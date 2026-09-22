@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>dev.haarness.desktop.voice</string>
+<key>CFBundleName</key><string>Haarness</string>
+<key>NSMicrophoneUsageDescription</key><string>Haarness uses the microphone when you start dictation to turn your voice into message text.</string>
+<key>NSSpeechRecognitionUsageDescription</key><string>Haarness uses macOS speech recognition to turn your voice into editable message text.</string>
+</dict></plist>

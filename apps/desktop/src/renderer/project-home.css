@@ -1,0 +1,101 @@
+.project-home {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: clamp(var(--s7), 9vh, 100px) var(--s6) var(--s8);
+}
+.project-home-content {
+  width: 100%;
+  max-width: 560px;
+  margin: auto;
+  text-align: center;
+}
+.project-home .start-mark {
+  margin: 0 auto var(--s7);
+}
+.project-home h1 {
+  font-size: clamp(24px, 3vw, 32px);
+}
+.project-home p {
+  color: var(--muted);
+  margin: var(--s3) 0 var(--s6);
+}
+.project-home-open {
+  margin: var(--s2) auto 0;
+}
+.project-home-error {
+  overflow-wrap: anywhere;
+}
+.project-home-recent {
+  margin-top: var(--s8);
+  text-align: start;
+}
+.project-home-recent h2 {
+  font-size: var(--ui);
+  color: var(--muted);
+  padding-inline: var(--s3);
+  margin-bottom: var(--s1);
+}
+.project-home-recent ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.project-home-row {
+  width: 100%;
+  text-align: start;
+  white-space: normal;
+  padding: var(--s4) var(--s3);
+  background: transparent;
+  border-color: transparent;
+}
+.project-home-row > span {
+  flex: 1;
+  min-width: 0;
+}
+.project-home-row strong {
+  display: block;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A deep path would otherwise wrap to three lines and leave the list ragged;
+   the whole path stays in the tooltip and the accessible name. */
+.project-home-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: var(--s0);
+}
+.project-home-row svg {
+  flex: none;
+}
+.chat-loading {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s4);
+  padding: var(--s7);
+  color: var(--muted);
+}
+.chat-loading .start-mark {
+  margin: 0;
+  animation: chat-loading-pulse 1.8s ease-in-out infinite;
+}
+.chat-loading p {
+  font-size: var(--ui);
+}
+@keyframes chat-loading-pulse {
+  50% {
+    opacity: 0.4;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-loading .start-mark {
+    animation: none;
+  }
+}

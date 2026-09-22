@@ -1,0 +1,102 @@
+.browser-settings {
+  min-width: 0;
+}
+.browser-settings > h3 {
+  margin: var(--s7) 0 var(--s2);
+}
+.browser-settings-scope {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  margin: var(--s4) 0;
+}
+.browser-settings-scope > span {
+  color: var(--muted);
+  font-size: var(--ui);
+  flex: 1;
+}
+.browser-settings-scope > input {
+  flex: 1;
+  min-width: 180px;
+}
+/* This row states its label in a span rather than the usual strong + p, so
+   match the weight and the measure the neighbouring rows read at. */
+.browser-settings > .setting-row > span {
+  flex: 1;
+  min-width: 0;
+  font-weight: 500;
+}
+.browser-settings > .setting-row > span small {
+  max-width: 420px;
+  font-weight: 400;
+  margin-block-start: 2px;
+}
+.browser-permissions {
+  overflow-x: auto;
+}
+.browser-permissions table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--ui);
+}
+.browser-permissions th,
+.browser-permissions td {
+  padding: var(--s3) var(--s1);
+  border-bottom: 1px solid var(--hairline);
+  text-align: start;
+}
+.browser-permissions th:first-child {
+  max-width: 200px;
+  overflow-wrap: anywhere;
+}
+.browser-permissions .select-trigger {
+  min-width: 125px;
+}
+/* The remove control is the one glyph-only button in this table; give it the
+   same square target every other icon button has. The selects in these cells
+   are buttons too, and keep their own size and padding. */
+.browser-permissions td button:not(.select-trigger) {
+  width: var(--icon-button);
+  height: var(--icon-button);
+  min-height: var(--icon-button);
+  padding: 0;
+  font-size: var(--ui-lg);
+  color: var(--muted);
+}
+.browser-permissions td button:not(.select-trigger):hover:not(:disabled) {
+  color: var(--text);
+}
+.browser-records {
+  padding: var(--s4);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  margin-top: var(--s4);
+}
+.browser-record {
+  display: flex;
+  gap: var(--s3);
+  align-items: center;
+  border-bottom: 1px solid var(--hairline);
+  padding: var(--s3) 0;
+}
+.browser-record > div {
+  min-width: 0;
+  flex: 1;
+}
+.browser-record p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  margin: var(--s1) 0;
+  font-size: var(--ui);
+}
+/* No rule under the last row: the container's own border already closes it. */
+.browser-record:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.browser-record small {
+  color: var(--muted);
+}

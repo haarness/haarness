@@ -1,0 +1,33 @@
+[package]
+name = "haarness-workflows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+dashmap.workspace = true
+fs2.workspace = true
+haarness-core = { path = "../haarness-core" }
+haarness-protocol = { path = "../haarness-protocol" }
+haarness-workflow-catalog = { path = "../haarness-workflow-catalog" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile = "3.23"
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["process", "signal"] }
+
+[dev-dependencies]
+haarness-store = { path = "../haarness-store" }
+
+[lints]
+workspace = true

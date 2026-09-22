@@ -1,0 +1,49 @@
+name = "cobalt2"
+
+[dark]
+bg = "#193549"
+surface = "#122738"
+selected = "#1f4662"
+text = "#ffffff"
+muted = "#adb7c9"
+primary = "#0088ff"
+accent = "#2affdf"
+user = "#73beff"
+danger = "#ff0088"
+
+[dark.syntax]
+keyword = "#ff9d00"
+string = "#9eff80"
+comment = "#0088ff"
+constant = "#ff628c"
+function = "#ffc600"
+
+[dark.diff]
+added = "#9eff80"
+added_bg = "#1a3a2a"
+removed = "#ff0088"
+removed_bg = "#3a1a2a"
+
+[light]
+bg = "#ffffff"
+surface = "#f5f7fa"
+selected = "#e8ecf1"
+text = "#193549"
+muted = "#5c6b7d"
+primary = "#0066cc"
+accent = "#00acc1"
+user = "#0b5091"
+danger = "#e91e63"
+
+[light.syntax]
+keyword = "#ff5722"
+string = "#4caf50"
+comment = "#5c6b7d"
+constant = "#e91e63"
+function = "#ff9800"
+
+[light.diff]
+added = "#4caf50"
+added_bg = "#e8f5e9"
+removed = "#e91e63"
+removed_bg = "#ffebee"

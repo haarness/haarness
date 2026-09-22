@@ -1,0 +1,49 @@
+name = "gruvbox"
+
+[dark]
+bg = "#282828"
+surface = "#3c3836"
+selected = "#504945"
+text = "#ebdbb2"
+muted = "#928374"
+primary = "#83a598"
+accent = "#8ec07c"
+user = "#b2bda4"
+danger = "#fb4934"
+
+[dark.syntax]
+keyword = "#fb4934"
+string = "#fabd2f"
+comment = "#928374"
+constant = "#d3869b"
+function = "#b8bb26"
+
+[dark.diff]
+added = "#98971a"
+added_bg = "#32302f"
+removed = "#cc241d"
+removed_bg = "#322929"
+
+[light]
+bg = "#fbf1c7"
+surface = "#ebdbb2"
+selected = "#d5c4a1"
+text = "#3c3836"
+muted = "#7c6f64"
+primary = "#076678"
+accent = "#427b58"
+user = "#1f515a"
+danger = "#9d0006"
+
+[light.syntax]
+keyword = "#9d0006"
+string = "#b57614"
+comment = "#7c6f64"
+constant = "#8f3f71"
+function = "#79740e"
+
+[light.diff]
+added = "#79740e"
+added_bg = "#dcd8a4"
+removed = "#9d0006"
+removed_bg = "#e2c7c3"

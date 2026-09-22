@@ -1,0 +1,138 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/haarness-extensions",
+    "crates/haarness-protocol",
+    "crates/haarness-core",
+    "crates/haarness-store",
+    "crates/haarness-insights",
+    "crates/haarness-profiles",
+    "crates/haarness-language",
+    "crates/haarness-workspaces",
+    "crates/haarness-scheduler",
+    "crates/haarness-workflow-catalog",
+    "crates/haarness-workflows",
+    "crates/haarness-providers",
+    "crates/haarness-mcp",
+    "crates/haarness-pty",
+    "crates/haarness-ripgrep",
+    "crates/haarness-server",
+    "crates/haarness-opentui",
+    "crates/haarness-tui",
+    "crates/haarness-cli",
+    "xtask",
+]
+default-members = ["crates/haarness-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/haarness/haarness"
+
+[workspace.dependencies]
+agent-client-protocol = "2.0.0"
+anyhow = "1.0"
+async-stream = "0.3"
+async-trait = "0.1"
+axum = { version = "0.8.9", features = ["macros", "ws"] }
+base64 = "0.22"
+bytes = "1.11"
+chrono = { version = "0.4", features = ["serde"] }
+hmac = "0.12"
+clap = { version = "4.5", features = ["derive", "env"] }
+crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste"] }
+dashmap = "6.1"
+directories = "6.0"
+flate2 = "1.1"
+fs2 = "0.4"
+futures = "0.3"
+glob = "0.3"
+hex = "0.4"
+http = "1.4"
+ignore = "0.4"
+libloading = "0.9"
+nix = { version = "0.31", default-features = false }
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
+opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "trace"] }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
+parking_lot = "0.12"
+portable-pty = "0.9"
+prost = "0.14"
+pulldown-cmark = { version = "0.13", default-features = false }
+rand = "0.9"
+rpassword = "7.4"
+reqwest = { version = "0.13.4", default-features = false, features = ["form", "json", "rustls", "stream"] }
+regex = "1.12"
+rmcp = { version = "3.1.4", features = ["auth", "client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+rusqlite = { version = "0.38", features = ["bundled", "chrono", "uuid"] }
+secrecy = { version = "0.10", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+sha2 = "0.10"
+similar = { version = "2", features = ["inline"] }
+syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
+thiserror = "2.0"
+textwrap = "0.16"
+tokio = { version = "1.49", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+toml = "1.0"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["catch-panic", "cors", "request-id", "trace"] }
+htmd = "0.5"
+jsonc-parser = { version = "0.33", features = ["serde", "cst"] }
+jsonschema = { version = "0.51", default-features = false }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-opentelemetry = { version = "0.33", default-features = false }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+unicode-width = "0.2"
+url = { version = "2.5", features = ["serde"] }
+utoipa = { version = "5.5", features = ["axum_extras", "chrono", "uuid"] }
+uuid = { version = "1.20", features = ["serde", "v7"] }
+vt100 = "0.16"
+walkdir = "2.5"
+zeroize = "1.8"
+zip = { version = "7.2", default-features = false, features = ["deflate"] }
+
+# Keep hot Rust edits fast; limit debug data while retaining file/line backtraces.
+# Tests inherit dev, so both commands reuse the same dependency profile.
+[profile.dev]
+debug = "line-tables-only"
+incremental = true
+
+# Opt in only when inspecting local variables in a native debugger.
+[profile.debugger]
+inherits = "dev"
+debug = "full"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = "s"
+strip = "symbols"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"
+collapsible_if = "allow"
+map_unwrap_or = "allow"
+manual_let_else = "allow"
+must_use_candidate = "allow"
+needless_pass_by_value = "allow"
+possible_missing_else = "allow"
+semicolon_if_nothing_returned = "allow"
+single_match_else = "allow"
+too_many_lines = "allow"
+unnecessary_literal_bound = "allow"

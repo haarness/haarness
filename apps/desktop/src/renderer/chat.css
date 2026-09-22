@@ -1,0 +1,1670 @@
+/*
+ * The conversation.
+ *
+ * One reading column governs everything: prose, the rail of things the engine
+ * did, approvals and the composer all share the same measure, so the text never
+ * moves when a side panel opens. Within that column the transcript has three
+ * shapes and no more — a bubble for what the user said, plain prose for the
+ * answer, and a hairline rail for the work. Metadata is present but quiet;
+ * actions stay out of the way until the pointer or the keyboard arrives.
+ */
+.conversation {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+  container-type: inline-size;
+}
+.file-drop-active {
+  outline: 2px dashed var(--accent);
+  outline-offset: -3px;
+}
+.chat-file-drop-hint {
+  position: absolute;
+  z-index: 10;
+  top: var(--s5);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: var(--s3) var(--s5);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--text);
+  pointer-events: none;
+}
+.transcript {
+  overflow-anchor: none;
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: var(--s5) max(var(--s5), calc((100% - var(--measure)) / 2)) 0;
+  scrollbar-gutter: stable;
+}
+/* The scroll region is focusable for PageUp/PageDown, not a framed input. */
+.transcript:focus-visible {
+  outline: none;
+}
+/* Short conversations sit against the composer instead of floating in a void;
+   once the transcript overflows the auto margin resolves to zero. */
+.transcript-body {
+  margin-top: auto;
+  position: relative;
+  flex: none;
+}
+.transcript > .message,
+.transcript > .conversation-empty {
+  flex: none;
+}
+/* The only gap between the last message and the composer, so it carries the
+   whole separation between what was said and where you answer. */
+.transcript-tail {
+  height: var(--s6);
+  flex: none;
+}
+
+/* A quiet seam between inherited history and the fork's own continuation. */
+.fork-origin {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  flex: none;
+  min-height: 28px;
+  margin: var(--s5) 0;
+}
+.fork-origin::before,
+.fork-origin::after {
+  content: "";
+  flex: 1;
+  min-width: 16px;
+  height: 1px;
+  background: var(--line);
+}
+.fork-origin-link {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+  max-width: calc(100% - 56px);
+  padding: var(--s0) var(--s1);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--primary);
+  font-size: var(--ui-sm);
+}
+.fork-origin-link span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fork-origin-link svg {
+  flex: none;
+}
+.fork-origin-link:hover:not(:disabled) {
+  background: var(--hover);
+}
+.fork-origin-link:disabled {
+  color: var(--muted);
+  cursor: default;
+  opacity: 1;
+}
+
+/* ---------------------------------------------------------------- messages */
+.message {
+  overflow-wrap: anywhere;
+  scroll-margin-top: var(--s5);
+}
+
+/* -- what the user said ---------------------------------------------------- */
+/* A bubble on the right needs no author label: nothing else in the transcript
+   has this shape, so the name would only repeat what the layout already says. */
+.message.user {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  margin: var(--s6) 0 0;
+  padding: 0;
+}
+.message.user .bubble {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-xl);
+  border-bottom-right-radius: var(--r-sm);
+  padding: var(--s3) var(--s4);
+  width: fit-content;
+  max-width: min(92%, 560px);
+  color: var(--text);
+}
+.message.user .markdown {
+  font-size: var(--font-size);
+}
+.message.user .markdown p {
+  margin: var(--s2) 0;
+}
+/* The bubble's own padding sets the vertical rhythm; the first and last
+   paragraph must not add their margins on top of it. */
+.message.user .markdown > :first-child {
+  margin-top: 0;
+}
+.message.user .markdown > :last-child {
+  margin-bottom: 0;
+}
+.message.user .message-footer {
+  justify-content: flex-end;
+  /* The trailing glyph is inset 7px inside its 28px box, so this lands it on
+     the bubble's own text edge. */
+  padding-inline-end: var(--s2);
+  margin-top: 0;
+  min-height: var(--icon-button);
+}
+/* The user's own words carry no persistent metadata; it appears with the
+   actions, on hover or focus, so a re-read of the thread stays clean. */
+.message.user .message-time {
+  opacity: 0;
+  transition: opacity var(--fast) var(--ease);
+}
+.message.user:hover .message-time,
+.message.user:focus-within .message-time {
+  opacity: 1;
+}
+
+/* -- what Haarness answered ------------------------------------------------ */
+.message.assistant {
+  padding: var(--s3) 0 0;
+}
+.message.assistant > .inline-error,
+.message.assistant > .plan-block,
+.message.assistant > .activity-note {
+  margin-block: var(--s2);
+}
+
+.message.reasoning {
+  color: var(--muted);
+  border-inline-start: 1.5px solid var(--hairline);
+  padding-block: var(--s1);
+  padding-inline-start: var(--s4);
+  margin: var(--s2) 0;
+}
+.message.reasoning .markdown {
+  font-size: var(--ui-lg);
+  line-height: 1.65;
+}
+.message-label {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--ui-sm);
+  margin-bottom: var(--s1);
+  color: var(--muted);
+  min-height: var(--icon-button);
+}
+.message-label .author {
+  font-weight: 500;
+  color: var(--muted);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  font-size: var(--ui-xs);
+}
+
+/* -- metadata and per-message actions -------------------------------------- */
+.message-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-top: var(--s1);
+  /* Reserved so revealing the actions never reflows the transcript. */
+  min-height: var(--icon-button);
+  color: var(--muted);
+}
+.message-time {
+  font-size: var(--ui-xs);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+.message-tools {
+  display: flex;
+  gap: 1px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--fast) var(--ease);
+}
+.message:hover .message-tools,
+.message:focus-within .message-tools {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: none) {
+  .message-tools {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+.message-tools button {
+  color: var(--faint);
+  border-color: transparent;
+  border-radius: var(--r-sm);
+}
+.message-tools button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--hover);
+}
+
+/* ---------------------------------------------------------------- markdown */
+.markdown {
+  line-height: var(--lh-read);
+  font-size: var(--font-size);
+  overflow-wrap: anywhere;
+}
+.markdown > :first-child {
+  margin-top: 0;
+}
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+.markdown p {
+  margin: var(--s3) 0;
+}
+.markdown ul,
+.markdown ol {
+  margin: var(--s3) 0;
+  padding-inline-start: var(--s5);
+}
+.markdown li {
+  margin: var(--s1) 0;
+}
+.markdown li::marker {
+  color: var(--faint);
+}
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  margin: var(--s5) 0 var(--s2);
+  line-height: 1.35;
+  letter-spacing: var(--track-tight);
+}
+.markdown h1 {
+  font-size: 1.35em;
+}
+.markdown h2 {
+  font-size: 1.2em;
+}
+.markdown h3 {
+  font-size: 1.08em;
+}
+.markdown h4 {
+  font-size: 1em;
+  color: var(--muted);
+}
+.markdown blockquote {
+  border-inline-start: 2px solid var(--hairline);
+  padding-inline-start: var(--s4);
+  color: var(--muted);
+  margin: var(--s3) 0;
+}
+.markdown img {
+  max-width: 100%;
+  max-height: 420px;
+  border-radius: var(--r-md);
+}
+.markdown table {
+  display: block;
+  overflow: auto;
+  margin: var(--s3) 0;
+}
+.markdown hr {
+  margin: var(--s5) 0;
+  border-top-color: var(--hairline);
+}
+.markdown a:hover {
+  text-decoration-thickness: 2px;
+}
+.markdown :not(pre) > code {
+  font-size: 0.9em;
+  color: var(--accent);
+  background: var(--surface);
+  padding: 1px var(--s1);
+  border-radius: var(--r-xs);
+  border: 1px solid var(--hairline);
+}
+
+/* Fenced code gets a quiet frame, its language, and a Copy control that only
+   appears once the pointer or keyboard is inside the block. */
+.markdown pre {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  padding: var(--s3) var(--s4);
+  border-radius: var(--r-lg);
+  overflow: auto;
+  white-space: pre;
+  font-size: var(--ui);
+  margin: var(--s3) 0;
+}
+.markdown pre[data-language] {
+  padding-top: var(--s7);
+}
+.markdown pre[data-language]::before {
+  content: attr(data-language);
+  position: absolute;
+  top: var(--s3);
+  inset-inline-start: var(--s4);
+  font-size: var(--ui-xs);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  font-family: var(--sans);
+  color: var(--muted);
+  pointer-events: none;
+}
+.code-copy {
+  position: absolute;
+  top: var(--s1);
+  inset-inline-end: var(--s1);
+  min-height: var(--control-sm);
+  padding: 0 var(--s2);
+  font-size: var(--ui-xs);
+  font-family: var(--sans);
+  color: var(--muted);
+  background: var(--raised);
+  border-color: var(--hairline);
+  border-radius: var(--r-sm);
+  opacity: 0;
+  transition: opacity var(--fast) var(--ease);
+}
+.markdown pre:hover .code-copy,
+.code-copy:focus-visible {
+  opacity: 1;
+}
+.code-copy.done {
+  color: var(--green);
+}
+
+/* ---------------------------------------------------------- agent activity */
+/*
+ * Everything the engine did hangs off one hairline rail. Consecutive steps have
+ * no vertical gap, so a burst of eight file reads reads as a single column of
+ * work rather than eight floating cards.
+ */
+.message.step {
+  padding: 0;
+}
+.tool-call {
+  font-size: var(--ui);
+  border-inline-start: 1.5px solid var(--hairline);
+  padding-inline-start: var(--s4);
+  margin: 0;
+  transition: border-color var(--fast) var(--ease);
+}
+.tool-call[data-status="running"] {
+  border-inline-start-color: var(--primary-edge);
+}
+.tool-call > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  cursor: pointer;
+  list-style: none;
+  color: var(--muted);
+  min-height: var(--icon-button);
+  padding-inline-end: var(--s2);
+  border-radius: var(--r-sm);
+}
+.tool-call > summary:hover {
+  color: var(--text);
+}
+.tool-mark {
+  display: inline-flex;
+  color: var(--faint);
+  flex: none;
+}
+.tool-call[data-status="running"] > summary .tool-mark {
+  color: var(--primary);
+}
+.tool-call > summary strong {
+  color: var(--text);
+  font-weight: 500;
+  flex: none;
+  font-size: var(--ui);
+}
+/* The target is what a reader actually scans a step for, so it stays at the
+   secondary text tone rather than the decorative one. */
+.tool-target {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: var(--ui-sm);
+  color: var(--muted);
+}
+/* The verb and its target share one box so a running step can sweep across
+   both, the same motion the activity line and the agent card use. */
+.tool-label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+.tool-label.activity-shimmer > strong,
+.tool-label.activity-shimmer > .tool-target {
+  color: inherit;
+}
+/* A step without a result is the one state that still needs a word; it
+   surfaces on hover or when the step is open. */
+.tool-status {
+  flex: none;
+  font-size: var(--ui-xs);
+  color: var(--muted);
+  letter-spacing: 0.02em;
+  opacity: 0;
+  transition: opacity var(--fast) var(--ease);
+}
+.tool-call:hover > summary .tool-status,
+.tool-call[open] > summary .tool-status {
+  opacity: 1;
+}
+.tool-chevron {
+  flex: none;
+  color: var(--faint);
+  opacity: 0;
+  transition:
+    transform var(--fast) var(--ease),
+    opacity var(--fast) var(--ease);
+}
+.tool-call:hover > summary .tool-chevron,
+.tool-call[open] > summary .tool-chevron,
+.tool-call > summary:focus-visible .tool-chevron {
+  opacity: 1;
+}
+.tool-call[open] > summary .tool-chevron {
+  transform: rotate(90deg);
+}
+.tool-batch > summary strong {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-batch > summary .tool-target {
+  flex: none;
+  font-family: var(--sans);
+  font-size: var(--ui-xs);
+  color: var(--muted);
+}
+.tool-children {
+  padding-block: var(--s1);
+}
+.tool-child {
+  border-inline-start: 0;
+  padding-inline-start: 0;
+}
+.tool-console {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+.tool-console-label {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  color: var(--muted);
+  padding: var(--s2) var(--s3) 0;
+  font-size: var(--ui-sm);
+}
+.tool-console-label span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: var(--ui-xs);
+  color: var(--muted);
+}
+.tool-body .tool-console pre {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow-wrap: anywhere;
+}
+.tool-console .tool-input {
+  max-height: 160px;
+}
+.tool-console .tool-output {
+  padding-top: var(--s3);
+}
+.tool-empty {
+  padding: var(--s2) var(--s3);
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--ui-sm);
+}
+.tool-body {
+  padding: var(--s0) 0 var(--s3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+.tool-body pre {
+  max-height: 320px;
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  padding: var(--s2) var(--s3);
+  font-size: var(--ui-sm);
+  color: var(--muted);
+}
+.tool-body .tool-output {
+  color: var(--text);
+}
+
+/* An edit shown as a change rather than as arguments. */
+.change-preview {
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  background: var(--surface);
+}
+.change-path {
+  font-family: var(--mono);
+  font-size: var(--ui-xs);
+  color: var(--muted);
+  padding: var(--s1) var(--s3);
+  border-bottom: 1px solid var(--hairline);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.change-lines {
+  font: var(--ui-sm) / 1.6 var(--mono);
+  overflow-x: auto;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: var(--s1) 0;
+}
+.change-lines .diff-line {
+  display: flex;
+  min-width: max-content;
+  padding-inline: var(--s3);
+}
+.change-lines .diff-line code {
+  white-space: pre;
+}
+.change-more {
+  margin: 0;
+  padding: var(--s1) var(--s3);
+  border-top: 1px solid var(--hairline);
+  font-size: var(--ui-xs);
+  color: var(--muted);
+}
+
+/* Separate sibling targets keep stopping independent from opening the row. */
+.agent-task-row {
+  position: relative;
+}
+.agent-task {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 58px;
+  height: auto;
+  gap: var(--s3);
+  padding-block: var(--s2);
+  /* Every other block hanging off the rail — tool rows, reasoning, plans —
+     starts its content at --s4, so this one does too. */
+  padding-inline: var(--s4) var(--s3);
+  border: 0;
+  border-inline-start: 1.5px solid var(--hairline);
+  /* A button inherits a radius on every corner, which bent this rail into a
+     bracket. The rail is straight, like the tool rows' and the plan's; only
+     the far side stays rounded so the hover fill reads as a tab. */
+  border-start-start-radius: 0;
+  border-end-start-radius: 0;
+  border-start-end-radius: var(--r-sm);
+  border-end-end-radius: var(--r-sm);
+  background: transparent;
+  text-align: start;
+  color: var(--text);
+  font-size: var(--ui);
+}
+.agent-task:hover {
+  background: var(--hover);
+}
+.agent-task:disabled {
+  opacity: 1;
+  cursor: default;
+}
+.agent-task-mark {
+  display: flex;
+  color: var(--muted);
+  flex: none;
+}
+.agent-task-body {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--s0);
+}
+.agent-task-title {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-task-title > span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.agent-task-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s0) var(--s2);
+  color: var(--muted);
+  font-size: var(--ui-sm);
+}
+.agent-task-agent {
+  text-transform: capitalize;
+}
+.agent-task-model,
+.agent-task-detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-task-model::before,
+.agent-task-detail::before {
+  content: "·";
+  margin-inline-end: var(--s2);
+  color: var(--faint);
+}
+.agent-task-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: var(--icon-button);
+  height: var(--icon-button);
+  color: var(--muted);
+  font-size: var(--ui-xs);
+}
+.agent-task-stop {
+  position: absolute;
+  inset-inline-end: calc(var(--s3) * 2 + 12px);
+  top: 50%;
+  margin-top: calc(var(--icon-button) / -2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  color: var(--text);
+  background: var(--surface);
+}
+.agent-task-stop .icon {
+  fill: currentColor;
+}
+.agent-task-stop:hover:not(:disabled) {
+  border-color: var(--muted);
+}
+.agent-task-chevron {
+  flex: none;
+  color: var(--faint);
+}
+.agent-task[data-status="starting"],
+.agent-task[data-status="running"],
+.agent-task[data-status="background"] {
+  border-inline-start-color: var(--primary-edge);
+}
+.agent-task[data-status="starting"] .agent-task-mark,
+.agent-task[data-status="running"] .agent-task-mark,
+.agent-task[data-status="background"] .agent-task-mark {
+  color: var(--primary);
+}
+.agent-task[data-status="failed"] .agent-task-status {
+  color: var(--danger);
+}
+.agent-task[data-status="approval"] .agent-task-mark,
+.agent-task[data-status="question"] .agent-task-mark {
+  color: var(--accent);
+}
+.activity-note {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  padding: var(--s1) 0;
+}
+.block-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  font-size: var(--ui-xs);
+  font-weight: 600;
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: var(--s2);
+}
+.plan-block {
+  border-inline-start: 1.5px solid var(--hairline);
+  padding-block: var(--s2);
+  padding-inline-start: var(--s4);
+}
+
+/* An error is reported where it happened, with the action that resolves it. */
+.inline-error,
+.notice-inline {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  background: var(--accent-soft);
+  border-inline-start: 2px solid var(--accent);
+  border-start-end-radius: var(--r-md);
+  border-end-end-radius: var(--r-md);
+  font-size: var(--ui);
+  color: var(--text);
+}
+.inline-error {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+  color: var(--danger);
+  align-items: flex-start;
+}
+.inline-error > svg {
+  flex: none;
+  margin-top: 3px;
+}
+.inline-error > span {
+  flex: 1;
+  min-width: 0;
+}
+.inline-error-action {
+  flex: none;
+  min-height: var(--control-sm);
+  font-size: var(--ui-sm);
+  color: var(--text);
+  border-color: var(--danger-edge);
+  background: var(--page);
+}
+
+/* -------------------------------------------------------- live turn status */
+/*
+ * One honest line about what is happening right now, derived from the tool that
+ * is actually running. The shimmer is the only motion in the transcript, and it
+ * is removed entirely when the reader prefers reduced motion.
+ */
+.assistant-activity {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s3) 0 var(--s2);
+  font-size: var(--ui);
+  color: var(--muted);
+}
+.activity-shimmer {
+  --shimmer-width: 240px;
+  display: inline-block;
+  background: linear-gradient(
+    90deg,
+    var(--muted) 0% 25%,
+    var(--text) 50%,
+    var(--muted) 75% 100%
+  );
+  /* A fixed tile keeps speed and position independent of label width. Moving
+     exactly one tile makes both sides of the loop identical, without a jump. */
+  background-size: var(--shimmer-width) 100%;
+  background-repeat: repeat-x;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: activity-shimmer 2.8s linear infinite;
+}
+@keyframes activity-shimmer {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: var(--shimmer-width) 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .activity-shimmer {
+    animation: none;
+    background: none;
+    color: var(--muted);
+  }
+}
+
+/* ------------------------------------------------------------- empty state */
+.empty-start .transcript-body,
+.empty-start .transcript-tail {
+  display: none;
+}
+.conversation-empty {
+  width: 100%;
+  max-width: var(--measure);
+  margin: auto 0;
+  padding: var(--s8) 0 var(--s7);
+  text-align: center;
+  animation: fade-up var(--slow) var(--ease);
+}
+.start-mark {
+  display: inline-flex;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 56px;
+  line-height: 1;
+  margin-bottom: var(--s6);
+}
+.conversation-empty h2 {
+  font-size: 27px;
+  font-weight: 400;
+  line-height: 1.35;
+  letter-spacing: -0.025em;
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+}
+.conversation-empty p {
+  color: var(--muted);
+  font-size: var(--ui-lg);
+  margin: var(--s2) 0 0;
+}
+/* The project sits inside the sentence, so it has to read as a word and behave
+   as a control: an underline at rest, a chip once the pointer arrives. */
+.conversation-empty .heading-project-picker {
+  display: inline;
+  padding: 0 3px;
+  margin: 0 -1px;
+  border: 0;
+  min-height: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  letter-spacing: inherit;
+  text-decoration: underline dotted
+    color-mix(in srgb, var(--muted) 55%, transparent);
+  text-underline-offset: 6px;
+}
+.conversation-empty .heading-project-picker:hover,
+.conversation-empty .heading-project-picker[aria-expanded="true"] {
+  color: var(--text);
+  background: var(--hover);
+  text-decoration-color: transparent;
+}
+.picker-caret {
+  vertical-align: middle;
+  margin-inline-start: 2px;
+  opacity: 0.55;
+}
+.conversation-empty .picker-caret {
+  margin-bottom: 3px;
+}
+.suggestions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: var(--s7);
+  gap: var(--s2);
+}
+.suggestions button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  min-width: 0;
+  min-height: 118px;
+  padding: var(--s3);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  background: transparent;
+  color: var(--text);
+  text-align: start;
+  white-space: normal;
+  gap: var(--s3);
+  transition:
+    background var(--fast) var(--ease),
+    border-color var(--fast) var(--ease),
+    transform var(--fast) var(--ease);
+}
+.suggestions button:hover {
+  background: var(--hover);
+  border-color: color-mix(in srgb, var(--muted) 34%, transparent);
+  transform: translateY(-1px);
+}
+.suggestions button:active:not(:disabled) {
+  transform: none;
+}
+.starter-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-sm);
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+.suggestions button:nth-child(2) .starter-icon {
+  color: var(--syntax-keyword);
+  background: color-mix(in srgb, var(--syntax-keyword) 13%, transparent);
+}
+.suggestions button:nth-child(3) .starter-icon {
+  color: var(--green);
+  background: var(--green-soft);
+}
+.suggestions button:nth-child(4) .starter-icon {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.starter-copy {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0);
+}
+.starter-copy strong {
+  font-size: var(--ui-lg);
+  font-weight: 500;
+  line-height: 1.35;
+}
+.starter-copy > span {
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  line-height: 1.45;
+}
+@container (max-width: 660px) {
+  .conversation-empty {
+    padding: var(--s6) 0;
+  }
+  .conversation-empty h2 {
+    font-size: 23px;
+  }
+  .suggestions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--s2);
+    margin-top: var(--s6);
+  }
+  .suggestions button {
+    min-height: 90px;
+  }
+  .start-mark {
+    margin-bottom: var(--s4);
+    font-size: 46px;
+  }
+}
+
+/* --------------------------------------------------------------- composer */
+.composer-area {
+  position: relative;
+  min-width: 0;
+  width: 100%;
+  flex-shrink: 0;
+  padding: 0 max(var(--s5), calc((100% - var(--measure)) / 2)) var(--s3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+/* The live checklist shares the composer's tray without entering the transcript. */
+.plan-dock {
+  margin: 0 var(--s3) calc(-1 * var(--s2));
+  padding-bottom: var(--s2);
+  min-width: 0;
+  border: 1px solid var(--hairline);
+  border-bottom: 0;
+  border-radius: var(--r-xl) var(--r-xl) 0 0;
+  background: var(--raised);
+}
+.plan-header {
+  display: flex;
+  align-items: center;
+  padding-inline-end: var(--s1);
+}
+.plan-dismiss {
+  flex: none;
+  color: var(--muted);
+}
+.plan-toggle {
+  flex: 1;
+  min-width: 0;
+  min-height: var(--control-lg);
+  padding-block: var(--s2);
+  padding-inline: var(--s3) var(--s1);
+  border: 0;
+  border-radius: var(--r-xl) var(--r-xl) var(--r-xs) var(--r-xs);
+  justify-content: flex-start;
+  gap: var(--s2);
+}
+.plan-dock:last-child {
+  margin-bottom: 0;
+  border-bottom: 1px solid var(--hairline);
+  border-radius: var(--r-xl);
+}
+.plan-toggle > svg,
+.plan-title,
+.plan-count {
+  flex: none;
+}
+.plan-toggle > svg {
+  color: var(--muted);
+}
+.plan-toggle[aria-expanded="false"] .plan-chevron {
+  transform: rotate(180deg);
+}
+.plan-title {
+  font-weight: 500;
+}
+.plan-count {
+  font-size: var(--ui-sm);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.plan-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: start;
+  color: var(--muted);
+  font-size: var(--ui-sm);
+}
+.plan-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 var(--s3) var(--s2);
+  max-height: min(160px, 22vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  font-size: var(--ui);
+}
+.plan-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+  padding: var(--s0) 0;
+  color: var(--muted);
+}
+.plan-content {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.plan-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+  flex: none;
+  border: 1px solid var(--muted);
+  border-radius: var(--r-xs);
+  transition:
+    background var(--fast) var(--ease),
+    border-color var(--fast) var(--ease),
+    color var(--fast) var(--ease);
+}
+.plan-list li[data-status="in_progress"] {
+  color: var(--text);
+}
+.plan-list li[data-status="in_progress"] .plan-check {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+.plan-list li[data-status="in_progress"] .plan-check::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  background: var(--primary);
+  border-radius: 50%;
+}
+.plan-list li[data-status="completed"] .plan-check {
+  color: var(--green);
+  border-color: var(--green);
+  background: var(--green-soft);
+}
+.plan-list li[data-status="cancelled"] .plan-check::after {
+  content: "";
+  width: 6px;
+  height: 1px;
+  background: var(--muted);
+}
+.plan-list li[data-status="completed"] .plan-content,
+.plan-list li[data-status="cancelled"] .plan-content {
+  text-decoration: line-through;
+}
+
+/* Where the next message will run, docked to the top of the composer. The
+   composer covers the tab's lowest 8px (its 16px negative margin less the
+   column gap), so the bottom padding is the top padding plus exactly that
+   overlap: the label sits vertically centred in the part you can see. */
+.composer-project {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: 0 var(--s4) calc(-1 * var(--s4));
+  padding: var(--s1) var(--s2) calc(var(--s1) + var(--s2));
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+  background: var(--raised);
+}
+.composer-project button {
+  display: inline-flex;
+  gap: var(--s2);
+  align-items: center;
+  background: transparent;
+  border: none;
+  min-height: var(--control-sm);
+  font-size: var(--ui-sm);
+  color: var(--muted);
+  border-radius: var(--r-sm);
+}
+.composer-project button:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.composer-project .location-picker {
+  margin-inline-start: auto;
+  max-width: 55%;
+  overflow: hidden;
+}
+
+.composer {
+  position: relative;
+  min-width: 0;
+  border: 1px solid
+    color-mix(in srgb, var(--composer-agent, var(--primary)) 60%, transparent);
+  padding-block: var(--s3);
+  padding-inline: var(--s4);
+  background: var(--raised);
+  border-radius: var(--r-2xl);
+  transition:
+    border-color var(--fast) var(--ease),
+    box-shadow var(--fast) var(--ease);
+}
+.composer:focus-within {
+  border-color: var(--composer-agent, var(--primary));
+  box-shadow: none;
+}
+/* A slow breath on the edge is the whole "working" treatment: enough to notice
+   in peripheral vision, not enough to compete with the transcript. */
+.composer.running {
+  border-color: var(--composer-agent, var(--primary));
+  animation: composer-breathe 3.2s ease-in-out infinite;
+}
+.composer.running.waiting {
+  animation: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-edge);
+}
+@keyframes composer-breathe {
+  0%,
+  100% {
+    border-color: color-mix(
+      in srgb,
+      var(--composer-agent, var(--primary)) 45%,
+      transparent
+    );
+  }
+  50% {
+    border-color: color-mix(
+      in srgb,
+      var(--composer-agent, var(--primary)) 85%,
+      transparent
+    );
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer.running {
+    animation: none;
+    border-color: var(--composer-agent, var(--primary));
+  }
+}
+.composer textarea {
+  width: 100%;
+  min-height: 64px;
+  max-height: 240px;
+  resize: none;
+  border: 0;
+  padding: var(--s1) var(--s1) var(--s2);
+  background: transparent;
+  outline: none;
+  box-shadow: none;
+  line-height: var(--lh-read);
+  font-size: var(--font-size);
+  color: var(--text);
+}
+.composer textarea:focus {
+  box-shadow: none;
+}
+.composer textarea:disabled {
+  opacity: 1;
+  -webkit-text-fill-color: var(--text);
+}
+.composer footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s0);
+  min-width: 0;
+}
+.composer-leading,
+.composer-trailing {
+  display: flex;
+  align-items: center;
+  gap: var(--s0);
+  min-width: 0;
+}
+.composer-trailing {
+  margin-inline-start: auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.composer .icon-button {
+  width: var(--control);
+  height: var(--control);
+  flex: none;
+}
+.composer .approval-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  max-width: none;
+}
+.composer .composer-model {
+  color: var(--text);
+  max-width: 210px;
+}
+.composer .agent-select {
+  color: var(--composer-agent, var(--muted));
+  max-width: 90px;
+}
+.composer .send-button {
+  width: 34px;
+  height: 34px;
+  background: var(--text);
+  color: var(--page);
+}
+.composer .send-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 85%, var(--page));
+}
+.composer .send-button:disabled {
+  background: var(--hover);
+  color: var(--faint);
+}
+.pill-select {
+  border: 0;
+  background-color: transparent;
+  min-height: 26px;
+  height: 26px;
+  /* Size to the chosen option, not the longest one, so the row reads as chips. */
+  padding: 0 var(--s2);
+  background-position: right 5px center;
+  font-size: var(--ui-sm);
+  color: var(--muted);
+  max-width: 170px;
+  border-radius: var(--r-sm);
+}
+.pill-select:hover {
+  background-color: var(--hover);
+}
+.pill-select:focus {
+  box-shadow: none;
+  background-color: var(--hover);
+}
+.agent-select {
+  color: var(--primary);
+  font-weight: 500;
+  max-width: 120px;
+}
+.send-button {
+  width: 28px;
+  height: 28px;
+  min-height: 0;
+  padding: 0;
+  background: var(--primary);
+  color: var(--page);
+  border: 0;
+  border-radius: 50%;
+  flex: none;
+}
+.send-button:hover:not(:disabled) {
+  background: var(--primary-hover);
+  border-color: transparent;
+}
+.send-button:disabled {
+  background: var(--raised);
+  color: var(--faint);
+  opacity: 1;
+}
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+  padding: var(--s1) 0 var(--s2);
+}
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  font-size: var(--ui-xs);
+  color: var(--muted);
+  background: var(--raised);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  padding: var(--s0) var(--s1);
+  max-width: 220px;
+}
+.attachment-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-chip img {
+  width: 20px;
+  height: 20px;
+  object-fit: cover;
+  border-radius: var(--r-xs);
+}
+.attachment-chip button {
+  position: relative;
+  border: 0;
+  padding: 0;
+  min-height: 0;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--r-xs);
+  color: var(--faint);
+}
+/* A 16px glyph keeps the chip compact; the pointer still gets a 28px target. */
+.attachment-chip button::after {
+  content: "";
+  position: absolute;
+  inset: calc(-1 * var(--s1));
+  border-radius: var(--r-sm);
+}
+.attachment-chip button:hover:not(:disabled) {
+  color: var(--text);
+}
+/* Inside a bubble the chips are inline, so each carries its own separation:
+   there is no flex gap to space consecutive attachments. */
+.message .attachment-chip {
+  margin-top: var(--s2);
+  margin-inline-end: var(--s1);
+  background: var(--page);
+}
+.message .attachment-chip img {
+  width: auto;
+  height: auto;
+  max-width: 180px;
+  max-height: 120px;
+}
+.dictation-status {
+  color: var(--muted);
+  font-size: var(--ui-xs);
+}
+.dictation-button.recording {
+  color: var(--primary);
+  background: var(--hover);
+}
+.dictation-error {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  color: var(--danger);
+  font-size: var(--ui-sm);
+  padding-inline: var(--s2);
+}
+.dictation-error span {
+  flex: 1;
+}
+.jump-latest {
+  position: absolute;
+  top: calc(-32px - var(--s2));
+  left: 50%;
+  translate: -50% 0;
+  background: var(--raised);
+  border: 1px solid var(--hairline);
+  box-shadow: var(--shadow-1);
+  font-size: var(--ui-sm);
+  color: var(--muted);
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: var(--r-pill);
+  z-index: 5;
+  animation: fade-up var(--fast) var(--ease);
+}
+.jump-latest:hover {
+  color: var(--text);
+}
+
+/* -------------------------------------------------------------- approvals */
+/*
+ * A permission or a question waits where the next message is typed: one
+ * prompt at a time docks above the composer like the plan, the transcript
+ * stays a record, and every other project, chat and setting stays usable.
+ */
+.approvals {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  min-width: 0;
+  margin: 0 var(--s3);
+}
+.prompt-dock {
+  padding: var(--s2) var(--s3) var(--s3);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-xl);
+  background: var(--raised);
+  animation: fade-up var(--fast) var(--ease);
+}
+/* Tucked under whatever follows in the tray, the way the plan is. */
+.approvals:has(~ .plan-dock, ~ .composer) {
+  margin-bottom: calc(-1 * var(--s2));
+}
+.approvals:has(~ .plan-dock, ~ .composer) .prompt-dock {
+  padding-bottom: calc(var(--s2) * 2);
+  border-bottom: 0;
+  border-radius: var(--r-xl) var(--r-xl) 0 0;
+}
+.prompt-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: var(--control-sm);
+  padding-inline: var(--s1);
+  color: var(--muted);
+}
+.prompt-head > svg {
+  flex: none;
+  color: var(--accent);
+}
+.question .prompt-head > svg {
+  color: var(--primary);
+}
+.prompt-title {
+  color: var(--text);
+  font-weight: 500;
+  font-size: var(--ui);
+}
+.prompt-count {
+  font-size: var(--ui-sm);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.prompt-link {
+  margin-inline-start: auto;
+  min-height: var(--control-sm);
+  padding: 0 var(--s2);
+  font-size: var(--ui-sm);
+  color: var(--muted);
+}
+.prompt-subject {
+  margin: 0;
+  max-height: 140px;
+  overflow: auto;
+  background: var(--page);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  padding: var(--s2) var(--s3);
+  color: var(--text);
+  font-size: var(--ui-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.prompt-subject.prompt-detail {
+  color: var(--muted);
+}
+.prompt-actions {
+  display: flex;
+  gap: var(--s1);
+  justify-content: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.prompt-actions button {
+  min-height: var(--control-sm);
+  font-size: var(--ui-sm);
+}
+.prompt-actions .prompt-always {
+  gap: var(--s1);
+}
+.prompt-actions input {
+  flex: 1;
+  min-width: 140px;
+  min-height: var(--control-sm);
+  background: var(--page);
+}
+.question-prompt {
+  margin: 0;
+  font-size: var(--ui-lg);
+  color: var(--text);
+}
+.question-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+}
+.question-options button {
+  min-height: var(--control-sm);
+  font-size: var(--ui-sm);
+}
+.question-options .active {
+  background: var(--primary-soft);
+  color: var(--primary);
+  border-color: var(--primary-edge);
+}
+
+/* --------------------------------------------------- slash command popover */
+.slash-suggestions {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + var(--s2));
+  max-height: min(320px, 40vh);
+  overflow-x: hidden;
+  overflow-y: auto;
+  z-index: 25;
+  padding: var(--s1);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.slash-suggestions-header {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: var(--s1) var(--s2) var(--s2);
+  font-size: var(--ui-xs);
+  color: var(--muted);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  font-weight: 600;
+}
+.slash-suggestions-header span {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  text-align: end;
+}
+.slash-suggestions > button {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 0;
+  padding: var(--s1) var(--s2);
+  text-align: start;
+  white-space: normal;
+  border: 0;
+  border-radius: var(--r-sm);
+}
+.slash-suggestions > button[aria-selected="true"] {
+  background: var(--selected);
+}
+.slash-suggestions strong {
+  font-size: var(--ui);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+}
+.slash-suggestions > button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--ui-sm);
+}
+
+@media (max-width: 1100px) {
+  .transcript,
+  .composer-area {
+    padding-inline-start: var(--s4);
+    padding-inline-end: var(--s4);
+  }
+}
+@media (max-width: 940px) {
+  .pill-select {
+    max-width: 130px;
+  }
+}
+
+.parent-conversation .icon {
+  transform: rotate(180deg);
+}
+
+.agent-task-error {
+  color: var(--danger);
+  font-size: var(--ui-sm);
+  /* The row is a button, so the inherited nowrap would defeat the clamp. */
+  white-space: normal;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow-wrap: anywhere;
+}

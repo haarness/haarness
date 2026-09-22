@@ -1,0 +1,1663 @@
+//! Content-addressed workspace snapshots in SQLite.
+//!
+//! A snapshot is a complete manifest of the files that Haarness is willing to
+//! manage. Hidden source files are included, gitignore rules are respected,
+//! and `.git` is never traversed. Large files remain in the manifest as
+//! unrestorable `omitted` entries instead of silently disappearing.
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ffi::{OsStr, OsString},
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
+    path::{Component, Path, PathBuf},
+    sync::Arc,
+};
+
+use async_trait::async_trait;
+use chrono::Utc;
+use haarness_core::{CoreError, CoreResult, SnapshotInfo, SnapshotStore};
+use haarness_protocol::{FileDiff, FileDiffStatus, ThreadId};
+use parking_lot::Mutex;
+use rusqlite::{Connection, OptionalExtension, params};
+use sha2::{Digest, Sha256};
+use similar::{ChangeTag, TextDiff};
+
+const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_DIFF_BYTES: usize = 10 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryKind {
+    File,
+    SymlinkFile,
+    SymlinkDirectory,
+    Omitted,
+}
+
+impl EntryKind {
+    fn database_name(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::SymlinkFile => "symlink_file",
+            Self::SymlinkDirectory => "symlink_directory",
+            Self::Omitted => "omitted",
+        }
+    }
+
+    fn from_database(value: &str) -> CoreResult<Self> {
+        match value {
+            "file" => Ok(Self::File),
+            "symlink_file" => Ok(Self::SymlinkFile),
+            "symlink_directory" => Ok(Self::SymlinkDirectory),
+            "omitted" => Ok(Self::Omitted),
+            other => Err(CoreError::Storage(format!(
+                "unknown snapshot entry kind {other:?}"
+            ))),
+        }
+    }
+
+    fn is_symlink(self) -> bool {
+        matches!(self, Self::SymlinkFile | Self::SymlinkDirectory)
+    }
+
+    fn has_blob(self) -> bool {
+        !matches!(self, Self::Omitted)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManifestEntry {
+    path: String,
+    hash: String,
+    kind: EntryKind,
+    mode: Option<u32>,
+    size: u64,
+}
+
+#[derive(Debug)]
+struct SourcePath {
+    absolute: PathBuf,
+    relative: String,
+}
+
+#[derive(Debug)]
+struct ScannedEntry {
+    manifest: ManifestEntry,
+    data: Option<Vec<u8>>,
+}
+
+#[derive(Debug)]
+struct PreparedEntry {
+    manifest: ManifestEntry,
+    data: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct PreparedChange {
+    path: String,
+    desired: Option<ManifestEntry>,
+}
+
+#[derive(Clone)]
+pub struct SqliteSnapshotStore {
+    // Its own connection to the shared database file: large blob writes never
+    // contend with the hot thread/item path.
+    connection: Arc<Mutex<Connection>>,
+    workspace: PathBuf,
+}
+
+impl SqliteSnapshotStore {
+    pub fn open(database: impl AsRef<Path>, workspace: PathBuf) -> CoreResult<Self> {
+        let workspace = workspace.canonicalize().map_err(|error| {
+            CoreError::Storage(format!(
+                "cannot canonicalize snapshot workspace {}: {error}",
+                workspace.display()
+            ))
+        })?;
+        if !workspace.is_dir() {
+            return Err(CoreError::Invalid(format!(
+                "snapshot workspace is not a directory: {}",
+                workspace.display()
+            )));
+        }
+        let configured_homes = [std::env::var_os("HOME"), std::env::var_os("USERPROFILE")]
+            .into_iter()
+            .flatten();
+        if matches_configured_home(&workspace, configured_homes) {
+            return Err(CoreError::Invalid(format!(
+                "refusing to snapshot the operating-system home directory: {}",
+                workspace.display()
+            )));
+        }
+        let connection = Connection::open(database).map_err(storage)?;
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .map_err(storage)?;
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(storage)?;
+        Ok(Self {
+            connection: Arc::new(Mutex::new(connection)),
+            workspace,
+        })
+    }
+
+    /// Walk the complete managed tree. `hidden(false)` means "do not filter
+    /// hidden entries" in the `ignore` crate; gitignore rules remain enabled.
+    fn source_paths(&self) -> CoreResult<Vec<SourcePath>> {
+        let mut builder = ignore::WalkBuilder::new(&self.workspace);
+        builder.hidden(false).follow_links(false);
+        builder.filter_entry(|entry| entry.depth() == 0 || entry.file_name() != OsStr::new(".git"));
+
+        let mut sources = Vec::new();
+        for result in builder.build() {
+            let entry = result.map_err(|error| {
+                CoreError::Storage(format!("cannot walk snapshot workspace: {error}"))
+            })?;
+            if entry.depth() == 0 {
+                continue;
+            }
+            let file_type = entry.file_type().ok_or_else(|| {
+                CoreError::Storage(format!(
+                    "cannot determine file type for {}",
+                    entry.path().display()
+                ))
+            })?;
+            if !file_type.is_file() && !file_type.is_symlink() {
+                continue;
+            }
+            let relative = entry.path().strip_prefix(&self.workspace).map_err(|_| {
+                CoreError::Invalid(format!(
+                    "snapshot path escaped workspace: {}",
+                    entry.path().display()
+                ))
+            })?;
+            let relative = encode_relative_path(relative)?;
+            // Decode too so capture and restore share the exact same safety
+            // contract (including the hard `.git` exclusion).
+            let _ = decode_relative_path(&relative)?;
+            sources.push(SourcePath {
+                absolute: entry.into_path(),
+                relative,
+            });
+        }
+        sources.sort_by(|left, right| left.relative.cmp(&right.relative));
+        Ok(sources)
+    }
+
+    fn scan_entry(&self, source: &SourcePath, include_data: bool) -> CoreResult<ScannedEntry> {
+        ensure_safe_ancestors(&self.workspace, &source.relative)?;
+        let metadata = fs::symlink_metadata(&source.absolute).map_err(io_error)?;
+        if metadata.file_type().is_symlink() {
+            let target = fs::read_link(&source.absolute).map_err(io_error)?;
+            let data = os_string_bytes(target.into_os_string());
+            let kind = if self.symlink_points_to_managed_directory(&source.absolute)? {
+                EntryKind::SymlinkDirectory
+            } else {
+                EntryKind::SymlinkFile
+            };
+            return Ok(ScannedEntry {
+                manifest: ManifestEntry {
+                    path: source.relative.clone(),
+                    hash: hex_digest(&data),
+                    kind,
+                    mode: None,
+                    size: u64::try_from(data.len()).unwrap_or(u64::MAX),
+                },
+                data: include_data.then_some(data),
+            });
+        }
+        if !metadata.is_file() {
+            return Err(CoreError::Conflict(format!(
+                "snapshot entry changed type while capturing: {}",
+                source.relative
+            )));
+        }
+
+        let size = metadata.len();
+        let mode = file_mode(&metadata);
+        if size > MAX_FILE_BYTES {
+            let (hash, actual_size) = hash_file(&source.absolute)?;
+            let after = fs::symlink_metadata(&source.absolute).map_err(io_error)?;
+            if !after.is_file() || after.len() != actual_size {
+                return Err(CoreError::Conflict(format!(
+                    "snapshot entry changed while capturing: {}",
+                    source.relative
+                )));
+            }
+            return Ok(ScannedEntry {
+                manifest: ManifestEntry {
+                    path: source.relative.clone(),
+                    hash,
+                    kind: EntryKind::Omitted,
+                    mode,
+                    size: actual_size,
+                },
+                data: None,
+            });
+        }
+
+        let data = fs::read(&source.absolute).map_err(io_error)?;
+        let after = fs::symlink_metadata(&source.absolute).map_err(io_error)?;
+        if !after.is_file()
+            || after.len() != u64::try_from(data.len()).unwrap_or(u64::MAX)
+            || file_mode(&after) != mode
+        {
+            return Err(CoreError::Conflict(format!(
+                "snapshot entry changed while capturing: {}",
+                source.relative
+            )));
+        }
+        Ok(ScannedEntry {
+            manifest: ManifestEntry {
+                path: source.relative.clone(),
+                hash: hex_digest(&data),
+                kind: EntryKind::File,
+                mode,
+                size: u64::try_from(data.len()).unwrap_or(u64::MAX),
+            },
+            data: include_data.then_some(data),
+        })
+    }
+
+    /// Determine the Windows symlink flavor without following a link outside
+    /// the managed root. Unix does not need the distinction to recreate it,
+    /// but storing it keeps manifests portable.
+    fn symlink_points_to_managed_directory(&self, link: &Path) -> CoreResult<bool> {
+        let target = fs::read_link(link).map_err(io_error)?;
+        let candidate = if target.is_absolute() {
+            target
+        } else {
+            link.parent().unwrap_or(&self.workspace).join(target)
+        };
+        let Ok(canonical) = candidate.canonicalize() else {
+            return Ok(false);
+        };
+        if !canonical.starts_with(&self.workspace) {
+            return Ok(false);
+        }
+        Ok(canonical.is_dir())
+    }
+
+    fn scan_manifest(&self) -> CoreResult<BTreeMap<String, ManifestEntry>> {
+        let mut manifest = BTreeMap::new();
+        for source in self.source_paths()? {
+            let entry = self.scan_entry(&source, false)?.manifest;
+            manifest.insert(entry.path.clone(), entry);
+        }
+        Ok(manifest)
+    }
+
+    fn snapshot_exists(&self, snapshot_id: &str) -> CoreResult<bool> {
+        self.connection
+            .lock()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM snapshots WHERE id=?1)",
+                [snapshot_id],
+                |row| row.get(0),
+            )
+            .map_err(storage)
+    }
+
+    fn load_manifest(&self, snapshot_id: &str) -> CoreResult<BTreeMap<String, ManifestEntry>> {
+        let exists = self.snapshot_exists(snapshot_id)?;
+        if !exists {
+            return Err(CoreError::NotFound(format!("snapshot {snapshot_id}")));
+        }
+        let connection = self.connection.lock();
+        let mut statement = connection
+            .prepare(
+                "SELECT f.path,f.hash,f.kind,f.mode,COALESCE(f.size,b.size,0) \
+                 FROM snapshot_files f \
+                 LEFT JOIN snapshot_blobs b ON b.hash=f.hash \
+                 WHERE f.snapshot_id=?1 ORDER BY f.path",
+            )
+            .map_err(storage)?;
+        let rows = statement
+            .query_map([snapshot_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(storage)?;
+
+        let mut manifest = BTreeMap::new();
+        for row in rows {
+            let (path, hash, kind, mode, size) = row.map_err(storage)?;
+            let _ = decode_relative_path(&path)?;
+            let entry = ManifestEntry {
+                path: path.clone(),
+                hash,
+                kind: EntryKind::from_database(&kind)?,
+                mode: mode.and_then(|value| u32::try_from(value).ok()),
+                size: u64::try_from(size)
+                    .map_err(|_| CoreError::Storage(format!("invalid snapshot size for {path}")))?,
+            };
+            if manifest.insert(path.clone(), entry).is_some() {
+                return Err(CoreError::Storage(format!(
+                    "duplicate path in snapshot manifest: {path}"
+                )));
+            }
+        }
+        Ok(manifest)
+    }
+
+    fn load_blob(&self, entry: &ManifestEntry) -> CoreResult<Vec<u8>> {
+        if !entry.kind.has_blob() {
+            return Err(CoreError::Conflict(format!(
+                "snapshot entry {} was omitted because it exceeds {} bytes",
+                entry.path, MAX_FILE_BYTES
+            )));
+        }
+        let row: Option<(i64, Vec<u8>)> = self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT size,data FROM snapshot_blobs WHERE hash=?1",
+                [&entry.hash],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(storage)?;
+        let (stored_size, compressed) =
+            row.ok_or_else(|| CoreError::Storage(format!("missing snapshot blob {}", entry.hash)))?;
+        let mut decoder = flate2::read::ZlibDecoder::new(compressed.as_slice());
+        let mut data = Vec::new();
+        decoder.read_to_end(&mut data).map_err(io_error)?;
+        let actual_size = u64::try_from(data.len()).unwrap_or(u64::MAX);
+        if u64::try_from(stored_size).ok() != Some(actual_size)
+            || actual_size != entry.size
+            || hex_digest(&data) != entry.hash
+        {
+            return Err(CoreError::Storage(format!(
+                "corrupt snapshot blob {} for {}",
+                entry.hash, entry.path
+            )));
+        }
+        Ok(data)
+    }
+
+    fn prepare_entry(&self, entry: &ManifestEntry) -> CoreResult<PreparedEntry> {
+        Ok(PreparedEntry {
+            manifest: entry.clone(),
+            data: self.load_blob(entry)?,
+        })
+    }
+
+    fn live_matches(&self, expected: Option<&ManifestEntry>) -> CoreResult<bool> {
+        let Some(expected) = expected else {
+            return Ok(false);
+        };
+        let target = safe_target(&self.workspace, &expected.path)?;
+        ensure_safe_ancestors(&self.workspace, &expected.path)?;
+        let Some(actual) = scan_live_entry(&target, &expected.path, &self.workspace)? else {
+            return Ok(false);
+        };
+        Ok(entries_match_live(expected, &actual))
+    }
+
+    fn diff_manifests(
+        &self,
+        before: &BTreeMap<String, ManifestEntry>,
+        after: &BTreeMap<String, ManifestEntry>,
+        after_is_live: bool,
+        summary: bool,
+        selected: Option<&str>,
+    ) -> CoreResult<Vec<FileDiff>> {
+        let paths: BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+        let mut remaining = MAX_DIFF_BYTES;
+        let mut files = Vec::new();
+        for path in paths {
+            if selected.is_some_and(|selected| selected != path) {
+                continue;
+            }
+            let left = before.get(path);
+            let right = after.get(path);
+            if left == right {
+                continue;
+            }
+            let status = match (left, right) {
+                (None, Some(_)) => FileDiffStatus::Added,
+                (Some(_), None) => FileDiffStatus::Deleted,
+                _ => FileDiffStatus::Modified,
+            };
+
+            let left_bytes = match left {
+                Some(entry) if entry.kind == EntryKind::Omitted => None,
+                Some(entry) => Some(self.load_blob(entry)?),
+                None => Some(Vec::new()),
+            };
+            let right_bytes = match right {
+                Some(entry) if entry.kind == EntryKind::Omitted => None,
+                Some(entry) if after_is_live => {
+                    let target = safe_target(&self.workspace, path)?;
+                    read_live_data(&target, entry)?
+                }
+                Some(entry) => Some(self.load_blob(entry)?),
+                None => Some(Vec::new()),
+            };
+
+            let omitted = left.is_some_and(|entry| entry.kind == EntryKind::Omitted)
+                || right.is_some_and(|entry| entry.kind == EntryKind::Omitted);
+            let binary = left_bytes.as_deref().is_some_and(is_binary)
+                || right_bytes.as_deref().is_some_and(is_binary);
+            let mut truncated = omitted;
+            let (additions, deletions) = match (&left_bytes, &right_bytes) {
+                (Some(left), Some(right)) if !binary => line_counts(left, right),
+                _ => (0, 0),
+            };
+
+            let body_size =
+                left_bytes.as_ref().map_or(0, Vec::len) + right_bytes.as_ref().map_or(0, Vec::len);
+            let include_body = !summary && !binary && !omitted && body_size <= remaining;
+            let (before_body, after_body) = if include_body {
+                remaining -= body_size;
+                (
+                    match left {
+                        Some(_) => left_bytes
+                            .as_deref()
+                            .map(|value| String::from_utf8_lossy(value).into_owned()),
+                        None => None,
+                    },
+                    match right {
+                        Some(_) => right_bytes
+                            .as_deref()
+                            .map(|value| String::from_utf8_lossy(value).into_owned()),
+                        None => None,
+                    },
+                )
+            } else {
+                if !summary && !binary {
+                    truncated = true;
+                }
+                (None, None)
+            };
+
+            files.push(FileDiff {
+                file: path.clone(),
+                status,
+                additions,
+                deletions,
+                patch: None,
+                before: before_body,
+                after: after_body,
+                binary,
+                truncated,
+            });
+        }
+        Ok(files)
+    }
+
+    /// Drop snapshots the workspace can no longer reach, then the blobs that
+    /// were only theirs.
+    ///
+    /// Without this the blob store is append-only: every turn that touches a
+    /// file adds another copy of it forever. Three things are always kept —
+    /// anything newer than `retention`, the most recent `keep_per_thread`
+    /// checkpoints of each thread (so undo still has somewhere to go), and
+    /// whatever a pending undo is holding as its backup or base.
+    pub fn prune(
+        &self,
+        retention: chrono::Duration,
+        keep_per_thread: usize,
+    ) -> CoreResult<PruneReport> {
+        let cutoff = Utc::now() - retention;
+        let connection = self.connection.lock();
+        let mut protected: BTreeSet<String> = BTreeSet::new();
+        // A pending undo is live state, never garbage, whatever its age.
+        let mut pending = connection
+            .prepare(
+                "SELECT revert_snapshot, revert_base_snapshot FROM threads \
+                 WHERE revert_snapshot IS NOT NULL OR revert_base_snapshot IS NOT NULL",
+            )
+            .map_err(storage)?;
+        let rows = pending
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            })
+            .map_err(storage)?;
+        for row in rows {
+            let (backup, base) = row.map_err(storage)?;
+            protected.extend(backup);
+            protected.extend(base);
+        }
+        drop(pending);
+
+        let mut all = connection
+            .prepare(
+                "SELECT id, thread_id, created_at FROM snapshots ORDER BY created_at DESC, id DESC",
+            )
+            .map_err(storage)?;
+        let rows = all
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(storage)?;
+        let mut kept_per_thread: BTreeMap<String, usize> = BTreeMap::new();
+        let mut doomed: Vec<String> = Vec::new();
+        for row in rows {
+            let (id, thread, created_at) = row.map_err(storage)?;
+            if protected.contains(&id) {
+                continue;
+            }
+            let kept = kept_per_thread.entry(thread).or_default();
+            if *kept < keep_per_thread {
+                *kept += 1;
+                continue;
+            }
+            // An unparseable timestamp is treated as recent: refusing to
+            // delete is always the safer side of this decision.
+            let recent = chrono::DateTime::parse_from_rfc3339(&created_at)
+                .map(|created| created.with_timezone(&Utc) >= cutoff)
+                .unwrap_or(true);
+            if recent {
+                continue;
+            }
+            doomed.push(id);
+        }
+        drop(all);
+        if doomed.is_empty() {
+            return Ok(PruneReport::default());
+        }
+
+        let transaction = connection.unchecked_transaction().map_err(storage)?;
+        for id in &doomed {
+            transaction
+                .execute("DELETE FROM snapshot_files WHERE snapshot_id=?1", [id])
+                .map_err(storage)?;
+            transaction
+                .execute("DELETE FROM snapshots WHERE id=?1", [id])
+                .map_err(storage)?;
+        }
+        // Blobs are content-addressed and shared, so they only go once the
+        // last manifest that named them is gone.
+        let blobs = transaction
+            .execute(
+                "DELETE FROM snapshot_blobs WHERE hash NOT IN (SELECT hash FROM snapshot_files)",
+                [],
+            )
+            .map_err(storage)?;
+        transaction.commit().map_err(storage)?;
+        Ok(PruneReport {
+            snapshots: doomed.len(),
+            blobs,
+        })
+    }
+}
+
+/// What one retention pass reclaimed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PruneReport {
+    pub snapshots: usize,
+    pub blobs: usize,
+}
+
+impl SqliteSnapshotStore {
+    fn capture_sync(&self, thread: ThreadId) -> CoreResult<SnapshotInfo> {
+        let id = uuid::Uuid::now_v7().to_string();
+        // Discover before opening the transaction; repository size is not a
+        // reason to reject an otherwise valid operation.
+        let sources = self.source_paths()?;
+        let mut connection = self.connection.lock();
+        // IMMEDIATE, not the default DEFERRED: a deferred read-to-write
+        // upgrade racing the other connection returns SQLITE_BUSY without
+        // consulting the busy timeout.
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage)?;
+
+        for source in &sources {
+            let scanned = self.scan_entry(source, true)?;
+            if let Some(data) = scanned.data {
+                let mut encoder =
+                    flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+                encoder.write_all(&data).map_err(io_error)?;
+                let compressed = encoder.finish().map_err(io_error)?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO snapshot_blobs(hash,size,data) VALUES(?1,?2,?3)",
+                    params![
+                        scanned.manifest.hash,
+                        i64::try_from(data.len()).unwrap_or(i64::MAX),
+                        compressed
+                    ],
+                )
+                .map_err(storage)?;
+            }
+            tx.execute(
+                "INSERT INTO snapshot_files(snapshot_id,path,hash,kind,mode,size) \
+                 VALUES(?1,?2,?3,?4,?5,?6)",
+                params![
+                    id,
+                    scanned.manifest.path,
+                    scanned.manifest.hash,
+                    scanned.manifest.kind.database_name(),
+                    scanned.manifest.mode.map(i64::from),
+                    i64::try_from(scanned.manifest.size).unwrap_or(i64::MAX),
+                ],
+            )
+            .map_err(storage)?;
+        }
+        tx.execute(
+            "INSERT INTO snapshots(id,thread_id,created_at,file_count) VALUES(?1,?2,?3,?4)",
+            params![
+                id,
+                thread.to_string(),
+                Utc::now().to_rfc3339(),
+                i64::try_from(sources.len()).unwrap_or(i64::MAX)
+            ],
+        )
+        .map_err(storage)?;
+        tx.commit().map_err(storage)?;
+        Ok(SnapshotInfo {
+            id,
+            file_count: u64::try_from(sources.len()).unwrap_or(u64::MAX),
+        })
+    }
+}
+
+#[async_trait]
+impl SnapshotStore for SqliteSnapshotStore {
+    async fn capture(&self, thread: ThreadId) -> CoreResult<SnapshotInfo> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.capture_sync(thread))
+            .await
+            .map_err(|error| CoreError::Storage(format!("snapshot worker failed: {error}")))?
+    }
+
+    /// Legacy snapshots predate paired checkpoints. Preserve their historical
+    /// overlay behavior, but never delete files that are absent from the old
+    /// manifest.
+    async fn restore(&self, snapshot_id: &str) -> CoreResult<Vec<String>> {
+        let manifest = self.load_manifest(snapshot_id)?;
+        // Validate every path, ancestor, and blob before the first write.
+        for entry in manifest.values() {
+            let _ = safe_target(&self.workspace, &entry.path)?;
+            ensure_safe_ancestors(&self.workspace, &entry.path)?;
+            let _ = self.load_blob(entry)?;
+        }
+
+        let mut touched = Vec::new();
+        for entry in manifest.values() {
+            let target = safe_target(&self.workspace, &entry.path)?;
+            if self.live_matches(Some(entry))? {
+                continue;
+            }
+            let prepared = self.prepare_entry(entry)?;
+            write_prepared(&self.workspace, &target, &prepared)?;
+            touched.push(entry.path.clone());
+        }
+        Ok(touched)
+    }
+
+    async fn restore_delta(
+        &self,
+        expected_snapshot_id: &str,
+        desired_snapshot_id: &str,
+    ) -> CoreResult<Vec<String>> {
+        let expected = self.load_manifest(expected_snapshot_id)?;
+        let desired = self.load_manifest(desired_snapshot_id)?;
+        let paths: BTreeSet<&String> = expected.keys().chain(desired.keys()).collect();
+        let changed: Vec<String> = paths
+            .into_iter()
+            .filter(|path| expected.get(*path) != desired.get(*path))
+            .cloned()
+            .collect();
+
+        let mut prepared = Vec::with_capacity(changed.len());
+        // This is deliberately a separate complete preflight pass. If any
+        // path contains a later human edit, no earlier path is touched.
+        for path in &changed {
+            let target = safe_target(&self.workspace, path)?;
+            ensure_safe_ancestors(&self.workspace, path)?;
+            let actual = scan_live_entry(&target, path, &self.workspace)?;
+            if !optional_entry_matches(expected.get(path), actual.as_ref()) {
+                return Err(CoreError::Conflict(format!(
+                    "workspace path changed since snapshot: {path}"
+                )));
+            }
+            let desired = desired.get(path).cloned();
+            if let Some(entry) = &desired {
+                // Validate now and reload immediately before writing. This
+                // keeps restore memory bounded to one blob while retaining a
+                // fail-before-mutation validation pass.
+                let _ = self.load_blob(entry)?;
+            }
+            prepared.push(PreparedChange {
+                path: path.clone(),
+                desired,
+            });
+        }
+
+        let mut touched = Vec::with_capacity(prepared.len());
+        // Delete delta-only paths first, then materialize desired entries. A
+        // replacement never removes anything outside this explicit path set.
+        for change in prepared.iter().filter(|change| change.desired.is_none()) {
+            let target = safe_target(&self.workspace, &change.path)?;
+            ensure_safe_ancestors(&self.workspace, &change.path)?;
+            remove_target(&target)?;
+            touched.push(change.path.clone());
+        }
+        for change in prepared.iter().filter(|change| change.desired.is_some()) {
+            let target = safe_target(&self.workspace, &change.path)?;
+            ensure_safe_ancestors(&self.workspace, &change.path)?;
+            let desired =
+                self.prepare_entry(change.desired.as_ref().expect("filtered desired entry"))?;
+            write_prepared(&self.workspace, &target, &desired)?;
+            touched.push(change.path.clone());
+        }
+        Ok(touched)
+    }
+
+    async fn diff_live(&self, snapshot_id: &str) -> CoreResult<Vec<FileDiff>> {
+        let before = self.load_manifest(snapshot_id)?;
+        let after = self.scan_manifest()?;
+        self.diff_manifests(&before, &after, true, false, None)
+    }
+
+    async fn diff_snapshots(
+        &self,
+        before_snapshot_id: &str,
+        after_snapshot_id: &str,
+    ) -> CoreResult<Vec<FileDiff>> {
+        let before = self.load_manifest(before_snapshot_id)?;
+        let after = self.load_manifest(after_snapshot_id)?;
+        self.diff_manifests(&before, &after, false, false, None)
+    }
+
+    async fn diff_review(
+        &self,
+        before: &str,
+        after: Option<&str>,
+        summary: bool,
+        path: Option<&str>,
+    ) -> CoreResult<Vec<FileDiff>> {
+        let before = self.load_manifest(before)?;
+        let live = after.is_none();
+        let after = match after {
+            Some(id) => self.load_manifest(id)?,
+            None => self.scan_manifest()?,
+        };
+        self.diff_manifests(&before, &after, live, summary, path)
+    }
+}
+
+fn encode_relative_path(path: &Path) -> CoreResult<String> {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => {
+                let value = value.to_str().ok_or_else(|| {
+                    CoreError::Invalid(format!(
+                        "snapshot path is not valid UTF-8: {}",
+                        path.display()
+                    ))
+                })?;
+                if value == ".git" {
+                    return Err(CoreError::Invalid(
+                        "snapshot path may not contain .git".into(),
+                    ));
+                }
+                components.push(value);
+            }
+            _ => {
+                return Err(CoreError::Invalid(format!(
+                    "snapshot path is not a safe relative path: {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    if components.is_empty() {
+        return Err(CoreError::Invalid("snapshot path may not be empty".into()));
+    }
+    Ok(components.join("/"))
+}
+
+fn matches_configured_home(
+    workspace: &Path,
+    configured_homes: impl IntoIterator<Item = OsString>,
+) -> bool {
+    configured_homes.into_iter().any(|home| {
+        PathBuf::from(home)
+            .canonicalize()
+            .is_ok_and(|canonical| canonical == workspace)
+    })
+}
+
+fn decode_relative_path(path: &str) -> CoreResult<PathBuf> {
+    if path.is_empty() || path.contains('\0') || path.contains('\\') {
+        return Err(CoreError::Invalid(format!("unsafe snapshot path {path:?}")));
+    }
+    let candidate = Path::new(path);
+    if candidate.is_absolute() {
+        return Err(CoreError::Invalid(format!(
+            "absolute snapshot path {path:?}"
+        )));
+    }
+    let mut decoded = PathBuf::new();
+    for component in candidate.components() {
+        match component {
+            Component::Normal(value) if value != OsStr::new(".git") => decoded.push(value),
+            _ => {
+                return Err(CoreError::Invalid(format!("unsafe snapshot path {path:?}")));
+            }
+        }
+    }
+    if decoded.as_os_str().is_empty() {
+        return Err(CoreError::Invalid(format!("unsafe snapshot path {path:?}")));
+    }
+    Ok(decoded)
+}
+
+fn safe_target(workspace: &Path, relative: &str) -> CoreResult<PathBuf> {
+    Ok(workspace.join(decode_relative_path(relative)?))
+}
+
+fn ensure_safe_ancestors(workspace: &Path, relative: &str) -> CoreResult<()> {
+    let decoded = decode_relative_path(relative)?;
+    let Some(parent) = decoded.parent() else {
+        return Ok(());
+    };
+    let mut current = workspace.to_path_buf();
+    for component in parent.components() {
+        let Component::Normal(value) = component else {
+            return Err(CoreError::Invalid(format!(
+                "unsafe snapshot path {relative:?}"
+            )));
+        };
+        current.push(value);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CoreError::Conflict(format!(
+                    "snapshot path has symlink ancestor: {relative}"
+                )));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(CoreError::Conflict(format!(
+                    "snapshot path has non-directory ancestor: {relative}"
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(io_error(error)),
+        }
+    }
+    Ok(())
+}
+
+fn create_safe_parents(workspace: &Path, relative: &str) -> CoreResult<()> {
+    let decoded = decode_relative_path(relative)?;
+    let Some(parent) = decoded.parent() else {
+        return Ok(());
+    };
+    let mut current = workspace.to_path_buf();
+    for component in parent.components() {
+        let Component::Normal(value) = component else {
+            return Err(CoreError::Invalid(format!(
+                "unsafe snapshot path {relative:?}"
+            )));
+        };
+        current.push(value);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CoreError::Conflict(format!(
+                    "snapshot path has symlink ancestor: {relative}"
+                )));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(CoreError::Conflict(format!(
+                    "snapshot path has non-directory ancestor: {relative}"
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&current).map_err(io_error)?;
+                let metadata = fs::symlink_metadata(&current).map_err(io_error)?;
+                if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                    return Err(CoreError::Conflict(format!(
+                        "snapshot parent changed while restoring: {relative}"
+                    )));
+                }
+            }
+            Err(error) => return Err(io_error(error)),
+        }
+    }
+    Ok(())
+}
+
+fn scan_live_entry(
+    target: &Path,
+    relative: &str,
+    workspace: &Path,
+) -> CoreResult<Option<ManifestEntry>> {
+    let metadata = match fs::symlink_metadata(target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error(error)),
+    };
+    if metadata.file_type().is_symlink() {
+        let target_value = fs::read_link(target).map_err(io_error)?;
+        let data = os_string_bytes(target_value.into_os_string());
+        let points_to_directory = target
+            .canonicalize()
+            .ok()
+            .is_some_and(|canonical| canonical.starts_with(workspace) && canonical.is_dir());
+        return Ok(Some(ManifestEntry {
+            path: relative.to_string(),
+            hash: hex_digest(&data),
+            kind: if points_to_directory {
+                EntryKind::SymlinkDirectory
+            } else {
+                EntryKind::SymlinkFile
+            },
+            mode: None,
+            size: u64::try_from(data.len()).unwrap_or(u64::MAX),
+        }));
+    }
+    if !metadata.is_file() {
+        // Directories and special files deliberately do not compare equal to
+        // an absent/file manifest entry.
+        return Ok(Some(ManifestEntry {
+            path: relative.to_string(),
+            hash: String::new(),
+            kind: EntryKind::File,
+            mode: None,
+            size: u64::MAX,
+        }));
+    }
+    let (hash, size) = hash_file(target)?;
+    Ok(Some(ManifestEntry {
+        path: relative.to_string(),
+        hash,
+        kind: if size > MAX_FILE_BYTES {
+            EntryKind::Omitted
+        } else {
+            EntryKind::File
+        },
+        mode: file_mode(&metadata),
+        size,
+    }))
+}
+
+fn entries_match_live(expected: &ManifestEntry, actual: &ManifestEntry) -> bool {
+    let kind_matches = expected.kind == actual.kind
+        || matches!(
+            (expected.kind, actual.kind),
+            (EntryKind::File, EntryKind::Omitted) | (EntryKind::Omitted, EntryKind::File)
+        );
+    kind_matches
+        && expected.hash == actual.hash
+        && expected.mode == actual.mode
+        && expected.size == actual.size
+}
+
+fn optional_entry_matches(
+    expected: Option<&ManifestEntry>,
+    actual: Option<&ManifestEntry>,
+) -> bool {
+    match (expected, actual) {
+        (None, None) => true,
+        (Some(expected), Some(actual)) => entries_match_live(expected, actual),
+        _ => false,
+    }
+}
+
+fn read_live_data(target: &Path, entry: &ManifestEntry) -> CoreResult<Option<Vec<u8>>> {
+    if entry.kind == EntryKind::Omitted {
+        return Ok(None);
+    }
+    if entry.kind.is_symlink() {
+        let metadata = fs::symlink_metadata(target).map_err(io_error)?;
+        if !metadata.file_type().is_symlink() {
+            return Err(CoreError::Conflict(format!(
+                "workspace path changed while producing diff: {}",
+                entry.path
+            )));
+        }
+        let data = os_string_bytes(fs::read_link(target).map_err(io_error)?.into_os_string());
+        if hex_digest(&data) != entry.hash {
+            return Err(CoreError::Conflict(format!(
+                "workspace path changed while producing diff: {}",
+                entry.path
+            )));
+        }
+        return Ok(Some(data));
+    }
+    let metadata = fs::symlink_metadata(target).map_err(io_error)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(CoreError::Conflict(format!(
+            "workspace path changed while producing diff: {}",
+            entry.path
+        )));
+    }
+    let data = fs::read(target).map_err(io_error)?;
+    if u64::try_from(data.len()).ok() != Some(entry.size) || hex_digest(&data) != entry.hash {
+        return Err(CoreError::Conflict(format!(
+            "workspace path changed while producing diff: {}",
+            entry.path
+        )));
+    }
+    Ok(Some(data))
+}
+
+fn write_prepared(workspace: &Path, target: &Path, prepared: &PreparedEntry) -> CoreResult<()> {
+    create_safe_parents(workspace, &prepared.manifest.path)?;
+    ensure_safe_ancestors(workspace, &prepared.manifest.path)?;
+    if fs::symlink_metadata(target).is_ok_and(|metadata| metadata.is_dir()) {
+        fs::remove_dir(target).map_err(|error| {
+            CoreError::Conflict(format!(
+                "cannot replace directory at {}: {error}",
+                prepared.manifest.path
+            ))
+        })?;
+    }
+    let parent = target.parent().ok_or_else(|| {
+        CoreError::Invalid(format!("invalid snapshot path {}", prepared.manifest.path))
+    })?;
+    let temporary = parent.join(format!(".haarness-snapshot-{}.tmp", uuid::Uuid::now_v7()));
+
+    if prepared.manifest.kind.is_symlink() {
+        let link_target = bytes_os_string(&prepared.data)?;
+        create_symlink(
+            &link_target,
+            &temporary,
+            prepared.manifest.kind == EntryKind::SymlinkDirectory,
+        )?;
+    } else {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(io_error)?;
+        file.write_all(&prepared.data).map_err(io_error)?;
+        set_file_mode(&file, prepared.manifest.mode)?;
+        file.sync_all().map_err(io_error)?;
+    }
+
+    #[cfg(windows)]
+    if fs::symlink_metadata(target).is_ok() {
+        remove_target(target)?;
+    }
+    if let Err(error) = fs::rename(&temporary, target) {
+        let _ = fs::remove_file(&temporary);
+        return Err(io_error(error));
+    }
+    Ok(())
+}
+
+fn remove_target(target: &Path) -> CoreResult<()> {
+    match fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            fs::remove_dir(target).map_err(io_error)
+        }
+        Ok(_) => fs::remove_file(target).map_err(io_error),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error(error)),
+    }
+}
+
+#[cfg(unix)]
+fn create_symlink(target: &OsStr, link: &Path, _directory: bool) -> CoreResult<()> {
+    std::os::unix::fs::symlink(target, link).map_err(io_error)
+}
+
+#[cfg(windows)]
+fn create_symlink(target: &OsStr, link: &Path, directory: bool) -> CoreResult<()> {
+    if directory {
+        std::os::windows::fs::symlink_dir(target, link).map_err(io_error)
+    } else {
+        std::os::windows::fs::symlink_file(target, link).map_err(io_error)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_symlink(_target: &OsStr, _link: &Path, _directory: bool) -> CoreResult<()> {
+    Err(CoreError::Storage(
+        "symlink restore is unsupported on this platform".into(),
+    ))
+}
+
+#[cfg(unix)]
+fn os_string_bytes(value: OsString) -> Vec<u8> {
+    use std::os::unix::ffi::OsStringExt;
+    value.into_vec()
+}
+
+#[cfg(windows)]
+fn os_string_bytes(value: OsString) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+    value
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn os_string_bytes(value: OsString) -> Vec<u8> {
+    value.to_string_lossy().into_owned().into_bytes()
+}
+
+#[cfg(unix)]
+fn bytes_os_string(value: &[u8]) -> CoreResult<OsString> {
+    use std::os::unix::ffi::OsStringExt;
+    if value.contains(&0) {
+        return Err(CoreError::Storage("symlink target contains NUL".into()));
+    }
+    Ok(OsString::from_vec(value.to_vec()))
+}
+
+#[cfg(windows)]
+fn bytes_os_string(value: &[u8]) -> CoreResult<OsString> {
+    use std::os::windows::ffi::OsStringExt;
+    let chunks = value.chunks_exact(2);
+    if !chunks.remainder().is_empty() {
+        return Err(CoreError::Storage(
+            "symlink target contains invalid UTF-16 bytes".into(),
+        ));
+    }
+    let wide = chunks
+        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        .collect::<Vec<_>>();
+    Ok(OsString::from_wide(&wide))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn bytes_os_string(value: &[u8]) -> CoreResult<OsString> {
+    String::from_utf8(value.to_vec())
+        .map(OsString::from)
+        .map_err(|_| CoreError::Storage("symlink target is not valid UTF-8".into()))
+}
+
+#[cfg(unix)]
+// The manifest schema is cross-platform: modes are absent on platforms that
+// do not expose Unix permission bits, hence the shared `Option<u32>` shape.
+#[allow(clippy::unnecessary_wraps)]
+fn file_mode(metadata: &fs::Metadata) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    Some(metadata.mode() & 0o7777)
+}
+
+#[cfg(not(unix))]
+fn file_mode(_metadata: &fs::Metadata) -> Option<u32> {
+    None
+}
+
+#[cfg(unix)]
+fn set_file_mode(file: &File, mode: Option<u32>) -> CoreResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(mode) = mode {
+        file.set_permissions(fs::Permissions::from_mode(mode))
+            .map_err(io_error)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_file_mode(_file: &File, _mode: Option<u32>) -> CoreResult<()> {
+    Ok(())
+}
+
+fn hash_file(path: &Path) -> CoreResult<(String, u64)> {
+    let mut file = File::open(path).map_err(io_error)?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    let mut size = 0_u64;
+    loop {
+        let count = file.read(&mut buffer).map_err(io_error)?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+        size = size.saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+    }
+    Ok((hex_digest_value(&digest.finalize()), size))
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    hex_digest_value(&Sha256::digest(bytes))
+}
+
+fn hex_digest_value(bytes: &[u8]) -> String {
+    hex::encode(bytes)
+}
+
+fn is_binary(bytes: &[u8]) -> bool {
+    bytes.contains(&0) || std::str::from_utf8(bytes).is_err()
+}
+
+fn line_counts(before: &[u8], after: &[u8]) -> (u64, u64) {
+    let before = String::from_utf8_lossy(before);
+    let after = String::from_utf8_lossy(after);
+    let diff = TextDiff::from_lines(&before, &after);
+    let mut additions = 0_u64;
+    let mut deletions = 0_u64;
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Insert => additions += 1,
+            ChangeTag::Delete => deletions += 1,
+            ChangeTag::Equal => {}
+        }
+    }
+    (additions, deletions)
+}
+
+fn storage(error: impl std::fmt::Display) -> CoreError {
+    CoreError::Storage(error.to_string())
+}
+
+fn io_error(error: impl std::fmt::Display) -> CoreError {
+    CoreError::Storage(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture() -> (tempdir::TempDirGuard, SqliteSnapshotStore) {
+        let root = std::env::temp_dir().join(format!("haarness-snap-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(root.join("ws/src")).unwrap();
+        // Migrations come from the main store opening the same file.
+        let database = root.join("test.db");
+        crate::SqliteStore::open(&database).unwrap();
+        let store = SqliteSnapshotStore::open(&database, root.join("ws")).unwrap();
+        (tempdir::TempDirGuard(root), store)
+    }
+
+    mod tempdir {
+        pub struct TempDirGuard(pub std::path::PathBuf);
+        impl Drop for TempDirGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+    }
+
+    fn count(store: &SqliteSnapshotStore, table: &str) -> i64 {
+        store
+            .connection
+            .lock()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    /// Backdate a snapshot so retention has something expired to find.
+    fn age(store: &SqliteSnapshotStore, id: &str, days: i64) {
+        let when = (Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+        store
+            .connection
+            .lock()
+            .execute(
+                "UPDATE snapshots SET created_at=?2 WHERE id=?1",
+                params![id, when],
+            )
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn retention_drops_expired_checkpoints_and_their_orphaned_blobs() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        let thread = ThreadId::new();
+        fs::write(workspace.join("a.txt"), "one\n").unwrap();
+        let old = store.capture(thread).await.unwrap();
+        fs::write(workspace.join("a.txt"), "two\n").unwrap();
+        let recent = store.capture(thread).await.unwrap();
+        age(&store, &old.id, 30);
+
+        assert_eq!(count(&store, "snapshots"), 2);
+        assert_eq!(count(&store, "snapshot_blobs"), 2);
+        let report = store.prune(chrono::Duration::days(7), 1).unwrap();
+        assert_eq!(report.snapshots, 1);
+        assert_eq!(report.blobs, 1, "the blob only the old manifest named");
+        assert_eq!(count(&store, "snapshots"), 1);
+        assert_eq!(count(&store, "snapshot_files"), 1);
+        // The surviving checkpoint still restores.
+        fs::write(workspace.join("a.txt"), "three\n").unwrap();
+        store.restore(&recent.id).await.unwrap();
+        assert_eq!(
+            fs::read_to_string(workspace.join("a.txt")).unwrap(),
+            "two\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn retention_keeps_recent_checkpoints_and_a_floor_per_thread() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        let thread = ThreadId::new();
+        let mut ids = Vec::new();
+        for index in 0..4 {
+            fs::write(workspace.join("a.txt"), format!("v{index}\n")).unwrap();
+            let snapshot = store.capture(thread).await.unwrap();
+            age(&store, &snapshot.id, 30);
+            ids.push(snapshot.id);
+        }
+        // Everything is expired, but the floor holds the newest two back.
+        let report = store.prune(chrono::Duration::days(7), 2).unwrap();
+        assert_eq!(report.snapshots, 2);
+        assert_eq!(count(&store, "snapshots"), 2);
+        assert!(store.restore(ids.last().unwrap()).await.is_ok());
+
+        // Nothing is expired here, so nothing goes.
+        let (guard, store) = fixture();
+        fs::write(guard.0.join("ws/a.txt"), "fresh\n").unwrap();
+        store.capture(ThreadId::new()).await.unwrap();
+        assert_eq!(
+            store.prune(chrono::Duration::days(7), 0).unwrap(),
+            PruneReport::default()
+        );
+        assert_eq!(count(&store, "snapshots"), 1);
+    }
+
+    #[tokio::test]
+    async fn retention_never_touches_a_pending_undo() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        let thread = ThreadId::new();
+        fs::write(workspace.join("a.txt"), "one\n").unwrap();
+        let backup = store.capture(thread).await.unwrap();
+        fs::write(workspace.join("a.txt"), "two\n").unwrap();
+        let base = store.capture(thread).await.unwrap();
+        age(&store, &backup.id, 30);
+        age(&store, &base.id, 30);
+        // A thread mid-undo holds both sides of the delta.
+        store
+            .connection
+            .lock()
+            .execute(
+                "INSERT INTO threads(id,title,created_at,updated_at,provider,model,agent,archived,\
+                 revert_sequence,revert_snapshot,revert_base_snapshot) \
+                 VALUES(?1,'t','now','now','p','m','build',0,1,?2,?3)",
+                params![thread.to_string(), backup.id, base.id],
+            )
+            .unwrap();
+
+        let report = store.prune(chrono::Duration::days(7), 0).unwrap();
+        assert_eq!(report.snapshots, 0, "a live undo is not garbage");
+        assert_eq!(count(&store, "snapshots"), 2);
+    }
+
+    #[tokio::test]
+    async fn paired_delta_round_trip_adds_deletes_and_modifies() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::write(workspace.join("src/main.rs"), "before\n").unwrap();
+        fs::write(workspace.join("delete-me"), "present\n").unwrap();
+        let before = store.capture(ThreadId::new()).await.unwrap();
+
+        fs::write(workspace.join("src/main.rs"), "after\n").unwrap();
+        fs::write(workspace.join("added"), "new\n").unwrap();
+        fs::remove_file(workspace.join("delete-me")).unwrap();
+        let after = store.capture(ThreadId::new()).await.unwrap();
+
+        let undone = store.restore_delta(&after.id, &before.id).await.unwrap();
+        assert_eq!(undone, vec!["added", "delete-me", "src/main.rs"]);
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/main.rs")).unwrap(),
+            "before\n"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("delete-me")).unwrap(),
+            "present\n"
+        );
+        assert!(!workspace.join("added").exists());
+
+        let redone = store.restore_delta(&before.id, &after.id).await.unwrap();
+        assert_eq!(redone, vec!["delete-me", "added", "src/main.rs"]);
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/main.rs")).unwrap(),
+            "after\n"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("added")).unwrap(),
+            "new\n"
+        );
+        assert!(!workspace.join("delete-me").exists());
+    }
+
+    #[tokio::test]
+    async fn human_edit_conflict_happens_before_any_write() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::write(workspace.join("a"), "old-a").unwrap();
+        fs::write(workspace.join("b"), "old-b").unwrap();
+        let before = store.capture(ThreadId::new()).await.unwrap();
+        fs::write(workspace.join("a"), "new-a").unwrap();
+        fs::write(workspace.join("b"), "new-b").unwrap();
+        let after = store.capture(ThreadId::new()).await.unwrap();
+        fs::write(workspace.join("b"), "human-b").unwrap();
+
+        let error = store
+            .restore_delta(&after.id, &before.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CoreError::Conflict(_)));
+        assert_eq!(fs::read_to_string(workspace.join("a")).unwrap(), "new-a");
+        assert_eq!(fs::read_to_string(workspace.join("b")).unwrap(), "human-b");
+    }
+
+    #[tokio::test]
+    async fn legacy_restore_is_overlay_and_preserves_extra_files() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::write(workspace.join("src/main.rs"), "original\n").unwrap();
+        let snapshot = store.capture(ThreadId::new()).await.unwrap();
+        fs::write(workspace.join("src/main.rs"), "mutated\n").unwrap();
+        fs::write(workspace.join("extra"), "human\n").unwrap();
+
+        let touched = store.restore(&snapshot.id).await.unwrap();
+        assert_eq!(touched, vec!["src/main.rs"]);
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/main.rs")).unwrap(),
+            "original\n"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("extra")).unwrap(),
+            "human\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn identical_content_shares_blobs_across_snapshots() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::write(workspace.join("a.txt"), "same-bytes\n").unwrap();
+        fs::write(workspace.join("b.txt"), "same-bytes\n").unwrap();
+        store.capture(ThreadId::new()).await.unwrap();
+        store.capture(ThreadId::new()).await.unwrap();
+
+        let blobs: i64 = store
+            .connection
+            .lock()
+            .query_row("SELECT COUNT(*) FROM snapshot_blobs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(blobs, 1, "two files times two snapshots, one stored blob");
+    }
+
+    #[tokio::test]
+    async fn omitted_large_entry_is_explicit_and_restore_refuses_it() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::write(workspace.join("huge.bin"), vec![7_u8; 3 * 1024 * 1024]).unwrap();
+        let with_large = store.capture(ThreadId::new()).await.unwrap();
+        assert_eq!(with_large.file_count, 1);
+        fs::remove_file(workspace.join("huge.bin")).unwrap();
+        let without_large = store.capture(ThreadId::new()).await.unwrap();
+
+        let error = store
+            .restore_delta(&without_large.id, &with_large.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CoreError::Conflict(_)));
+        assert!(!workspace.join("huge.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn large_workspace_captures_and_restores_the_complete_manifest() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        for index in 0..10_005 {
+            fs::write(workspace.join(format!("entry-{index:05}")), []).unwrap();
+        }
+
+        let snapshot = store.capture(ThreadId::new()).await.unwrap();
+        assert_eq!(snapshot.file_count, 10_005);
+        assert_eq!(store.load_manifest(&snapshot.id).unwrap().len(), 10_005);
+        fs::write(workspace.join("entry-10004"), "edited after capture").unwrap();
+        store.restore(&snapshot.id).await.unwrap();
+        assert_eq!(fs::read(workspace.join("entry-10004")).unwrap(), b"");
+    }
+
+    #[tokio::test]
+    async fn hidden_files_are_included_but_git_and_ignored_files_are_not() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::write(workspace.join(".hidden"), "yes").unwrap();
+        fs::write(workspace.join(".gitignore"), "ignored\n").unwrap();
+        fs::write(workspace.join("ignored"), "no").unwrap();
+        fs::create_dir(workspace.join(".git")).unwrap();
+        fs::write(workspace.join(".git/config"), "secret").unwrap();
+
+        let snapshot = store.capture(ThreadId::new()).await.unwrap();
+        let manifest = store.load_manifest(&snapshot.id).unwrap();
+        assert!(manifest.contains_key(".hidden"));
+        assert!(manifest.contains_key(".gitignore"));
+        assert!(!manifest.contains_key("ignored"));
+        assert!(!manifest.keys().any(|path| path.starts_with(".git/")));
+    }
+
+    #[test]
+    fn exact_canonical_home_directory_is_detected() {
+        let root = std::env::temp_dir().join(format!("haarness-home-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(root.join("child")).unwrap();
+        let canonical = root.canonicalize().unwrap();
+        assert!(matches_configured_home(
+            &canonical,
+            [root.join("child/..").into_os_string()]
+        ));
+        assert!(!matches_configured_home(
+            &canonical,
+            [root.join("child").into_os_string()]
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_diff_is_stable_and_live_diff_is_bounded() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::write(workspace.join("a"), "one\n").unwrap();
+        let before = store.capture(ThreadId::new()).await.unwrap();
+        fs::write(workspace.join("a"), "two\nthree\n").unwrap();
+        let after = store.capture(ThreadId::new()).await.unwrap();
+
+        let stable = store.diff_snapshots(&before.id, &after.id).await.unwrap();
+        assert_eq!(stable.len(), 1);
+        assert_eq!(stable[0].status, FileDiffStatus::Modified);
+        assert_eq!((stable[0].additions, stable[0].deletions), (2, 1));
+        assert_eq!(stable[0].before.as_deref(), Some("one\n"));
+        assert_eq!(stable[0].after.as_deref(), Some("two\nthree\n"));
+
+        let summary = store
+            .diff_review(&before.id, Some(&after.id), true, None)
+            .await
+            .unwrap();
+        assert_eq!((summary[0].additions, summary[0].deletions), (2, 1));
+        assert!(summary[0].before.is_none() && summary[0].after.is_none() && !summary[0].truncated);
+        assert_eq!(
+            store
+                .diff_review(&before.id, Some(&after.id), false, Some("a"))
+                .await
+                .unwrap(),
+            stable
+        );
+        assert!(
+            store
+                .diff_review(&before.id, Some(&after.id), false, Some("missing"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        fs::write(workspace.join("a"), vec![0_u8; 32]).unwrap();
+        let live = store.diff_live(&after.id).await.unwrap();
+        assert!(live[0].binary);
+        assert!(live[0].before.is_none() && live[0].after.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn delta_preserves_mode_and_symlink_target() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::write(workspace.join("script"), "echo before\n").unwrap();
+        fs::set_permissions(workspace.join("script"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(workspace.join("target-a"), "a").unwrap();
+        fs::write(workspace.join("target-b"), "b").unwrap();
+        symlink("target-a", workspace.join("link")).unwrap();
+        let before = store.capture(ThreadId::new()).await.unwrap();
+
+        fs::write(workspace.join("script"), "echo after\n").unwrap();
+        fs::set_permissions(workspace.join("script"), fs::Permissions::from_mode(0o644)).unwrap();
+        fs::remove_file(workspace.join("link")).unwrap();
+        symlink("target-b", workspace.join("link")).unwrap();
+        let after = store.capture(ThreadId::new()).await.unwrap();
+
+        store.restore_delta(&after.id, &before.id).await.unwrap();
+        assert_eq!(
+            fs::metadata(workspace.join("script"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::read_link(workspace.join("link")).unwrap(),
+            PathBuf::from("target-a")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ancestor_symlink_swap_is_rejected_without_touching_outside() {
+        use std::os::unix::fs::symlink;
+
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::write(workspace.join("src/main.rs"), "before").unwrap();
+        let before = store.capture(ThreadId::new()).await.unwrap();
+        fs::write(workspace.join("src/main.rs"), "after").unwrap();
+        let after = store.capture(ThreadId::new()).await.unwrap();
+
+        let outside = guard.0.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("main.rs"), "outside").unwrap();
+        fs::remove_dir_all(workspace.join("src")).unwrap();
+        symlink(&outside, workspace.join("src")).unwrap();
+
+        let error = store
+            .restore_delta(&after.id, &before.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CoreError::Conflict(_)));
+        assert_eq!(
+            fs::read_to_string(outside.join("main.rs")).unwrap(),
+            "outside"
+        );
+    }
+}

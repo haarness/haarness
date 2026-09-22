@@ -1,0 +1,70 @@
+[package]
+name = "haarness-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "haarness"
+path = "src/main.rs"
+
+[dependencies]
+haarness-ripgrep = { path = "../haarness-ripgrep" }
+agent-client-protocol.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+clap.workspace = true
+directories.workspace = true
+fs2.workspace = true
+glob.workspace = true
+haarness-core = { path = "../haarness-core" }
+haarness-extensions = { path = "../haarness-extensions" }
+haarness-insights = { path = "../haarness-insights" }
+haarness-profiles = { path = "../haarness-profiles" }
+haarness-language = { path = "../haarness-language" }
+haarness-mcp = { path = "../haarness-mcp" }
+haarness-opentui = { path = "../haarness-opentui" }
+haarness-protocol = { path = "../haarness-protocol" }
+haarness-providers = { path = "../haarness-providers" }
+haarness-scheduler = { path = "../haarness-scheduler" }
+haarness-server = { path = "../haarness-server" }
+haarness-store = { path = "../haarness-store" }
+haarness-tui = { path = "../haarness-tui" }
+haarness-workflow-catalog = { path = "../haarness-workflow-catalog" }
+haarness-workflows = { path = "../haarness-workflows" }
+haarness-workspaces = { path = "../haarness-workspaces" }
+jsonc-parser.workspace = true
+opentelemetry.workspace = true
+opentelemetry-otlp.workspace = true
+opentelemetry_sdk.workspace = true
+parking_lot.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+rpassword.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-opentelemetry.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+futures.workspace = true
+opentelemetry-proto.workspace = true
+prost.workspace = true
+reqwest.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["poll", "signal"] }
+
+[lints]
+workspace = true

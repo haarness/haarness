@@ -1,0 +1,49 @@
+name = "catppuccin-frappe"
+
+[dark]
+bg = "#303446"
+surface = "#292c3c"
+selected = "#232634"
+text = "#c6d0f5"
+muted = "#949cb8"
+primary = "#8da4e2"
+accent = "#f4b8e4"
+user = "#a7b8eb"
+danger = "#e78284"
+
+[dark.syntax]
+keyword = "#ca9ee6"
+string = "#a6d189"
+comment = "#949cb8"
+constant = "#ef9f76"
+function = "#8da4e2"
+
+[dark.diff]
+added = "#a6d189"
+added_bg = "#29342b"
+removed = "#e78284"
+removed_bg = "#3a2a31"
+
+[light]
+bg = "#303446"
+surface = "#292c3c"
+selected = "#232634"
+text = "#c6d0f5"
+muted = "#949cb8"
+primary = "#8da4e2"
+accent = "#f4b8e4"
+user = "#a7b8eb"
+danger = "#e78284"
+
+[light.syntax]
+keyword = "#ca9ee6"
+string = "#a6d189"
+comment = "#949cb8"
+constant = "#ef9f76"
+function = "#8da4e2"
+
+[light.diff]
+added = "#a6d189"
+added_bg = "#29342b"
+removed = "#e78284"
+removed_bg = "#3a2a31"

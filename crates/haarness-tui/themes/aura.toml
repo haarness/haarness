@@ -1,0 +1,49 @@
+name = "aura"
+
+[dark]
+bg = "#0f0f0f"
+surface = "#15141b"
+selected = "#15141b"
+text = "#edecee"
+muted = "#6d6d6d"
+primary = "#a277ff"
+accent = "#a277ff"
+user = "#c4acf7"
+danger = "#ff6767"
+
+[dark.syntax]
+keyword = "#f694ff"
+string = "#61ffca"
+comment = "#6d6d6d"
+constant = "#9dff65"
+function = "#a277ff"
+
+[dark.diff]
+added = "#61ffca"
+added_bg = "#354933"
+removed = "#ff6767"
+removed_bg = "#3f191a"
+
+[light]
+bg = "#0f0f0f"
+surface = "#15141b"
+selected = "#15141b"
+text = "#edecee"
+muted = "#6d6d6d"
+primary = "#a277ff"
+accent = "#a277ff"
+user = "#c4acf7"
+danger = "#ff6767"
+
+[light.syntax]
+keyword = "#f694ff"
+string = "#61ffca"
+comment = "#6d6d6d"
+constant = "#9dff65"
+function = "#a277ff"
+
+[light.diff]
+added = "#61ffca"
+added_bg = "#354933"
+removed = "#ff6767"
+removed_bg = "#3f191a"

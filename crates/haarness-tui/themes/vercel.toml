@@ -1,0 +1,49 @@
+name = "vercel"
+
+[dark]
+bg = "#000000"
+surface = "#1A1A1A"
+selected = "#292929"
+text = "#EDEDED"
+muted = "#878787"
+primary = "#0070F3"
+accent = "#8E4EC6"
+user = "#6ba8f0"
+danger = "#E5484D"
+
+[dark.syntax]
+keyword = "#F75590"
+string = "#63C46D"
+comment = "#878787"
+constant = "#F2A700"
+function = "#BF7AF0"
+
+[dark.diff]
+added = "#63C46D"
+added_bg = "#0B1D0F"
+removed = "#FF6166"
+removed_bg = "#2A1314"
+
+[light]
+bg = "#FFFFFF"
+surface = "#FAFAFA"
+selected = "#EAEAEA"
+text = "#171717"
+muted = "#666666"
+primary = "#0070F3"
+accent = "#8E4EC6"
+user = "#0a4890"
+danger = "#DC3545"
+
+[light.syntax]
+keyword = "#E93D82"
+string = "#46A758"
+comment = "#888888"
+constant = "#FFB224"
+function = "#8E4EC6"
+
+[light.diff]
+added = "#46A758"
+added_bg = "#E6F9E9"
+removed = "#E5484D"
+removed_bg = "#FDECED"

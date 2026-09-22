@@ -1,0 +1,30 @@
+import { t } from "./i18n";
+import { Show } from "solid-js";
+import { useApp } from "./state";
+import { Button, Icon } from "./ui";
+
+/** Render in the active surface so native modality cannot hide operation errors. */
+export function Notifications() {
+  const { state, set } = useApp();
+  return (
+      <div class="notifications">
+        <Show when={state.notice}>
+          <div class="toast" role="status">
+            <Icon name="check" size="sm" />
+            {state.notice}
+          </div>
+        </Show>
+        <Show when={state.error}>
+          <div class="error-banner" role="alert">
+            <Icon name="alert" size="sm" />
+            <span>{state.error}</span>
+            <Button
+              icon="close"
+              label={t("Dismiss error")}
+              onClick={() => set("error", "")}
+            />
+          </div>
+        </Show>
+      </div>
+  );
+}

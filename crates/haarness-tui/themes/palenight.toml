@@ -1,0 +1,49 @@
+name = "palenight"
+
+[dark]
+bg = "#292d3e"
+surface = "#1e2132"
+selected = "#32364a"
+text = "#a6accd"
+muted = "#676e95"
+primary = "#82aaff"
+accent = "#89ddff"
+user = "#92abe8"
+danger = "#f07178"
+
+[dark.syntax]
+keyword = "#c792ea"
+string = "#c3e88d"
+comment = "#676e95"
+constant = "#f78c6c"
+function = "#82aaff"
+
+[dark.diff]
+added = "#c3e88d"
+added_bg = "#2e3c2b"
+removed = "#f07178"
+removed_bg = "#3c2b2b"
+
+[light]
+bg = "#fafafa"
+surface = "#f5f5f5"
+selected = "#e7e7e8"
+text = "#292d3e"
+muted = "#8796b0"
+primary = "#4976eb"
+accent = "#00acc1"
+user = "#3b559d"
+danger = "#e53935"
+
+[light.syntax]
+keyword = "#a854f2"
+string = "#91b859"
+comment = "#8796b0"
+constant = "#f4511e"
+function = "#4976eb"
+
+[light.diff]
+added = "#91b859"
+added_bg = "#e8f5e9"
+removed = "#e53935"
+removed_bg = "#ffebee"

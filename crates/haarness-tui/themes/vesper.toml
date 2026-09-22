@@ -1,0 +1,47 @@
+name = "vesper"
+
+[dark]
+bg = "#101010"
+surface = "#101010"
+selected = "#101010"
+muted = "#A0A0A0"
+primary = "#FFC799"
+accent = "#FFC799"
+user = "#99FFE4"
+danger = "#FF8080"
+
+[dark.syntax]
+keyword = "#A0A0A0"
+string = "#99FFE4"
+comment = "#8b8b8b"
+constant = "#FFC799"
+function = "#FFC799"
+
+[dark.diff]
+added = "#99FFE4"
+added_bg = "#0d2818"
+removed = "#FF8080"
+removed_bg = "#281a1a"
+
+[light]
+surface = "#F0F0F0"
+selected = "#E0E0E0"
+text = "#101010"
+muted = "#A0A0A0"
+primary = "#FFC799"
+accent = "#FFC799"
+user = "#93755b"
+danger = "#FF8080"
+
+[light.syntax]
+keyword = "#A0A0A0"
+string = "#99FFE4"
+comment = "#8b8b8b"
+constant = "#FFC799"
+function = "#FFC799"
+
+[light.diff]
+added = "#99FFE4"
+added_bg = "#e8f5e8"
+removed = "#FF8080"
+removed_bg = "#f5e8e8"

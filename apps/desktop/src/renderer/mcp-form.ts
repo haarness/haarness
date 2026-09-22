@@ -1,0 +1,132 @@
+export interface McpPair {
+  key: string;
+  value: string;
+}
+
+export interface McpDraft {
+  name: string;
+  type: "local" | "remote";
+  scope: "global" | "local";
+  enabled: boolean;
+  command: string;
+  args: McpPair[];
+  environment: McpPair[];
+  url: string;
+  headers: McpPair[];
+  oauth: "auto" | "enabled" | "disabled";
+  oauthClientId: string;
+  oauthScopes: string;
+}
+
+export function newMcpDraft(): McpDraft {
+  return {
+    name: "",
+    type: "local",
+    scope: "global",
+    enabled: true,
+    command: "",
+    args: [],
+    environment: [],
+    url: "",
+    headers: [],
+    oauth: "auto",
+    oauthClientId: "",
+    oauthScopes: "",
+  };
+}
+
+function pairs(rows: McpPair[], kind: "environment" | "headers") {
+  const seen = new Set<string>();
+  const entries: [string, string][] = [];
+  for (const [index, row] of rows.entries()) {
+    const key = row.key.trim();
+    if (!key && !row.value) continue;
+    const label = kind === "environment" ? "Environment variable" : "Header";
+    if (!key) throw Error(`${label} ${index + 1} needs a name.`);
+    const valid =
+      kind === "environment"
+        ? /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)
+        : /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(key);
+    if (!valid) throw Error(`${label} ${index + 1} has an invalid name.`);
+    const identity = kind === "headers" ? key.toLowerCase() : key;
+    if (seen.has(identity))
+      throw Error(
+        `${label} ${index + 1} repeats a name. Keep one row per name.`,
+      );
+    if (kind === "headers" && /[\x00-\x08\x0a-\x1f\x7f]/.test(row.value))
+      throw Error(
+        `Header ${index + 1} contains an invalid character in its value.`,
+      );
+    if (row.value.includes("\0"))
+      throw Error(`${label} ${index + 1} contains a null character.`);
+    seen.add(identity);
+    entries.push([key, row.value]);
+  }
+  return Object.fromEntries(entries);
+}
+
+/** Preserve argument boundaries and values; never interpret shell syntax. */
+export function mcpInput(draft: McpDraft): Record<string, unknown> {
+  const name = draft.name.trim();
+  if (!name || /[\x00-\x1f\x7f]/.test(name))
+    throw Error("Enter a server name without control characters.");
+  const common = {
+    action: "add",
+    name,
+    type: draft.type,
+    scope: draft.scope,
+    enabled: draft.enabled,
+  };
+  if (draft.type === "local") {
+    const command = draft.command.trim();
+    if (!command || command.includes("\0"))
+      throw Error("Enter an executable, such as npx, uvx, or a full path.");
+    const args: string[] = [];
+    for (const [index, row] of draft.args.entries()) {
+      if (!row.key && !row.value) continue;
+      if (!row.key)
+        throw Error(
+          `Argument ${index + 1} needs a flag or positional argument.`,
+        );
+      if (row.key.includes("\0") || row.value.includes("\0"))
+        throw Error(`Argument ${index + 1} contains a null character.`);
+      args.push(row.key);
+      if (row.value !== "") args.push(row.value);
+    }
+    return {
+      ...common,
+      command,
+      args,
+      environment: pairs(draft.environment, "environment"),
+    };
+  }
+  const url = draft.url.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw Error("Enter a valid HTTP or HTTPS server URL.");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol))
+    throw Error("The server URL must use HTTP or HTTPS.");
+  if (parsed.username || parsed.password)
+    throw Error(
+      "Use a request header for credentials instead of putting them in the URL.",
+    );
+  return {
+    ...common,
+    url,
+    headers: pairs(draft.headers, "headers"),
+    ...(draft.oauth !== "auto" ? { oauth: draft.oauth === "enabled" } : {}),
+    ...(draft.oauth !== "disabled"
+      ? {
+          ...(draft.oauthClientId.trim()
+            ? { oauthClientId: draft.oauthClientId.trim() }
+            : {}),
+          oauthScopes: [
+            ...new Set(draft.oauthScopes.split(/\s+/).filter(Boolean)),
+          ],
+        }
+      : {}),
+  };
+}

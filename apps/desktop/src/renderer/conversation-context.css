@@ -1,0 +1,76 @@
+.conversation-context {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--s5);
+  font-size: var(--ui-sm);
+}
+.conversation-context header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+}
+.conversation-context h2 {
+  font-size: var(--ui-lg);
+  margin: 0;
+}
+.conversation-context h3 {
+  font-size: var(--ui-sm);
+  margin: 0 0 var(--s3);
+}
+/* A subsection ranks below its section, so it reads quieter — not larger, which
+   is what the shared h4 size would do here. */
+.conversation-context h4 {
+  font-size: var(--ui-sm);
+  color: var(--muted);
+}
+.conversation-context > section {
+  border-top: 1px solid var(--hairline);
+  margin-top: var(--s5);
+  padding-top: var(--s5);
+}
+.context-title {
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+.context-total {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+}
+.context-total strong {
+  font-size: 28px;
+  font-variant-numeric: tabular-nums;
+}
+.context-total span,
+.context-note,
+.conversation-context small {
+  color: var(--muted);
+}
+.context-note {
+  font-size: var(--ui-xs);
+  line-height: 1.6;
+}
+.conversation-context progress {
+  width: 100%;
+  height: 8px;
+  display: block;
+  margin-bottom: var(--s1);
+  accent-color: var(--primary);
+}
+.context-stats,
+.context-breakdown {
+  margin: var(--s3) 0;
+}
+.context-stats > div,
+.context-breakdown > div {
+  display: flex;
+  gap: var(--s4);
+  justify-content: space-between;
+  padding: var(--s2) 0;
+}
+.conversation-context dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}

@@ -1,0 +1,53 @@
+.server-connect {
+  width: min(480px, calc(100vw - 32px));
+}
+.server-connect fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.server-connect .field > span {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+}
+.server-connect small,
+.server-connect summary > span {
+  color: var(--muted);
+  font-size: var(--ui);
+  font-weight: normal;
+}
+.server-connect details {
+  margin-top: var(--s6);
+  border-top: 1px solid var(--hairline);
+  padding-top: var(--s5);
+}
+.server-connect summary {
+  cursor: pointer;
+  font-weight: 500;
+}
+.server-connect summary > span {
+  margin-inline-start: var(--s1);
+}
+.server-connect details p {
+  margin: var(--s3) 0 var(--s4);
+  font-size: var(--ui-lg);
+}
+.server-password {
+  display: flex;
+  gap: var(--s2);
+}
+.server-password input {
+  flex: 1;
+  min-width: 0;
+}
+.server-password button {
+  flex: 0 0 auto;
+}
+/* The same distance every other dialog puts between a form and its failure. */
+.server-connect form > .server-connect-error {
+  color: var(--danger);
+  overflow-wrap: anywhere;
+  margin: var(--s3) 0 0;
+}

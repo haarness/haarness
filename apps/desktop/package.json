@@ -1,0 +1,128 @@
+{
+  "name": "@haarness/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Haarness Desktop",
+  "author": "Haarness",
+  "license": "MIT",
+  "type": "module",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "npm run typecheck && electron-vite build",
+    "start": "electron .",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:e2e": "playwright test",
+    "package": "node scripts/prepare.mjs && electron-builder --publish never",
+    "package:dir": "node scripts/prepare.mjs && electron-builder --dir --publish never",
+    "prebuild": "node scripts/build-voice.mjs",
+    "predev": "node scripts/build-voice.mjs"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.8.1",
+    "@codemirror/lang-css": "^6.3.1",
+    "@codemirror/lang-html": "^6.4.9",
+    "@codemirror/lang-javascript": "^6.2.4",
+    "@codemirror/lang-json": "^6.0.2",
+    "@codemirror/lang-markdown": "^6.3.4",
+    "@codemirror/lang-python": "^6.2.1",
+    "@codemirror/lang-rust": "^6.0.2",
+    "@codemirror/language": "^6.11.3",
+    "@codemirror/language-data": "^6.5.2",
+    "@codemirror/search": "^6.5.11",
+    "@codemirror/state": "^6.5.2",
+    "@codemirror/view": "^6.38.1",
+    "@haarness/sdk": "file:../../sdks/typescript",
+    "@lezer/highlight": "^1.2.1",
+    "@tanstack/solid-virtual": "^3.13.12",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "devtools-protocol": "0.0.1687809",
+    "diff": "^8.0.2",
+    "dompurify": "^3.2.7",
+    "effect": "4.0.0-rc.112",
+    "electron-updater": "^6.6.2",
+    "jsonc-parser": "^3.3.1",
+    "lighthouse": "13.4.1",
+    "lucide-solid": "^1.41.0",
+    "marked": "^16.3.0",
+    "puppeteer-core": "25.9.0",
+    "solid-js": "1.9.15",
+    "ws": "8.21.0",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "^22.0.0",
+    "@types/ws": "8.18.1",
+    "electron": "44.2.0",
+    "electron-builder": "26.15.3",
+    "electron-vite": "5.0.0",
+    "tsx": "^4.20.5",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.0",
+    "vite-plugin-solid": "2.11.14"
+  },
+  "build": {
+    "appId": "dev.haarness.desktop",
+    "productName": "Haarness",
+    "directories": {
+      "output": "release",
+      "buildResources": "assets"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/",
+        "to": "bin/"
+      }
+    ],
+    "asar": true,
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "hardenedRuntime": true,
+      "icon": "assets/icon.png",
+      "identity": "-",
+      "entitlements": "assets/entitlements.mac.plist",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Haarness uses the microphone when you start dictation to turn your voice into message text.",
+        "NSSpeechRecognitionUsageDescription": "Haarness uses macOS speech recognition to turn your voice into editable message text."
+      },
+      "entitlementsInherit": "assets/entitlements.mac.plist"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development",
+      "icon": "assets/icon.png"
+    },
+    "protocols": [
+      {
+        "name": "Haarness",
+        "schemes": [
+          "haarness"
+        ]
+      }
+    ]
+  }
+}

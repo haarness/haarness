@@ -1,0 +1,49 @@
+name = "synthwave84"
+
+[dark]
+bg = "#262335"
+surface = "#1e1a29"
+selected = "#2a2139"
+text = "#ffffff"
+muted = "#848bbd"
+primary = "#36f9f6"
+accent = "#b084eb"
+user = "#90fcfa"
+danger = "#fe4450"
+
+[dark.syntax]
+keyword = "#ff7edb"
+string = "#fede5d"
+comment = "#848bbd"
+constant = "#b084eb"
+function = "#ff8b39"
+
+[dark.diff]
+added = "#72f1b8"
+added_bg = "#1a3a2a"
+removed = "#fe4450"
+removed_bg = "#3a1a2a"
+
+[light]
+bg = "#fafafa"
+surface = "#f5f5f5"
+selected = "#eeeeee"
+text = "#262335"
+muted = "#5c5c8a"
+primary = "#00bcd4"
+accent = "#9c27b0"
+user = "#11778c"
+danger = "#f44336"
+
+[light.syntax]
+keyword = "#e91e63"
+string = "#ff9800"
+comment = "#5c5c8a"
+constant = "#9c27b0"
+function = "#ff5722"
+
+[light.diff]
+added = "#4caf50"
+added_bg = "#e8f5e9"
+removed = "#f44336"
+removed_bg = "#ffebee"

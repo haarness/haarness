@@ -1,0 +1,39 @@
+name = "lucent-orng"
+
+[dark]
+text = "#eeeeee"
+muted = "#808080"
+primary = "#EC5B2B"
+accent = "#FFF7F1"
+user = "#ed9d83"
+danger = "#e06c75"
+
+[dark.syntax]
+keyword = "#EC5B2B"
+string = "#6ba1e6"
+comment = "#808080"
+constant = "#FFF7F1"
+function = "#EE7948"
+
+[dark.diff]
+added = "#6ba1e6"
+removed = "#c53b53"
+
+[light]
+text = "#1a1a1a"
+muted = "#8a8a8a"
+primary = "#EC5B2B"
+accent = "#c94d24"
+user = "#8e3e23"
+danger = "#d1383d"
+
+[light.syntax]
+keyword = "#EC5B2B"
+string = "#0062d1"
+comment = "#8a8a8a"
+constant = "#EC5B2B"
+function = "#c94d24"
+
+[light.diff]
+added = "#0062d1"
+removed = "#c53b53"

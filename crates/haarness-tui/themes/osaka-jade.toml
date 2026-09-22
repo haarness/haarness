@@ -1,0 +1,49 @@
+name = "osaka-jade"
+
+[dark]
+bg = "#111c18"
+surface = "#1a2520"
+selected = "#23372B"
+text = "#C1C497"
+muted = "#53685B"
+primary = "#2DD5B7"
+accent = "#549e6a"
+user = "#70cda9"
+danger = "#FF5345"
+
+[dark.syntax]
+keyword = "#2DD5B7"
+string = "#63b07a"
+comment = "#53685B"
+constant = "#D2689C"
+function = "#509475"
+
+[dark.diff]
+added = "#549e6a"
+added_bg = "#15241c"
+removed = "#FF5345"
+removed_bg = "#241515"
+
+[light]
+bg = "#F6F5DD"
+surface = "#E8E7CC"
+selected = "#D5D4B8"
+text = "#111c18"
+muted = "#53685B"
+primary = "#1faa90"
+accent = "#3d7a52"
+user = "#196a5a"
+danger = "#c7392d"
+
+[light.syntax]
+keyword = "#1faa90"
+string = "#3d7a52"
+comment = "#53685B"
+constant = "#a8527a"
+function = "#3d7560"
+
+[light.diff]
+added = "#3d7a52"
+added_bg = "#e0eee5"
+removed = "#c7392d"
+removed_bg = "#eee0e0"

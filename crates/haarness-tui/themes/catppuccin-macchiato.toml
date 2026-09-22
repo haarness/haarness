@@ -1,0 +1,49 @@
+name = "catppuccin-macchiato"
+
+[dark]
+bg = "#24273a"
+surface = "#1e2030"
+selected = "#181926"
+text = "#cad3f5"
+muted = "#939ab7"
+primary = "#8aadf4"
+accent = "#f5bde6"
+user = "#a7bef4"
+danger = "#ed8796"
+
+[dark.syntax]
+keyword = "#c6a0f6"
+string = "#a6da95"
+comment = "#939ab7"
+constant = "#f5a97f"
+function = "#8aadf4"
+
+[dark.diff]
+added = "#a6da95"
+added_bg = "#29342b"
+removed = "#ed8796"
+removed_bg = "#3a2a31"
+
+[light]
+bg = "#24273a"
+surface = "#1e2030"
+selected = "#181926"
+text = "#cad3f5"
+muted = "#939ab7"
+primary = "#8aadf4"
+accent = "#f5bde6"
+user = "#a7bef4"
+danger = "#ed8796"
+
+[light.syntax]
+keyword = "#c6a0f6"
+string = "#a6da95"
+comment = "#939ab7"
+constant = "#f5a97f"
+function = "#8aadf4"
+
+[light.diff]
+added = "#a6da95"
+added_bg = "#29342b"
+removed = "#ed8796"
+removed_bg = "#3a2a31"

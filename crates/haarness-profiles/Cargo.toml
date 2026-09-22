@@ -1,0 +1,21 @@
+[package]
+name = "haarness-profiles"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+fs2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+walkdir.workspace = true
+zip.workspace = true
+utoipa.workspace = true
+
+[lints]
+workspace = true

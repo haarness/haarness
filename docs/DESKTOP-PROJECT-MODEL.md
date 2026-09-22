@@ -1,0 +1,100 @@
+# Projects, worktrees, and conversations
+
+**Project** is the sidebar group. **Project folder** is its main checkout. A **Worktree** is an additional Git checkout belonging to that project. An ordinary non-Git folder is also a project. “Workspace” remains an internal API/storage term for a concrete working directory; it is not another desktop navigation concept.
+
+## Identity and execution
+
+The native project registry determines ownership through Git's common directory and primary checkout. The desktop does not infer relationships from path prefixes. A worktree outside the repository therefore joins the same project; a subdirectory of the main checkout is not mistaken for a linked worktree. Remote endpoints remain separate from local projects, even if their paths match.
+
+`src/projects.ts` projects the native registry into desktop groups. Each location retains its original connection ID, actual path, server, session database, and runtime lease. Conversations are identified in presentation state by both location and thread ID, so imported IDs cannot collide across checkouts. Opening a conversation routes transcript, tools, permissions, files, review, and terminals to that location.
+
+Opening only a linked worktree also registers the primary project folder. Registered, existing worktrees appear in the project's working-location menu. Unavailable worktrees are hidden from the sidebar and working-location menu, retaining their identity and cached history. In worktree view, the project menu offers **Show unavailable worktrees** with a count, so users can inspect or remove stale registrations. This temporary reveal resets on reload; **Hide unavailable worktrees** dismisses it immediately. Restoring the folder at its original path and refreshing the project returns the worktree and its conversations to the normal list.
+
+## Navigation and drafts
+
+- Clicking a project title toggles its conversation list and restores its last working location and conversation. The chevron independently expands/collapses its conversation list. Selecting a project never reorders projects or collapses other expanded projects.
+- The project menu offers **Pin**, **Edit** (a custom display name), **Section**, **Reveal in Finder**, **Archive chats** and **Remove project**. Sections list first, then unfiled projects under a **No section** heading once any section exists; a pin keeps a project at the top of its own group. Each group orders its rows through the shared persistent `list:projects` ordering, so Alt+arrows and drops move among the group's own rows, and a drop onto another group's row files the project there and places it beside that row. A custom name replaces the registry name wherever the desktop shows the project. Pin, name and section live in desktop storage (`project-presentation:v1`) keyed by project ID, and they follow a bare folder when it later resolves to its registered project. Archiving a project's chats archives every independent conversation in its available checkouts through the normal thread API and leaves the current chat open.
+- The project menu offers **Enable worktree view** for local Git projects. It replaces the flat list with collapsible **Local** and worktree groups, each with its own sessions, branch, new-chat button, and checkout menu. The preference and expansion states survive restarts. Creation, reset, removal, and refresh live in this sidebar; there is no separate Worktrees page. Non-Git folders retain the flat list.
+- In flat view, New chat defaults to **Project folder**. In worktree view it keeps the current checkout; each group also starts chats directly in its own folder. The composer still offers existing and new worktrees. Selecting a location, model, agent, or starter does not create a conversation.
+- Flat-view new-chat drafts belong to the project, so choosing a worktree preserves text and attachments. Worktree-view new-chat drafts belong to their concrete checkout. Switching views preserves each saved draft. Sending creates a conversation bound to the chosen folder. Existing-conversation drafts are always keyed by location and thread identity.
+- In flat view, independent conversations from all locations appear together; in worktree view they appear beneath their owning checkout. Delegated agent conversations are reached through the parent transcript; forks remain in the sidebar. `parentId` records lineage, while `isSubagent` distinguishes actual delegation. Worktree conversations have a small checkout badge; the title bar also identifies the active worktree.
+- Projects, conversations, and tabs drag from their whole row, without dedicated grips, move menus, or success notifications. Alt+arrow keys and Alt+Home/End provide keyboard ordering while preserving focus. Sidebar conversations have one Archive/Restore action; renaming and forking remain in the conversation header. Archiving an inactive project's conversation does not navigate away from the current chat.
+- Projects, conversations, and tabs use the existing persistent ordering system. A versioned migration folds old location-level project order/expansion into project groups and qualifies saved session positions with their locations.
+- Each expanded project maintains lightweight indexes for its locations. Versioned, paged title caches preserve all summaries during startup/recovery without a conversation-count cap. These are navigation caches, not a second transcript database. Collapsing releases subscriptions without stopping tasks.
+- Permission/question state belongs to its task and location. A waiting task marks its sidebar row while other chats, projects, settings, and menus remain usable.
+
+Configuration, credentials, plugins, skills, and executable resources continue to use the shared [global/project scope model](CONFIGURATION-SCOPES.md). Desktop appearance/layout state belongs in desktop storage; agent configuration does not.
+
+## Runtime lifecycle
+
+Local servers start automatically in the background. Opening a directory and saving its settings form one transaction, serialized only against other opens of that same directory. Background refreshes read the latest committed setting, so they cannot restore an older trust choice during a restart. Filesystem leases coordinate independent desktop/CLI clients. A slow project's launch cannot block another project's navigation or replace a more recent selection.
+
+Reset and removal execute through the owning project folder. The desktop serializes them against opens of that checkout, refuses active turns, pending permissions/questions, running or paused workflows, and running terminals, and closes an idle server before the backend acquires its lease. Dirty checkout protection remains in the backend; discarding tracked edits or both tracked and untracked files are separate explicit reset choices. Reset retains ignored files. Removal leaves conversation data intact and removes only the checkout registration from desktop navigation.
+
+A rebuild can change the executable while an earlier daemon owns a task. The desktop reuses that daemon when authenticated identity, directory, capabilities, and trust are compatible, preserving pending approvals. Reopening after its work finishes replaces the idle daemon normally. Incompatible protocols and explicit trust changes retain their lifecycle guards. Closing Electron detaches clients; it does not stop tasks or answer permissions.
+
+## Practical scale
+
+Automatic snapshots now default to Git projects. A plain folder such as Downloads is not scanned for automatic checkpoints unless snapshots are explicitly enabled. Snapshot capture runs off the asynchronous server executor and records the complete managed manifest, without the former 10,000-entry rejection. Ignore rules, symlink handling, restore validation, and SQLite atomicity remain intact.
+
+The explorer no longer truncates directories at 2,000 entries. Extension catalogs have no 64-tool cap; terminals have no 20-session cap; profile archives have no 4,096-file cap; memory search no longer ignores entries after the first 1,000. Profile export deduplicates identical migrated resources while preserving distinct legacy content.
+
+Byte budgets still bound previews, diff output, IPC payloads, and archive expansion. For example, large snapshot file content is represented as omitted metadata, rather than rejecting the whole project. These budgets are distinct from arbitrary project-size or item-count limits.
+
+## Reference implementations and compatibility
+
+Haarness uses separate ownership for project navigation, draft state, and directory execution.
+
+The preferred CLI/TUI management command is `worktree` / `/worktree`. Existing `workspace`, `workspaces`, and API `/v1/workspaces` remain compatible aliases/contracts; database and runtime directory names are unchanged. This naming change does not migrate or copy live conversation databases.
+
+See [desktop verification](DESKTOP-VERIFICATION.md) for executed scenarios and evidence limits.
+
+## Projects are required
+
+Every desktop conversation belongs to a project folder or a remote server's
+workspace. Both project pickers offer existing projects and New project. With
+no project selected, Home shows an Open project action and recent projects for
+the selected server. The composer, conversation starters, and project tools are
+hidden. New chat opens the folder chooser; cancelling keeps Home visible.
+Startup and server switching restore only an explicitly remembered project,
+never the first saved project. An unavailable project offers Retry and Choose
+another project. Sending never creates a hidden working folder.
+
+Opening a project or an existing conversation shows a centered Haarness mark
+until the selected history is loaded, without flashing the new-chat starters
+or project Home. A newer chat selection supersedes an earlier pending history
+request. The loading animation respects reduced-motion preferences.
+
+Older general-chat records migrate to ordinary projects in their existing
+working folders. Their connection IDs, conversation databases, saved drafts,
+active session, and trust settings stay intact. The legacy `projectless` marker
+is removed from desktop storage at startup, and the IPC connection API no longer
+accepts it. Existing `<desktop userData>/chats` folders remain accessible in the
+Projects list; new general-chat folders are not created.
+
+## Remote hosts with multiple projects
+
+An authenticated host exposes `/v1/host/projects`, `/v1/host/directories?path=...`, and `POST /v1/host/open` with `{ "path": "/absolute/folder" }`. The catalog uses `WorkspaceListResponse`; opening returns the canonical registered `WorkspaceInfo`. Directory listings contain canonical `path`, optional `parent`, `directories` (`name`, `path`), and optional `nextCursor`. The folder explorer uses this endpoint alone, without fetching the project catalog. Browsing is read-only; opening an existing directory registers it and ensures its normal daemon. Invalid/unavailable paths return an error without changing the desktop selection.
+
+`/v1/host/workspaces/{workspaceId}/v1/...` routes directory APIs to that daemon, including event streams and terminal upgrades. Every gateway request uses the host’s configured authentication (optional username/password, or a legacy saved bearer credential) and normal Origin validation. The host resolves registry IDs, never client-supplied upstream URLs, and replaces authorization internally. Streams are detached when the gateway shuts down; other directory daemons keep their own work.
+
+New remote connections are keyed by server origin plus opaque workspace ID. The existing origin-only default connection is retained when reopening its canonical folder. Server identity, credentials and last-project state remain separate from each location's drafts, event cursor and conversation state. Removing one desktop project preserves the host connection and server-side history.
+
+Opening and routing inspect only the selected workspace. Startup reads registry metadata for migration and snapshot policy without probing every saved folder. The full catalog refresh is reserved for listing projects. Desktop reuses the connection's verified server information and loads chat state and model choices concurrently; it becomes ready only after both complete. Opening failures preserve the path and distinguish slow servers, access problems and missing folders in plain language.
+
+
+### Remote folder explorer
+
+The remote picker is a folder explorer with Back, Up and Home navigation, a path bar with debounced autocomplete, and a hidden-folders toggle. Click a folder to browse it, then choose **Open project**. In the path bar, Up/Down selects a suggestion, Tab completes it, Enter navigates, and Escape dismisses suggestions. Pending older responses cannot replace a newer path or selection.
+
+`GET /v1/host/directories` accepts:
+
+| Query | Behavior |
+| --- | --- |
+| `path` | Absolute server path; omitted starts at the served project. `~` and `~/...` resolve on the server. |
+| `prefix` | Case-insensitive folder-name prefix for autocomplete. |
+| `hidden` | Include dot folders; false by default. A prefix beginning with `.` also matches hidden names. |
+| `limit` | Page size from 1 to 200; default 200. |
+| `after` | The previous response's `nextCursor`; preserve the path and filter when requesting another page. |
+
+Results sort by lowercase name, then exact name, and exclude ordinary files. The server retains at most one page plus a look-ahead entry in memory while scanning. `nextCursor` is null when there are no more results. Symlink directories are browsable; navigating resolves the canonical path. Unavailable or unreadable parent folders return an error, and the picker keeps the entered path for correction. All browsing uses the selected host's authentication and Origin checks. No client filesystem listing is substituted for the remote host.

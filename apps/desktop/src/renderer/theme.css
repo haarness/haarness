@@ -1,0 +1,115 @@
+/*
+ * Design tokens.
+ *
+ * Colour roles (--page, --surface, --text, …) are written onto <html> at runtime
+ * by the palette in src/themes.ts. The values below are the first-paint
+ * fallbacks for the default Haarness palette so the window never flashes.
+ * Everything else here — type, space, radius, motion, elevation — is fixed and
+ * is the only vocabulary the rest of the stylesheets are allowed to use.
+ */
+:root {
+  --sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI",
+    Inter, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono",
+    monospace;
+
+  /* Conversation reading size; the chrome scale below stays fixed. */
+  --font-size: 14px;
+  --ui-xs: 10.5px;
+  --ui-sm: 11.5px;
+  --ui: 12.5px;
+  --ui-lg: 13.5px;
+  --title-sm: 15px;
+  --title: 19px;
+  --title-lg: 25px;
+  --display: 32px;
+
+  --lh-tight: 1.25;
+  --lh-ui: 1.45;
+  --lh-read: 1.7;
+  --track-tight: -0.012em;
+  --track-caps: 0.06em;
+
+  --s0: 4px;
+  --s1: 6px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s7: 32px;
+  --s8: 44px;
+  --s9: 64px;
+
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 9px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+  --r-2xl: 22px;
+  --r-pill: 999px;
+
+  --control: 30px;
+  --control-sm: 26px;
+  --control-lg: 36px;
+  --icon-button: 28px;
+
+  --ease: cubic-bezier(0.2, 0.6, 0.25, 1);
+  --fast: 110ms;
+  --slow: 220ms;
+
+  /* Reading column. 760px put ~107 characters on a line at the default
+     conversation size, which is past comfortable prose; 700px lands near 95
+     while still leaving code, tables and diffs room to breathe. */
+  --measure: 700px;
+  --titlebar: 46px;
+
+  /* First-paint palette (Haarness, dark). */
+  --page: #151413;
+  --sidebar: #1c1a19;
+  --surface: #232120;
+  --raised: #2c2a27;
+  --hover: #ffffff0d;
+  --line: #ffffff16;
+  --text: #eae5dd;
+  --muted: #a9a298;
+  --primary: #eae5dd;
+  --primary-hover: #ffffff;
+  --accent: #dba273;
+  --selected: #ffffff12;
+  --user: #c8c2b8;
+  --danger: #ef8078;
+  --green: #82c78f;
+  --diff-add: #1a2c20;
+  --diff-remove: #331f1f;
+  --word-change: #ffffff1f;
+  --syntax-keyword: #c9a6f0;
+  --syntax-string: #a7d3a3;
+  --syntax-number: #e6bd8a;
+  --syntax-property: #8fbfe8;
+  color-scheme: dark;
+
+  /* Roles derived from the palette so every theme gets them for free. */
+  --hairline: color-mix(in srgb, var(--line) 70%, transparent);
+  --faint: color-mix(in srgb, var(--muted) 62%, transparent);
+  --primary-soft: color-mix(in srgb, var(--primary) 14%, transparent);
+  --primary-edge: color-mix(in srgb, var(--primary) 45%, transparent);
+  --accent-soft: color-mix(in srgb, var(--accent) 13%, transparent);
+  --accent-edge: color-mix(in srgb, var(--accent) 42%, transparent);
+  --danger-soft: color-mix(in srgb, var(--danger) 13%, transparent);
+  --danger-edge: color-mix(in srgb, var(--danger) 45%, transparent);
+  --green-soft: color-mix(in srgb, var(--green) 14%, transparent);
+  --focus: var(--primary);
+  --scrim: color-mix(in srgb, var(--page) 72%, #000000);
+
+  --shadow-1: 0 1px 2px #00000026, 0 6px 20px -6px #0000003d;
+  --shadow-2: 0 2px 6px #0000002e, 0 24px 60px -12px #00000059;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --shadow-1: 0 1px 2px #0000000f, 0 6px 18px -8px #00000021;
+  --shadow-2: 0 2px 8px #00000014, 0 26px 60px -16px #0000002e;
+  --scrim: color-mix(in srgb, var(--page) 55%, #2b2825);
+}

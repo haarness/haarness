@@ -1,0 +1,115 @@
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # Haarness is a commercial product: no internal identifiers may
+      # reach a release. The self-test proves the gate still detects them.
+      - run: sh ./scripts/check-commercial-boundary.sh --self-test
+        if: runner.os != 'Windows'
+      - run: sh ./scripts/check-commercial-boundary.sh
+        if: runner.os != 'Windows'
+      - run: cargo fmt --all -- --check
+      - run: cargo run -p xtask -- architecture
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo build --release -p haarness-cli
+      - name: Bundled ripgrep integrity and offline CLI/server searches
+        env:
+          HAARNESS_BIN: ./target/release/haarness${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: |
+          python3 vendor/ripgrep/verify.py
+          python3 scripts/test-ripgrep.py
+      - name: Install terminal test dependency
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Extension CLI, provider, and terminal integration
+        if: runner.os == 'Linux'
+        env:
+          HAARNESS_BIN: ./target/release/haarness
+        run: python3 scripts/test-extensions.py
+      - uses: actions/setup-node@v4
+        if: runner.os == 'Linux'
+        with:
+          node-version: '22'
+      - uses: astral-sh/setup-uv@v6
+        if: runner.os == 'Linux'
+      - name: SDK generation, typing, artifacts, and complete server coverage
+        if: runner.os == 'Linux'
+        env:
+          HAARNESS_BIN: ./target/release/haarness
+        run: ./scripts/test-sdks.sh
+      - name: Native cursor visibility across TUI screens
+        if: runner.os == 'Linux'
+        env:
+          HAARNESS_BIN: ./target/release/haarness
+        run: python3 scripts/test-tui-cursor.py
+      - run: ./target/release/haarness doctor
+        if: runner.os != 'Windows'
+      - run: .\target\release\haarness.exe doctor
+        if: runner.os == 'Windows'
+  desktop:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - run: cargo build --release -p haarness-cli
+      - run: npm run desktop:install
+      - run: npm --prefix apps/desktop run build
+      - run: npm --prefix apps/desktop test
+      - name: Electron end-to-end tests
+        if: runner.os == 'macOS'
+        env:
+          HAARNESS_BIN: ${{ github.workspace }}/target/release/haarness
+        run: npm --prefix apps/desktop run test:e2e
+      - name: Electron end-to-end tests under Xvfb
+        if: runner.os == 'Linux'
+        env:
+          HAARNESS_BIN: ${{ github.workspace }}/target/release/haarness
+        run: xvfb-run -a npm --prefix apps/desktop run test:e2e
+      - name: Package desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm --prefix apps/desktop run package:dir
+      - name: Verify packaged macOS application
+        if: runner.os == 'macOS'
+        env:
+          HAARNESS_BIN: ${{ github.workspace }}/apps/desktop/release/mac-arm64/Haarness.app/Contents/Resources/bin/haarness
+          HAARNESS_DESKTOP_EXECUTABLE: ${{ github.workspace }}/apps/desktop/release/mac-arm64/Haarness.app/Contents/MacOS/Haarness
+        run: npm --prefix apps/desktop run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-verification-${{ matrix.os }}
+          path: |
+            apps/desktop/test-results
+            apps/desktop/playwright-report

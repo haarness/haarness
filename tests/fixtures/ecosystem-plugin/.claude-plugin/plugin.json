@@ -1,0 +1,5 @@
+{
+  "name": "ecosystem-smoke",
+  "description": "Deterministic Haarness extension ecosystem smoke fixture",
+  "version": "1.0.0"
+}

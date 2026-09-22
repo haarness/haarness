@@ -1,0 +1,10 @@
+{
+  "name": "root-source-market",
+  "plugins": [
+    {
+      "name": "root-source-plugin",
+      "source": "./",
+      "description": "Marketplace-root plugin path smoke fixture"
+    }
+  ]
+}

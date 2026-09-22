@@ -1,0 +1,100 @@
+.prompt-context-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+  padding: var(--s0) 0 var(--s3);
+}
+.prompt-context-item {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  max-width: 100%;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  padding-block: var(--s0);
+  padding-inline: var(--s2) var(--s1);
+  background: var(--surface);
+  font-size: var(--ui-xs);
+}
+.prompt-context-item details {
+  min-width: 0;
+}
+.prompt-context-item summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  max-width: 480px;
+}
+.prompt-context-preview {
+  position: absolute;
+  bottom: calc(100% + var(--s2));
+  inset-inline-start: 0;
+  z-index: 15;
+  width: min(650px, 100%);
+  padding: var(--s4);
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-1);
+}
+.prompt-context-preview pre {
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: var(--s2) 0 0;
+}
+.mention-popover {
+  position: absolute;
+  z-index: 20;
+  bottom: calc(100% + var(--s2));
+  inset-inline-start: 0;
+  width: min(620px, 100%);
+  max-height: min(380px, 50vh);
+  overflow: auto;
+  padding: var(--s2);
+}
+.mention-options {
+  display: flex;
+  flex-direction: column;
+  /* Each option stacks a name over a path; rows need more air than the two
+     lines inside one row. */
+  gap: var(--s0);
+}
+.mention-options [role="option"] {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s2);
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+.mention-options [role="option"].highlighted {
+  background: var(--selected);
+}
+.mention-options [role="option"] > span {
+  flex: 1;
+  min-width: 0;
+}
+.mention-options > [role="option"] > span {
+  line-height: var(--lh-ui);
+}
+.mention-options strong,
+.mention-options small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mention-options strong {
+  font-weight: 500;
+}
+.mention-options small {
+  color: var(--muted);
+  font-size: var(--ui-xs);
+}
+.mention-popover p {
+  margin: var(--s2);
+  font-size: var(--ui-xs);
+}

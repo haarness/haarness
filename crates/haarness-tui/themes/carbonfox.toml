@@ -1,0 +1,49 @@
+name = "carbonfox"
+
+[dark]
+bg = "#161616"
+surface = "#1a1a1a"
+selected = "#1e1e1e"
+text = "#f2f4f8"
+muted = "#7d848f"
+primary = "#33b1ff"
+accent = "#ff7eb6"
+user = "#89cffc"
+danger = "#ee5396"
+
+[dark.syntax]
+keyword = "#be95ff"
+string = "#25be6a"
+comment = "#7d848f"
+constant = "#3ddbd9"
+function = "#8cb6ff"
+
+[dark.diff]
+added = "#50fa7b"
+added_bg = "#0f2418"
+removed = "#ff6b6b"
+removed_bg = "#2a1216"
+
+[light]
+bg = "#ffffff"
+surface = "#f4f4f4"
+selected = "#f4f4f4"
+text = "#161616"
+muted = "#6f6f6f"
+primary = "#0043ce"
+accent = "#9f1853"
+user = "#0a2f7b"
+danger = "#9f1853"
+
+[light.syntax]
+keyword = "#6929c4"
+string = "#198038"
+comment = "#6f6f6f"
+constant = "#007d79"
+function = "#0043ce"
+
+[light.diff]
+added = "#198038"
+added_bg = "#defbe6"
+removed = "#9f1853"
+removed_bg = "#fff1f1"

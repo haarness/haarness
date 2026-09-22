@@ -1,0 +1,44 @@
+"""Extract registered routes and wire annotations; fail on unknown Rust types."""
+
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def routes():
+    result = []
+    for filename in ("api.rs", "profiles.rs", "files.rs", "browser.rs"):
+        text = (ROOT / "crates/haarness-server/src" / filename).read_text()
+        for m in re.finditer(r'\.route\(\s*"([^"]+)",', text):
+            pos = m.end()
+            depth = 1
+            end = pos
+            while depth:
+                depth += (text[end] == "(") - (text[end] == ")")
+                end += 1
+            for method, handler in re.findall(
+                r"\b(get|post|put|patch|delete)\((\w+)\)", text[pos:end]
+            ):
+                if filename == "browser.rs" and handler != "call_browser_tool":
+                    continue  # Native host and tunnel transport are internal, not client operations.
+                path = m[1] if m[1] in ("/healthz", "/openapi.json") else "/v1" + m[1]
+                name = (
+                    {
+                        "list": "list_profiles",
+                        "upload": "upload_profile",
+                        "metadata": "get_profile",
+                        "download": "download_profile",
+                        "remove": "delete_profile",
+                    }.get(handler, handler)
+                    if filename == "profiles.rs"
+                    else handler
+                )
+                fn = re.search(r"async fn " + handler + r"\b([\s\S]*?)\{", text)
+                result.append((name, method.upper(), path, fn[1], filename))
+    return result
+
+
+if __name__ == "__main__":
+    for name, method, path, sig, file in routes():
+        print(name, method, path, re.sub(r"\s+", " ", sig))

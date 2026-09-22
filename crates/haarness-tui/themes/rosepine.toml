@@ -1,0 +1,49 @@
+name = "rosepine"
+
+[dark]
+bg = "#191724"
+surface = "#1f1d2e"
+selected = "#26233a"
+text = "#e0def4"
+muted = "#6e6a86"
+primary = "#9ccfd8"
+accent = "#ebbcba"
+user = "#bbd6e5"
+danger = "#eb6f92"
+
+[dark.syntax]
+keyword = "#31748f"
+string = "#f6c177"
+comment = "#6e6a86"
+constant = "#c4a7e7"
+function = "#ebbcba"
+
+[dark.diff]
+added = "#31748f"
+added_bg = "#1f2d3a"
+removed = "#eb6f92"
+removed_bg = "#3a1f2d"
+
+[light]
+bg = "#faf4ed"
+surface = "#fffaf3"
+selected = "#f2e9e1"
+text = "#575279"
+muted = "#9893a5"
+primary = "#31748f"
+accent = "#d7827e"
+user = "#426585"
+danger = "#b4637a"
+
+[light.syntax]
+keyword = "#286983"
+string = "#ea9d34"
+comment = "#9893a5"
+constant = "#907aa9"
+function = "#d7827e"
+
+[light.diff]
+added = "#286983"
+added_bg = "#e5f2f3"
+removed = "#b4637a"
+removed_bg = "#fce5e8"

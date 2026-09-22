@@ -1,0 +1,41 @@
+{
+  "name": "@haarness/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Typed Haarness server client with events, PTYs and managed local servers",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "OPERATIONS.md",
+    "src"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test tests/*.test.mjs",
+    "prepublishOnly": "node -e \"throw new Error('Publishing is intentionally disabled')\""
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
+    "prettier": "^3.9.6",
+    "typescript": "~5.9.3"
+  }
+}

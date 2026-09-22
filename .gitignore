@@ -1,0 +1,12 @@
+/target
+/.haarness
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+node_modules/
+/apps/desktop/out/
+/apps/desktop/release/
+/apps/desktop/resources/
+/apps/desktop/test-results/
+/apps/desktop/playwright-report/

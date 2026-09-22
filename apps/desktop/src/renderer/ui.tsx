@@ -1,0 +1,273 @@
+import { t } from "./i18n";
+import { Select } from "./Select";
+import { For, Show, createSignal, onMount, type JSX } from "solid-js";
+import { Icon, type IconName, type IconSize } from "./icons";
+export { Icon, type IconName, type IconSize } from "./icons";
+/**
+ * The one icon-only control. It owns the hit area (`--icon-button`), the
+ * accessible name and the tooltip, so no screen ever ships a bare `<svg>` in a
+ * button. `size` picks a smaller *glyph*, never a smaller target.
+ */
+export const Button = (props: {
+  label: string;
+  icon: IconName;
+  onClick: () => void;
+  active?: boolean;
+  disabled?: boolean;
+  class?: string;
+  size?: IconSize;
+  // Extra explanation for the tooltip; the accessible name stays terse.
+  hint?: string;
+}) => (
+  <button
+    type="button"
+    class={"icon-button " + (props.class ?? "")}
+    classList={{ active: props.active }}
+    title={props.hint ? props.label + " — " + props.hint : props.label}
+    aria-label={props.label}
+    aria-pressed={props.active === undefined ? undefined : props.active}
+    onClick={props.onClick}
+    disabled={props.disabled}
+  >
+    <Icon name={props.icon} size={props.size} />
+  </button>
+);
+export interface Field {
+  name: string;
+  label: string;
+  value?: string;
+  placeholder?: string;
+  type?: "text" | "textarea" | "password" | "number" | "select" | "checkbox";
+  /** Fixed choices, or an accessor for choices that arrive after the dialog
+   * opens; the control then settles on the first one. */
+  options?: string[] | (() => string[]);
+  required?: boolean;
+  readonly?: boolean;
+}
+interface Form {
+  title: string;
+  description?: string;
+  fields: Field[];
+  submit: string;
+  onSubmit?: (value: Record<string, string>) => Promise<unknown>;
+  resolve: (value: Record<string, string> | null) => void;
+}
+const [form, setForm] = createSignal<Form | null>(null);
+export function ask(
+  title: string,
+  fields: Field[],
+  options: { description?: string; submit?: string; onSubmit?: Form["onSubmit"] } = {},
+) {
+  return new Promise<Record<string, string> | null>((resolve) =>
+    setForm({
+      title,
+      fields,
+      description: options.description,
+      onSubmit: options.onSubmit,
+      submit: options.submit ?? "Save",
+      resolve,
+    }),
+  );
+}
+export async function confirm(title: string, description: string) {
+  return !!(await ask(title, [], { description, submit: "Confirm" }));
+}
+
+/** Dismiss only a complete backdrop click, never a drag out of the panel. */
+export function dismissOnBackdrop(close: () => void) {
+  let pressedBackdrop = false;
+  const outside = (event: MouseEvent & { currentTarget: HTMLElement }) => {
+    if (event.target !== event.currentTarget) return false;
+    // Native dialogs receive backdrop events on themselves. Custom backdrops
+    // can also receive a click when a drag ends inside their panel. Check the
+    // panel box in both cases; padding and drag releases inside stay open.
+    const panel =
+      event.currentTarget instanceof HTMLDialogElement
+        ? event.currentTarget
+        : event.currentTarget.querySelector<HTMLElement>('[role="dialog"]');
+    if (!panel) return false;
+    const box = panel.getBoundingClientRect();
+    return (
+      event.clientX < box.left ||
+      event.clientX > box.right ||
+      event.clientY < box.top ||
+      event.clientY > box.bottom
+    );
+  };
+  return {
+    onPointerDown(event: PointerEvent & { currentTarget: HTMLElement }) {
+      pressedBackdrop = event.button === 0 && event.isPrimary && outside(event);
+    },
+    onPointerCancel() {
+      pressedBackdrop = false;
+    },
+    onClick(event: MouseEvent & { currentTarget: HTMLElement }) {
+      const dismiss = pressedBackdrop && event.button === 0 && outside(event);
+      pressedBackdrop = false;
+      if (dismiss) {
+        event.preventDefault();
+        event.stopPropagation();
+        close();
+      }
+    },
+  };
+}
+
+export function Forms() {
+  let dialog!: HTMLDialogElement;
+  return (
+    <Show when={form()} keyed>
+      {(current) => {
+        const [busy, setBusy] = createSignal(false);
+        const [error, setError] = createSignal("");
+        const finish = (value: Record<string, string> | null) => {
+          if (busy()) return;
+          dialog.close();
+          setForm(null);
+          current.resolve(value);
+        };
+        onMount(() => dialog.showModal());
+        return (
+          <dialog
+            ref={dialog}
+            class="dialog"
+            aria-label={current.title}
+            onCancel={(event) => { event.preventDefault(); finish(null); }}
+            {...dismissOnBackdrop(() => finish(null))}
+          >
+            <form
+              onSubmit={async (event) => {
+                event.preventDefault();
+                if (busy()) return;
+                const input = Object.fromEntries(new FormData(event.currentTarget).entries()) as Record<string, string>;
+                setError("");
+                setBusy(true);
+                try {
+                  await current.onSubmit?.(input);
+                  setBusy(false);
+                  finish(input);
+                } catch (error) {
+                  setError(error instanceof Error ? error.message : String(error));
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              <header>
+                <h2>{current.title}</h2>
+                <Button
+                  icon="close"
+                  label={t("Close dialog")}
+                  disabled={busy()}
+                  onClick={() => finish(null)}
+                />
+              </header>
+              <Show when={current.description}>
+                <p class="muted">{current.description}</p>
+              </Show>
+              <fieldset disabled={busy()}>
+              <For each={current.fields}>
+                {(field) => {
+                  const choices = () =>
+                    (typeof field.options === "function" ? field.options() : field.options) ?? [];
+                  return (
+                  <label class="field">
+                    <span>{field.label}</span>
+                    <Show
+                      when={field.type === "textarea"}
+                      fallback={
+                        <Show
+                          when={field.type === "select"}
+                          fallback={
+                            <input
+                              name={field.name}
+                              type={field.type ?? "text"}
+                              value={field.value ?? ""}
+                              placeholder={field.placeholder}
+                              required={field.required}
+                              readOnly={field.readonly}
+                            />
+                          }
+                        >
+                          <Select
+                            name={field.name}
+                            aria-label={field.label}
+                            defaultValue={field.value ?? choices()[0]}
+                            options={choices().map((value) => ({
+                              value,
+                              label: value,
+                            }))}
+                          />
+                        </Show>
+                      }
+                    >
+                      <textarea
+                        name={field.name}
+                        rows={5}
+                        value={field.value ?? ""}
+                        placeholder={field.placeholder}
+                        required={field.required}
+                        readOnly={field.readonly}
+                      />
+                    </Show>
+                  </label>
+                  );
+                }}
+              </For>
+              </fieldset>
+              <Show when={error()}><p class="notice-inline" role="alert">{error()}</p></Show>
+              <footer>
+                <button type="button" disabled={busy()} onClick={() => finish(null)}>
+                  {t("Cancel")}
+                </button>
+                <button type="submit" class="primary" disabled={busy()}>
+                  {current.submit}
+                </button>
+              </footer>
+            </form>
+          </dialog>
+        );
+      }}
+    </Show>
+  );
+}
+export const Empty = (props: {
+  title: string;
+  detail?: string;
+  children?: JSX.Element;
+}) => (
+  <div class="empty">
+    <h2>{props.title}</h2>
+    <p>{props.detail}</p>
+    {props.children}
+  </div>
+);
+export function stringify(value: unknown) {
+  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+export function time(value: string) {
+  return new Date(value).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+export function trapFocus(
+  event: KeyboardEvent & { currentTarget: HTMLElement },
+) {
+  if (event.key !== "Tab") return;
+  const nodes = Array.from(
+    event.currentTarget.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]',
+    ),
+  ).filter((node) => node.getClientRects().length);
+  const first = nodes[0],
+    last = nodes[nodes.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last?.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first?.focus();
+  }
+}

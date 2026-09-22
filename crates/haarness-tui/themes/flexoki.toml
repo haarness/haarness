@@ -1,0 +1,49 @@
+name = "flexoki"
+
+[dark]
+bg = "#100F0F"
+surface = "#1C1B1A"
+selected = "#282726"
+text = "#CECDC3"
+muted = "#6F6E69"
+primary = "#DA702C"
+accent = "#8B7EC8"
+user = "#d59a70"
+danger = "#D14D41"
+
+[dark.syntax]
+keyword = "#879A39"
+string = "#3AA99F"
+comment = "#6F6E69"
+constant = "#8B7EC8"
+function = "#DA702C"
+
+[dark.diff]
+added = "#879A39"
+added_bg = "#1A2D1A"
+removed = "#D14D41"
+removed_bg = "#2D1A1A"
+
+[light]
+bg = "#FFFCF0"
+surface = "#F2F0E5"
+selected = "#E6E4D9"
+text = "#100F0F"
+muted = "#6F6E69"
+primary = "#205EA6"
+accent = "#BC5215"
+user = "#193a62"
+danger = "#AF3029"
+
+[light.syntax]
+keyword = "#66800B"
+string = "#24837B"
+comment = "#6F6E69"
+constant = "#5E409D"
+function = "#BC5215"
+
+[light.diff]
+added = "#66800B"
+added_bg = "#D5E5D5"
+removed = "#AF3029"
+removed_bg = "#F7D8DB"

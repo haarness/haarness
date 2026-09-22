@@ -1,0 +1,129 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readdir, readFile } from "node:fs/promises";
+import { defaults } from "../src/shared";
+import { languages, dictionaries, displayLanguage, parseLanguage, translate } from "../src/localization";
+
+test("English is the explicit default and invalid preferences recover to English", () => {
+  assert.equal(defaults.language, "en");
+  for (const value of [undefined, null, "", "xx", "constructor", "__proto__", 1])
+    assert.equal(displayLanguage(value), "en");
+  assert.equal(parseLanguage("ja_JP.UTF-8"), "ja");
+  assert.equal(parseLanguage("zh_Hant_TW"), "zh-TW");
+  assert.equal(parseLanguage("zh-HK"), "zh-TW");
+  assert.equal(parseLanguage("zh-Hans"), "zh-CN");
+  assert.equal(parseLanguage("pt-PT"), "pt-BR");
+  assert.equal(parseLanguage("nn-NO"), "nb");
+});
+
+test("all 17 shared catalogs cover the same interface keys", () => {
+  assert.equal(languages.length, 17);
+  for (const { code, label, direction } of languages) {
+    assert.equal(parseLanguage(code), code);
+    assert.ok(label.length);
+    assert.equal(direction, code === "ar" ? "rtl" : "ltr");
+    assert.deepEqual(Object.keys(dictionaries[code]).sort(), Object.keys(dictionaries.en).sort(), code);
+    for (const [key, text] of Object.entries(dictionaries[code])) {
+      assert.ok(text.trim(), `${code}: ${key}`);
+      assert.equal(translate(code, key), text);
+    }
+    assert.equal(translate(code, "untranslated diagnostic"), "untranslated diagnostic");
+    assert.equal(translate(code, "__proto__"), "__proto__");
+  }
+  assert.equal(translate("ja", "Settings"), "設定");
+  assert.notEqual(translate("zh-CN", "Language"), translate("zh-TW", "Language"));
+});
+
+
+test("translations preserve every interpolation field in every language", () => {
+  const keys = Object.keys(dictionaries.en).filter((key) => /\{\w+\}/.test(key));
+  assert.ok(keys.length > 10);
+  for (const key of keys) {
+    const fields = key.match(/\{\w+\}/g)!.sort();
+    for (const { code } of languages)
+      assert.deepEqual(dictionaries[code][key].match(/\{\w+\}/g)?.sort(), fields, `${code}: ${key}`);
+  }
+});
+
+// A literal that never reaches a catalog shows English in all 17 languages, so
+// the renderer's own t() keys are checked here rather than found in the UI.
+test("every renderer t() key is in the shared catalog", async () => {
+  const directory = new URL("../src/renderer/", import.meta.url);
+  const names = (await readdir(directory)).filter((name) => /\.tsx?$/.test(name));
+  const missing = new Set<string>();
+  for (const name of names) {
+    const source = await readFile(new URL(name, directory), "utf8");
+    for (const [, key] of source.matchAll(/\bt\(\s*"((?:[^"\\]|\\.)*)"/g))
+      if (!Object.hasOwn(dictionaries.en, key)) missing.add(`${name}: ${key}`);
+  }
+  assert.deepEqual([...missing], []);
+});
+
+// Keys the renderer reaches through a variable, which the scan above cannot
+// see: search-result groups, the panel launcher, the starter cards, and the
+// labels that shared modules hand back for the renderer to translate.
+test("keys translated through a variable are in the catalog", () => {
+  const dynamic = [
+    "Chats", "Archived chats", "Projects", "Worktrees", "Files", "Settings",
+    "Commands", "Shortcuts", "Conversation actions", "Project panels",
+    "Editor actions", "Review actions", "Terminal actions", "Terminals",
+    "Open files", "Slash commands", "Window", "Worktree actions",
+    // Keyboard shortcut names, from the `shortcutTitles` map.
+    "Next agent", "Previous agent",
+    "Browser", "Review", "Terminal", "Context",
+    "Browse and test websites with Haarness", "Browse and edit project files",
+    "Inspect changes and compare diffs", "Run commands in this project",
+    "Inspect conversation tokens, cache and context",
+    "Explore code", "Explore and understand code",
+    "Explain the architecture of this project",
+    "Build a feature", "Build a new feature, app, or tool",
+    "Help me build a new feature: ",
+    "Review changes", "Review code and suggest changes",
+    "Review the current changes",
+    "Fix a problem", "Fix issues and failures",
+    "Help me investigate and fix this issue: ",
+    "This computer", "Project folder", "Worktree",
+    "signed in", "API key", "from the environment",
+    // Custom-provider API formats, kept as English keys in the `protocols`
+    // constant and translated at the render site.
+    "OpenAI Chat Completions", "OpenAI Responses", "Anthropic Messages",
+    "Google Gemini", "Azure OpenAI", "Google Vertex AI", "Amazon Bedrock",
+    // Browser permission decisions, from the `decisions` constant.
+    "Always allow", "Requires approval", "Block",
+    // Browser setting rows: SettingRow translates the title and description
+    // it is handed, so these never appear as literals inside t().
+    "Agent browser control",
+    "Allow Haarness to inspect and control this project’s browser from Desktop or an attached TUI. Manual browsing remains available.",
+    "Web link destination",
+    "Where web links in conversations open. Applies to this desktop.",
+    "Local URL destination",
+    "Where localhost and loopback links open. Haarness uses the connected server’s network.",
+    "Show full URL",
+    "Show paths, queries, and fragments in the address bar. Editing always shows the complete URL.",
+    "Browsing data",
+    "Clear this project’s tabs, cookies, site storage, cache, history, and retained downloads on this desktop. Saved files and conversation attachments remain.",
+    "Browsing history",
+    "View, search, reopen, and remove pages visited in this project’s browser.",
+    "Ask where to save downloads",
+    "Show a save dialog when a browser download completes. Otherwise, save it later from download history.",
+    "Download history",
+    "Manage the last 200 retained downloads for this project. Removing an entry removes its retained copy, but keeps files saved separately.",
+    // Per-cell names for the browser permission table, chosen by field.
+    "Default browsing", "Default downloads", "Default uploads",
+    "{origin} browsing", "{origin} downloads", "{origin} uploads",
+    // Goal controls and their confirmations, from the `goalActions` and
+    // `goalConfirmations` constants in Manager.tsx.
+    "Pause", "Resume", "Complete", "Block", "Clear",
+    "Clear goal?", "Complete goal?", "Block goal?",
+    // Insight breakdown headings, from the `insightGroups` constant.
+    "Models", "Projects", "Tools", "Days",
+    // Workflow-run and goal statuses, translated from the server value.
+    "running", "completed", "failed", "cancelled", "paused", "interrupted",
+    "active", "blocked", "usage_limited", "budget_limited", "complete",
+    "cleared",
+  ];
+  assert.deepEqual(
+    dynamic.filter((key) => !Object.hasOwn(dictionaries.en, key)),
+    [],
+  );
+});

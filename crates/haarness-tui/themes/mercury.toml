@@ -1,0 +1,45 @@
+name = "mercury"
+
+[dark]
+bg = "#171721"
+surface = "#10101a"
+selected = "#272735"
+text = "#dddde5"
+muted = "#9d9da8"
+primary = "#8da4f5"
+accent = "#8da4f5"
+user = "#b1beee"
+danger = "#fc92b4"
+
+[dark.syntax]
+keyword = "#8da4f5"
+string = "#77c599"
+comment = "#9d9da8"
+constant = "#fc9b6f"
+function = "#8da4f5"
+
+[dark.diff]
+added = "#77c599"
+removed = "#fc92b4"
+
+[light]
+bg = "#ffffff"
+surface = "#fbfcfd"
+selected = "#f4f5f9"
+text = "#363644"
+muted = "#70707d"
+primary = "#5266eb"
+accent = "#8da4f5"
+user = "#4550a0"
+danger = "#b0175f"
+
+[light.syntax]
+keyword = "#465bd1"
+string = "#036e43"
+comment = "#70707d"
+constant = "#a44200"
+function = "#5266eb"
+
+[light.diff]
+added = "#036e43"
+removed = "#b0175f"

@@ -1,0 +1,23 @@
+[package]
+name = "haarness-ripgrep"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+directories.workspace = true
+flate2.workspace = true
+fs2.workspace = true
+hex.workspace = true
+sha2.workspace = true
+tempfile = "3"
+
+[build-dependencies]
+flate2.workspace = true
+hex.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

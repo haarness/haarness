@@ -1,0 +1,49 @@
+name = "solarized"
+
+[dark]
+bg = "#002b36"
+surface = "#073642"
+selected = "#073642"
+text = "#839496"
+muted = "#586e75"
+primary = "#268bd2"
+accent = "#2aa198"
+user = "#508fb7"
+danger = "#dc322f"
+
+[dark.syntax]
+keyword = "#859900"
+string = "#2aa198"
+comment = "#586e75"
+constant = "#d33682"
+function = "#268bd2"
+
+[dark.diff]
+added = "#859900"
+added_bg = "#073642"
+removed = "#dc322f"
+removed_bg = "#073642"
+
+[light]
+bg = "#fdf6e3"
+surface = "#eee8d5"
+selected = "#eee8d5"
+text = "#657b83"
+muted = "#93a1a1"
+primary = "#268bd2"
+accent = "#2aa198"
+user = "#4284ae"
+danger = "#dc322f"
+
+[light.syntax]
+keyword = "#859900"
+string = "#2aa198"
+comment = "#93a1a1"
+constant = "#d33682"
+function = "#268bd2"
+
+[light.diff]
+added = "#859900"
+added_bg = "#eee8d5"
+removed = "#dc322f"
+removed_bg = "#eee8d5"

@@ -1,0 +1,155 @@
+.dialog.remote-project-picker {
+  width: min(660px, calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
+  overflow-x: hidden;
+}
+.remote-folder-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+}
+/* "Back" points against the reading direction, so the glyph flips with it. */
+.remote-folder-back svg {
+  transform: rotate(180deg);
+}
+:root[dir="rtl"] .remote-folder-back svg {
+  transform: none;
+}
+.remote-folder-address {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+}
+.remote-folder-address input {
+  font-family: var(--mono);
+  font-size: var(--ui-sm);
+}
+.remote-path-suggestions {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + var(--s0));
+  inset-inline: 0;
+  max-height: 240px;
+  overflow: auto;
+  list-style: none;
+  margin: 0;
+  padding: var(--s0);
+  background: var(--raised);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-2);
+}
+.remote-path-suggestions li {
+  display: flex;
+  gap: var(--s2);
+  align-items: center;
+  padding: var(--s2);
+  cursor: pointer;
+  border-radius: var(--r-sm);
+}
+.remote-path-suggestions li:hover,
+.remote-path-suggestions [aria-selected="true"] {
+  background: var(--selected);
+}
+.remote-path-suggestions span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.remote-folder-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  margin: var(--s4) 0 var(--s2);
+  color: var(--muted);
+  font-size: var(--ui-sm);
+}
+.remote-folder-heading > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.remote-folder-heading label {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  flex: none;
+  cursor: pointer;
+  /* A checkbox and its word are one target; keep it hittable. */
+  min-height: var(--icon-button);
+}
+.remote-project-picker .remote-folder-heading input {
+  width: auto;
+  margin: 0;
+}
+.remote-folder-browser {
+  position: relative;
+  height: clamp(180px, 38vh, 340px);
+  overflow: auto;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--page);
+}
+.remote-folder-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--s0);
+}
+.remote-folder-list button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--s3);
+  width: 100%;
+  min-height: 36px;
+  text-align: start;
+  background: transparent;
+  border: 0;
+}
+.remote-folder-list button:hover {
+  background: var(--hover);
+}
+.remote-folder-list button span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.remote-folder-list button svg {
+  flex: none;
+  color: var(--muted);
+}
+.remote-folder-list button svg:last-child {
+  width: 14px;
+  opacity: 0.6;
+}
+/* The disclosure chevron points the way you are going, which reverses in RTL. */
+:root[dir="rtl"] .remote-folder-list button svg:last-child {
+  transform: rotate(180deg);
+}
+.remote-folder-status {
+  padding: var(--s6);
+  color: var(--muted);
+  text-align: center;
+  font-size: var(--ui);
+}
+.remote-folder-status p {
+  margin: 0 0 var(--s3);
+}
+.remote-folder-more {
+  display: block;
+  margin: var(--s3) auto;
+}
+
+.remote-folder-browser > [role="status"] {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  display: grid;
+  place-content: center;
+  background: var(--page);
+  z-index: 1;
+}

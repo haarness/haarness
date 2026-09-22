@@ -1,0 +1,223 @@
+import { t } from "./i18n";
+import {
+  For,
+  Index,
+  Show,
+  createEffect,
+  createMemo,
+  createSignal,
+} from "solid-js";
+import { Icon } from "./ui";
+import { Shimmer } from "./Shimmer";
+import { lines } from "./diff";
+import {
+  batchLabel,
+  batchSteps,
+  describeTool,
+  toolChanges,
+  toolInput,
+  toolName,
+  toolOutput,
+  toolFailed,
+  CHANGE_PREVIEW_LINES,
+  type Change,
+  type ToolResult,
+} from "./transcript";
+
+/** A quiet action row; its disclosure shows the action and readable results. */
+export function ToolActivity(props: {
+  name: string;
+  args: unknown;
+  result?: ToolResult;
+  expanded?: boolean;
+  nested?: boolean;
+  settled?: boolean;
+}) {
+  const [open, setOpen] = createSignal(!!props.expanded);
+  createEffect(() => setOpen(!!props.expanded));
+  const batch = createMemo(() =>
+    !props.nested && toolName(props.name) === "batch"
+      ? batchSteps(props.args, props.result)
+      : [],
+  );
+  // A grouped row names what happened, not how many calls it took: a count
+  // invites the reader to wonder about it, and the disclosure lists them.
+  const shape = createMemo(() =>
+    batch().length
+      ? {
+          icon: "layers" as const,
+          verb: batchLabel(batch()),
+          target: "",
+        }
+      : describeTool(props.name, props.args),
+  );
+  const status = () =>
+    props.result
+      ? toolFailed(props.name, props.result) ||
+        batch().some((step) => toolFailed(step.name, step.result))
+        ? "failed"
+        : "done"
+      : props.nested
+        ? "pending"
+        : "running";
+  const live = () =>
+    status() === "running" || (status() === "pending" && !props.settled);
+  const changes = createMemo(() =>
+    toolChanges(toolName(props.name), props.args),
+  );
+  const input = createMemo(() => toolInput(props.name, props.args));
+  const output = createMemo(
+    () => props.result && toolOutput(props.name, props.result.output),
+  );
+  return (
+    <details
+      class="tool-call"
+      classList={{
+        "tool-child": props.nested,
+        "tool-batch": !!batch().length,
+      }}
+      data-status={status()}
+      open={open()}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary>
+        <span class="tool-mark" aria-hidden="true">
+          <Icon name={shape().icon} size="sm" />
+        </span>
+        {/* A step in motion sweeps like the activity line and the agent card;
+            a finished one simply rests. The word stays for screen readers. */}
+        <Shimmer class="tool-label" active={live()}>
+          <strong>{shape().verb}</strong>
+          <span class="tool-target" title={shape().target}>
+            {shape().target}
+          </span>
+        </Shimmer>
+        <Show when={live()}>
+          <span class="sr-only">
+            {status() === "running" ? t("Running") : t("Waiting for result")}
+          </span>
+        </Show>
+        <Show when={status() === "pending" && props.settled}>
+          <span class="tool-status">{t("No result")}</span>
+        </Show>
+        <Icon name="chevron" size="xs" class="tool-chevron" />
+      </summary>
+      <Show when={open()}>
+        <div class="tool-body">
+          <Show
+            when={batch().length}
+            fallback={
+              <>
+                <Show
+                  when={changes().length}
+                  fallback={
+                    <div class="tool-console">
+                      <div class="tool-console-label">
+                        {input().label}
+                        <Show when={input().context}>
+                          <span>{input().context}</span>
+                        </Show>
+                      </div>
+                      <Show when={input().text}>
+                        <pre class="tool-input">{input().text}</pre>
+                      </Show>
+                      <Show
+                        when={props.result}
+                        fallback={
+                          <p class="tool-empty">
+                            {props.settled
+                              ? "No result was recorded."
+                              : "Waiting for output…"}
+                          </p>
+                        }
+                      >
+                        <Show
+                          when={output()}
+                          fallback={<p class="tool-empty">{t("No output")}</p>}
+                        >
+                          <pre class="tool-output">{output()}</pre>
+                        </Show>
+                      </Show>
+                    </div>
+                  }
+                >
+                  <For each={changes()}>
+                    {(change, index) => (
+                      <ChangePreview
+                        change={change}
+                        showPath={index() > 0 || changes().length > 1}
+                      />
+                    )}
+                  </For>
+                  <Show when={output()}>
+                    <div class="tool-console">
+                      <pre class="tool-output">{output()}</pre>
+                    </div>
+                  </Show>
+                </Show>
+              </>
+            }
+          >
+            <div class="tool-children">
+              <Index each={batch()}>
+                {(step) => (
+                  <ToolActivity
+                    name={step().name}
+                    args={step().args}
+                    result={step().result}
+                    nested
+                    settled={!!props.result}
+                  />
+                )}
+              </Index>
+            </div>
+            <Show
+              when={
+                props.result &&
+                (props.result.is_error ||
+                  batch().some((step) => !step.result))
+              }
+            >
+              <div class="tool-console">
+                <pre class="tool-output">{output()}</pre>
+              </div>
+            </Show>
+          </Show>
+        </div>
+      </Show>
+    </details>
+  );
+}
+function ChangePreview(props: { change: Change; showPath?: boolean }) {
+  const rows = createMemo(() =>
+    lines({
+      file: props.change.path || "change",
+      patch: props.change.patch,
+      before: props.change.before,
+      after: props.change.after,
+    } as Parameters<typeof lines>[0]).filter((row) => row.kind !== "hunk"),
+  );
+  const shown = () => rows().slice(0, CHANGE_PREVIEW_LINES);
+  const hidden = () => rows().length - shown().length;
+  return (
+    <div class="change-preview">
+      <Show when={props.showPath && props.change.path}>
+        <div class="change-path">{props.change.path}</div>
+      </Show>
+      <div class="change-lines">
+        <For each={shown()}>
+          {(row) => (
+            <div class={"diff-line " + row.kind}>
+              <code>{row.text || " "}</code>
+            </div>
+          )}
+        </For>
+      </div>
+      <Show when={hidden() > 0}>
+        <p class="change-more">
+          {hidden()} more lines · open Review to see all
+        </p>
+      </Show>
+    </div>
+  );
+}

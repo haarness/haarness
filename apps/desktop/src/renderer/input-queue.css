@@ -1,0 +1,52 @@
+/*
+ * Messages waiting for the current turn.
+ *
+ * It is a tray of the composer, so it shares the composer's surface and lets
+ * the tray's own column gap do the separating.
+ */
+.input-queue {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  margin: 0;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  background: var(--raised);
+  max-height: 240px;
+  overflow: auto;
+}
+.input-queue header {
+  font-size: var(--ui);
+  color: var(--muted);
+}
+.input-queue p {
+  margin: 0;
+}
+.input-queue-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  min-height: var(--control);
+}
+.input-queue-row button {
+  flex-shrink: 0;
+}
+/* The queued text reads as text and truncates; the controls beside it do not. */
+.input-queue-row .input-queue-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: start;
+  justify-content: flex-start;
+  border-color: transparent;
+  padding: var(--s1);
+}
+.input-queue-row textarea {
+  flex: 1;
+  min-width: 0;
+  min-height: 64px;
+  resize: vertical;
+}

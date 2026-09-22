@@ -1,0 +1,24 @@
+[package]
+name = "haarness-insights"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+utoipa.workspace = true
+
+[dev-dependencies]
+haarness-store = { path = "../haarness-store" }
+haarness-core = { path = "../haarness-core" }
+haarness-protocol = { path = "../haarness-protocol" }
+tokio.workspace = true
+
+[lints]
+workspace = true

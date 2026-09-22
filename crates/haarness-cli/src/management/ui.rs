@@ -1,0 +1,1704 @@
+//! Interactive client adapter. Forms carry revisions and use the same domain
+//! operations as Desktop and CLI; the terminal never edits the host's files.
+use super::*;
+use anyhow::ensure;
+use haarness_protocol::{
+    ManagementEntry as Entry, ManagementField as Field, ManagementView as View,
+};
+use haarness_providers::auth::{
+    CopilotOAuthClient, Credential, CredentialStore, OpenAiOAuthClient, XaiOAuthClient,
+};
+use haarness_scheduler::{CreateSchedule, Scheduler, Trigger, UpdateSchedule};
+use std::{future::Future, pin::Pin, sync::Mutex, time::Instant};
+use uuid::Uuid;
+
+type Completion<T = ()> = Pin<Box<dyn Future<Output = Result<T>> + Send>>;
+
+pub(super) type Logins = BTreeMap<String, Login>;
+pub(super) struct Login {
+    created: Instant,
+    task: tokio::task::JoinHandle<()>,
+    result: Arc<Mutex<Option<std::result::Result<(), String>>>>,
+    callback: Option<tokio::sync::oneshot::Sender<String>>,
+    /// What the wait screen shows: the resource ("providers"/"mcp"), the
+    /// target's id and display name, the method, and the URL/code to open.
+    resource: String,
+    target: String,
+    name: String,
+    method: String,
+    url: String,
+    code: String,
+}
+
+impl Login {
+    /// The machine-readable half of every login view, so clients can poll
+    /// without parsing prose.
+    fn data(&self, id: &str, state: &str, error: Option<&str>) -> Value {
+        json!({
+            "id": id,
+            "resource": self.resource,
+            "provider": self.target,
+            "name": self.name,
+            "method": self.method,
+            "url": self.url,
+            "code": self.code,
+            "state": state,
+            "error": error,
+        })
+    }
+
+    fn title(&self) -> String {
+        format!("Sign in to {}", self.name)
+    }
+
+    fn instructions(&self) -> Vec<String> {
+        // The bare URL first: generic panels turn a URL-only line into a link.
+        let mut lines = vec![self.url.clone()];
+        if !self.code.is_empty() {
+            lines.push(format!("Code  {}", self.code));
+        }
+        lines.push(if self.code.is_empty() {
+            "Finish signing in in your browser. This page updates by itself.".into()
+        } else {
+            "Enter the code in your browser. This page updates by itself.".into()
+        });
+        lines
+    }
+}
+fn field(key: &str, label: &str, value: impl ToString, required: bool) -> Field {
+    Field {
+        key: key.into(),
+        label: label.into(),
+        value: value.to_string(),
+        required,
+        secret: false,
+        choices: vec![],
+    }
+}
+fn choice(key: &str, label: &str, value: &str, values: &[&str]) -> Field {
+    Field {
+        choices: values.iter().map(|v| (*v).into()).collect(),
+        ..field(key, label, value, true)
+    }
+}
+fn entry(label: impl Into<String>, description: impl Into<String>, request: Value) -> Entry {
+    Entry {
+        label: label.into(),
+        description: description.into(),
+        request,
+        confirm: None,
+    }
+}
+fn destructive(label: &str, request: Value) -> Entry {
+    Entry {
+        confirm: Some(format!("{label}?")),
+        ..entry(label, "This changes the selected resource", request)
+    }
+}
+fn text<'a>(v: &'a Value, key: &str) -> &'a str {
+    v[key].as_str().unwrap_or("")
+}
+fn form(title: &str, submit: Value, fields: Vec<Field>) -> View {
+    View {
+        title: title.into(),
+        fields,
+        submit: Some(submit),
+        ..View::default()
+    }
+}
+fn revision(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    Ok(format!("{:x}", Sha256::digest(fs::read(path)?)))
+}
+fn output(view: View) -> Result<Value> {
+    Ok(serde_json::to_value(view)?)
+}
+fn row_request(action: &str, row: &Value) -> Value {
+    json!({"action":action,"name":row["name"],"id":row["id"],"scope":row["scope"],"revision":row["revision"]})
+}
+
+impl ManagementService {
+    pub(super) async fn ui_request(&self, resource: &str, input: &Value) -> Result<Value> {
+        if resource == "browser-settings" {
+            let result = crate::browser_settings::request(
+                self.trust_project,
+                self.paths.config_dir(),
+                &self.workspace,
+                input,
+            )?;
+            return output(View {
+                title: "Browser settings".into(),
+                data: Some(result),
+                ..View::default()
+            });
+        }
+        if resource == "input-settings" {
+            let result = crate::input_settings::request(
+                self.trust_project,
+                self.paths.config_dir(),
+                &self.workspace,
+                input,
+            )?;
+            if result.get("title").is_some() {
+                return Ok(result);
+            }
+            return output(View {
+                title: "Input settings".into(),
+                data: Some(result),
+                ..View::default()
+            });
+        }
+        let action = required_string(input, "action")?;
+        if resource == "assets" {
+            let kind = required_string(input, "kind")?;
+            anyhow::ensure!(
+                matches!(kind, "agent" | "command" | "skill"),
+                "Unsupported definition type"
+            );
+            let result = self.desktop_asset(kind, input).await?;
+            if !matches!(action, "get" | "list") {
+                if let Ok(runtime) = self.runtime() {
+                    self.refresh_runtime_assets(&runtime);
+                    runtime.events().publish(
+                        "assets.updated",
+                        None,
+                        None,
+                        None,
+                        json!({"resource":kind,"action":action}),
+                    );
+                    runtime.events().publish(
+                        "configuration.reload_queued",
+                        None,
+                        None,
+                        None,
+                        json!({"resource":kind,"action":action}),
+                    );
+                }
+            }
+            return Ok(result);
+        }
+        if resource == "providers" && matches!(action, "router_form" | "router_connect") {
+            if action == "router_form" {
+                return output(router_form(input, false));
+            }
+            let result = crate::router_connection::connect(
+                &self.paths,
+                &self.workspace,
+                self.trust_project,
+                &crate::router_connection::ConnectRequest {
+                    url: text(input, "url").into(),
+                    name: text(input, "label").into(),
+                    key: text(input, "key").into(),
+                    project: text(input, "scope") == "project",
+                },
+            )
+            .await?;
+            return match result {
+                crate::router_connection::ConnectResult::NeedsKey => output(router_form(input, true)),
+                crate::router_connection::ConnectResult::Connected { name, models, .. } => output(View {
+                    title: "Router connected".into(),
+                    lines: vec![format!("{name} · Self-hosted · {models} models available"),
+                        "Models refresh automatically. Open the model picker to choose one.".into(),
+                        "Saved on this Haarness server. If a turn is running, the connection becomes available when it finishes.".into()],
+                    entries: vec![entry("Connect another router", "", json!({"action":"router_form"})), entry("Back to providers", "", json!({"action":"view"}))],
+                    ..View::default()
+                }),
+            };
+        }
+        if resource == "sharing" {
+            return self.sharing_view(input).await.and_then(output);
+        }
+        if action == "login_callback_form" {
+            let mut callback = field(
+                "callback",
+                "Callback URL from the browser address bar",
+                "",
+                true,
+            );
+            callback.secret = true;
+            return output(form(
+                "Complete remote authorization",
+                json!({"action":"login_callback","id":input["id"]}),
+                vec![callback],
+            ));
+        }
+        if action == "login_callback" {
+            let mut logins = self
+                .logins
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let login = logins
+                .get_mut(required_string(input, "id")?)
+                .context("Login expired; start again")?;
+            let callback = required_string(input, "callback")?.to_owned();
+            let sender = login
+                .callback
+                .take()
+                .context("Callback already submitted")?;
+            sender
+                .send(callback)
+                .map_err(|_| anyhow::anyhow!("Login already completed"))?;
+            return output(View {
+                title: "Authorization submitted".into(),
+                entries: vec![entry(
+                    "Check status",
+                    "",
+                    json!({"action":"login_status","id":input["id"]}),
+                )],
+                ..View::default()
+            });
+        }
+        if action == "login_cancel" {
+            let mut login = self
+                .logins
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(required_string(input, "id")?)
+                .context("Login expired; start again")?;
+            login.task.abort();
+            let _ = (&mut login.task).await;
+            let result = login
+                .result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let id = required_string(input, "id")?;
+            let (title, state, error) = match &result {
+                Some(Ok(())) => (format!("Connected {}", login.name), "connected", None),
+                Some(Err(error)) => (
+                    format!("Could not connect {}", login.name),
+                    "failed",
+                    Some(error.as_str()),
+                ),
+                None => ("Sign-in cancelled".to_owned(), "cancelled", None),
+            };
+            return output(View {
+                title,
+                data: Some(login.data(id, state, error)),
+                lines: error
+                    .map(|error| vec![format!("Error  {error}")])
+                    .unwrap_or_default(),
+                entries: vec![entry("Back", "", json!({"action":"view"}))],
+                ..View::default()
+            });
+        }
+        if action == "login_status" {
+            let id = required_string(input, "id")?;
+            let mut logins = self
+                .logins
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let login = logins.get(id).context("Login expired; start again")?;
+            let result = login
+                .result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let mut view = View {
+                title: login.title(),
+                ..View::default()
+            };
+            match result {
+                None => {
+                    view.data = Some(login.data(id, "pending", None));
+                    view.lines = login.instructions();
+                    view.entries.push(entry(
+                        "Check status",
+                        "Refresh this page by hand",
+                        input.clone(),
+                    ));
+                    view.entries.push(entry(
+                        "Cancel sign-in",
+                        "",
+                        json!({"action":"login_cancel","id":id}),
+                    ));
+                }
+                Some(Ok(())) => {
+                    view.title = format!("Connected {}", login.name);
+                    view.data = Some(login.data(id, "connected", None));
+                    view.lines.push(if login.resource == "mcp" {
+                        format!("{} is connected.", login.name)
+                    } else {
+                        format!(
+                            "{} is connected. Open the model picker to choose a model.",
+                            login.name
+                        )
+                    });
+                    view.entries
+                        .push(entry("Back", "", json!({"action":"view"})));
+                    logins.remove(id);
+                }
+                Some(Err(error)) => {
+                    view.title = format!("Could not connect {}", login.name);
+                    view.data = Some(login.data(id, "failed", Some(&error)));
+                    view.lines.push(format!("Error  {error}"));
+                    view.entries.push(entry(
+                        "Try again",
+                        "",
+                        json!({"action":"login","name":login.target,"method":login.method}),
+                    ));
+                    view.entries
+                        .push(entry("Back", "", json!({"action":"view"})));
+                    logins.remove(id);
+                }
+            }
+            return output(view);
+        }
+        if action == "login" {
+            return self.start_login(resource, input).await;
+        }
+        if resource == "schedules" && action == "history" {
+            let rows = self
+                .scheduler()?
+                .history(required_string(input, "id")?, 50)?;
+            return output(View {
+                title: "Schedule run history".into(),
+                lines: rows
+                    .into_iter()
+                    .map(|row| serde_json::to_string_pretty(&row))
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+                entries: vec![
+                    entry("Refresh", "", input.clone()),
+                    entry("Back", "", json!({"action":"inspect","id":input["id"]})),
+                ],
+                ..View::default()
+            });
+        }
+
+        if matches!(
+            action,
+            "view" | "inspect" | "form" | "edit_form" | "restore_preview" | "connect"
+        ) {
+            return output(self.ui_view(resource, input).await?);
+        }
+        match resource {
+            "providers" => self.provider_mutation(input)?,
+            "mcp" => {
+                if action == "restart" {
+                    self.mcp
+                        .reconnect(required_string(input, "name")?)
+                        .await
+                        .map_err(core_error)?;
+                } else {
+                    let mut data = input.clone();
+                    if let Some(args) = data["argsText"].as_str() {
+                        data["args"] =
+                            json!(args.lines().filter(|v| !v.is_empty()).collect::<Vec<_>>());
+                    }
+                    if let Some(scopes) = data["oauthScopesText"].as_str() {
+                        data["oauthScopes"] = json!(
+                            scopes
+                                .split(',')
+                                .map(str::trim)
+                                .filter(|v| !v.is_empty())
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                    self.mcp(&data).await?;
+                }
+            }
+            "memory" => {
+                self.desktop_memory(input)?;
+            }
+            "hooks" => {
+                let mut data = input.clone();
+                if let Some(timeout) = data["timeout"].as_str() {
+                    data["timeout"] = json!(
+                        timeout
+                            .parse::<u64>()
+                            .context("Timeout must be a whole number")?
+                    );
+                }
+                crate::desktop_hooks::execute(
+                    &self.paths,
+                    &self.workspace,
+                    self.trust_project,
+                    &data,
+                )?;
+            }
+            "schedules" => self.schedule_mutation(input)?,
+            "profiles" => self.profile_mutation(input)?,
+            _ => bail!("Unsupported management resource"),
+        }
+        if let Ok(runtime) = self.runtime() {
+            self.refresh_runtime_assets(&runtime);
+        }
+        let mut view = self.ui_view(resource, &json!({"action":"view"})).await?;
+        view.lines.insert(
+            0,
+            "Saved. Runtime configuration changes apply when active work is idle.".into(),
+        );
+        output(view)
+    }
+
+    async fn sharing_view(&self, input: &Value) -> Result<View> {
+        use haarness_server::sharing::Snapshot;
+        let thread: ThreadId = serde_json::from_value(input["threadId"].clone())?;
+        let runtime = self.runtime()?;
+        let current = runtime.get_thread(thread).await?;
+        let action = text(input, "action");
+        if action == "preview" {
+            let archive = runtime.export_session_archive(thread, false).await?;
+            let preview =
+                Snapshot::prepare(&self.paths.data, &archive, input["includeTools"] == true)?;
+            let messages = &preview.messages;
+            return Ok(View {
+                title: "Review shared snapshot".into(),
+                lines: messages
+                    .iter()
+                    .map(|m| format!("{}: {}", m.role, m.text))
+                    .collect(),
+                entries: vec![destructive(
+                    "Create shared link",
+                    json!({"action":"create","threadId":thread,"preview":preview.token}),
+                )],
+                ..View::default()
+            });
+        }
+        if action == "create" {
+            let snapshot = Snapshot::publish(&self.paths.data, required_string(input, "preview")?)?;
+            return Ok(View {
+                title: "Shared link created".into(),
+                lines: vec![
+                    format!("/s/{}", snapshot.token),
+                    format!("Expires {}", snapshot.expires_at),
+                ],
+                entries: vec![destructive(
+                    "Revoke link",
+                    json!({"action":"revoke","token":snapshot.token,"threadId":thread}),
+                )],
+                ..View::default()
+            });
+        }
+        if action == "revoke" {
+            Snapshot::revoke(&self.paths.data, required_string(input, "token")?)?;
+        }
+        let mut view=View{title:format!("Share · {}",current.title),lines:vec!["Create an immutable snapshot on this server. Anyone with its link can read it until it expires or you revoke it. Only the text in the preview is published. Review it for secrets before creating a link.".into()],entries:vec![entry("Review conversation snapshot","Messages only · expires in seven days",json!({"action":"preview","threadId":thread,"includeTools":false})),entry("Review with tool details","Includes commands and tool outputs",json!({"action":"preview","threadId":thread,"includeTools":true}))],..View::default()};
+        for row in Snapshot::list(&self.paths.data, thread)? {
+            view.lines.push(format!("/s/{}", row.token));
+            view.entries.push(destructive(
+                "Revoke existing link",
+                json!({"action":"revoke","threadId":thread,"token":row.token}),
+            ));
+        }
+        Ok(view)
+    }
+
+    async fn ui_view(&self, resource: &str, input: &Value) -> Result<View> {
+        match resource {
+            "providers" => self.provider_view(input),
+            "mcp" => self.mcp_view(input).await,
+            "memory" => self.memory_view(input),
+            "hooks" => self.hooks_view(input),
+            "schedules" => self.schedule_view(input),
+            "profiles" => self.profile_view(input),
+            _ => bail!("Unsupported management resource"),
+        }
+    }
+
+    fn provider_view(&self, input: &Value) -> Result<View> {
+        let id = text(input, "name");
+        let providers = self.runtime()?.providers().list();
+        match text(input, "action") {
+            "form" if id.is_empty() => Ok(form(
+                "Custom provider",
+                json!({"action":"add"}),
+                vec![
+                    field("name", "Provider ID", "", true),
+                    choice("scope", "Scope", "global", &["global", "project"]),
+                    field("label", "Display name", "", true),
+                    field("url", "Endpoint URL (HTTPS or local HTTP)", "", true),
+                    choice(
+                        "protocol",
+                        "Protocol",
+                        "openai-chat-completions",
+                        &[
+                            "openai-chat-completions",
+                            "openai-responses",
+                            "anthropic-messages",
+                        ],
+                    ),
+                    field("models", "Model IDs (comma separated)", "", true),
+                    choice(
+                        "requiresAuth",
+                        "Requires authentication",
+                        "true",
+                        &["true", "false"],
+                    ),
+                ],
+            )),
+            "edit_form" => {
+                let (_, path, section) = self.provider_source(input)?;
+                Ok(form(
+                    "Edit custom provider",
+                    json!({"action":"edit","name":id,"scope":input["scope"],"source":path,"revision":revision(&path)?}),
+                    vec![
+                        field(
+                            "label",
+                            "Display name",
+                            section.name.as_deref().unwrap_or(id),
+                            true,
+                        ),
+                        field(
+                            "url",
+                            "Endpoint URL (HTTPS or local HTTP)",
+                            section.base_url.as_deref().unwrap_or(""),
+                            true,
+                        ),
+                        field(
+                            "models",
+                            "Model IDs (optional; empty discovers automatically)",
+                            section.models.join(", "),
+                            false,
+                        ),
+                    ],
+                ))
+            }
+            "form" => {
+                let name = provider_name(&providers, id);
+                let guide = haarness_providers::connect::guide(id);
+                let label = guide
+                    .methods
+                    .iter()
+                    .find(|method| method.kind == haarness_providers::connect::MethodKind::Api)
+                    .map_or("API key", |method| key_field_label(method.label));
+                let mut key = field("key", label, "", true);
+                key.secret = true;
+                let mut lines = Vec::new();
+                if let Some(url) = guide.key_url {
+                    lines.push(format!("Create a key  {url}"));
+                }
+                if !guide.env.is_empty() {
+                    lines.push(format!("Or set  {}", guide.env.join(" / ")));
+                }
+                if let Some(note) = guide.note {
+                    lines.push(note.to_owned());
+                }
+                lines.push("Stored in owner-only auth.json on this Haarness server.".into());
+                Ok(View {
+                    lines,
+                    ..form(
+                        &format!("Connect {name}"),
+                        json!({"action":"credential","name":id}),
+                        vec![key],
+                    )
+                })
+            }
+            "connect" => Ok(self.connect_view(&providers, id)),
+            "inspect" => {
+                ensure!(providers.iter().any(|p| p.id == id), "Unknown provider");
+                let info = providers.iter().find(|p| p.id == id);
+                let name = provider_name(&providers, id);
+                let store = CredentialStore::new(self.paths.auth.clone());
+                let stored = store.get(id).ok().flatten();
+                let guide = haarness_providers::connect::guide(id);
+                let connected = info.is_some_and(|p| p.authenticated);
+                let models = info.map_or(0, |p| p.models.len());
+                let mut view = View {
+                    title: name.clone(),
+                    lines: vec![match (&stored, connected) {
+                        (Some(credential), _) if credential.kind() == "oauth" => {
+                            format!("Status  Connected · signed in · {models} models")
+                        }
+                        (Some(_), _) => format!("Status  Connected · API key · {models} models"),
+                        (None, true) if guide.methods.is_empty() => {
+                            format!("Status  Connected · {models} models")
+                        }
+                        (None, true) => {
+                            format!("Status  Connected · from the environment · {models} models")
+                        }
+                        (None, false) => "Status  Not connected".into(),
+                    }],
+                    ..View::default()
+                };
+                for method in &guide.methods {
+                    match method.kind {
+                        haarness_providers::connect::MethodKind::Oauth => view.entries.push(entry(
+                            method.label,
+                            method.description,
+                            json!({"action":"login","name":id,"method":method.id}),
+                        )),
+                        haarness_providers::connect::MethodKind::Api => view.entries.push(entry(
+                            if stored.is_some() {
+                                method.label.replacen("Use a", "Replace the", 1).replacen(
+                                    "Use an",
+                                    "Replace the",
+                                    1,
+                                )
+                            } else {
+                                method.label.to_owned()
+                            },
+                            method.description,
+                            json!({"action":"form","name":id}),
+                        )),
+                    }
+                }
+                if let Some(note) = guide.note {
+                    view.lines.push(note.to_owned());
+                }
+                if stored.is_some() {
+                    view.entries.push(destructive(
+                        "Disconnect",
+                        json!({"action":"logout","name":id}),
+                    ));
+                }
+                for (scope, path, section) in self.provider_sources(id)? {
+                    let request =
+                        json!({"name":id,"scope":scope,"source":path,"revision":revision(&path)?});
+                    let mut edit = request.clone();
+                    edit["action"] = json!("edit_form");
+                    view.entries.push(entry(
+                        format!("Edit {scope} provider"),
+                        section.name.unwrap_or_default(),
+                        edit,
+                    ));
+                    let mut remove = request;
+                    remove["action"] = json!("remove");
+                    view.entries
+                        .push(destructive(&format!("Remove {scope} provider"), remove));
+                }
+                Ok(view)
+            }
+            _ => {
+                let mut sorted: Vec<_> = providers.iter().collect();
+                sorted.sort_by_key(|p| {
+                    (
+                        !p.authenticated,
+                        haarness_providers::connect::rank(&p.id, &p.name),
+                    )
+                });
+                Ok(View {
+                    title: "Providers".into(),
+                    entries: std::iter::once(entry(
+                        "Connect a provider",
+                        "Sign in or add an API key",
+                        json!({"action":"connect"}),
+                    ))
+                    .chain(std::iter::once(entry(
+                        "Connect Haarness Router",
+                        "Self-hosted · address first, access key only if needed",
+                        json!({"action":"router_form"}),
+                    )))
+                    .chain(std::iter::once(entry(
+                        "Add custom provider",
+                        "Connect your own model endpoint",
+                        json!({"action":"form"}),
+                    )))
+                    .chain(sorted.into_iter().map(|p| {
+                        entry(
+                            p.name.clone(),
+                            provider_status(p),
+                            json!({"action":"inspect","name":p.id}),
+                        )
+                    }))
+                    .collect(),
+                    ..View::default()
+                })
+            }
+        }
+    }
+
+    /// The connect picker's catalog: every provider with how it can be
+    /// connected, popular ones first. With a `name`, only that provider.
+    fn connect_view(&self, providers: &[haarness_protocol::ProviderInfo], only: &str) -> View {
+        let store = CredentialStore::new(self.paths.auth.clone());
+        let mut rows: Vec<_> = providers
+            .iter()
+            .filter(|p| only.is_empty() || p.id == only)
+            .collect();
+        rows.sort_by_key(|p| haarness_providers::connect::rank(&p.id, &p.name));
+        let catalog: Vec<Value> = rows
+            .iter()
+            .map(|p| {
+                let guide = haarness_providers::connect::guide(&p.id);
+                let stored = store.get(&p.id).ok().flatten();
+                let source = match (&stored, p.authenticated, guide.methods.is_empty()) {
+                    (Some(credential), _, _) => Some(credential.kind()),
+                    (None, true, true) => Some("local"),
+                    (None, true, false) => Some("environment"),
+                    (None, false, _) => None,
+                };
+                json!({
+                    "id": p.id,
+                    "name": p.name,
+                    "connected": p.authenticated,
+                    "models": p.models.len(),
+                    "source": source,
+                    "methods": guide.methods,
+                    "keyUrl": guide.key_url,
+                    "env": guide.env,
+                    "note": guide.note,
+                    "popular": guide.popular,
+                })
+            })
+            .collect();
+        View {
+            title: "Connect a provider".into(),
+            data: Some(json!({"providers": catalog})),
+            entries: rows
+                .iter()
+                .map(|p| {
+                    entry(
+                        p.name.clone(),
+                        provider_status(p),
+                        json!({"action":"inspect","name":p.id}),
+                    )
+                })
+                .collect(),
+            ..View::default()
+        }
+    }
+    fn provider_sources(&self, id: &str) -> Result<Vec<(String, PathBuf, crate::ProviderSection)>> {
+        let mut entries = Vec::new();
+        for project in [false, true] {
+            if project && !self.trust_project {
+                continue;
+            }
+            for path in crate::scoped_config_files(&self.paths, &self.workspace, project) {
+                if !path.exists() {
+                    continue;
+                }
+                let root: Value = if path.extension().is_some_and(|e| e == "toml") {
+                    serde_json::to_value(toml::from_str::<toml::Value>(&fs::read_to_string(
+                        &path,
+                    )?)?)?
+                } else {
+                    crate::jsonconfig::read_json(&path)
+                        .map_err(anyhow::Error::msg)?
+                        .unwrap_or_default()
+                };
+                if let Some(value) = root.get("providers").and_then(|p| p.get(id)) {
+                    let section = serde_json::from_value(value.clone())?;
+                    if !entries.iter().any(|(_, existing, _)| existing == &path) {
+                        entries.push((
+                            if project { "project" } else { "global" }.into(),
+                            path,
+                            section,
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(entries)
+    }
+    fn provider_source(&self, input: &Value) -> Result<(String, PathBuf, crate::ProviderSection)> {
+        self.provider_sources(required_string(input, "name")?)?
+            .into_iter()
+            .find(|(scope, path, _)| {
+                input["scope"] == *scope && input["source"].as_str() == path.to_str()
+            })
+            .context("Provider source changed; reopen the provider")
+    }
+    fn provider_mutation(&self, input: &Value) -> Result<()> {
+        let id = required_string(input, "name")?;
+        crate::validate_provider_id(id)?;
+        let store = CredentialStore::new(self.paths.auth.clone());
+        let _lock = haarness_profiles::configuration_lock(&self.paths.data)?;
+        match text(input, "action") {
+            "credential" => {
+                let key = required_string(input, "key")?;
+                ensure!(!key.trim().is_empty(), "Enter an API key");
+                store.set(id, &Credential::api(key.to_owned()))?;
+            }
+            "logout" => {
+                store.remove(id)?;
+            }
+            "add" => {
+                let url = required_string(input, "url")?;
+                ensure!(
+                    crate::valid_provider_url(url),
+                    "Use HTTPS, or HTTP on a loopback address"
+                );
+                let protocol = required_string(input, "protocol")?;
+                haarness_providers::CompatibleProtocol::parse(protocol)
+                    .map_err(anyhow::Error::msg)?;
+                let models = required_string(input, "models")?
+                    .split(',')
+                    .map(str::trim)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                ensure!(
+                    !models.is_empty() && models.iter().all(|s| !s.is_empty()),
+                    "Enter model IDs"
+                );
+                let current = crate::load_config(&self.paths, &self.workspace, self.trust_project)?;
+                ensure!(
+                    !current.providers.contains_key(id),
+                    "Provider already exists"
+                );
+                let section = crate::ProviderSection {
+                    protocol: protocol.into(),
+                    name: Some(required_string(input, "label")?.into()),
+                    base_url: Some(url.into()),
+                    models,
+                    requires_auth: text(input, "requiresAuth") != "false",
+                    ..crate::ProviderSection::default()
+                };
+                let project = text(input, "scope") == "project";
+                ensure!(
+                    !project || self.trust_project,
+                    "Trust this project before changing its providers"
+                );
+                crate::write_provider_entry(
+                    &crate::provider_config_target(&self.paths, &self.workspace, project),
+                    id,
+                    Some(&section),
+                )?;
+            }
+            "edit" | "remove" => {
+                let (_, path, mut section) = self.provider_source(input)?;
+                ensure!(
+                    input["revision"].as_str() == Some(&revision(&path)?),
+                    "Configuration changed; reopen the provider"
+                );
+                if text(input, "action") == "edit" {
+                    let url = required_string(input, "url")?;
+                    section.base_url = Some(if section.integration.is_some() {
+                        crate::router_connection::normalize_url(url)?
+                    } else {
+                        ensure!(
+                            crate::valid_provider_url(url),
+                            "Use HTTPS, or HTTP on a loopback address"
+                        );
+                        url.into()
+                    });
+                    section.name = Some(required_string(input, "label")?.into());
+                    section.models = text(input, "models")
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                    crate::write_provider_entry(&path, id, Some(&section))?;
+                } else {
+                    crate::write_provider_entry(&path, id, None)?;
+                }
+            }
+            _ => bail!("Unsupported provider action"),
+        }
+        Ok(())
+    }
+
+    async fn mcp_view(&self, input: &Value) -> Result<View> {
+        let action = text(input, "action");
+        let name = text(input, "name");
+        if action == "edit_form" {
+            let row = self
+                .mcp(&json!({"action":"get","name":name,"scope":input["scope"]}))
+                .await?;
+            let config = &row["config"];
+            let fields = if config["command"].is_string() {
+                vec![
+                    field("command", "Executable", text(config, "command"), true),
+                    field(
+                        "argsText",
+                        "Arguments (one per line)",
+                        config["args"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        false,
+                    ),
+                ]
+            } else {
+                vec![field("url", "Server URL", text(config, "url"), true)]
+            };
+            return Ok(form(
+                "Edit MCP connection",
+                row_request("edit", &row),
+                fields,
+            ));
+        }
+        if action == "form" {
+            let kind = if text(input, "type") == "remote" {
+                "remote"
+            } else {
+                "local"
+            };
+            let mut fields = vec![
+                field("name", "Server name", name, true),
+                choice("scope", "Scope", "global", &["global", "local"]),
+            ];
+            if kind == "local" {
+                fields.extend([
+                    field("command", "Executable", "", true),
+                    field("argsText", "Arguments (one per line)", "", false),
+                ]);
+            } else {
+                fields.push(field("url", "Server URL", "", true));
+                fields.push(field(
+                    "oauthClientId",
+                    "OAuth client ID (optional)",
+                    "",
+                    false,
+                ));
+                fields.push(field(
+                    "oauthScopesText",
+                    "OAuth scopes (comma separated)",
+                    "",
+                    false,
+                ));
+            }
+            return Ok(form(
+                "Add MCP server",
+                json!({"action":"add","type":kind}),
+                fields,
+            ));
+        }
+        if action == "inspect" {
+            let row = self
+                .mcp(&json!({"action":"get","name":name,"scope":input["scope"]}))
+                .await?;
+            let enabled = row["config"]["enabled"].as_bool().unwrap_or(true);
+            let mut view = View {
+                title: format!("MCP · {name}"),
+                lines: vec![
+                    format!("Status: {}", text(&row, "runtimeStatus")),
+                    format!("Source: {}", text(&row, "file")),
+                ],
+                entries: vec![
+                    entry(
+                        if enabled { "Disable" } else { "Enable" },
+                        "Persist this server's availability",
+                        row_request(if enabled { "disable" } else { "enable" }, &row),
+                    ),
+                    entry(
+                        "Edit connection",
+                        "Change executable or endpoint",
+                        row_request("edit_form", &row),
+                    ),
+                    entry(
+                        "Restart",
+                        "Reconnect this server",
+                        row_request("restart", &row),
+                    ),
+                    entry(
+                        "Authenticate",
+                        "Open the OAuth authorization URL",
+                        row_request("login", &row),
+                    ),
+                    destructive("Clear authorization", row_request("logout", &row)),
+                    destructive("Remove server", row_request("remove", &row)),
+                ],
+                ..View::default()
+            };
+            view.lines
+                .push(serde_json::to_string_pretty(&row["config"])?);
+            return Ok(view);
+        }
+        let rows = self.mcp(&json!({"action":"list"})).await?;
+        let mut view = View {
+            title: "MCP servers".into(),
+            entries: vec![
+                entry(
+                    "Add local server",
+                    "An executable on this server",
+                    json!({"action":"form","type":"local"}),
+                ),
+                entry(
+                    "Add remote server",
+                    "An HTTP MCP endpoint",
+                    json!({"action":"form","type":"remote"}),
+                ),
+            ],
+            ..View::default()
+        };
+        for row in rows.as_array().into_iter().flatten() {
+            if row["readOnly"] == true {
+                view.lines.push(format!(
+                    "{} · {} · managed by plugin",
+                    text(row, "name"),
+                    text(row, "runtimeStatus")
+                ));
+            } else {
+                view.entries.push(entry(
+                    text(row, "name"),
+                    text(row, "runtimeStatus"),
+                    row_request("inspect", row),
+                ));
+            }
+        }
+        Ok(view)
+    }
+
+    fn memory_view(&self, input: &Value) -> Result<View> {
+        let action = text(input, "action");
+        let name = text(input, "name");
+        if action == "form" || action == "inspect" {
+            let row = if name.is_empty() {
+                json!({})
+            } else {
+                self.desktop_memory(&json!({"action":"read","name":name}))?
+            };
+            if action == "form" {
+                let mut fields = vec![
+                    field(
+                        "description",
+                        "Description",
+                        text(&row, "description"),
+                        true,
+                    ),
+                    choice(
+                        "type",
+                        "Type",
+                        if text(&row, "type").is_empty() {
+                            "project"
+                        } else {
+                            text(&row, "type")
+                        },
+                        &["project", "user", "feedback", "reference"],
+                    ),
+                    field("content", "Content", text(&row, "content"), true),
+                ];
+                if name.is_empty() {
+                    fields.insert(0, field("name", "Memory name", "", true));
+                }
+                return Ok(form(
+                    "Memory",
+                    json!({"action":if name.is_empty(){"create"}else{"save"},"name":name,"revision":row["revision"]}),
+                    fields,
+                ));
+            }
+            return Ok(View {
+                title: name.into(),
+                lines: vec![
+                    text(&row, "description").into(),
+                    text(&row, "content").into(),
+                ],
+                entries: vec![
+                    entry("Edit", "", json!({"action":"form","name":name})),
+                    destructive("Delete memory", row_request("delete", &row)),
+                ],
+                ..View::default()
+            });
+        }
+        let status = self.desktop_memory(&json!({"action":"status"}))?;
+        let mut config = status["config"].clone();
+        config["enabled"] = json!(!config["enabled"].as_bool().unwrap_or(true));
+        let mut view = View {
+            title: "Project memory".into(),
+            lines: vec![format!("Directory: {}", text(&status, "directory"))],
+            entries: vec![
+                entry("Create memory", "", json!({"action":"form"})),
+                entry(
+                    if config["enabled"] == true {
+                        "Enable memory"
+                    } else {
+                        "Disable memory"
+                    },
+                    "Applies to this project",
+                    json!({"action":"configure","config":config,"revision":status["revision"]}),
+                ),
+            ],
+            ..View::default()
+        };
+        for row in status["memories"].as_array().into_iter().flatten() {
+            view.entries.push(entry(
+                text(row, "name"),
+                text(row, "description"),
+                row_request("inspect", row),
+            ));
+        }
+        Ok(view)
+    }
+
+    fn hooks_view(&self, input: &Value) -> Result<View> {
+        let status = crate::desktop_hooks::execute(
+            &self.paths,
+            &self.workspace,
+            self.trust_project,
+            &json!({"action":"list"}),
+        )?;
+        let id = text(input, "id");
+        let row = status["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|r| text(r, "id") == id)
+            .cloned()
+            .unwrap_or(json!({}));
+        if text(input, "action") == "form" {
+            ensure!(
+                id.is_empty() || row["source"]["editable"] == true,
+                "Hook is not editable"
+            );
+            let mut fields = vec![
+                choice(
+                    "event",
+                    "Event",
+                    if id.is_empty() {
+                        "PostToolUse"
+                    } else {
+                        text(&row, "event")
+                    },
+                    crate::desktop_hooks::EVENTS,
+                ),
+                field(
+                    "matcher",
+                    "Tool matcher",
+                    if id.is_empty() {
+                        "*"
+                    } else {
+                        text(&row, "matcher")
+                    },
+                    true,
+                ),
+                field("command", "Command", text(&row["handler"], "command"), true),
+                field(
+                    "timeout",
+                    "Timeout in seconds",
+                    row["handler"]["timeout"].as_u64().unwrap_or(30),
+                    true,
+                ),
+            ];
+            if id.is_empty() {
+                fields.insert(0, choice("scope", "Scope", "global", &["global", "local"]));
+            }
+            return Ok(form(
+                "Hook",
+                json!({"action":if id.is_empty(){"create"}else{"update"},"id":id,"revision":row["revision"],"args":row["handler"].get("args").cloned().unwrap_or(json!([])),"async":row["handler"]["async"].as_bool().unwrap_or(false),"shell":text(&row["handler"],"shell")}),
+                fields,
+            ));
+        }
+        if text(input, "action") == "inspect" {
+            ensure!(
+                !row.is_null() && row.get("id").is_some(),
+                "Hook no longer exists"
+            );
+            let mut view = View {
+                title: format!("{} · {}", text(&row, "event"), text(&row, "matcher")),
+                lines: vec![
+                    text(&row["handler"], "command").into(),
+                    format!("Source: {}", text(&row["source"], "path")),
+                ],
+                ..View::default()
+            };
+            if row["source"]["editable"] == true {
+                view.entries
+                    .push(entry("Edit", "", row_request("form", &row)));
+                let enabled = row["handler"]["disabled"] == true;
+                view.entries.push(entry(
+                    if enabled { "Enable" } else { "Disable" },
+                    "",
+                    json!({"action":"toggle","id":id,"revision":row["revision"],"enabled":enabled}),
+                ));
+                view.entries
+                    .push(destructive("Delete hook", row_request("delete", &row)));
+            }
+            return Ok(view);
+        }
+        let mut view = View {
+            title: "Hooks".into(),
+            entries: vec![entry(
+                "Create hook",
+                "Run a command on a runtime event",
+                json!({"action":"form"}),
+            )],
+            ..View::default()
+        };
+        for row in status["items"].as_array().into_iter().flatten() {
+            view.entries.push(entry(
+                format!(
+                    "{} · {}",
+                    text(row, "event"),
+                    text(&row["handler"], "command")
+                ),
+                text(&row["source"], "scope"),
+                row_request("inspect", row),
+            ));
+        }
+        Ok(view)
+    }
+
+    fn scheduler(&self) -> Result<Scheduler> {
+        Scheduler::discover(std::env::current_exe()?, self.paths.root.clone())
+    }
+    fn schedule_view(&self, input: &Value) -> Result<View> {
+        let scheduler = self.scheduler()?;
+        let id = text(input, "id");
+        if text(input, "action") == "form" {
+            let row = if id.is_empty() {
+                json!({})
+            } else {
+                serde_json::to_value(scheduler.require(id)?)?
+            };
+            let trigger = &row["trigger"];
+            let kind = trigger["type"].as_str().unwrap_or("interval");
+            let value = match kind {
+                "cron" => text(trigger, "expression").to_owned(),
+                "once" => text(trigger, "at").to_owned(),
+                _ => trigger["seconds"].as_u64().unwrap_or(3600).to_string(),
+            };
+            return Ok(form(
+                "Schedule",
+                json!({"action":if id.is_empty(){"create"}else{"update"},"id":id}),
+                vec![
+                    field("name", "Name", text(&row, "name"), true),
+                    field("prompt", "Prompt", text(&row, "prompt"), true),
+                    choice(
+                        "triggerType",
+                        "Trigger",
+                        kind,
+                        &["interval", "cron", "once"],
+                    ),
+                    field(
+                        "triggerValue",
+                        "Seconds, cron expression, or RFC3339 time",
+                        value,
+                        true,
+                    ),
+                    field(
+                        "timezone",
+                        "Timezone (optional)",
+                        text(&row, "timezone"),
+                        false,
+                    ),
+                ],
+            ));
+        }
+        if text(input, "action") == "inspect" {
+            let row = scheduler.require(id)?;
+            return Ok(View {
+                title: row.name.clone(),
+                lines: vec![
+                    Scheduler::summary(&row),
+                    row.prompt,
+                    format!("Workspace: {}", row.workspace.display()),
+                ],
+                entries: vec![
+                    entry("Edit", "", json!({"action":"form","id":id})),
+                    entry(
+                        if row.enabled { "Disable" } else { "Enable" },
+                        "",
+                        json!({"action":if row.enabled{"disable"}else{"enable"},"id":id}),
+                    ),
+                    entry(
+                        "Run now",
+                        "Start a scheduled run",
+                        json!({"action":"run","id":id}),
+                    ),
+                    entry("Run history", "", json!({"action":"history","id":id})),
+                    destructive("Delete schedule", json!({"action":"remove","id":id})),
+                ],
+                ..View::default()
+            });
+        }
+        let mut view = View {
+            title: "Schedules".into(),
+            entries: vec![entry(
+                "Create schedule",
+                "New schedules start disabled",
+                json!({"action":"form"}),
+            )],
+            ..View::default()
+        };
+        for row in scheduler.list()? {
+            view.entries.push(entry(
+                row.name.clone(),
+                Scheduler::summary(&row),
+                json!({"action":"inspect","id":row.id}),
+            ));
+        }
+        Ok(view)
+    }
+    fn schedule_mutation(&self, input: &Value) -> Result<()> {
+        let scheduler = self.scheduler()?;
+        let id = text(input, "id");
+        match text(input, "action") {
+            "create" | "update" => {
+                let value = required_string(input, "triggerValue")?;
+                let trigger = match text(input, "triggerType") {
+                    "interval" => Trigger::Interval {
+                        seconds: value.parse().context("Enter an interval in seconds")?,
+                    },
+                    "cron" => Trigger::Cron {
+                        expression: value.into(),
+                    },
+                    "once" => Trigger::Once {
+                        at: chrono::DateTime::parse_from_rfc3339(value)?
+                            .with_timezone(&chrono::Utc),
+                    },
+                    _ => bail!("Choose a trigger"),
+                };
+                let name = Some(required_string(input, "name")?.into());
+                let prompt = Some(required_string(input, "prompt")?.into());
+                let timezone = optional_string(input, "timezone")
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_owned);
+                if text(input, "action") == "create" {
+                    scheduler.create(CreateSchedule {
+                        name,
+                        prompt,
+                        workspace: self.workspace.clone(),
+                        trust_project: self.trust_project,
+                        trigger: Some(trigger),
+                        timezone,
+                        enabled: false,
+                        ..CreateSchedule::default()
+                    })?;
+                } else {
+                    scheduler.update(
+                        id,
+                        UpdateSchedule {
+                            name,
+                            prompt,
+                            trigger: Some(trigger),
+                            timezone: Some(timezone),
+                            ..UpdateSchedule::default()
+                        },
+                    )?;
+                }
+            }
+            "enable" | "disable" => {
+                scheduler.toggle(id, text(input, "action") == "enable")?;
+            }
+            "remove" => {
+                scheduler.remove(id)?;
+            }
+            "run" => {
+                scheduler.start_now(id)?;
+            }
+            _ => bail!("Unsupported schedule action"),
+        }
+        Ok(())
+    }
+    fn profile_roots(&self) -> haarness_profiles::Roots {
+        haarness_profiles::Roots {
+            config: self.paths.config_dir().to_path_buf(),
+            data: self.paths.data.clone(),
+            project: self.workspace.clone(),
+        }
+    }
+    fn profile_view(&self, input: &Value) -> Result<View> {
+        let catalog = haarness_profiles::Catalog::new(&self.paths.data);
+        if text(input, "action") == "restore_preview" {
+            let id: Uuid = required_string(input, "id")?.parse()?;
+            let archive = haarness_profiles::Archive::decode(&catalog.download(id)?)?;
+            let targets = archive.restore(&self.profile_roots(), true, true)?;
+            return Ok(View {
+                title: "Restore configuration profile".into(),
+                lines: std::iter::once("These files will be replaced:".into())
+                    .chain(targets.into_iter().map(|p| p.display().to_string()))
+                    .collect(),
+                entries: vec![destructive(
+                    "Replace configuration files",
+                    json!({"action":"restore","id":id,"force":true}),
+                )],
+                ..View::default()
+            });
+        }
+        if text(input, "action") == "form" {
+            return Ok(form(
+                "Save configuration profile",
+                json!({"action":"save"}),
+                vec![
+                    field("name", "Name", "", true),
+                    choice("scope", "Scope", "both", &["both", "global", "local"]),
+                ],
+            ));
+        }
+        if text(input, "action") == "inspect" {
+            let id: Uuid = required_string(input, "id")?.parse()?;
+            let row = catalog.get(id)?;
+            let archive = haarness_profiles::Archive::decode(&catalog.download(id)?)?;
+            return Ok(View {
+                title: row.name,
+                lines: vec![
+                    format!(
+                        "{} configuration files · {} bytes",
+                        row.entry_count, row.size_bytes
+                    ),
+                    format!("Scope: {:?}", row.scope),
+                    serde_json::to_string_pretty(&archive.manifest)?,
+                ],
+                entries: vec![
+                    entry(
+                        "Restore profile",
+                        "Review the files that will be replaced",
+                        json!({"action":"restore_preview","id":id}),
+                    ),
+                    destructive("Delete profile", json!({"action":"remove","id":id})),
+                ],
+                ..View::default()
+            });
+        }
+        Ok(View{title:"Configuration profiles".into(),lines:vec!["Profiles exclude credential stores. Inline configuration secrets remain in the archive.".into()],entries:std::iter::once(entry("Save profile","Capture configuration from this server",json!({"action":"form"}))).chain(catalog.list("",0,100)?.into_iter().map(|r|entry(r.name,format!("{} files",r.entry_count),json!({"action":"inspect","id":r.id})))).collect(),..View::default()})
+    }
+    fn profile_mutation(&self, input: &Value) -> Result<()> {
+        let catalog = haarness_profiles::Catalog::new(&self.paths.data);
+        match text(input, "action") {
+            "save" => {
+                let scope = match text(input, "scope") {
+                    "global" => haarness_profiles::Scope::Global,
+                    "local" => haarness_profiles::Scope::Local,
+                    "both" => haarness_profiles::Scope::Both,
+                    _ => bail!("Choose profile scope"),
+                };
+                catalog.put(&haarness_profiles::Archive::capture(
+                    &self.profile_roots(),
+                    required_string(input, "name")?,
+                    scope,
+                )?)?;
+            }
+            "restore" => {
+                let archive = haarness_profiles::Archive::decode(
+                    &catalog.download(required_string(input, "id")?.parse()?)?,
+                )?;
+                archive.restore(&self.profile_roots(), input["force"] == true, false)?;
+            }
+            "remove" => {
+                catalog.remove(required_string(input, "id")?.parse()?)?;
+            }
+            _ => bail!("Unsupported profile action"),
+        }
+        Ok(())
+    }
+
+    async fn start_login(&self, resource: &str, input: &Value) -> Result<Value> {
+        let name = required_string(input, "name")?.to_owned();
+        let method = match text(input, "method") {
+            "" | "browser" => "browser",
+            "device" | "headless" => "device",
+            other => bail!("Unknown sign-in method {other}"),
+        };
+        let display = if resource == "mcp" {
+            name.clone()
+        } else {
+            provider_name(
+                &self
+                    .runtime()
+                    .map(|runtime| runtime.providers().list())
+                    .unwrap_or_default(),
+                &name,
+            )
+        };
+        let provider_id = name.clone();
+        let mut callback_sender = None;
+        let (url, code, completion): (String, String, Completion) = if resource == "mcp" {
+            self.resolve_mcp(&name, optional_scope(input)?)?;
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+            let redirect = format!("http://{}/mcp/oauth/callback", listener.local_addr()?);
+            let session = self
+                .mcp
+                .begin_oauth(&name, &redirect)
+                .await
+                .map_err(core_error)?;
+            let url = session.authorization_url.clone();
+            let mcp = self.mcp.clone();
+            let (sender, receiver) = tokio::sync::oneshot::channel::<String>();
+            callback_sender = Some(sender);
+            (
+                url,
+                String::new(),
+                Box::pin(async move {
+                    let callback = tokio::select! {
+                        value = receive_oauth_callback(&listener, &redirect) => value?,
+                        value = receiver => value.context("Authorization cancelled")?,
+                    };
+                    session.complete(&callback).await.map_err(core_error)?;
+                    mcp.reconnect(&name).await.map_err(core_error)?;
+                    Ok(())
+                }),
+            )
+        } else {
+            let (url, code, future): (String, String, Completion<Credential>) =
+                match (name.as_str(), method) {
+                    ("openai", "browser") => {
+                        let login = OpenAiOAuthClient::new(self.openai_oauth.clone())
+                            .start_browser_login()
+                            .await?;
+                        (
+                            login.url.to_string(),
+                            String::new(),
+                            Box::pin(async move { Ok(login.finish().await?) }),
+                        )
+                    }
+                    ("openai", _) => {
+                        let login = OpenAiOAuthClient::new(self.openai_oauth.clone())
+                            .start_device_login()
+                            .await?;
+                        (
+                            login.verification_url.clone(),
+                            login.user_code.clone(),
+                            Box::pin(async move { Ok(login.finish().await?) }),
+                        )
+                    }
+                    ("xai", _) => {
+                        // xAI's complete verification URL carries the code, so
+                        // the browser method needs no typing; the code is still
+                        // shown for a browser opened by hand.
+                        let login = XaiOAuthClient::default().start_device_login().await?;
+                        (
+                            if method == "browser" {
+                                login.verification_url.clone()
+                            } else {
+                                login.instructions_url.clone()
+                            },
+                            login.user_code.clone(),
+                            Box::pin(async move { Ok(login.finish().await?) }),
+                        )
+                    }
+                    ("github-copilot", _) => {
+                        let login = CopilotOAuthClient::default().start_device_login().await?;
+                        (
+                            login.verification_url.clone(),
+                            login.user_code.clone(),
+                            Box::pin(async move { Ok(login.finish().await?) }),
+                        )
+                    }
+                    _ => bail!("{display} has no sign-in; use an API key"),
+                };
+            let store = CredentialStore::new(self.paths.auth.clone());
+            (
+                url,
+                code,
+                Box::pin(async move {
+                    store.set(&name, &future.await?)?;
+                    Ok(())
+                }),
+            )
+        };
+        let mut logins = self
+            .logins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        logins.retain(|_, login| {
+            if login.created.elapsed() > Duration::from_secs(900) {
+                login.task.abort();
+                false
+            } else {
+                true
+            }
+        });
+        ensure!(
+            logins.len() < 16,
+            "Too many pending logins; cancel one before starting another"
+        );
+        let id = Uuid::now_v7().to_string();
+        let result = Arc::new(Mutex::new(None));
+        let target = result.clone();
+        let task = tokio::spawn(async move {
+            let outcome = tokio::time::timeout(Duration::from_secs(600), completion)
+                .await
+                .map_err(|_| "Login timed out".into())
+                .and_then(|r| r.map_err(|e| e.to_string()));
+            *target
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(outcome);
+        });
+        let remote_callback = callback_sender.is_some();
+        let login = Login {
+            created: Instant::now(),
+            task,
+            callback: callback_sender,
+            result,
+            resource: resource.into(),
+            target: provider_id,
+            name: display,
+            method: method.into(),
+            url,
+            code,
+        };
+        let view = View {
+            title: login.title(),
+            data: Some(login.data(&id, "pending", None)),
+            lines: login.instructions(),
+            entries: [if remote_callback { Some(entry("Paste callback URL", "For remote servers: paste the URL after browser authorization if localhost cannot connect", json!({"action":"login_callback_form","id":id}))) } else { None }].into_iter().flatten().chain(vec![
+                entry(
+                    "Check status",
+                    "Refresh this page by hand",
+                    json!({"action":"login_status","id":id}),
+                ),
+                entry("Cancel sign-in", "", json!({"action":"login_cancel","id":id})),
+            ]).collect(),
+            ..View::default()
+        };
+        logins.insert(id, login);
+        output(view)
+    }
+}
+
+/// "Use an API key" → "API key": the noun a form field is labelled with.
+fn key_field_label(label: &str) -> &str {
+    ["Use an ", "Use a ", "Use "]
+        .iter()
+        .find_map(|prefix| label.strip_prefix(prefix))
+        .unwrap_or(label)
+}
+
+/// A provider's display name, falling back to its id for unknown ids.
+fn provider_name(providers: &[haarness_protocol::ProviderInfo], id: &str) -> String {
+    providers
+        .iter()
+        .find(|p| p.id == id)
+        .map_or_else(|| id.to_owned(), |p| p.name.clone())
+}
+
+/// One-line status for a provider row in the manager and the connect picker.
+fn provider_status(provider: &haarness_protocol::ProviderInfo) -> String {
+    if provider.authenticated {
+        return match provider.models.len() {
+            0 => "Connected".into(),
+            1 => "Connected · 1 model".into(),
+            count => format!("Connected · {count} models"),
+        };
+    }
+    let guide = haarness_providers::connect::guide(&provider.id);
+    let oauth = guide
+        .methods
+        .iter()
+        .find(|method| method.kind == haarness_providers::connect::MethodKind::Oauth);
+    match (oauth, guide.note) {
+        (Some(method), _) => format!(
+            "Not connected · {} or use an API key",
+            method.label.to_lowercase()
+        ),
+        (None, Some(note)) if guide.methods.is_empty() => format!("Not connected · {note}"),
+        _ => "Not connected · API key".into(),
+    }
+}
+
+fn router_form(input: &Value, needs_key: bool) -> View {
+    let advanced = input["advanced"] == true;
+    let mut fields = vec![field("url", "Router address", text(input, "url"), true)];
+    if needs_key {
+        let mut key = field("key", "Router access key", "", true);
+        key.secret = true;
+        fields.push(key);
+    }
+    if advanced {
+        fields.push(field(
+            "label",
+            "Connection name (optional)",
+            text(input, "label"),
+            false,
+        ));
+        fields.push(choice(
+            "scope",
+            "Available in",
+            if text(input, "scope") == "project" {
+                "project"
+            } else {
+                "global"
+            },
+            &["global", "project"],
+        ));
+    }
+    let mut request = json!({"action":"router_connect","advanced":advanced,"label":text(input,"label"),"scope":text(input,"scope")});
+    let mut advanced_request = request.clone();
+    advanced_request["action"] = json!("router_form");
+    advanced_request["advanced"] = json!(!advanced);
+    advanced_request["url"] = json!(text(input, "url"));
+    request["url"] = json!(text(input, "url"));
+    View {
+        data: None,
+        title: "Connect Haarness Router".into(), fields, submit: Some(request),
+        lines: vec!["Self-hosted · Enter the address of the router you run, for example http://localhost:8080. A key is optional unless the router requires one.".into(),
+            "The connection is checked and saved on this Haarness server. localhost refers to this server.".into(),
+            if needs_key { "This router requires an access key. Enter it to connect.".into() } else { "Your provider API keys stay on the router.".into() }],
+        entries: vec![entry(if advanced { "Hide advanced" } else { "Advanced" }, "Connection name and project scope", advanced_request)],
+    }
+}

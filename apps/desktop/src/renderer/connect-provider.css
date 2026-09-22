@@ -1,0 +1,221 @@
+/* The connect-a-provider dialog: a picker, a method choice, a key form and
+   the sign-in wait screen, all inside one editor-dialog shell. */
+.connect-dialog {
+  width: 560px;
+  display: flex;
+  flex-direction: column;
+  max-height: min(85vh, 640px);
+}
+.connect-dialog > header {
+  align-items: flex-start;
+  margin-bottom: var(--s4);
+}
+.connect-dialog > header > div {
+  flex: 1;
+  min-width: 0;
+}
+.connect-dialog > header p {
+  margin: var(--s1) 0 0;
+  font-size: var(--ui-sm);
+  line-height: 1.5;
+}
+.connect-back svg {
+  transform: rotate(180deg);
+}
+:root[dir="rtl"] .connect-back svg {
+  transform: none;
+}
+.connect-dialog .form-error {
+  color: var(--danger);
+  overflow-wrap: anywhere;
+  margin-bottom: var(--s3);
+}
+.connect-search {
+  width: 100%;
+  margin-bottom: var(--s3);
+}
+.connect-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  margin-inline: calc(var(--s2) * -1);
+  padding-inline: var(--s2);
+}
+.connect-list section {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.connect-list .section-label {
+  display: block;
+  padding: var(--s1) var(--s2);
+}
+.connect-row,
+.connect-method {
+  width: 100%;
+  min-height: var(--s8);
+  justify-content: flex-start;
+  gap: var(--s3);
+  padding: var(--s2);
+  border-color: transparent;
+  text-align: start;
+  border-radius: var(--r-md);
+}
+.connect-row:hover:not(:disabled),
+.connect-row:focus-visible,
+.connect-method:hover:not(:disabled),
+.connect-method:focus-visible {
+  background: var(--hover);
+  border-color: transparent;
+}
+.connect-row-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.3;
+}
+.connect-row-text strong {
+  font-weight: 600;
+  font-size: var(--ui-lg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.connect-row-text small {
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.connect-row > .provider-icon,
+.connect-row > svg,
+.connect-method > svg {
+  flex-shrink: 0;
+}
+.connect-row > svg:last-child {
+  color: var(--faint);
+}
+.connect-check {
+  color: var(--primary);
+}
+.connect-row.connected .connect-row-text small {
+  color: var(--primary);
+}
+.connect-manage {
+  border-color: transparent;
+  color: var(--muted);
+  font-size: var(--ui-sm);
+}
+.connect-methods {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.connect-method {
+  border: 1px solid var(--hairline);
+  min-height: 56px;
+}
+.connect-method.primary {
+  background: var(--primary);
+  color: var(--on-primary, var(--page));
+  border-color: transparent;
+}
+.connect-method.primary .connect-row-text small {
+  color: inherit;
+  opacity: 0.8;
+}
+.connect-method.primary:hover:not(:disabled) {
+  background: var(--primary);
+  filter: brightness(1.06);
+}
+.connect-hint {
+  font-size: var(--ui-sm);
+  line-height: 1.6;
+  margin: var(--s3) 0 0;
+}
+.connect-hint code {
+  font-size: var(--ui-sm);
+}
+.connect-hint .link {
+  border: 0;
+  padding: 0;
+  min-height: 0;
+  color: var(--primary);
+  font-size: inherit;
+  text-decoration: underline;
+}
+.connect-key .field {
+  margin: 0;
+}
+.connect-key footer,
+.connect-login footer,
+.connect-dialog > footer {
+  display: flex;
+  gap: var(--s2);
+  justify-content: flex-end;
+  margin-top: var(--s5);
+}
+.connect-steps {
+  margin: 0;
+  padding-inline-start: var(--s5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  font-size: var(--ui);
+}
+.connect-steps li {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  align-items: flex-start;
+}
+.connect-open {
+  gap: var(--s2);
+}
+.connect-code {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+}
+.connect-code code {
+  font-size: 22px;
+  letter-spacing: 0.12em;
+  padding: var(--s1) var(--s3);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--accent);
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+.connect-waiting {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: var(--s4) 0 0;
+  font-size: var(--ui);
+}
+.connect-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--hairline);
+  border-top-color: var(--primary);
+  animation: connect-spin 0.9s linear infinite;
+}
+@keyframes connect-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .connect-spinner {
+    animation: none;
+  }
+}
