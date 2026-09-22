@@ -1,0 +1,49 @@
+name = "everforest"
+
+[dark]
+bg = "#2d353b"
+surface = "#333c43"
+selected = "#343f44"
+text = "#d3c6aa"
+muted = "#7a8478"
+primary = "#a7c080"
+accent = "#d699b6"
+user = "#bbc393"
+danger = "#e67e80"
+
+[dark.syntax]
+keyword = "#d699b6"
+string = "#a7c080"
+comment = "#7a8478"
+constant = "#e69875"
+function = "#a7c080"
+
+[dark.diff]
+added = "#4fd6be"
+added_bg = "#20303b"
+removed = "#c53b53"
+removed_bg = "#37222c"
+
+[light]
+bg = "#fdf6e3"
+surface = "#efebd4"
+selected = "#f4f0d9"
+text = "#5c6a72"
+muted = "#a6b0a0"
+primary = "#8da101"
+accent = "#df69ba"
+user = "#778834"
+danger = "#f85552"
+
+[light.syntax]
+keyword = "#df69ba"
+string = "#8da101"
+comment = "#a6b0a0"
+constant = "#f57d26"
+function = "#8da101"
+
+[light.diff]
+added = "#1e725c"
+added_bg = "#d5e5d5"
+removed = "#c53b53"
+removed_bg = "#f7d8db"

@@ -1,0 +1,41 @@
+name = "cursor"
+
+[dark]
+bg = "#181818"
+surface = "#141414"
+selected = "#262626"
+text = "#e4e4e4"
+primary = "#88c0d0"
+accent = "#88c0d0"
+user = "#b1d0d9"
+danger = "#e34671"
+
+[dark.syntax]
+keyword = "#82D2CE"
+string = "#E394DC"
+constant = "#F8C762"
+function = "#EFB080"
+
+[dark.diff]
+added = "#3fa266"
+removed = "#e34671"
+
+[light]
+bg = "#fcfcfc"
+surface = "#f3f3f3"
+selected = "#ededed"
+text = "#141414"
+primary = "#6f9ba6"
+accent = "#6f9ba6"
+user = "#465e64"
+danger = "#cf2d56"
+
+[light.syntax]
+keyword = "#b3003f"
+string = "#9e94d5"
+constant = "#b8448b"
+function = "#db704b"
+
+[light.diff]
+added = "#1f8a65"
+removed = "#cf2d56"

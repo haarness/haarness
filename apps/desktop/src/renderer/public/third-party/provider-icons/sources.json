@@ -1,0 +1,162 @@
+[
+  {
+    "file": "openai.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/openai.svg",
+    "sha256": "a595df6b423920c67a7f8f73c063e4bfb72d415948097b6cac063a2366bb5186"
+  },
+  {
+    "file": "anthropic.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/anthropic.svg",
+    "sha256": "e833fdfa7e7187a86a05b870925067556a506dcd4239089aed73e1e58c9366a3"
+  },
+  {
+    "file": "gemini.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/gemini.svg",
+    "sha256": "87d5b3c4be75a66f54c1936482a263df68185545b741129badd1b7c2449c18d3"
+  },
+  {
+    "file": "azure.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/azure.svg",
+    "sha256": "a48fa106b32093acac4cb858df39c4ee6bf1049d2ecec92ad556190f7c4d9a0e"
+  },
+  {
+    "file": "vertexai.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/vertexai.svg",
+    "sha256": "3a78043e65f2dad8a6278f5eaf7b5d636810a7b901efe03430ef2f40f3b38b2e"
+  },
+  {
+    "file": "githubcopilot.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/githubcopilot.svg",
+    "sha256": "bbc7fddc13448236e5edea8c399d2072dc40aa5da5bca07f7a2f412405c500a3"
+  },
+  {
+    "file": "bedrock.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/bedrock.svg",
+    "sha256": "b07f07bb6b77a1ee83916430250dc9adfc799ec43fbc5932947af099bcfcb9f9"
+  },
+  {
+    "file": "groq.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/groq.svg",
+    "sha256": "078d5cf6e7a54905040c15ddacf5ea33c13042fe7739e820cedc2096e4406651"
+  },
+  {
+    "file": "mistral.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/mistral.svg",
+    "sha256": "a06cfa54e7deff7f7544175b006b7f8a03fbc5624c44f7d553a44d07ea96e629"
+  },
+  {
+    "file": "xai.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/xai.svg",
+    "sha256": "89eb7de9f0d02a41cfecd9109e253d7fd3529e27467dee4254faa67f3ac21451"
+  },
+  {
+    "file": "deepseek.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/deepseek.svg",
+    "sha256": "8f9443e351b6dacce71871790201b799d92e8bf96a45ef79aeb5e9bf4db423e2"
+  },
+  {
+    "file": "together.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/together.svg",
+    "sha256": "b3ec218e7e0b0432a2ce07f5ec98a1dcd24f808c74d5fee624ab31e4947feef3"
+  },
+  {
+    "file": "fireworks.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/fireworks.svg",
+    "sha256": "9991ab2a8331096d3f408e07a5f2e1cb54c369143dd9fc7a97f6458478b33fe3"
+  },
+  {
+    "file": "openrouter.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/openrouter.svg",
+    "sha256": "ae671cc83de9bd45db97a47ed5e38a4e1bd9f93a12be495ba4b4f8b284026bca"
+  },
+  {
+    "file": "cerebras.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/cerebras.svg",
+    "sha256": "05af9593eca3fefdb30c5ad042040f008beea2b27e0a6b7315c319492f7a44ff"
+  },
+  {
+    "file": "sambanova.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/sambanova.svg",
+    "sha256": "4f82732325bba2496cb91f2e72636d05c03276763562b75795c37f764ae4357f"
+  },
+  {
+    "file": "nvidia.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/nvidia.svg",
+    "sha256": "5a419b99e0ffdbfbe8caa7ec25581054eae03024da59cb860c54ea55ac8e7e73"
+  },
+  {
+    "file": "zai.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/zai.svg",
+    "sha256": "e748cb5108ce37b116d7a5ba97d37e0ae97eadf6849b0de11afb248e244a01e1"
+  },
+  {
+    "file": "deepinfra.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/deepinfra.svg",
+    "sha256": "2a20be86e90b3c2085d5b3213f52c75e4f0041b239d6140475f5809863d45392"
+  },
+  {
+    "file": "huggingface.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/huggingface.svg",
+    "sha256": "de7f2c60f974b75b385116ef0dc6a9fa62f2fd7bf58156b5623301a5436b91c4"
+  },
+  {
+    "file": "perplexity.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/perplexity.svg",
+    "sha256": "c66c64e9e3c273ef6c235f743808d67ffa7d482e8cbe4a79496a42b60333e1fe"
+  },
+  {
+    "file": "moonshot.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/moonshot.svg",
+    "sha256": "435f41b74e6a87639b6bf860e9628f20cbe7d6229bece412d548f4cea3081852"
+  },
+  {
+    "file": "siliconcloud.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/siliconcloud.svg",
+    "sha256": "50025587d401e07f7d82a2977146176bd8c9d9f52c54c452f31bb49c16d0cf3c"
+  },
+  {
+    "file": "nebius.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/nebius.svg",
+    "sha256": "4213ea25ec4c782688a7dafdad4bb828096151639077001c4df9c10a315f1af1"
+  },
+  {
+    "file": "novita.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/novita.svg",
+    "sha256": "118af2fde0c68b129f85d28154eedd52f9c0456ecc4870823424c81c7f7bc523"
+  },
+  {
+    "file": "ollama.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/ollama.svg",
+    "sha256": "3a268218fb2e6e81fa31df70f70b51331625047794db81db21d35359428fae7a"
+  },
+  {
+    "file": "meta.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/meta.svg",
+    "sha256": "805ef9a35305393eb5a89be46b0708c9b119b3308ca44aaedd1457ff04857060"
+  },
+  {
+    "file": "modelscope.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/modelscope.svg",
+    "sha256": "e2f89ef46b3fd764c1847b6d1f6390d1c5a9f5b012c9d3dec373e804fd3d7c23"
+  },
+  {
+    "file": "upstage.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/upstage.svg",
+    "sha256": "2b740c9457fdbe4b0e7e3ff2e10f99882314a813e1e81f8d291b7b61d56a2416"
+  },
+  {
+    "file": "lmstudio.svg",
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/a94750e3f5f8fc33757b839d85030e742284e43a/packages/static-svg/icons/lmstudio.svg",
+    "sha256": "4a575e8382b52ce742ac5d21d361a7d2a08cea7c12390ee1bbb755ef7d3cc25b"
+  },
+  {
+    "file": "digitalocean.svg",
+    "source": "https://raw.githubusercontent.com/anomalyco/models.dev/b2dc9cc0b2e5308690dc184e03bbee0749ee767a/providers/digitalocean/logo.svg",
+    "sha256": "556ab6fd0900757348019d72a7ee9ea1abdb1ea59a10c666a1c0a71a2e5dddbf"
+  },
+  {
+    "file": "wandb.svg",
+    "source": "https://raw.githubusercontent.com/anomalyco/models.dev/b2dc9cc0b2e5308690dc184e03bbee0749ee767a/providers/wandb/logo.svg",
+    "sha256": "40138dd1516b8337094fbcdac3946192bc4fce8d76d9ad8d3e701ebcd0658f14"
+  }
+]

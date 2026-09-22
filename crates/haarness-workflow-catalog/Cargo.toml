@@ -1,0 +1,17 @@
+[package]
+name = "haarness-workflow-catalog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+directories.workspace = true
+haarness-protocol = { path = "../haarness-protocol" }
+serde_json.workspace = true
+thiserror.workspace = true
+tree-sitter = "0.25"
+tree-sitter-typescript = "0.23.2"
+
+[lints]
+workspace = true

@@ -1,0 +1,49 @@
+name = "nightowl"
+
+[dark]
+bg = "#011627"
+surface = "#0b253a"
+selected = "#0b253a"
+text = "#d6deeb"
+muted = "#5f7e97"
+primary = "#82AAFF"
+accent = "#c792ea"
+user = "#a8c1f6"
+danger = "#EF5350"
+
+[dark.syntax]
+keyword = "#c792ea"
+string = "#ecc48d"
+comment = "#637777"
+constant = "#F78C6C"
+function = "#82AAFF"
+
+[dark.diff]
+added = "#c5e478"
+added_bg = "#0a2e1a"
+removed = "#EF5350"
+removed_bg = "#2d1b1b"
+
+[light]
+bg = "#011627"
+surface = "#0b253a"
+selected = "#0b253a"
+text = "#d6deeb"
+muted = "#5f7e97"
+primary = "#82AAFF"
+accent = "#c792ea"
+user = "#a8c1f6"
+danger = "#EF5350"
+
+[light.syntax]
+keyword = "#c792ea"
+string = "#ecc48d"
+comment = "#637777"
+constant = "#F78C6C"
+function = "#82AAFF"
+
+[light.diff]
+added = "#c5e478"
+added_bg = "#0a2e1a"
+removed = "#EF5350"
+removed_bg = "#2d1b1b"

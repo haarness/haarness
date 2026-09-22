@@ -1,0 +1,49 @@
+name = "monokai"
+
+[dark]
+bg = "#272822"
+surface = "#1e1f1c"
+selected = "#3e3d32"
+text = "#f8f8f2"
+muted = "#75715e"
+primary = "#66d9ef"
+accent = "#a6e22e"
+user = "#a8e7f0"
+danger = "#f92672"
+
+[dark.syntax]
+keyword = "#f92672"
+string = "#e6db74"
+comment = "#75715e"
+constant = "#ae81ff"
+function = "#a6e22e"
+
+[dark.diff]
+added = "#a6e22e"
+added_bg = "#1a3a1a"
+removed = "#f92672"
+removed_bg = "#3a1a1a"
+
+[light]
+bg = "#fafafa"
+surface = "#f0f0f0"
+selected = "#e0e0e0"
+text = "#272822"
+muted = "#75715e"
+primary = "#66d9ef"
+accent = "#a6e22e"
+user = "#4a8993"
+danger = "#f92672"
+
+[light.syntax]
+keyword = "#f92672"
+string = "#fd971f"
+comment = "#75715e"
+constant = "#ae81ff"
+function = "#a6e22e"
+
+[light.diff]
+added = "#a6e22e"
+added_bg = "#e0ffe0"
+removed = "#f92672"
+removed_bg = "#ffe0e0"

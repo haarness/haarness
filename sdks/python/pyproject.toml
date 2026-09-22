@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "haarness-sdk"
+version = "0.1.0"
+description = "Typed synchronous and asynchronous Haarness server SDK"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+classifiers = ["Private :: Do Not Upload", "Typing :: Typed"]
+dependencies = ["httpx>=0.28,<1", "websockets>=15,<16", "typing-extensions>=4.12,<5"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<10",
+    "mypy>=1.15,<2",
+    "build>=1.2,<2",
+    "jsonschema>=4.23,<5",
+    "ruff>=0.12,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/haarness_sdk"]
+
+[tool.mypy]
+python_version = "3.10"
+check_untyped_defs = true
+files = ["src/haarness_sdk"]

@@ -1,0 +1,49 @@
+name = "one-dark"
+
+[dark]
+bg = "#282c34"
+surface = "#21252b"
+selected = "#353b45"
+text = "#abb2bf"
+muted = "#5c6370"
+primary = "#61afef"
+accent = "#56b6c2"
+user = "#82b0d9"
+danger = "#e06c75"
+
+[dark.syntax]
+keyword = "#c678dd"
+string = "#98c379"
+comment = "#5c6370"
+constant = "#d19a66"
+function = "#61afef"
+
+[dark.diff]
+added = "#98c379"
+added_bg = "#2c382b"
+removed = "#e06c75"
+removed_bg = "#3a2d2f"
+
+[light]
+bg = "#fafafa"
+surface = "#f0f0f1"
+selected = "#eaeaeb"
+text = "#383a42"
+muted = "#a0a1a7"
+primary = "#4078f2"
+accent = "#0184bc"
+user = "#3c5ca3"
+danger = "#e45649"
+
+[light.syntax]
+keyword = "#a626a4"
+string = "#50a14f"
+comment = "#a0a1a7"
+constant = "#986801"
+function = "#4078f2"
+
+[light.diff]
+added = "#50a14f"
+added_bg = "#eafbe9"
+removed = "#e45649"
+removed_bg = "#fce9e8"

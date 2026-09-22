@@ -1,0 +1,49 @@
+name = "catppuccin"
+
+[dark]
+bg = "#1e1e2e"
+surface = "#181825"
+selected = "#11111b"
+text = "#cdd6f4"
+muted = "#9399b2"
+primary = "#89b4fa"
+accent = "#f5c2e7"
+user = "#a8c3f7"
+danger = "#f38ba8"
+
+[dark.syntax]
+keyword = "#cba6f7"
+string = "#a6e3a1"
+comment = "#9399b2"
+constant = "#fab387"
+function = "#89b4fa"
+
+[dark.diff]
+added = "#a6e3a1"
+added_bg = "#24312b"
+removed = "#f38ba8"
+removed_bg = "#3c2a32"
+
+[light]
+bg = "#eff1f5"
+surface = "#e6e9ef"
+selected = "#dce0e8"
+text = "#4c4f69"
+muted = "#7c7f93"
+primary = "#1e66f5"
+accent = "#ea76cb"
+user = "#335cb6"
+danger = "#d20f39"
+
+[light.syntax]
+keyword = "#8839ef"
+string = "#40a02b"
+comment = "#7c7f93"
+constant = "#fe640b"
+function = "#1e66f5"
+
+[light.diff]
+added = "#40a02b"
+added_bg = "#d6f0d9"
+removed = "#d20f39"
+removed_bg = "#f6dfe2"

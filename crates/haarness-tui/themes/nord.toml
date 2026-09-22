@@ -1,0 +1,49 @@
+name = "nord"
+
+[dark]
+bg = "#2E3440"
+surface = "#3B4252"
+selected = "#434C5E"
+text = "#ECEFF4"
+muted = "#8B95A7"
+primary = "#88C0D0"
+accent = "#8FBCBB"
+user = "#b5d5e0"
+danger = "#BF616A"
+
+[dark.syntax]
+keyword = "#81A1C1"
+string = "#A3BE8C"
+comment = "#8B95A7"
+constant = "#B48EAD"
+function = "#88C0D0"
+
+[dark.diff]
+added = "#A3BE8C"
+added_bg = "#3B4252"
+removed = "#BF616A"
+removed_bg = "#3B4252"
+
+[light]
+bg = "#ECEFF4"
+surface = "#E5E9F0"
+selected = "#D8DEE9"
+text = "#2E3440"
+muted = "#3B4252"
+primary = "#5E81AC"
+accent = "#8FBCBB"
+user = "#485e7b"
+danger = "#BF616A"
+
+[light.syntax]
+keyword = "#81A1C1"
+string = "#A3BE8C"
+comment = "#4C566A"
+constant = "#B48EAD"
+function = "#88C0D0"
+
+[light.diff]
+added = "#A3BE8C"
+added_bg = "#E5E9F0"
+removed = "#BF616A"
+removed_bg = "#E5E9F0"

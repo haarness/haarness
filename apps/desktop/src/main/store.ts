@@ -1,0 +1,182 @@
+import { displayLanguage, parseLanguage } from "../localization";
+import type { ServerAuth } from "@haarness/sdk";
+import { z } from "zod";
+import { app, safeStorage } from "electron";
+import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+  defaults,
+  type Preferences,
+  type Recent,
+  type SavedServer,
+} from "../shared";
+import { migrateProjectlessLocations } from "../projects";
+import { migrateServers } from "../servers";
+import { themeIds } from "../themes";
+interface Data {
+  preferences: Preferences;
+  recent: Recent[];
+  servers: SavedServer[];
+  values: Record<string, unknown>;
+  credentials: Record<string, string>;
+}
+let state: Data = {
+  preferences: { ...defaults },
+  recent: [],
+  servers: [],
+  values: {},
+  credentials: {},
+};
+let chain = Promise.resolve();
+const path = () => join(app.getPath("userData"), "desktop.json");
+export async function load() {
+  try {
+    const raw = JSON.parse(await readFile(path(), "utf8"));
+    state = {
+      ...state,
+      ...raw,
+      preferences: { ...defaults, ...raw.preferences, shortcuts: { ...defaults.shortcuts, ...raw.preferences?.shortcuts }, language: displayLanguage(raw.preferences?.language) },
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+      throw new Error(
+        "Desktop preferences could not be read. Preserve desktop.json and repair it before continuing.",
+      );
+  }
+  const recent = migrateProjectlessLocations(state.recent);
+  const servers = migrateServers(recent, state.servers);
+  if (
+    recent !== state.recent ||
+    JSON.stringify(servers) !== JSON.stringify(state.servers)
+  ) {
+    state.servers = servers;
+    state.recent = recent;
+    await persist();
+  }
+  return state;
+}
+export function data() {
+  return state;
+}
+export function persist() {
+  chain = chain
+    .catch(() => {})
+    .then(async () => {
+      await mkdir(app.getPath("userData"), { recursive: true });
+      const temporary = path() + "." + randomUUID();
+      await writeFile(temporary, JSON.stringify(state), { mode: 0o600 });
+      await rename(temporary, path());
+    });
+  return chain;
+}
+export function credential(id: string) {
+  const encoded = state.credentials[id];
+  return encoded
+    ? safeStorage.decryptString(Buffer.from(encoded, "base64"))
+    : "";
+}
+export function serverAuth(id: string): ServerAuth {
+  const value = credential(id);
+  if (!value) return { type: "none" };
+  // Legacy installations stored a bare bearer token in encrypted storage.
+  if (!value.startsWith("haarness-auth:v1:"))
+    return { type: "bearer", token: value };
+  return z
+    .discriminatedUnion("type", [
+      z.object({ type: z.literal("none") }),
+      z.object({ type: z.literal("bearer"), token: z.string() }),
+      z.object({
+        type: z.literal("basic"),
+        username: z.string(),
+        password: z.string(),
+      }),
+    ])
+    .parse(JSON.parse(value.slice("haarness-auth:v1:".length)));
+}
+export function saveServerAuth(id: string, auth: ServerAuth) {
+  setCredential(
+    id,
+    auth.type === "none" ? "" : "haarness-auth:v1:" + JSON.stringify(auth),
+  );
+}
+export function setCredential(id: string, token: string) {
+  if (!token) {
+    delete state.credentials[id];
+    return;
+  }
+  if (
+    !safeStorage.isEncryptionAvailable() ||
+    safeStorage.getSelectedStorageBackend?.() === "basic_text"
+  )
+    throw new Error(
+      "Secure credential storage is unavailable. Configure the operating system keyring before saving a remote server.",
+    );
+  state.credentials[id] = safeStorage.encryptString(token).toString("base64");
+}
+export async function preferences(input: Partial<Preferences>) {
+  const candidate = z
+    .object({
+      theme: z.enum(["dark", "light", "system"]),
+      palette: z.enum(themeIds),
+      fontSize: z.number().int().min(11).max(24),
+      terminalFontSize: z.number().int().min(10).max(24),
+      notifications: z.boolean(),
+      completionNotifications: z.enum(["background", "always", "never"]),
+      permissionNotifications: z.boolean(),
+      questionNotifications: z.boolean(),
+      browserWebLinks: z.enum(["external", "browser"]),
+      browserLocalLinks: z.enum(["external", "browser"]),
+      browserShowFullURL: z.boolean(),
+      browserAskDownloadLocation: z.boolean(),
+      sound: z.boolean(),
+      compactTools: z.boolean(),
+      showReasoning: z.boolean(),
+      sendKey: z.enum(["enter", "mod-enter"]),
+      editorWrap: z.boolean(),
+      diffLayout: z.enum(["split", "unified"]),
+      language: z.string().refine((value) => !!parseLanguage(value), "Unsupported display language").transform((value) => displayLanguage(value)),
+      shortcuts: z.object({
+        new: z.string(),
+        settings: z.string(),
+        palette: z.string(),
+        files: z.string(),
+        diff: z.string(),
+        terminal: z.string(),
+        browser: z.string(),
+        agentNext: z.string(),
+        agentPrev: z.string(),
+      }),
+    })
+    .parse({ ...state.preferences, ...input });
+  if (
+    !["dark", "light", "system"].includes(candidate.theme) ||
+    candidate.fontSize < 11 ||
+    candidate.fontSize > 24 ||
+    candidate.terminalFontSize < 10 ||
+    candidate.terminalFontSize > 24
+  )
+    throw new Error("Invalid appearance setting");
+  // Menu shortcuts become native accelerators, so they need a modifier and a
+  // single character. Composer shortcuts are matched in the window and may be
+  // a bare named key, which is how Tab switches agents.
+  const KEY = "[a-z0-9,.;/\\[\\]\\\\\\-=`]|F(?:[1-9]|1[0-9]|2[0-4])";
+  const NAMED = `${KEY}|Tab|Enter|Space|Escape|Backspace|Up|Down|Left|Right`;
+  const MODIFIER = "Mod|Ctrl|Alt|Shift|Meta";
+  const accelerator = new RegExp(
+    `^(${MODIFIER})(\\+(${MODIFIER}))*\\+(${KEY})$`, "i");
+  const composer = new RegExp(`^((${MODIFIER})\\+)*(${NAMED})$`, "i");
+  const composerKeys = new Set(["agentNext", "agentPrev"]);
+  const shortcuts = Object.values(candidate.shortcuts);
+  if (
+    Object.entries(candidate.shortcuts).some(([name, value]) =>
+      !(composerKeys.has(name) ? composer : accelerator).test(value),
+    ) ||
+    new Set(shortcuts.map((value) => value.toLowerCase())).size !==
+      shortcuts.length
+  )
+    throw new Error("Use unique shortcuts such as Mod+Shift+E.");
+  state.preferences = candidate;
+  await persist();
+  return candidate;
+}

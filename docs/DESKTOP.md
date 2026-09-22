@@ -1,0 +1,260 @@
+# Haarness Desktop
+
+Haarness Desktop is an Electron application in `apps/desktop`. Its SolidJS interface uses Haarness's directory-scoped server for every conversation, turn, tool, approval, workflow, and terminal. The server remains the durable owner of work and can be shared with the CLI and TUI.
+
+Normal Send steers active work; **Queue** or **Alt+Enter** saves a follow-up until that work finishes. The pending list supports edit, reorder, remove, and Steer/Send. See [Steer and Queue](INPUT-QUEUE.md).
+
+## Development
+
+See [Keeping local builds small](BUILD-STORAGE.md) for Rust build defaults and safe cache cleanup.
+
+Install Node 22+, npm, Rust and Bun. From this repository:
+
+```sh
+npm run desktop:install
+npm run desktop:dev
+```
+
+`HAARNESS_BIN` can select an existing Haarness binary. `HAARNESS_DESKTOP_DATA` overrides desktop preferences and encrypted remote credentials; `HAARNESS_DATA_DIR` independently overrides runtime storage. Normal builds use the system application-data directory and normal Haarness storage.
+
+## Package and launch
+
+```sh
+npm run desktop:package
+```
+
+Packaging builds the Rust executable, SDK, renderer and Electron main/preload, then bundles the Rust executable and Bun 1.3.14 into the application. Extensions and workflows therefore work without a separate Bun installation. The Rust executable also embeds ripgrep 15.2.0, available as `rg` in agent shell calls and integrated terminals without a separate install or download. Installers appear in `apps/desktop/release`. `npm --prefix apps/desktop run package:dir` produces an unpacked application for local testing. Build on the target platform for macOS DMG/ZIP, Windows NSIS, and Linux AppImage/DEB.
+
+Conversations require a selected project. With no saved project, choose a folder
+before typing or sending. Both project pickers offer existing projects and New
+project. Older general chats remain accessible as ordinary projects in their
+existing folders, with history, drafts and trust settings preserved.
+
+
+Signing and notarization use standard electron-builder credentials supplied by release CI. Local packaging uses an ad hoc signature. For distribution, explicitly override `mac.identity` with the release signing identity and supply notarization credentials. An optional HTTPS `HAARNESS_UPDATE_URL` points to an electron-updater generic feed. Do not point production clients at unsigned or development artifacts.
+
+## Session transport
+
+Only the Electron main process holds server bearer tokens. A narrow, validated IPC bridge exposes domain operations to a sandboxed renderer with context isolation and a restrictive content-security policy. External links open through a protocol allowlist. Local provider credentials use the existing Haarness credential store; remote connection credentials use the operating-system keyring through Electron safeStorage.
+
+On connection or resynchronization, the desktop captures `/v1/info`'s event cursor, fetches REST snapshots, and subscribes to `/v1/events` with `Last-Event-ID`. The SDK validates ordering and server identity. Snapshot races reconcile with events received during the fetch. Durable items are merged by ID and sequence; live text/reasoning is replaced by its persisted item. Same-instance reconnects resume from the last consumed event and preserve partial streaming text; server changes and replay gaps trigger fresh snapshots. Message request IDs are retained across uncertain failures and reloads so a retry cannot submit the same message twice. Reconnect uses bounded backoff and refreshes snapshots, including after a daemon restart. Observing or closing a window does not cancel a turn.
+
+## Conversation controls
+
+Open a conversation's actions menu or search the command palette for **Undo last turn**, **Redo turn**, **Compact conversation**, or **Find in conversation**. The composer also accepts `/undo`, `/redo`, and `/compact` as local commands.
+
+Undo restores the previous conversation boundary and the files changed by that turn, and puts the undone prompt back in the composer. An existing draft is preserved. Redo restores the next undone turn; an untouched restored prompt is removed from the draft. Undo state and drafts survive reload. Sending a new message after undo replaces the undone branch. If files changed outside the conversation conflict with an undo, Haarness reports the conflict without overwriting those edits.
+
+Manual compaction asks the conversation's model to summarize its history. History actions are unavailable during an active turn or another history operation. Redo or continue an undone conversation before compacting. Provider errors leave the draft available to retry.
+
+Press **Cmd+F** on macOS or **Ctrl+F** elsewhere while in a conversation to search messages and tool output, including older messages outside the currently rendered viewport. Search is literal and case insensitive; the counter counts matching messages. Enter and Shift+Enter move between matches, and Escape closes search. File editor search keeps its own shortcut when the editor has focus.
+
+## Hooks and memory
+
+Open **Settings → Hooks** to add, edit, enable, disable, or remove command hooks. Choose **This project** or **All projects** when adding a hook, then select an event and enter the command. For example, a `Stop` hook can run a script after a response finishes. Tool events accept a matcher such as `Bash|Edit`; `*` matches every tool. Advanced fields include arguments, a shell, timeout, and asynchronous execution.
+
+The editor shows hooks from the same configuration sources the runtime loads, including compatible configuration files. Plugin hooks are read-only. Project hooks remain inactive when project configuration is not trusted; change that separately under **Settings → Projects**. Supported events are `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `UserPromptSubmit`, `PermissionRequest`, `Stop`, `SessionStart`, `SessionEnd`, `TurnEnd`, `Notification`, `FileChanged`, and `ConfigChange`.
+
+Enter **`/memory`** in the composer, or search for **Manage memory**, to manage the active project's memories. Add or edit a named memory with its description, type, and content, or delete an obsolete memory. The dialog shows the storage directory outside the repository. **Index limit** controls how many summaries enter the prompt (1–1000, default 200). Turning memory off removes its prompt index and disables memory tools without deleting saved memories.
+
+These editors use the existing local host management service. For remote projects, manage configuration on the remote host. Runtime changes apply when idle. If a file changes outside an editor, saving reports a conflict and retains your draft so you can reopen the current file before applying your changes.
+
+## First run and providers
+
+Opening a project whose server has no connected provider opens the connect dialog ("Welcome to Haarness") before anything else; the composer's model pill reads "Connect a provider" until one is. The dialog is a single flow: pick a provider (popular ones first, search for the rest, a check on the ones already connected), choose how to connect when there is more than one way, then either paste a key or sign in. Keys are masked, saved through the server's management API into owner-only `auth.json`, and the dialog shows where to create one and which environment variable also works. Sign-in (ChatGPT, xAI, GitHub Copilot) opens the system browser, shows the device code with a copy button, polls the server every two seconds and closes itself when the browser comes back; "Use a code instead" switches a browser sign-in to the device code, and on a remote server only the code method is offered. Success refreshes the catalogs, notifies "{provider} is connected", and the composer picks a model from that provider. Settings → Providers keeps the same dialog behind "Connect a provider" and per-provider Connect/Reconnect buttons, plus Disconnect, Refresh models, custom endpoints and the Router. The e2e suite drives both the key path and the device-code path against a fixture issuer (`HAARNESS_OPENAI_OAUTH_ISSUER`).
+
+## Project tools
+
+Projects keep their position when selected. Drag anywhere on a project or conversation row to reorder it. There are no dedicated grips, move menus, or reorder notifications. Alt+arrow keys and Alt+Home/End provide keyboard ordering while retaining focus. Conversation, side-panel, and terminal tabs use the same controls. Ordering is remembered per project and collection and survives activity, renaming, filtering, and relaunching. Newly opened projects are appended; new conversations appear at the top without disturbing existing saved positions.
+
+Saved projects remain in navigation while their local runtimes start or recover, with cached conversation titles. The app restores the last project and task on launch. New chat opens a per-project draft and creates a conversation on send; its composer includes a project picker. A waiting permission or question belongs to its own task and is indicated in the conversation list. See the [project and task model](DESKTOP-PROJECT-MODEL.md).
+
+Projects expand independently. Use the chevron to show or hide a project’s conversations without switching the active chat; click its name to toggle its conversations and activate it, or select any visible conversation to open that exact chat. Several projects can remain expanded, with independent ordering. Expansion choices, including an explicitly collapsed active project, survive relaunches. Conversation titles and activity indicators update live in expanded inactive projects.
+
+The side-panel button opens a launcher when no panel is selected. Its Files, Review, and Terminal entries include descriptions and the configured shortcuts. The plus button in the side-panel tab bar returns to this launcher; closing the last tab also returns there. Files and review stay alongside the conversation, and terminals open below it.
+
+Expanding the terminal starts the first shell automatically and focuses its input. Existing terminals are reused when reopening the panel. Hiding the panel keeps its processes running; closing a terminal tab stops that terminal immediately without a confirmation dialog. Closing the last terminal hides the panel, and reopening it starts a fresh shell.
+
+Opening a project goes directly to the native folder picker. Project configuration, MCP servers, hooks, and extensions are enabled by default. Explicit per-folder settings are remembered when reopening recent projects and can be changed in Settings → Projects. When the requested setting differs from an existing local daemon, the desktop applies it by restarting the idle daemon; running work must finish first, and session history is retained.
+
+The desktop keeps the conversation in the center, projects and sessions in a collapsible sidebar, and files or diffs in a tabbed panel on the right. The sidebar contains New chat, Projects, and Settings. Chat has no secondary toolbar for compacting, undoing, or exporting; its title stays in the window header and controls stay with the composer. Workflows, Goals, Schedules, and Plugins are available from the Haarness menu; file review and terminal controls stay in the workspace toolbar. Usage diagnostics are available through the command palette. The terminal opens below the workspace. Drag the dividers to resize the sidebar, side panel or terminal; focused dividers also support arrow keys, Shift for larger steps, and Home or double-click to reset. Panel sizes and sidebar visibility are saved between launches. The side panel can expand to fill the workspace; smaller windows show one pane at a time.
+
+Sidebar conversation rows expose one Archive/Restore action. Renaming and forking remain in the conversation header. Archiving in another expanded project leaves the current conversation open.
+
+Forked conversations show a “Continued from [source title]” divider between the copied history and new messages. Activate it to open the source conversation at the original fork point, including archived sources. The boundary survives reloads and renames. Older forks without a saved boundary show the source link at the beginning; a portable fork whose source is unavailable retains the source title with an inactive link.
+
+While a task runs, the composer border pulses gently; approvals and questions use a steady outline while awaiting input. Reduced-motion preferences disable the pulse. The send-button position becomes Stop when the active task has no draft to send; entering guidance restores Send. There is no separate Working/Stop row or send-key footer hint.
+
+Model, agent, effort, review, settings, and form pickers share a themed popover component instead of native HTML selects. Long lists have search, options stay inside the window, arrow keys and type-ahead navigate, Enter/Space select, and Escape dismisses only the picker. Form values are submitted through hidden inputs. Pickers opened inside dialogs stay within that dialog's top layer.
+
+New chats resolve and display a concrete model before the first message. Selection follows the current explicit choice, the chosen agent's pinned model, the project's configured provider/model, valid remembered choices and conversation history, then a connected provider's preferred model (favoring tool support). Child-agent history does not change the default for new conversations. Manual choices are remembered across reloads; existing conversations keep their selected model even if it is no longer in the catalog. With no connected model, the composer offers **Connect a provider**. Reasoning-effort choices follow the resolved model immediately, and the exact displayed provider/model is sent when creating the conversation.
+
+Settings → General separates appearance from palette. Choose Light, Dark, or Auto (follow the operating system), then Haarness, Graphite, Ocean, Forest, Violet, Rose, Sand, or High contrast. Every palette includes light and dark variants. Changes apply immediately to the conversation, file editor, syntax colors, diffs, and existing terminals, and persist across app launches.
+
+
+Search is a universal launcher, available from the sidebar or its configurable keyboard shortcut (Command/Control K by default). It finds application and contextual commands, settings sections and individual controls, keyboard shortcuts, saved projects and worktrees, active and archived conversations, and files in the current workspace. Settings results open their section and focus the matching control. File results open the editor; conversation results retain their project/worktree identity. Search temporarily refreshes conversation indexes for collapsed projects without expanding their sidebar groups. Missing worktrees remain hidden.
+
+Results show their destination and configured shortcut, match title words and aliases, and support compact fuzzy matches. Chats appear first, followed by matching archived chats and then commands, settings and other results. Matching chats are not capped at eight; the empty-query view shows the eight most recent chats first. Arrow keys navigate, Enter opens the selected result, and Escape closes Search and restores focus. A slash-command result inserts into the draft for review before sending. Modules register their contextual actions with the shared index, so editor, review, terminal, and conversation commands can be searched alongside global actions.
+
+The explorer offers nested directories, filename search, hidden files, editor tabs, syntax highlighting, search, save, rename, creation, deletion, and media previews. Saves carry a SHA-256 revision and reject external modification. The server constrains file access to its workspace, rejects Git metadata and escaping symlinks, and bounds individual files to 10 MiB. Unsaved file edits survive panel navigation and require a discard decision before changing workspaces or closing the window.
+
+Diff review offers working-tree, branch and last-turn changes, split/unified presentation, word differences, context selection, review markers and line comments added to the session draft. Clicking a line's plus button or double-clicking its code opens an input directly below that line. Split diffs keep the input on the selected original or updated side. Enter adds the comment to the message draft, Shift+Enter inserts a new line, and Escape or Cancel closes the input. Unsubmitted text survives diff layout changes and refreshes within the review. Terminals use the server's PTY WebSocket API, including replay on reattachment; hiding a terminal preserves its process.
+
+Settings cover appearance, keyboard shortcuts, connections, providers, models, agents, commands, skills, tools, MCP, plugins, extensions, schedules and profiles. Raw JSON configuration editors and their sidebar entries are omitted; existing engine settings remain supported in configuration files. See [configuration scopes](CONFIGURATION-SCOPES.md) for shared global/project storage, migration and precedence. Native management is available for local workspaces. Remote catalogs remain available, while remote host configuration is managed on that host.
+
+MCP setup uses a transport-specific form. Local servers have an executable, ordered argument/optional-value rows, and environment-variable key/value rows. Remote HTTP servers have a URL, request-header key/value rows, and automatic, enabled, or disabled OAuth with optional client ID and scopes. Switching transport keeps each draft; saving writes only the selected transport. Values with spaces remain single arguments, and environment/header values are masked until revealed. Servers can be available to all projects or just the current project, and saved disabled for later use. Duplicate keys and invalid entries are rejected before saving; server-side errors preserve the draft. Closing with Escape or a backdrop click leaves Settings open.
+
+
+Schedules use frequency, day/time, agent, model and reasoning-effort pickers. Common frequencies are daily, weekdays, weekly, an interval, or once; custom cron is an explicit advanced choice. The model is resolved from the connected catalog before saving. Settings show definitions for the current checkout, with edit, enable/disable, run-now and remove actions; execution logs and raw command output stay out of this panel. macOS and Windows calendar triggers follow the computer timezone; Linux calendar schedules can select a timezone.
+
+Scheduled conversations live below ordinary chats in a collapsible **Scheduled** section, grouped by schedule within their original checkout and ordered newest first. Opening a run expands its group, and each group initially shows ten conversations with a show-more control. Renaming a conversation or schedule does not split new runs into new groups. Removing a schedule leaves its conversations available; archiving a run removes just that conversation from the sidebar. Independent forks remain ordinary chats. Older runs with the historical `Schedule: name @ timestamp` title remain discoverable.
+
+
+Slash suggestions open above the composer without moving the conversation. Long names wrap within the available width, descriptions truncate, arrow keys move the selection, Enter or Tab completes it, and Escape dismisses it.
+
+New chats have the same searchable project picker in the welcome heading and composer. It lists saved projects in the user's order, marks the selection, and opens the native folder chooser from New project. Every conversation belongs to a project folder or worktree; switching projects preserves each draft.
+
+## The conversation
+
+The transcript has three shapes and no more. What you said is a bubble on the right, so it needs no author label. What Haarness answered is plain prose in the reading column, with no repeated author heading. What the engine _did_ hangs off a single hairline rail beneath the answer. One reading measure — about ninety-five characters at the default conversation size — governs prose, steps, approvals and the composer, so the text column never moves when a side panel opens.
+
+Each step on the rail is a verb and a target: “Ran `npm test`”, “Read `src/server.ts`”, “Edited `src/app.tsx`”. Haarness's own tools are named exactly; an MCP or extension tool falls back to its family, and an unrecognised tool is labelled with its own name rather than a guessed verb. Consecutive steps share one unbroken rail, so a burst of file reads reads as one column of work. Successful steps state “Done” only on hover or when open; running steps keep their status visible. Tools that return an error use the same neutral icon, rail and output colors, with no “Failed” badge. Their returned message remains available when expanded, including inside batches. Opening a command shows one Shell panel with the literal command and readable output. Other tools use plain labelled inputs and results; edits keep their compact diffs. JSON argument and batch-result envelopes do not render. Actual source files and shell output retain their original contents, including JSON when that is the content being read or printed.
+
+Batches use an action summary such as “Read files, ran commands” and expand into individual tool rows. Each nested row opens independently, keeps its expansion when results arrive, and shows its own output or failure. Batch results are paired in input order, including repeated tool names; transcript results are scoped to their thread, turn, call, and undo boundary. A failed child marks the batch as failed without hiding successful results. Full files and changes remain available in the Review panel.
+
+Assistant replies carry a compact footer: a quiet timestamp beside Copy and Fork icons that appear on hover or keyboard focus. The footer always reserves its height, so revealing the icons never reflows the transcript. Copy preserves Markdown; Fork includes the selected reply while excluding later history. Your own messages expose the same actions and reveal their timestamp with them, so re-reading a thread stays clean.
+
+The current task checklist lives in a compact Plan tray above the composer. It updates in place, shows completed and cancelled counts, and uses distinct read-only marks for pending, active, completed, and cancelled steps. Click its header, or use Enter or Space, to collapse it to the current step. The X dismisses the entire tray for that checklist, and the choice survives status updates, chat switches, and desktop restarts. A different checklist, a checklist created after clearing the list, or restarting a completed/cancelled checklist opens a new tray. Reordering existing steps preserves dismissal. An incomplete plan opens while work is active and collapses to a summary when idle, unless you explicitly expand it. Once every step is completed or cancelled, the tray disappears automatically, even if it was expanded or the turn is still running. Long lists scroll inside the tray. Switching chats and restoring history select that conversation's latest plan, including its undo boundary. Plan-update tools remain compact entries in the transcript; repeated checklist snapshots do not render there.
+
+Fenced code is framed, labelled with its language, and offers Copy inside the block. That control is attached only once a message has finished streaming, so a block that is still growing never moves under the pointer. During a turn the transcript shows one activity line derived from the tool that is actually running. Its text shimmers without a spinner, using a shared animation clock synchronized before painting so refreshes, navigation and virtual-row remounts do not restart the sweep. The gradient travels exactly one fixed-width tile per loop, keeping the repeat seamless and its position independent of label width. Reduced-motion preferences disable the shimmer. An error is reported where it happened and offers the action that resolves it — a missing credential links straight to Settings → Providers.
+
+Icons come from Lucide through one shared component in `renderer/icons.tsx`. Call sites name a role (`diff`, `branch`, `stop`) rather than a drawing, sizes are a five-step scale rather than arbitrary pixels, and the stroke is specified in rendered pixels so a 12px glyph and a 22px glyph have the same optical weight. Icon-only controls always go through `Button`, which owns the hit area, the accessible name and the tooltip. Haarness's brand artwork — the **Haarness.** wordmark and the H mark — is deliberately outside that catalogue and lives in `renderer/brand.tsx`, drawn from [`brand/`](../brand/README.md). Both inherit `currentColor` and scale off the font-size of whatever they sit in. The mark is two posts joined by a strap that overhangs them; the wordmark's H is redrawn at the interface face's own cap height, stem weight and side bearings so it stands in for the word's first letter rather than sitting beside a letter it would repeat.
+
+On macOS, the composer microphone button (or Command+Shift+M) starts dictation using Apple Speech and AVFoundation. macOS 26 and later use SpeechAnalyzer with SpeechTranscriber, falling back to DictationTranscriber for other supported languages. These engines run on-device without requiring Siri or keyboard dictation to be enabled. The first use may download the selected language's speech model and asks for microphone access; the composer shows model preparation until capture starts. Older macOS versions use SFSpeechRecognizer and require speech recognition access and enabled system dictation; recognition stays on-device where supported, otherwise macOS may use Apple's speech service. Transcription replaces the selected text or inserts at the cursor, revises partial results, and never sends automatically. Typing, navigating to another conversation, opening settings, reloading or closing the window stops capture. Audio is not written to an app recording file or sent to the Haarness model runtime. See Apple's [SpeechAnalyzer overview](https://developer.apple.com/videos/play/wwdc2025/277/). Windows/Linux dictation is not implemented in this revision.
+
+## Verification
+
+```sh
+./scripts/test-desktop.sh
+```
+
+The desktop suite launches real Electron against private temporary Git workspaces and a real Haarness daemon using the deterministic test provider. It does not use paid providers or personal runtime storage. Tests exercise chat and SSE, cross-client updates, approvals, files, diff review, terminal reattachment, settings and lifecycle. Playwright keeps traces and screenshots for failures. Rust tests cover workspace path confinement and conflicting configuration edits. SDK generation and coverage remain part of `scripts/test-sdks.sh`.
+
+On macOS 26+, the dictation E2E also transcribes synthetic speech through the real native helper into the composer. After building, `python3 apps/desktop/tests/native/voice.py` checks native recognition with AIFF and 16 kHz WAV input and cancellation during preparation. Add `--microphone` to check live capture, conversion, stopping, and finalization; this briefly opens the microphone without saving audio or printing microphone transcripts.
+
+The implementation validation record and tested feature matrix are in [DESKTOP-VERIFICATION.md](DESKTOP-VERIFICATION.md).
+
+## Presentation ordering
+
+`renderer/transcript.ts` owns the pure presentation rules for transcript items — the tool vocabulary, the change shapes, permission details, error recovery and path shortening — with no DOM or runtime access, so they are covered by ordinary unit tests. `renderer/Session.tsx` renders one `Switch` over item types rather than a chain of conditionals.
+
+`renderer/ordering.ts` owns the pure ID reconciliation and move operations. `renderer/Sortable.tsx` makes whole rows draggable and supplies keyboard controls, drop indicators, and silent ordering. All collections use this layer, rather than separate sorting logic in each component.
+
+The versioned `ordering:v1` desktop record stores ordered IDs under collection scopes (`list:projects`, project-grouped sessions, conversation tabs and terminals, and side-panel tabs). Domain timestamps, session ownership, and server history are unchanged by presentation moves. Invalid persisted data is ignored. Missing/filtered IDs retain their slots, new IDs are reconciled according to the collection's policy, and a move can only target the same collection. This also gives future reorderable collections a common integration point.
+
+`renderer/ProjectGroup.tsx` owns each project’s disclosure and conversation list. The versioned `project-expansion:v1` record stores boolean expansion choices by stable project ID. `renderer/project-overview.ts` caches thread/turn metadata for inactive projects and subscribes while they are expanded, capturing a cursor before its snapshot to replay concurrent changes. Activating a project transfers display ownership to the canonical active workspace state; collapsing an inactive project or disposing the component releases its subscription without stopping the daemon or its work. Shared connection requests and generation guards prevent stale workspace loads from winning after a switch.
+
+Terminal failures are published as durable `item.created` events before `turn.finished`, using the same runtime path as other transcript items. The desktop renders them as live alerts; it does not need a pane change or history reload to discover the error.
+
+Forked conversations remain ordinary sidebar entries; lineage does not hide them. Conversation actions open directly beside the button, with a text dialog only for Rename. New conversations show a centered project-aware starting area with four editable prompt suggestions. Upward wheel, touch or keyboard scrolling pauses stream following immediately, cancels queued automatic scrolls, and keeps that position through Markdown reflow and turn completion. Following resumes at the bottom or through Jump to latest.
+
+## Projects and worktrees
+
+Projects group conversations from the main project folder and its Git worktrees. Choose **Enable worktree view** from a project’s sidebar menu to show sessions under collapsible checkout groups, with branch names, a new-chat button for each checkout, and menus for opening, resetting, removing, or refreshing worktrees. **New worktree** appears above the groups. Choose **Disable worktree view** to restore the flat session list. New chat keeps the active checkout in worktree view; flat view defaults to the project folder. Drafts, terminal processes, permissions, and file views stay scoped to their working location. Worktree conversations carry a checkout badge. See [the project model](DESKTOP-PROJECT-MODEL.md) for identity, draft migration, runtime routing, and practical scaling behavior.
+
+Worktrees whose folders are unavailable stay out of the normal sidebar and working-location picker. In worktree view, the project menu's **Show unavailable worktrees** action temporarily reveals them for inspection or removal. Hiding a worktree keeps its registration and conversation history. Restoring its folder and refreshing the project makes it available again.
+
+The same project menu offers **Pin**, which floats the project to the top of the list with a small pin glyph, **Edit**, which gives it a display name of your own, **Section**, which files it under a named heading, **Reveal in Finder** (the platform's file manager elsewhere) for local folders, **Archive chats**, which archives every conversation in the project without leaving the current one, and **Remove project**. Sections list first, each under its heading, and once anything is filed the remaining projects follow under a **No section** heading. A pin keeps a project at the top of its own group. Dragging and Alt+arrow ordering move a project among its group's rows, and dropping it onto a row in another group files it there, before or after that row. A section exists as long as a project is filed under it, and its heading menu renames or removes it. Pins, names and sections are desktop presentation stored in `project-presentation:v1`; the runtime's project registry and conversation data are untouched, and a custom name replaces the folder name wherever the desktop shows the project.
+
+## Conversation titles
+
+New conversations are named from the first real user message in a background request while the main turn runs. The configured title-agent model or `small_model` is preferred, with fallback to the conversation model. Titles appear in tabs and sidebars through `thread.updated`, including while tools wait for permission; TUI clients receive the same event. Title failures do not interrupt work, and a manual rename wins over a late generated title. Child sessions and explicitly named conversations keep their existing names.
+
+## Delegated agents
+
+A delegation appears as one compact, clickable task row in its parent's transcript. It shows the task description, agent and resolved model. Active titles shimmer smoothly, with live tool activity underneath and a square stop button that stops only that agent and its descendants. The parent and sibling agents keep running. Finished tasks use quiet completion, failure or stop icons; approvals and questions use attention icons. Status descriptions remain available to screen readers and on hover. Shimmer respects reduced-motion preferences. Link and lifecycle records update that row instead of producing repeated buttons. Clicking the row or pressing Enter opens the child conversation; the separate stop button also supports keyboard activation. Older rows cannot offer a stop control for a newer run in the same child conversation. The child header provides a return to the parent. The child view has no message composer, model controls or dictation input, including after completion or reload. Permission and question responses remain available. Continue the work from the parent; ordinary forks still have their own composers. Opening a child preserves and saves the parent's draft immediately.
+
+The sidebar lists independent conversations, including forks. Delegated agent sessions stay under their parent's task rows, with ongoing work and pending approvals reflected on the parent sidebar row. The server's persisted `isSubagent` flag distinguishes delegation from fork lineage; older databases are migrated using actual task links. A compatibility reader supports older daemons while they finish existing work, without stopping or replacing active turns.
+
+### Approval mode and composer
+
+The rounded composer has attachment and approval controls on the left, with agent/model/effort, dictation and the circular send/stop control on the right. Controls wrap in narrower windows. The shield switches **Auto approvals** / **Review** for the current conversation, or the workspace default before creating one. Auto answers requests once, including child agents, and can be turned off without leaving learned permission rules. See [Automatic approvals](AUTO-APPROVALS.md) for scope, persistence and TUI controls.
+
+## Editing commands, agents and other resources
+
+Commands, agents and skills use dedicated editors with a large prompt area and a clear project or all-projects scope. Editing preserves the definition's original scope and unexposed metadata. Commands offer agent/model pickers, an argument hint and an **Insert arguments** action for `$ARGUMENTS`. Agents offer session/subagent modes and optional tool-access override rows. Skill notes have their own field.
+
+Model pickers list connected providers using friendly names. **Use session model** and **Use session agent** let reusable definitions inherit the conversation's choices; an existing unavailable selection is preserved until explicitly changed. Custom-provider setup separates API format, authentication and model discovery. API keys stay masked and use the credential store. Explicit model lists use removable rows.
+
+Workflow inputs are populated from declared metadata with text, number and yes/no controls, plus optional named inputs and execution pickers. Complex custom values remain available through the explicit Structured input type. Plugin, marketplace and extension installers ask for a source type first, then show only the relevant folder, repository, marketplace or package fields; local sources support the native file/folder picker.
+
+These editors retain drafts and show an inline error if validation or saving fails. Escape, Cancel and clicking the backdrop dismiss without saving; closing a child editor returns focus to its opener in Settings.
+
+## Servers and projects
+
+Use the server switcher above New chat to choose **This computer** or a saved remote server. The sidebar, project picker and project search show projects from the selected server. Desktop remembers that server and its last project across relaunches. Switching back restores that server’s project and conversation.
+
+**Settings → Servers** manages remote URLs, encrypted credentials and server names. **Settings → Projects** shows the current folder and server at the top, with a refresh action, followed by the saved project list. Project configuration loads automatically when opening a folder. Launch with `HAARNESS_DISABLE_PROJECT_CONFIG=1` to use only global configuration; there is no project-trust prompt. Forgetting a project preserves its saved server connection. Removing a server removes its saved connection and project entries from Desktop; conversations and running tasks remain on the server.
+
+**Open project** on a remote server opens a server-side folder browser. Browse into folders, enter an absolute remote path, or select a known working folder, then choose **Open project**. The selected folder becomes a separate sidebar project on that server. Conversations, drafts, files, approvals and terminals stay scoped to their folder, including across switching and relaunch. Opening another folder does not stop work in the previous one. Local projects continue to use the native folder picker.
+
+Run an updated `haarness serve` on the remote machine to enable folder browsing. Older servers retain their original project and show an update explanation if you request the browser. A host token authorizes browsing and opening folders accessible to that server's OS account; project configuration is enabled by default and follows the host's `--disable-project-config` or `HAARNESS_DISABLE_PROJECT_CONFIG` opt-out. New directory daemons never inherit `--yolo`.
+
+The host gateway resolves canonical folders through the native workspace registry and starts or reuses the existing leased directory daemons. Only the host endpoint is exposed to Desktop. Directory-specific API paths proxy REST, SSE and terminal WebSockets; private daemon tokens stay on the host. Desktop saves one encrypted credential per server and separate connection IDs per working folder. Legacy origin-only connections retain their IDs and history.
+
+## Prompt context
+
+Type **@** in the message composer to search workspace files and delegation agents. Use the arrow keys and Enter/Tab, or click a result, to attach it. The mention becomes a removable context item. Agent mentions request a task delegation without changing the primary conversation agent; hidden and primary-only agents are excluded.
+
+In the file editor, select code and choose **Add selection to context**, or press **Command/Ctrl+Shift+L**. With no selection, the same action adds the whole file. Selected ranges capture complete lines and show their line numbers. Unsaved editor content is supported and labeled. Expand a context item to inspect its captured content, or remove it before sending.
+
+Context is a snapshot taken when attached, so subsequent file edits do not silently change an existing draft. To update it, attach the same file/range again. Context is saved separately for each project, checkout and conversation and restored after reload. Local and remote file mentions use the workspace file API; binary files use the existing media attachment flow. A draft supports up to 20 context items and 128 KiB, with an inline error when the limit is exceeded.
+
+`prompt-context.ts` owns context identity, bounds, mention detection, line selection and serialization. At submission, the shared send path includes fenced file snapshots and delegation instructions in the ordinary user request, including queued guidance and command arguments. This keeps the context inspectable in saved messages and compatible with the current server protocol and other clients. Context clears only after submission succeeds.
+
+## Prompt history
+
+The composer sends messages to the selected agent. Drafts and prompt history stay scoped to each project.
+
+Press Up at the beginning of the input to recall a submitted entry. Up and Down browse history from either end of a recalled entry; Down past the newest entry restores the unfinished draft. A selection, modified arrow keys, and a caret inside multiline text retain normal editing behavior. Editing recalled text starts a fresh draft. Chat history includes its attachments and file/agent context. Each workspace keeps up to 100 chat history entries across reloads. Large media entries remain available in memory but are omitted from persisted history when they exceed the 1.5 MiB history storage budget.
+
+## Provider logos and model reasoning
+
+Conversation and execution pickers show visible primary/all-mode agents. Agents marked `hidden` or `mode: subagent` remain in the management catalog but are not offered for a new conversation. A stale draft selection falls back to build (or the first available conversation agent); existing conversations and saved configurations are not silently rewritten.
+
+The message composer's border and agent selector use the selected agent's theme color. The border becomes stronger while focused and keeps that agent color while running; approval waiting retains its separate highlight. Built-in agents have fixed color roles, and custom agents receive a stable color based on their ID. These presentation colors live in `agent-colors.ts` and do not change agent permissions or execution.
+
+Provider logos appear in model pickers, provider settings, the model catalog, search results and delegated task details. Assets are bundled with Desktop and adapt to the active theme; custom providers have a neutral icon.
+
+The model picker also controls reasoning. Open **Model**, select a model, then use the reasoning slider or its arrow keys. Each stop comes from that model's advertised reasoning levels, with **Model default** as a separate choice. Reset returns to the model default. Models without configurable levels have no slider. **Done** or Escape closes the picker. The composer, reusable-resource editors and schedules share this component. Changing models resets unsupported effort values, while an existing unavailable saved setting remains visible in editors until changed or reset.
+
+The presentation layers are `provider-brands.ts` (identity), `ProviderIcon.tsx` (bundled artwork), `provider-model-options.tsx` (catalog presentation) and `ModelPicker.tsx` (combined selection). Generic `Select` only renders optional icon slots, a trigger suffix and footer; it contains no provider or reasoning rules. Runtime capabilities remain the source of truth.
+
+## Conversation context and usage
+
+Choose **Context** from the side-panel launcher or **View conversation context** in Universal search to open the **Context** side-panel tab. It follows the selected conversation and refreshes when provider usage reports arrive. The open tab is restored with the saved layout after reload. New chats show an empty state until a conversation exists.
+
+The inspector separates three measurements:
+
+- **Retained text estimate** breaks saved context into user messages, assistant messages, tool calls, tool results and compaction summary. It respects undo boundaries and the latest compaction's retained tail. Its four-characters-per-token heuristic excludes system instructions, tool definitions, media and provider overhead, so the displayed share of a known model limit is not full request occupancy. Missing model limits remain unavailable.
+- **Latest reported request** displays input, output, cache-read and cache-write tokens as reported, with the actual turn's model when available. Cache semantics differ across providers, so cache counts are not added to input. Reasoning token counts are not separately available in the current protocol.
+- **Conversation totals** uses `threadUsage` for cumulative input/output/cache statistics, including usage from undone and compacted history. Known cost includes only priced requests; unavailable pricing is not shown as zero.
+
+`context-usage.ts` owns the text estimate and history boundaries. `ConversationContext.tsx` owns the inspector and guards requests by connection, conversation and request generation so a late response cannot replace another conversation's statistics. It uses the existing SDK/IPC contract and leaves provider billing and runtime compaction decisions unchanged.
+
+### Editing agents, commands, and skills
+
+Open Settings, choose Agents, Commands, or Skills, and click **Edit**. Your own
+definitions save in their existing scope. Editing a built-in or plugin definition
+saves a custom version for **All projects** or **This project**; the plugin's
+original files remain intact. **Reset to default** removes your override and
+restores the original. Skills retain their supporting files, and agent edits
+retain their permission rules. These editors also work on a connected remote
+server; changes are saved on that server.
+
+Internal agents used for conversation titles and compaction are hidden from
+Settings and search, and cannot be edited through definition management.
+
+## Embedded browser
+
+Open **Browser** in the side panel to browse alongside a conversation, or ask Haarness to operate it. See [Browser alongside chat](BROWSER.md) for local and remote networking, tools, files and diagnostics.

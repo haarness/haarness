@@ -1,0 +1,1281 @@
+/*
+ * The window shell: title bar, sidebar, workbench columns, side panel and the
+ * terminal dock. Chrome (title bar + sidebar) shares one tone; the canvas the
+ * conversation lives on is a step lighter, so the app reads as an "L" of chrome
+ * wrapped around the work.
+ */
+.application {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--sidebar);
+}
+
+/* ---------------------------------------------------------------- titlebar */
+.titlebar {
+  height: var(--titlebar);
+  flex: none;
+  display: flex;
+  align-items: center;
+  background: var(--sidebar);
+  -webkit-app-region: drag;
+  user-select: none;
+}
+.titlebar button,
+.titlebar .select-trigger,
+.titlebar input {
+  -webkit-app-region: no-drag;
+}
+.window-toolbar {
+  width: var(--sidebar-width);
+  height: 100%;
+  padding-block: 0;
+  padding-inline: var(--s3) var(--s2);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: none;
+  min-width: 46px;
+}
+.application[data-platform="darwin"] .window-toolbar {
+  padding-left: 78px;
+  min-width: 116px;
+}
+.titlebar-session {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 0 var(--s4);
+  color: var(--muted);
+}
+.titlebar-caption {
+  color: var(--text);
+  font-size: var(--ui);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.titlebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 var(--s3);
+  flex: none;
+}
+.titlebar-divider {
+  width: 1px;
+  height: 16px;
+  margin: 0 var(--s1);
+  background: var(--hairline);
+}
+
+/* ----------------------------------------------------------------- sidebar */
+.app-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.sidebar {
+  width: var(--sidebar-width);
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: var(--sidebar);
+  padding: 0 var(--s2) var(--s2);
+  gap: var(--s0);
+  overflow: hidden;
+  user-select: none;
+}
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  padding-block: 0 var(--s2);
+  /* Keeps the wordmark on the same inline rhythm as the nav rows below. */
+  padding-inline: var(--s2);
+  min-height: var(--control);
+  min-width: 0;
+  color: var(--text);
+}
+/* The drawing carries its own weight and tracking; this only sets the size
+   it is drawn against. */
+.wordmark {
+  font-size: var(--title);
+}
+
+.primary-nav {
+  display: flex;
+  flex-direction: column;
+}
+.nav-group {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: var(--s3);
+}
+.nav-row,
+.new-session {
+  justify-content: flex-start;
+  border: 0;
+  background: transparent;
+  min-height: 32px;
+  padding: 0 var(--s2);
+  gap: var(--s2);
+  font-size: var(--ui-lg);
+  color: var(--text);
+  border-radius: var(--r-md);
+}
+.nav-row svg,
+.new-session svg {
+  color: var(--muted);
+  flex: none;
+}
+.nav-row:hover:not(:disabled),
+.new-session:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: transparent;
+}
+.nav-row kbd,
+.new-session kbd {
+  margin-inline-start: auto;
+  opacity: 0;
+  transition: opacity var(--fast) var(--ease);
+}
+.nav-row:hover kbd,
+.nav-row:focus-visible kbd,
+.new-session:hover kbd,
+.new-session:focus-visible kbd {
+  opacity: 1;
+}
+
+/* The trailing control sits flush with the sidebar's inline padding so it
+   shares a column with the per-project menus in the list below. */
+.sidebar > .section-label {
+  padding-block: var(--s1) var(--s0);
+  padding-inline: var(--s2) 0;
+  font-size: var(--ui-sm);
+  color: var(--muted);
+  flex: none;
+}
+/* The label keeps the row's start; its controls group at the end. */
+.section-label-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s0);
+}
+.sidebar > .section-label .icon-button {
+  width: 26px;
+  height: 26px;
+  opacity: 0.75;
+}
+.sidebar > .section-label .icon-button:hover {
+  opacity: 1;
+}
+
+@property --sidebar-scrollbar-opacity {
+  syntax: "<percentage>";
+  inherits: true;
+  initial-value: 0%;
+}
+.sidebar-lists {
+  --sidebar-scrollbar-opacity: 0%;
+  transition: --sidebar-scrollbar-opacity 240ms ease-out;
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding-bottom: var(--s2);
+  margin: 0 calc(var(--s1) * -1);
+  padding-inline: var(--s1);
+}
+.sidebar-lists.is-scrolling {
+  --sidebar-scrollbar-opacity: 35%;
+  transition-duration: 80ms;
+}
+.sidebar-lists::-webkit-scrollbar-thumb,
+.sidebar-lists::-webkit-scrollbar-thumb:hover {
+  background: color-mix(
+    in srgb,
+    var(--muted) var(--sidebar-scrollbar-opacity),
+    transparent
+  );
+  background-clip: padding-box;
+}
+.project-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+/* Collapsed rows sit close together; an open conversation list keeps a
+   clearer break before the next heading. */
+.project-list .project-group + .project-group {
+  padding-top: var(--s0);
+}
+.project-list .project-group:has(> .sessions, > .worktree-list) + .project-group {
+  padding-top: var(--s2);
+}
+/* A pinned project floats to the top of the list and carries a quiet pin. */
+.project-heading > .project-pin {
+  opacity: 0.55;
+}
+/* A section files projects under a small heading. Its menu shares the
+   trailing column with the per-project menus, so the column stays aligned. */
+.project-section {
+  display: flex;
+  flex-direction: column;
+}
+.project-group + .project-section,
+.project-section + .project-section {
+  padding-top: var(--s3);
+}
+.project-section-row {
+  display: flex;
+  align-items: center;
+  min-height: 26px;
+  padding-inline-start: var(--s2);
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  font-weight: 500;
+}
+.project-section-row > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-section-row > .icon-button {
+  width: 26px;
+  min-width: 26px;
+  height: 26px;
+  opacity: 0;
+}
+.project-section-row:hover > .icon-button,
+.project-section-row:focus-within > .icon-button,
+.project-section-row > .icon-button[aria-expanded="true"] {
+  opacity: 1;
+}
+.project-heading {
+  border: 0;
+  width: 100%;
+  justify-content: flex-start;
+  min-height: 30px;
+  padding: 0 var(--s2);
+  color: var(--muted);
+  font-size: var(--ui);
+  font-weight: 500;
+  gap: var(--s1);
+  border-radius: var(--r-md);
+}
+.project-heading:hover {
+  background: var(--hover);
+  border-color: transparent;
+}
+.project-heading.current {
+  color: var(--text);
+  font-weight: 600;
+}
+.project-heading > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: start;
+}
+.project-heading > svg {
+  flex: none;
+  opacity: 0.7;
+}
+
+.project-row {
+  display: flex;
+  align-items: center;
+  position: relative;
+  border-radius: var(--r-md);
+}
+.project-row > .project-heading {
+  flex: 1;
+  min-width: 0;
+  padding-inline-start: 0;
+}
+.project-disclosure {
+  flex: none;
+  width: 28px;
+  min-height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--muted);
+}
+.project-disclosure:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+/* A failed checkout keeps its explanation and its retry on one row, in the
+   same column as the conversations it replaces. */
+.project-error {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s2);
+  margin-block: var(--s1);
+  padding-inline: var(--s2);
+  color: var(--muted);
+  font-size: var(--ui-xs);
+}
+.project-error > span {
+  flex: 1;
+  min-width: 0;
+}
+.project-error > button {
+  flex: none;
+  min-height: var(--control-sm);
+  padding: 0 var(--s2);
+  font-size: var(--ui-sm);
+}
+[data-drop-position] {
+  position: relative;
+}
+html[data-order-dragging] * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+[data-order-source="true"] {
+  opacity: 0.5;
+}
+.order-drag-preview {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 10000;
+  pointer-events: none;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-md);
+  background: var(--sidebar);
+  color: var(--text);
+  box-shadow: 0 4px 16px #0005;
+  font-size: var(--ui);
+}
+.project-list[data-drop-position="inside"] > .project-group:last-child {
+  position: relative;
+}
+[data-drop-position="before"]::after,
+[data-drop-position="after"]::after,
+.project-list[data-drop-position="inside"] > .project-group:last-child::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  z-index: 4;
+  background: var(--accent);
+  border-radius: 2px;
+  left: 0;
+  right: 0;
+  height: 2px;
+}
+.project-section-row[data-drop-position="inside"] {
+  background: var(--hover);
+  color: var(--text);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+  border-radius: var(--r-sm);
+}
+[data-drop-position="before"]::after {
+  top: 0;
+}
+[data-drop-position="after"]::after,
+.project-list[data-drop-position="inside"] > .project-group:last-child::after {
+  bottom: 0;
+}
+[data-sort-axis="x"][data-drop-position]::after {
+  top: 0;
+  bottom: 0;
+  height: auto;
+  width: 2px;
+  inset-inline-end: auto;
+}
+[data-sort-axis="x"][data-drop-position="after"]::after {
+  inset-inline-start: auto;
+  inset-inline-end: 0;
+}
+.panel-launcher {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: clamp(var(--s5), 5%, 56px);
+  gap: var(--s1);
+}
+.panel-launcher h2 {
+  font-size: var(--title-sm);
+  font-weight: 600;
+  margin: 0;
+}
+.panel-launcher > p {
+  color: var(--muted);
+  font-size: var(--ui);
+  margin: var(--s0) 0 var(--s4);
+}
+.panel-launcher > button {
+  justify-content: flex-start;
+  text-align: start;
+  gap: var(--s3);
+  padding: var(--s3);
+  min-height: 56px;
+  background: transparent;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+}
+.panel-launcher > button:hover {
+  background: var(--hover);
+  border-color: color-mix(in srgb, var(--muted) 34%, transparent);
+}
+.panel-launcher > button > svg {
+  color: var(--muted);
+}
+.panel-launcher > button:hover > svg {
+  color: var(--primary);
+}
+.panel-launcher button > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+  font-size: var(--ui-lg);
+  font-weight: 500;
+}
+.panel-launcher small {
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  font-weight: 400;
+}
+.panel-launcher kbd {
+  color: var(--muted);
+  font-size: var(--ui-xs);
+  white-space: nowrap;
+}
+
+/* Conversations are children of a project heading whose disclosure owns the
+   first 28px, so the list is inset to put its titles on the heading's rail. */
+.sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding-block: var(--s0) var(--s2);
+  /* The end inset was missing, so a selected row's pill ran flush into the
+     sidebar edge while its start sat 8px in. Inset both sides. */
+  padding-inline: var(--s2);
+}
+/* The flat list has no disclosure rail to line up with, so its rows sit on
+   the Projects label instead. */
+.project-list > .sessions {
+  flex: 1;
+  padding-inline: 0;
+}
+/* A row that names its place takes two lines: room above and below, the
+   status dot centred on the title line rather than on the pair. */
+.session-row > button:first-child:has(.session-location) {
+  align-items: flex-start;
+  padding-block: var(--s1);
+}
+.session-row > button:first-child:has(.session-location) > .session-status {
+  margin-top: 5px;
+}
+.session-row {
+  display: flex;
+  align-items: center;
+  border-radius: var(--r-md);
+  position: relative;
+}
+.session-row > button:first-child {
+  border: 0;
+  flex: 1;
+  min-width: 0;
+  text-align: start;
+  justify-content: flex-start;
+  font-size: var(--ui);
+  font-weight: 400;
+  color: color-mix(in srgb, var(--text) 82%, transparent);
+  min-height: 30px;
+  padding-block: 0;
+  /* The title has to clear the pill's rounded edge and the selected row's
+     accent bar, so it starts further in than the row's own inset. */
+  padding-inline: var(--s3) var(--s1);
+  gap: var(--s1);
+  border-radius: var(--r-md);
+}
+.session-row:hover {
+  background: var(--hover);
+}
+.session-row > button:first-child:hover {
+  background: transparent;
+  border-color: transparent;
+}
+.session-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.session-waiting {
+  font-size: var(--ui-xs);
+  color: var(--muted);
+  flex: none;
+}
+.session-row:hover .session-waiting,
+.session-row:focus-within .session-waiting {
+  display: none;
+}
+/* Row-trailing controls share one column with the project and checkout menus. */
+.session-row > .icon-button {
+  width: 26px;
+  min-width: 26px;
+  height: 28px;
+  display: inline-flex;
+  opacity: 0;
+}
+.session-row:hover > .icon-button,
+.session-row:focus-within > .icon-button {
+  opacity: 1;
+}
+.session-row.selected {
+  background: var(--selected);
+}
+.session-row.selected > button:first-child {
+  color: var(--text);
+  font-weight: 500;
+}
+.session-row.selected::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  border-radius: var(--r-pill);
+  background: var(--primary);
+}
+.session-status {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: transparent;
+  flex: none;
+}
+.session-status.running {
+  background: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+  animation: blink 1.6s ease-in-out infinite;
+}
+/* The inline-start inset lines the copy up with the conversation titles it
+   stands in for: the button's own padding plus the status dot and its gap. */
+.sessions-empty {
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  padding-block: var(--s1);
+  padding-inline: var(--s5) var(--s2);
+  margin: 0;
+}
+
+.sidebar-footer {
+  border-top: 1px solid var(--hairline);
+  padding-top: var(--s2);
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  gap: var(--s0);
+}
+
+/* --------------------------------------------------------------- workbench */
+.resize-handle {
+  width: 1px;
+  flex: none;
+  align-self: stretch;
+  position: relative;
+  background: var(--line);
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 12;
+  outline: none;
+  transition: background var(--fast) var(--ease);
+}
+/* The divider is a hairline; the grab target around it is 9px, which is what
+   a pointer can actually catch without hunting. */
+.resize-handle::after {
+  content: "";
+  position: absolute;
+  inset: 0 -4px;
+  z-index: 1;
+}
+.resize-handle:hover,
+.resize-handle:focus-visible,
+.resize-handle.dragging {
+  background: var(--primary);
+}
+.resize-handle.horizontal {
+  width: auto;
+  height: 1px;
+  cursor: row-resize;
+}
+.resize-handle.horizontal::after {
+  inset: -4px 0;
+}
+
+.workspace-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+  background: var(--page);
+  border-top: 1px solid var(--hairline);
+}
+.workbench {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+}
+.chat-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.workspace-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.persistent-panel {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* ------------------------------------------------------------- session bar */
+.session-bar {
+  height: 36px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding-block: 0;
+  padding-inline: var(--s4) var(--s2);
+  border-bottom: 1px solid var(--hairline);
+  min-width: 0;
+}
+.session-bar-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--ui-lg);
+}
+.session-bar-name {
+  font-weight: 500;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 var(--s1);
+  border-radius: var(--r-sm);
+  line-height: 26px;
+  max-width: 100%;
+  cursor: default;
+}
+.session-bar-name:hover {
+  background: var(--hover);
+}
+.session-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+/* The strip scrolls, so it needs its own padding for the keyboard focus ring;
+   the negative margin keeps the first tab where it was. */
+.workspace-tabs {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: var(--s0);
+  margin-block: calc(var(--s0) * -1);
+  margin-inline-start: calc(var(--s3) * -1);
+}
+.workspace-tabs::-webkit-scrollbar {
+  display: none;
+}
+.workspace-tab {
+  display: flex;
+  align-items: center;
+  height: 26px;
+  max-width: 190px;
+  flex: 0 1 auto;
+  min-width: 76px;
+  border-radius: var(--r-md);
+  padding-inline-end: 2px;
+}
+.workspace-tab:hover {
+  background: var(--hover);
+}
+.workspace-tab.active {
+  background: var(--selected);
+}
+.workspace-tab > button:first-child {
+  border: 0;
+  min-height: 0;
+  height: 26px;
+  font-size: var(--ui-sm);
+  color: var(--muted);
+  padding-block: 0;
+  padding-inline: var(--s2) var(--s1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: start;
+  display: block;
+  line-height: 26px;
+  min-width: 0;
+}
+.workspace-tab.active > button:first-child {
+  color: var(--text);
+}
+.workspace-tab > .icon-button {
+  width: 18px;
+  height: 18px;
+  opacity: 0;
+}
+.workspace-tab:hover > .icon-button,
+.workspace-tab.active > .icon-button,
+.workspace-tab:focus-within > .icon-button {
+  opacity: 1;
+}
+
+/* -------------------------------------------------------------- side panel */
+.side-panel {
+  /* Never take so much that the conversation drops far below its measure. */
+  width: clamp(360px, var(--dock-width), calc(100% - 480px));
+  min-width: 0;
+  flex: none;
+  flex-direction: column;
+  background: var(--page);
+  overflow: hidden;
+  container-type: inline-size;
+}
+.dock-expanded .chat-pane {
+  display: none;
+}
+.dock-expanded .side-panel {
+  width: 100%;
+}
+/* Same height as the session bar beside it, so the two hairlines under the
+   window's split line up. */
+.dock-tabs {
+  display: flex;
+  height: 36px;
+  align-items: center;
+  padding: 0 var(--s2);
+  gap: 2px;
+  border-bottom: 1px solid var(--hairline);
+  flex: none;
+}
+.dock-tab {
+  display: flex;
+  align-items: center;
+  border-radius: var(--r-md);
+  flex: none;
+  height: 26px;
+  max-width: 170px;
+  padding-inline-end: 2px;
+}
+.dock-tab:hover {
+  background: var(--hover);
+}
+.dock-tab.active {
+  background: var(--selected);
+}
+.dock-tab > button:first-child {
+  padding-block: 0;
+  padding-inline: var(--s2) var(--s1);
+  height: 26px;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--ui-sm);
+  border: 0;
+  color: var(--muted);
+  gap: var(--s1);
+}
+.dock-tab.active > button:first-child {
+  color: var(--text);
+}
+.dock-tab > .icon-button {
+  width: 18px;
+  height: 18px;
+  opacity: 0;
+}
+.dock-tab:hover > .icon-button,
+.dock-tab.active > .icon-button,
+.dock-tab:focus-within > .icon-button {
+  opacity: 1;
+}
+.dock-tabs > .icon-button {
+  width: 24px;
+  height: 24px;
+}
+.dock-content {
+  display: flex;
+  min-height: 0;
+}
+
+/* ----------------------------------------------------------- terminal dock */
+.terminal-dock {
+  height: min(var(--terminal-height), 55vh);
+  min-height: 150px;
+  flex: none;
+  display: flex;
+  background: var(--page);
+}
+.terminal-dock .terminal-panel {
+  height: 100%;
+  min-height: 0;
+  width: 100%;
+  border: 0;
+}
+.terminal-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+.terminal-tabs {
+  height: 34px;
+  min-height: 34px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 var(--s2);
+  background: var(--page);
+  border-bottom: 1px solid var(--hairline);
+}
+.terminal-tabs > div:not(.grow) {
+  display: flex;
+  align-items: center;
+  height: 24px;
+  min-width: 0;
+  max-width: 180px;
+  border-radius: var(--r-sm);
+  padding-inline-end: 2px;
+}
+.terminal-tabs > div:not(.grow):hover {
+  background: var(--hover);
+}
+.terminal-tabs > .active {
+  background: var(--selected);
+}
+/* Only the label button takes the tab padding; the close control keeps the
+   square hit area `.icon-button` gives it, and a renamed shell ellipsises. */
+.terminal-tabs > div > button:first-child {
+  border: 0;
+  min-height: 0;
+  height: 24px;
+  min-width: 0;
+  font-size: var(--ui-sm);
+  color: var(--muted);
+  padding: 0 var(--s2);
+  font-family: var(--mono);
+  display: block;
+  line-height: 24px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: start;
+}
+.terminal-tabs > .active > button:first-child {
+  color: var(--text);
+}
+.terminal-tabs .icon-button {
+  width: 20px;
+  height: 20px;
+}
+.terminal-tabs > .icon-button {
+  width: 24px;
+  height: 24px;
+}
+.terminal-view {
+  flex: 1;
+  min-height: 0;
+  padding: var(--s2) var(--s3);
+  background: var(--page);
+}
+.terminal-view .xterm {
+  height: 100%;
+}
+.terminal-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s3);
+  flex-direction: column;
+  color: var(--muted);
+  font-size: var(--ui);
+}
+
+/* --------------------------------------------------------------- narrow UI */
+@media (max-width: 1100px) {
+  .workbench.has-dock .chat-pane {
+    visibility: hidden;
+  }
+  .workbench.has-dock.dock-expanded .chat-pane {
+    display: none;
+  }
+  .workbench.has-dock > .resize-handle {
+    display: none;
+  }
+  .side-panel {
+    position: absolute;
+    top: 0;
+    inset-inline-end: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 10;
+    border-inline-start: 1px solid var(--hairline);
+  }
+}
+@media (max-width: 940px) {
+  .titlebar-actions {
+    gap: 0;
+    padding-inline-end: var(--s2);
+  }
+  .titlebar-session {
+    padding: 0 var(--s2);
+  }
+}
+
+.action-menu {
+  position: fixed;
+  z-index: 90;
+  width: 220px;
+  max-width: calc(100vw - 16px);
+  padding: var(--s1);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.action-menu button {
+  justify-content: flex-start;
+  min-height: 30px;
+  padding: 0 var(--s2);
+  border: 0;
+  border-radius: var(--r-sm);
+  font-size: var(--ui);
+  gap: var(--s2);
+}
+.action-menu button:focus-visible {
+  background: var(--selected);
+  outline-offset: -2px;
+}
+.action-menu svg {
+  flex: none;
+  color: var(--muted);
+}
+/* A menu item that has to explain itself — such as which checkout work will
+   run in — keeps the action on the first line and the explanation beneath. */
+.action-menu .menu-item-label {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+  text-align: start;
+}
+.action-menu .menu-item-label small {
+  font-size: var(--ui-xs);
+  color: var(--muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.action-menu button:has(.menu-item-label) {
+  min-height: 40px;
+  padding-block: var(--s1);
+}
+
+/* A branch item opens its alternatives beside the menu instead of running. */
+.menu-branch {
+  position: relative;
+  display: flex;
+}
+.menu-branch > button {
+  flex: 1;
+  min-width: 0;
+}
+.menu-branch > button > svg:last-child {
+  margin-inline-start: auto;
+}
+.action-menu .menu-branch-panel {
+  position: absolute;
+  inset-inline-start: 100%;
+  top: calc(var(--s1) * -1);
+  margin-inline-start: var(--s0);
+}
+/* Groups of related choices are separated by a hairline. */
+.action-menu .menu-divider {
+  flex: none;
+  height: 1px;
+  margin: var(--s1) var(--s1);
+  background: var(--line);
+}
+/* Reserve the tick column so a checked and an unchecked row align. */
+.menu-check {
+  display: inline-flex;
+  width: 14px;
+  flex: none;
+  justify-content: center;
+}
+
+.session-status.waiting {
+  background: var(--accent);
+  opacity: 1;
+}
+
+.session-label {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.session-label .session-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3;
+}
+.session-location {
+  display: flex;
+  align-items: center;
+  gap: var(--s0);
+  color: var(--muted);
+  font-size: var(--ui-xs);
+  line-height: 1.3;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.session-location > svg {
+  flex: none;
+}
+.session-location > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.checkout-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s0);
+  min-width: 0;
+  max-width: 200px;
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: var(--ui-xs);
+  color: var(--muted);
+  background: var(--hover);
+  border-radius: var(--r-sm);
+  padding: 2px var(--s1);
+}
+.checkout-badge > svg {
+  flex: none;
+}
+.checkout-badge > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Optional checkout groups keep worktree management beside its conversations. */
+.project-row > .icon-button,
+.worktree-row > .icon-button {
+  width: 26px;
+  min-width: 26px;
+  height: 28px;
+  opacity: 0;
+}
+.project-row:hover > .icon-button,
+.project-row:focus-within > .icon-button,
+.worktree-row:hover > .icon-button,
+.worktree-row:focus-within > .icon-button,
+.project-row > .icon-button[aria-expanded="true"],
+.worktree-row > .icon-button[aria-expanded="true"] {
+  opacity: 1;
+}
+.worktree-list {
+  padding: var(--s1) 0;
+}
+/* Start-aligned like every other row in this column, not centred in its box. */
+.new-worktree {
+  width: calc(100% - var(--s4));
+  margin-block: var(--s1) var(--s2);
+  margin-inline: var(--s2);
+  min-height: 30px;
+  justify-content: flex-start;
+  padding-inline: var(--s2);
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  gap: var(--s1);
+}
+.worktree-group + .worktree-group {
+  margin-top: var(--s2);
+}
+.worktree-row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  border-radius: var(--r-md);
+}
+.worktree-heading {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  padding-block: var(--s1);
+  padding-inline: var(--s2) 0;
+  gap: var(--s1);
+  justify-content: flex-start;
+  color: var(--muted);
+  text-align: start;
+}
+.worktree-heading > svg {
+  flex: none;
+}
+.worktree-label {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+.worktree-label > span,
+.worktree-label > small {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.worktree-label > span {
+  font-size: var(--ui-sm);
+  font-weight: 500;
+}
+.worktree-label > small {
+  font-size: var(--ui-xs);
+  font-weight: 400;
+  color: var(--muted);
+}
+.worktree-group.current > .worktree-row .worktree-heading {
+  color: var(--text);
+}
+.worktree-group > .sessions {
+  margin-inline-start: var(--s3);
+  padding-inline-start: var(--s1);
+  border-inline-start: 1px solid var(--hairline);
+}
+.worktree-group.missing .worktree-heading {
+  opacity: 0.65;
+}
+
+.scheduled-sessions {
+  margin-top: var(--s2);
+}
+/* Same row metrics as the project and checkout headings they sit beneath. */
+.scheduled-heading,
+.schedule-group-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  width: 100%;
+  min-height: 30px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-md);
+  color: var(--muted);
+  text-align: start;
+  padding-block: 0;
+  padding-inline: var(--s2);
+}
+.scheduled-heading:hover,
+.schedule-group-heading:hover {
+  background: var(--hover);
+  border-color: transparent;
+}
+.scheduled-heading > span,
+.schedule-group-heading > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.scheduled-heading small,
+.schedule-group-heading small {
+  font-size: var(--ui-xs);
+  color: var(--muted);
+}
+.schedule-group {
+  margin-inline-start: var(--s2);
+}
+.schedule-runs {
+  margin-inline-start: var(--s3);
+  border-inline-start: 1px solid var(--hairline);
+  padding-inline-start: var(--s1);
+}
+.schedule-more {
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  margin-inline-start: var(--s3);
+}
+
+/* The switcher sits on the same rail as the navigation rows below it: its box
+   spans the sidebar's inline padding and its icon lands where theirs do. */
+.server-switcher {
+  padding-block: 0 var(--s2);
+  padding-inline: 0;
+}
+.server-switcher-button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: 32px;
+  padding-inline: var(--s2);
+  text-align: start;
+}
+.server-switcher-button > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -1,0 +1,382 @@
+//! Native desktop operations remain in the CLI composition root. This process
+//! never owns conversation execution; connect reuses the canonical daemon.
+use super::{
+    Credential, CredentialStore, FileConfig, Paths, ensure_workspace_server,
+    inspect_workspace_server, replace_incompatible_workspace_server,
+};
+use anyhow::{Context as _, Result, bail, ensure};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
+use std::{
+    fs,
+    io::{Read as _, Write as _},
+    path::{Path, PathBuf},
+};
+
+const LIMIT: u64 = 4 * 1024 * 1024;
+
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum Request {
+    Connect,
+    Projects {
+        #[serde(default)]
+        directories: Vec<PathBuf>,
+    },
+    Configuration,
+    ReadConfiguration {
+        id: String,
+    },
+    WriteConfiguration {
+        id: String,
+        text: String,
+        revision: String,
+    },
+    Credentials,
+    SetCredential {
+        provider: String,
+        key: String,
+    },
+    RemoveCredential {
+        provider: String,
+    },
+    Extensions {
+        #[serde(default)]
+        project: bool,
+    },
+    Asset {
+        kind: String,
+        input: Value,
+    },
+}
+
+pub async fn run(paths: &Paths, workspace: &Path, trust: bool) -> Result<()> {
+    let mut bytes = Vec::new();
+    std::io::stdin().take(LIMIT + 1).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() as u64 <= LIMIT, "Desktop request exceeds 4 MiB");
+    let request: Request = serde_json::from_slice(&bytes).context("Invalid desktop request")?;
+    let output = execute(paths, workspace, trust, request).await?;
+    println!("{}", serde_json::to_string(&output)?);
+    Ok(())
+}
+
+async fn execute(paths: &Paths, workspace: &Path, trust: bool, request: Request) -> Result<Value> {
+    match request {
+        Request::Projects { directories } => {
+            let manager = paths.workspace_manager()?;
+            let mut project_ids = std::collections::HashSet::new();
+            for directory in directories {
+                if directory.is_dir() {
+                    let registered = manager.register_local(&directory)?;
+                    project_ids.insert(registered.project_id);
+                }
+            }
+            // Opening an existing linked checkout also makes its primary
+            // project folder selectable, without starting either daemon.
+            for project in manager.list(None)?.projects {
+                if project_ids.contains(&project.id) && Path::new(&project.root).is_dir() {
+                    manager.register_local(Path::new(&project.root))?;
+                }
+            }
+            Ok(serde_json::to_value(
+                manager.list(paths.workspace_id.as_deref())?,
+            )?)
+        }
+        Request::Asset { kind, input } => {
+            let service = super::management::ManagementService::new(
+                paths.clone(),
+                workspace.to_path_buf(),
+                trust,
+                std::sync::Arc::new(haarness_server::FilesystemSkillRegistry::new_scoped(
+                    super::skill_roots(
+                        paths,
+                        workspace,
+                        trust,
+                        &super::load_config(paths, workspace, trust)?,
+                    ),
+                )),
+                std::sync::Arc::new(haarness_mcp::NativeMcpRegistry::default()),
+            );
+            service.desktop_asset(&kind, &input).await
+        }
+        Request::Connect => {
+            // Build freshness and wire compatibility are different concerns.
+            // A compatible daemon with unfinished work must remain reachable:
+            // its permission/question may be the very thing keeping it busy.
+            if let Some(live) = inspect_workspace_server(paths, workspace).await?
+                && live.info.project_trusted == Some(trust)
+                && live.info.workspace.as_deref().is_some_and(|actual| {
+                    super::comparable_workspace(Path::new(actual))
+                        == super::comparable_workspace(workspace)
+                })
+                && super::server_compatibility_error(&live.info).is_none()
+                && super::local_server_compatibility_error(&live).is_some()
+            {
+                let client =
+                    haarness_tui::api::ApiClient::new(&live.discovery.url, &live.discovery.token)?;
+                let active =
+                    tokio::time::timeout(std::time::Duration::from_secs(4), client.active_turns())
+                        .await
+                        .context("Timed out checking existing workspace activity")??;
+                if !active.is_empty() {
+                    return Ok(json!({"schemaVersion":1,"url":live.discovery.url,
+                        "token":live.discovery.token,"workspace":workspace,
+                        "workspaceId":paths.workspace_id,"upgradePending":true}));
+                }
+            }
+            // A desktop opening can change the saved project configuration
+            // setting. Apply it to an idle daemon instead of reporting a
+            // trusted connection while reusing an untrusted runtime.
+            if let Some(live) = inspect_workspace_server(paths, workspace).await?
+                && live.info.project_trusted != Some(trust)
+            {
+                replace_incompatible_workspace_server(
+                    paths,
+                    workspace,
+                    live,
+                    "project configuration setting changed",
+                )
+                .await?;
+            }
+            let discovery = ensure_workspace_server(paths, workspace, trust, false).await?;
+            Ok(
+                json!({"schemaVersion":1,"url":discovery.url,"token":discovery.token,
+                "workspace":workspace,"workspaceId":paths.workspace_id,"upgradePending":false}),
+            )
+        }
+        Request::Configuration => Ok(
+            json!({"files": configuration_files(paths, workspace).into_iter()
+            .map(|(id, path)| json!({"id":id,"path":path,"exists":path.is_file()})).collect::<Vec<_>>(),
+            "trustProject":trust,"data":paths.data,"logs":paths.data.join("logs")}),
+        ),
+        Request::ReadConfiguration { id } => {
+            let path = configuration_path(paths, workspace, &id)?;
+            let text = read(&path)?;
+            Ok(json!({"id":id,"path":path,"text":text,"revision":revision(&text)}))
+        }
+        Request::WriteConfiguration {
+            id,
+            text,
+            revision: expected,
+        } => {
+            ensure!(text.len() as u64 <= LIMIT, "Configuration exceeds 4 MiB");
+            let path = configuration_path(paths, workspace, &id)?;
+            validate(&path, &text)?;
+            let _lock = haarness_profiles::configuration_lock(&paths.data)?;
+            ensure!(
+                revision(&read(&path)?) == expected,
+                "Configuration changed outside this editor. Reload before saving."
+            );
+            write(&path, text.as_bytes())?;
+            Ok(json!({"id":id,"path":path,"text":text,"revision":revision(&text)}))
+        }
+        Request::Credentials => {
+            let entries = CredentialStore::new(paths.auth.clone()).all()?;
+            Ok(
+                json!(entries.into_iter().map(|(provider, credential)|
+                json!({"provider":provider,"kind":credential.kind()})).collect::<Vec<_>>()),
+            )
+        }
+        Request::SetCredential { provider, key } => {
+            ensure!(
+                !provider.trim().is_empty() && provider.len() <= 200,
+                "Invalid provider"
+            );
+            ensure!(
+                !key.trim().is_empty() && key.len() <= 65536 && !key.contains(['\r', '\n']),
+                "Invalid API key"
+            );
+            CredentialStore::new(paths.auth.clone()).set(&provider, &Credential::api(key))?;
+            Ok(json!({"provider":provider,"connected":true}))
+        }
+        Request::RemoveCredential { provider } => {
+            CredentialStore::new(paths.auth.clone()).remove(&provider)?;
+            Ok(json!({"provider":provider,"connected":false}))
+        }
+        Request::Extensions { project } => Ok(serde_json::to_value(
+            super::extensions::scoped_config(paths, workspace, project)?,
+        )?),
+    }
+}
+
+fn configuration_files(paths: &Paths, workspace: &Path) -> Vec<(String, PathBuf)> {
+    let global = paths.config.parent().unwrap_or(Path::new("."));
+    vec![
+        ("global-json".into(), global.join("haarness.json")),
+        ("global-jsonc".into(), global.join("haarness.jsonc")),
+        ("global-toml".into(), paths.config.clone()),
+        ("project-json".into(), workspace.join("haarness.json")),
+        ("project-jsonc".into(), workspace.join("haarness.jsonc")),
+        (
+            "project-toml".into(),
+            workspace.join(".haarness/config.toml"),
+        ),
+        ("extensions".into(), super::extensions::config_path(paths)),
+        ("project-instructions".into(), workspace.join("AGENTS.md")),
+    ]
+}
+
+fn configuration_path(paths: &Paths, workspace: &Path, id: &str) -> Result<PathBuf> {
+    let path = configuration_files(paths, workspace)
+        .into_iter()
+        .find(|(name, _)| name == id)
+        .map(|(_, path)| path)
+        .context("Unknown configuration document")?;
+    // A project cannot redirect the settings editor into arbitrary host files.
+    let root = if id.starts_with("project-") {
+        workspace
+    } else {
+        paths.config.parent().context("Missing config directory")?
+    };
+    let root = root.canonicalize()?;
+    let mut existing = path.as_path();
+    while !existing.exists() {
+        existing = existing.parent().context("Invalid configuration path")?;
+    }
+    ensure!(
+        existing.canonicalize()?.starts_with(root),
+        "Configuration symlink escapes its root"
+    );
+    Ok(path)
+}
+
+fn read(path: &Path) -> Result<String> {
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    let mut file = fs::File::open(path)?.take(LIMIT + 1);
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    ensure!(text.len() as u64 <= LIMIT, "Configuration exceeds 4 MiB");
+    Ok(text)
+}
+
+fn revision(text: &str) -> String {
+    format!("{:x}", Sha256::digest(text.as_bytes()))
+}
+
+fn validate(path: &Path, text: &str) -> Result<()> {
+    if text.trim().is_empty() {
+        return Ok(());
+    }
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("toml") => {
+            let _: FileConfig = toml::from_str(text).context("Invalid TOML configuration")?;
+        }
+        Some("json" | "jsonc") => {
+            let value = jsonc_parser::parse_to_serde_value::<Value>(
+                text,
+                &jsonc_parser::ParseOptions::default(),
+            )?;
+            ensure!(value.is_object(), "Configuration must be an object");
+            if path
+                .file_name()
+                .is_some_and(|name| name == "extensions.json")
+            {
+                let _: haarness_extensions::Config = serde_json::from_value(value)?;
+            }
+        }
+        Some("md") => {}
+        _ => bail!("Unsupported configuration format"),
+    }
+    Ok(())
+}
+
+fn write(path: &Path, bytes: &[u8]) -> Result<()> {
+    fs::create_dir_all(path.parent().context("Missing parent directory")?)?;
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::now_v7()));
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let result = (|| -> Result<()> {
+        let mut file = options.open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
+}
+
+/// Serialize editor read/compare/write operations across native CLI processes.
+pub(super) fn editor_lock(data: &Path, resource: &str) -> anyhow::Result<std::fs::File> {
+    let path = data
+        .canonicalize()?
+        .join(format!(".desktop-{resource}.lock"));
+    haarness_profiles::check_path(&path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    fs2::FileExt::lock_exclusive(&file)?;
+    Ok(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn configuration_rejects_invalid_and_stale_writes() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-desktop-config-{}", uuid::Uuid::now_v7()));
+        let paths = Paths::new(Some(&root)).unwrap();
+        let input = Request::WriteConfiguration {
+            id: "global-json".into(),
+            text: "{\"model\":\"echo/echo-1\"}".into(),
+            revision: revision(""),
+        };
+        let saved = execute(&paths, &root, false, input).await.unwrap();
+        for (text, rev) in [
+            ("{invalid", saved["revision"].as_str().unwrap()),
+            ("{}", "stale"),
+        ] {
+            assert!(
+                execute(
+                    &paths,
+                    &root,
+                    false,
+                    Request::WriteConfiguration {
+                        id: "global-json".into(),
+                        text: text.into(),
+                        revision: rev.into(),
+                    }
+                )
+                .await
+                .is_err()
+            );
+        }
+        assert_eq!(
+            read(&paths.config.with_file_name("haarness.json")).unwrap(),
+            saved["text"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_configuration_cannot_follow_an_external_symlink() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-desktop-path-{}", uuid::Uuid::now_v7()));
+        let paths = Paths::new(Some(&root)).unwrap();
+        let workspace = root.join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(root.join("outside.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(root.join("outside.json"), workspace.join("haarness.json"))
+            .unwrap();
+        assert!(configuration_path(&paths, &workspace, "project-json").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+}

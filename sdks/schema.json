@@ -1,0 +1,5435 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Haarness API",
+    "description": "",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    },
+    "version": "1"
+  },
+  "paths": {
+    "/v1/files/action": {
+      "post": {
+        "tags": [],
+        "operationId": "mutate_file",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FileAction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/files/content": {
+      "get": {
+        "tags": [],
+        "operationId": "read_file",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "hidden",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileContent"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [],
+        "operationId": "write_file",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FileWrite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileContent"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/files/list": {
+      "get": {
+        "tags": [],
+        "operationId": "list_files",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "hidden",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileListing"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/insights": {
+      "get": {
+        "tags": [],
+        "operationId": "analytics_insights",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "currentProject",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyticsDocument"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/manage/{resource}": {
+      "post": {
+        "tags": [],
+        "operationId": "manage_resource",
+        "parameters": [
+          {
+            "name": "resource",
+            "in": "path",
+            "description": "providers, mcp, schedules, hooks, memory, or profiles",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagementView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          }
+        }
+      }
+    },
+    "/v1/profiles": {
+      "get": {
+        "tags": [
+          "profiles"
+        ],
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Record"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Bearer token required"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "profiles"
+        ],
+        "operationId": "upload",
+        "requestBody": {
+          "content": {
+            "application/zip": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Record"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid archive"
+          },
+          "413": {
+            "description": "Archive exceeds 32 MiB"
+          }
+        }
+      }
+    },
+    "/v1/profiles/{id}": {
+      "get": {
+        "tags": [
+          "profiles"
+        ],
+        "operationId": "metadata",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Record"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Profile not found"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "profiles"
+        ],
+        "operationId": "remove",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "Profile not found"
+          }
+        }
+      }
+    },
+    "/v1/profiles/{id}/download": {
+      "get": {
+        "tags": [
+          "profiles"
+        ],
+        "operationId": "download",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Profile not found"
+          }
+        }
+      }
+    },
+    "/v1/stats": {
+      "get": {
+        "tags": [],
+        "operationId": "analytics_stats",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "description": "Rolling days selected by turn start time",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "description": "Project ID, name or root",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "currentProject",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Report"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/threads/{id}/browser/tool": {
+      "post": {
+        "tags": [],
+        "summary": "Run a browser tool through the same permissions and transcript as a model call.",
+        "operationId": "call_browser_tool",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BrowserToolRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowserToolResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AgentProfile": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "hidden",
+          "maxSubagents"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "hidden": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "maxSubagents": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "primary | subagent | all; None = primary."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pinned `provider/model` override for this agent."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "AnalyticsDocument": {
+        "type": "object",
+        "required": [
+          "summary",
+          "html"
+        ],
+        "properties": {
+          "html": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      },
+      "ApiError": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "retryable"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        }
+      },
+      "BackgroundTaskInfo": {
+        "type": "object",
+        "description": "Process-local child-agent work associated with one parent conversation.\nChild threads and their transcript are durable; the live/background flag\nintentionally is not and disappears when the server process stops.",
+        "required": [
+          "parentThreadId",
+          "parentTurnId",
+          "callId",
+          "childThreadId",
+          "childTurnId",
+          "agent",
+          "description",
+          "background",
+          "startedAt"
+        ],
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "background": {
+            "type": "boolean"
+          },
+          "callId": {
+            "type": "string"
+          },
+          "childThreadId": {
+            "$ref": "#/components/schemas/ThreadId"
+          },
+          "childTurnId": {
+            "$ref": "#/components/schemas/TurnId"
+          },
+          "description": {
+            "type": "string"
+          },
+          "parentThreadId": {
+            "$ref": "#/components/schemas/ThreadId"
+          },
+          "parentTurnId": {
+            "$ref": "#/components/schemas/TurnId"
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "BrowserToolRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "arguments"
+        ],
+        "properties": {
+          "arguments": {},
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "BrowserToolResponse": {
+        "type": "object",
+        "required": [
+          "output",
+          "metadata",
+          "isError"
+        ],
+        "properties": {
+          "isError": {
+            "type": "boolean"
+          },
+          "metadata": {},
+          "output": {
+            "type": "string"
+          }
+        }
+      },
+      "BtwRequest": {
+        "type": "object",
+        "required": [
+          "question"
+        ],
+        "properties": {
+          "question": {
+            "type": "string"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          }
+        }
+      },
+      "BtwResponse": {
+        "type": "object",
+        "required": [
+          "answer",
+          "inputTokens",
+          "outputTokens"
+        ],
+        "properties": {
+          "answer": {
+            "type": "string"
+          },
+          "inputTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "outputTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "CommandExecutionResponse": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "turn",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "turn"
+                ]
+              },
+              "turn": {
+                "$ref": "#/components/schemas/Turn"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "run",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "workflow_run"
+                ]
+              },
+              "run": {
+                "$ref": "#/components/schemas/WorkflowRun"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "text",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "text"
+                ]
+              },
+              "text": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "Tagged result of the shared command dispatcher. Prompt commands create a\nnormal turn; workflow commands return the durable run; management commands\nsuch as `/workflow list` and `delete` return concise text."
+      },
+      "CommandInfo": {
+        "type": "object",
+        "description": "A user-defined slash command served from markdown files.",
+        "required": [
+          "name",
+          "description",
+          "template"
+        ],
+        "properties": {
+          "agent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "argumentHint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Autocomplete hint for arguments, e.g. `[file] [focus]`."
+          },
+          "description": {
+            "type": "string"
+          },
+          "execution": {
+            "$ref": "#/components/schemas/DefinitionExecution"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "plugin": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Contributing plugin, when this command came from a plugin bundle."
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Registry source. `workflow` identifies a dynamically discovered\nworkflow invocation; absent values are configured prompt commands."
+          },
+          "template": {
+            "type": "string",
+            "description": "Prompt template with `$ARGUMENTS` / `$1..$9` placeholders."
+          }
+        }
+      },
+      "CompactRequest": {
+        "type": "object",
+        "properties": {
+          "filesTouched": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "outstanding": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Caller-provided summary. When absent the server generates one with the\nthread's model using the hidden `compaction` agent profile."
+          },
+          "tailStartSequence": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Runtime-owned retained-tail boundary. API callers may omit this; the\nserver computes it from the configured recent-turn count.",
+            "minimum": 0
+          },
+          "todoCheckpoint": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TodoCheckpoint",
+                "description": "Runtime-owned exact task state. API callers may omit this; the server\nalways replaces it with the current durable state before committing."
+              }
+            ]
+          }
+        }
+      },
+      "CreateThreadRequest": {
+        "type": "object",
+        "description": "Unset fields resolve to configured defaults on the server, falling back to\nthe built-in `build` agent and the current default OpenAI model.",
+        "properties": {
+          "agent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parentId": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ThreadId"
+              }
+            ]
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schedule": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ScheduleOrigin"
+              }
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ultracode": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "DefinitionExecution": {
+        "type": "object",
+        "description": "Execution semantics shared by discovered commands and skills.",
+        "properties": {
+          "agent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "allowedTools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "arguments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "claudeArguments": {
+            "type": "boolean",
+            "default": false
+          },
+          "directory": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "disableModelInvocation": {
+            "type": "boolean",
+            "default": false
+          },
+          "disallowedTools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "fork": {
+            "type": "boolean",
+            "default": false
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "pluginRoot": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "userInvocable": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "EventEnvelope": {
+        "type": "object",
+        "required": [
+          "schemaVersion",
+          "serverInstanceId",
+          "eventId",
+          "type",
+          "payload",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "eventId": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "itemId": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ItemId"
+              }
+            ]
+          },
+          "payload": {},
+          "rootThreadId": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ThreadId",
+                "description": "Topmost ancestor of `thread_id`: equals `thread_id` for root threads,\nand the root of the parent chain for child-agent threads. Lets clients\nfollow everything belonging to one root conversation."
+              }
+            ]
+          },
+          "schemaVersion": {
+            "type": "string"
+          },
+          "serverInstanceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "threadId": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ThreadId"
+              }
+            ]
+          },
+          "turnId": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TurnId"
+              }
+            ]
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "ExecuteCommandRequest": {
+        "type": "object",
+        "description": "Execute one name from the authoritative server command registry. Unlike\n`StartTurnRequest::command`, this contract can dispatch both configured\nprompt templates and durable workflows without overloading the stable turn\nendpoint.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "agent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "arguments": {
+            "description": "Plain command tails use a JSON string. Workflow callers may supply\ntyped JSON directly, preserving booleans/numbers/objects end to end."
+          },
+          "attachments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reasoningEffort": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "timeoutMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "tools": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "variant": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Workflow child-agent variant (for example `high` or `xhigh`). Prompt\ncommands use `reasoning_effort` instead."
+          },
+          "wait": {
+            "type": "boolean"
+          }
+        }
+      },
+      "FileAction": {
+        "type": "object",
+        "required": [
+          "action",
+          "path"
+        ],
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "confirm": {
+            "type": "boolean"
+          },
+          "path": {
+            "type": "string"
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "FileContent": {
+        "type": "object",
+        "required": [
+          "path",
+          "content",
+          "encoding",
+          "mime",
+          "revision",
+          "size"
+        ],
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "encoding": {
+            "type": "string"
+          },
+          "mime": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "FileDiff": {
+        "type": "object",
+        "description": "Bounded file-change payload shared by Git review and snapshot/turn diffs.\nGit responses normally carry `patch`; snapshot responses normally carry\n`before` and `after`. A missing body with `truncated=true` remains an\nhonest metadata-only change instead of returning an unbounded payload.",
+        "required": [
+          "file",
+          "status",
+          "additions",
+          "deletions"
+        ],
+        "properties": {
+          "additions": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "after": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "before": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "binary": {
+            "type": "boolean"
+          },
+          "deletions": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "file": {
+            "type": "string"
+          },
+          "patch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/FileDiffStatus"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "FileDiffStatus": {
+        "type": "string",
+        "enum": [
+          "added",
+          "deleted",
+          "modified"
+        ]
+      },
+      "FileEntry": {
+        "type": "object",
+        "required": [
+          "name",
+          "path",
+          "directory",
+          "symlink",
+          "size"
+        ],
+        "properties": {
+          "directory": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "symlink": {
+            "type": "boolean"
+          }
+        }
+      },
+      "FileListing": {
+        "type": "object",
+        "required": [
+          "entries",
+          "truncated"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FileEntry"
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "FileWrite": {
+        "type": "object",
+        "required": [
+          "path",
+          "content",
+          "revision"
+        ],
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          }
+        }
+      },
+      "ForkOrigin": {
+        "type": "object",
+        "required": [
+          "title",
+          "sequence"
+        ],
+        "properties": {
+          "itemId": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ItemId",
+                "description": "Original source item, not its newly assigned ID in the fork."
+              }
+            ]
+          },
+          "sequence": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last copied sequence, or zero for a fork with no copied history.",
+            "minimum": 0
+          },
+          "title": {
+            "type": "string",
+            "description": "Source title at creation, retained when the source is unavailable."
+          }
+        }
+      },
+      "ForkThreadRequest": {
+        "type": "object",
+        "properties": {
+          "beforeItemId": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ItemId",
+                "description": "Semantic fork boundary. When set, copy history strictly before this\nuser-message item so clients can restore and edit that prompt."
+              }
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Title for the fork; defaults to \"Fork of {parent title}\"."
+          },
+          "upToSequence": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Copy parent items up to and including this sequence; defaults to all.\nMay accompany `before_item_id` as a compatibility fallback when it is\nexactly the sequence immediately before that user message.",
+            "minimum": 0
+          }
+        }
+      },
+      "GoalActionRequest": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "status"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "pause"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "resume"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "clear"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "complete"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "block"
+                ]
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "goal",
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "set"
+                ]
+              },
+              "goal": {
+                "type": "string"
+              },
+              "tokenBudget": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "minimum": 0
+              }
+            }
+          }
+        ]
+      },
+      "GoalActionResponse": {
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "goal": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Compatibility mirror for clients that consumed the original `{ goal }` API."
+          },
+          "message": {
+            "type": "string"
+          },
+          "state": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GoalState"
+              }
+            ]
+          }
+        }
+      },
+      "GoalCompletion": {
+        "type": "object",
+        "required": [
+          "title",
+          "edit",
+          "new",
+          "clear",
+          "dismiss"
+        ],
+        "properties": {
+          "clear": {
+            "$ref": "#/components/schemas/GoalCompletionOption"
+          },
+          "dismiss": {
+            "$ref": "#/components/schemas/GoalCompletionOption"
+          },
+          "edit": {
+            "$ref": "#/components/schemas/GoalCompletionOption"
+          },
+          "new": {
+            "$ref": "#/components/schemas/GoalCompletionOption"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "GoalCompletionOption": {
+        "type": "object",
+        "required": [
+          "label",
+          "description"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          }
+        }
+      },
+      "GoalCriteriaEvidence": {
+        "type": "object",
+        "required": [
+          "index",
+          "evidence"
+        ],
+        "properties": {
+          "evidence": {
+            "type": "string"
+          },
+          "index": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "GoalCriterion": {
+        "type": "object",
+        "required": [
+          "id",
+          "text"
+        ],
+        "properties": {
+          "evidence": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "satisfied": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "GoalLogicalTurnEvent": {
+        "type": "object",
+        "required": [
+          "goalID",
+          "durableTurnId",
+          "logicalTurn",
+          "continuation",
+          "phase",
+          "startedAt"
+        ],
+        "properties": {
+          "continuation": {
+            "type": "boolean"
+          },
+          "durableTurnId": {
+            "$ref": "#/components/schemas/TurnId"
+          },
+          "finishedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "goalID": {
+            "type": "string"
+          },
+          "logicalTurn": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Zero is the user-triggered iteration; positive values are autonomous\ncontinuations already reflected by `GoalState::turns_used`.",
+            "minimum": 0
+          },
+          "phase": {
+            "$ref": "#/components/schemas/GoalLogicalTurnPhase"
+          },
+          "startedAt": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "GoalLogicalTurnPhase": {
+        "type": "string",
+        "description": "Observable boundary for one provider-facing goal iteration. Haarness may\nexecute several logical goal turns inside one durable user turn; this event\npreserves the lifecycle distinction without manufacturing transcript\nmessages or nested durable turns.",
+        "enum": [
+          "started",
+          "finished"
+        ]
+      },
+      "GoalState": {
+        "type": "object",
+        "required": [
+          "goalID",
+          "goal",
+          "status",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "awaitingUserInput": {
+            "type": "boolean",
+            "description": "Runtime circuit breakers set this only when the next ordinary user\nmessage should naturally resume the pursuit. Manual and budget pauses\ndeliberately keep it false."
+          },
+          "consecutiveBlockerTurns": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "consecutiveParseFailures": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "createdAt": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "criteria": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GoalCriterion"
+            }
+          },
+          "goal": {
+            "type": "string"
+          },
+          "goalID": {
+            "type": "string"
+          },
+          "lastBlockerReason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lastBlockerTurn": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Logical goal-turn number on which the blocker recurrence was last counted.",
+            "minimum": 0
+          },
+          "lastReason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lastVerdict": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GoalVerdict"
+              }
+            ]
+          },
+          "needsCriteria": {
+            "type": "boolean"
+          },
+          "pausedReason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/GoalStatus"
+          },
+          "subgoals": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "timeUsedSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "tokenBudget": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "tokensUsed": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "turnsUsed": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "updatedAt": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "GoalStatus": {
+        "type": "string",
+        "enum": [
+          "active",
+          "paused",
+          "blocked",
+          "usage_limited",
+          "budget_limited",
+          "complete",
+          "cleared"
+        ]
+      },
+      "GoalUpdateRequest": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "criteria_evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GoalCriteriaEvidence"
+            }
+          },
+          "next_step_question": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GoalCompletion"
+              }
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/GoalUpdateStatus"
+          }
+        }
+      },
+      "GoalUpdateStatus": {
+        "type": "string",
+        "enum": [
+          "complete",
+          "blocked"
+        ]
+      },
+      "GoalUpdatedEvent": {
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "completion": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GoalCompletion"
+              }
+            ]
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "$ref": "#/components/schemas/GoalState"
+          },
+          "verdict": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GoalVerdict"
+              }
+            ]
+          }
+        }
+      },
+      "GoalVerdict": {
+        "type": "string",
+        "enum": [
+          "done",
+          "continue",
+          "skipped",
+          "blocked",
+          "error",
+          "inactive"
+        ]
+      },
+      "Group": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "metrics"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "metrics": {
+            "$ref": "#/components/schemas/Metrics"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "InputDelivery": {
+        "type": "string",
+        "enum": [
+          "steer",
+          "queue"
+        ]
+      },
+      "InputQueue": {
+        "type": "object",
+        "required": [
+          "revision",
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PendingInput"
+            }
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "InputQueueAction": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "revision",
+              "id",
+              "text",
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "edit"
+                ]
+              },
+              "id": {
+                "$ref": "#/components/schemas/RequestId"
+              },
+              "revision": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "text": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "revision",
+              "id",
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "remove"
+                ]
+              },
+              "id": {
+                "$ref": "#/components/schemas/RequestId"
+              },
+              "revision": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "revision",
+              "ids",
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "reorder"
+                ]
+              },
+              "ids": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RequestId"
+                }
+              },
+              "revision": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "revision",
+              "id",
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "steer"
+                ]
+              },
+              "id": {
+                "$ref": "#/components/schemas/RequestId"
+              },
+              "revision": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "All edits compare the whole queue revision. A stale client must refresh,\nnever silently overwrite another client's edit or an already-delivered input."
+      },
+      "Item": {
+        "type": "object",
+        "required": [
+          "id",
+          "threadId",
+          "sequence",
+          "data",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "data": {
+            "$ref": "#/components/schemas/ItemData"
+          },
+          "id": {
+            "$ref": "#/components/schemas/ItemId"
+          },
+          "sequence": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "threadId": {
+            "$ref": "#/components/schemas/ThreadId"
+          },
+          "turnId": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TurnId"
+              }
+            ]
+          }
+        }
+      },
+      "ItemData": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "text",
+              "type"
+            ],
+            "properties": {
+              "attachments": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Local media paths, file URLs, or data URLs attached to this\nmessage. `images` remains accepted when reading older databases\nand API clients."
+              },
+              "queued": {
+                "type": "boolean",
+                "description": "True when the message arrived while a turn was already running and\nwas queued for steering into that turn's next provider round."
+              },
+              "synthetic": {
+                "type": "boolean",
+                "description": "Internal prompt injected by the runtime rather than authored by the\nuser. Clients hide it from transcript/history surfaces while the\nprovider still receives its text as normal context."
+              },
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "user_message"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Durable boundary recording that a queued user message was included in\na provider-round snapshot. The original message keeps `queued=true` as\nprovenance; this marker is its transient-queue acknowledgement.",
+            "required": [
+              "item_id",
+              "type"
+            ],
+            "properties": {
+              "item_id": {
+                "$ref": "#/components/schemas/ItemId"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "queue_consumed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "text",
+              "type"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "assistant_message"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "text",
+              "type"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "reasoning"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "call_id",
+              "name",
+              "arguments",
+              "type"
+            ],
+            "properties": {
+              "arguments": {},
+              "call_id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "provider_metadata": {},
+              "type": {
+                "type": "string",
+                "enum": [
+                  "tool_call"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "call_id",
+              "name",
+              "output",
+              "is_error",
+              "type"
+            ],
+            "properties": {
+              "call_id": {
+                "type": "string"
+              },
+              "is_error": {
+                "type": "boolean"
+              },
+              "metadata": {
+                "description": "Host-produced structured result details. Native file tools use\nthis for the actual before/after content rendered by clients;\nolder persisted results decode as null."
+              },
+              "name": {
+                "type": "string"
+              },
+              "output": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "tool_result"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Durable navigation edge between a parent `task` call and the child\nthread it created. Live `task.updated` events carry progress, while\nthis item keeps completed children reopenable after the turn or a\nclient restart.",
+            "required": [
+              "call_id",
+              "child_thread_id",
+              "type"
+            ],
+            "properties": {
+              "call_id": {
+                "type": "string"
+              },
+              "child_thread_id": {
+                "$ref": "#/components/schemas/ThreadId"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "task_link"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Durable lifecycle checkpoint for a task that may outlive the parent\ntool call. This keeps background state reconstructable after an SSE\ngap or client restart without treating the launch acknowledgement as\nthe child's final result.",
+            "required": [
+              "call_id",
+              "child_thread_id",
+              "child_turn_id",
+              "state",
+              "type"
+            ],
+            "properties": {
+              "call_id": {
+                "type": "string"
+              },
+              "child_thread_id": {
+                "$ref": "#/components/schemas/ThreadId"
+              },
+              "child_turn_id": {
+                "$ref": "#/components/schemas/TurnId"
+              },
+              "state": {
+                "type": "string",
+                "description": "running | background | done | failed | cancelled | interrupted"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "task_state"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "server",
+              "action",
+              "detail",
+              "type"
+            ],
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "detail": {},
+              "server": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "mcp_action"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "permission_id",
+              "operation",
+              "detail",
+              "type"
+            ],
+            "properties": {
+              "always_patterns": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Generalized rules an \"always\" answer would persist,\ne.g. `bash:git status *`."
+              },
+              "detail": {},
+              "operation": {
+                "type": "string"
+              },
+              "patterns": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Exact things being asked about (command texts, paths, globs)."
+              },
+              "permission": {
+                "type": "string",
+                "description": "Permission category (bash, edit, external_directory, \u2026)."
+              },
+              "permission_id": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "permission_request"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "question_id",
+              "prompt",
+              "choices",
+              "type"
+            ],
+            "properties": {
+              "choices": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "custom": {
+                "type": "boolean",
+                "description": "Permit free-form text alongside the listed choices."
+              },
+              "multiple": {
+                "type": "boolean",
+                "description": "Select any number of choices before submitting one reply."
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "question_id": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "question"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "summary",
+              "files_touched",
+              "outstanding",
+              "type"
+            ],
+            "properties": {
+              "files_touched": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "outstanding": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "summary": {
+                "type": "string"
+              },
+              "tail_start_sequence": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "First raw transcript item retained verbatim after the summary.\nSequence numbers remain stable inside a thread and across forks.",
+                "minimum": 0
+              },
+              "todo_checkpoint": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TodoCheckpoint",
+                    "description": "Exact task-list state at this compaction boundary. Older records\ndecode without a checkpoint; a present checkpoint with an empty\nlist intentionally clears all prior todos."
+                  }
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "compaction"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "markdown",
+              "type"
+            ],
+            "properties": {
+              "markdown": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "findings",
+              "type"
+            ],
+            "properties": {
+              "findings": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ReviewFinding"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "review"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "message",
+              "retryable",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "error"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "input_tokens",
+              "output_tokens",
+              "type"
+            ],
+            "properties": {
+              "cache_read_tokens": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "cache_write_tokens": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "cost_usd": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "input_tokens": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "output_tokens": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "prompt": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/PromptUsage"
+                  }
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "usage"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "items",
+              "type"
+            ],
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/TodoEntry"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "todo"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A workspace file snapshot captured before a turn's first mutation.",
+            "required": [
+              "snapshot_id",
+              "file_count",
+              "type"
+            ],
+            "properties": {
+              "base_snapshot_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Present on a completion checkpoint and points to the matching\npre-mutation checkpoint. Undo applies only this bounded delta."
+              },
+              "boundary_sequence": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "Transcript sequence immediately before the mutation group guarded\nby this snapshot. Older records omit it and use legacy inference.",
+                "minimum": 0
+              },
+              "file_count": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "snapshot_id": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "snapshot"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "ItemId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "LazyToolMode": {
+        "type": "string",
+        "description": "Controls whether non-essential tool schemas are loaded on demand.",
+        "enum": [
+          "off",
+          "auto",
+          "always"
+        ]
+      },
+      "LazyToolSettingsUpdate": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LazyToolMode",
+                "description": "Sets a durable live override. Omit or send null to return to the\nconfigured/default mode, matching per-tool availability reset semantics."
+              }
+            ]
+          }
+        }
+      },
+      "LoopConfig": {
+        "type": "object",
+        "description": "A recurring prompt attached to a thread: re-submitted `interval_seconds`\nafter each completed turn until `expires_at`.",
+        "required": [
+          "prompt",
+          "intervalSeconds",
+          "expiresAt"
+        ],
+        "properties": {
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "intervalSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "prompt": {
+            "type": "string"
+          }
+        }
+      },
+      "ManagementEntry": {
+        "type": "object",
+        "required": [
+          "label",
+          "description",
+          "request"
+        ],
+        "properties": {
+          "confirm": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "request": {}
+        }
+      },
+      "ManagementField": {
+        "type": "object",
+        "required": [
+          "key",
+          "label",
+          "value"
+        ],
+        "properties": {
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Empty for free text, otherwise an enumerated choice."
+          },
+          "key": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "secret": {
+            "type": "boolean"
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "ManagementView": {
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "data": {
+            "description": "Structured resource state for clients that render their own controls."
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ManagementEntry"
+            }
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ManagementField"
+            }
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "submit": {},
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "McpConfigureRequest": {
+        "type": "object",
+        "required": [
+          "transport"
+        ],
+        "properties": {
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "command": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Working directory for a local MCP process or a dynamic header helper."
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "env": {
+            "type": "object",
+            "description": "Environment passed only to a local stdio MCP child process.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "headers": {
+            "type": "object",
+            "description": "Headers attached to every remote Streamable HTTP request.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "headersHelper": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Claude Code-compatible command that prints a JSON header object."
+          },
+          "oauth": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Generic public MCP OAuth. `None` auto-detects OAuth for Streamable HTTP;\n`Some(false)` disables discovery for servers using another auth scheme."
+          },
+          "oauthClientId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional public client id for servers without dynamic registration."
+          },
+          "oauthScopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Explicit OAuth scopes. Empty lets MCP discovery select server scopes."
+          },
+          "timeoutMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Optional connection/helper timeout. Plugin `timeout` seconds are\nnormalized to milliseconds by configuration discovery.",
+            "minimum": 0
+          },
+          "transport": {
+            "type": "string"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "McpServerInfo": {
+        "type": "object",
+        "required": [
+          "name",
+          "transport",
+          "status"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "transport": {
+            "type": "string"
+          }
+        }
+      },
+      "Metrics": {
+        "type": "object",
+        "required": [
+          "sessions",
+          "turns",
+          "completed",
+          "failed",
+          "interrupted",
+          "inProgress",
+          "inputTokens",
+          "outputTokens",
+          "cacheReadTokens",
+          "cacheWriteTokens",
+          "knownCostUsd",
+          "pricedUsageRecords",
+          "unpricedUsageRecords",
+          "turnsWithoutUsage",
+          "toolCalls",
+          "toolResults",
+          "toolErrors",
+          "fileChanges",
+          "additions",
+          "deletions"
+        ],
+        "properties": {
+          "additions": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "cacheReadTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "cacheWriteTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "completed": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "deletions": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "fileChanges": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "inProgress": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "inputTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "interrupted": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "knownCostUsd": {
+            "type": "number",
+            "format": "double"
+          },
+          "outputTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "pricedUsageRecords": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "sessions": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "toolCalls": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "toolErrors": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "toolResults": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "turns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "turnsWithoutUsage": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "unpricedUsageRecords": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "ModelInfo": {
+        "type": "object",
+        "required": [
+          "id",
+          "displayName",
+          "reasoning",
+          "images",
+          "tools"
+        ],
+        "properties": {
+          "contextWindow": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "images": {
+            "type": "boolean"
+          },
+          "maxOutputTokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "pricing": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ModelPricing"
+              }
+            ]
+          },
+          "reasoning": {
+            "type": "boolean"
+          },
+          "reasoningEfforts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Concrete reasoning-effort names accepted by this model/provider pair,\nordered from lightest to strongest. An empty list means callers must\nleave the effort unset and use the provider default."
+          },
+          "tools": {
+            "type": "boolean"
+          },
+          "video": {
+            "type": "boolean",
+            "description": "Native video understanding (not video generation)."
+          }
+        }
+      },
+      "ModelPricing": {
+        "type": "object",
+        "description": "USD per million tokens.",
+        "required": [
+          "input",
+          "output"
+        ],
+        "properties": {
+          "cacheRead": {
+            "type": "number",
+            "format": "double"
+          },
+          "cacheWrite": {
+            "type": "number",
+            "format": "double"
+          },
+          "input": {
+            "type": "number",
+            "format": "double"
+          },
+          "output": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "Options": {
+        "type": "object",
+        "properties": {
+          "currentProject": {
+            "type": "boolean"
+          },
+          "days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "project": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "PendingInput": {
+        "type": "object",
+        "required": [
+          "id",
+          "text"
+        ],
+        "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "id": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "PendingPermissionInfo": {
+        "type": "object",
+        "description": "One unanswered permission prompt, listable so clients can repopulate\npending approvals after a reconnect or thread switch \u2014 including prompts\nraised on child-agent threads.",
+        "required": [
+          "permissionId",
+          "operation",
+          "threadId",
+          "createdAt"
+        ],
+        "properties": {
+          "agent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "allowAlways": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "alwaysPatterns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Rules an \"always\" answer would persist, e.g. `bash:git status *`."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "detail": {},
+          "operation": {
+            "type": "string"
+          },
+          "patterns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Exact things being asked about (command texts, paths, globs)."
+          },
+          "permission": {
+            "type": "string",
+            "description": "Permission category (bash, edit, external_directory, \u2026)."
+          },
+          "permissionId": {
+            "type": "string"
+          },
+          "repositoryScope": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rootThreadId": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ThreadId"
+              }
+            ]
+          },
+          "threadId": {
+            "$ref": "#/components/schemas/ThreadId"
+          },
+          "turnId": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TurnId"
+              }
+            ]
+          }
+        }
+      },
+      "PendingQuestionInfo": {
+        "type": "object",
+        "description": "One unanswered model question, listable so clients can hydrate every\nprompt in a root conversation after reconnecting or switching threads.\nQuestions raised by parallel child agents remain distinct queue entries.",
+        "required": [
+          "questionId",
+          "prompt",
+          "threadId",
+          "createdAt"
+        ],
+        "properties": {
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "custom": {
+            "type": "boolean"
+          },
+          "multiple": {
+            "type": "boolean"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "questionId": {
+            "type": "string"
+          },
+          "rootThreadId": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ThreadId"
+              }
+            ]
+          },
+          "threadId": {
+            "$ref": "#/components/schemas/ThreadId"
+          },
+          "turnId": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TurnId"
+              }
+            ]
+          }
+        }
+      },
+      "PermissionReply": {
+        "type": "object",
+        "required": [
+          "decision"
+        ],
+        "properties": {
+          "decision": {
+            "$ref": "#/components/schemas/PermissionReplyDecision"
+          },
+          "feedback": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PermissionReplyDecision": {
+        "type": "string",
+        "enum": [
+          "once",
+          "always",
+          "always_workspace",
+          "always_repository",
+          "reject"
+        ]
+      },
+      "PluginActionRequest": {
+        "type": "object",
+        "required": [
+          "action",
+          "target"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "install | update | enable | disable | remove | marketplace"
+          },
+          "target": {
+            "type": "string"
+          }
+        }
+      },
+      "PluginInfo": {
+        "type": "object",
+        "required": [
+          "name",
+          "spec",
+          "source",
+          "path",
+          "enabled",
+          "managed"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "managed": {
+            "type": "boolean"
+          },
+          "marketplace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "description": "`haarness` for installed bundles; `haarness-global` or\n`haarness-local` for directly loaded Haarness plugin directories."
+          },
+          "spec": {
+            "type": "string"
+          }
+        }
+      },
+      "ProjectInfo": {
+        "type": "object",
+        "description": "A durable project groups one primary checkout and any linked Git worktrees.",
+        "required": [
+          "id",
+          "name",
+          "root",
+          "git",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "git": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string",
+            "description": "Primary checkout for a Git project, or the registered directory for a\nnon-Git project."
+          }
+        }
+      },
+      "PromptUsage": {
+        "type": "object",
+        "description": "Text estimates from the final prepared request, after request hooks.\nProvider framing and binary media tokens are not included.",
+        "required": [
+          "system_tokens",
+          "tool_tokens",
+          "history_tokens",
+          "media_attachments"
+        ],
+        "properties": {
+          "history_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "media_attachments": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "system_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "tool_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "ProviderInfo": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "authenticated",
+          "models"
+        ],
+        "properties": {
+          "authenticated": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelInfo"
+            }
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "PtyCreateRequest": {
+        "type": "object",
+        "properties": {
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "cols": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "command": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rows": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PtyCursor": {
+        "type": "object",
+        "description": "Text control frame sent before replay and whenever the output cursor moves.",
+        "required": [
+          "start",
+          "end",
+          "truncated"
+        ],
+        "properties": {
+          "end": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "start": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "PtyId": {
+        "type": "string",
+        "format": "uuid",
+        "description": "Server-owned pseudo-terminal identifier."
+      },
+      "PtyInfo": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "command",
+          "args",
+          "cwd",
+          "status",
+          "cols",
+          "rows"
+        ],
+        "properties": {
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "cols": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "command": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/PtyId"
+          },
+          "pid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "rows": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "status": {
+            "$ref": "#/components/schemas/PtyStatus"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "PtyStatus": {
+        "type": "string",
+        "enum": [
+          "running",
+          "exited"
+        ]
+      },
+      "PtyUpdateRequest": {
+        "type": "object",
+        "properties": {
+          "cols": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "rows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "QuestionReply": {
+        "type": "object",
+        "required": [
+          "answer"
+        ],
+        "properties": {
+          "answer": {
+            "type": "string"
+          }
+        }
+      },
+      "QueueInputRequest": {
+        "type": "object",
+        "description": "User input against a thread that may already have a running turn. When a\nturn is active the text is persisted immediately and steered into that\nturn's next provider round; otherwise a normal turn starts.",
+        "required": [
+          "requestId",
+          "text"
+        ],
+        "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "delivery": {
+            "$ref": "#/components/schemas/InputDelivery",
+            "description": "Steer by default for compatibility; queue waits for an idle boundary."
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "synthetic": {
+            "type": "boolean",
+            "description": "Internal runtime prompt, hidden from user-authored transcript/history\nsurfaces but still delivered to the provider."
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "QueueInputResponse": {
+        "type": "object",
+        "required": [
+          "queued"
+        ],
+        "properties": {
+          "item": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Item",
+                "description": "The queued user-message item (queued == true)."
+              }
+            ]
+          },
+          "queued": {
+            "type": "boolean",
+            "description": "True when the message was queued into an already-running turn."
+          },
+          "turn": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Turn",
+                "description": "The freshly started turn (queued == false)."
+              }
+            ]
+          }
+        }
+      },
+      "Record": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "scope",
+          "createdAt",
+          "uploadedAt",
+          "entryCount",
+          "sizeBytes",
+          "sha256"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "entryCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "uploadedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "Report": {
+        "type": "object",
+        "required": [
+          "schemaVersion",
+          "generatedAt",
+          "options",
+          "total",
+          "projects",
+          "models",
+          "tools",
+          "files",
+          "days",
+          "sessions",
+          "findings",
+          "warnings",
+          "databasesRead",
+          "matchingSessions",
+          "duplicateTurnsSkipped",
+          "detachedItemsSkipped"
+        ],
+        "properties": {
+          "databasesRead": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "days": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Group"
+            }
+          },
+          "detachedItemsSkipped": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "duplicateTurnsSkipped": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Group"
+            }
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "generatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "matchingSessions": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Group"
+            }
+          },
+          "options": {
+            "$ref": "#/components/schemas/Options"
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Group"
+            }
+          },
+          "schemaVersion": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Group"
+            }
+          },
+          "since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Group"
+            }
+          },
+          "total": {
+            "$ref": "#/components/schemas/Metrics"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "RequestId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "RevertState": {
+        "type": "object",
+        "required": [
+          "sequence",
+          "snapshotId"
+        ],
+        "properties": {
+          "baseSnapshotId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Workspace state produced by undo. Redo uses it as the expected side of\na conflict-checked delta before restoring `snapshot_id`."
+          },
+          "sequence": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Items after this sequence soft-delete when the next turn starts.",
+            "minimum": 0
+          },
+          "snapshotId": {
+            "type": "string",
+            "description": "Pre-revert backup snapshot consumed by unrevert."
+          }
+        }
+      },
+      "ReviewFinding": {
+        "type": "object",
+        "required": [
+          "severity",
+          "explanation"
+        ],
+        "properties": {
+          "explanation": {
+            "type": "string"
+          },
+          "file": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "line": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "severity": {
+            "type": "string"
+          }
+        }
+      },
+      "ScheduleOrigin": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "Scope": {
+        "type": "string",
+        "enum": [
+          "global",
+          "local",
+          "both"
+        ]
+      },
+      "ServerInfo": {
+        "type": "object",
+        "required": [
+          "name",
+          "version",
+          "schemaVersion",
+          "serverInstanceId",
+          "capabilities"
+        ],
+        "properties": {
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "defaultModel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "defaultProvider": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Effective workspace configuration, for choosing a concrete model before\ncreating a conversation. These are preferences, not credentials."
+          },
+          "eventCursor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Latest published event id. Snapshot-first clients capture this before\nhydration, then replay only deltas after the snapshot boundary.",
+            "minimum": 0
+          },
+          "gitBranch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "projectTrusted": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "schemaVersion": {
+            "type": "string"
+          },
+          "serverInstanceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "version": {
+            "type": "string"
+          },
+          "workspace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "SkillInfo": {
+        "type": "object",
+        "required": [
+          "name",
+          "description",
+          "path",
+          "trusted",
+          "loaded"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "execution": {
+            "$ref": "#/components/schemas/DefinitionExecution"
+          },
+          "loaded": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "trusted": {
+            "type": "boolean"
+          }
+        }
+      },
+      "StartTurnRequest": {
+        "type": "object",
+        "required": [
+          "requestId",
+          "text"
+        ],
+        "properties": {
+          "agent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "attachments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Local media paths, file URLs, or data URLs. Kept as string sources so\nlocal-first clients do not have to persist large base64 blobs."
+          },
+          "autoApprove": {
+            "type": "boolean",
+            "description": "Non-interactive caller explicitly authorizes permission prompts for\nthis turn. Scheduled runs set this after the schedule itself has been\napproved; ordinary REST/TUI clients leave it false."
+          },
+          "command": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name of a custom slash command; the server expands its template with\n`text` as the argument string and may switch agent/model per its\nfrontmatter."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reasoningEffort": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "synthetic": {
+            "type": "boolean",
+            "description": "Internal runtime prompt. Backward-compatible API clients omit this and\nreceive ordinary user-message behavior."
+          },
+          "text": {
+            "type": "string"
+          },
+          "tools": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Per-turn tool visibility and execution policy. Missing names retain\ntheir normal availability; `false` both removes a tool from the\nprovider schema and hard-denies a fabricated call.",
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "Thread": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "archived",
+          "agent",
+          "provider",
+          "model",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "archived": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "forkOrigin": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ForkOrigin",
+                "description": "Durable boundary between copied history and a fork's own continuation."
+              }
+            ]
+          },
+          "id": {
+            "$ref": "#/components/schemas/ThreadId"
+          },
+          "isSubagent": {
+            "type": "boolean",
+            "description": "Delegated agent conversation; forks retain parent lineage but are not subagents."
+          },
+          "model": {
+            "type": "string"
+          },
+          "parentId": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ThreadId"
+              }
+            ]
+          },
+          "provider": {
+            "type": "string"
+          },
+          "revert": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RevertState",
+                "description": "Present while the thread sits in a reverted state (undo pending\nconfirmation by the next turn)."
+              }
+            ]
+          },
+          "schedule": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ScheduleOrigin",
+                "description": "Schedule that created this run; independent of its editable title."
+              }
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "ultracode": {
+            "type": "boolean",
+            "description": "Standing workflow-orchestration preference for subsequent turns."
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ThreadId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "TodoCheckpoint": {
+        "type": "object",
+        "description": "Versioned exact todo state carried across a lossy prose compaction.",
+        "required": [
+          "version",
+          "revision",
+          "todos"
+        ],
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sequence of the latest todo snapshot, or zero when the exact state is\nknown to be empty without a prior todo write.",
+            "minimum": 0
+          },
+          "todos": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TodoEntry"
+            }
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "TodoEntry": {
+        "type": "object",
+        "required": [
+          "content",
+          "status"
+        ],
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "string",
+            "description": "Priority. Older persisted todo items did\nnot carry it, so decoding them defaults to medium."
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "ToolCatalogEntry": {
+        "type": "object",
+        "description": "One provider-visible or deferred tool in the current runtime catalog.",
+        "required": [
+          "id",
+          "description",
+          "group",
+          "groupTitle",
+          "source",
+          "essential",
+          "enabled",
+          "advertised",
+          "loaded",
+          "estimatedTokens"
+        ],
+        "properties": {
+          "advertised": {
+            "type": "boolean",
+            "description": "Whether this schema would be sent on the next matching provider round."
+          },
+          "description": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "False means the tool is unavailable at both schema and execution time."
+          },
+          "essential": {
+            "type": "boolean",
+            "description": "Essential tools stay resident when lazy loading is active."
+          },
+          "estimatedTokens": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Deterministic provider-schema estimate; deliberately labeled as an estimate.",
+            "minimum": 0
+          },
+          "group": {
+            "type": "string",
+            "description": "Stable functional grouping such as `core`, `agents`, or `extensions`."
+          },
+          "groupTitle": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "loaded": {
+            "type": "boolean",
+            "description": "Whether this session explicitly promoted a deferred tool."
+          },
+          "source": {
+            "type": "string",
+            "description": "`native` or the projected MCP server id."
+          }
+        }
+      },
+      "ToolCatalogResponse": {
+        "type": "object",
+        "required": [
+          "tools",
+          "lazyMode",
+          "lazyActive",
+          "estimatedTotalTokens",
+          "estimatedAdvertisedTokens",
+          "estimatedSavedTokens"
+        ],
+        "properties": {
+          "estimatedAdvertisedTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "estimatedSavedTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "estimatedTotalTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "lazyActive": {
+            "type": "boolean"
+          },
+          "lazyMode": {
+            "$ref": "#/components/schemas/LazyToolMode"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ToolCatalogEntry"
+            }
+          }
+        }
+      },
+      "ToolSettingsUpdate": {
+        "type": "object",
+        "description": "Live, durable workspace-scoped tool policy update.",
+        "properties": {
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`Some` sets an override; omitted removes the persisted override."
+          }
+        }
+      },
+      "Turn": {
+        "type": "object",
+        "required": [
+          "id",
+          "threadId",
+          "requestId",
+          "status",
+          "agent",
+          "provider",
+          "model",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "$ref": "#/components/schemas/TurnId"
+          },
+          "model": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "requestId": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TurnStatus"
+          },
+          "threadId": {
+            "$ref": "#/components/schemas/ThreadId"
+          },
+          "ultracode": {
+            "type": "boolean",
+            "description": "This turn runs with workflow-orchestration guidance. The flag is\ndurable and provider-independent; runtimes resolve it to the strongest\nsupported reasoning effort (or the provider default)."
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "TurnId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "TurnStatus": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "running",
+          "completed",
+          "failed",
+          "interrupted"
+        ]
+      },
+      "UpdateThreadRequest": {
+        "type": "object",
+        "properties": {
+          "agent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "archived": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ultracode": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "WorkflowArgument": {
+        "type": "object",
+        "properties": {
+          "default": {},
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkflowArgumentType"
+              }
+            ]
+          }
+        }
+      },
+      "WorkflowArgumentType": {
+        "type": "string",
+        "enum": [
+          "string",
+          "number",
+          "boolean"
+        ]
+      },
+      "WorkflowDefinition": {
+        "type": "object",
+        "required": [
+          "name",
+          "invocation",
+          "dialect",
+          "path",
+          "meta"
+        ],
+        "properties": {
+          "dialect": {
+            "$ref": "#/components/schemas/WorkflowDialect"
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowFinding"
+            }
+          },
+          "invocation": {
+            "type": "string"
+          },
+          "legacy": {
+            "type": "boolean"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/WorkflowMeta"
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "pluginName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "WorkflowDialect": {
+        "type": "string",
+        "enum": [
+          "native",
+          "claude-portable"
+        ]
+      },
+      "WorkflowFinding": {
+        "type": "object",
+        "required": [
+          "line",
+          "rule",
+          "text"
+        ],
+        "properties": {
+          "line": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "rule": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "WorkflowId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "WorkflowInvalidDefinition": {
+        "type": "object",
+        "required": [
+          "path",
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "legacy": {
+            "type": "boolean"
+          },
+          "path": {
+            "type": "string"
+          },
+          "pluginName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "WorkflowListResponse": {
+        "type": "object",
+        "required": [
+          "workflows",
+          "invalid"
+        ],
+        "properties": {
+          "invalid": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowInvalidDefinition"
+            }
+          },
+          "workflows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowDefinition"
+            }
+          }
+        }
+      },
+      "WorkflowLog": {
+        "type": "object",
+        "required": [
+          "sequence",
+          "time",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "phase": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sequence": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "source": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkflowLogSource"
+              }
+            ]
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "WorkflowLogSource": {
+        "type": "string",
+        "enum": [
+          "platform",
+          "workflow"
+        ]
+      },
+      "WorkflowMeta": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "arguments": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/WorkflowArgument"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "phases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowPhase"
+            }
+          },
+          "whenToUse": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "WorkflowPhase": {
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "variant": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "WorkflowRun": {
+        "type": "object",
+        "required": [
+          "id",
+          "directory",
+          "workflowName",
+          "sourceHash",
+          "status",
+          "definition",
+          "time"
+        ],
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowRunAgent"
+            }
+          },
+          "args": {},
+          "definition": {
+            "$ref": "#/components/schemas/WorkflowRunDefinition"
+          },
+          "directory": {
+            "type": "string"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "$ref": "#/components/schemas/WorkflowId"
+          },
+          "logs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowLog"
+            }
+          },
+          "phase": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": {},
+          "sourceHash": {
+            "type": "string",
+            "description": "SHA-256 of the immutable source snapshot."
+          },
+          "sourcePath": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/WorkflowRunStatus"
+          },
+          "statusPayload": {},
+          "threadId": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ThreadId"
+              }
+            ]
+          },
+          "time": {
+            "$ref": "#/components/schemas/WorkflowRunTime"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowRunWarning"
+            }
+          },
+          "workflowName": {
+            "type": "string"
+          }
+        }
+      },
+      "WorkflowRunAgent": {
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "startedAt"
+        ],
+        "properties": {
+          "agent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "completedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "output": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "phase": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "$ref": "#/components/schemas/WorkflowRunAgentStatus"
+          },
+          "threadId": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ThreadId"
+              }
+            ]
+          },
+          "variant": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "WorkflowRunAgentStatus": {
+        "type": "string",
+        "enum": [
+          "running",
+          "completed",
+          "failed",
+          "cancelled"
+        ]
+      },
+      "WorkflowRunDefinition": {
+        "type": "object",
+        "required": [
+          "name",
+          "invocation",
+          "dialect",
+          "meta"
+        ],
+        "properties": {
+          "agent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Immutable workflow-wide child-agent defaults captured at launch."
+          },
+          "argsProvided": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "dialect": {
+            "$ref": "#/components/schemas/WorkflowDialect"
+          },
+          "invocation": {
+            "type": "string"
+          },
+          "launchThreadId": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ThreadId",
+                "description": "Conversation that launched this run. Execution itself happens in the\nrun's dedicated `thread_id`; this scope keeps progress notifications\nattached to the conversation that requested the workflow."
+              }
+            ]
+          },
+          "meta": {
+            "$ref": "#/components/schemas/WorkflowMeta"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "pluginName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Immutable source snapshot used by restart-from-beginning resume."
+          },
+          "sourcePath": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "variant": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "WorkflowRunStatus": {
+        "type": "string",
+        "enum": [
+          "running",
+          "completed",
+          "failed",
+          "cancelled",
+          "paused",
+          "interrupted"
+        ]
+      },
+      "WorkflowRunTime": {
+        "type": "object",
+        "required": [
+          "created",
+          "updated"
+        ],
+        "properties": {
+          "completed": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "started": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "updated": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "WorkflowRunWarning": {
+        "type": "object",
+        "required": [
+          "time",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "phase": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requestedModel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "resolvedModel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "WorkflowSourceResponse": {
+        "type": "object",
+        "required": [
+          "definition",
+          "source"
+        ],
+        "properties": {
+          "definition": {
+            "$ref": "#/components/schemas/WorkflowDefinition"
+          },
+          "source": {
+            "type": "string"
+          }
+        }
+      },
+      "WorkflowStartRequest": {
+        "type": "object",
+        "description": "Start one durable workflow run. Exactly one of `name`, `source`, or `path`\nmust be supplied. Named runs use the statically discovered catalog; inline\nand explicit-path runs are intended for the model-facing workflow tool and\nstill pass through the coordinator's trust and permission boundary.",
+        "properties": {
+          "agent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Workflow-wide child-agent defaults. Individual `ctx.agent` calls and\nphase model/variant metadata retain higher precedence."
+          },
+          "args": {},
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "threadId": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ThreadId",
+                "description": "Launching conversation. The coordinator creates a dedicated workflow\nchild session so tool and agent activity stays inspectable."
+              }
+            ]
+          },
+          "timeoutMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "variant": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "wait": {
+            "type": "boolean",
+            "description": "Wait for a terminal state before returning. REST/TUI starts normally\nleave this false; the CLI can request synchronous execution."
+          }
+        }
+      },
+      "WorkspaceCleanupRequest": {
+        "type": "object",
+        "description": "Explicitly remove a stale managed-workspace registration after its checkout\nhas disappeared. This is intentionally a distinct endpoint so an older\nserver cannot interpret cleanup as ordinary worktree deletion.",
+        "properties": {
+          "confirm": {
+            "type": "boolean"
+          }
+        }
+      },
+      "WorkspaceCreateRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fromRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "WorkspaceInfo": {
+        "type": "object",
+        "description": "A concrete directory with its own server, session database, and runtime\nlease. `managed` means Haarness created it and may reset/remove it.",
+        "required": [
+          "id",
+          "projectId",
+          "name",
+          "path",
+          "kind",
+          "managed",
+          "createdAt",
+          "lastOpenedAt",
+          "exists"
+        ],
+        "properties": {
+          "baseCommit": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "exists": {
+            "type": "boolean",
+            "description": "Refreshed when the registry is read; missing directories remain visible\nso users can explicitly clean up stale metadata."
+          },
+          "fromRef": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/WorkspaceKind"
+          },
+          "lastOpenedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "managed": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": "string"
+          }
+        }
+      },
+      "WorkspaceKind": {
+        "type": "string",
+        "enum": [
+          "local",
+          "git_worktree"
+        ]
+      },
+      "WorkspaceListResponse": {
+        "type": "object",
+        "required": [
+          "projects",
+          "workspaces"
+        ],
+        "properties": {
+          "currentWorkspaceId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectInfo"
+            }
+          },
+          "workspaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceInfo"
+            }
+          }
+        }
+      },
+      "WorkspaceOperationResponse": {
+        "type": "object",
+        "required": [
+          "workspace",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "workspace": {
+            "$ref": "#/components/schemas/WorkspaceInfo"
+          }
+        }
+      },
+      "WorkspaceRefInfo": {
+        "type": "object",
+        "description": "One named Git ref that can be selected as a new workspace's base.\n`reference` is the unambiguous, fully-qualified value clients should send\nback; `name` is the concise label intended for display.",
+        "required": [
+          "name",
+          "reference",
+          "kind",
+          "commit",
+          "current"
+        ],
+        "properties": {
+          "commit": {
+            "type": "string"
+          },
+          "current": {
+            "type": "boolean",
+            "description": "True only for the local branch used by an omitted/blank `fromRef`."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/WorkspaceRefKind"
+          },
+          "name": {
+            "type": "string"
+          },
+          "reference": {
+            "type": "string"
+          }
+        }
+      },
+      "WorkspaceRefKind": {
+        "type": "string",
+        "description": "The Git namespace a discoverable workspace base belongs to.",
+        "enum": [
+          "local_branch",
+          "remote_branch",
+          "tag"
+        ]
+      },
+      "WorkspaceRefsResponse": {
+        "type": "object",
+        "description": "Discoverable named bases for the current workspace's owning project.",
+        "required": [
+          "defaultRef",
+          "defaultCommit",
+          "refs"
+        ],
+        "properties": {
+          "defaultCommit": {
+            "type": "string"
+          },
+          "defaultRef": {
+            "type": "string",
+            "description": "Stable value recorded by create when `fromRef` is omitted or blank:\nthe primary checkout's current branch, or its exact detached commit."
+          },
+          "refs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceRefInfo"
+            }
+          }
+        }
+      },
+      "WorkspaceRemoveRequest": {
+        "type": "object",
+        "properties": {
+          "confirm": {
+            "type": "boolean",
+            "description": "Required acknowledgement that the checkout directory will be removed."
+          },
+          "deleteBranch": {
+            "type": "boolean",
+            "description": "Delete the worktree branch after removal. Git's safe `-d` check still\nrefuses an unmerged branch."
+          },
+          "discardChanges": {
+            "type": "boolean",
+            "description": "Permit removal when tracked or untracked changes exist."
+          }
+        }
+      },
+      "WorkspaceResetRequest": {
+        "type": "object",
+        "properties": {
+          "confirm": {
+            "type": "boolean",
+            "description": "Required acknowledgement that commits on the worktree branch may be\nmoved back to its base ref."
+          },
+          "discardChanges": {
+            "type": "boolean",
+            "description": "Permit discarding tracked working-tree modifications."
+          },
+          "removeUntracked": {
+            "type": "boolean",
+            "description": "Permit deleting untracked (but never ignored) files."
+          },
+          "toRef": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Override the workspace's recorded base ref for this reset."
+          }
+        }
+      },
+      "WorkspaceResolveRefRequest": {
+        "type": "object",
+        "description": "Resolve an arbitrary Git ref to the commit a workspace would start from.\nMissing and blank values deliberately use create's default-base behavior.",
+        "properties": {
+          "reference": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "WorkspaceResolveRefResponse": {
+        "type": "object",
+        "required": [
+          "reference",
+          "commit"
+        ],
+        "properties": {
+          "commit": {
+            "type": "string"
+          },
+          "reference": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

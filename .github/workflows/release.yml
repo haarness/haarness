@@ -1,0 +1,52 @@
+name: release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v-prefixed tag to package
+        required: true
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, target: aarch64-apple-darwin, output: haarness }
+          - { os: macos-13, target: x86_64-apple-darwin, output: haarness }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, output: haarness }
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, output: haarness }
+          - { os: windows-11-arm, target: aarch64-pc-windows-msvc, output: haarness.exe }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, output: haarness.exe }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ inputs.tag }}" }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { toolchain: 1.94.0, targets: "${{ matrix.target }}" }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - run: cargo build --release -p haarness-cli --target ${{ matrix.target }}
+      - shell: bash
+        run: |
+          cp "target/${{ matrix.target }}/release/${{ matrix.output }}" "haarness-${{ matrix.target }}${{ runner.os == 'Windows' && '.exe' || '' }}"
+          shasum -a 256 "haarness-${{ matrix.target }}${{ runner.os == 'Windows' && '.exe' || '' }}" > SHA256SUM
+      - uses: actions/upload-artifact@v4
+        with:
+          name: haarness-${{ matrix.target }}
+          path: |
+            haarness-${{ matrix.target }}*
+            SHA256SUM
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions: { contents: write, id-token: write }
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts }
+      - run: find artifacts -type f -name 'haarness-*' -exec sha256sum {} \; | sed 's#  artifacts/[^/]*/#  #' > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: |
+            artifacts/**/haarness-*
+            SHA256SUMS

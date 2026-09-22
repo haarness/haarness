@@ -1,0 +1,578 @@
+/* Side-panel surfaces: file explorer, diff review and the editor. */
+.explorer,
+.review {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* One toolbar row per panel; the dock tab already names the panel. */
+.panel-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  padding: var(--s1) var(--s2);
+  min-height: 36px;
+  border-bottom: 1px solid var(--hairline);
+  flex: none;
+  flex-wrap: wrap;
+}
+.panel-search {
+  flex: 1;
+  min-width: 90px;
+  min-height: var(--control-sm);
+  background: var(--surface);
+  border-color: transparent;
+  font-size: var(--ui-sm);
+}
+.panel-search:focus {
+  background: var(--page);
+}
+.panel-loading {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s2);
+  color: var(--muted);
+  font-size: var(--ui);
+  min-height: 120px;
+}
+.spinner {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--muted) 30%, transparent);
+  border-top-color: var(--primary);
+  animation: spin 700ms linear infinite;
+  flex: none;
+}
+
+.file-workspace {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  min-width: 0;
+}
+.file-tree {
+  width: 220px;
+  flex: none;
+  border-inline-end: 1px solid var(--hairline);
+  padding: var(--s1);
+  overflow: auto;
+}
+.file-entry {
+  display: flex;
+  justify-content: flex-start;
+  width: 100%;
+  text-align: start;
+  border: 0;
+  border-radius: var(--r-sm);
+  min-height: 28px;
+  padding: 0 var(--s1);
+  font-size: var(--ui-sm);
+  color: var(--muted);
+  gap: var(--s1);
+}
+.file-entry:hover {
+  background: var(--hover);
+  border-color: transparent;
+  color: var(--text);
+}
+.file-entry > span:first-of-type {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.file-entry svg {
+  flex: none;
+  opacity: 0.8;
+}
+.file-entry.selected {
+  background: var(--selected);
+  color: var(--text);
+}
+.tree-children {
+  padding-inline-start: var(--s2);
+  border-inline-start: 1px solid var(--hairline);
+  margin-inline-start: var(--s3);
+}
+.diff-all {
+  padding: var(--s1) var(--s1) var(--s2);
+  font-size: var(--ui-xs);
+}
+.diff-totals {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  font-size: var(--ui-sm);
+  font-variant-numeric: tabular-nums;
+  font-family: var(--mono);
+}
+
+.file-preview {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.file-toolbar {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: var(--s0);
+  border-bottom: 1px solid var(--hairline);
+  padding: 0 var(--s1);
+  flex: none;
+}
+.file-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 var(--s1);
+  min-height: 34px;
+  min-width: 0;
+  flex: 1;
+  overflow-x: auto;
+}
+.file-tabs > div {
+  display: flex;
+  align-items: center;
+  height: 26px;
+  flex: 0 0 auto;
+  min-width: 44px;
+  border-radius: var(--r-sm);
+  padding-inline-end: 2px;
+  max-width: 180px;
+}
+.file-tabs > div:hover {
+  background: var(--hover);
+}
+/* Only the file-name button takes the tab padding and the block display the
+   ellipsis needs; the close control keeps `.icon-button`'s centred hit area. */
+.file-tabs > div > button:first-child {
+  border: 0;
+  min-height: 0;
+  height: 26px;
+  min-width: 0;
+  font-size: var(--ui-sm);
+  color: var(--muted);
+  padding: 0 var(--s2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: start;
+  display: block;
+  line-height: 26px;
+}
+.file-tabs .active {
+  background: var(--selected);
+}
+.file-tabs .active > button:first-child {
+  color: var(--text);
+}
+.file-tabs .icon-button {
+  width: 20px;
+  height: 20px;
+}
+.file-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+.file-actions .icon-button {
+  width: 24px;
+  height: 24px;
+}
+.save-file {
+  min-height: var(--control-sm);
+  padding: 0 var(--s3);
+  font-size: var(--ui-sm);
+  margin-inline-start: var(--s1);
+}
+.editor {
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+.config-code {
+  height: 320px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  display: flex;
+  margin-top: var(--s3);
+  overflow: hidden;
+}
+.media-preview {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: var(--s6);
+}
+.media-preview img,
+.media-preview video {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--r-md);
+}
+
+/* -------------------------------------------------------------------- diff */
+.diff-content {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+}
+.diff-file {
+  margin-bottom: var(--s5);
+}
+.diff-file > header {
+  display: flex;
+  gap: var(--s2);
+  align-items: center;
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  z-index: 2;
+  padding: var(--s2) var(--s3);
+  font-size: var(--ui-sm);
+  border-bottom: 1px solid var(--hairline);
+}
+.diff-file > header strong {
+  font-family: var(--mono);
+  font-weight: 500;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.diff-file > header label {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  color: var(--muted);
+  font-size: var(--ui-xs);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.diff-file > header .icon-button {
+  width: 22px;
+  height: 22px;
+}
+.diff-lines,
+.diff-split {
+  font: var(--ui-sm) / 1.65 var(--mono);
+  overflow-x: auto;
+}
+.diff-line {
+  display: flex;
+  min-width: max-content;
+  min-height: 19px;
+}
+.diff-line code {
+  flex: 1;
+  white-space: pre;
+  padding-inline-end: var(--s3);
+}
+.diff-line > button,
+.diff-cell > button {
+  border: 0;
+  padding: 0;
+  min-height: 0;
+  width: 16px;
+  border-radius: 0;
+  font-size: var(--ui-sm);
+  color: transparent;
+  flex: none;
+  background: transparent;
+}
+.diff-line:hover > button,
+.diff-cell:hover > button,
+.diff-line > button:focus-visible,
+.diff-cell > button:focus-visible,
+.diff-line > button[aria-expanded="true"],
+.diff-cell > button[aria-expanded="true"] {
+  color: var(--primary);
+  background: var(--hover);
+}
+.line-number {
+  width: 40px;
+  padding: 0 var(--s2);
+  text-align: end;
+  user-select: none;
+  color: var(--muted);
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.diff-line.add,
+.diff-cell.add {
+  background: var(--diff-add);
+}
+.diff-line.remove,
+.diff-cell.remove {
+  background: var(--diff-remove);
+}
+.diff-line.hunk,
+.diff-hunk {
+  background: var(--surface);
+  color: var(--muted);
+  padding: var(--s1) var(--s3);
+  font-size: var(--ui-xs);
+  letter-spacing: 0.02em;
+}
+.split-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  min-height: 19px;
+}
+.diff-cell {
+  display: flex;
+  min-width: 0;
+  border-inline-end: 1px solid var(--hairline);
+}
+.diff-cell code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-width: 0;
+  padding-inline-end: var(--s2);
+}
+.diff-cell.blank {
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent,
+    transparent 5px,
+    var(--hover) 5px,
+    var(--hover) 6px
+  );
+}
+.word-change {
+  background: var(--word-change);
+  border-radius: 2px;
+}
+.diff-comment-row {
+  position: sticky;
+  inset-inline-start: 0;
+  padding: var(--s2) var(--s3) var(--s3);
+}
+.diff-comment-row.split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+.diff-comment-row.split > [data-side="updated"] {
+  grid-column: 2;
+}
+.diff-comment {
+  min-width: 0;
+  border: 1px solid var(--primary-edge);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  padding: var(--s3);
+  font: var(--ui-sm) / var(--lh-ui) var(--sans);
+}
+.diff-comment label {
+  display: block;
+  min-width: 0;
+}
+.diff-comment-label {
+  display: block;
+  margin-bottom: var(--s2);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.diff-comment textarea {
+  display: block;
+  width: 100%;
+  min-height: 76px;
+}
+.diff-comment footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-top: var(--s2);
+}
+.diff-comment-hint {
+  flex: 1;
+  min-width: 120px;
+  color: var(--muted);
+  font-size: var(--ui-xs);
+}
+.diff-comment-row.split .diff-comment-hint {
+  flex-basis: 100%;
+}
+
+.command-output {
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  padding: var(--s3);
+  margin: var(--s5) 0;
+  font-size: var(--ui);
+  background: var(--surface);
+}
+.command-output summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+}
+.command-output pre {
+  max-height: 300px;
+  overflow: auto;
+  margin-top: var(--s2);
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  text-align: center;
+  padding: var(--s7) var(--s5);
+  min-height: 180px;
+  gap: var(--s1);
+}
+.empty h2 {
+  font-size: var(--title-sm);
+  font-weight: 600;
+}
+.empty p {
+  max-width: 380px;
+  color: var(--muted);
+  font-size: var(--ui);
+  margin: 0;
+}
+.empty button {
+  margin-top: var(--s3);
+}
+.fatal {
+  padding: var(--s9);
+  max-width: 640px;
+}
+.fatal pre {
+  margin: var(--s4) 0;
+  color: var(--danger);
+}
+.fatal button {
+  margin-block: var(--s3) 0;
+  margin-inline: 0 var(--s2);
+}
+
+@container (max-width: 460px) {
+  .explorer .file-workspace {
+    flex-direction: column;
+  }
+  .explorer .file-workspace > .file-tree {
+    width: 100%;
+    max-height: 170px;
+    border-inline-end: 0;
+    border-bottom: 1px solid var(--hairline);
+  }
+  .explorer .file-preview {
+    min-height: 220px;
+  }
+}
+.side-panel .file-tree {
+  width: 170px;
+}
+.side-panel .review .file-workspace {
+  flex-direction: column;
+}
+.side-panel .review .file-tree {
+  width: 100%;
+  flex: none;
+  max-height: 170px;
+  padding: var(--s1);
+  border-inline-end: 0;
+  border-bottom: 1px solid var(--hairline);
+}
+.side-panel .diff-content {
+  flex: 1;
+  min-height: 0;
+}
+
+.entry-symlink {
+  display: inline-flex;
+  color: var(--muted);
+  flex: none;
+}
+
+/* Both file and line lists share measured rows. Only the review pane scrolls
+   vertically; split cells retain wrapping and inline comments are measured. */
+.review-rows {
+  position: relative;
+  width: 100%;
+  overflow-anchor: none;
+}
+.review-row {
+  position: absolute;
+  top: 0;
+  inset-inline-start: 0;
+  width: 100%;
+  display: flow-root;
+}
+.review .diff-content {
+  overflow-anchor: none;
+}
+.review .review-tree {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.review-file-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overflow-anchor: none;
+}
+/* Its text sits on the same rail as the checkbox above and the file rows
+   below, and it keeps the compact scale the rest of the panel chrome uses. */
+.review-filter {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--control-sm);
+  padding-inline: var(--s1);
+  font-size: var(--ui-sm);
+  margin-bottom: var(--s2);
+}
+.review .file-entry {
+  height: 28px;
+}
+/* The added/removed counts are a trailing column, so they never shrink and
+   never reflow as the digits change. */
+.review .file-entry > .added,
+.review .file-entry > .removed {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.review .diff-file {
+  position: relative;
+}
+.review .diff-lines,
+.review .diff-split {
+  overflow-x: clip;
+}
+.review .diff-line code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.review .diff-line {
+  min-width: 0;
+}
+
+.side-panel .review .review-tree {
+  height: 170px;
+}
+.review-tree > .diff-all,
+.review-tree > .review-filter {
+  flex-shrink: 0;
+}

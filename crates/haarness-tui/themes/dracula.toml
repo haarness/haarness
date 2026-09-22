@@ -1,0 +1,49 @@
+name = "dracula"
+
+[dark]
+bg = "#282a36"
+surface = "#21222c"
+selected = "#44475a"
+text = "#f8f8f2"
+muted = "#6272a4"
+primary = "#bd93f9"
+accent = "#8be9fd"
+user = "#d8c0f6"
+danger = "#ff5555"
+
+[dark.syntax]
+keyword = "#ff79c6"
+string = "#f1fa8c"
+comment = "#6272a4"
+constant = "#bd93f9"
+function = "#50fa7b"
+
+[dark.diff]
+added = "#50fa7b"
+added_bg = "#1a3a1a"
+removed = "#ff5555"
+removed_bg = "#3a1a1a"
+
+[light]
+bg = "#f8f8f2"
+surface = "#e8e8e2"
+selected = "#d8d8d2"
+text = "#282a36"
+muted = "#6272a4"
+primary = "#bd93f9"
+accent = "#8be9fd"
+user = "#7a64a1"
+danger = "#ff5555"
+
+[light.syntax]
+keyword = "#ff79c6"
+string = "#f1fa8c"
+comment = "#6272a4"
+constant = "#bd93f9"
+function = "#50fa7b"
+
+[light.diff]
+added = "#50fa7b"
+added_bg = "#e0ffe0"
+removed = "#ff5555"
+removed_bg = "#ffe0e0"

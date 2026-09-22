@@ -1,0 +1,162 @@
+.browser-panel {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  background: var(--page);
+}
+.browser-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--s0);
+  min-height: 36px;
+  padding: var(--s0) var(--s1);
+  border-bottom: 1px solid var(--hairline);
+  overflow: auto;
+}
+/* 28px rows in a 36px strip: the same chrome height as the panel tabs above.
+ *
+ * Tabs follow the browser convention: each one takes an equal share of the
+ * strip, never grows past a comfortable reading width, and compresses as more
+ * open. Sizing from `flex-basis: 0` rather than the content is what makes the
+ * title truncate instead of pushing the strip sideways; the strip only starts
+ * scrolling once every tab has hit its minimum.
+ */
+.browser-tab {
+  display: flex;
+  align-items: center;
+  gap: var(--s0);
+  height: 28px;
+  flex: 1 1 0;
+  min-width: 72px;
+  max-width: 200px;
+  padding-inline-end: var(--s0);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  overflow: hidden;
+}
+.browser-tab.active {
+  background: var(--hover);
+  box-shadow: inset 0 -2px var(--accent);
+}
+.browser-tab button {
+  border: 0;
+  min-height: 0;
+  height: 28px;
+  background: transparent;
+  color: inherit;
+  padding: var(--s1);
+  cursor: pointer;
+}
+.browser-tab button:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: start;
+  font-size: var(--ui);
+}
+/* The throbber holds a fixed slot, so a long title truncates around it rather
+   than shunting it out of the tab. */
+.browser-tab-busy {
+  flex: none;
+  margin-inline-start: var(--s1);
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  line-height: 1;
+}
+/* Closing stays reachable at any width: the button keeps its box while the
+   title gives up space. */
+.browser-tab button:last-child {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: var(--r-xs);
+  color: var(--muted);
+  line-height: 1;
+}
+.browser-tab button:last-child:hover {
+  background: var(--selected);
+  color: var(--text);
+}
+.browser-new {
+  flex: none;
+  min-height: 0;
+  height: 28px;
+  font-size: var(--title-sm);
+  line-height: 1;
+}
+.browser-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--s0);
+  padding: var(--s2);
+  border-bottom: 1px solid var(--hairline);
+}
+.browser-toolbar input {
+  min-width: 70px;
+  flex: 1;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  padding: var(--s1) var(--s2);
+  background: var(--surface);
+  color: inherit;
+  font-size: var(--ui);
+}
+.browser-toolbar button,
+.browser-new,
+.browser-error button {
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: var(--s0) var(--s2);
+}
+.browser-toolbar button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.browser-viewport {
+  flex: 1;
+  min-height: 80px;
+  position: relative;
+}
+/* The viewport is as tall as the panel, so the placeholder centres in it
+   rather than hanging off the address bar. */
+.browser-empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--s7) var(--s6);
+  line-height: 1.6;
+  text-align: center;
+  color: var(--muted);
+}
+.browser-empty > * {
+  max-width: 44ch;
+}
+.browser-empty strong {
+  font-size: var(--title-sm);
+  color: var(--text);
+}
+.browser-error {
+  padding: var(--s2) var(--s3);
+  color: var(--danger);
+  font-size: var(--ui);
+  max-height: 100px;
+  overflow: auto;
+  border-bottom: 1px solid var(--hairline);
+}
+.browser-status {
+  font-size: var(--ui-xs);
+  color: var(--muted);
+  padding: var(--s1) var(--s2);
+  border-top: 1px solid var(--hairline);
+}

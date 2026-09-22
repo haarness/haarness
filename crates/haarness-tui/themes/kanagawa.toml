@@ -1,0 +1,49 @@
+name = "kanagawa"
+
+[dark]
+bg = "#1F1F28"
+surface = "#2A2A37"
+selected = "#363646"
+text = "#DCD7BA"
+muted = "#727169"
+primary = "#7E9CD8"
+accent = "#D27E99"
+user = "#a8b7ca"
+danger = "#E82424"
+
+[dark.syntax]
+keyword = "#957FB8"
+string = "#98BB6C"
+comment = "#727169"
+constant = "#D7A657"
+function = "#7E9CD8"
+
+[dark.diff]
+added = "#98BB6C"
+added_bg = "#252E25"
+removed = "#E82424"
+removed_bg = "#362020"
+
+[light]
+bg = "#F2E9DE"
+surface = "#EAE4D7"
+selected = "#E3DCD2"
+text = "#54433A"
+muted = "#9E9389"
+primary = "#2D4F67"
+accent = "#D27E99"
+user = "#3f4a53"
+danger = "#E82424"
+
+[light.syntax]
+keyword = "#957FB8"
+string = "#98BB6C"
+comment = "#9E9389"
+constant = "#D7A657"
+function = "#2D4F67"
+
+[light.diff]
+added = "#98BB6C"
+added_bg = "#EAF3E4"
+removed = "#E82424"
+removed_bg = "#FBE6E6"

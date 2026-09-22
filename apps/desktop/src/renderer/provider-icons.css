@@ -1,0 +1,42 @@
+.provider-icon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  vertical-align: -0.15em;
+}
+.provider-icon[data-size="xs"] {
+  width: 12px;
+  height: 12px;
+}
+.provider-icon[data-size="sm"] {
+  width: 14px;
+  height: 14px;
+}
+.provider-icon[data-size="lg"] {
+  width: 18px;
+  height: 18px;
+}
+.provider-icon[data-size="xl"] {
+  width: 22px;
+  height: 22px;
+}
+.provider-icon-mask {
+  width: 100%;
+  height: 100%;
+  background: currentColor;
+  mask-size: contain;
+  mask-position: center;
+  mask-repeat: no-repeat;
+}
+.provider-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+  vertical-align: middle;
+}
+.provider-label > span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}

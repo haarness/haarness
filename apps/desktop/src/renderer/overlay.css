@@ -1,0 +1,1430 @@
+/* Everything that floats above the workbench: menus, dialogs, the command
+   palette, settings and transient notifications. */
+.popover {
+  background: var(--raised);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-1);
+  animation: fade-up var(--fast) var(--ease);
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, var(--scrim) 78%, transparent);
+  backdrop-filter: blur(6px);
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--s7);
+  animation: fade-in var(--fast) var(--ease);
+}
+.palette-backdrop {
+  align-items: flex-start;
+  padding-top: 12vh;
+}
+
+/* ------------------------------------------------------------------ dialog */
+.dialog {
+  background: var(--raised);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-xl);
+  color: var(--text);
+  width: 520px;
+  max-width: 90vw;
+  max-height: 85vh;
+  overflow: auto;
+  padding: var(--s5);
+  box-shadow: var(--shadow-2);
+}
+/* A modal centres itself. Pane rules that style ordinary content must not be
+   able to pull one off-centre by matching it as a child — which is what
+   `.settings-content > :first-child` did to any dialog opened from Settings. */
+.dialog:modal {
+  margin: auto;
+}
+.dialog::backdrop {
+  background: color-mix(in srgb, var(--scrim) 72%, transparent);
+  backdrop-filter: blur(4px);
+}
+.dialog header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s3);
+  margin-bottom: var(--s2);
+}
+.dialog header h2 {
+  font-size: var(--title);
+}
+.dialog form > p {
+  font-size: var(--ui-lg);
+  line-height: 1.6;
+  color: var(--muted);
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  font-size: var(--ui);
+  margin: var(--s3) 0;
+}
+.field > span {
+  color: var(--muted);
+}
+.field textarea {
+  min-height: 96px;
+}
+.dialog footer {
+  display: flex;
+  gap: var(--s2);
+  justify-content: flex-end;
+  margin-top: var(--s5);
+}
+/* A disclosure is a control, so give it a target rather than a text line. */
+.dialog summary {
+  padding-block: var(--s0);
+}
+
+.mcp-dialog {
+  width: min(740px, calc(100vw - 32px));
+}
+/* One header rhythm for every dialog that carries a title over a subtitle,
+   whether its header sits inside the form or directly in the dialog. */
+.mcp-dialog > form > header,
+.editor-dialog > form > header,
+.editor-dialog > header,
+.schedule-dialog > form > header {
+  margin-bottom: var(--s4);
+}
+.mcp-dialog > form > header p,
+.editor-dialog > form > header p,
+.editor-dialog > header p,
+.schedule-dialog > form > header p {
+  margin: var(--s1) 0 0;
+  font-size: var(--ui-sm);
+  line-height: 1.5;
+}
+.mcp-fields {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+.mcp-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s4);
+}
+.mcp-dialog .field {
+  min-width: 0;
+  margin: 0 0 var(--s4);
+}
+.mcp-dialog input {
+  min-width: 0;
+  width: 100%;
+}
+.mcp-transport {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s3);
+  margin-bottom: var(--s5);
+}
+.mcp-transport > button {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  text-align: start;
+  padding: var(--s3);
+  /* The card carries a label over a wrapped description, so it must not keep
+     the single-line button's nowrap. */
+  white-space: normal;
+}
+.mcp-transport > button > span {
+  min-width: 0;
+}
+.mcp-transport > button[aria-pressed="true"] {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 9%, transparent);
+}
+.mcp-transport small,
+.mcp-enabled small {
+  display: block;
+  font-size: var(--ui-sm);
+  color: var(--muted);
+  margin-top: var(--s1);
+}
+.mcp-rows {
+  margin-bottom: var(--s5);
+}
+.mcp-dialog .mcp-rows > header {
+  margin-bottom: var(--s2);
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+.mcp-rows h3 {
+  margin: 0;
+  font-size: var(--ui);
+  font-weight: 550;
+}
+.mcp-rows header button:not(.icon-button) {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  font-size: var(--ui-sm);
+}
+.mcp-pair-row,
+.mcp-argument-row {
+  display: grid;
+  align-items: center;
+  gap: var(--s2);
+  margin-bottom: var(--s2);
+}
+.mcp-pair-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) var(--icon-button);
+}
+.mcp-argument-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) calc(
+      var(--icon-button) * 2 + var(--s1)
+    );
+}
+.mcp-row-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+}
+.mcp-row-labels {
+  color: var(--muted);
+  font-size: var(--ui-sm);
+}
+.mcp-empty,
+.mcp-hint {
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  margin: var(--s2) 0 0;
+}
+.mcp-oauth {
+  margin-bottom: var(--s4);
+}
+.mcp-oauth summary {
+  cursor: pointer;
+  margin-bottom: var(--s3);
+}
+.mcp-oauth summary > span {
+  font-size: var(--ui-sm);
+  margin-inline-start: var(--s2);
+}
+.mcp-enabled {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  cursor: pointer;
+}
+.mcp-enabled input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+@media (max-width: 600px) {
+  .mcp-columns,
+  .mcp-transport {
+    grid-template-columns: 1fr;
+    gap: var(--s2);
+  }
+  .mcp-dialog {
+    padding: var(--s4);
+  }
+  .mcp-pair-row,
+  .mcp-argument-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .mcp-pair-row input:nth-child(2),
+  .mcp-argument-row input:nth-child(2) {
+    grid-column: 1;
+    grid-row: 2;
+  }
+  .mcp-pair-row > button,
+  .mcp-row-actions {
+    grid-column: 2;
+    grid-row: 1 / 3;
+  }
+  .mcp-row-labels {
+    display: none;
+  }
+}
+
+/* ------------------------------------------------------------------ palette */
+.editor-dialog {
+  width: 720px;
+}
+.editor-dialog fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.editor-dialog .field {
+  min-width: 0;
+  margin: 0 0 var(--s4);
+}
+.editor-dialog input,
+.editor-dialog textarea {
+  min-width: 0;
+  width: 100%;
+}
+.editor-dialog .instruction-editor {
+  min-height: 190px;
+  resize: vertical;
+  line-height: 1.6;
+}
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 var(--s4);
+}
+.form-hint-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: calc(var(--s2) * -1) 0 var(--s4);
+}
+/* A hint pushes the action to the far end; a row of bare buttons stays a
+   group instead of being flung to opposite edges of the dialog. */
+.form-hint-row > small {
+  flex: 1;
+  min-width: 0;
+}
+.form-hint-row button {
+  flex-shrink: 0;
+}
+.form-advanced {
+  margin-top: var(--s3);
+}
+.form-advanced summary {
+  cursor: pointer;
+  margin-bottom: var(--s3);
+}
+.form-advanced summary span {
+  font-size: var(--ui-sm);
+  margin-inline-start: var(--s2);
+}
+.form-tool-row {
+  display: grid;
+  align-items: center;
+  grid-template-columns: minmax(0, 1fr) 130px var(--icon-button);
+  gap: var(--s2);
+  margin-bottom: var(--s2);
+}
+.form-list-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-bottom: var(--s2);
+}
+/* One way to report a failure, whichever dialog raised it. */
+.editor-dialog .form-error,
+.mcp-dialog .mcp-error {
+  color: var(--danger);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin-block-start: var(--s3);
+}
+/* The panel's own flex gap already spaces this one; it lacked only the colour
+   that marks it as a failure. */
+.management-panel > .form-error {
+  color: var(--danger);
+  overflow-wrap: anywhere;
+  margin: 0;
+}
+.workflow-argument-row {
+  display: grid;
+  align-items: center;
+  grid-template-columns: minmax(0, 1fr) 110px minmax(0, 1fr) var(
+      --icon-button
+    );
+  gap: var(--s2);
+  margin-bottom: var(--s2);
+}
+/* Keep an input's own description closer to it than the next input is. */
+.workflow-input {
+  margin-bottom: var(--s3);
+}
+.workflow-input > .workflow-argument-row {
+  margin-bottom: 0;
+}
+.workflow-input > small:not(:empty) {
+  margin-block-start: var(--s0);
+}
+.form-arguments {
+  margin-bottom: var(--s4);
+}
+.form-arguments > h3 {
+  margin: 0 0 var(--s2);
+  font-size: var(--ui);
+  font-weight: 550;
+}
+.workflow-argument-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--primary);
+}
+@media (max-width: 600px) {
+  .editor-dialog {
+    padding: var(--s4);
+  }
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+  .form-hint-row {
+    flex-wrap: wrap;
+  }
+  .workflow-argument-row {
+    grid-template-columns: minmax(0, 1fr) 110px;
+  }
+  .form-tool-row {
+    grid-template-columns: minmax(0, 1fr) 100px var(--icon-button);
+  }
+}
+
+.palette {
+  width: 560px;
+  max-width: 92vw;
+  background: var(--raised);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+  max-height: 62vh;
+  display: flex;
+  flex-direction: column;
+  animation: fade-up var(--fast) var(--ease);
+}
+.palette-field {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 0 var(--s4);
+  border-bottom: 1px solid var(--hairline);
+  flex: none;
+  color: var(--muted);
+}
+.palette-field input {
+  flex: 1;
+  min-height: 48px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font-size: var(--ui-lg);
+}
+.palette-field input:focus {
+  box-shadow: none;
+}
+.palette-field kbd {
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-xs);
+  padding: 1px var(--s1);
+}
+.palette-results {
+  /* The row's inline inset, its icon column and the gap after it. Every rule
+     that has to line up with the label column derives from these three, so a
+     change here moves the group headings and the rows together. The icon sits
+     closer to its own label than the row does to the panel edge, so it reads
+     as part of the row instead of as its own column. */
+  --palette-gutter: var(--s3);
+  --palette-icon: 14px;
+  --palette-icon-gap: var(--s2);
+  overflow: auto;
+  padding: var(--s1);
+  display: flex;
+  flex-direction: column;
+  /* A row's own two lines must sit closer together than two rows do, or the
+     detail line reads as a caption for the row below it. */
+  gap: var(--s0);
+}
+.palette-group {
+  font-size: var(--ui-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--track-caps);
+  font-weight: 600;
+  color: var(--muted);
+  /* Align the caps heading with the row labels, not the icon column:
+     row padding + the sm icon + the row gap. */
+  padding-block: var(--s4) var(--s1);
+  padding-inline:
+    calc(var(--palette-gutter) + var(--palette-icon) + var(--palette-icon-gap))
+    var(--s2);
+}
+.palette-results > .palette-group:first-child {
+  padding-block-start: var(--s2);
+}
+.palette-results > button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: var(--palette-icon-gap);
+  justify-content: flex-start;
+  border: 0;
+  font-size: var(--ui-lg);
+  min-height: 34px;
+  padding-inline: var(--palette-gutter);
+  border-radius: var(--r-md);
+  color: var(--text);
+}
+/* A fixed column for the leading glyph, so a brand mask and a stroked icon
+   start their labels at the same place. */
+.palette-results > button > svg,
+.palette-results > button > .provider-icon {
+  color: var(--muted);
+  flex: 0 0 var(--palette-icon);
+  justify-content: center;
+}
+/* Only the label may take the leftover width. Matching every child span here
+   also stretched the provider icon, which pushed its label out of column. */
+.palette-results > button > .palette-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: start;
+}
+.palette-results > button[aria-selected="true"] {
+  background: var(--selected);
+}
+.palette-results > button[aria-selected="true"] > svg,
+.palette-results > button[aria-selected="true"] > .provider-icon {
+  color: var(--primary);
+}
+.palette-empty {
+  color: var(--muted);
+  font-size: var(--ui);
+  padding: var(--s4) var(--s2);
+  margin: 0;
+}
+
+/* ----------------------------------------------------------- notifications */
+.notifications {
+  position: fixed;
+  inset-inline-end: var(--s4);
+  bottom: var(--s4);
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--s2);
+  max-width: min(400px, calc(100vw - var(--s7)));
+  pointer-events: none;
+}
+.notifications > * {
+  pointer-events: auto;
+}
+.toast {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  background: var(--raised);
+  color: var(--text);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  padding: var(--s2) var(--s3);
+  font-size: var(--ui);
+  box-shadow: var(--shadow-1);
+  animation: fade-up var(--fast) var(--ease);
+}
+.toast svg {
+  color: var(--green);
+  flex: none;
+}
+.error-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+  background: var(--raised);
+  border: 1px solid var(--danger-edge);
+  border-inline-start: 2px solid var(--danger);
+  border-radius: var(--r-md);
+  padding: var(--s2);
+  /* The extra breathing room belongs beside the accent rule, which moves in RTL. */
+  padding-inline-start: var(--s3);
+  font-size: var(--ui);
+  box-shadow: var(--shadow-1);
+  animation: fade-up var(--fast) var(--ease);
+}
+.error-banner > svg {
+  color: var(--danger);
+  flex: none;
+  margin-top: 2px;
+}
+.error-banner > span {
+  flex: 1;
+  max-height: 140px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ----------------------------------------------------------------- settings */
+.settings {
+  width: min(1040px, 100%);
+  height: min(760px, 100%);
+  display: flex;
+  background: var(--page);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+  animation: fade-up var(--slow) var(--ease);
+}
+.settings > aside {
+  width: 196px;
+  flex: none;
+  padding: var(--s5) var(--s2) var(--s3);
+  overflow: auto;
+  background: var(--sidebar);
+  border-inline-end: 1px solid var(--hairline);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0);
+}
+.settings > aside > h2 {
+  font-size: var(--title-lg);
+  padding: 0 var(--s2);
+  margin-bottom: var(--s4);
+}
+.settings-filter {
+  margin: 0 var(--s1) var(--s3);
+  min-height: var(--control-sm);
+  font-size: var(--ui-sm);
+  background: var(--page);
+  border-color: transparent;
+}
+.settings > aside.settings-searching {
+  overflow: hidden;
+}
+.settings-searching > :is(h2, .settings-filter, .small) {
+  flex-shrink: 0;
+}
+.settings-search-results {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--s0);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.settings-search-results button {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+  padding: var(--s2);
+  border: 0;
+  border-radius: var(--r-sm);
+  text-align: start;
+  line-height: 1.4;
+}
+.settings-search-results button > :is(span, small) {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-search-results small {
+  color: var(--muted);
+  font-size: var(--ui-xs);
+}
+.settings-search-results > p {
+  padding: var(--s2);
+  font-size: var(--ui);
+}
+.settings-group {
+  margin-bottom: var(--s3);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.settings-group .section-label {
+  font-size: var(--ui-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--track-caps);
+  font-weight: 600;
+  color: var(--muted);
+  padding: 0 var(--s2) var(--s1);
+  display: block;
+}
+.settings-group button {
+  display: flex;
+  width: 100%;
+  justify-content: flex-start;
+  border: 0;
+  font-size: var(--ui);
+  min-height: 28px;
+  padding: 0 var(--s2);
+  color: var(--muted);
+  border-radius: var(--r-sm);
+}
+.settings-group button:hover {
+  background: var(--hover);
+  border-color: transparent;
+  color: var(--text);
+}
+.settings-group button.active {
+  background: var(--selected);
+  color: var(--text);
+  font-weight: 500;
+}
+.settings > aside > .small {
+  margin-top: auto;
+  padding: var(--s3) var(--s2) 0;
+  font-size: var(--ui-xs);
+  color: var(--muted);
+}
+.settings-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.settings-main > header {
+  padding: var(--s5) var(--s6) var(--s4);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  border-bottom: 1px solid var(--hairline);
+  flex: none;
+}
+.settings-main > header h1 {
+  font-size: var(--title);
+}
+/* One consistent gap under the header, whatever a pane opens with: a bare
+   button, a row, or a paragraph that carries its own margin. */
+.settings-content {
+  padding: var(--s4) var(--s6) var(--s8);
+  overflow: auto;
+  flex: 1;
+}
+.settings-content > :first-child:not(dialog) {
+  margin-block-start: 0;
+}
+.settings-content > p {
+  font-size: var(--ui);
+  color: var(--muted);
+  margin: var(--s4) 0;
+  max-width: 620px;
+  line-height: 1.6;
+}
+.settings-content > .toolbar {
+  margin: var(--s4) 0;
+}
+.settings-current-project {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s3);
+  margin: var(--s4) 0 var(--s5);
+  padding: var(--s4);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  background: var(--sidebar);
+}
+.settings-current-project-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--r-md);
+  background: var(--hover);
+  color: var(--primary);
+}
+.settings-current-project-details {
+  flex: 1;
+  min-width: 0;
+}
+.settings-current-project-details > h3 {
+  margin: var(--s0) 0;
+  overflow-wrap: anywhere;
+}
+.settings-current-project-path {
+  margin: 0 0 var(--s1);
+  font-size: var(--ui);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.settings-current-project > button {
+  flex: none;
+}
+.setting-row {
+  display: flex;
+  align-items: center;
+  /* Controls in the same row belong together; the distance to the label is
+     restored on the label block below, so a pair of buttons reads as a pair. */
+  gap: var(--s2);
+  padding: var(--s4) 0;
+  border-bottom: 1px solid var(--hairline);
+}
+.setting-row > div:first-child {
+  flex: 1;
+  min-width: 0;
+  margin-inline-end: var(--s2);
+}
+.setting-row strong {
+  font-size: var(--ui-lg);
+  font-weight: 500;
+}
+.setting-row p {
+  font-size: var(--ui);
+  color: var(--muted);
+  max-width: 420px;
+  margin: 2px 0 0;
+  line-height: 1.5;
+  white-space: pre-line;
+}
+/* A row that reports a failure says so in the failure colour, not in the
+   muted tone its own description uses. */
+.setting-row p[role="alert"] {
+  color: var(--danger);
+}
+.setting-row p.clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+.setting-row-more {
+  margin-top: var(--s1);
+  padding: 0;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+  color: var(--primary);
+  font-size: var(--ui-sm);
+}
+.setting-row-more:hover:not(:disabled) {
+  background: transparent;
+  text-decoration: underline;
+}
+.setting-row button,
+.setting-row .select-trigger,
+.setting-row input:not([type="checkbox"]) {
+  font-size: var(--ui);
+}
+/* Give the controls one column rather than a ragged edge of hugged widths. */
+.setting-row .select-trigger {
+  min-width: 200px;
+  max-width: 340px;
+}
+.setting-row input:not([type="checkbox"]):not([type="range"]) {
+  max-width: 200px;
+}
+.setting-block {
+  border-bottom: 1px solid var(--hairline);
+  padding: var(--s5) 0;
+}
+.setting-block > header {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  justify-content: space-between;
+  margin-bottom: var(--s3);
+}
+/* Long provider, server and MCP names must give way to the row's actions
+   instead of pushing them out of the block. */
+.setting-block > header > div:first-child,
+.setting-block > header h3,
+.setting-block > header h2 {
+  flex: 1;
+  min-width: 0;
+}
+.setting-block > header h3,
+.setting-block > header h2 {
+  overflow-wrap: anywhere;
+}
+/* Actions placed straight into a block, without a toolbar to space them. */
+.setting-block > button + button {
+  margin-inline-start: var(--s2);
+}
+/* A block's actions stand the same distance from its text as its heading does. */
+.setting-block > .toolbar {
+  margin-block-start: var(--s3);
+}
+.setting-block p {
+  font-size: var(--ui);
+  color: var(--muted);
+}
+.setting-block pre {
+  font-size: var(--ui-sm);
+  max-height: 320px;
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  padding: var(--s2) var(--s3);
+  color: var(--muted);
+}
+.setting-block details {
+  margin-top: var(--s4);
+}
+.setting-block .toolbar button {
+  font-size: var(--ui-sm);
+  min-height: var(--control-sm);
+}
+.configuration-editor {
+  padding: var(--s5) 0;
+}
+.configuration-editor .toolbar {
+  margin-top: var(--s3);
+}
+.configuration-editor .toolbar > .path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--ui-xs);
+}
+.configuration-editor p {
+  font-size: var(--ui);
+  color: var(--muted);
+}
+.configuration-editor button,
+.configuration-editor .select-trigger {
+  font-size: var(--ui-sm);
+  min-height: var(--control-sm);
+}
+
+.theme-section {
+  padding: var(--s5) 0;
+  border-bottom: 1px solid var(--hairline);
+}
+.theme-section h3 {
+  font-size: var(--ui-lg);
+  font-weight: 500;
+}
+.theme-section p {
+  color: var(--muted);
+  font-size: var(--ui);
+  margin: 2px 0 var(--s4);
+}
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--s3);
+}
+.theme-option {
+  flex-direction: column;
+  align-items: stretch;
+  border: 1px solid transparent;
+  border-radius: var(--r-lg);
+  padding: var(--s1);
+  white-space: normal;
+  min-width: 0;
+  min-height: 0;
+  gap: var(--s1);
+  background: transparent;
+}
+.theme-option:hover {
+  background: var(--hover);
+  border-color: var(--hairline);
+}
+.theme-option[aria-pressed="true"] {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+.theme-preview {
+  display: flex;
+  height: 66px;
+  border: 1px solid;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+.theme-preview-sidebar {
+  width: 28%;
+  padding: var(--s3) var(--s0);
+  display: flex;
+  gap: var(--s1);
+  flex-direction: column;
+}
+.theme-preview-sidebar i {
+  height: 3px;
+  opacity: 0.45;
+  border-radius: 2px;
+}
+.theme-preview-chat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  padding: var(--s3) var(--s2) var(--s1);
+}
+.theme-preview-chat > i {
+  height: 3px;
+  width: 70%;
+  opacity: 0.65;
+  border-radius: 2px;
+}
+.theme-preview-chat > i:nth-child(2) {
+  width: 90%;
+}
+.theme-preview-chat > span {
+  display: flex;
+  margin-top: auto;
+  border-radius: var(--r-sm);
+  height: 18px;
+  align-items: flex-end;
+  padding: var(--s0);
+  justify-content: flex-end;
+}
+.theme-preview-chat b {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+.theme-option-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2px;
+  font-size: var(--ui-sm);
+  padding: 0 var(--s0) 2px;
+  text-align: start;
+  color: var(--text);
+}
+.theme-option-label svg {
+  color: var(--primary);
+  flex: none;
+}
+.about-mark {
+  font-size: 40px;
+  margin-top: var(--s6);
+}
+
+@media (max-width: 1100px) {
+  .theme-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .settings-content {
+    padding-inline-start: var(--s5);
+    padding-inline-end: var(--s5);
+  }
+}
+@media (max-width: 940px) {
+  .settings .theme-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .modal-backdrop {
+    padding: var(--s4);
+  }
+}
+
+/* Shared picker: small anchored surfaces, theme-aware and keyboard navigable. */
+.select-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  text-align: start;
+}
+.select-trigger > .select-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.select-trigger > svg {
+  flex: none;
+  opacity: 0.65;
+}
+.select-trigger[aria-expanded="true"] {
+  background: var(--hover);
+}
+.select-popover {
+  position: fixed;
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  max-height: min(420px, calc(100vh - 16px));
+  padding: var(--s1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  background: var(--raised);
+  box-shadow: var(--shadow-2);
+  color: var(--text);
+  font-size: var(--ui);
+}
+.select-popover .select-search {
+  flex: none;
+  margin: 2px 2px var(--s1);
+  width: calc(100% - 4px);
+  background: var(--page);
+  box-shadow: none;
+}
+.select-options {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  min-height: 0;
+  outline: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.select-option {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding-block: var(--s2);
+  padding-inline: var(--s2);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  min-height: 34px;
+}
+.select-option > .select-label {
+  flex: 1;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.select-option.highlighted {
+  background: var(--selected);
+}
+.select-option[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: default;
+}
+.select-check {
+  color: var(--primary);
+  font-weight: 600;
+}
+.select-group {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding-block: var(--s4) var(--s1);
+  padding-inline: var(--s2);
+  color: var(--muted);
+  font-size: var(--ui-xs);
+  font-weight: 600;
+}
+.select-options > .select-group:first-child {
+  padding-block-start: var(--s1);
+}
+.select-empty {
+  padding-block: var(--s5);
+  padding-inline: var(--s2);
+  color: var(--muted);
+  text-align: center;
+}
+
+.select-popover.searchable {
+  height: min(420px, calc(100vh - 16px));
+}
+.select-popover.searchable .select-options {
+  flex: 1;
+}
+
+.project-popover {
+  position: fixed;
+  z-index: 2000;
+  width: min(340px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  display: flex;
+  flex-direction: column;
+  padding: var(--s1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  background: var(--raised);
+  box-shadow: var(--shadow-2);
+  color: var(--text);
+  font-size: var(--ui);
+}
+.project-picker-search {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s0) var(--s3);
+  color: var(--muted);
+  flex: none;
+}
+.project-picker-search input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: var(--s1) 0;
+  box-shadow: none;
+  outline: none;
+}
+.project-picker-search:focus-within {
+  color: var(--text);
+}
+.project-picker-list {
+  min-height: 40px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  /* Rows carry a name over a path; keep them further apart than those two
+     lines are, so each pair reads as one row. */
+  gap: var(--s0);
+}
+.project-picker-option,
+.project-picker-actions button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--s3);
+  width: 100%;
+  min-height: 40px;
+  padding-block: var(--s1);
+  padding-inline: var(--s2);
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--muted);
+  text-align: start;
+  cursor: pointer;
+}
+.project-picker-option.highlighted,
+.project-picker-actions button:hover {
+  background: var(--hover);
+}
+.project-picker-option > svg,
+.project-picker-actions svg {
+  flex: none;
+}
+.project-picker-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-picker-name {
+  line-height: var(--lh-ui);
+}
+.project-picker-name small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+  font-size: var(--ui-xs);
+  margin-block-start: 1px;
+}
+.project-picker-actions {
+  margin-block: var(--s1) 0;
+  margin-inline: var(--s2);
+  padding-block-start: var(--s1);
+  border-top: 1px solid var(--hairline);
+  flex: none;
+}
+.project-picker-actions button > svg:last-child:not(:first-child) {
+  margin-inline-start: auto;
+}
+.project-picker-empty {
+  color: var(--muted);
+  padding: var(--s3);
+}
+
+/* Universal search keeps destination context readable without exposing data. */
+.palette-results > button {
+  padding-block: var(--s1);
+}
+.palette-label {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  line-height: var(--lh-ui);
+}
+.palette-label > span,
+.palette-label > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.palette-label > small {
+  color: var(--muted);
+  font-size: var(--ui-sm);
+}
+.palette-results > button[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: default;
+}
+.palette-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s2) var(--s4);
+  border-top: 1px solid var(--hairline);
+  color: var(--muted);
+  font-size: var(--ui-sm);
+}
+.palette-count {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.palette-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  flex: none;
+}
+.palette-hint kbd {
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-xs);
+  min-width: 16px;
+  text-align: center;
+  padding: 0 3px;
+}
+/* The reveal marks a whole row, so the tint runs the full width of the page
+   rather than boxing the text in. Inline padding and an equal negative margin
+   cancel out, so the row's content box is untouched and nothing moves; every
+   wrapper a row can sit in (.setting-block, .browser-settings) has zero inline
+   padding, so the band lines up with the page gutter wherever it lands. */
+.setting-search-target {
+  background: var(--primary-soft);
+  padding-inline: var(--s6);
+  margin-inline: calc(var(--s6) * -1);
+}
+@media (max-width: 600px) {
+  .palette-footer > span {
+    display: none;
+  }
+}
+
+.approval-mode {
+  white-space: nowrap;
+}
+.approval-mode.enabled {
+  color: var(--accent);
+}
+
+/* Schedule editing uses compact controls instead of wire-format fields. */
+.schedule-card h3 {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  overflow-wrap: anywhere;
+}
+.schedule-card h3 > svg {
+  flex: none;
+}
+.schedule-dialog {
+  width: 640px;
+  padding: var(--s5);
+}
+.schedule-dialog fieldset {
+  padding: 0;
+  margin: 0;
+  border: 0;
+  min-width: 0;
+}
+/* A bottom-only margin keeps one gap whether fields stack in normal flow —
+   where margins collapse — or sit in the trigger grid, where they do not. */
+.schedule-dialog .field {
+  margin: 0 0 var(--s3);
+}
+.schedule-dialog textarea {
+  min-height: 82px;
+  max-height: 180px;
+}
+.schedule-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 var(--s3);
+}
+.schedule-interval {
+  display: grid;
+  grid-template-columns: 80px minmax(0, 1fr);
+  gap: var(--s2);
+  margin-block-end: var(--s3);
+}
+.schedule-interval > .field {
+  margin-block-end: 0;
+}
+.schedule-dialog input {
+  min-width: 0;
+  width: 100%;
+}
+.schedule-timezone {
+  margin: var(--s1) 0 var(--s2);
+}
+.schedule-enabled {
+  display: flex;
+  gap: var(--s2);
+  align-items: center;
+  margin-top: var(--s3);
+}
+.schedule-enabled input {
+  width: auto;
+  accent-color: var(--accent);
+}
+.schedule-enabled small {
+  display: block;
+}
+.schedule-dialog footer {
+  margin-top: var(--s3);
+}
+@media (max-width: 560px) {
+  .schedule-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.input-settings-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  max-width: 260px;
+}
+@media (max-width: 650px) {
+  /* Stacked, the controls need the row's full gap back, not the tighter one
+     that keeps side-by-side controls grouped. */
+  .input-settings-row {
+    align-items: stretch;
+    flex-direction: column;
+    gap: var(--s3);
+  }
+}
+
+/* Native modality supplies initial focus, background inertness and restoration. */
+ .settings-dialog {
+  width: min(1040px, calc(100vw - 32px));
+  height: min(760px, calc(100vh - 32px));
+  max-width: none;
+  max-height: none;
+  margin: auto;
+  padding: 0;
+  color: var(--text);
+}
+.settings-dialog:not([open]) { display: none; }
+.settings-dialog::backdrop {
+  background: color-mix(in srgb, var(--scrim) 78%, transparent);
+  backdrop-filter: blur(6px);
+}
+.dialog fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+
+/* The palette deliberately sits high, where the eye already is after the
+   shortcut, so it opts out of centring. */
+.palette-dialog:modal {
+  margin: 12vh auto auto;
+}
+.palette-dialog {
+  padding: 0;
+  color: var(--text);
+}
+.palette-dialog:not([open]) { display: none; }
+.palette-dialog::backdrop {
+  background: color-mix(in srgb, var(--scrim) 78%, transparent);
+  backdrop-filter: blur(6px);
+}

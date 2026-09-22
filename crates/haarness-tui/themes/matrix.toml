@@ -1,0 +1,49 @@
+name = "matrix"
+
+[dark]
+bg = "#0a0e0a"
+surface = "#0e130d"
+selected = "#141c12"
+text = "#62ff94"
+muted = "#8ca391"
+primary = "#2eff6a"
+accent = "#c770ff"
+user = "#45ff7d"
+danger = "#ff4b4b"
+
+[dark.syntax]
+keyword = "#c770ff"
+string = "#1cc24b"
+comment = "#8ca391"
+constant = "#ffa83d"
+function = "#30b3ff"
+
+[dark.diff]
+added = "#1cc24b"
+added_bg = "#132616"
+removed = "#ff4b4b"
+removed_bg = "#261212"
+
+[light]
+bg = "#eef3ea"
+surface = "#e4ebe1"
+selected = "#dae1d7"
+text = "#203022"
+muted = "#748476"
+primary = "#1cc24b"
+accent = "#c770ff"
+user = "#1e8039"
+danger = "#ff4b4b"
+
+[light.syntax]
+keyword = "#c770ff"
+string = "#1cc24b"
+comment = "#748476"
+constant = "#ffa83d"
+function = "#30b3ff"
+
+[light.diff]
+added = "#1cc24b"
+added_bg = "#e0efde"
+removed = "#ff4b4b"
+removed_bg = "#f9e5e5"

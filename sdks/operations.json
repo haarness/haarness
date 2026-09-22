@@ -1,0 +1,1364 @@
+[
+  {
+    "name": "manage_resource",
+    "method": "POST",
+    "path": "/v1/manage/{resource}",
+    "pathParams": [
+      "resource"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/ManagementView"
+    },
+    "body": {}
+  },
+  {
+    "name": "info",
+    "method": "GET",
+    "path": "/v1/info",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/ServerInfo"
+    }
+  },
+  {
+    "name": "analytics_stats",
+    "method": "GET",
+    "path": "/v1/stats",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/Report"
+    },
+    "query": {
+      "$ref": "#/components/schemas/AnalyticsQuery"
+    }
+  },
+  {
+    "name": "analytics_insights",
+    "method": "GET",
+    "path": "/v1/insights",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/AnalyticsDocument"
+    },
+    "query": {
+      "$ref": "#/components/schemas/AnalyticsQuery"
+    }
+  },
+  {
+    "name": "providers",
+    "method": "GET",
+    "path": "/v1/providers",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/ProviderInfo"
+      }
+    }
+  },
+  {
+    "name": "refresh_providers",
+    "method": "POST",
+    "path": "/v1/providers/refresh",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/ProviderInfo"
+      }
+    }
+  },
+  {
+    "name": "agents",
+    "method": "GET",
+    "path": "/v1/agents",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/AgentProfile"
+      }
+    }
+  },
+  {
+    "name": "commands",
+    "method": "GET",
+    "path": "/v1/commands",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/CommandInfo"
+      }
+    }
+  },
+  {
+    "name": "lsp_status",
+    "method": "GET",
+    "path": "/v1/lsp",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/LanguageStatus"
+      }
+    }
+  },
+  {
+    "name": "formatter_status",
+    "method": "GET",
+    "path": "/v1/formatter",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/FormatterStatus"
+      }
+    }
+  },
+  {
+    "name": "tool_catalog",
+    "method": "GET",
+    "path": "/v1/tools",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/ToolCatalogResponse"
+    },
+    "query": {
+      "$ref": "#/components/schemas/ToolCatalogQuery"
+    }
+  },
+  {
+    "name": "update_lazy_tools",
+    "method": "POST",
+    "path": "/v1/tools/lazy",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/ToolCatalogResponse"
+    },
+    "body": {
+      "$ref": "#/components/schemas/LazyToolSettingsUpdate"
+    }
+  },
+  {
+    "name": "update_tool",
+    "method": "POST",
+    "path": "/v1/tools/{name}",
+    "pathParams": [
+      "name"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/ToolCatalogResponse"
+    },
+    "body": {
+      "$ref": "#/components/schemas/ToolSettingsUpdate"
+    }
+  },
+  {
+    "name": "projects",
+    "method": "GET",
+    "path": "/v1/projects",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/ProjectInfo"
+      }
+    }
+  },
+  {
+    "name": "workspaces_list",
+    "method": "GET",
+    "path": "/v1/workspaces",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceListResponse"
+    }
+  },
+  {
+    "name": "create_workspace",
+    "method": "POST",
+    "path": "/v1/workspaces",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceOperationResponse"
+    },
+    "body": {
+      "$ref": "#/components/schemas/WorkspaceCreateRequest"
+    }
+  },
+  {
+    "name": "workspace_refs",
+    "method": "GET",
+    "path": "/v1/workspaces/refs",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceRefsResponse"
+    }
+  },
+  {
+    "name": "resolve_workspace_ref",
+    "method": "POST",
+    "path": "/v1/workspaces/resolve-ref",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceResolveRefResponse"
+    },
+    "body": {
+      "$ref": "#/components/schemas/WorkspaceResolveRefRequest"
+    }
+  },
+  {
+    "name": "get_workspace",
+    "method": "GET",
+    "path": "/v1/workspaces/{reference}",
+    "pathParams": [
+      "reference"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceInfo"
+    }
+  },
+  {
+    "name": "remove_workspace",
+    "method": "DELETE",
+    "path": "/v1/workspaces/{reference}",
+    "pathParams": [
+      "reference"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceOperationResponse"
+    },
+    "body": {
+      "$ref": "#/components/schemas/WorkspaceRemoveRequest"
+    }
+  },
+  {
+    "name": "open_workspace",
+    "method": "POST",
+    "path": "/v1/workspaces/{reference}/open",
+    "pathParams": [
+      "reference"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceOperationResponse"
+    }
+  },
+  {
+    "name": "reset_workspace",
+    "method": "POST",
+    "path": "/v1/workspaces/{reference}/reset",
+    "pathParams": [
+      "reference"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceOperationResponse"
+    },
+    "body": {
+      "$ref": "#/components/schemas/WorkspaceResetRequest"
+    }
+  },
+  {
+    "name": "cleanup_workspace",
+    "method": "POST",
+    "path": "/v1/workspaces/{reference}/cleanup",
+    "pathParams": [
+      "reference"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceOperationResponse"
+    },
+    "body": {
+      "$ref": "#/components/schemas/WorkspaceCleanupRequest"
+    }
+  },
+  {
+    "name": "list_ptys",
+    "method": "GET",
+    "path": "/v1/ptys",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/PtyInfo"
+      }
+    }
+  },
+  {
+    "name": "create_pty",
+    "method": "POST",
+    "path": "/v1/ptys",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/PtyInfo"
+    },
+    "body": {
+      "$ref": "#/components/schemas/PtyCreateRequest"
+    }
+  },
+  {
+    "name": "get_pty",
+    "method": "GET",
+    "path": "/v1/ptys/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/PtyInfo"
+    }
+  },
+  {
+    "name": "update_pty",
+    "method": "PATCH",
+    "path": "/v1/ptys/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/PtyInfo"
+    },
+    "body": {
+      "$ref": "#/components/schemas/PtyUpdateRequest"
+    }
+  },
+  {
+    "name": "delete_pty",
+    "method": "DELETE",
+    "path": "/v1/ptys/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "connect_pty",
+    "method": "GET",
+    "path": "/v1/ptys/{id}/connect",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    },
+    "query": {
+      "$ref": "#/components/schemas/PtyConnectQuery"
+    },
+    "stream": "websocket"
+  },
+  {
+    "name": "workflows",
+    "method": "GET",
+    "path": "/v1/workflows",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/WorkflowListResponse"
+    }
+  },
+  {
+    "name": "workflow_source",
+    "method": "GET",
+    "path": "/v1/workflows/{invocation}/source",
+    "pathParams": [
+      "invocation"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkflowSourceResponse"
+    }
+  },
+  {
+    "name": "start_workflow",
+    "method": "POST",
+    "path": "/v1/workflows/run",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/WorkflowRun"
+    },
+    "body": {
+      "$ref": "#/components/schemas/WorkflowStartRequest"
+    }
+  },
+  {
+    "name": "list_workflow_runs",
+    "method": "GET",
+    "path": "/v1/workflows/runs",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/WorkflowRun"
+      }
+    },
+    "query": {
+      "$ref": "#/components/schemas/WorkflowRunsQuery"
+    }
+  },
+  {
+    "name": "get_workflow_run",
+    "method": "GET",
+    "path": "/v1/workflows/runs/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkflowRun"
+    },
+    "query": {
+      "$ref": "#/components/schemas/WorkflowRunQuery"
+    }
+  },
+  {
+    "name": "delete_workflow_run",
+    "method": "DELETE",
+    "path": "/v1/workflows/runs/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "wait_workflow_run",
+    "method": "GET",
+    "path": "/v1/workflows/runs/{id}/wait",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkflowRun"
+    },
+    "query": {
+      "$ref": "#/components/schemas/WorkflowWaitQuery"
+    }
+  },
+  {
+    "name": "cancel_workflow_run",
+    "method": "POST",
+    "path": "/v1/workflows/runs/{id}/cancel",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkflowRun"
+    }
+  },
+  {
+    "name": "pause_workflow_run",
+    "method": "POST",
+    "path": "/v1/workflows/runs/{id}/pause",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkflowRun"
+    }
+  },
+  {
+    "name": "resume_workflow_run",
+    "method": "POST",
+    "path": "/v1/workflows/runs/{id}/resume",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkflowRun"
+    }
+  },
+  {
+    "name": "skills",
+    "method": "GET",
+    "path": "/v1/skills",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/SkillInfo"
+      }
+    }
+  },
+  {
+    "name": "load_skill",
+    "method": "GET",
+    "path": "/v1/skills/{name}",
+    "pathParams": [
+      "name"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/SkillContent"
+    }
+  },
+  {
+    "name": "plugins",
+    "method": "GET",
+    "path": "/v1/plugins",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/PluginInfo"
+      }
+    }
+  },
+  {
+    "name": "plugin_action",
+    "method": "POST",
+    "path": "/v1/plugins",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/PluginInfo"
+      }
+    },
+    "body": {
+      "$ref": "#/components/schemas/PluginActionRequest"
+    }
+  },
+  {
+    "name": "mcp_servers",
+    "method": "GET",
+    "path": "/v1/mcp",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/McpServerInfo"
+      }
+    }
+  },
+  {
+    "name": "configure_mcp",
+    "method": "POST",
+    "path": "/v1/mcp/{name}",
+    "pathParams": [
+      "name"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/McpServerInfo"
+    },
+    "body": {
+      "$ref": "#/components/schemas/McpConfigureRequest"
+    }
+  },
+  {
+    "name": "reconnect_mcp",
+    "method": "POST",
+    "path": "/v1/mcp/{name}/reconnect",
+    "pathParams": [
+      "name"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/McpServerInfo"
+    }
+  },
+  {
+    "name": "disconnect_mcp",
+    "method": "POST",
+    "path": "/v1/mcp/{name}/disconnect",
+    "pathParams": [
+      "name"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/McpServerInfo"
+    }
+  },
+  {
+    "name": "mcp_tools",
+    "method": "GET",
+    "path": "/v1/mcp/{name}/tools",
+    "pathParams": [
+      "name"
+    ],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/ToolDefinition"
+      }
+    }
+  },
+  {
+    "name": "call_mcp_tool",
+    "method": "POST",
+    "path": "/v1/mcp/{name}/tools/{tool}",
+    "pathParams": [
+      "name",
+      "tool"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/ToolOutput"
+    },
+    "body": {}
+  },
+  {
+    "name": "mcp_resources",
+    "method": "GET",
+    "path": "/v1/mcp/{name}/resources",
+    "pathParams": [
+      "name"
+    ],
+    "response": {
+      "type": "array",
+      "items": {}
+    }
+  },
+  {
+    "name": "mcp_resource_templates",
+    "method": "GET",
+    "path": "/v1/mcp/{name}/resource-templates",
+    "pathParams": [
+      "name"
+    ],
+    "response": {
+      "type": "array",
+      "items": {}
+    }
+  },
+  {
+    "name": "read_mcp_resource",
+    "method": "POST",
+    "path": "/v1/mcp/{name}/resources/read",
+    "pathParams": [
+      "name"
+    ],
+    "response": {},
+    "body": {
+      "$ref": "#/components/schemas/ResourceReadRequest"
+    }
+  },
+  {
+    "name": "mcp_prompts",
+    "method": "GET",
+    "path": "/v1/mcp/{name}/prompts",
+    "pathParams": [
+      "name"
+    ],
+    "response": {
+      "type": "array",
+      "items": {}
+    }
+  },
+  {
+    "name": "get_mcp_prompt",
+    "method": "POST",
+    "path": "/v1/mcp/{name}/prompts/{prompt}",
+    "pathParams": [
+      "name",
+      "prompt"
+    ],
+    "response": {},
+    "body": {}
+  },
+  {
+    "name": "list_threads",
+    "method": "GET",
+    "path": "/v1/threads",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/Thread"
+      }
+    },
+    "query": {
+      "$ref": "#/components/schemas/ThreadQuery"
+    }
+  },
+  {
+    "name": "create_thread",
+    "method": "POST",
+    "path": "/v1/threads",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/Thread"
+    },
+    "body": {
+      "$ref": "#/components/schemas/CreateThreadRequest"
+    }
+  },
+  {
+    "name": "get_thread",
+    "method": "GET",
+    "path": "/v1/threads/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/Thread"
+    }
+  },
+  {
+    "name": "update_thread",
+    "method": "PATCH",
+    "path": "/v1/threads/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/Thread"
+    },
+    "body": {
+      "$ref": "#/components/schemas/UpdateThreadRequest"
+    }
+  },
+  {
+    "name": "export_session_archive",
+    "method": "GET",
+    "path": "/v1/threads/{id}/archive",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/SessionArchive"
+    },
+    "query": {
+      "$ref": "#/components/schemas/SessionArchiveQuery"
+    }
+  },
+  {
+    "name": "fork_thread",
+    "method": "POST",
+    "path": "/v1/threads/{id}/fork",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/Thread"
+    },
+    "body": {
+      "$ref": "#/components/schemas/ForkThreadRequest"
+    }
+  },
+  {
+    "name": "list_items",
+    "method": "GET",
+    "path": "/v1/threads/{id}/items",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/Item"
+      }
+    },
+    "query": {
+      "$ref": "#/components/schemas/ItemsQuery"
+    }
+  },
+  {
+    "name": "list_todos",
+    "method": "GET",
+    "path": "/v1/threads/{id}/todos",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/TodoEntry"
+      }
+    }
+  },
+  {
+    "name": "active_turn",
+    "method": "GET",
+    "path": "/v1/threads/{id}/active",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "anyOf": [
+        {
+          "$ref": "#/components/schemas/Turn"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  {
+    "name": "interrupt_thread_tree",
+    "method": "POST",
+    "path": "/v1/threads/{id}/interrupt",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/InterruptResponse"
+    }
+  },
+  {
+    "name": "list_background_tasks",
+    "method": "GET",
+    "path": "/v1/threads/{id}/background",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/BackgroundTaskInfo"
+      }
+    }
+  },
+  {
+    "name": "promote_background_tasks",
+    "method": "POST",
+    "path": "/v1/threads/{id}/background",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/BackgroundTaskInfo"
+      }
+    },
+    "query": {
+      "$ref": "#/components/schemas/BackgroundQuery"
+    }
+  },
+  {
+    "name": "pending_question",
+    "method": "GET",
+    "path": "/v1/threads/{id}/pending-question",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "anyOf": [
+        {
+          "$ref": "#/components/schemas/PendingQuestionInfo"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  {
+    "name": "start_turn",
+    "method": "POST",
+    "path": "/v1/threads/{id}/turns",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/Turn"
+    },
+    "body": {
+      "$ref": "#/components/schemas/StartTurnRequest"
+    }
+  },
+  {
+    "name": "execute_command",
+    "method": "POST",
+    "path": "/v1/threads/{id}/commands",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/CommandExecutionResponse"
+    },
+    "body": {
+      "$ref": "#/components/schemas/ExecuteCommandRequest"
+    }
+  },
+  {
+    "name": "queue_input",
+    "method": "POST",
+    "path": "/v1/threads/{id}/input",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/QueueInputResponse"
+    },
+    "body": {
+      "$ref": "#/components/schemas/QueueInputRequest"
+    }
+  },
+  {
+    "name": "input_queue",
+    "method": "GET",
+    "path": "/v1/threads/{id}/input/queue",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/InputQueue"
+    }
+  },
+  {
+    "name": "change_input_queue",
+    "method": "POST",
+    "path": "/v1/threads/{id}/input/queue",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/InputQueue"
+    },
+    "body": {
+      "$ref": "#/components/schemas/InputQueueAction"
+    }
+  },
+  {
+    "name": "btw",
+    "method": "POST",
+    "path": "/v1/threads/{id}/btw",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/BtwResponse"
+    },
+    "body": {
+      "$ref": "#/components/schemas/BtwRequest"
+    }
+  },
+  {
+    "name": "compact",
+    "method": "POST",
+    "path": "/v1/threads/{id}/compact",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/Item"
+    },
+    "body": {
+      "$ref": "#/components/schemas/CompactRequest"
+    }
+  },
+  {
+    "name": "get_goal",
+    "method": "GET",
+    "path": "/v1/threads/{id}/goal",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/GoalActionResponse"
+    }
+  },
+  {
+    "name": "set_goal",
+    "method": "POST",
+    "path": "/v1/threads/{id}/goal",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/GoalActionResponse"
+    },
+    "body": {
+      "$ref": "#/components/schemas/GoalRequest"
+    }
+  },
+  {
+    "name": "get_loop",
+    "method": "GET",
+    "path": "/v1/threads/{id}/loop",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/LoopResponse"
+    }
+  },
+  {
+    "name": "set_loop",
+    "method": "POST",
+    "path": "/v1/threads/{id}/loop",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/LoopResponse"
+    },
+    "body": {
+      "$ref": "#/components/schemas/LoopRequest"
+    }
+  },
+  {
+    "name": "thread_usage",
+    "method": "GET",
+    "path": "/v1/threads/{id}/usage",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/UsageResponse"
+    }
+  },
+  {
+    "name": "run_shell",
+    "method": "POST",
+    "path": "/v1/threads/{id}/shell",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    },
+    "body": {
+      "$ref": "#/components/schemas/ShellRequest"
+    }
+  },
+  {
+    "name": "revert_thread",
+    "method": "POST",
+    "path": "/v1/threads/{id}/revert",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/Thread"
+    },
+    "body": {
+      "$ref": "#/components/schemas/RevertRequest"
+    }
+  },
+  {
+    "name": "unrevert_thread",
+    "method": "POST",
+    "path": "/v1/threads/{id}/unrevert",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/Thread"
+    }
+  },
+  {
+    "name": "last_turn_diff",
+    "method": "GET",
+    "path": "/v1/threads/{id}/diff",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/FileDiff"
+      }
+    }
+  },
+  {
+    "name": "last_turn_review",
+    "method": "GET",
+    "path": "/v1/threads/{id}/diff/review",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/FileDiff"
+      }
+    },
+    "query": {
+      "$ref": "#/components/schemas/DiffReviewQuery"
+    }
+  },
+  {
+    "name": "vcs_diff",
+    "method": "GET",
+    "path": "/v1/vcs/diff",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/FileDiff"
+      }
+    },
+    "query": {
+      "$ref": "#/components/schemas/VcsDiffQuery"
+    }
+  },
+  {
+    "name": "search_files",
+    "method": "GET",
+    "path": "/v1/files/search",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "query": {
+      "$ref": "#/components/schemas/FileSearchQuery"
+    }
+  },
+  {
+    "name": "import_session_archive",
+    "method": "POST",
+    "path": "/v1/session-archives/import",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/SessionArchiveImportResult"
+    },
+    "body": {
+      "$ref": "#/components/schemas/SessionArchiveImportRequest"
+    }
+  },
+  {
+    "name": "active_turns",
+    "method": "GET",
+    "path": "/v1/turns/active",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/Turn"
+      }
+    }
+  },
+  {
+    "name": "get_turn",
+    "method": "GET",
+    "path": "/v1/turns/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/Turn"
+    }
+  },
+  {
+    "name": "interrupt_turn",
+    "method": "POST",
+    "path": "/v1/turns/{id}/interrupt",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/Turn"
+    }
+  },
+  {
+    "name": "wait_turn",
+    "method": "GET",
+    "path": "/v1/turns/{id}/wait",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/Turn"
+    },
+    "query": {
+      "$ref": "#/components/schemas/WaitQuery"
+    }
+  },
+  {
+    "name": "list_permissions",
+    "method": "GET",
+    "path": "/v1/permissions",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/PendingPermissionInfo"
+      }
+    }
+  },
+  {
+    "name": "reply_permission",
+    "method": "POST",
+    "path": "/v1/permissions/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    },
+    "body": {
+      "$ref": "#/components/schemas/PermissionReply"
+    }
+  },
+  {
+    "name": "list_questions",
+    "method": "GET",
+    "path": "/v1/questions",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/PendingQuestionInfo"
+      }
+    }
+  },
+  {
+    "name": "reply_question",
+    "method": "POST",
+    "path": "/v1/questions/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    },
+    "body": {
+      "$ref": "#/components/schemas/QuestionReply"
+    }
+  },
+  {
+    "name": "shutdown_server",
+    "method": "POST",
+    "path": "/v1/shutdown",
+    "pathParams": [],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "events",
+    "method": "GET",
+    "path": "/v1/events",
+    "pathParams": [],
+    "response": {
+      "type": "null"
+    },
+    "stream": "sse"
+  },
+  {
+    "name": "health",
+    "method": "GET",
+    "path": "/healthz",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/HealthResponse"
+    }
+  },
+  {
+    "name": "openapi",
+    "method": "GET",
+    "path": "/openapi.json",
+    "pathParams": [],
+    "response": {}
+  },
+  {
+    "name": "list_profiles",
+    "method": "GET",
+    "path": "/v1/profiles",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/ProfileRecord"
+      }
+    },
+    "query": {
+      "$ref": "#/components/schemas/Filters"
+    }
+  },
+  {
+    "name": "upload_profile",
+    "method": "POST",
+    "path": "/v1/profiles",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/ProfileRecord"
+    },
+    "binaryBody": true
+  },
+  {
+    "name": "get_profile",
+    "method": "GET",
+    "path": "/v1/profiles/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/ProfileRecord"
+    }
+  },
+  {
+    "name": "delete_profile",
+    "method": "DELETE",
+    "path": "/v1/profiles/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "download_profile",
+    "method": "GET",
+    "path": "/v1/profiles/{id}/download",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    },
+    "binaryResponse": true
+  },
+  {
+    "name": "list_files",
+    "method": "GET",
+    "path": "/v1/files/list",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/FileListing"
+    },
+    "query": {
+      "$ref": "#/components/schemas/FileQuery"
+    }
+  },
+  {
+    "name": "read_file",
+    "method": "GET",
+    "path": "/v1/files/content",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/FileContent"
+    },
+    "query": {
+      "$ref": "#/components/schemas/FileQuery"
+    }
+  },
+  {
+    "name": "write_file",
+    "method": "PUT",
+    "path": "/v1/files/content",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/FileContent"
+    },
+    "body": {
+      "$ref": "#/components/schemas/FileWrite"
+    }
+  },
+  {
+    "name": "mutate_file",
+    "method": "POST",
+    "path": "/v1/files/action",
+    "pathParams": [],
+    "response": {},
+    "body": {
+      "$ref": "#/components/schemas/FileAction"
+    }
+  },
+  {
+    "name": "call_browser_tool",
+    "method": "POST",
+    "path": "/v1/threads/{id}/browser/tool",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/BrowserToolResponse"
+    },
+    "body": {
+      "$ref": "#/components/schemas/BrowserToolRequest"
+    }
+  }
+]

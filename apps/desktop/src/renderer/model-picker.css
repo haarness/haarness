@@ -1,0 +1,193 @@
+.select-footer {
+  flex: none;
+  border-top: 1px solid var(--hairline);
+  margin-top: var(--s1);
+}
+.model-picker-detail {
+  padding: var(--s3) var(--s2) var(--s0);
+}
+.model-effort-summary {
+  flex: none;
+  color: var(--muted);
+  font-size: var(--ui-xs);
+  white-space: nowrap;
+}
+.reasoning-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+.reasoning-heading > .icon {
+  color: var(--primary);
+  flex: none;
+}
+.reasoning-current {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+}
+.reasoning-current strong {
+  display: block;
+  color: var(--primary);
+  font-weight: 600;
+}
+.reasoning-current small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: var(--s0);
+  color: var(--muted);
+}
+/* A padded track: the fill and the thumb both live inside it, so nothing can
+   spill past the rounded ends. One fraction drives both, and both animate, so
+   a level change reads as a single movement. */
+.reasoning-slider {
+  --reasoning-thumb: 22px;
+  --reasoning-inset: 5px;
+  --reasoning-travel: calc(
+    100% - 2 * var(--reasoning-inset) - var(--reasoning-thumb)
+  );
+  position: relative;
+  height: 32px;
+  margin-top: var(--s4);
+  border-radius: var(--r-pill);
+  background: var(--hover);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+.reasoning-fill {
+  position: absolute;
+  inset-block: var(--reasoning-inset);
+  inset-inline-start: var(--reasoning-inset);
+  width: calc(
+    var(--reasoning-travel) * var(--reasoning-fraction) + var(--reasoning-thumb)
+  );
+  border-radius: var(--r-pill);
+  background: var(--primary);
+  transition: width var(--slow) var(--ease);
+}
+.reasoning-thumb {
+  position: absolute;
+  top: 50%;
+  inset-inline-start: calc(
+    var(--reasoning-inset) + var(--reasoning-thumb) / 2 + var(--reasoning-travel) *
+      var(--reasoning-fraction)
+  );
+  width: var(--reasoning-thumb);
+  height: var(--reasoning-thumb);
+  translate: -50% -50%;
+  border-radius: 50%;
+  background: var(--raised);
+  box-shadow:
+    0 1px 3px #0000004d,
+    0 0 0 1px color-mix(in srgb, var(--primary) 45%, transparent);
+  pointer-events: none;
+  transition:
+    inset-inline-start var(--slow) var(--ease),
+    scale var(--fast) var(--ease);
+}
+.reasoning-slider:hover .reasoning-thumb {
+  scale: 1.06;
+}
+/* Dragging tracks the pointer exactly; only committed steps animate. */
+.reasoning-slider:has(input[type="range"]:active) .reasoning-fill,
+.reasoning-slider:has(input[type="range"]:active) .reasoning-thumb {
+  transition: scale var(--fast) var(--ease);
+}
+.reasoning-slider:has(input[type="range"]:active) .reasoning-thumb {
+  scale: 1.1;
+}
+.reasoning-slider:has(input[type="range"]:focus-visible) {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.reasoning-slider input[type="range"] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  border-radius: inherit;
+  cursor: pointer;
+}
+.reasoning-slider input[type="range"]:disabled {
+  cursor: default;
+}
+.reasoning-slider input[type="range"]::-webkit-slider-runnable-track {
+  height: 100%;
+  background: transparent;
+}
+/* The visible thumb is `.reasoning-thumb`; the native one keeps the hit area
+   and every keyboard and accessibility behaviour. */
+.reasoning-slider input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  height: var(--reasoning-thumb);
+  width: var(--reasoning-thumb);
+  border-radius: 50%;
+  background: transparent;
+  border: 0;
+}
+.reasoning-slider input[type="range"]::-moz-range-thumb {
+  height: var(--reasoning-thumb);
+  width: var(--reasoning-thumb);
+  border-radius: 50%;
+  background: transparent;
+  border: 0;
+}
+.reasoning-slider input[type="range"]:focus-visible {
+  outline: none;
+}
+.reasoning-ticks {
+  position: absolute;
+  inset-block: 0;
+  inset-inline: calc(var(--reasoning-inset) + var(--reasoning-thumb) / 2);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  pointer-events: none;
+}
+.reasoning-ticks span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text);
+  opacity: 0.35;
+  transition:
+    background var(--fast) var(--ease),
+    opacity var(--fast) var(--ease);
+}
+/* A dot the fill has reached reads against the fill, not through it. */
+.reasoning-ticks span.passed {
+  background: var(--page);
+  opacity: 0.55;
+}
+@media (prefers-reduced-motion: reduce) {
+  .reasoning-fill,
+  .reasoning-thumb,
+  .reasoning-ticks span {
+    transition: none;
+  }
+}
+.reasoning-scale {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: var(--ui-xs);
+  margin-top: var(--s1);
+}
+.reasoning-unavailable {
+  font-size: var(--ui-xs);
+  color: var(--muted);
+  margin: var(--s3) 0;
+}
+.model-picker-done {
+  display: block;
+  margin: var(--s3) 0 0 auto;
+  min-height: 28px;
+}

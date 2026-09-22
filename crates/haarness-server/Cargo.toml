@@ -1,0 +1,61 @@
+[package]
+name = "haarness-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+haarness-ripgrep = { path = "../haarness-ripgrep" }
+anyhow.workspace = true
+async-stream.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+chrono.workspace = true
+htmd.workspace = true
+axum.workspace = true
+directories.workspace = true
+futures.workspace = true
+glob.workspace = true
+haarness-core = { path = "../haarness-core" }
+haarness-insights = { path = "../haarness-insights" }
+haarness-profiles = { path = "../haarness-profiles" }
+haarness-language = { path = "../haarness-language" }
+haarness-protocol = { path = "../haarness-protocol" }
+haarness-pty = { path = "../haarness-pty" }
+haarness-scheduler = { path = "../haarness-scheduler" }
+haarness-workflow-catalog = { path = "../haarness-workflow-catalog" }
+haarness-workflows = { path = "../haarness-workflows" }
+haarness-workspaces = { path = "../haarness-workspaces" }
+http.workspace = true
+ignore.workspace = true
+jsonschema.workspace = true
+opentelemetry.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+tokio-util.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-tungstenite.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-opentelemetry.workspace = true
+utoipa.workspace = true
+url.workspace = true
+uuid.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["process", "signal"] }
+
+[dev-dependencies]
+fs2.workspace = true
+haarness-store = { path = "../haarness-store" }
+reqwest.workspace = true

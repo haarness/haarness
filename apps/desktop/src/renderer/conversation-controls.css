@@ -1,0 +1,51 @@
+.conversation-find {
+  flex: none;
+  padding: var(--s2) var(--s4);
+  border-bottom: 1px solid var(--hairline);
+  background: var(--surface);
+}
+.conversation-find-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+.conversation-find input {
+  flex: 1;
+  min-width: 80px;
+}
+.conversation-find [role="status"] {
+  color: var(--muted);
+  font-size: var(--ui-xs);
+}
+.conversation-find-preview {
+  color: var(--muted);
+  font-size: var(--ui-xs);
+  margin-top: var(--s1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conversation-find mark {
+  color: var(--text);
+  background: var(--accent-soft);
+}
+.conversation-match {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+.conversation-history-notice {
+  flex: none;
+  padding: var(--s2) var(--s4);
+  color: var(--muted);
+  font-size: var(--ui-xs);
+  display: flex;
+  gap: var(--s3);
+  align-items: center;
+}
+@media (max-width: 600px) {
+  .conversation-find-controls {
+    flex-wrap: wrap;
+  }
+  .conversation-find [role="status"] {
+    flex: 1;
+  }
+}

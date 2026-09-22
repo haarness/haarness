@@ -1,0 +1,49 @@
+name = "ayu"
+
+[dark]
+bg = "#0B0E14"
+surface = "#0F131A"
+selected = "#0D1017"
+text = "#BFBDB6"
+muted = "#565B66"
+primary = "#59C2FF"
+accent = "#E6B450"
+user = "#87c0de"
+danger = "#D95757"
+
+[dark.syntax]
+keyword = "#FF8F40"
+string = "#AAD94C"
+comment = "#ACB6BF"
+constant = "#D2A6FF"
+function = "#FFB454"
+
+[dark.diff]
+added = "#7FD962"
+added_bg = "#20303b"
+removed = "#F26D78"
+removed_bg = "#37222c"
+
+[light]
+bg = "#0B0E14"
+surface = "#0F131A"
+selected = "#0D1017"
+text = "#BFBDB6"
+muted = "#565B66"
+primary = "#59C2FF"
+accent = "#E6B450"
+user = "#87c0de"
+danger = "#D95757"
+
+[light.syntax]
+keyword = "#FF8F40"
+string = "#AAD94C"
+comment = "#ACB6BF"
+constant = "#D2A6FF"
+function = "#FFB454"
+
+[light.diff]
+added = "#7FD962"
+added_bg = "#20303b"
+removed = "#F26D78"
+removed_bg = "#37222c"

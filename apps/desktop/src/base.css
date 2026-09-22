@@ -1,0 +1,7 @@
+
+/* Interface direction follows the chosen language; source and terminals retain
+   their original order regardless of the surrounding interface. */
+html[dir="rtl"] :is(pre, code, .cm-editor, .xterm) {
+  direction: ltr;
+  unicode-bidi: isolate;
+}

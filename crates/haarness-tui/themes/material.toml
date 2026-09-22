@@ -1,0 +1,49 @@
+name = "material"
+
+[dark]
+bg = "#263238"
+surface = "#1e272c"
+selected = "#37474f"
+text = "#eeffff"
+muted = "#546e7a"
+primary = "#82aaff"
+accent = "#89ddff"
+user = "#b3d0ff"
+danger = "#f07178"
+
+[dark.syntax]
+keyword = "#c792ea"
+string = "#c3e88d"
+comment = "#546e7a"
+constant = "#ffcb6b"
+function = "#82aaff"
+
+[dark.diff]
+added = "#c3e88d"
+added_bg = "#2e3c2b"
+removed = "#f07178"
+removed_bg = "#3c2b2b"
+
+[light]
+bg = "#fafafa"
+surface = "#f5f5f5"
+selected = "#e7e7e8"
+text = "#263238"
+muted = "#90a4ae"
+primary = "#6182b8"
+accent = "#39adb5"
+user = "#465e7e"
+danger = "#e53935"
+
+[light.syntax]
+keyword = "#7c4dff"
+string = "#91b859"
+comment = "#90a4ae"
+constant = "#f4511e"
+function = "#6182b8"
+
+[light.diff]
+added = "#91b859"
+added_bg = "#e8f5e9"
+removed = "#e53935"
+removed_bg = "#ffebee"

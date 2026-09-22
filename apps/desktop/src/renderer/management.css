@@ -1,0 +1,68 @@
+.management-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+}
+.management-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+.management-card {
+  padding: var(--s4) 0;
+  border-bottom: 1px solid var(--hairline);
+  display: flex;
+  flex-direction: column;
+  /* The command and the lines that describe it are one block; the actions are
+     a separate one, so they sit a little further away. */
+  gap: var(--s2);
+}
+.management-card > .management-actions {
+  margin-block-start: var(--s1);
+}
+.management-card-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  flex-wrap: wrap;
+}
+.management-card-heading .management-toggle {
+  margin-inline-start: auto;
+}
+.management-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: var(--icon-button);
+}
+.management-command,
+.management-source {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.memory-list {
+  max-height: 300px;
+  overflow: auto;
+}
+.memory-list .management-card:first-child {
+  padding-top: 0;
+}
+.memory-setting {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s5);
+}
+.memory-setting input[type="number"] {
+  width: 100px;
+}
+
+.router-connection-dialog {
+  width: min(620px, calc(100vw - 32px));
+}
+.router-connection-panel .management-source {
+  font-family: inherit;
+  font-size: var(--ui-lg);
+  line-height: 1.55;
+  margin: 0;
+}
