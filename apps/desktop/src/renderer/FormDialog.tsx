@@ -2,7 +2,7 @@ import { t } from "./i18n";
 import { Show, createSignal, onMount, type Accessor, type JSX } from "solid-js";
 import { Button, dismissOnBackdrop } from "./ui";
 
-/** Keep drafts mounted until the write succeeds, and share dismissal behavior. */
+/** Preserve failed drafts and allow dismissal without waiting for pending writes. */
 export function FormDialog(props: {
   title: string;
   description?: string;
@@ -22,7 +22,7 @@ export function FormDialog(props: {
   onMount(() => dialog.showModal());
   const locked = () => busy() || !!props.pending;
   const close = () => {
-    if (locked()) return;
+    if (!dialog.isConnected || !dialog.open) return;
     dialog.close();
     props.close();
   };
@@ -66,7 +66,6 @@ export function FormDialog(props: {
           <Button
             icon="close"
             label={t("Close dialog")}
-            disabled={locked()}
             onClick={close}
           />
         </header>
@@ -83,7 +82,7 @@ export function FormDialog(props: {
           </p>
         </Show>
         <footer>
-          <button type="button" disabled={locked()} onClick={close}>
+          <button type="button" onClick={close}>
             {props.submit ? t("Cancel") : t("Close")}
           </button>
           <Show when={props.submit}>

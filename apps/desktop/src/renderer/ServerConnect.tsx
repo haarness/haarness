@@ -27,7 +27,7 @@ function ConnectionForm() {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const close = () => {
-    if (busy()) return;
+    if (!dialog.isConnected || !dialog.open) return;
     dialog.close();
     setOpened(false);
   };
@@ -114,7 +114,6 @@ function ConnectionForm() {
           <Button
             icon="close"
             label={t("Close dialog")}
-            disabled={busy()}
             onClick={close}
           />
         </header>
@@ -193,7 +192,7 @@ function ConnectionForm() {
           </p>
         </Show>
         <footer>
-          <button type="button" disabled={busy()} onClick={close}>
+          <button type="button" onClick={close}>
             {t("Cancel")}
           </button>
           <button

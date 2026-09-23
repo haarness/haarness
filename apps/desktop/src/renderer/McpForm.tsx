@@ -15,7 +15,7 @@ export function McpForm(props: {
   let dialog!: HTMLDialogElement;
   let failure!: HTMLParagraphElement;
   const close = () => {
-    if (saving()) return;
+    if (!dialog.isConnected || !dialog.open) return;
     dialog.close();
     props.close();
   };
@@ -60,7 +60,6 @@ export function McpForm(props: {
           <Button
             icon="close"
             label={t("Close dialog")}
-            disabled={saving()}
             onClick={close}
           />
         </header>
@@ -370,7 +369,7 @@ export function McpForm(props: {
           </p>
         </Show>
         <footer>
-          <button type="button" disabled={saving()} onClick={close}>
+          <button type="button" onClick={close}>
             {t("Cancel")}
           </button>
           <button class="primary" type="submit" disabled={saving()}>

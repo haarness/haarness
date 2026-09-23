@@ -67,9 +67,7 @@ export function MemoryDialog(props: { close: () => void }) {
       description={t("Memory for {project}. Stored outside the repository.", {
         project: connection.label,
       })}
-      close={() => {
-        if (!busy()) props.close();
-      }}
+      close={props.close}
       save={async () => {}}
     >
       {() => (
@@ -271,6 +269,12 @@ function MemoryEditor(props: {
     type: props.item?.type ?? "project",
     content: props.item?.content ?? "",
   });
+  let dismissed = false;
+  const close = () => {
+    if (dismissed) return;
+    dismissed = true;
+    props.close();
+  };
   const [deleting, setDeleting] = createSignal(false),
     [error, setError] = createSignal("");
   return (
@@ -278,9 +282,7 @@ function MemoryEditor(props: {
       title={props.item ? t("Edit memory") : t("Add memory")}
       submit={t("Save memory")}
       pending={deleting()}
-      close={() => {
-        if (!deleting()) props.close();
-      }}
+      close={close}
       save={async () => {
         if (deleting()) throw Error(t("Wait for deletion to finish."));
         if (
@@ -349,7 +351,7 @@ function MemoryEditor(props: {
                 try {
                   await props.remove();
                   setDeleting(false);
-                  props.close();
+                  close();
                 } catch (error) {
                   setDeleting(false);
                   setError(

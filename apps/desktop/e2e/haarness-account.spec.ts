@@ -111,6 +111,17 @@ test("Haarness account signs in through a browser, discovers Cloud models, and s
       window.haarness.account({ action: "status" }),
     );
     expect(view.loggedIn).toBe(true);
+    const outside = async () => {
+      const box = await dialog.boundingBox();
+      if (!box || box.x < 8) throw Error("Expected an exposed account backdrop");
+      await page.mouse.click(box.x / 2, box.y + box.height / 2);
+      await expect(dialog).toHaveCount(0);
+    };
+    await outside();
+    await page.getByRole("button", {
+      name: view.user?.displayName || "Haarness account", exact: true,
+    }).click();
+    await expect(dialog.getByRole("button", { name: "Sign out", exact: true })).toBeVisible();
     const spaces = await page.evaluate(() =>
       window.haarness.account({ action: "workspaces" }),
     );
@@ -167,6 +178,13 @@ test("Haarness account signs in through a browser, discovers Cloud models, and s
     await expect(
       dialog.getByRole("button", { name: "Sign in to Haarness", exact: true }),
     ).toBeEnabled();
+    // Outside dismissal uses the same cancellation path during browser login.
+    await dialog.getByRole("button", { name: "Sign in to Haarness", exact: true }).click();
+    await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
+    await outside();
+    await page.getByRole("button", { name: "Sign in to Haarness", exact: true }).click();
+    await expect(dialog.getByRole("button", { name: "Sign in to Haarness", exact: true })).toBeEnabled();
+    expect((await page.evaluate(() => window.haarness.account({ action: "status" }))).loggedIn).toBe(false);
   } finally {
     await browser.close();
     await app.close();

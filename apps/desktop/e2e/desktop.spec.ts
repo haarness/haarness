@@ -4849,6 +4849,11 @@ test("all modal surfaces dismiss on outside clicks without closing parents or su
       ),
     ) as { id: string; name: string }[];
   const originalJobs = jobs();
+  const account = page.getByRole("dialog", { name: "Haarness account", exact: true });
+  await page.getByRole("button", { name: "Sign in to Haarness", exact: true }).click();
+  await account.getByRole("heading", { name: "Haarness account", exact: true }).click();
+  await expect(account).toBeVisible();
+  await dismiss(account);
   await settingsButton.click();
   await settings.locator("h2").first().click();
   await expect(settings).toBeVisible();
@@ -4950,7 +4955,39 @@ test("all modal surfaces dismiss on outside clicks without closing parents or su
       (provider) => provider.id === "unsubmitted-provider",
     ),
   ).toBe(false);
+  await settings.getByRole("button", { name: "Connect a provider", exact: true }).click();
+  const connect = page.getByRole("dialog", { name: "Connect a provider", exact: true });
+  await connect.getByRole("button", { name: "Use Haarness Cloud", exact: true }).click();
+  await dismiss(account);
+  await expect(connect).toBeVisible();
+  await dismiss(connect);
+  await expect(settings).toBeVisible();
+
+  await settings.getByRole("button", { name: "Connect Haarness Router", exact: true }).click();
+  await dismiss(page.getByRole("dialog", { name: "Connect Haarness Router", exact: true }));
+  await expect(settings).toBeVisible();
+  await settings.getByRole("button", { name: "MCP servers", exact: true }).click();
+  await settings.getByRole("button", { name: "Add MCP server", exact: true }).click();
+  await dismiss(page.getByRole("dialog", { name: "Add MCP server", exact: true }));
+  await expect(settings).toBeVisible();
+  await settings.getByRole("button", { name: "Servers", exact: true }).click();
+  await settings.getByRole("button", { name: "Add remote server", exact: true }).click();
+  const server = page.getByRole("dialog", { name: "Connect to server", exact: true });
+  await server.getByLabel("Server URL", { exact: true }).fill("http://127.0.0.1:1");
+  await dismiss(server);
+  await expect(settings).toBeVisible();
   await dismiss(settings);
+
+  await newSession();
+  await send("/memory");
+  const memory = page.getByRole("dialog", { name: "Memory", exact: true });
+  await memory.getByRole("button", { name: "Add memory", exact: true }).click();
+  const memoryEditor = page.getByRole("dialog", { name: "Add memory", exact: true });
+  await memoryEditor.getByLabel("Memory name", { exact: true }).fill("Unsubmitted memory");
+  await dismiss(memoryEditor);
+  await expect(memory).toBeVisible();
+  await expect(memory).not.toContainText("Unsubmitted memory");
+  await dismiss(memory);
 
   const searchButton = page.getByRole("button", {
     name: "Search",
