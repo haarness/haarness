@@ -6,6 +6,7 @@ const invoke = async (channel: string, ...args: unknown[]) => {
   return response.value;
 };
 const bridge: Bridge = {
+  account: (input) => invoke("account", input),
   openLink: (connection, thread, url) => invoke("openLink", connection, thread, url),
   browserData: (connection, input) => invoke("browserData", connection, input),
   browserAttach:(connection,thread)=>invoke("browserAttach",connection,thread),

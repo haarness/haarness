@@ -72,6 +72,13 @@ pub struct ConnectGuide {
 #[must_use]
 pub fn guide(provider: &str) -> ConnectGuide {
     match provider {
+        "haarness" => ConnectGuide {
+            note: Some(
+                "Run `haarness login` in your terminal, then refresh models. Your Haarness account supplies Cloud access; no API key is needed.",
+            ),
+            popular: Some(0),
+            ..ConnectGuide::default()
+        },
         "openai" => ConnectGuide {
             methods: vec![
                 method(

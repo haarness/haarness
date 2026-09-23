@@ -42,3 +42,22 @@ test("explicit anonymous and password connections override ambient bearer creden
     await new Promise(resolve=>server.close(resolve));
   }
 });
+
+test("rotating runtime credentials are resolved for every request and failure sends nothing", async () => {
+  const requests=[];
+  let token="ticket-one", calls=0;
+  const client=new Haarness({baseUrl:"http://127.0.0.1:1/ws/workspace",resolveAuth:async()=>{
+    calls++;
+    if(!token)throw new Error("Sign in again");
+    return {type:"bearer",token};
+  },fetch:async(url,init)=>{
+    requests.push([url,init.headers.Authorization]);
+    return new Response(JSON.stringify({name:"haarness"}),{headers:{"Content-Type":"application/json"}});
+  }});
+  try {
+    await client.info();token="ticket-two";await client.info();token="";
+    await assert.rejects(client.info(),/Sign in again/);
+    assert.equal(calls,3);
+    assert.deepEqual(requests,[["http://127.0.0.1:1/ws/workspace/v1/info","Bearer ticket-one"],["http://127.0.0.1:1/ws/workspace/v1/info","Bearer ticket-two"]]);
+  } finally {client.close();}
+});

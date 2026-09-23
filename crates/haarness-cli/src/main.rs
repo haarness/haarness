@@ -1,12 +1,13 @@
+mod account;
 mod acp;
+mod browser_settings;
 mod config_specs;
 mod desktop;
 mod desktop_hooks;
 mod extensions;
+mod input_settings;
 mod insights;
 mod jsonconfig;
-mod input_settings;
-mod browser_settings;
 mod layout;
 mod management;
 mod memory_settings;
@@ -129,6 +130,14 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Sign in to your Haarness account to use Cloud models and workspaces.
+    Login(account::LoginArgs),
+    /// Sign out of your Haarness account.
+    Logout,
+    /// Show or switch your Haarness account.
+    Account(account::AccountArgs),
+    /// Use Haarness Cloud services.
+    Cloud(account::CloudArgs),
     /// Private, versioned desktop bridge. Requests are read from standard input.
     #[command(hide = true)]
     Desktop,
@@ -1031,6 +1040,10 @@ async fn main() -> Result<()> {
     let base_paths = Paths::new(cli.data_dir.as_deref())?;
     // Analytics must not register workspaces, migrate databases, start daemons or load credentials.
     match &cli.command {
+        Some(Command::Login(args)) => return account::login(args).await,
+        Some(Command::Logout) => return account::logout().await,
+        Some(Command::Account(args)) => return account::account(args).await,
+        Some(Command::Cloud(args)) => return account::cloud(args).await,
         Some(Command::Profile(args)) => {
             return profile::run(&base_paths, &cli.workspace, args).await;
         }
@@ -1078,6 +1091,7 @@ async fn main() -> Result<()> {
         );
         match cli.command {
         Some(Command::Desktop) => desktop::run(&paths, &workspace, project_config).await,
+        Some(Command::Login(_) | Command::Logout | Command::Account(_) | Command::Cloud(_)) => unreachable!("account command handled before project setup"),
         Some(Command::Stats(_) | Command::Insights(_) | Command::Profile(_)) => unreachable!("standalone commands dispatched before runtime setup"),
         None => {
             interactive(
@@ -1222,6 +1236,10 @@ impl Command {
     const fn name(&self) -> &'static str {
         match self {
             Self::Desktop => "desktop",
+            Self::Login(_) => "login",
+            Self::Logout => "logout",
+            Self::Account(_) => "account",
+            Self::Cloud(_) => "cloud",
             Self::Profile(_) => "profile",
             Self::Extension(_) => "extension",
             Self::Stats(_) => "stats",
@@ -1255,6 +1273,10 @@ impl Command {
 
 fn normalize_natural_language_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
     const COMMANDS: &[&str] = &[
+        "login",
+        "logout",
+        "account",
+        "cloud",
         "profile",
         "stats",
         "insights",
@@ -1564,12 +1586,8 @@ fn agents_command(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let plugin_roots = plugins::all_enabled_roots(
-        &paths.data,
-        paths.config_dir(),
-        workspace,
-        trust,
-    );
+    let plugin_roots =
+        plugins::all_enabled_roots(&paths.data, paths.config_dir(), workspace, trust);
     let layers = jsonconfig::load_layers(
         &config_dir,
         home.as_deref(),
@@ -1585,16 +1603,26 @@ fn agents_command(
             profile.model = agent.model;
         } else {
             profiles.push(haarness_protocol::AgentProfile {
-                id: agent.id.clone(), name: agent.id, description: agent.description,
-                hidden: agent.hidden, max_subagents: 4, mode: agent.mode, model: agent.model,
+                id: agent.id.clone(),
+                name: agent.id,
+                description: agent.description,
+                hidden: agent.hidden,
+                max_subagents: 4,
+                mode: agent.mode,
+                model: agent.model,
             });
         }
     }
     let config = load_config(paths, workspace, trust)?;
-    let execution: haarness_core::ExecutionSettings = serde_json::from_value(serde_json::to_value(&config.execution)?)?;
+    let execution: haarness_core::ExecutionSettings =
+        serde_json::from_value(serde_json::to_value(&config.execution)?)?;
     execution.validate()?;
     for profile in &mut profiles {
-        profile.max_subagents = if execution.subagent_depth == 0 || profile.max_subagents == 0 { 0 } else { u8::try_from(execution.subagent_concurrency).unwrap_or(u8::MAX) };
+        profile.max_subagents = if execution.subagent_depth == 0 || profile.max_subagents == 0 {
+            0
+        } else {
+            u8::try_from(execution.subagent_concurrency).unwrap_or(u8::MAX)
+        };
     }
     profiles.retain(|profile| include_hidden || !profile.hidden);
     if json_output {
@@ -1626,12 +1654,7 @@ fn asset_layers(paths: &Paths, workspace: &Path, trust: bool) -> jsonconfig::Jso
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let plugins = plugins::all_enabled_roots(
-        &paths.data,
-        paths.config_dir(),
-        workspace,
-        trust,
-    );
+    let plugins = plugins::all_enabled_roots(&paths.data, paths.config_dir(), workspace, trust);
     jsonconfig::load_layers(&config, home.as_deref(), workspace, trust, &plugins)
 }
 
@@ -1866,18 +1889,17 @@ fn skill_roots(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let plugins = plugins::all_enabled_roots(
-        &paths.data,
-        paths.config_dir(),
-        workspace,
-        trust,
-    );
+    let plugins = plugins::all_enabled_roots(&paths.data, paths.config_dir(), workspace, trust);
     let mut roots = plugins
         .into_iter()
-        .flat_map(|root| haarness_core::definitions::component_paths(&root, "skills").into_iter().map(move |path|(path,true,Some(root.clone()))))
+        .flat_map(|root| {
+            haarness_core::definitions::component_paths(&root, "skills")
+                .into_iter()
+                .map(move |path| (path, true, Some(root.clone())))
+        })
         .collect::<Vec<_>>();
     if let Some(home) = home.as_deref() {
-        roots.push((home.join(".agents/skills"), true,None));
+        roots.push((home.join(".agents/skills"), true, None));
     }
     if claude_compat(file_config).skills() {
         if let Some(home) = home.as_deref() {
@@ -1889,7 +1911,7 @@ fn skill_roots(
             }
         }
     }
-    roots.push((paths.skills.clone(), true,None));
+    roots.push((paths.skills.clone(), true, None));
     for root in layout::resource_roots(&config, home.as_deref(), workspace, trust) {
         for name in ["skill", "skills"] {
             roots.push((root.join(name), true, None));
@@ -1955,7 +1977,9 @@ fn validate_asset_name(name: &str, kind: &str) -> Result<()> {
 }
 
 fn validate_qualified_model(model: &str, kind: &str) -> Result<()> {
-    if matches!(model, "inherit" | "sonnet" | "opus" | "haiku") { return Ok(()); }
+    if matches!(model, "inherit" | "sonnet" | "opus" | "haiku") {
+        return Ok(());
+    }
     if model
         .split_once('/')
         .is_none_or(|(provider, model)| provider.trim().is_empty() || model.trim().is_empty())
@@ -2770,9 +2794,13 @@ async fn execute_schedule(
     let mut thread_id = None;
     let mut turn_id = None;
     let result = async {
-        let discovery =
-            ensure_workspace_server(paths, &schedule.workspace, schedule.trust_project && trust, yolo)
-                .await?;
+        let discovery = ensure_workspace_server(
+            paths,
+            &schedule.workspace,
+            schedule.trust_project && trust,
+            yolo,
+        )
+        .await?;
         let client = haarness_tui::api::ApiClient::new(&discovery.url, &discovery.token)?;
         let (provider, model) = schedule
             .model
@@ -4165,12 +4193,8 @@ fn compose_runtime_sources(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let plugin_roots = plugins::all_enabled_roots(
-        &paths.data,
-        paths.config_dir(),
-        workspace,
-        trust,
-    );
+    let plugin_roots =
+        plugins::all_enabled_roots(&paths.data, paths.config_dir(), workspace, trust);
     let mut json_layers = jsonconfig::load_layers(
         &config_dir,
         home.as_deref(),
@@ -4194,8 +4218,7 @@ fn compose_runtime_sources(
         jsonconfig::discover_skill_commands(&mut json_layers.commands, root, None);
     }
 
-    let mut workflow_catalog = WorkflowCatalog::for_workspace(workspace)
-        .with_project_config(trust);
+    let mut workflow_catalog = WorkflowCatalog::for_workspace(workspace).with_project_config(trust);
     for root in &plugin_roots {
         let fallback = root
             .file_name()
@@ -4203,10 +4226,7 @@ fn compose_runtime_sources(
             .unwrap_or("plugin");
         workflow_catalog = workflow_catalog.with_plugin_mount(root, fallback);
     }
-    let project_context = json_layers
-        .instructions
-        .clone()
-        .unwrap_or_default();
+    let project_context = json_layers.instructions.clone().unwrap_or_default();
     let mut runtime_config = runtime_config(
         &file_config,
         json_layers.rules.clone(),
@@ -4236,8 +4256,15 @@ fn compose_runtime_sources(
             decision: haarness_core::PermissionDecision::Allow,
         },
     );
-    runtime_config.read_roots = skill_roots.iter().filter_map(|(path, _, _)| path.canonicalize().ok()).collect();
-    runtime_config.read_roots.extend(plugins::all_enabled_roots(&paths.data, paths.config_dir(), workspace, trust).into_iter().filter_map(|path| path.canonicalize().ok()));
+    runtime_config.read_roots = skill_roots
+        .iter()
+        .filter_map(|(path, _, _)| path.canonicalize().ok())
+        .collect();
+    runtime_config.read_roots.extend(
+        plugins::all_enabled_roots(&paths.data, paths.config_dir(), workspace, trust)
+            .into_iter()
+            .filter_map(|path| path.canonicalize().ok()),
+    );
     runtime_config.read_roots.sort();
     runtime_config.read_roots.dedup();
     runtime_config.commands.clone_from(&json_layers.commands);
@@ -4387,8 +4414,9 @@ impl HotReloadController {
             .await,
         );
         let candidate_mcp = mcp_from_config(&self.paths, &sources.file_config).await;
-        let candidate_skills: Arc<dyn SkillRegistry> =
-            Arc::new(FilesystemSkillRegistry::new_scoped(sources.skill_roots.clone()));
+        let candidate_skills: Arc<dyn SkillRegistry> = Arc::new(
+            FilesystemSkillRegistry::new_scoped(sources.skill_roots.clone()),
+        );
         let skill_infos = candidate_skills.discover().await.unwrap_or_default();
         let tools: Arc<dyn ToolRegistry> = Arc::new(
             NativeToolRegistry::with_workflows_and_scheduler(
@@ -4882,7 +4910,9 @@ async fn application_at(
     let browser_global = paths.config_dir().to_path_buf();
     let browser_workspace = workspace.to_path_buf();
     let browser = haarness_server::browser::BrowserBroker::with_policy(Arc::new(move || {
-        browser_settings::load(trust, &browser_global, &browser_workspace).map_err(|error| haarness_core::CoreError::Tool(format!("Cannot read browser settings: {error}")))
+        browser_settings::load(trust, &browser_global, &browser_workspace).map_err(|error| {
+            haarness_core::CoreError::Tool(format!("Cannot read browser settings: {error}"))
+        })
     }));
     let tools: Arc<dyn ToolRegistry> = Arc::new(
         NativeToolRegistry::with_workflows_and_scheduler(
@@ -4941,10 +4971,21 @@ async fn application_at(
             Err(error) => eprintln!("Snapshots disabled: {error}"),
         }
     }
-    let common = std::process::Command::new("git").arg("-C").arg(workspace).args(["rev-parse", "--path-format=absolute", "--git-common-dir"]).output();
-    if let Ok(common) = common && common.status.success() {
+    let common = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output();
+    if let Ok(common) = common
+        && common.status.success()
+    {
         let identity = PathBuf::from(String::from_utf8(common.stdout)?.trim()).canonicalize()?;
-        runtime = runtime.with_repository_approvals(Arc::new(haarness_store::RepositoryApprovals::open(&paths.data.join("repository-approvals.sqlite3"), &identity)?))?;
+        runtime = runtime.with_repository_approvals(Arc::new(
+            haarness_store::RepositoryApprovals::open(
+                &paths.data.join("repository-approvals.sqlite3"),
+                &identity,
+            )?,
+        ))?;
     }
     let runtime = Arc::new(runtime);
     management.attach_runtime(&runtime);
@@ -5047,6 +5088,14 @@ async fn auth_command(paths: &Paths, command: AuthCommand) -> Result<()> {
         }
         AuthCommand::Login { provider, method } => {
             let provider = provider.trim_end_matches('/').to_ascii_lowercase();
+            if provider == "haarness" {
+                return account::login(&account::LoginArgs {
+                    device: method == Some(AuthLoginMethod::Headless),
+                    no_browser: false,
+                    json: false,
+                })
+                .await;
+            }
             let method = method.unwrap_or(
                 if matches!(provider.as_str(), "openai" | "xai" | "github-copilot") {
                     AuthLoginMethod::Browser
@@ -5123,6 +5172,9 @@ async fn auth_command(paths: &Paths, command: AuthCommand) -> Result<()> {
             println!("Connected {provider} ({})", credential.kind());
         }
         AuthCommand::Logout { provider } => {
+            if provider.eq_ignore_ascii_case("haarness") {
+                return account::logout().await;
+            }
             if store.remove(&provider)? {
                 println!("Removed {provider} credential");
             } else {
@@ -5516,11 +5568,7 @@ fn read_mcp_entry(path: &Path, name: &str) -> Result<McpConfigureRequest> {
     if path.extension().is_some_and(|value| value != "toml") {
         return jsonconfig::read_json(path)
             .map_err(anyhow::Error::msg)?
-            .and_then(|root| {
-                root.get("mcp")?
-                    .get(name)
-                    .and_then(jsonconfig::mcp_entry)
-            })
+            .and_then(|root| root.get("mcp")?.get(name).and_then(jsonconfig::mcp_entry))
             .with_context(|| format!("no MCP server named '{name}' in {}", path.display()));
     }
     let root: toml::Value = toml::from_str(
@@ -6614,7 +6662,8 @@ fn runtime_config(
     }
     Ok(haarness_core::RuntimeConfig {
         execution: {
-            let settings: haarness_core::ExecutionSettings = serde_json::from_value(serde_json::to_value(&config.execution)?)?;
+            let settings: haarness_core::ExecutionSettings =
+                serde_json::from_value(serde_json::to_value(&config.execution)?)?;
             settings.validate()?;
             settings
         },
@@ -6704,12 +6753,8 @@ fn plugin_command(
                     println!("  {name}  {}", path.display());
                 }
             }
-            let installed = plugins::plugin_infos(
-                &paths.data,
-                paths.config_dir(),
-                workspace,
-                project_config,
-            );
+            let installed =
+                plugins::plugin_infos(&paths.data, paths.config_dir(), workspace, project_config);
             if installed.is_empty() {
                 println!("No plugins installed.");
             } else {
@@ -7551,7 +7596,10 @@ async fn ensure_workspace_server_at(
         .arg("--workspace")
         .arg(workspace)
         .args((!trust).then_some("--disable-project-config"))
-        .env("HAARNESS_DISABLE_PROJECT_CONFIG", if trust { "0" } else { "1" })
+        .env(
+            "HAARNESS_DISABLE_PROJECT_CONFIG",
+            if trust { "0" } else { "1" },
+        )
         .args(yolo.then_some("--yolo"))
         .arg("serve")
         .arg("--host")
@@ -7729,11 +7777,23 @@ mod tests {
         let default = super::Cli::try_parse_from(["haarness", "run", "hello"]).unwrap();
         assert!(!default.disable_project_config);
         assert!(!default.yolo);
-        let disabled = super::Cli::try_parse_from(["haarness", "--disable-project-config", "run", "hello"]).unwrap();
+        let disabled =
+            super::Cli::try_parse_from(["haarness", "--disable-project-config", "run", "hello"])
+                .unwrap();
         assert!(disabled.disable_project_config);
         assert!(!disabled.yolo);
-        let legacy = super::Cli::try_parse_from(["haarness", "--trust-project", "--disable-project-config", "run", "hello"]).unwrap();
-        assert!(legacy.disable_project_config, "explicit opt-out wins over legacy opt-in");
+        let legacy = super::Cli::try_parse_from([
+            "haarness",
+            "--trust-project",
+            "--disable-project-config",
+            "run",
+            "hello",
+        ])
+        .unwrap();
+        assert!(
+            legacy.disable_project_config,
+            "explicit opt-out wins over legacy opt-in"
+        );
     }
 
     #[test]
@@ -9649,13 +9709,13 @@ mod tests {
     }
     #[test]
     fn execution_settings_merge_per_field_and_validate() {
-        let mut base: FileConfig=toml::from_str("[execution]\nshell_timeout_ms=0\nsubagent_concurrency=6\n").unwrap();
-        let project: FileConfig=toml::from_str("[execution]\nsubagent_depth=3\n").unwrap();
-        super::merge_file_config(&mut base,project);
-        let config=super::runtime_config(&base,Vec::new(),Vec::new(),false).unwrap();
-        assert_eq!(config.execution.shell_timeout_ms,0);
-        assert_eq!(config.execution.subagent_concurrency,6);
-        assert_eq!(config.execution.subagent_depth,3);
+        let mut base: FileConfig =
+            toml::from_str("[execution]\nshell_timeout_ms=0\nsubagent_concurrency=6\n").unwrap();
+        let project: FileConfig = toml::from_str("[execution]\nsubagent_depth=3\n").unwrap();
+        super::merge_file_config(&mut base, project);
+        let config = super::runtime_config(&base, Vec::new(), Vec::new(), false).unwrap();
+        assert_eq!(config.execution.shell_timeout_ms, 0);
+        assert_eq!(config.execution.subagent_concurrency, 6);
+        assert_eq!(config.execution.subagent_depth, 3);
     }
-
 }

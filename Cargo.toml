@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/haarness-account",
     "crates/haarness-extensions",
     "crates/haarness-protocol",
     "crates/haarness-core",

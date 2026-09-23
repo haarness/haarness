@@ -1,4 +1,5 @@
 import { t, splitAround } from "./i18n";
+import { AccountMenu } from "./AccountMenu";
 import type { ManagementView } from "@haarness/sdk";
 import {
   For,
@@ -78,10 +79,10 @@ export function ConnectProvider(props: {
       const view = await manage({ action: "connect" });
       if (current !== generation) return;
       const rows = parseCatalog(view);
-      setCatalog(rows.length ? rows : fallbackCatalog(app.state.providers));
+      setCatalog((rows.length ? rows : fallbackCatalog(app.state.providers)).filter(row => row.id !== "haarness"));
     } catch {
       if (current !== generation) return;
-      setCatalog(fallbackCatalog(app.state.providers));
+      setCatalog(fallbackCatalog(app.state.providers).filter(row => row.id !== "haarness"));
     } finally {
       if (current === generation) setLoading(false);
     }
@@ -301,6 +302,7 @@ export function ConnectProvider(props: {
       </Show>
       <Switch>
         <Match when={step().kind === "pick"}>
+          <Show when={local()}><AccountMenu models connected={props.close} /></Show>
           <input
             ref={search}
             class="connect-search"

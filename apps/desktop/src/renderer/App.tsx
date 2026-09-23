@@ -1,4 +1,5 @@
 import { BrowserPanel } from "./BrowserPanel";
+import { AccountMenu } from "./AccountMenu";
 import { Notifications } from "./Notifications";
 import { t } from "./i18n";
 import { ServerConnect, openServerConnection } from "./ServerConnect";
@@ -807,6 +808,7 @@ export function App() {
             </div>
           </div>
           <footer class="sidebar-footer">
+            <AccountMenu />
             <button
               class="nav-row"
               aria-label={t("Settings")}

@@ -9,6 +9,7 @@ mod cloud;
 mod compatibility_tests;
 pub mod connect;
 mod gemini;
+mod haarness_cloud;
 mod live_models;
 mod media;
 mod openai;
@@ -276,6 +277,12 @@ impl NativeProviderRegistry {
         );
         if !disabled.contains("openai") {
             registry.insert(Arc::new(openai));
+        }
+        if !disabled.contains("haarness") {
+            if let Some(provider) = haarness_cloud::HaarnessCloudProvider::from_environment() {
+                provider.refresh_models(true).await;
+                registry.insert(Arc::new(provider));
+            }
         }
         if !disabled.contains("anthropic") {
             registry.insert(Arc::new(anthropic));
