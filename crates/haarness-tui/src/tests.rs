@@ -1186,7 +1186,7 @@ fn slash_commands_filter_and_render_as_an_interactive_menu() {
     assert_eq!(commands.first().unwrap().name, "models");
     let lines = app.lines((80, 24));
     assert!(lines.iter().any(|line| line_text(line).contains("/models")));
-    let selected = Theme::editorial_dark().primary;
+    let selected = app.theme.primary;
     assert!(
         lines
             .iter()
@@ -1505,7 +1505,7 @@ fn completed_tools_do_not_remain_stuck_on_running() {
     let marker = row.spans.first().unwrap();
     assert_eq!(
         marker.fg,
-        Theme::editorial_dark().muted,
+        app.theme.muted,
         "completed tools settle to the muted state"
     );
 }
@@ -2639,7 +2639,7 @@ fn assistant_replies_carry_the_identity_marker() {
     assert_eq!(marked.len(), 2, "one marker per reply, first line only");
     assert!(line_text(marked[0]).contains("crates"));
     let anchor = marked[0].spans.first().unwrap();
-    assert_eq!(anchor.fg, Theme::editorial_dark().primary);
+    assert_eq!(anchor.fg, app.theme.primary);
     assert!(
         lines
             .iter()
@@ -2790,6 +2790,53 @@ fn theme_switching_applies_variants_and_invalidates_renders() {
 }
 
 #[test]
+fn explicit_themes_paint_their_background_in_limited_color_terminals() {
+    use crate::config::BackgroundMode;
+    let support = haarness_opentui::ColorSupport {
+        truecolor: false,
+        ansi256: true,
+    };
+    let mut app = selector_fixture();
+    assert_eq!(app.theme_name, "haarness");
+    assert_eq!(app.theme, Theme::haarness_dark());
+    for selected in [false, true] {
+        app.theme_selected = selected;
+        for preview in [false, true] {
+            if preview {
+                app.open_overlay(crate::state::Overlay::Themes);
+            }
+            assert!(app.apply_theme("haarness", "light"));
+            let mode = BackgroundMode::Auto
+                .for_theme_choice(app.theme_selected || app.theme_preview_restore.is_some());
+            app.set_terminal_background(crate::uses_terminal_background(mode, support));
+            assert_eq!(app.terminal_background, !selected && !preview);
+            if selected || preview {
+                assert_eq!(
+                    crate::page_background(app.theme.bg, mode, support),
+                    Theme::haarness_light().bg
+                );
+                assert_eq!(app.theme.surface, Theme::haarness_light().surface);
+                assert_eq!(
+                    crate::initial_theme_variant(false, Some("dark"), Some("light")),
+                    "light"
+                );
+            }
+            if preview {
+                app.close_overlay();
+            }
+        }
+    }
+    assert_eq!(
+        BackgroundMode::Terminal.for_theme_choice(true),
+        BackgroundMode::Terminal
+    );
+    assert_eq!(
+        BackgroundMode::Theme.for_theme_choice(false),
+        BackgroundMode::Theme
+    );
+}
+
+#[test]
 fn assistant_markdown_renders_without_literal_markers() {
     let thread = fixture_thread();
     let items = vec![message_item(
@@ -2813,7 +2860,7 @@ fn assistant_markdown_renders_without_literal_markers() {
         code_line
             .spans
             .iter()
-            .any(|span| span.bg == Some(Theme::editorial_dark().surface)),
+            .any(|span| span.bg == Some(app.theme.surface)),
         "code renders on the surface background"
     );
 }
@@ -2878,7 +2925,7 @@ fn edit_results_are_collapsed_then_expand_to_a_diff_block() {
         added
             .spans
             .iter()
-            .any(|span| span.bg == Some(Theme::editorial_dark().diff.added_bg))
+            .any(|span| span.bg == Some(app.theme.diff.added_bg))
     );
 }
 
@@ -3042,7 +3089,7 @@ fn user_prompts_render_as_surface_blocks() {
         .iter()
         .find(|line| line_text(line).contains("make it good"))
         .unwrap();
-    let surface = Theme::editorial_dark().surface;
+    let surface = app.theme.surface;
     assert!(
         block
             .spans
@@ -3068,8 +3115,8 @@ fn status_band_spans_the_full_width_on_surface() {
     let lines = app.lines((90, 24));
     let band = lines.last().unwrap();
     assert_eq!(band.width(), 90, "the band is the frame's bottom edge");
-    let surface = Theme::editorial_dark().surface;
-    let primary = Theme::editorial_dark().primary;
+    let surface = app.theme.surface;
+    let primary = app.theme.primary;
     assert!(
         band.spans
             .iter()
@@ -6565,14 +6612,14 @@ async fn child_thread_permission_surfaces_in_the_root_view() {
         toast
             .spans
             .iter()
-            .any(|span| span.bg == Some(Theme::editorial_dark().surface)),
+            .any(|span| span.bg == Some(app.theme.overlay)),
         "the toast body is a raised panel"
     );
     assert!(
         frame.iter().any(|line| line.spans.iter().any(|span| {
-            span.fg == Theme::editorial_dark().accent
+            span.fg == app.theme.accent
                 && span.text.starts_with('━')
-                && span.bg == Some(Theme::editorial_dark().surface)
+                && span.bg == Some(app.theme.overlay)
         })),
         "an approval toast is capped in the attention color"
     );
@@ -9392,7 +9439,7 @@ fn selection_extracts_and_paints_the_dragged_rows() {
     assert_eq!(app.selected_text(), "alpha beta");
     // Re-render paints the selection background over those cells.
     let painted = app.lines((80, 20));
-    let selected = Theme::editorial_dark().primary;
+    let selected = app.theme.primary;
     assert!(
         painted[row as usize]
             .spans
@@ -9457,7 +9504,7 @@ fn compact_terminal_keeps_the_explicit_dialog_visible() {
         text.contains('━'),
         "compact dialog lost its accent cap: {text}"
     );
-    let surface = Theme::editorial_dark().surface;
+    let surface = app.theme.overlay;
     assert!(
         lines
             .iter()
@@ -9759,6 +9806,102 @@ fn model_dialog_rows_do_not_jump_when_catalog_metadata_refreshes() {
         after_row, before_row,
         "provider metadata refresh moved the interactive model row"
     );
+}
+
+#[tokio::test]
+async fn model_picker_hover_scroll_and_keyboard_keep_one_highlighted_choice() {
+    let mut app = selector_fixture();
+    let template = app.providers[0].models[0].clone();
+    app.providers[0].models = (0..80)
+        .map(|index| {
+            let mut model = template.clone();
+            model.id = format!("model-{index:02}");
+            model.display_name = format!("Model {index:02}");
+            model
+        })
+        .collect();
+    app.open_overlay(crate::state::Overlay::Models);
+    app.selection = 35;
+    app.lines((120, 32));
+    let edge = app
+        .hit_rows
+        .borrow()
+        .iter()
+        .rev()
+        .find(|hit| matches!(hit.target, crate::view::frame::HitTarget::MenuRow(_)))
+        .cloned()
+        .unwrap();
+    let client = offline_client();
+    crate::input::mouse::handle_mouse(
+        &mut app,
+        MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: u16::try_from(edge.start + 1).unwrap(),
+            row: u16::try_from(edge.row).unwrap(),
+            modifiers: KeyModifiers::NONE,
+        },
+        &client,
+    )
+    .await
+    .unwrap();
+    for keyboard in [false, true] {
+        if keyboard {
+            crate::input::handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+                &client,
+            )
+            .await
+            .unwrap();
+        }
+        let lines = app.lines((120, 32));
+        let highlighted: std::collections::BTreeSet<_> = app
+            .hit_rows
+            .borrow()
+            .iter()
+            .filter_map(|hit| {
+                let crate::view::frame::HitTarget::MenuRow(index) = hit.target else {
+                    return None;
+                };
+                lines[hit.row]
+                    .spans
+                    .iter()
+                    .any(|span| span.bg == Some(app.theme.primary))
+                    .then_some(index)
+            })
+            .collect();
+        assert_eq!(
+            highlighted,
+            std::collections::BTreeSet::from([app.selection]),
+            "mouse and keyboard must share one selected row"
+        );
+    }
+}
+
+#[test]
+fn cloud_picker_displays_public_prefix_and_omits_connected_status() {
+    let mut app = selector_fixture();
+    app.providers[0].id = "haarness".into();
+    app.thread.provider = "haarness".into();
+    app.providers[0].models[0].id = "openai/gpt-6-sol".into();
+    app.thread.model = "openai/gpt-6-sol".into();
+    app.open_overlay(crate::state::Overlay::Models);
+    app.overlay_filter = "haarness-cloud/".into();
+    let models = app.filtered_models();
+    assert!(!models.is_empty());
+    assert!(
+        models.iter().all(|id| id.starts_with("haarness/")),
+        "stored IDs stay compatible"
+    );
+    let text = app
+        .lines((180, 36))
+        .iter()
+        .map(Line::text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("haarness-cloud/openai/gpt-6-sol"), "{text}");
+    assert!(text.contains("active"), "{text}");
+    assert!(!text.contains(" · connected"), "{text}");
 }
 
 #[test]

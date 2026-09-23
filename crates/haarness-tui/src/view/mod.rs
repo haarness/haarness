@@ -458,6 +458,10 @@ impl App {
                 // This target exists solely to prevent click-through and must
                 // never make inert card chrome look interactive.
                 frame::HitTarget::DialogSurface => {}
+                // Mouse movement already changes selection. When that scrolls
+                // a picker, this cell can now belong to another item; painting
+                // it again would highlight both the selected and stale row.
+                frame::HitTarget::MenuRow(_) => {}
                 frame::HitTarget::DialogItem(_) => {
                     let target = hit.target.clone();
                     for region in hits

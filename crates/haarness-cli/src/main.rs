@@ -1374,14 +1374,17 @@ async fn models_command(
     )
     .await;
     let mut found_provider = provider_filter.is_none();
-    for provider in providers
-        .list()
-        .into_iter()
-        .filter(|provider| provider_filter.is_none_or(|filter| provider.id == filter))
-    {
+    for provider in providers.list().into_iter().filter(|provider| {
+        provider_filter
+            .is_none_or(|filter| provider.id == haarness_protocol::provider_storage_id(filter))
+    }) {
         found_provider = true;
         for model in provider.models {
-            println!("{}/{}", provider.id, model.id);
+            println!(
+                "{}/{}",
+                haarness_protocol::provider_display_id(&provider.id),
+                model.id
+            );
             if verbose {
                 println!("{}", serde_json::to_string_pretty(&model)?);
             }
@@ -3546,11 +3549,29 @@ fn qualified_run_model(provider: &str, model: &str) -> Result<(String, String)> 
             anyhow::bail!("--model must be a model id or provider/model");
         }
         return Ok((
-            qualified_provider.trim().to_owned(),
+            haarness_protocol::provider_storage_id(qualified_provider.trim()).to_owned(),
             qualified_model.trim().to_owned(),
         ));
     }
-    Ok((provider.to_owned(), model.to_owned()))
+    Ok((
+        haarness_protocol::provider_storage_id(provider).to_owned(),
+        model.to_owned(),
+    ))
+}
+
+#[cfg(test)]
+#[test]
+fn cloud_model_prefix_preserves_the_existing_provider_identity() {
+    for prefix in ["haarness", "haarness-cloud"] {
+        assert_eq!(
+            qualified_run_model("openai", &format!("{prefix}/openai/gpt-6-sol")).unwrap(),
+            ("haarness".into(), "openai/gpt-6-sol".into())
+        );
+        assert_eq!(
+            qualified_run_model(prefix, "gpt-6-sol").unwrap().0,
+            "haarness"
+        );
+    }
 }
 
 fn run_title(requested: Option<&str>, prompt: &str) -> String {
@@ -5088,7 +5109,7 @@ async fn auth_command(paths: &Paths, command: AuthCommand) -> Result<()> {
         }
         AuthCommand::Login { provider, method } => {
             let provider = provider.trim_end_matches('/').to_ascii_lowercase();
-            if provider == "haarness" {
+            if haarness_protocol::provider_storage_id(&provider) == "haarness" {
                 return account::login(&account::LoginArgs {
                     device: method == Some(AuthLoginMethod::Headless),
                     no_browser: false,
@@ -5172,7 +5193,10 @@ async fn auth_command(paths: &Paths, command: AuthCommand) -> Result<()> {
             println!("Connected {provider} ({})", credential.kind());
         }
         AuthCommand::Logout { provider } => {
-            if provider.eq_ignore_ascii_case("haarness") {
+            if matches!(
+                provider.to_ascii_lowercase().as_str(),
+                "haarness" | "haarness-cloud"
+            ) {
                 return account::logout().await;
             }
             if store.remove(&provider)? {

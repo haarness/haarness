@@ -18,6 +18,18 @@ pub enum BackgroundMode {
     Terminal,
 }
 
+impl BackgroundMode {
+    /// A theme explicitly picked or previewed by the user owns its background.
+    /// The terminal override still wins when explicitly configured.
+    pub const fn for_theme_choice(self, explicit: bool) -> Self {
+        if explicit && matches!(self, Self::Auto) {
+            Self::Theme
+        } else {
+            self
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(untagged)]
 pub enum StatusLineCommand {
@@ -363,7 +375,7 @@ pub fn load_theme_selection() -> (Option<String>, Option<String>) {
 
 /// The `[tui].background_mode` setting. `auto` is the compatibility default:
 /// exact RGB terminals keep the theme page color, while limited-color
-/// terminals keep their own configured background.
+/// terminals keep their own configured background until a theme is chosen.
 pub fn load_background_mode() -> BackgroundMode {
     let Some(directory) = config_dir() else {
         return BackgroundMode::default();

@@ -21,19 +21,19 @@ removed = "#c53b53"
 
 [light]
 text = "#1a1a1a"
-muted = "#8a8a8a"
-primary = "#EC5B2B"
-accent = "#c94d24"
+muted = "#626262"
+primary = "#a8411f"
+accent = "#a8401e"
 user = "#8e3e23"
-danger = "#d1383d"
+danger = "#b43035"
 
 [light.syntax]
-keyword = "#EC5B2B"
-string = "#0062d1"
-comment = "#8a8a8a"
-constant = "#EC5B2B"
-function = "#c94d24"
+keyword = "#a8411f"
+string = "#005ec8"
+comment = "#626262"
+constant = "#a8411f"
+function = "#a8401e"
 
 [light.diff]
-added = "#0062d1"
-removed = "#c53b53"
+added = "#005ec8"
+removed = "#af354a"
