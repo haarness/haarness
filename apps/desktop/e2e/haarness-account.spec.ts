@@ -96,7 +96,9 @@ test("Haarness account signs in through a browser, discovers Cloud models, and s
     );
     const cloud = providers.find((p) => p.id === "haarness");
     expect(cloud?.authenticated).toBe(true);
-    expect(cloud?.models.some((m: any) => m.id === "fixture/echo")).toBe(true);
+    // OIDC fixtures also support a live provider pricebook. Account discovery
+    // must work with that catalog rather than depend on a test model being sold.
+    expect(cloud?.models.length).toBeGreaterThan(0);
     await page.screenshot({
       path: test.info().outputPath("account-signed-in.png"),
     });
