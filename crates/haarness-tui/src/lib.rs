@@ -200,6 +200,24 @@ pub async fn run_attached_with_auth(
     .map(|_| ())
 }
 
+/// Cloud attachment tickets renew independently of the remote runtime.
+pub async fn run_attached_with_resolver(
+    server: &str,
+    token: &str,
+    resolver: EndpointResolver,
+) -> Result<()> {
+    Box::pin(run_with_client(
+        ApiClient::new(server, token)?
+            .with_remote_endpoint_resolver(resolver)
+            .with_attachment_uploads(),
+        None,
+        false,
+        false,
+    ))
+    .await
+    .map(|_| ())
+}
+
 /// Start a local, auto-discovered TUI that can follow a replacement daemon's
 /// new loopback port and bearer token. Explicit remote `--connect` clients use
 /// `run_with_thread` and remain pinned to the endpoint the user selected.

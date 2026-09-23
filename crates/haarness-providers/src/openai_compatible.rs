@@ -106,6 +106,12 @@ impl OpenAiCompatibleProvider {
         }
     }
 
+    /// First-party router credentials must not follow redirects.
+    pub(crate) fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
+    }
+
     #[must_use]
     pub fn with_auth_store(mut self, auth_store: Option<Arc<CredentialStore>>) -> Self {
         self.auth_store = auth_store;

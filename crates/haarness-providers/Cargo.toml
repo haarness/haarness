@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+haarness-account = { path = "../haarness-account" }
 async-trait.workspace = true
 async-stream.workspace = true
 base64.workspace = true

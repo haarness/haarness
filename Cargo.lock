@@ -1399,6 +1399,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "haarness-account"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "fs2",
+ "rand 0.9.5",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "haarness-cli"
 version = "0.1.0"
 dependencies = [
@@ -1412,6 +1431,7 @@ dependencies = [
  "fs2",
  "futures",
  "glob",
+ "haarness-account",
  "haarness-core",
  "haarness-extensions",
  "haarness-insights",
@@ -1602,6 +1622,7 @@ dependencies = [
  "chrono",
  "fs2",
  "futures",
+ "haarness-account",
  "haarness-core",
  "haarness-protocol",
  "hmac",

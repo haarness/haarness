@@ -43,7 +43,7 @@ export class Haarness extends Api {
       .join("");
     return { turn: result, items, text: output };
   }
-  connectPty(
+  async connectPty(
     id: string,
     query: { cursor?: number } = {},
     options: RequestOptions = {},
@@ -53,7 +53,7 @@ export class Haarness extends Api {
         /^http/,
         "ws",
       ),
-      this.headers(),
+      await this.headers(),
       this.signal(options.signal),
       options.timeoutMs ?? this.timeoutMs,
     );

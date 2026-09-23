@@ -25,6 +25,8 @@ export function authorizationHeaders(
 }
 
 export interface ClientOptions {
+  /** Resolve short-lived runtime credentials before each request or reconnect. */
+  resolveAuth?: () => Promise<ServerAuth>;
   baseUrl: string;
   token?: string;
   auth?: ServerAuth;
@@ -73,6 +75,7 @@ export interface EventOptions extends Omit<RequestOptions, "timeoutMs"> {
 export class Transport {
   readonly baseUrl: string;
   private readonly authentication: Record<string, string>;
+  private readonly resolveAuth?: () => Promise<ServerAuth>;
   protected readonly timeoutMs: number;
   private readonly fetcher: typeof globalThis.fetch;
   private readonly lifetime = new AbortController();
@@ -88,6 +91,7 @@ export class Transport {
       throw new TypeError(
         "Use an HTTP(S) server URL without credentials, query or fragment",
       );
+    this.resolveAuth = options.resolveAuth;
     this.baseUrl = url.href.replace(/\/+$/, "");
     this.authentication = authorizationHeaders(
       options.auth ??
@@ -122,8 +126,8 @@ export class Transport {
         url.searchParams.set(key, String(value));
     return url.href;
   }
-  protected headers(): Record<string, string> {
-    return { ...this.authentication };
+  protected async headers(): Promise<Record<string, string>> {
+    return this.resolveAuth ? authorizationHeaders(await this.resolveAuth()) : { ...this.authentication };
   }
   protected signal(signal?: AbortSignal): AbortSignal {
     return signal
@@ -153,7 +157,7 @@ export class Transport {
     path: string,
     options: WireOptions = {},
   ): Promise<T> {
-    const headers = this.headers();
+    const headers = await this.headers();
     const deadline = new AbortController();
     const timeout = options.timeoutMs ?? this.timeoutMs;
     if (!(timeout > 0)) throw new TypeError("timeoutMs must be positive");
@@ -209,7 +213,7 @@ export class Transport {
     let instance: string | undefined;
     while (!signal.aborted) {
       const headers = {
-        ...this.headers(),
+        ...await this.headers(),
         Accept: "text/event-stream",
         ...(cursor === undefined ? {} : { "Last-Event-ID": String(cursor) }),
       };

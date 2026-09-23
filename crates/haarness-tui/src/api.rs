@@ -196,6 +196,7 @@ pub struct ApiClient {
     endpoint: Arc<RwLock<ApiEndpoint>>,
     endpoint_resolver: Option<EndpointResolver>,
     upload_attachments: bool,
+    local_workspace_switching: bool,
     pty_events: tokio::sync::broadcast::Sender<PtyClientEvent>,
     pty_connections: Arc<Mutex<HashMap<PtyId, PtyClientConnection>>>,
 }
@@ -314,6 +315,7 @@ impl ApiClient {
             endpoint: Arc::new(RwLock::new(ApiEndpoint::new(server, auth)?)),
             endpoint_resolver: None,
             upload_attachments: false,
+            local_workspace_switching: false,
             pty_events,
             pty_connections: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -321,12 +323,21 @@ impl ApiClient {
 
     #[must_use]
     pub(crate) fn supports_local_workspace_switch(&self) -> bool {
-        self.endpoint_resolver.is_some()
+        self.local_workspace_switching
     }
 
     #[must_use]
     pub fn with_endpoint_resolver(mut self, resolver: EndpointResolver) -> Self {
         self.endpoint_resolver = Some(resolver);
+        self.local_workspace_switching = true;
+        self
+    }
+
+    /// Refresh a remote ticket without enabling local project switching.
+    #[must_use]
+    pub fn with_remote_endpoint_resolver(mut self, resolver: EndpointResolver) -> Self {
+        self.endpoint_resolver = Some(resolver);
+        self.local_workspace_switching = false;
         self
     }
 
@@ -347,10 +358,29 @@ impl ApiClient {
     }
 
     fn endpoint(&self) -> ApiEndpoint {
-        self.endpoint
+        let current = self
+            .endpoint
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+            .clone();
+        if !self.local_workspace_switching {
+            if let Some(credentials) = self
+                .endpoint_resolver
+                .as_ref()
+                .and_then(|resolve| resolve())
+            {
+                // A native Cloud renewal can change credentials, never the trusted gateway path.
+                if credentials.server.trim_end_matches('/') == current.base
+                    && !current.matches(&credentials)
+                {
+                    if let Ok(next) = ApiEndpoint::new(&credentials.server, credentials.auth) {
+                        self.replace_endpoint(next.clone());
+                        return next;
+                    }
+                }
+            }
+        }
+        current
     }
 
     fn replace_endpoint(&self, endpoint: ApiEndpoint) {
@@ -2060,5 +2090,7 @@ mod tests {
         let resolver: EndpointResolver = Arc::new(|| None);
         let local = plain.with_endpoint_resolver(resolver);
         assert!(local.supports_local_workspace_switch());
+        let remote = local.with_remote_endpoint_resolver(Arc::new(|| None));
+        assert!(!remote.supports_local_workspace_switch());
     }
 }

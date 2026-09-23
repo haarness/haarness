@@ -1,3 +1,4 @@
+import { accountRequest, accountLogin, cancelAccountLogin, connectCloud, closeCloudConnections } from "./account";
 import { createReviewStorage, type ReviewRequest } from "../review-drafts";
 import { browserLinkDestination } from "../browser-settings";
 import { browserData, removeBrowserData, saveBrowserDownload } from "./browser-data";
@@ -512,10 +513,29 @@ function installHandlers() {
     }
     return data().values[key] ?? null;
   });
+  handle("account", async (win, raw: unknown) => {
+    const input = z.object({ action: z.enum(["status", "login", "cancel", "logout", "select", "workspaces", "create", "start", "stop", "billing", "usage", "web"]), id: z.string().uuid().optional(), name: z.string().max(200).optional(), repo: z.string().max(2000).optional(), page: z.enum(["billing", "usage"]).optional(), device: z.boolean().optional() }).strict().parse(raw);
+    if (input.action === "cancel") { cancelAccountLogin(); return null; }
+    if (input.action === "login") {
+      await accountLogin(!!input.device, value => send(win, { kind: "menu", data: { action: "account-login", ...value as object } }));
+    } else if (input.action === "web") {
+      const result = await accountRequest(input); await shell.openExternal(external(result.url)); return null;
+    } else {
+      if (["logout", "select"].includes(input.action)) cancelAccountLogin();
+      if (input.action === "logout") closeCloudConnections();
+      const result = await accountRequest(input);
+      if (!["logout", "select"].includes(input.action)) return result;
+      closeCloudConnections();
+    }
+    await Promise.allSettled([...connections.values()].filter(c => !c.view.remote).map(c => c.client.refreshProviders()));
+    broadcast({ kind: "menu", data: { action: "account-changed" } });
+    return accountRequest({ action: "status" });
+  });
   handle("connect", async (win, raw: unknown) => {
     const input = z
       .object({
         workspace: z.string().optional(),
+        cloudWorkspace: z.string().uuid().optional(),
         url: z.string().optional(),
         token: z.string().optional(),
         username: z.string().max(1024).optional(),
@@ -530,6 +550,14 @@ function installHandlers() {
       ? data().recent.find((item) => item.id === input.recent)
       : undefined;
     if (input.recent && !recent) throw new Error("Saved project was not found");
+    const cloudWorkspace = input.cloudWorkspace ?? recent?.cloudWorkspace;
+    if (cloudWorkspace) {
+      const view = await connectCloud(cloudWorkspace, recent);
+      const index = data().recent.findIndex(item => item.id === view.id);
+      if (index >= 0) data().recent[index] = view; else data().recent.push(view);
+      await persist(); watchNotifications(view.id, win.id); return view;
+    }
+
     let workspace = input.workspace ?? recent?.workspace;
     const url = input.url ?? recent?.url;
     if (!url && !workspace) {

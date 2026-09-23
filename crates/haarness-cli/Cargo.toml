@@ -10,6 +10,7 @@ name = "haarness"
 path = "src/main.rs"
 
 [dependencies]
+haarness-account = { path = "../haarness-account" }
 haarness-ripgrep = { path = "../haarness-ripgrep" }
 agent-client-protocol.workspace = true
 anyhow.workspace = true
