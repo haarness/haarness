@@ -36,6 +36,13 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
     (
         "openai",
         &[
+            entry("gpt-6-sol", 1_050_000, 128_000, Some((2.0, 10.0, 0.2, 2.5))),
+            entry(
+                "gpt-6-luna",
+                1_050_000,
+                128_000,
+                Some((0.1, 0.5, 0.01, 0.125)),
+            ),
             entry(
                 "gpt-6-astra",
                 1_050_000,
@@ -89,6 +96,9 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
     (
         "anthropic",
         &[
+            // Limits verified through Anthropic's live Models API on 2026-09-23.
+            // Do not inherit Opus 5's price for a newly discovered release.
+            entry("claude-opus-5-5", 1_000_000, 128_000, None),
             entry(
                 "claude-fable-5-1",
                 1_000_000,
@@ -167,6 +177,7 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
     (
         "gemini",
         &[
+            entry("gemini-3.8-flash", 1_048_576, 65_536, None),
             entry("gemini-3.7-flash", 1_048_576, 65_536, None),
             entry("gemini-3.6-flash", 1_048_576, 65_536, None),
             entry("gemini-3.5-flash-lite", 1_048_576, 65_536, None),

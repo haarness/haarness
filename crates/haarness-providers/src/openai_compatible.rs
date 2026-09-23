@@ -333,11 +333,10 @@ fn model_info(provider: &str, id: &str, defaults: CompatibleModelDefaults) -> Mo
         id: id.into(),
         display_name: id.into(),
         reasoning: false,
-        reasoning_efforts: if known_reasoning_effort_model(provider, id) {
-            ["low", "medium", "high"].map(str::to_owned).to_vec()
-        } else {
-            Vec::new()
-        },
+        reasoning_efforts: known_reasoning_efforts(provider, id)
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
         // Chat Completions itself does not guarantee multimodal input. Keep
         // this false unless discovery or config proves otherwise.
         images: false,
@@ -390,7 +389,20 @@ fn model_info(provider: &str, id: &str, defaults: CompatibleModelDefaults) -> Mo
 }
 
 fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
+    if !info.reasoning_efforts.is_empty() {
+        info.reasoning = true;
+    }
     match (provider, info.id.as_str()) {
+        ("xai", "grok-4.7") => {
+            info.images = true;
+            info.context_window = Some(500_000);
+            info.pricing = Some(ModelPricing {
+                input: 2.0,
+                output: 6.0,
+                cache_read: 0.5,
+                cache_write: 0.0,
+            });
+        }
         ("groq", "openai/gpt-oss-120b") => {
             info.display_name = "GPT-OSS 120B".into();
             info.reasoning = true;
@@ -436,26 +448,24 @@ fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
                 cache_write: 0.0,
             });
         }
-        ("deepseek", "deepseek-v4-flash" | "deepseek-v4-pro") => {
-            info.display_name = if info.id.ends_with("flash") {
-                "DeepSeek V4 Flash".into()
+        (
+            "deepseek",
+            "deepseek-flash"
+            | "deepseek-v4-flash"
+            | "deepseek-v4-flash-vision-exp"
+            | "deepseek-v4-pro",
+        ) => {
+            info.display_name = if info.id != "deepseek-v4-pro" {
+                "DeepSeek V4.1 Flash".into()
             } else {
                 "DeepSeek V4 Pro".into()
             };
             info.reasoning = true;
             info.context_window = Some(1_000_000);
             info.max_output_tokens = Some(384_000);
-            let (input, output, cache_read) = if info.id.ends_with("flash") {
-                (0.14, 0.28, 0.0028)
-            } else {
-                (0.435, 0.87, 0.003_625)
-            };
-            info.pricing = Some(ModelPricing {
-                input,
-                output,
-                cache_read,
-                cache_write: 0.0,
-            });
+            info.images = info.id != "deepseek-v4-pro";
+            // Peak/off-peak billing cannot be represented by one static price.
+            info.pricing = None;
         }
         ("together" | "togetherai", "zai-org/GLM-5.1") => {
             info.display_name = "GLM-5.1".into();
@@ -474,6 +484,17 @@ fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
                 input: 1.20,
                 output: 4.50,
                 cache_read: 0.20,
+                cache_write: 0.0,
+            });
+        }
+        ("mistral", "mistral-medium-3-5" | "mistral-medium-2604") => {
+            info.display_name = "Mistral Medium 3.5".into();
+            info.images = true;
+            info.context_window = Some(256_000);
+            info.pricing = Some(ModelPricing {
+                input: 1.5,
+                output: 7.5,
+                cache_read: 0.15,
                 cache_write: 0.0,
             });
         }
@@ -566,6 +587,14 @@ fn discovered_model_info(
                 Some("reasoning" | "reasoning_effort" | "include_reasoning")
             )
         });
+    }
+    if let Some(efforts) = entry["reasoning_efforts"].as_array() {
+        info.reasoning_efforts = efforts
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        info.reasoning = !info.reasoning_efforts.is_empty();
     }
     override_bool(entry, "supports_vision", &mut info.images);
     override_bool(entry, "supports_tools", &mut info.tools);
@@ -795,7 +824,31 @@ fn advertises_reasoning_effort(entry: &Value) -> bool {
 }
 
 fn known_reasoning_effort_model(provider: &str, model: &str) -> bool {
-    provider == "groq" && matches!(model, "openai/gpt-oss-20b" | "openai/gpt-oss-120b")
+    !known_reasoning_efforts(provider, model).is_empty()
+}
+
+fn known_reasoning_efforts(provider: &str, model: &str) -> Vec<&'static str> {
+    match (provider, model) {
+        ("groq", "openai/gpt-oss-20b" | "openai/gpt-oss-120b") => vec!["low", "medium", "high"],
+        ("xai", "grok-4.6" | "grok-4.7") => vec!["low", "medium", "high", "xhigh"],
+        ("xai", "grok-4.5") => vec!["low", "medium", "high"],
+        (
+            "deepseek",
+            "deepseek-flash"
+            | "deepseek-v4-flash"
+            | "deepseek-v4-pro"
+            | "deepseek-v4-flash-vision-exp",
+        ) => vec!["none", "low", "high", "max"],
+        (
+            "mistral",
+            "mistral-medium-3-5"
+            | "mistral-medium-3.5"
+            | "mistral-medium-2604"
+            | "mistral-small-2603"
+            | "mistral-small-latest",
+        ) => vec!["none", "high"],
+        _ => vec![],
+    }
 }
 
 fn append_reasoning_details(target: &mut Vec<Value>, details: &Value) {
@@ -967,11 +1020,17 @@ impl ModelProvider for OpenAiCompatibleProvider {
             )));
         }
         let model = request.model;
+        let replay_reasoning_content =
+            matches!(self.id.as_str(), "deepseek" | "moonshotai" | "zai");
         let mut messages = vec![json!({"role":"system","content":request.system})];
         for message in request.messages {
             match message {
                 ProviderMessage::Text { role, content } => {
-                    messages.push(json!({"role":role,"content":content}));
+                    let mut message = json!({"role":role,"content":content});
+                    if replay_reasoning_content && role == "assistant" {
+                        message["reasoning_content"] = json!("");
+                    }
+                    messages.push(message);
                 }
                 ProviderMessage::Media {
                     role,
@@ -999,6 +1058,18 @@ impl ModelProvider for OpenAiCompatibleProvider {
                         // OpenRouter requires these opaque blocks to be
                         // replayed byte-for-byte and in their original order.
                         message["reasoning_details"] = Value::Array(details.clone());
+                    }
+                    if replay_reasoning_content {
+                        message["reasoning_content"] = json!(
+                            provider_metadata["reasoning_content"]
+                                .as_str()
+                                .unwrap_or_default()
+                        );
+                    }
+                    if self.id == "mistral"
+                        && let Some(content) = provider_metadata.get("mistral_content")
+                    {
+                        message["content"] = content.clone();
                     }
                     messages.push(message);
                 }
@@ -1052,9 +1123,21 @@ impl ModelProvider for OpenAiCompatibleProvider {
         }
         if self.id != "perplexity"
             && supports_reasoning_effort
-            && let Some(effort) = request.reasoning_effort
+            && let Some(effort) = request.reasoning_effort.as_deref()
         {
-            body["reasoning_effort"] = json!(effort);
+            if self.id == "deepseek" {
+                body["thinking"] =
+                    json!({"type": if effort == "none" { "disabled" } else { "enabled" }});
+                if effort != "none" {
+                    body["reasoning_effort"] = json!(match effort {
+                        "minimal" | "low" => "low",
+                        "max" | "ultra" => "max",
+                        _ => "high",
+                    });
+                }
+            } else {
+                body["reasoning_effort"] = json!(effort);
+            }
         }
         for (key, value) in &parameters.options {
             body[key.as_str()] = value.clone();
@@ -1080,6 +1163,8 @@ impl ModelProvider for OpenAiCompatibleProvider {
             let mut finish_reason: Option<String> = None;
             let mut usage: Option<(u64, u64, u64)> = None;
             let mut reasoning_details: Vec<Value> = Vec::new();
+            let mut reasoning_content = String::new();
+            let mut mistral_content: Vec<Value> = Vec::new();
             // The last detail whose text reached the transcript, so a new
             // block can be separated from the one before it.
             let mut emitted_reasoning: Option<Value> = None;
@@ -1093,12 +1178,22 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 }
                 let delta=&event["choices"][0]["delta"];
                 if let Some(text)=delta["content"].as_str().filter(|text| !text.is_empty()){yield ProviderEvent::TextDelta(text.into());}
+                if let Some(parts) = delta["content"].as_array() {
+                    for part in parts {
+                        mistral_content.push(part.clone());
+                        if part["type"] == "text" && let Some(text) = part["text"].as_str() { yield ProviderEvent::TextDelta(text.into()); }
+                        if part["type"] == "thinking" && let Some(thoughts) = part["thinking"].as_array() {
+                            for thought in thoughts { if let Some(text) = thought["text"].as_str() { yield ProviderEvent::ReasoningDelta(text.into()); } }
+                        }
+                    }
+                }
                 let direct_reasoning = delta
                     .get("reasoning_content")
                     .and_then(Value::as_str)
                     .or_else(|| delta.get("reasoning").and_then(Value::as_str))
                     .filter(|reasoning| !reasoning.is_empty());
                 if let Some(reasoning) = direct_reasoning {
+                    reasoning_content.push_str(reasoning);
                     yield ProviderEvent::ReasoningDelta(reasoning.into());
                 }
                 if let Some(details) = delta.get("reasoning_details") {
@@ -1138,11 +1233,11 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 }
                 if let Some(reason)=event["choices"][0]["finish_reason"].as_str(){finish_reason = Some(reason.to_owned());}
             }
-            let provider_metadata = if reasoning_details.is_empty() {
-                Value::Null
-            } else {
-                json!({"reasoning_details": reasoning_details})
-            };
+            let mut provider_metadata = json!({});
+            if !reasoning_details.is_empty() { provider_metadata["reasoning_details"] = json!(reasoning_details); }
+            if replay_reasoning_content { provider_metadata["reasoning_content"] = json!(reasoning_content); }
+            if !mistral_content.is_empty() { provider_metadata["mistral_content"] = json!(mistral_content); }
+            if provider_metadata.as_object().is_some_and(|metadata| metadata.is_empty()) { provider_metadata = Value::Null; }
             for (call_id, name, arguments) in calls.drain(..) {
                 if !name.is_empty() {
                     let arguments = serde_json::from_str(&arguments).map_err(|error| CoreError::Provider(format!("OpenAI-compatible provider returned invalid tool arguments: {error}")))?;
@@ -1617,10 +1712,12 @@ mod tests {
         headers: axum::http::HeaderMap,
         Json(mut request): Json<Value>,
     ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
-        request["_headers"] = json!(headers
-            .iter()
-            .map(|(name, value)| (name.to_string(), value.to_str().unwrap_or("").to_owned()))
-            .collect::<std::collections::BTreeMap<_, _>>());
+        request["_headers"] = json!(
+            headers
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_str().unwrap_or("").to_owned()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        );
         state.0.lock().push(request);
         (
             [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
@@ -1671,9 +1768,15 @@ mod tests {
         let requests = state.0.lock();
         assert_eq!(requests[0]["temperature"], 0.25);
         assert_eq!(requests[0]["top_p"], 0.9);
-        assert_eq!(requests[0]["max_tokens"], 512, "hook limit overrides the model default");
+        assert_eq!(
+            requests[0]["max_tokens"], 512,
+            "hook limit overrides the model default"
+        );
         assert_eq!(requests[0]["seed"], 7);
-        assert!(requests[0].get("top_k").is_none(), "chat completions has no top_k field");
+        assert!(
+            requests[0].get("top_k").is_none(),
+            "chat completions has no top_k field"
+        );
         assert_eq!(requests[0]["_headers"]["x-fixture"], "yes");
         assert!(requests[0]["_headers"].get("bad header").is_none());
     }
@@ -1944,6 +2047,24 @@ mod tests {
 
     #[tokio::test]
     async fn discovery_preserves_authoritative_metadata_and_config_overrides() {
+        let future = discovered_model_info(
+            "custom",
+            &json!({"id":"future-model","reasoning_efforts":["low","xhigh"]}),
+            CompatibleModelDefaults::default(),
+        )
+        .unwrap();
+        assert!(future.reasoning);
+        assert_eq!(future.reasoning_efforts, ["low", "xhigh"]);
+        let configured = discovered_model_info(
+            "custom",
+            &json!({"id":"future-model","reasoning_efforts":["low"]}),
+            CompatibleModelDefaults {
+                reasoning: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!configured.reasoning);
         let router = Router::new().route("/models", get(models));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();

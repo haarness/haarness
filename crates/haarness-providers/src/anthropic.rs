@@ -327,8 +327,13 @@ impl ModelProvider for AnthropicProvider {
                     call_id,
                     name,
                     arguments,
-                    ..
-                } => Some(Ok(json!({"role":"assistant","content":[{"type":"tool_use","id":call_id,"name":name,"input":arguments}]}))),
+                    provider_metadata,
+                } => {
+                    let mut blocks = provider_metadata.get("anthropic_thinking")
+                        .and_then(Value::as_array).cloned().unwrap_or_default();
+                    blocks.push(json!({"type":"tool_use","id":call_id,"name":name,"input":arguments}));
+                    Some(Ok(json!({"role":"assistant","content":blocks})))
+                },
                 ProviderMessage::ToolResult {
                     call_id,
                     output,
@@ -395,7 +400,7 @@ impl ModelProvider for AnthropicProvider {
             body["tool_choice"] = json!({"type":"any"});
         }
         if adaptive {
-            body["thinking"] = json!({"type":"adaptive"});
+            body["thinking"] = json!({"type":"adaptive", "display":"summarized"});
             if let Some(effort) = request.reasoning_effort.as_deref() {
                 body["output_config"]["effort"] = json!(match effort {
                     "none" | "minimal" => "low",
@@ -420,6 +425,14 @@ impl ModelProvider for AnthropicProvider {
             }
         }
         let parameters = &request.parameters;
+        let bound_thinking = adaptive
+            && (request.model.starts_with("claude-fable-5-1")
+                || request.model.starts_with("claude-opus-5-5"));
+        if bound_thinking {
+            // Like OpenCode, allow prompt/tool refresh and compaction to retire
+            // invalidated reasoning instead of breaking the conversation.
+            body["thinking"]["block_binding"] = json!({"prefix_mismatch_behavior":"drop_block"});
+        }
         if let Some(limit) = parameters.max_output_tokens.filter(|limit| *limit > 0) {
             // A thinking budget must stay below max_tokens.
             let floor = body["thinking"]["budget_tokens"]
@@ -427,17 +440,42 @@ impl ModelProvider for AnthropicProvider {
                 .map_or(0, |budget| budget + 1024);
             body["max_tokens"] = json!(limit.max(floor));
         }
-        if let Some(temperature) = parameters.temperature {
+        let thinking = body.get("thinking").is_some();
+        // New Claude families reject sampling parameters; older models only
+        // permit temperature/top_k when thinking is off, and top_p >= .95 on.
+        let sampling = !adaptive_thinking(&request.model);
+        if let Some(temperature) = parameters.temperature.filter(|_| sampling && !thinking) {
             body["temperature"] = json!(temperature);
         }
-        if let Some(top_p) = parameters.top_p {
+        if let Some(top_p) = parameters
+            .top_p
+            .filter(|value| sampling && (!thinking || *value >= 0.95))
+        {
             body["top_p"] = json!(top_p);
         }
-        if let Some(top_k) = parameters.top_k {
+        if let Some(top_k) = parameters.top_k.filter(|_| sampling && !thinking) {
             body["top_k"] = json!(top_k);
         }
         let mut headers = self.headers.map();
         crate::apply_request_headers(&mut headers, &parameters.headers);
+        if bound_thinking {
+            let beta = "thinking-binding-controls-2026-08-01";
+            let existing = headers
+                .get("anthropic-beta")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            if !existing.split(',').any(|value| value.trim() == beta) {
+                let value = if existing.is_empty() {
+                    beta.to_owned()
+                } else {
+                    format!("{existing},{beta}")
+                };
+                headers.insert(
+                    HeaderName::from_static("anthropic-beta"),
+                    HeaderValue::from_str(&value).map_err(provider_error)?,
+                );
+            }
+        }
         if !headers.contains_key("anthropic-version") {
             headers.insert(
                 HeaderName::from_static("anthropic-version"),
@@ -460,7 +498,9 @@ impl ModelProvider for AnthropicProvider {
             .map_err(provider_error)?;
         let mut events = json_stream(response, cancel);
         Ok(Box::pin(try_stream! {
-            let mut tool: Option<(String,String,String)> = None;
+            let mut tool: Option<(String,String,String,Value)> = None;
+            let mut thinking_block: Option<Value> = None;
+            let mut thinking_blocks: Vec<Value> = Vec::new();
             let mut json_output = String::new();
             // A response can carry several thinking blocks. Their deltas end
             // without a break, so consecutive blocks would otherwise fuse into
@@ -477,41 +517,65 @@ impl ModelProvider for AnthropicProvider {
             while let Some(event) = events.next().await {
                 let event = event?;
                 match event["type"].as_str().unwrap_or_default() {
-                    "message_start" => if let Some(usage) = event.pointer("/message/usage") {
+                    "message_start" => {
+                        if event.pointer("/message/input_transformations").and_then(Value::as_array).is_some_and(|items| items.iter().any(|item| item["reason"] == "prefix_binding_mismatch")) {
+                            tracing::warn!("Anthropic dropped preserved thinking after the conversation prefix changed");
+                        }
+                        if let Some(usage) = event.pointer("/message/usage") {
                         input_tokens = usage["input_tokens"].as_u64().unwrap_or(0);
                         cache_read = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
                         cache_write = usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                    }},
+                    "content_block_start" if matches!(event["content_block"]["type"].as_str(), Some("thinking" | "redacted_thinking")) => {
+                        thinking_break = thinking_seen;
+                        thinking_block = Some(event["content_block"].clone());
                     },
-                    "content_block_start" if matches!(event["content_block"]["type"].as_str(), Some("thinking" | "redacted_thinking")) => thinking_break = thinking_seen,
                     "content_block_start" => {
                         thinking_seen = false;
                         thinking_break = false;
                         if event["content_block"]["type"] == "tool_use" {
                             tool = Some((
                                 event["content_block"]["id"].as_str().unwrap_or_default().into(),
-                                event["content_block"]["name"].as_str().unwrap_or_default().into(), String::new()));
+                                event["content_block"]["name"].as_str().unwrap_or_default().into(), String::new(), event["content_block"].get("input").cloned().unwrap_or_else(||json!({}))));
                         }
                     },
                     "content_block_delta" => match event["delta"]["type"].as_str().unwrap_or_default() {
                         "text_delta" => if let Some(text) = event["delta"]["text"].as_str().filter(|text| !text.is_empty()) { if native_json { json_output.push_str(text); } else { yield ProviderEvent::TextDelta(text.into()); } },
                         "thinking_delta" => if let Some(text) = event["delta"]["thinking"].as_str().filter(|text| !text.is_empty()) {
+                            if let Some(block) = &mut thinking_block {
+                                let mut value = block["thinking"].as_str().unwrap_or_default().to_owned();
+                                value.push_str(text);
+                                block["thinking"] = json!(value);
+                            }
                             if std::mem::take(&mut thinking_break) {
                                 yield ProviderEvent::ReasoningDelta("\n\n".into());
                             }
                             thinking_seen = true;
                             yield ProviderEvent::ReasoningDelta(text.into());
                         },
-                        "input_json_delta" => if let (Some((_,_,buffer)), Some(json)) = (&mut tool, event["delta"]["partial_json"].as_str()) { buffer.push_str(json); },
+                        "input_json_delta" => if let (Some((_,_,buffer,_)), Some(json)) = (&mut tool, event["delta"]["partial_json"].as_str()) { buffer.push_str(json); },
+                        "signature_delta" => if let (Some(block), Some(signature)) = (&mut thinking_block, event["delta"]["signature"].as_str()) {
+                            let mut value = block["signature"].as_str().unwrap_or_default().to_owned();
+                            value.push_str(signature);
+                            block["signature"] = json!(value);
+                        },
                         _ => {}
                     },
-                    "content_block_stop" => if let Some((call_id,name,arguments)) = tool.take() {
-                        let arguments = serde_json::from_str(&arguments).map_err(|error| CoreError::Provider(format!("Anthropic returned invalid tool arguments: {error}")))?;
+                    "content_block_stop" => {
+                        if let Some(block) = thinking_block.take() { thinking_blocks.push(block); }
+                        if let Some((call_id,name,arguments,initial_input)) = tool.take() {
+                        let arguments = if arguments.is_empty() { initial_input } else {
+                            serde_json::from_str(&arguments).map_err(|error| CoreError::Provider(format!("Anthropic returned invalid tool arguments: {error}")))?
+                        };
                         if structured_output.is_some() && name == STRUCTURED_OUTPUT_TOOL_NAME {
                             yield ProviderEvent::StructuredOutput(arguments);
                         } else {
-                            yield ProviderEvent::ToolCall { call_id, name, arguments, provider_metadata: Value::Null };
+                            let provider_metadata = if thinking_blocks.is_empty() { Value::Null } else {
+                                json!({"anthropic_thinking":std::mem::take(&mut thinking_blocks)})
+                            };
+                            yield ProviderEvent::ToolCall { call_id, name, arguments, provider_metadata };
                         }
-                    },
+                    }},
                     "message_delta" => if let Some(usage) = event.get("usage") {
                         yield ProviderEvent::Usage {
                             input_tokens: usage["input_tokens"].as_u64().unwrap_or(input_tokens),
@@ -555,7 +619,14 @@ fn model(id: &str) -> ModelInfo {
             id: id.into(),
             display_name: id.into(),
             reasoning: true,
-            reasoning_efforts: ["low", "medium", "high"].map(str::to_owned).to_vec(),
+            reasoning_efforts: if adaptive_thinking(id) {
+                vec!["low", "medium", "high", "xhigh", "max"]
+            } else {
+                vec!["low", "medium", "high"]
+            }
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
             images: true,
             video: false,
             tools: true,
@@ -650,6 +721,7 @@ fn positive_u64(value: &Value) -> Option<u64> {
 
 fn preferred_models() -> Vec<ModelInfo> {
     vec![
+        model("claude-opus-5-5"),
         model("claude-fable-5-1"),
         model("claude-fable-5"),
         model("claude-opus-5"),
@@ -1167,7 +1239,9 @@ mod tests {
                     },
                     // A request hook may supply an older generated schema.
                     // Both requests must use the canonical current definition.
-                    haarness_core::structured_output_tool(&json!({"type":"object","properties":{"old":{"type":"integer"}}})),
+                    haarness_core::structured_output_tool(
+                        &json!({"type":"object","properties":{"old":{"type":"integer"}}}),
+                    ),
                 ],
                 reasoning_effort: None,
                 parameters: haarness_core::RequestParameters::default(),
