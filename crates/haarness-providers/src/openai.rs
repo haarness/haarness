@@ -747,6 +747,10 @@ fn gpt5_minor(id: &str) -> Option<u32> {
         .chars()
         .take_while(char::is_ascii_digit)
         .collect();
+    // A four-digit hyphenated suffix starts a snapshot date, not a minor version.
+    if rest.starts_with('-') && digits.len() == 4 {
+        return None;
+    }
     digits.parse().ok()
 }
 
@@ -983,6 +987,13 @@ mod tests {
 
     #[test]
     fn reasoning_tiers_follow_the_openai_model_family() {
+        assert_eq!(
+            openai_reasoning_efforts("gpt-5-2025-08-07"),
+            ["minimal", "low", "medium", "high"]
+        );
+        for id in ["gpt-5-1", "gpt-5.1-2025-11-13"] {
+            assert_eq!(openai_reasoning_efforts(id), ["none", "low", "medium", "high"]);
+        }
         assert_eq!(
             openai_reasoning_efforts("gpt-6-astra"),
             ["low", "medium", "high", "xhigh", "max"]

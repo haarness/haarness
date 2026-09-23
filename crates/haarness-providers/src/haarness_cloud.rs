@@ -55,7 +55,8 @@ impl HaarnessCloudProvider {
             assume_authenticated: false,
             headers: ProviderHeaders::default(),
         })
-        .with_http_client(http))
+        .with_http_client(http)
+        .with_server_output_limit())
     }
 }
 fn error(e: impl std::fmt::Display) -> CoreError {

@@ -4,6 +4,28 @@ Run `haarness login`, finish sign-in in your browser, then choose a model under 
 
 Desktop has **Sign in to Haarness** in its sidebar and **Use Haarness Cloud** in Connect provider. The account dialog shows available credits and Cloud workspaces, with links to billing and usage. Existing provider keys and self-hosted router connections continue to work independently.
 
+Signing in to OpenAI with ChatGPT connects the **OpenAI** provider. Choosing
+**Haarness Cloud** uses the signed-in Haarness account and Cloud's upstream API
+credentials. TUI and Desktop share both credential stores when they use the same
+profile; a ChatGPT subscription's model access and quota do not transfer to
+Cloud's API account.
+
+Cloud model capabilities come from the routed provider's catalog. The model
+picker shows its supported reasoning levels, and `/reasoning` exposes the same
+choices in TUI. A non-reasoning model has no reasoning slider. Tools, images,
+context limits and opaque reasoning history follow the provider contract; a
+public Cloud model ID can differ from its upstream ID.
+
+For an ordinary turn, the client lets Cloud choose an output allowance instead
+of requesting the model's full output capacity. Cloud caps that allowance at
+32,768 tokens, the model ceiling, and its available pending-request monetary
+allowance. An
+explicit agent/extension output limit is still honored subject to admission.
+Cloud reserves and forwards the same bound, then settles actual provider usage.
+An exhausted pending-request allowance is reported separately from upstream
+provider quota. Provider outages, retired models and API-account restrictions
+can still prevent a listed model from serving a request.
+
 `haarness account` shows the signed-in user and selected account; `haarness account --select <account-id>` switches it. `haarness logout` removes local credentials and revokes the login. Sign-out does not stop running Cloud workspaces; stop them separately to stop compute usage. If Cloud is unreachable during sign-out, credentials are removed locally and the command explains how to revoke the session online.
 
 ## Cloud workspaces

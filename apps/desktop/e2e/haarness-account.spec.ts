@@ -16,7 +16,7 @@ test("Haarness account signs in through a browser, discovers Cloud models, and s
     !api,
     "Set HAARNESS_ACCOUNT_E2E_URL to the local fixture Cloud API",
   );
-  test.setTimeout(180000);
+  test.setTimeout(process.env.HAARNESS_ACCOUNT_E2E_REASONING === "1" ? 600000 : 180000);
   expect(new URL(api!).hostname).toBe("127.0.0.1");
   const root = await mkdtemp(join(tmpdir(), "haarness-account-desktop-"));
   const workspace = join(root, "project");
@@ -118,6 +118,62 @@ test("Haarness account signs in through a browser, discovers Cloud models, and s
       await expect(dialog).toHaveCount(0);
     };
     await outside();
+    if (process.env.HAARNESS_ACCOUNT_E2E_REASONING === "1") {
+      // Real Cloud catalog -> IPC -> model picker -> reasoning selection ->
+      // streamed native turn, using only this test's account and workspace.
+      await app.evaluate(({ dialog }, directory) => {
+        const original = dialog.showOpenDialog;
+        dialog.showOpenDialog = async () => {
+          dialog.showOpenDialog = original;
+          return { canceled: false, filePaths: [directory] };
+        };
+      }, workspace);
+      await page.getByRole("region", { name: "Project home" })
+        .getByRole("button", { name: "Open another project", exact: true }).click();
+      await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
+      const cases = [
+        ["openai/gpt-6-astra", ["low", "medium", "high", "xhigh", "max"]],
+        ["anthropic/claude-sonnet-4.6", ["low", "medium", "high", "max"]],
+        ["anthropic/claude-haiku-4.5", ["low", "medium", "high"]],
+        ["google/gemini-3.8-flash", ["low", "medium", "high"]],
+        ["google/gemini-3.5-flash-lite", ["minimal", "low", "medium", "high"]],
+        ["google/gemini-2.5-flash", ["none", "low", "medium", "high"]],
+      ] as const;
+      const model = page.getByRole("combobox", { name: "Model", exact: true });
+      for (const [id, efforts] of cases) {
+        const info = cloud.models.find((m: any) => m.id === id);
+        expect(info, `Live Cloud model ${id}`).toBeTruthy();
+        expect(info.reasoningEfforts).toEqual([...efforts]);
+        await model.click();
+        const list = page.locator(`[id=${JSON.stringify(await model.getAttribute("aria-controls"))}]`);
+        await list.locator(`[role="option"][data-value=${JSON.stringify(`haarness/${id}`)}]`).click();
+        const slider = page.getByRole("slider", { name: "Reasoning effort", exact: true });
+        await expect(slider).toHaveAttribute("max", String(efforts.length));
+        // Exercise every advertised UI level and choose low for a bounded call.
+        await slider.focus();
+        await slider.press("Home");
+        for (const effort of efforts) {
+          await slider.press("ArrowRight");
+          await expect(slider).toHaveAttribute("aria-valuetext", effort[0].toUpperCase() + effort.slice(1));
+        }
+        await expect(slider).toHaveValue(String(efforts.length));
+        await page.screenshot({ animations: "disabled", path: test.info().outputPath(`reasoning-${id.replaceAll("/", "-")}.png`) });
+        await slider.press("Home");
+        for (let n = 0; n <= [...efforts as readonly string[]].indexOf("low"); n++) await slider.press("ArrowRight");
+        await page.locator(".select-footer").getByRole("button", { name: "Done", exact: true }).click();
+        // Catalog/selection coverage also includes retired or overloaded models.
+        // Live calls use the explicitly selected available test models.
+        const liveModels = (process.env.HAARNESS_ACCOUNT_E2E_LIVE_MODELS ?? "openai/gpt-6-astra,anthropic/claude-sonnet-4.6,anthropic/claude-haiku-4.5,google/gemini-3.5-flash-lite").split(",");
+        if (!liveModels.includes(id)) continue;
+        const marker = `CLOUD_REASONING_OK_${id.replaceAll(/[^a-z0-9]/g, "_")}`;
+        await page.getByRole("textbox", { name: "Message", exact: true }).fill(`Without tools, reply with exactly ${marker}`);
+        await page.getByRole("button", { name: "Send message", exact: true }).click();
+        await expect(page.locator(".message.assistant").filter({ hasText: marker })).toBeVisible({ timeout: 120000 });
+        await expect(page.getByRole("button", { name: "Stop", exact: true })).toHaveCount(0, { timeout: 120000 });
+        await page.getByRole("button", { name: "New session", exact: true }).click();
+      }
+      expect(cloud.models.find((m: any) => m.id === "openai/gpt-4.1").reasoningEfforts).toEqual([]);
+    }
     await page.getByRole("button", {
       name: view.user?.displayName || "Haarness account", exact: true,
     }).click();

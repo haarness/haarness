@@ -88,6 +88,18 @@ fn provider_error_detail(body: &str) -> Option<String> {
             body.split_whitespace().collect::<Vec<_>>().join(" ")
         }
     };
+    // Keep machine-readable error codes without exposing unrelated response
+    // fields. Managed-router admission failures are not upstream API quotas.
+    let code = serde_json::from_str::<Value>(body).ok().and_then(|value| {
+        value
+            .pointer("/error/code")
+            .and_then(Value::as_str)
+            .filter(|code| {
+                code.len() <= 80 && code.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            })
+            .map(str::to_owned)
+    });
+    let detail = code.map_or_else(|| detail.clone(), |code| format!("[{code}] {detail}"));
     let truncated = detail.chars().count() > 1_024;
     let mut detail: String = detail.chars().take(1_024).collect();
     if truncated {
@@ -125,6 +137,7 @@ mod tests {
             provider_error_detail(r#"{"error":{"message":"Invalid call_id"}}"#).as_deref(),
             Some("Invalid call_id")
         );
+        assert_eq!(provider_error_detail(r#"{"error":{"code":"exposure_cap","message":"request reserve exceeded"},"secret":"must not appear"}"#).as_deref(), Some("[exposure_cap] request reserve exceeded"));
     }
 
     #[test]
@@ -141,8 +154,10 @@ mod tests {
             Some("model_not_found")
         );
         assert_eq!(
-            provider_error_detail(r#"{"detail":[{"loc":["query","client_version"],"msg":"Field required"}]}"#)
-                .as_deref(),
+            provider_error_detail(
+                r#"{"detail":[{"loc":["query","client_version"],"msg":"Field required"}]}"#
+            )
+            .as_deref(),
             Some("Field required")
         );
         assert_eq!(
