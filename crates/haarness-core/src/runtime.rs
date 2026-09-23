@@ -531,6 +531,11 @@ fn user_facing_error(error: &CoreError) -> String {
     }
 
     let lower = raw.to_ascii_lowercase();
+    if lower.contains("[exposure_cap]")
+        || lower.contains("too many unsettled requests for this account")
+    {
+        return "Haarness Cloud's pending-request allowance is full, or this request's output limit exceeds it. Wait for active requests to finish or reduce the output limit.".into();
+    }
     if lower.contains("error sending request")
         || lower.contains("connection reset")
         || lower.contains("connection refused")
@@ -10361,6 +10366,12 @@ mod tests {
 
     #[test]
     fn provider_failures_are_clean_and_actionable_in_the_transcript() {
+        assert!(
+            super::user_facing_error(&CoreError::Provider(
+                "HTTP 429: [exposure_cap] request reserve exceeded".into()
+            ))
+            .starts_with("Haarness Cloud's pending-request allowance")
+        );
         let policy = CoreError::Provider(
             r#"{"type":"error","error":{"type":"invalid_request","code":"cyber_policy","message":"This content was flagged for possible cybersecurity risk."}}"#
                 .into(),

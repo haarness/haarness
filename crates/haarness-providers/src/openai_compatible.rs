@@ -39,6 +39,8 @@ pub struct OpenAiCompatibleProvider {
     reasoning_effort_models: HashSet<String>,
     model_defaults: CompatibleModelDefaults,
     discover_models: bool,
+    /// Managed gateways choose and enforce their own per-request allowance.
+    server_output_limit: bool,
     /// Local runtimes need no key; reachable means usable.
     assume_authenticated: bool,
     headers: crate::ProviderHeaders,
@@ -101,6 +103,7 @@ impl OpenAiCompatibleProvider {
             reasoning_effort_models: HashSet::new(),
             model_defaults,
             discover_models: instance.discover_models,
+            server_output_limit: false,
             assume_authenticated: instance.assume_authenticated,
             headers: instance.headers,
         }
@@ -109,6 +112,11 @@ impl OpenAiCompatibleProvider {
     /// First-party router credentials must not follow redirects.
     pub(crate) fn with_http_client(mut self, client: reqwest::Client) -> Self {
         self.client = client;
+        self
+    }
+
+    pub(crate) fn with_server_output_limit(mut self) -> Self {
+        self.server_output_limit = true;
         self
     }
 
@@ -236,6 +244,7 @@ impl OpenAiCompatibleProvider {
             reasoning_effort_models: HashSet::from(["compat-test".into()]),
             model_defaults: defaults,
             discover_models: false,
+            server_output_limit: false,
             assume_authenticated: false,
             headers: crate::ProviderHeaders::default(),
         }
@@ -1108,7 +1117,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         if self.id != "perplexity" {
             body["stream_options"] = json!({"include_usage": true});
         }
-        if let Some(limit) = max_output_tokens {
+        if let Some(limit) = max_output_tokens.filter(|_| !self.server_output_limit) {
             body["max_tokens"] = json!(limit);
         }
         let parameters = request.parameters;
@@ -1729,6 +1738,49 @@ mod tests {
             [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
             "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".into(),
         )
+    }
+
+    #[tokio::test]
+    async fn managed_output_allowance_is_chosen_by_server_unless_explicit() {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route("/chat/completions", post(completions_recording_headers))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider =
+            OpenAiCompatibleProvider::for_test(format!("http://{address}/chat/completions"))
+                .with_server_output_limit();
+        assert_eq!(provider.info().models[0].max_output_tokens, Some(8192));
+        for limit in [None, Some(512)] {
+            let request = ProviderRequest {
+                model: "compat-test".into(),
+                system: "sys".into(),
+                messages: vec![ProviderMessage::Text {
+                    role: "user".into(),
+                    content: "hi".into(),
+                }],
+                tools: vec![],
+                reasoning_effort: Some("high".into()),
+                output_schema: None,
+                parameters: haarness_core::RequestParameters {
+                    max_output_tokens: limit,
+                    ..Default::default()
+                },
+            };
+            let events = provider
+                .stream(request, CancellationToken::new())
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            assert!(events.iter().all(Result::is_ok));
+        }
+        let requests = state.0.lock();
+        assert!(requests[0].get("max_tokens").is_none());
+        assert_eq!(requests[0]["reasoning_effort"], "high");
+        assert_eq!(requests[1]["max_tokens"], 512);
     }
 
     #[tokio::test]
