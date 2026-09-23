@@ -399,9 +399,7 @@ fn chatgpt_catalog(body: &Value) -> Option<ChatGptCatalog> {
                 images: modality("image"),
                 video: modality("video"),
                 tools: true,
-                context_window: entry["context_window"]
-                    .as_u64()
-                    .filter(|value| *value > 0),
+                context_window: entry["context_window"].as_u64().filter(|value| *value > 0),
                 max_output_tokens: None,
                 // Usage is covered by the subscription, not billed per token.
                 pricing: Some(ModelPricing {
@@ -444,7 +442,11 @@ fn request_model<'a>(
             let available: Vec<&str> = advertised.iter().map(|model| model.id.as_str()).collect();
             Err(CoreError::Provider(format!(
                 "OpenAI model {model} is not available on this ChatGPT account. Available: {}. Choose one of those, or sign in with an OpenAI API key for the public Responses API.",
-                if available.is_empty() { "none".to_owned() } else { available.join(", ") }
+                if available.is_empty() {
+                    "none".to_owned()
+                } else {
+                    available.join(", ")
+                }
             )))
         }
         _ => Ok(wire),
@@ -538,24 +540,66 @@ impl ModelProvider for OpenAiProvider {
             if tool.name != STRUCTURED_OUTPUT_TOOL_NAME { value["strict"] = json!(false); }
             value
         }).collect();
-        let input: Vec<Value> = request
-            .messages
-            .into_iter()
-            .map(|message| -> CoreResult<Value> {
-                Ok(match message {
-                    ProviderMessage::Text { role, content } => {
-                        json!({"role":role,"content":content})
+        let mut input: Vec<Value> = Vec::new();
+        for message in request.messages {
+            let value = match message {
+                ProviderMessage::Text { role, content } => {
+                    json!({"role":role,"content":content})
+                }
+                ProviderMessage::Media {
+                    role,
+                    content,
+                    attachments,
+                } => {
+                    let media = crate::media::load_all(&attachments)?;
+                    let mut blocks = vec![json!({"type":"input_text","text":content})];
+                    for item in media {
+                        if item.is_image() {
+                            blocks.push(json!({"type":"input_image","image_url":item.data_url()}));
+                        } else if item.is_pdf() {
+                            blocks.push(json!({
+                                "type":"input_file",
+                                "filename":item.filename,
+                                "file_data":item.data_url()
+                            }));
+                        } else {
+                            return Err(CoreError::Provider(
+                                    "OpenAI Responses accepts Haarness image and PDF attachments; use Gemini for audio or video input"
+                                        .into(),
+                                ));
+                        }
                     }
-                    ProviderMessage::Media {
-                        role,
-                        content,
-                        attachments,
-                    } => {
-                        let media = crate::media::load_all(&attachments)?;
-                        let mut blocks = vec![json!({"type":"input_text","text":content})];
-                        for item in media {
+                    json!({"role":role,"content":blocks})
+                }
+                ProviderMessage::ToolCall {
+                    call_id,
+                    name,
+                    arguments,
+                    provider_metadata,
+                } => {
+                    if let Some(items) = provider_metadata
+                        .get("openai_reasoning")
+                        .and_then(Value::as_array)
+                    {
+                        input.extend(items.iter().cloned());
+                    }
+                    json!({"type":"function_call","call_id":call_id,"name":name,"arguments":serde_json::to_string(&arguments).unwrap_or_else(|_|"{}".into())})
+                }
+                ProviderMessage::ToolResult {
+                    call_id,
+                    output,
+                    attachments,
+                    ..
+                } => {
+                    if attachments.is_empty() {
+                        json!({"type":"function_call_output","call_id":call_id,"output":output})
+                    } else {
+                        let mut blocks = vec![json!({"type":"input_text","text":output})];
+                        for item in crate::media::load_all(&attachments)? {
                             if item.is_image() {
-                                blocks.push(json!({"type":"input_image","image_url":item.data_url()}));
+                                blocks.push(
+                                    json!({"type":"input_image","image_url":item.data_url()}),
+                                );
                             } else if item.is_pdf() {
                                 blocks.push(json!({
                                     "type":"input_file",
@@ -564,55 +608,23 @@ impl ModelProvider for OpenAiProvider {
                                 }));
                             } else {
                                 return Err(CoreError::Provider(
-                                    "OpenAI Responses accepts Haarness image and PDF attachments; use Gemini for audio or video input"
-                                        .into(),
-                                ));
-                            }
-                        }
-                        json!({"role":role,"content":blocks})
-                    }
-                    ProviderMessage::ToolCall {
-                        call_id,
-                        name,
-                        arguments,
-                        ..
-                    } => json!({"type":"function_call","call_id":call_id,"name":name,"arguments":serde_json::to_string(&arguments).unwrap_or_else(|_|"{}".into())}),
-                    ProviderMessage::ToolResult {
-                        call_id,
-                        output,
-                        attachments,
-                        ..
-                    } => {
-                        if attachments.is_empty() {
-                            json!({"type":"function_call_output","call_id":call_id,"output":output})
-                        } else {
-                            let mut blocks = vec![json!({"type":"input_text","text":output})];
-                            for item in crate::media::load_all(&attachments)? {
-                                if item.is_image() {
-                                    blocks.push(json!({"type":"input_image","image_url":item.data_url()}));
-                                } else if item.is_pdf() {
-                                    blocks.push(json!({
-                                        "type":"input_file",
-                                        "filename":item.filename,
-                                        "file_data":item.data_url()
-                                    }));
-                                } else {
-                                    return Err(CoreError::Provider(
                                         "OpenAI Responses tool results support Haarness images and PDFs, not audio or video"
                                             .into(),
                                     ));
-                                }
                             }
-                            json!({"type":"function_call_output","call_id":call_id,"output":blocks})
                         }
-                    },
-                })
-            })
-            .collect::<CoreResult<_>>()?;
-        let mut body = json!({"model": model, "instructions": request.system, "input": input, "tools": tools, "stream": true, "store": false});
+                        json!({"type":"function_call_output","call_id":call_id,"output":blocks})
+                    }
+                }
+            };
+            input.push(value);
+        }
+        let mut body = json!({"model": model, "instructions": request.system, "input": input, "tools": tools, "stream": true, "store": false, "include": ["reasoning.encrypted_content"]});
         if structured_output.is_some() {
             body["tool_choice"] = json!("required");
         }
+        let sampling_allowed =
+            !model.starts_with("gpt-6") || request.reasoning_effort.as_deref() == Some("none");
         if let Some(effort) = request.reasoning_effort {
             body["reasoning"] = json!({"effort": effort, "summary": "auto"});
         }
@@ -623,10 +635,10 @@ impl ModelProvider for OpenAiProvider {
             if let Some(limit) = parameters.max_output_tokens.filter(|limit| *limit > 0) {
                 body["max_output_tokens"] = json!(limit);
             }
-            if let Some(temperature) = parameters.temperature {
+            if let Some(temperature) = parameters.temperature.filter(|_| sampling_allowed) {
                 body["temperature"] = json!(temperature);
             }
-            if let Some(top_p) = parameters.top_p {
+            if let Some(top_p) = parameters.top_p.filter(|_| sampling_allowed) {
                 body["top_p"] = json!(top_p);
             }
         }
@@ -662,6 +674,7 @@ impl ModelProvider for OpenAiProvider {
             // straight through they run together mid-sentence, so a paragraph
             // break goes in wherever the part changes.
             let mut reasoning_part: Option<(bool, u64, u64)> = None;
+            let mut reasoning_items: Vec<Value> = Vec::new();
             while let Some(event) = events.next().await {
                 let event = event?;
                 match event.get("type").and_then(Value::as_str).unwrap_or_default() {
@@ -686,6 +699,12 @@ impl ModelProvider for OpenAiProvider {
                     // Responses stream does not include its call_id (and currently omits the
                     // documented name too). The completed output item is the authoritative
                     // function-call record and contains every field needed for continuation.
+                    "response.output_item.done" if event["item"]["type"] == "reasoning" => {
+                        // Opaque reasoning is required for stateless tool continuation.
+                        if event["item"]["encrypted_content"].is_string() {
+                            reasoning_items.push(event["item"].clone());
+                        }
+                    }
                     "response.output_item.done" if event["item"]["type"] == "function_call" => {
                         let item = &event["item"];
                         let raw_arguments = item.get("arguments").and_then(Value::as_str).unwrap_or("{}");
@@ -698,7 +717,8 @@ impl ModelProvider for OpenAiProvider {
                         if structured_output.is_some() && name == STRUCTURED_OUTPUT_TOOL_NAME {
                             yield ProviderEvent::StructuredOutput(arguments);
                         } else {
-                            yield ProviderEvent::ToolCall { call_id, name, arguments, provider_metadata: Value::Null };
+                            let provider_metadata = if reasoning_items.is_empty() { Value::Null } else { json!({"openai_reasoning":std::mem::take(&mut reasoning_items)}) };
+                            yield ProviderEvent::ToolCall { call_id, name, arguments, provider_metadata };
                         }
                     }
                     "response.completed" => {
@@ -732,7 +752,7 @@ fn gpt5_minor(id: &str) -> Option<u32> {
 
 /// Reasoning tiers the public Responses API accepts per OpenAI model family,
 /// lightest first. GPT-5.1 replaced `minimal` with `none`, 5.2 added `xhigh`,
-/// 5.6 added `max`, GPT-6 dropped `none`; Codex, Pro and chat variants keep
+/// 5.6 added `max`, GPT-6 Astra dropped `none`; Sol/Luna retain it. Codex, Pro and chat variants keep
 /// their own narrower sets. A request outside the set is a 400.
 fn openai_reasoning_efforts(id: &str) -> Vec<&'static str> {
     let lower = id.to_ascii_lowercase();
@@ -744,6 +764,9 @@ fn openai_reasoning_efforts(id: &str) -> Vec<&'static str> {
         return vec!["medium"];
     }
     if family.starts_with("gpt-6") {
+        if family.starts_with("gpt-6-sol") || family.starts_with("gpt-6-luna") {
+            return vec!["none", "low", "medium", "high", "xhigh", "max"];
+        }
         return vec!["low", "medium", "high", "xhigh", "max"];
     }
     if !family.starts_with("gpt-5") {
@@ -803,6 +826,8 @@ fn model(id: &str, reasoning: bool) -> ModelInfo {
 fn preferred_models() -> Vec<ModelInfo> {
     vec![
         model("gpt-6-astra", true),
+        model("gpt-6-sol", true),
+        model("gpt-6-luna", true),
         model("gpt-5.6", true),
         model("gpt-5.6-sol", true),
         model("gpt-5.6-terra", true),
@@ -820,6 +845,7 @@ fn supports_responses(id: &str) -> bool {
     let unsupported = [
         "audio",
         "realtime",
+        "gpt-live",
         "transcribe",
         "tts",
         "whisper",
@@ -911,7 +937,10 @@ mod tests {
             request_model("gpt-5.6", &oauth, None, &[]).unwrap(),
             "gpt-5.6-sol"
         );
-        assert_eq!(request_model("gpt-5.6", &api, None, &[]).unwrap(), "gpt-5.6");
+        assert_eq!(
+            request_model("gpt-5.6", &api, None, &[]).unwrap(),
+            "gpt-5.6"
+        );
         assert_eq!(
             request_model("gpt-5.6-terra", &oauth, None, &[]).unwrap(),
             "gpt-5.6-terra"
@@ -986,15 +1015,24 @@ mod tests {
             openai_reasoning_efforts("gpt-5.2-codex"),
             ["low", "medium", "high", "xhigh"]
         );
-        assert_eq!(openai_reasoning_efforts("gpt-5-codex"), ["low", "medium", "high"]);
+        assert_eq!(
+            openai_reasoning_efforts("gpt-5-codex"),
+            ["low", "medium", "high"]
+        );
         assert_eq!(openai_reasoning_efforts("gpt-5-pro"), ["high"]);
-        assert_eq!(openai_reasoning_efforts("gpt-5.2-pro"), ["medium", "high", "xhigh"]);
+        assert_eq!(
+            openai_reasoning_efforts("gpt-5.2-pro"),
+            ["medium", "high", "xhigh"]
+        );
         assert!(openai_reasoning_efforts("gpt-5-chat-latest").is_empty());
         assert_eq!(
             openai_reasoning_efforts("ft:gpt-5.6:org:project"),
             ["none", "low", "medium", "high", "xhigh", "max"]
         );
-        assert_eq!(openai_reasoning_efforts("o4-mini"), ["low", "medium", "high"]);
+        assert_eq!(
+            openai_reasoning_efforts("o4-mini"),
+            ["low", "medium", "high"]
+        );
     }
 
     #[tokio::test]
@@ -1009,7 +1047,10 @@ mod tests {
             assert_eq!(headers["chatgpt-account-id"], "account-1");
             assert!(query.contains_key("client_version"));
             let levels = |efforts: &[&str]| -> Value {
-                efforts.iter().map(|effort| json!({"effort": effort})).collect()
+                efforts
+                    .iter()
+                    .map(|effort| json!({"effort": effort}))
+                    .collect()
             };
             Json(json!({"models": [
                 {"slug":"gpt-5.6-luna","display_name":"GPT-5.6-Luna","visibility":"list","priority":8,"context_window":272_000,"input_modalities":["text","image"],"supported_reasoning_levels":levels(&["low","medium","high","xhigh","max"]),"upgrade":null},
@@ -1055,12 +1096,19 @@ mod tests {
         // serve are offered.
         let fallback = provider.info().models;
         assert!(fallback.iter().any(|model| model.id == "gpt-6-astra"));
-        assert!(fallback.iter().all(|model| !model.id.starts_with("gpt-5.4")));
+        assert!(
+            fallback
+                .iter()
+                .all(|model| !model.id.starts_with("gpt-5.4"))
+        );
 
         provider.refresh_models(true).await;
         let models = provider.info().models;
         assert_eq!(
-            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
             ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-luna", "team-model"],
             "listed models in priority order; hidden and retiring ones are dropped"
         );
@@ -1483,7 +1531,10 @@ mod tests {
         );
         let requests = state.requests.lock();
         assert_eq!(requests[0]["tools"][0]["strict"], false);
-        assert_eq!(requests[0]["tools"][0]["parameters"]["required"], json!(["path"]));
+        assert_eq!(
+            requests[0]["tools"][0]["parameters"]["required"],
+            json!(["path"])
+        );
         assert_eq!(requests.len(), 1);
         assert_eq!(
             requests[0]["reasoning"],

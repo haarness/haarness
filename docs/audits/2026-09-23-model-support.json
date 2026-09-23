@@ -1,0 +1,339 @@
+{
+  "date": "2026-09-23",
+  "haarness_base": "f9b0873ceaef18a4994e2e74a625e532c11a563e",
+  "opencode_reference": "2406400f0aeb07b36d0495af4e05aaca49159832",
+  "live_pass_count": 27,
+  "verified_tool_calls": 82,
+  "live_passes": [
+    {
+      "provider": "openai",
+      "model": "gpt-6-astra",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 26.91
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6-sol",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 16.36
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 13.35
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-sol",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 19.34
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-terra",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 16.03
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-luna",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 17.51
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-5-5",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 14.75
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-fable-5-1",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 17.12
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-5",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 4,
+      "turns": 2,
+      "seconds": 10.98
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-sonnet-5",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 8.09
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-fable-5",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 17.41
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4-8",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 12.21
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4-7",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 7.81
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4-6",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 11.32
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 7.81
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-haiku-4-5-20251001",
+      "effort": null,
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 5.24
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-5-20250929",
+      "effort": null,
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 8.62
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-opus-4-5-20251101",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 9.75
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-3.7-flash",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 15.54
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-3.6-flash",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 11.17
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-3.5-flash",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 13.93
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-3.5-flash-lite",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 6.58
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-3-flash-preview",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 40.26
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-flash-latest",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 24.33
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-flash-lite-latest",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 6.9
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-3.8-flash",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 26.36
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-3.1-flash-lite",
+      "effort": "low",
+      "status": "passed",
+      "tool_calls": 3,
+      "turns": 2,
+      "seconds": 16.13
+    }
+  ],
+  "provider_blocks": [
+    {
+      "provider": "gemini",
+      "model": "gemini-3.1-pro-preview",
+      "status": "provider_blocked",
+      "reason": "Account quota/rate limit"
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-2.5-pro",
+      "status": "provider_blocked",
+      "reason": "HTTP 404: no longer available to new users, despite being listed"
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-2.5-flash",
+      "status": "provider_blocked",
+      "reason": "HTTP 404: no longer available to new users, despite being listed"
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-2.5-flash-lite",
+      "status": "provider_blocked",
+      "reason": "HTTP 404: no longer available to new users, despite being listed"
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-pro-latest",
+      "status": "provider_blocked",
+      "reason": "Account quota/rate limit"
+    }
+  ],
+  "unavailable_on_chatgpt_account": [
+    {
+      "provider": "openai",
+      "model": "gpt-5.5",
+      "status": "unavailable",
+      "reason": "Not in authenticated live catalog"
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.4-mini",
+      "status": "unavailable",
+      "reason": "Not in authenticated live catalog"
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-4.1",
+      "status": "unavailable",
+      "reason": "Not in authenticated live catalog"
+    }
+  ],
+  "transient_failures": [
+    {
+      "provider": "gemini",
+      "model": "gemini-3.8-flash",
+      "failure": "HTTP 503 high demand",
+      "resolution": "Passed sequential retry on unchanged binary"
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-3.1-flash-lite",
+      "failure": "HTTP 503 high demand",
+      "resolution": "Passed sequential retry on unchanged binary"
+    }
+  ],
+  "fixed_live_failure": {
+    "provider": "anthropic",
+    "model": "claude-opus-5",
+    "failure": "Empty tool argument delta parsed as incomplete JSON",
+    "resolution": "Retain initial tool input when no delta is emitted; regression fixture and live retest passed"
+  },
+  "automated_checks": {
+    "protocol_tests": 20,
+    "provider_tests": 89,
+    "core_tests": 112,
+    "server_tests": 237,
+    "desktop_tests": 147,
+    "desktop_typecheck": "passed",
+    "desktop_model_picker_e2e": "passed",
+    "tui_model_picker_tmux": "passed"
+  },
+  "live_limitations": [
+    "No working public OpenAI API key: public API-only options were verified with local HTTP/SSE contract fixtures, not live.",
+    "xAI, DeepSeek, Mistral, Groq and other uncredentialed providers were not live-tested.",
+    "Each successful model used two user turns and sequential file-read tool continuation; this is not exhaustive certification of every effort, modality or hosted tool."
+  ]
+}

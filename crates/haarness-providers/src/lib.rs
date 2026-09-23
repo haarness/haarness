@@ -5,6 +5,8 @@ pub mod auth;
 mod bedrock;
 pub mod catalog;
 mod cloud;
+#[cfg(test)]
+mod compatibility_tests;
 pub mod connect;
 mod gemini;
 mod live_models;
@@ -75,7 +77,10 @@ pub(crate) fn apply_request_headers(headers: &mut HeaderMap, extra: &BTreeMap<St
             (Ok(name), Ok(value)) => {
                 headers.insert(name, value);
             }
-            _ => tracing::warn!(header = name, "ignoring invalid hook-supplied request header"),
+            _ => tracing::warn!(
+                header = name,
+                "ignoring invalid hook-supplied request header"
+            ),
         }
     }
 }
@@ -606,21 +611,26 @@ pub const COMPAT_PRESETS: &[CompatiblePreset] = &[
         "Mistral",
         "https://api.mistral.ai/v1",
         &["MISTRAL_API_KEY"],
-        &["mistral-large-latest", "devstral-latest"],
+        &[
+            "mistral-medium-3-5",
+            "mistral-small-latest",
+            "mistral-large-latest",
+            "devstral-latest",
+        ],
     ),
     preset_with_models(
         "xai",
         "xAI",
         "https://api.x.ai/v1",
         &["XAI_API_KEY"],
-        &["grok-4.3", "grok-build-0.1"],
+        &["grok-4.7", "grok-4.3", "grok-build-0.1"],
     ),
     preset_with_models(
         "deepseek",
         "DeepSeek",
         "https://api.deepseek.com",
         &["DEEPSEEK_API_KEY"],
-        &["deepseek-v4-flash", "deepseek-v4-pro"],
+        &["deepseek-flash", "deepseek-v4-pro"],
     ),
     preset_with_aliases(
         "togetherai",

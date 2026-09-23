@@ -243,15 +243,36 @@ impl ModelProvider for GeminiProvider {
             body["toolConfig"] = json!({"functionCallingConfig":{"mode":"ANY"}});
         }
         if let Some(effort) = request.reasoning_effort.as_deref() {
-            let budget: i64 = match effort {
-                "minimal" => 0,
-                "low" => 2048,
-                "high" => 24_576,
-                _ => 8192,
-            };
-            if budget > 0 {
+            if request.model.starts_with("gemini-3") {
+                let level = match effort {
+                    "none" | "minimal"
+                        if gemini_reasoning_efforts(&request.model).contains(&"minimal") =>
+                    {
+                        "minimal"
+                    }
+                    "none" | "minimal" | "low" => "low",
+                    "medium" => "medium",
+                    _ => "high",
+                };
                 body["generationConfig"] =
-                    json!({"thinkingConfig":{"thinkingBudget":budget,"includeThoughts":true}});
+                    json!({"thinkingConfig":{"thinkingLevel":level,"includeThoughts":true}});
+            } else {
+                let budget: i64 = match effort {
+                    "none" | "minimal" => 0,
+                    "low" => 2048,
+                    "high" => 24_576,
+                    _ => 8192,
+                };
+                if request.model.starts_with("gemini-2.5") || budget > 0 {
+                    // Gemini 2.5 Pro cannot disable thinking (minimum 128).
+                    let budget = if request.model.starts_with("gemini-2.5-pro") {
+                        budget.max(128)
+                    } else {
+                        budget
+                    };
+                    body["generationConfig"] =
+                        json!({"thinkingConfig":{"thinkingBudget":budget,"includeThoughts":true}});
+                }
             }
         }
         let parameters = &request.parameters;
@@ -300,7 +321,10 @@ impl ModelProvider for GeminiProvider {
                         if let Some(call)=part.get("functionCall") {
                             call_index += 1;
                             let response_id = event.get("responseId").and_then(Value::as_str).unwrap_or("response");
-                            let provider_metadata = part.get("thoughtSignature").map_or(Value::Null, |signature| json!({"thoughtSignature": signature}));
+                            let mut provider_metadata = json!({});
+                            if let Some(signature) = part.get("thoughtSignature") { provider_metadata["thoughtSignature"] = signature.clone(); }
+                            if let Some(id) = call.get("id") { provider_metadata["functionCallId"] = id.clone(); }
+                            if provider_metadata.as_object().is_some_and(|value| value.is_empty()) { provider_metadata = Value::Null; }
                             let name = call.get("name").and_then(Value::as_str).unwrap_or_default().to_owned();
                             let arguments = call.get("args").cloned().unwrap_or(Value::Null);
                             if structured_output.is_some() && name == STRUCTURED_OUTPUT_TOOL_NAME {
@@ -322,6 +346,19 @@ impl ModelProvider for GeminiProvider {
         }))
     }
 }
+fn gemini_reasoning_efforts(id: &str) -> Vec<&'static str> {
+    if id.starts_with("gemini-3.8-flash")
+        || id.starts_with("gemini-3.7-flash")
+        || id.starts_with("gemini-3.1-pro")
+    {
+        vec!["low", "medium", "high"]
+    } else if id.starts_with("gemini-3-pro") || id.starts_with("gemini-2.5-pro") {
+        vec!["low", "high"]
+    } else {
+        vec!["minimal", "low", "medium", "high"]
+    }
+}
+
 fn model(id: &str) -> ModelInfo {
     crate::catalog::annotate(
         "gemini",
@@ -329,9 +366,10 @@ fn model(id: &str) -> ModelInfo {
             id: id.into(),
             display_name: id.into(),
             reasoning: true,
-            reasoning_efforts: ["minimal", "low", "medium", "high"]
+            reasoning_efforts: gemini_reasoning_efforts(id)
+                .into_iter()
                 .map(str::to_owned)
-                .to_vec(),
+                .collect(),
             images: true,
             video: true,
             tools: true,
@@ -403,12 +441,23 @@ fn discovered_model_for(entry: &Value, require_gemini_prefix: bool) -> Option<Mo
     }
     if let Some(thinking) = entry["thinking"].as_bool() {
         info.reasoning = thinking;
+        if !thinking {
+            info.reasoning_efforts.clear();
+        }
     }
     Some(info)
 }
 
 fn supports_harness_chat(id: &str, require_gemini_prefix: bool) -> bool {
-    let unsupported = ["-image", "-tts", "-live", "native-audio", "omni-flash"];
+    let unsupported = [
+        "-image",
+        "-tts",
+        "-live",
+        "native-audio",
+        "omni-flash",
+        "gemini-omni-",
+        "-transcribe",
+    ];
     (!require_gemini_prefix || id.starts_with("gemini-"))
         && !id.is_empty()
         && !unsupported.iter().any(|kind| id.contains(kind))
@@ -416,6 +465,7 @@ fn supports_harness_chat(id: &str, require_gemini_prefix: bool) -> bool {
 
 fn preferred_models() -> Vec<ModelInfo> {
     vec![
+        model("gemini-3.8-flash"),
         model("gemini-3.7-flash"),
         model("gemini-3.6-flash"),
         model("gemini-3.5-flash"),
@@ -434,6 +484,7 @@ fn provider_error(error: impl std::fmt::Display) -> CoreError {
 
 fn gemini_contents(messages: Vec<ProviderMessage>) -> CoreResult<Vec<Value>> {
     let mut contents = Vec::new();
+    let mut function_ids = std::collections::HashMap::new();
     for message in messages {
         match message {
             ProviderMessage::Text { role, content } if role != "developer" => {
@@ -462,12 +513,20 @@ fn gemini_contents(messages: Vec<ProviderMessage>) -> CoreResult<Vec<Value>> {
             }
             ProviderMessage::Text { .. } | ProviderMessage::Media { .. } => {}
             ProviderMessage::ToolCall {
+                call_id,
                 name,
                 arguments,
                 provider_metadata,
                 ..
             } => {
                 let mut part = json!({"functionCall": {"name": name, "args": arguments}});
+                if let Some(id) = provider_metadata
+                    .get("functionCallId")
+                    .and_then(Value::as_str)
+                {
+                    part["functionCall"]["id"] = json!(id);
+                    function_ids.insert(call_id, id.to_owned());
+                }
                 if let Some(signature) = provider_metadata
                     .get("thoughtSignature")
                     .and_then(Value::as_str)
@@ -477,16 +536,20 @@ fn gemini_contents(messages: Vec<ProviderMessage>) -> CoreResult<Vec<Value>> {
                 contents.push(json!({"role": "model", "parts": [part]}));
             }
             ProviderMessage::ToolResult {
+                call_id,
                 name,
                 output,
                 attachments,
                 ..
             } => {
                 let media = crate::media::load_all_with_limit(&attachments, 10 * 1024 * 1024)?;
-                let response = json!({
+                let mut response = json!({
                     "name": name,
                     "response": {"name": name, "content": output}
                 });
+                if let Some(id) = function_ids.get(&call_id) {
+                    response["id"] = json!(id);
+                }
                 contents.push(json!({
                     "role": "user",
                     "parts": [{"functionResponse": response}]
@@ -502,7 +565,23 @@ fn gemini_contents(messages: Vec<ProviderMessage>) -> CoreResult<Vec<Value>> {
             }
         }
     }
-    Ok(contents)
+    // Parallel calls belong to a single model content, and their responses to
+    // one user content. Keep signatures on their original parts.
+    let mut grouped: Vec<Value> = Vec::new();
+    for content in contents {
+        if let Some(previous) = grouped
+            .last_mut()
+            .filter(|previous| previous["role"] == content["role"])
+        {
+            previous["parts"]
+                .as_array_mut()
+                .unwrap()
+                .extend(content["parts"].as_array().unwrap().iter().cloned());
+        } else {
+            grouped.push(content);
+        }
+    }
+    Ok(grouped)
 }
 
 #[cfg(test)]
@@ -761,6 +840,12 @@ mod tests {
         assert_eq!(info.context_window, Some(2_097_152));
         assert_eq!(info.max_output_tokens, Some(131_072));
         assert!(info.reasoning);
+        for id in ["gemini-omni-1.1-flash", "gemini-3.5-transcribe"] {
+            assert!(discovered_model(&json!({"name":format!("models/{id}"),"supportedGenerationMethods":["generateContent"]})).is_none());
+        }
+        let plain = discovered_model(&json!({"name":"models/gemini-future-plain","supportedGenerationMethods":["generateContent"],"thinking":false})).unwrap();
+        assert!(!plain.reasoning);
+        assert!(plain.reasoning_efforts.is_empty());
 
         assert!(
             discovered_model(&json!({
@@ -842,12 +927,12 @@ mod tests {
             "video/mp4"
         );
         assert_eq!(
-            contents[1]["parts"][0]["functionResponse"]["response"]["content"],
+            contents[0]["parts"][5]["functionResponse"]["response"]["content"],
             "PDF read successfully"
         );
-        assert!(contents[1]["parts"][0]["functionResponse"]["parts"].is_null());
+        assert!(contents[0]["parts"][5]["functionResponse"]["parts"].is_null());
         assert_eq!(
-            contents[2]["parts"][0]["inlineData"]["mimeType"],
+            contents[0]["parts"][6]["inlineData"]["mimeType"],
             "application/pdf"
         );
     }
