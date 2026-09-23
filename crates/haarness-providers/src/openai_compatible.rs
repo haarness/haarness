@@ -979,6 +979,43 @@ fn apply_model_defaults(mut info: ModelInfo, defaults: CompatibleModelDefaults) 
     info
 }
 
+// One model response can request several tools. Chat Completions requires those
+// calls in one assistant message, followed by all corresponding tool results.
+fn push_tool_call_message(messages: &mut Vec<Value>, message: Value) {
+    if let Some(previous) = messages.last_mut()
+        && previous["role"] == "assistant"
+        && previous["tool_calls"].is_array()
+    {
+        previous["tool_calls"]
+            .as_array_mut()
+            .unwrap()
+            .extend(message["tool_calls"].as_array().unwrap().iter().cloned());
+        // Streaming attaches shared reasoning to each call. Replay each opaque
+        // block once, preserving order and distinct per-call signatures.
+        for field in ["reasoning_details", "content"] {
+            if let Some(incoming) = message[field].as_array() {
+                if !previous[field].is_array() {
+                    previous[field] = json!([]);
+                }
+                let existing = previous[field].as_array_mut().unwrap();
+                for value in incoming {
+                    if !existing.contains(value) {
+                        existing.push(value.clone());
+                    }
+                }
+            }
+        }
+        if let Some(incoming) = message["reasoning_content"].as_str() {
+            let existing = previous["reasoning_content"].as_str().unwrap_or_default();
+            if existing != incoming {
+                previous["reasoning_content"] = json!(format!("{existing}{incoming}"));
+            }
+        }
+    } else {
+        messages.push(message);
+    }
+}
+
 #[async_trait]
 impl ModelProvider for OpenAiCompatibleProvider {
     async fn refresh_models(&self, force: bool) {
@@ -1038,7 +1075,11 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let replay_reasoning_content =
             matches!(self.id.as_str(), "deepseek" | "moonshotai" | "zai");
         let mut messages = vec![json!({"role":"system","content":request.system})];
+        let mut tool_media = Vec::new();
         for message in request.messages {
+            if !matches!(&message, ProviderMessage::ToolResult { .. }) {
+                messages.append(&mut tool_media);
+            }
             match message {
                 ProviderMessage::Text { role, content } => {
                     let mut message = json!({"role":role,"content":content});
@@ -1086,7 +1127,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     {
                         message["content"] = content.clone();
                     }
-                    messages.push(message);
+                    push_tool_call_message(&mut messages, message);
                 }
                 ProviderMessage::ToolResult {
                     call_id,
@@ -1096,7 +1137,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 } => {
                     messages.push(json!({"role":"tool","tool_call_id":call_id,"content":output}));
                     if !attachments.is_empty() {
-                        messages.push(openai_compatible_media_message(
+                        // Keep every tool result adjacent to its assistant batch;
+                        // user media messages may only follow the completed batch.
+                        tool_media.push(openai_compatible_media_message(
                             "user",
                             "The preceding tool result includes this binary document or media.",
                             &attachments,
@@ -1107,6 +1150,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 }
             }
         }
+        messages.append(&mut tool_media);
         let mut requested_tools = request.tools;
         if let Some(schema) = structured_output.as_ref() {
             requested_tools.retain(|tool| tool.name != STRUCTURED_OUTPUT_TOOL_NAME);
@@ -2035,6 +2079,77 @@ mod tests {
             .find(|tool| tool["function"]["name"] == "StructuredOutput")
             .unwrap();
         assert_eq!(tool["function"]["parameters"]["required"][0], "count");
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_history_is_one_assistant_batch_with_adjacent_results() {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route("/chat/completions", post(completions))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider =
+            OpenAiCompatibleProvider::for_test(format!("http://{address}/chat/completions"));
+        let shared = json!({"type":"reasoning.encrypted","id":"shared","data":"opaque"});
+        let signature = json!({"type":"reasoning.encrypted","id":"b","data":"call-b-signature"});
+        let call = |id: &str, details: Value| ProviderMessage::ToolCall {
+            call_id: id.into(),
+            name: "read".into(),
+            arguments: json!({"path":id}),
+            provider_metadata: json!({"reasoning_details":details}),
+        };
+        let result = |id: &str, media: bool| ProviderMessage::ToolResult {
+            call_id: id.into(),
+            name: "read".into(),
+            output: id.into(),
+            is_error: false,
+            attachments: if media {
+                vec!["data:image/png;base64,iVBORw0KGgo=".into()]
+            } else {
+                Vec::new()
+            },
+        };
+        let mut stream = provider
+            .stream(
+                ProviderRequest {
+                    model: "compat-test".into(),
+                    system: "sys".into(),
+                    messages: vec![
+                        call("a", json!([shared])),
+                        call("b", json!([shared, signature])),
+                        result("a", true),
+                        result("b", false),
+                        call("c", json!([shared])),
+                        result("c", false),
+                    ],
+                    tools: Vec::new(),
+                    reasoning_effort: None,
+                    parameters: haarness_core::RequestParameters::default(),
+                    output_schema: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+        let requests = state.0.lock();
+        let messages = requests[0]["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 7);
+        assert_eq!(messages[1]["tool_calls"].as_array().unwrap().len(), 2);
+        assert_eq!(messages[1]["tool_calls"][0]["id"], "a");
+        assert_eq!(messages[1]["tool_calls"][1]["id"], "b");
+        assert_eq!(messages[1]["reasoning_details"], json!([shared, signature]));
+        assert_eq!(messages[2]["tool_call_id"], "a");
+        assert_eq!(messages[3]["tool_call_id"], "b");
+        assert_eq!(messages[4]["role"], "user");
+        assert_eq!(messages[4]["content"][1]["type"], "image_url");
+        assert_eq!(messages[5]["tool_calls"].as_array().unwrap().len(), 1);
+        assert_eq!(messages[5]["tool_calls"][0]["id"], "c");
+        assert_eq!(messages[6]["tool_call_id"], "c");
     }
 
     #[tokio::test]
