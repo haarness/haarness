@@ -2054,6 +2054,7 @@ impl App {
             }
             OverlayChoice::Theme(name, variant) => {
                 if self.apply_theme(&name, &variant) {
+                    self.theme_selected = true;
                     crate::config::save_theme_selection(&name, &variant);
                     self.notice = format!("Theme: {name} · {variant}");
                 } else {
@@ -2497,6 +2498,7 @@ impl App {
                             (name, variant.trim())
                         });
                     if self.apply_theme(name, variant) {
+                        self.theme_selected = true;
                         crate::config::save_theme_selection(name, variant);
                         self.notice = format!("Theme: {name} · {variant}");
                     } else {
@@ -4326,6 +4328,7 @@ impl App {
             self.notice = "Use /models or /models provider/model".into();
             return Ok(());
         };
+        let provider = haarness_protocol::provider_storage_id(provider);
         let exists = self.providers.iter().any(|candidate| {
             candidate.id == provider && candidate.models.iter().any(|value| value.id == model)
         });
@@ -4355,7 +4358,10 @@ impl App {
             )
             .await?;
         self.remember_model();
-        self.notice = format!("Model: {provider}/{model}");
+        self.notice = format!(
+            "Model: {}/{model}",
+            haarness_protocol::provider_display_id(provider)
+        );
         self.normalize_reasoning();
         Ok(())
     }

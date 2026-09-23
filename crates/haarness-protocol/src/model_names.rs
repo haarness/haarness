@@ -3,6 +3,30 @@ use std::{collections::HashMap, sync::LazyLock};
 static NAMES: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
     serde_json::from_str(include_str!("model-names.json")).expect("valid embedded model names")
 });
+
+/// Public Cloud prefix, preserving the persisted provider identity for existing conversations.
+pub fn provider_display_id(id: &str) -> &str {
+    if id == "haarness" {
+        "haarness-cloud"
+    } else {
+        id
+    }
+}
+
+pub fn provider_storage_id(id: &str) -> &str {
+    if id == "haarness-cloud" {
+        "haarness"
+    } else {
+        id
+    }
+}
+
+pub fn model_display_id(qualified: &str) -> String {
+    qualified.split_once('/').map_or_else(
+        || qualified.to_owned(),
+        |(provider, model)| format!("{}/{model}", provider_display_id(provider)),
+    )
+}
 pub fn model_display_name(id: &str, supplied: Option<&str>) -> String {
     if let Some(name) = supplied.filter(|name| !name.trim().is_empty() && *name != id) {
         return name.to_owned();

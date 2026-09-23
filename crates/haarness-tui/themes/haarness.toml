@@ -1,0 +1,53 @@
+# Haarness: warm charcoal and paper, shared with Desktop's brand palette.
+# Ivory/ink focus, quiet amber activity, and distinct syntax and diff colors.
+name = "haarness"
+
+[dark]
+bg = "#151413"
+surface = "#232120"
+overlay = "#2c2a27"
+selected = "#35322e"
+text = "#eae5dd"
+muted = "#a9a298"
+primary = "#eae5dd"
+accent = "#dba273"
+user = "#c8c2b8"
+danger = "#ef8078"
+
+[dark.syntax]
+keyword = "#c9a6f0"
+string = "#a7d3a3"
+comment = "#a9a298"
+constant = "#e6bd8a"
+function = "#8fbfe8"
+
+[dark.diff]
+added = "#82c78f"
+added_bg = "#1a2c20"
+removed = "#ef8078"
+removed_bg = "#331f1f"
+
+[light]
+bg = "#fdfcfa"
+surface = "#f1eee8"
+overlay = "#f4f1ec"
+selected = "#e6e2d9"
+text = "#232120"
+muted = "#635c53"
+primary = "#232120"
+accent = "#8a5729"
+user = "#4c463e"
+danger = "#b3382f"
+
+[light.syntax]
+keyword = "#7040a0"
+string = "#25703f"
+comment = "#635c53"
+constant = "#8f5420"
+function = "#25599c"
+
+[light.diff]
+added = "#2b7241"
+added_bg = "#e4f0e4"
+removed = "#b3382f"
+removed_bg = "#fae3e0"

@@ -612,6 +612,9 @@ pub struct App {
     /// default.
     pub reasoning_effort: Option<String>,
     pub theme: Theme,
+    /// A saved or committed palette choice takes precedence over automatic
+    /// terminal-background matching, even on ANSI-256 terminals.
+    pub theme_selected: bool,
     /// Whether ordinary surfaces should reveal the terminal background.
     /// Overlays and selection colors stay opaque.
     pub terminal_background: bool,
@@ -837,8 +840,9 @@ impl App {
             model_favorites: crate::config::load_state().model_favorites,
             model_recents: crate::config::load_state().model_recents,
             theme: Theme::default(),
+            theme_selected: false,
             terminal_background: false,
-            theme_name: "editorial".into(),
+            theme_name: crate::theme::DEFAULT_THEME.into(),
             theme_variant: "dark".into(),
             themes: crate::theme::builtin_entries(),
             expanded: std::collections::HashSet::new(),
@@ -2302,6 +2306,9 @@ impl App {
             .filter(|model| {
                 query.is_empty()
                     || model.to_ascii_lowercase().contains(&query)
+                    || haarness_protocol::model_display_id(model)
+                        .to_ascii_lowercase()
+                        .contains(&query)
                     || self
                         .model_label(model)
                         .to_ascii_lowercase()

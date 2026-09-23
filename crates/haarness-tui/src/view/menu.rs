@@ -39,18 +39,7 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
                 .into_iter()
                 .map(|model| {
                     let active = model == format!("{}/{}", app.thread.provider, app.thread.model);
-                    let connected = model.split_once('/').is_some_and(|(provider, _)| {
-                        app.providers
-                            .iter()
-                            .any(|candidate| candidate.id == provider && candidate.authenticated)
-                    });
-                    let status = if active {
-                        "active"
-                    } else if connected {
-                        "connected"
-                    } else {
-                        "not connected"
-                    };
+                    let status = if active { "active" } else { "" };
                     let detail = model_detail(app, &model, status);
                     (app.model_label(&model), detail)
                 })
@@ -204,7 +193,10 @@ fn model_detail(app: &App, qualified: &str, status: &str) -> String {
         .iter()
         .find(|provider| provider.id == provider_id)
         .and_then(|provider| provider.models.iter().find(|model| model.id == model_id));
-    let mut parts = vec![qualified.to_owned(), status.to_owned()];
+    let mut parts = vec![haarness_protocol::model_display_id(qualified)];
+    if !status.is_empty() {
+        parts.push(status.to_owned());
+    }
     if let Some(info) = info {
         let mut capabilities = Vec::new();
         if info.reasoning {
@@ -331,18 +323,7 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
                 .into_iter()
                 .map(|model| {
                     let current = model == format!("{}/{}", app.thread.provider, app.thread.model);
-                    let connected = model.split_once('/').is_some_and(|(provider, _)| {
-                        app.providers
-                            .iter()
-                            .any(|candidate| candidate.id == provider && candidate.authenticated)
-                    });
-                    let status = if current {
-                        "active"
-                    } else if connected {
-                        "connected"
-                    } else {
-                        "not connected"
-                    };
+                    let status = if current { "active" } else { "" };
                     SelectorRow::new(
                         format!(
                             "{}{}",

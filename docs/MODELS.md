@@ -36,6 +36,14 @@ shared by the Rust protocol helper and Desktop. Provider-supplied names take
 precedence; unfamiliar IDs are preserved without guessing a label. IDs remain the
 stable API/storage values and remain searchable in the pickers.
 
+The TUI and CLI display routed Cloud models as `haarness-cloud/provider/model`.
+Both that prefix and the existing `haarness/` prefix are accepted; persisted
+provider IDs and saved favorites remain compatible. The model picker keeps an
+active marker and omits the redundant connected status. Dynamically discovered
+models are grouped by provider and family, with numeric generations newest first
+and larger variants before smaller ones. Existing curated provider order and TUI
+favorites/recents retain priority; dated snapshots follow the aliases.
+
 ## API and metadata update: 2026-09-23
 
 | Provider | Change |

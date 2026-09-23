@@ -31,7 +31,7 @@ selected = "#f0f3f6"
 text = "#24292f"
 muted = "#57606a"
 primary = "#0969da"
-accent = "#1b7c83"
+accent = "#1b7a81"
 user = "#154c8d"
 danger = "#cf222e"
 
@@ -39,7 +39,7 @@ danger = "#cf222e"
 keyword = "#cf222e"
 string = "#0969da"
 comment = "#57606a"
-constant = "#1b7c83"
+constant = "#1b7a81"
 function = "#8250df"
 
 [light.diff]

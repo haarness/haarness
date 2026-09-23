@@ -163,3 +163,46 @@ to the preserved working-tree baseline are in `target/adaptations-20260921/`.
 Validation used macOS with deterministic providers; it does not certify Linux,
 Windows or live third-party OAuth deployments. Existing user daemons were not
 restarted, and no packaged release was produced.
+
+
+## TUI model picker and themes on 2026-09-23
+
+The model picker uses one selection for keyboard and mouse. A hover at the edge
+of a scrolling list previously left the selected row highlighted while a second
+paint pass highlighted the row that moved under the pointer. Picker rows now
+skip that redundant hover pass. The regression test reproduces two focused rows
+with the old code and one with the fix.
+
+Discovered model catalogs group provider/family and compare generations
+numerically, keeping current GPT generations ahead of older o-series models.
+Cloud model IDs display as `haarness-cloud/…` and both public and legacy prefixes
+work in CLI/TUI selection. Storage IDs, favorites, recents, and active selections
+remain compatible. The picker omits the redundant connected label.
+
+`haarness` is the default theme for fresh installations, with warm charcoal and
+paper variants matching Desktop. Explicit saved themes remain selected.
+Five embedded light variants duplicated their dark palettes; those now have real
+light palettes. Low-contrast light foregrounds throughout the collection were
+corrected. All 35 built-in light variants have light surfaces and at least 4.5:1
+contrast for body, secondary, accent, syntax, and diff text on their checked
+surfaces. These checks measure palette colors, before terminal quantization.
+Existing dark palettes are unchanged. Explicit theme choices and previews now
+paint the page even in ANSI-256 terminals under `auto` background mode; an explicit
+`terminal` background override remains honored. Saved light choices survive restart.
+
+Verification:
+
+- 575 tests passed across CLI (including integration workflows), protocol,
+  providers, and TUI; the TUI suite contains 352 tests.
+- Debug CLI/TUI build passed without new warnings.
+- Real tmux mouse hover, wheel scrolling, keyboard movement, model filtering and
+  selection retained exactly one focused model row.
+- Live Cloud GPT-6 Luna request succeeded from the TUI after model selection.
+- All 35 light themes were selected and their painted page colors checked in tmux.
+- Apple Terminal ANSI-256 mode painted a light page and restored it after restart.
+- Theme preview/escape was checked, and captured dark/light frames were visually
+  inspected. Tests used isolated workspace/state and did not stop user sessions.
+
+To switch an existing installation, use `/themes haarness dark` or
+`/themes haarness light`. Open `/themes` to preview without committing; Escape
+restores the prior palette.

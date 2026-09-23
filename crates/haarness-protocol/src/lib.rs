@@ -15,7 +15,7 @@ pub use btw::*;
 pub use goal::*;
 pub use input::*;
 pub use management::*;
-pub use model_names::model_display_name;
+pub use model_names::{model_display_id, model_display_name, provider_display_id, provider_storage_id};
 pub use pty::*;
 pub use tools::*;
 pub use workflow::*;

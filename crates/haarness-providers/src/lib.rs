@@ -12,6 +12,7 @@ mod gemini;
 mod haarness_cloud;
 mod live_models;
 mod media;
+mod model_order;
 mod openai;
 mod openai_compatible;
 mod sse;
@@ -952,11 +953,7 @@ fn merge_discovered_models(
     preferred: Vec<haarness_protocol::ModelInfo>,
     mut discovered: Vec<haarness_protocol::ModelInfo>,
 ) -> Vec<haarness_protocol::ModelInfo> {
-    discovered.sort_by(|left, right| {
-        is_snapshot(&left.id)
-            .cmp(&is_snapshot(&right.id))
-            .then_with(|| right.id.cmp(&left.id))
-    });
+    discovered.sort_by(|left, right| model_order::compare(&left.id, &right.id));
     discovered.dedup_by(|left, right| left.id == right.id);
     let mut discovered: HashMap<_, _> = discovered
         .into_iter()
@@ -970,11 +967,7 @@ fn merge_discovered_models(
         .filter_map(|model| discovered.remove(&model.id))
         .collect();
     let mut remaining: Vec<_> = discovered.into_values().collect();
-    remaining.sort_by(|left, right| {
-        is_snapshot(&left.id)
-            .cmp(&is_snapshot(&right.id))
-            .then_with(|| right.id.cmp(&left.id))
-    });
+    remaining.sort_by(|left, right| model_order::compare(&left.id, &right.id));
     models.extend(remaining);
     models
 }

@@ -425,7 +425,8 @@ async fn run_with_client(
     app.language = config::load_language();
     let statusline_config = config::load_statusline();
     let (saved_theme, saved_variant) = config::load_theme_selection();
-    let initial_theme = saved_theme.unwrap_or_else(|| "editorial".into());
+    app.theme_selected = saved_theme.is_some() || saved_variant.is_some();
+    let initial_theme = saved_theme.unwrap_or_else(|| theme::DEFAULT_THEME.into());
     let detected_variant = crate::terminal::detect_background_variant().map(str::to_owned);
     let _terminal = TerminalGuard::enter()?;
     let (width, height) = crossterm::terminal::size()?;
@@ -433,7 +434,8 @@ async fn run_with_client(
         .context("initialize embedded OpenTUI renderer")?;
     let color_support = renderer.color_support();
     let background_mode = config::load_background_mode();
-    let terminal_background = uses_terminal_background(background_mode, color_support);
+    let initial_background_mode = background_mode.for_theme_choice(app.theme_selected);
+    let terminal_background = uses_terminal_background(initial_background_mode, color_support);
     app.set_terminal_background(terminal_background);
     // A persisted picker variant is an explicit palette choice in theme mode.
     // When the terminal owns the background, its measured light/dark value
@@ -444,13 +446,13 @@ async fn run_with_client(
         saved_variant.as_deref(),
     );
     if !app.apply_theme(&initial_theme, &initial_variant)
-        && !app.apply_theme("editorial", &initial_variant)
+        && !app.apply_theme(theme::DEFAULT_THEME, &initial_variant)
     {
-        app.apply_theme("editorial", "dark");
+        app.apply_theme(theme::DEFAULT_THEME, "dark");
     }
     renderer.set_background(page_background(
         app.theme.bg,
-        background_mode,
+        initial_background_mode,
         color_support,
     ));
     let mut input = EventStream::new();
@@ -529,9 +531,15 @@ async fn run_with_client(
                 }
             }
         }
+        let frame_background_mode = background_mode
+            .for_theme_choice(app.theme_selected || app.theme_preview_restore.is_some());
+        app.set_terminal_background(uses_terminal_background(
+            frame_background_mode,
+            color_support,
+        ));
         renderer.set_background(page_background(
             app.theme.bg,
-            background_mode,
+            frame_background_mode,
             color_support,
         ));
         // The review viewer's layout depends on how much room the patch pane

@@ -263,7 +263,11 @@ fn left_variants(app: &App) -> Vec<Vec<Span>> {
     }
     let model = vec![
         chip.clone(),
-        Span::new(format!("  {}/", app.thread.provider), theme.muted).on(theme.surface),
+        Span::new(
+            format!("  {}/", haarness_protocol::provider_display_id(&app.thread.provider)),
+            theme.muted,
+        )
+        .on(theme.surface),
         Span::new(
             app.model_label(&format!("{}/{}", app.thread.provider, app.thread.model)),
             theme.text,

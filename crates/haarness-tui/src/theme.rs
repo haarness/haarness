@@ -1,9 +1,15 @@
-//! Color themes. The default `editorial` theme is the identity of the
-//! product: byte-identical to the original hardcoded palette. Additional
-//! themes load from TOML files with optional dark/light variants.
+//! Color themes. Haarness shares Desktop's warm charcoal and paper identity.
+//! The original editorial palette remains available, alongside TOML themes.
 
 use haarness_opentui::Color;
 use serde::Deserialize;
+
+pub const DEFAULT_THEME: &str = "haarness";
+
+static HAARNESS: std::sync::LazyLock<ThemeEntry> = std::sync::LazyLock::new(|| {
+    parse_theme_file(DEFAULT_THEME, include_str!("../themes/haarness.toml"))
+        .expect("valid built-in Haarness theme")
+});
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
@@ -51,6 +57,17 @@ pub struct DiffTheme {
 }
 
 impl Theme {
+    #[must_use]
+    pub fn haarness_dark() -> Self {
+        HAARNESS.dark.expect("Haarness dark palette")
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn haarness_light() -> Self {
+        HAARNESS.light.expect("Haarness light palette")
+    }
+
     /// Use the terminal behind ordinary application surfaces, matching
     /// Haarness's terminal background mode. Selection, diff emphasis, and
     /// overlays remain solid because they convey state or cover other text.
@@ -145,22 +162,22 @@ impl Theme {
             overlay: Color::rgb(234, 229, 219),
             selected: Color::rgb(205, 226, 219),
             text: Color::rgb(43, 40, 36),
-            muted: Color::rgb(125, 119, 109),
-            primary: Color::rgb(16, 122, 108),
-            accent: Color::rgb(164, 88, 41),
+            muted: Color::rgb(102, 97, 89),
+            primary: Color::rgb(14, 110, 97),
+            accent: Color::rgb(148, 79, 37),
             user: Color::rgb(52, 100, 87),
-            danger: Color::rgb(176, 58, 53),
+            danger: Color::rgb(174, 57, 52),
             syntax: SyntaxTheme {
-                keyword: Color::rgb(16, 122, 108),
+                keyword: Color::rgb(14, 110, 97),
                 string: Color::rgb(52, 100, 87),
-                comment: Color::rgb(125, 119, 109),
-                constant: Color::rgb(164, 88, 41),
+                comment: Color::rgb(102, 97, 89),
+                constant: Color::rgb(148, 79, 37),
                 function: Color::rgb(43, 40, 36),
             },
             diff: DiffTheme {
                 added: Color::rgb(38, 111, 54),
                 added_bg: Color::rgb(224, 238, 224),
-                removed: Color::rgb(176, 58, 53),
+                removed: Color::rgb(174, 57, 52),
                 removed_bg: Color::rgb(243, 224, 222),
             },
         }
@@ -184,7 +201,7 @@ fn blend(from: Color, to: Color, amount: f64) -> Color {
 
 impl Default for Theme {
     fn default() -> Self {
-        Self::editorial_dark()
+        Self::haarness_dark()
     }
 }
 
@@ -213,11 +230,14 @@ impl ThemeEntry {
 /// Built-in themes plus any parsed from theme files.
 #[must_use]
 pub fn builtin_entries() -> Vec<ThemeEntry> {
-    let mut entries = vec![ThemeEntry {
-        name: "editorial".into(),
-        dark: Some(Theme::editorial_dark()),
-        light: Some(Theme::editorial_light()),
-    }];
+    let mut entries = vec![
+        HAARNESS.clone(),
+        ThemeEntry {
+            name: "editorial".into(),
+            dark: Some(Theme::editorial_dark()),
+            light: Some(Theme::editorial_light()),
+        },
+    ];
     // The embedded theme collection.
     for (name, content) in crate::theme_embedded::EMBEDDED_THEMES {
         match parse_theme_file(name, content) {
@@ -440,6 +460,89 @@ mod tests {
 
 #[cfg(test)]
 mod embedded_tests {
+    use super::{Theme, builtin_entries};
+    use haarness_opentui::Color;
+
+    fn luminance(color: Color) -> f64 {
+        let channels = color.components().map(|channel| {
+            let value = f64::from(channel) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        });
+        channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722
+    }
+
+    fn contrast(a: Color, b: Color) -> f64 {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    fn assert_readable(name: &str, theme: Theme) {
+        for foreground in [
+            theme.text,
+            theme.muted,
+            theme.primary,
+            theme.accent,
+            theme.user,
+            theme.danger,
+            theme.syntax.keyword,
+            theme.syntax.string,
+            theme.syntax.comment,
+            theme.syntax.constant,
+            theme.syntax.function,
+        ] {
+            for background in [theme.bg, theme.surface, theme.overlay, theme.selected] {
+                assert!(
+                    contrast(foreground, background) >= 4.5,
+                    "{name}: unreadable {foreground:?} on {background:?}"
+                );
+            }
+        }
+        for (foreground, background) in [
+            (theme.diff.added, theme.diff.added_bg),
+            (theme.diff.removed, theme.diff.removed_bg),
+        ] {
+            assert!(
+                contrast(foreground, background) >= 4.5,
+                "{name}: unreadable diff {foreground:?} on {background:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_builtin_light_theme_has_light_surfaces_and_readable_text() {
+        for entry in builtin_entries() {
+            let theme = entry.light.expect("built-in light variant");
+            for background in [
+                theme.bg,
+                theme.surface,
+                theme.overlay,
+                theme.selected,
+                theme.diff.added_bg,
+                theme.diff.removed_bg,
+            ] {
+                assert!(
+                    luminance(background) >= 0.5,
+                    "{} has a dark surface in its light palette: {background:?}",
+                    entry.name
+                );
+            }
+            assert_readable(&entry.name, theme);
+        }
+    }
+
+    #[test]
+    fn haarness_is_the_default_with_readable_dark_and_light_variants() {
+        assert_eq!(super::DEFAULT_THEME, "haarness");
+        assert_eq!(Theme::default(), Theme::haarness_dark());
+        assert_eq!(builtin_entries()[0].name, "haarness");
+        assert_readable("haarness dark", Theme::haarness_dark());
+        assert_readable("haarness light", Theme::haarness_light());
+    }
+
     #[test]
     fn every_embedded_theme_parses_with_both_variants_resolved() {
         let entries = super::builtin_entries();
