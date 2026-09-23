@@ -11,7 +11,7 @@ export function RouterConnectionDialog(props: { close: () => void }) {
   let dialog!: HTMLDialogElement;
   onMount(() => dialog.showModal());
   const close = () => {
-    if (busy()) return;
+    if (!dialog.isConnected || !dialog.open) return;
     dialog.close();
     props.close();
   };
@@ -24,7 +24,7 @@ export function RouterConnectionDialog(props: { close: () => void }) {
           <h2>{t("Haarness Router")}</h2>
           <p class="muted">{t("Connect your self-hosted router to this Haarness server.")}</p>
         </div>
-        <Button icon="close" label={t("Close dialog")} disabled={busy()} onClick={close} />
+        <Button icon="close" label={t("Close dialog")} onClick={close} />
       </header>
       <ManagementPanel resource="providers" initialRequest={{ action: "router_form" }} pending={setBusy} />
       <footer>

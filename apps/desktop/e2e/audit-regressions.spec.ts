@@ -194,6 +194,60 @@ test("audit: Save remains clickable with many tabs at narrow and normal window s
   }
 });
 
+test("audit: dismissing a pending modal never closes its replacement when the write finishes", async ({ desktop: { app, page, a } }) => {
+  const dismiss = async (name: string) => {
+    const dialog = page.getByRole("dialog", { name, exact: true });
+    const box = await dialog.boundingBox();
+    if (!box || box.x < 8) throw Error("Expected an exposed modal backdrop");
+    await page.mouse.click(box.x / 2, box.y + box.height / 2);
+    await expect(dialog).toHaveCount(0);
+  };
+  await files(page);
+  await button(page, "New file").click();
+  const fileForm = page.getByRole("dialog", { name: "New file", exact: true });
+  const path = fileForm.getByRole("textbox", { name: "Path relative to this folder" });
+  await path.fill("pending.txt");
+  await hold(app, "PUT");
+  await fileForm.getByRole("button", { name: "Create", exact: true }).click();
+  await held(app);
+  await dismiss("New file");
+  await button(page, "New file").click();
+  await path.fill("new-draft.txt");
+  await release(app);
+  await expect.poll(() => readFile(join(a, "pending.txt"), "utf8").catch(() => null)).toBe("");
+  await expect(path).toHaveValue("new-draft.txt");
+  await expect(fileForm.getByRole("button", { name: "Create", exact: true })).toBeEnabled();
+  await dismiss("New file");
+
+  // Provider forms share a separate dialog component from file prompts.
+  await button(page, "Settings").click();
+  const settings = page.getByRole("dialog", { name: "Settings", exact: true });
+  await settings.getByRole("button", { name: "Providers", exact: true }).click();
+  await settings.getByRole("button", { name: "Add custom provider", exact: true }).click();
+  const provider = page.getByRole("dialog", { name: "Custom provider", exact: true });
+  await provider.getByLabel("Provider ID", { exact: true }).fill("pending-provider");
+  await provider.getByLabel("Base URL", { exact: true }).fill("http://127.0.0.1:1/v1");
+  await provider.getByRole("combobox", { name: "Authentication", exact: true }).click();
+  await page.getByRole("option").filter({ hasText: "No authentication" }).click();
+  await provider.getByRole("combobox", { name: "Models", exact: true }).click();
+  await page.getByRole("option").filter({ hasText: "Choose model IDs" }).click();
+  await provider.getByRole("button", { name: "Add model", exact: true }).click();
+  await provider.getByRole("textbox", { name: "Model ID 1", exact: true }).fill("fixture-model");
+  await hold(app, "POST", "/v1/providers/refresh");
+  await provider.getByRole("button", { name: "Add provider", exact: true }).click();
+  await held(app);
+  await dismiss("Custom provider");
+  await expect(settings).toBeVisible();
+  await settings.getByRole("button", { name: "Add custom provider", exact: true }).click();
+  await provider.getByLabel("Provider ID", { exact: true }).fill("replacement-draft");
+  await release(app);
+  await expect(settings.locator('[data-setting="provider:pending-provider"]')).toHaveCount(1);
+  await expect(provider.getByLabel("Provider ID", { exact: true })).toHaveValue("replacement-draft");
+  await expect(provider.getByRole("button", { name: "Add provider", exact: true })).toBeEnabled();
+  await dismiss("Custom provider");
+  await dismiss("Settings");
+});
+
 test("audit: Settings owns initial focus, traps keyboard, restores trigger and nests dialogs", async ({ desktop: { page } }) => {
   await button(page, "Settings").click();
   const settings = page.getByRole("dialog", { name: "Settings", exact: true });

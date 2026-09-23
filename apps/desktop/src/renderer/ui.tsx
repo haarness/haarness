@@ -121,7 +121,8 @@ export function Forms() {
         const [busy, setBusy] = createSignal(false);
         const [error, setError] = createSignal("");
         const finish = (value: Record<string, string> | null) => {
-          if (busy()) return;
+          // A dismissed submission may finish after another form opens.
+          if (form() !== current) return;
           dialog.close();
           setForm(null);
           current.resolve(value);
@@ -158,7 +159,6 @@ export function Forms() {
                 <Button
                   icon="close"
                   label={t("Close dialog")}
-                  disabled={busy()}
                   onClick={() => finish(null)}
                 />
               </header>
@@ -217,7 +217,7 @@ export function Forms() {
               </fieldset>
               <Show when={error()}><p class="notice-inline" role="alert">{error()}</p></Show>
               <footer>
-                <button type="button" disabled={busy()} onClick={() => finish(null)}>
+                <button type="button" onClick={() => finish(null)}>
                   {t("Cancel")}
                 </button>
                 <button type="submit" class="primary" disabled={busy()}>

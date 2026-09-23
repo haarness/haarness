@@ -129,7 +129,6 @@ export function Schedules(props: {
             item={value.item}
             save={async (args) => {
               await change(args);
-              setEditing();
             }}
             close={() => setEditing()}
           />
@@ -197,10 +196,9 @@ function ScheduleForm(props: {
   let dialog!: HTMLDialogElement;
   onMount(() => dialog.showModal());
   const close = () => {
-    if (!saving()) {
-      dialog.close();
-      props.close();
-    }
+    if (!dialog.isConnected || !dialog.open) return;
+    dialog.close();
+    props.close();
   };
   const submit = async (event: SubmitEvent) => {
     event.preventDefault();
@@ -244,6 +242,7 @@ function ScheduleForm(props: {
       else if (!form.enabled) args.push("--disabled");
       setSaving(true);
       await props.save(args);
+      close();
     } catch (error) {
       setError(t(error instanceof Error ? error.message : String(error)));
     } finally {
@@ -272,7 +271,6 @@ function ScheduleForm(props: {
           <Button
             icon="close"
             label={t("Close dialog")}
-            disabled={saving()}
             onClick={close}
           />
         </header>
@@ -511,7 +509,7 @@ function ScheduleForm(props: {
           </p>
         </Show>
         <footer>
-          <button type="button" disabled={saving()} onClick={close}>
+          <button type="button" onClick={close}>
             {t("Cancel")}
           </button>
           <button class="primary" type="submit" disabled={saving()}>

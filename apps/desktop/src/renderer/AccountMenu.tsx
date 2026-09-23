@@ -1,6 +1,6 @@
 import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import { useApp } from "./state";
-import { Button, Icon } from "./ui";
+import { Button, dismissOnBackdrop, Icon } from "./ui";
 import { t } from "./i18n";
 import "./account.css";
 
@@ -126,6 +126,7 @@ export function AccountMenu(props: {
           ref={dialog}
           class="dialog account-dialog"
           aria-label={t("Haarness account")}
+          {...dismissOnBackdrop(close)}
           onCancel={(event) => {
             event.preventDefault();
             close();

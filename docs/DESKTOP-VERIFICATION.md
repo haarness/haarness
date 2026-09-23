@@ -1,5 +1,30 @@
 # Desktop verification — 2026-09-07
 
+## Dismiss every modal from its backdrop — 2026-09-23
+
+The Haarness account dialog now uses the shared backdrop handler. All ten native
+dialog implementations were audited; pending loads and saves no longer block
+outside clicks or the close controls. A click dismisses only the topmost dialog.
+Panel padding, clicks inside, and drags across the panel boundary keep it open.
+Closing a submitted form lets its existing operation finish; guards prevent a
+late result from closing a replacement form. Provider login dismissal also
+cancels a sign-in that returns after the dialog has gone away.
+
+Passed Desktop typecheck, production build, 147 unit tests, and ten real Electron
+scenarios with isolated state. Coverage includes every native dialog
+implementation, nested dialogs, focus restoration, unsubmitted drafts, pending
+file/provider saves followed by replacement dialogs, and account dismissal both
+signed in and during browser sign-in. The account check used the local Cloud
+stack and fixture identity provider, including model discovery and logout.
+Existing MCP, schedule execution, custom provider, memory conflict/delete, and
+self-hosted router workflows also passed. The signed-in account screenshot was
+inspected. The running development Desktop received the renderer edits through
+hot reload; its account profile and the user's servers were preserved.
+
+Evidence: `/tmp/haarness-modal-e2e`, `/tmp/haarness-modal-save-regressions`, and the
+corresponding `.log` files; build/unit logs are `/tmp/haarness-modal-build.log`
+and `/tmp/haarness-modal-unit.log`.
+
 ## Multiple projects on one remote server — 2026-09-11
 
 Implemented authenticated host folder discovery and routing to independently leased directory daemons. Desktop retains one saved server credential and separate project identities, including the legacy default project.

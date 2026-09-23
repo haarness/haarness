@@ -105,7 +105,7 @@ export function ConnectProvider(props: {
   });
 
   const close = () => {
-    if (busy()) return;
+    if (!dialog.isConnected || !dialog.open) return;
     dialog.close();
     props.close();
   };
@@ -144,10 +144,15 @@ export function ConnectProvider(props: {
       queueMicrotask(() => keyInput?.focus());
       return;
     }
+    const currentGeneration = generation;
     setBusy(true);
     try {
       const view = await manage({ action: "login", name: provider.id, method: method.id });
       const login = parseLogin(view);
+      if (currentGeneration !== generation) {
+        if (login) await manage({ action: "login_cancel", id: login.id });
+        return;
+      }
       if (!login || !login.url) throw new Error(t("The server did not start a sign-in."));
       let opened = false;
       try {
@@ -155,6 +160,10 @@ export function ConnectProvider(props: {
         opened = true;
       } catch {
         opened = false;
+      }
+      if (currentGeneration !== generation) {
+        await manage({ action: "login_cancel", id: login.id });
+        return;
       }
       setStep({ kind: "login", provider, login, opened });
       startPolling(login.id, provider);
@@ -180,7 +189,7 @@ export function ConnectProvider(props: {
     try {
       const view = await manage({ action: "login_status", id });
       const login = parseLogin(view);
-      if (!login) return;
+      if (!dialog.isConnected || !dialog.open || !login) return;
       if (login.state === "pending") return;
       stopPolling();
       if (login.state === "connected") return void finish(provider);
@@ -231,8 +240,7 @@ export function ConnectProvider(props: {
       setBusy(false);
     }
     app.notify(t("{name} is connected").replace("{name}", provider.name));
-    dialog.close();
-    props.close();
+    close();
   }
 
   const title = createMemo(() => {
@@ -293,7 +301,7 @@ export function ConnectProvider(props: {
             <p class="muted">{subtitle()}</p>
           </Show>
         </div>
-        <Button icon="close" label={t("Close dialog")} disabled={busy()} onClick={close} />
+        <Button icon="close" label={t("Close dialog")} onClick={close} />
       </header>
       <Show when={error()}>
         <p class="form-error" role="alert">
