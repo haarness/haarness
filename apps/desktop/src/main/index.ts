@@ -63,11 +63,25 @@ import { createNotifications } from "./notifications";
 if (process.env.HAARNESS_DESKTOP_DATA)
   app.setPath("userData", resolve(process.env.HAARNESS_DESKTOP_DATA));
 app.setName("Haarness");
+let initialized = false;
+let quitting = false;
+// Pending startup work can resume while Electron destroys web contents. Creating
+// a renderer after its main loop exits is a native fatal error, not a JS error.
+app.on("before-quit", () => {
+  quitting = true;
+});
+app.on("will-quit", () => {
+  quitting = true;
+});
+app.on("quit", () => {
+  quitting = true;
+});
 // A development run boots the stock Electron bundle, which brings its own Dock
 // icon. Point it at ours so the app looks like itself before it is packaged;
 // a packaged build gets the icon from the bundle instead.
 if (!app.isPackaged && process.platform === "darwin")
   app.whenReady().then(() => {
+    if (quitting) return;
     const brand = nativeImage.createFromPath(
       resolve(fileURLToPath(new URL(".", import.meta.url)), "../../assets/icon.png"),
     );
@@ -117,6 +131,7 @@ const notifications = createNotifications({
       [...windows].find((win) => win.id === owner) ??
       [...windows][0] ??
       createWindow();
+    if (!win || quitting) return;
     if (win.isMinimized()) win.restore();
     win.show();
     // An explicit notification click should activate a background macOS app,
@@ -1076,6 +1091,7 @@ function installHandlers() {
   });
 }
 function createWindow() {
+  if (!initialized || quitting) return;
   const state = data().values.window as
     | { width?: number; height?: number }
     | undefined;
@@ -1119,6 +1135,7 @@ function createWindow() {
       detail: "Save your files before closing, or discard the edits.",
     });
     if (choice === 1) event.preventDefault();
+    else quitting = false;
   });
   win.webContents.on(
     "did-start-navigation",
@@ -1131,7 +1148,7 @@ function createWindow() {
   );
   win.webContents.on("render-process-gone", () => {
     voice.stop(win.id);
-    if (!win.isDestroyed())
+    if (!quitting && !win.isDestroyed())
       void dialog
         .showMessageBox(win, {
           type: "error",
@@ -1139,7 +1156,11 @@ function createWindow() {
           detail: "Your tasks keep running when you close this window.",
           buttons: ["Reload window", "Close"],
         })
-        .then((result) => (result.response === 0 ? win.reload() : win.close()));
+        .then((result) => {
+          if (quitting || win.isDestroyed()) return;
+          if (result.response === 0) win.reload();
+          else win.close();
+        });
   });
   win.on("close", () => {
     const [width, height] = win.getSize();
@@ -1330,14 +1351,22 @@ else {
   void app
     .whenReady()
     .then(async () => {
+      if (quitting) return;
       if (!app.isPackaged && !process.env.ELECTRON_RENDERER_URL) {
-        uiSession = await createUiSession(resolve(here, ".."));
+        const session = await createUiSession(resolve(here, ".."));
+        if (quitting) {
+          session.dispose();
+          return;
+        }
+        uiSession = session;
         renderer = uiSession.renderer;
         preload = uiSession.preload;
       }
       await load();
+      if (quitting) return;
       installHandlers();
       menu();
+      initialized = true;
       createWindow();
       void refreshProjects().catch(() => {});
       if (app.isPackaged) app.setAsDefaultProtocolClient("haarness");
@@ -1349,6 +1378,7 @@ else {
       );
     })
     .catch((error) => {
+      if (quitting) return;
       dialog.showErrorBox("Haarness could not start", String(error));
       app.quit();
     });
