@@ -335,7 +335,7 @@ export class Api extends Transport {
     return this.request("GET", `/v1/threads/${this.segment(id)}/diff/review`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /v1/vcs/diff */
-  vcsDiff(query: T.VcsDiffQuery = {}, options: RequestOptions = {}): Promise<Array<T.FileDiff>> {
+  vcsDiff(query: T.VcsDiffQuery = {}, options: RequestOptions = {}): Promise<Array<T.ReviewFile>> {
     return this.request("GET", `/v1/vcs/diff`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /v1/files/search */

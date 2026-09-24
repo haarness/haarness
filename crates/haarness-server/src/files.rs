@@ -56,6 +56,9 @@ pub struct FileWrite {
     pub path: String,
     pub content: String,
     pub revision: String,
+    /// utf8 (default) or base64 for binary uploads.
+    #[serde(default)]
+    pub encoding: Option<String>,
 }
 #[derive(Deserialize, ToSchema)]
 pub struct FileAction {
@@ -77,7 +80,7 @@ pub fn routes() -> Router<ServerState> {
         .route("/files/list", get(list_files))
         .route("/files/content", get(read_file).put(write_file))
         .route("/files/action", post(mutate_file))
-        .layer(DefaultBodyLimit::max(12 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(15 * 1024 * 1024))
 }
 fn bad(error: impl std::fmt::Display) -> Failure {
     (StatusCode::BAD_REQUEST, error.to_string())
@@ -230,6 +233,20 @@ pub async fn read_file(
     .map_err(bad)?
 }
 
+fn decode_write(input: &FileWrite) -> Result<Vec<u8>, Failure> {
+    let data = match input.encoding.as_deref().unwrap_or("utf8") {
+        "utf8" => input.content.as_bytes().to_vec(),
+        "base64" => base64::engine::general_purpose::STANDARD
+            .decode(&input.content)
+            .map_err(|_| bad("Invalid base64 file content"))?,
+        _ => return Err(bad("Unknown file encoding")),
+    };
+    if data.len() as u64 > LIMIT {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE, "File exceeds 10 MiB".into()));
+    }
+    Ok(data)
+}
+
 #[utoipa::path(put,path="/v1/files/content",request_body=FileWrite,responses((status=200,body=FileContent)))]
 pub async fn write_file(
     State(state): State<ServerState>,
@@ -238,9 +255,7 @@ pub async fn write_file(
     let _guard = EDIT.lock().await;
     tokio::task::spawn_blocking(move || {
         let path = resolve(&state.workspace, &input.path, true)?;
-        if input.content.len() as u64 > LIMIT {
-            return Err(bad("File exceeds 10 MiB"));
-        }
+        let data = decode_write(&input)?;
         let current = if path.exists() {
             bytes(&path)?
         } else {
@@ -265,7 +280,7 @@ pub async fn write_file(
             if let Ok(meta) = fs::metadata(&path) {
                 file.set_permissions(meta.permissions()).map_err(bad)?;
             }
-            file.write_all(input.content.as_bytes()).map_err(bad)?;
+            file.write_all(&data).map_err(bad)?;
             file.sync_all().map_err(bad)?;
             fs::rename(&temporary, &path).map_err(bad)
         })();
@@ -275,10 +290,10 @@ pub async fn write_file(
         result?;
         Ok(Json(FileContent {
             path: input.path,
-            revision: hash(input.content.as_bytes()),
-            size: input.content.len() as u64,
+            revision: hash(&data),
+            size: data.len() as u64,
             content: input.content,
-            encoding: "utf8".into(),
+            encoding: input.encoding.unwrap_or_else(|| "utf8".into()),
             mime: "text/plain".into(),
         }))
     })
@@ -337,6 +352,25 @@ pub async fn mutate_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn uploads_decode_binary_without_breaking_legacy_text_or_size_limits() {
+        let mut input: FileWrite = serde_json::from_value(
+            serde_json::json!({"path":"a", "content":"hello", "revision":""}),
+        )
+        .unwrap();
+        assert_eq!(decode_write(&input).unwrap(), b"hello");
+        input.encoding = Some("base64".into());
+        input.content = "AP8B".into();
+        assert_eq!(decode_write(&input).unwrap(), [0, 255, 1]);
+        input.content = "not-base64".into();
+        assert!(decode_write(&input).is_err());
+        input.encoding = Some("utf8".into());
+        input.content = "x".repeat(LIMIT as usize + 1);
+        assert_eq!(
+            decode_write(&input).unwrap_err().0,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
     #[test]
     fn paths_reject_traversal_and_external_symlinks() {
         let root = std::env::temp_dir().join(format!("haarness-files-{}", uuid::Uuid::now_v7()));

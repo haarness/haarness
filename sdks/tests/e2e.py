@@ -206,6 +206,12 @@ def scenario(mode):
             c("interrupt_turn", slow["id"])
             c("wait_turn", slow["id"], {"timeout_ms": 10000})
             c("interrupt_thread_tree", tid)
+            # Interrupt acknowledges cancellation; a queued follow-up may still
+            # be unwinding. Wait for durable idle before starting a new turn.
+            deadline = time.monotonic() + 10
+            while c("active_turn", tid) is not None:
+                assert time.monotonic() < deadline, "thread did not settle after interruption"
+                time.sleep(0.05)
             # Pending question + reply, then permission + reply using the actual tools.
             qturn = c(
                 "start_turn",
