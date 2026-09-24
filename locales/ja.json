@@ -1205,5 +1205,13 @@
   "No Cloud workspaces yet.": "Cloud ワークスペースはまだありません。",
   "Start": "起動",
   "Refresh": "更新",
-  "Sign out": "サインアウト"
+  "Sign out": "サインアウト",
+  "Cloud agent": "Cloud agent",
+  "Cloud sessions": "Cloud sessions",
+  "Manage agent templates": "Manage agent templates",
+  "No Cloud sessions yet.": "No Cloud sessions yet.",
+  "One account for Cloud models and sessions.": "One account for Cloud models and sessions.",
+  "Session title": "Session title",
+  "Start session": "Start session",
+  "Starts an independent session from the selected template. Compute and storage use your credits.": "Starts an independent session from the selected template. Compute and storage use your credits."
 }

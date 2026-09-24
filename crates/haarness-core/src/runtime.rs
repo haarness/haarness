@@ -901,6 +901,11 @@ impl AgentRuntime {
     }
 
     #[must_use]
+    pub fn agent_default(&self) -> Option<String> {
+        self.components().config.default_agent.clone()
+    }
+
+    #[must_use]
     pub fn model_defaults(&self) -> (Option<String>, Option<String>) {
         let components = self.components();
         (

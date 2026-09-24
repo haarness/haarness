@@ -4,6 +4,7 @@ import type { Attachment } from "./attachments";
 export type { Types };
 export interface ProjectLocation {
   cloudWorkspace?: string;
+  cloudSession?: string;
   cloudAccount?: string;
   cloudApiUrl?: string;
   remoteWorkspace?: string;
@@ -184,6 +185,7 @@ export interface Bridge {
   }>;
   connect(input: {
     cloudWorkspace?: string;
+    cloudSession?: string;
     workspace?: string;
     url?: string;
     token?: string;

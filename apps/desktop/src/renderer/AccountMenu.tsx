@@ -10,7 +10,13 @@ type Account = {
   accounts?: { id: string; name: string }[];
   selectedAccountId?: string;
 };
-type Workspace = { id: string; name: string; observedState: string };
+type CloudSession = {
+  id: string;
+  title: string;
+  agentSnapshot?: { name: string };
+  workspace: { observedState: string };
+};
+type CloudAgent = { id: string; name: string };
 export function AccountMenu(props: {
   models?: boolean;
   connected?: () => void;
@@ -22,9 +28,10 @@ export function AccountMenu(props: {
   const [error, setError] = createSignal("");
   const [loginUrl, setLoginUrl] = createSignal("");
   const [code, setCode] = createSignal("");
-  const [workspaces, setWorkspaces] = createSignal<Workspace[]>([]);
+  const [workspaces, setWorkspaces] = createSignal<CloudSession[]>([]);
   const [name, setName] = createSignal("");
-  const [repo, setRepo] = createSignal("");
+  const [agents, setAgents] = createSignal<CloudAgent[]>([]);
+  const [agentId, setAgentId] = createSignal("");
   const [creating, setCreating] = createSignal(false);
   const [credits, setCredits] = createSignal("");
   let dialog: HTMLDialogElement | undefined;
@@ -34,14 +41,17 @@ export function AccountMenu(props: {
     if (!alive) return;
     setAccount(result);
     if (result.loggedIn && open()) {
-      const [spaces, billing] = await Promise.allSettled([
-        window.haarness.account({ action: "workspaces" }),
+      const [spaces, billing, templates] = await Promise.allSettled([
+        window.haarness.account({ action: "sessions" }),
         window.haarness.account({ action: "billing" }),
+        window.haarness.account({ action: "agents" }),
       ]);
       if (!alive) return;
       if (spaces.status === "fulfilled")
         setWorkspaces(spaces.value.items ?? []);
       else setError(String(spaces.reason));
+      if (templates.status === "fulfilled")
+        setAgents(templates.value.items ?? []);
       if (billing.status === "fulfilled") {
         const remaining =
           Number(billing.value.includedAi?.credits ?? 0) +
@@ -91,6 +101,10 @@ export function AccountMenu(props: {
   }
   onMount(() => {
     void refresh().catch(() => {});
+    const timer = setInterval(() => {
+      if (open() && !busy()) void refresh().catch(() => {});
+    }, 5000);
+    onCleanup(() => clearInterval(timer));
   });
   const off = window.haarness.onEvent((event) => {
     if (event.kind !== "menu") return;
@@ -138,7 +152,7 @@ export function AccountMenu(props: {
               <p class="muted">
                 {account().loggedIn
                   ? account().user?.email
-                  : t("One account for Cloud models and workspaces.")}
+                  : t("One account for Cloud models and sessions.")}
               </p>
             </div>
             <Button icon="close" label={t("Close dialog")} onClick={close} />
@@ -255,13 +269,13 @@ export function AccountMenu(props: {
             </section>
             <section>
               <div class="account-heading">
-                <h3>{t("Cloud workspaces")}</h3>
+                <h3>{t("Cloud sessions")}</h3>
                 <button
                   class="secondary"
                   disabled={busy()}
                   onClick={() => setCreating(!creating())}
                 >
-                  {t("New workspace")}
+                  {t("New session")}
                 </button>
               </div>
               <Show when={creating()}>
@@ -271,62 +285,87 @@ export function AccountMenu(props: {
                     event.preventDefault();
                     void act(async () => {
                       await window.haarness.account({
-                        action: "create",
+                        action: "create-session",
                         name: name(),
-                        repo: repo() || undefined,
+                        id: agentId() || agents()[0]?.id,
                       });
                       setCreating(false);
                       setName("");
-                      setRepo("");
+                      setAgentId("");
                       await refresh();
                     });
                   }}
                 >
                   <input
-                    aria-label={t("Workspace name")}
-                    placeholder={t("Workspace name")}
+                    aria-label={t("Session title")}
+                    placeholder={t("Session title")}
                     required
                     value={name()}
                     onInput={(event) => setName(event.currentTarget.value)}
                   />
-                  <input
-                    aria-label={t("Repository URL (optional)")}
-                    placeholder={t("Repository URL (optional)")}
-                    value={repo()}
-                    onInput={(event) => setRepo(event.currentTarget.value)}
-                  />
+                  <label>
+                    {t("Cloud agent")}
+                    <select
+                      aria-label={t("Cloud agent")}
+                      value={agentId() || agents()[0]?.id || ""}
+                      onChange={(event) =>
+                        setAgentId(event.currentTarget.value)
+                      }
+                    >
+                      <For each={agents()}>
+                        {(agent) => (
+                          <option value={agent.id}>{agent.name}</option>
+                        )}
+                      </For>
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    class="secondary"
+                    onClick={() =>
+                      void window.haarness.account({
+                        action: "web",
+                        page: "agents",
+                      })
+                    }
+                  >
+                    {t("Manage agent templates")}
+                  </button>
                   <p class="muted">
                     {t(
-                      "Uses your account’s default size and region. Cloud compute and storage use your credits.",
+                      "Starts an independent session from the selected template. Compute and storage use your credits.",
                     )}
                   </p>
-                  <button class="primary" disabled={busy()}>
-                    {t("Create workspace")}
+                  <button class="primary" disabled={busy() || !agents().length}>
+                    {t("Start session")}
                   </button>
                 </form>
               </Show>
               <Show
                 when={workspaces().length}
-                fallback={<p class="muted">{t("No Cloud workspaces yet.")}</p>}
+                fallback={<p class="muted">{t("No Cloud sessions yet.")}</p>}
               >
                 <For each={workspaces()}>
                   {(w) => (
                     <div class="account-workspace">
                       <div>
-                        <strong>{w.name}</strong>
-                        <span class="muted">{w.observedState}</span>
+                        <strong>{w.title}</strong>
+                        <span class="muted">{w.workspace.observedState}</span>
                       </div>
                       <div class="account-actions">
                         <Show
-                          when={w.observedState === "running"}
+                          when={w.workspace.observedState === "running"}
                           fallback={
                             <button
                               class="secondary"
-                              disabled={busy() || w.observedState !== "stopped"}
+                              disabled={
+                                busy() ||
+                                w.workspace.observedState !== "stopped"
+                              }
                               onClick={() =>
                                 void act(async () => {
                                   await window.haarness.account({
-                                    action: "start",
+                                    action: "session-start",
                                     id: w.id,
                                   });
                                   await refresh();
@@ -343,7 +382,7 @@ export function AccountMenu(props: {
                             onClick={() =>
                               void act(async () => {
                                 const connected = await app.connect({
-                                  cloudWorkspace: w.id,
+                                  cloudSession: w.id,
                                 });
                                 if (connected) close();
                               })
@@ -357,7 +396,7 @@ export function AccountMenu(props: {
                             onClick={() =>
                               void act(async () => {
                                 await window.haarness.account({
-                                  action: "stop",
+                                  action: "session-stop",
                                   id: w.id,
                                 });
                                 await refresh();

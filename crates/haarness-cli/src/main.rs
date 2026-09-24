@@ -8567,6 +8567,7 @@ mod tests {
             git_branch: None,
             default_provider: None,
             default_model: None,
+            default_agent: None,
             project_trusted: None,
         }
     }

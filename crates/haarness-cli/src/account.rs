@@ -20,7 +20,7 @@ pub struct LoginArgs {
 pub struct AccountArgs {
     #[arg(long)]
     pub json: bool,
-    /// Switch the account used for Cloud models and workspaces.
+    /// Switch the account used for Cloud models and sessions.
     #[arg(long)]
     pub select: Option<String>,
     /// Private Desktop bridge: one request on stdin; no project configuration.
@@ -35,10 +35,73 @@ pub struct CloudArgs {
 #[derive(Subcommand)]
 pub enum CloudCommand {
     Login(LoginArgs),
-    /// Manage persistent Cloud workspaces.
+    /// Manage reusable cloud-agent templates.
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
+    /// Start and attach to independent sessions from agent templates.
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
+    /// Compatibility commands for existing Cloud workspaces.
     Workspace {
         #[command(subcommand)]
         command: WorkspaceCommand,
+    },
+}
+#[derive(Subcommand)]
+pub enum AgentCommand {
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    Show {
+        id: String,
+    },
+    /// JSON file with name, configuration, and optional write-only environment values.
+    Create {
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
+    /// JSON file with version and the full updated configuration.
+    Update {
+        id: String,
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
+    Delete {
+        id: String,
+    },
+}
+#[derive(Subcommand)]
+pub enum SessionCommand {
+    List {
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    Create {
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    Show {
+        id: String,
+    },
+    Start {
+        id: String,
+    },
+    Stop {
+        id: String,
+    },
+    Attach {
+        id: String,
     },
 }
 #[derive(Subcommand)]
@@ -150,9 +213,39 @@ pub async fn logout() -> Result<()> {
     Ok(())
 }
 fn id(input: &Value) -> Result<&str> {
-    let id = input["id"].as_str().context("Missing workspace id")?;
-    uuid::Uuid::parse_str(id).context("Invalid workspace id")?;
+    let id = input["id"].as_str().context("Missing resource id")?;
+    uuid::Uuid::parse_str(id).context("Invalid resource id")?;
     Ok(id)
+}
+
+async fn list_all(client: &Client, path: &str) -> Result<Value> {
+    let mut items = Vec::new();
+    let mut next = path.to_owned();
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        let page = client.request(Method::GET, &next, None).await?;
+        items.extend(
+            page["items"]
+                .as_array()
+                .context("Invalid Cloud list response")?
+                .iter()
+                .cloned(),
+        );
+        let Some(cursor) = page["nextCursor"].as_str() else {
+            break;
+        };
+        // The Cloud API uses UUID cursors. Validate before adding one to an authenticated URL.
+        uuid::Uuid::parse_str(cursor).context("Invalid Cloud pagination cursor")?;
+        anyhow::ensure!(
+            seen.insert(cursor.to_owned()),
+            "Cloud pagination cursor repeated"
+        );
+        next = format!(
+            "{path}{}cursor={cursor}",
+            if path.contains('?') { '&' } else { '?' }
+        );
+    }
+    Ok(json!({"items":items,"nextCursor":null}))
 }
 pub async fn rpc(client: &Client, input: Value) -> Result<Value> {
     let action = input["action"].as_str().unwrap_or("status");
@@ -174,6 +267,42 @@ pub async fn rpc(client: &Client, input: Value) -> Result<Value> {
         "workspaces" => {
             client
                 .request(Method::GET, &format!("api/v1/workspaces{query}"), None)
+                .await?
+        }
+        "agents" | "sessions" => {
+            let resource = if action == "agents" {
+                "cloud-agents"
+            } else {
+                "sessions"
+            };
+            list_all(client, &format!("api/v1/{resource}{query}")).await?
+        }
+        "create-session" => {
+            client
+                .request(
+                    Method::POST,
+                    "api/v1/sessions",
+                    Some(json!({"cloudAgentId":id(&input)?,"title":input["name"]})),
+                )
+                .await?
+        }
+        "session" => {
+            client
+                .request(
+                    Method::GET,
+                    &format!("api/v1/sessions/{}", id(&input)?),
+                    None,
+                )
+                .await?
+        }
+        "session-attach" | "session-start" | "session-stop" => {
+            let action = action.strip_prefix("session-").unwrap_or(action);
+            client
+                .request(
+                    Method::POST,
+                    &format!("api/v1/sessions/{}/{action}", id(&input)?),
+                    Some(json!({})),
+                )
                 .await?
         }
         "billing" => {
@@ -210,6 +339,8 @@ pub async fn rpc(client: &Client, input: Value) -> Result<Value> {
             let page = match input["page"].as_str() {
                 Some("billing") => "app/billing",
                 Some("usage") => "app/billing/usage",
+                Some("agents") => "app/agents",
+                Some("sessions") => "app/sessions",
                 _ => "app",
             };
             {
@@ -228,6 +359,110 @@ pub async fn cloud(args: &CloudArgs) -> Result<()> {
     let client = client()?;
     match &args.command {
         CloudCommand::Login(args) => return login(args).await,
+        CloudCommand::Agent { command } => {
+            let value = match command {
+                AgentCommand::List { .. } => rpc(&client, json!({"action":"agents"})).await?,
+                AgentCommand::Show { id: agent } => {
+                    client
+                        .request(
+                            Method::GET,
+                            &format!("api/v1/cloud-agents/{}", id(&json!({"id":agent}))?),
+                            None,
+                        )
+                        .await?
+                }
+                AgentCommand::Create { file } => {
+                    let mut value: Value =
+                        serde_json::from_slice(&std::fs::read(file).context("Read agent JSON")?)?;
+                    if value.get("accountId").is_none() {
+                        value["accountId"] = json!(client.config.selected_account());
+                    }
+                    client
+                        .request(Method::POST, "api/v1/cloud-agents", Some(value))
+                        .await?
+                }
+                AgentCommand::Update { id: agent, file } => {
+                    client
+                        .request(
+                            Method::PUT,
+                            &format!("api/v1/cloud-agents/{}", id(&json!({"id":agent}))?),
+                            Some(serde_json::from_slice(&std::fs::read(file)?)?),
+                        )
+                        .await?
+                }
+                AgentCommand::Delete { id: agent } => {
+                    client
+                        .request(
+                            Method::DELETE,
+                            &format!("api/v1/cloud-agents/{}", id(&json!({"id":agent}))?),
+                            None,
+                        )
+                        .await?
+                }
+            };
+            if matches!(command, AgentCommand::List { json: false }) {
+                print_list(&value, "name", false);
+            } else {
+                println!("{value}");
+            }
+        }
+        CloudCommand::Session { command } => match command {
+            SessionCommand::List {
+                json: as_json,
+                agent,
+            } => {
+                let mut path = format!(
+                    "api/v1/sessions?accountId={}",
+                    client.config.selected_account().unwrap_or_default()
+                );
+                if let Some(agent) = agent {
+                    path.push_str(&format!("&cloudAgentId={}", id(&json!({"id":agent}))?));
+                }
+                // Omitting accountId selects the signed-in personal account.
+                if client.config.selected_account().is_none() {
+                    path = path.replace("?accountId=", "?");
+                }
+                let value = list_all(&client, &path).await?;
+                if *as_json {
+                    println!("{value}");
+                } else {
+                    print_list(&value, "title", true);
+                }
+            }
+            SessionCommand::Create {
+                agent,
+                title,
+                json: as_json,
+            } => {
+                let value = rpc(
+                    &client,
+                    json!({"action":"create-session","id":agent,"name":title}),
+                )
+                .await?;
+                if *as_json {
+                    println!("{value}");
+                } else {
+                    println!(
+                        "Session {} is starting. Use `haarness cloud session list`, then `haarness cloud session attach <id>`.",
+                        value["session"]["id"].as_str().unwrap_or("")
+                    );
+                }
+            }
+            SessionCommand::Show { id } => println!(
+                "{}",
+                rpc(&client, json!({"action":"session","id":id})).await?
+            ),
+            SessionCommand::Start { id } | SessionCommand::Stop { id } => {
+                let action = if matches!(command, SessionCommand::Start { .. }) {
+                    "session-start"
+                } else {
+                    "session-stop"
+                };
+                rpc(&client, json!({"action":action,"id":id})).await?;
+                println!("Session operation requested.");
+            }
+            SessionCommand::Attach { id } => attach(client, id, "session-attach").await?,
+        },
         CloudCommand::Workspace { command } => match command {
             WorkspaceCommand::List { json: as_json } => {
                 let v = rpc(&client, json!({"action":"workspaces"})).await?;
@@ -273,49 +508,176 @@ pub async fn cloud(args: &CloudArgs) -> Result<()> {
                 println!("Workspace {action} requested.");
             }
             WorkspaceCommand::Attach { id } => {
-                let value = rpc(&client, json!({"action":"attach","id":id})).await?;
-                let url = value["gatewayUrl"]
-                    .as_str()
-                    .context("Missing gateway URL")?;
-                haarness_account::safe_url(url)?;
-                let token = value["ticket"]
-                    .as_str()
-                    .context("Missing workspace ticket")?;
-                let endpoint = std::sync::Arc::new(std::sync::RwLock::new(
-                    haarness_tui::api::EndpointCredentials::new(url, token),
-                ));
-                let shared = endpoint.clone();
-                let id = id.clone();
-                let renew = tokio::spawn(async move {
-                    loop {
-                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                        if let Ok(v) = rpc(&client, json!({"action":"attach","id":id})).await {
-                            if let (Some(url), Some(token)) =
-                                (v["gatewayUrl"].as_str(), v["ticket"].as_str())
-                            {
-                                if haarness_account::safe_url(url).is_ok() {
-                                    *shared
-                                        .write()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                        haarness_tui::api::EndpointCredentials::new(url, token);
-                                }
-                            }
-                        }
-                    }
-                });
-                let resolver = std::sync::Arc::new(move || {
-                    Some(
-                        endpoint
-                            .read()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .clone(),
-                    )
-                });
-                let result = haarness_tui::run_attached_with_resolver(url, token, resolver).await;
-                renew.abort();
-                result?;
+                attach(client, id, "attach").await?;
             }
         },
     }
     Ok(())
+}
+
+async fn attach(client: Client, id: &str, action: &'static str) -> Result<()> {
+    let value = rpc(&client, json!({"action":action,"id":id})).await?;
+    let url = value["gatewayUrl"]
+        .as_str()
+        .context("Missing gateway URL")?;
+    haarness_account::safe_url(url)?;
+    let token = value["ticket"]
+        .as_str()
+        .context("Missing workspace ticket")?;
+    let endpoint = std::sync::Arc::new(std::sync::RwLock::new(
+        haarness_tui::api::EndpointCredentials::new(url, token),
+    ));
+    let shared = endpoint.clone();
+    let id = id.to_owned();
+    let renew = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            if let Ok(v) = rpc(&client, json!({"action":action,"id":id})).await {
+                if let (Some(url), Some(token)) = (v["gatewayUrl"].as_str(), v["ticket"].as_str()) {
+                    if haarness_account::safe_url(url).is_ok() {
+                        *shared
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            haarness_tui::api::EndpointCredentials::new(url, token);
+                    }
+                }
+            }
+        }
+    });
+    let resolver = std::sync::Arc::new(move || {
+        Some(
+            endpoint
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
+    });
+    let result = if action == "session-attach" {
+        haarness_tui::resume_attached_with_resolver(url, token, resolver).await
+    } else {
+        haarness_tui::run_attached_with_resolver(url, token, resolver).await
+    };
+    renew.abort();
+    result?;
+    Ok(())
+}
+
+fn print_list(value: &Value, label: &str, session: bool) {
+    if let Some(items) = value["items"].as_array() {
+        for item in items {
+            println!(
+                "{}  {}  {}",
+                item["id"].as_str().unwrap_or(""),
+                item[label].as_str().unwrap_or(""),
+                if session {
+                    item["workspace"]["observedState"].as_str().unwrap_or("")
+                } else {
+                    "template"
+                }
+            );
+        }
+        if items.is_empty() {
+            println!("None yet. Create a cloud agent, then start a session from it.");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[tokio::test]
+    async fn cloud_lists_follow_pages_and_preserve_account_filters() {
+        use axum::{Json, Router, extract::Query, routing::get};
+        let cursor = uuid::Uuid::now_v7().to_string();
+        let app = Router::new().route(
+            "/api/v1/sessions",
+            get(
+                move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                    let cursor = cursor.clone();
+                    async move {
+                        assert_eq!(q.get("accountId").map(String::as_str), Some("account"));
+                        assert_eq!(q.get("cloudAgentId").map(String::as_str), Some("agent"));
+                        Json(if let Some(value) = q.get("cursor") {
+                            assert_eq!(value, &cursor);
+                            json!({"items":[{"id":"second"}],"nextCursor":null})
+                        } else {
+                            json!({"items":[{"id":"first"}],"nextCursor":cursor})
+                        })
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let dir =
+            std::env::temp_dir().join(format!("haarness-cloud-pages-{}", uuid::Uuid::now_v7()));
+        let config = Config::new(&url, dir.clone(), "haarness-cli").unwrap();
+        haarness_account::credentials::save(
+            &config.path(),
+            &haarness_account::Credentials {
+                api_url: url,
+                access_token: "fixture-access".into(),
+                refresh_token: "fixture-refresh".into(),
+                access_expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            },
+        )
+        .unwrap();
+        let result = list_all(
+            &Client::new(config).unwrap(),
+            "api/v1/sessions?accountId=account&cloudAgentId=agent",
+        )
+        .await;
+        server.abort();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(
+            result.unwrap(),
+            json!({"items":[{"id":"first"},{"id":"second"}],"nextCursor":null})
+        );
+    }
+    #[test]
+    fn cloud_commands_keep_templates_sessions_and_legacy_workspaces_distinct() {
+        let args = crate::Cli::try_parse_from([
+            "haarness",
+            "cloud",
+            "session",
+            "create",
+            "--agent",
+            "template-id",
+            "--title",
+            "Independent work",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            args.command,
+            Some(crate::Command::Cloud(CloudArgs {
+                command: CloudCommand::Session {
+                    command: SessionCommand::Create { json: true, .. }
+                }
+            }))
+        ));
+        assert!(crate::Cli::try_parse_from(["haarness", "cloud", "session", "create"]).is_err());
+        assert!(
+            crate::Cli::try_parse_from([
+                "haarness",
+                "cloud",
+                "agent",
+                "create",
+                "--file",
+                "agent.json"
+            ])
+            .is_ok()
+        );
+        assert!(crate::Cli::try_parse_from(["haarness", "cloud", "workspace", "list"]).is_ok());
+    }
+    #[test]
+    fn identifiers_cannot_change_the_cloud_api_path() {
+        assert!(id(&json!({"id":"../../api-keys"})).is_err());
+        assert!(id(&json!({"id":uuid::Uuid::now_v7().to_string()})).is_ok());
+    }
 }

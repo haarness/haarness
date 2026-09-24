@@ -145,7 +145,7 @@ export function Session() {
   const choice = () => choices()[draftProject()] ?? {};
   const selectedAgent = () =>
     thread()?.agent ??
-    selectConversationAgent(state.agents, choice().agent) ??
+    selectConversationAgent(state.agents, choice().agent ?? state.connection?.info.defaultAgent ?? undefined) ??
     "build";
   const setChoice = (value: {
     provider?: string;
