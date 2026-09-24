@@ -269,6 +269,7 @@ impl Client {
                     value
                         .pointer("/error/message")
                         .and_then(Value::as_str)
+                        .or_else(|| value.get("message").and_then(Value::as_str))
                         .unwrap_or("Cloud request failed. Retry.")
                         .into(),
                 ));
