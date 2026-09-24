@@ -88,3 +88,45 @@ fn reject_untrusted_token_destinations() {
     }
     assert!(haarness_account::safe_url("http://127.0.0.1:18080").is_ok());
 }
+
+#[tokio::test]
+async fn cloud_requests_preserve_flat_and_legacy_error_messages() {
+    let app = Router::new()
+        .route("/flat", post(|| async { (StatusCode::CONFLICT, Json(json!({"code":"invalid_state", "message":"This workspace is already running."}))) }))
+        .route("/legacy", post(|| async { (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error":{"message":"Try again later."}}))) }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dir = std::env::temp_dir().join(format!("haarness-account-test-{}", uuid::Uuid::now_v7()));
+    let config = Config::new(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        dir.clone(),
+        "haarness-cli",
+    )
+    .unwrap();
+    credentials::save(
+        &config.path(),
+        &Credentials {
+            api_url: config.api_url.to_string(),
+            access_token: "fixture-access".into(),
+            refresh_token: "fixture-refresh".into(),
+            access_expires_at: Utc::now() + Duration::minutes(10),
+        },
+    )
+    .unwrap();
+    let server = tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
+    let client = Client::new(config).unwrap();
+    for (path, message) in [
+        ("flat", "This workspace is already running."),
+        ("legacy", "Try again later."),
+    ] {
+        assert_eq!(
+            client
+                .request(reqwest::Method::POST, path, Some(json!({})))
+                .await
+                .unwrap_err()
+                .to_string(),
+            message
+        );
+    }
+    server.abort();
+    std::fs::remove_dir_all(dir).unwrap();
+}
