@@ -1334,6 +1334,13 @@
           },
           "revision": {
             "type": "string"
+          },
+          "encoding": {
+            "description": "utf8 (default) or base64 for binary uploads.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -2356,7 +2363,7 @@
               },
               "permission": {
                 "type": "string",
-                "description": "Permission category (bash, edit, external_directory, \u2026)."
+                "description": "Permission category (bash, edit, external_directory, …)."
               },
               "permission_id": {
                 "type": "string"
@@ -3166,7 +3173,7 @@
       },
       "PendingPermissionInfo": {
         "type": "object",
-        "description": "One unanswered permission prompt, listable so clients can repopulate\npending approvals after a reconnect or thread switch \u2014 including prompts\nraised on child-agent threads.",
+        "description": "One unanswered permission prompt, listable so clients can repopulate\npending approvals after a reconnect or thread switch — including prompts\nraised on child-agent threads.",
         "required": [
           "permissionId",
           "operation",
@@ -3210,7 +3217,7 @@
           },
           "permission": {
             "type": "string",
-            "description": "Permission category (bash, edit, external_directory, \u2026)."
+            "description": "Permission category (bash, edit, external_directory, …)."
           },
           "permissionId": {
             "type": "string"
@@ -5429,6 +5436,47 @@
             "type": "string"
           }
         }
+      },
+      "DiffTruncation": {
+        "description": "Why a reviewed file arrives without its body. `truncated` says *that* a\nbody is missing; this says *why*, so a client can tell \"too big to review\nhere\" from \"there is nothing textual to show\".",
+        "enum": [
+          "binary",
+          "file_too_large",
+          "response_too_large"
+        ],
+        "type": "string"
+      },
+      "ReviewFile": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/FileDiff"
+          },
+          {
+            "properties": {
+              "omittedFiles": {
+                "description": "Changed paths the response does not list at all, because the review\nhit its file bound. The response is an array with no envelope to hang\nthis on, so every returned entry repeats the same count and a client\nrenders it from whichever row it happens to hold. Absent when the\nreview listed everything that changed.",
+                "format": "int64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "truncation": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DiffTruncation"
+                  }
+                ]
+              }
+            },
+            "type": "object"
+          }
+        ],
+        "description": "One entry of a Git review: a [`FileDiff`] plus the bounds the review had\nto apply to produce it.\n\nIt flattens, so the wire shape is a strict superset of `FileDiff` and the\nendpoint keeps returning the same array of the same objects; both added\nfields are optional and defaulted, so an older client — or the generated\nTypeScript SDK before it is regenerated — decodes these responses\nunchanged and simply does not see them."
       }
     }
   }

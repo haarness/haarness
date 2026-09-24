@@ -609,6 +609,7 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
             "sse".into(),
             "network.attach".into(),
             "attachments.inline-upload".into(),
+            "files.base64-write.v1".into(),
             "mcp".into(),
             "skills".into(),
             "subagents".into(),

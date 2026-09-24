@@ -335,9 +335,9 @@ class Api(Transport):
         """GET /v1/threads/{id}/diff/review."""
         return cast("list[T.FileDiff]", self.request('GET', f'/v1/threads/{self.segment(id)}/diff/review', query=query, binary_body=False, binary_response=False, options=options))
 
-    def vcs_diff(self, query: T.VcsDiffQuery | None = None, *, options: RequestOptions | None = None) -> list[T.FileDiff]:
+    def vcs_diff(self, query: T.VcsDiffQuery | None = None, *, options: RequestOptions | None = None) -> list[T.ReviewFile]:
         """GET /v1/vcs/diff."""
-        return cast("list[T.FileDiff]", self.request('GET', f'/v1/vcs/diff', query=query, binary_body=False, binary_response=False, options=options))
+        return cast("list[T.ReviewFile]", self.request('GET', f'/v1/vcs/diff', query=query, binary_body=False, binary_response=False, options=options))
 
     def search_files(self, query: T.FileSearchQuery, *, options: RequestOptions | None = None) -> list[str]:
         """GET /v1/files/search."""
@@ -764,9 +764,9 @@ class AsyncApi(AsyncTransport):
         """GET /v1/threads/{id}/diff/review."""
         return cast("list[T.FileDiff]", await self.request('GET', f'/v1/threads/{self.segment(id)}/diff/review', query=query, binary_body=False, binary_response=False, options=options))
 
-    async def vcs_diff(self, query: T.VcsDiffQuery | None = None, *, options: RequestOptions | None = None) -> list[T.FileDiff]:
+    async def vcs_diff(self, query: T.VcsDiffQuery | None = None, *, options: RequestOptions | None = None) -> list[T.ReviewFile]:
         """GET /v1/vcs/diff."""
-        return cast("list[T.FileDiff]", await self.request('GET', f'/v1/vcs/diff', query=query, binary_body=False, binary_response=False, options=options))
+        return cast("list[T.ReviewFile]", await self.request('GET', f'/v1/vcs/diff', query=query, binary_body=False, binary_response=False, options=options))
 
     async def search_files(self, query: T.FileSearchQuery, *, options: RequestOptions | None = None) -> list[str]:
         """GET /v1/files/search."""

@@ -9,6 +9,7 @@ fi
 npm --prefix sdks/typescript ci --ignore-scripts
 uv sync --project sdks/python --frozen
 python3 sdks/tests/server.py --check
+python3 sdks/tests/files_binary.py
 python3 sdks/generate.py --check
 npm --prefix sdks/typescript run build
 npm --prefix sdks/typescript test

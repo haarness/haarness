@@ -1073,7 +1073,7 @@
     "response": {
       "type": "array",
       "items": {
-        "$ref": "#/components/schemas/FileDiff"
+        "$ref": "#/components/schemas/ReviewFile"
       }
     },
     "query": {
