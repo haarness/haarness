@@ -218,6 +218,24 @@ pub async fn run_attached_with_resolver(
     .map(|_| ())
 }
 
+/// Resume a Cloud session's most recent conversation, creating one only for a new session.
+pub async fn resume_attached_with_resolver(
+    server: &str,
+    token: &str,
+    resolver: EndpointResolver,
+) -> Result<()> {
+    Box::pin(run_with_client(
+        ApiClient::new(server, token)?
+            .with_remote_endpoint_resolver(resolver)
+            .with_attachment_uploads(),
+        None,
+        true,
+        false,
+    ))
+    .await
+    .map(|_| ())
+}
+
 /// Start a local, auto-discovered TUI that can follow a replacement daemon's
 /// new loopback port and bearer token. Explicit remote `--connect` clients use
 /// `run_with_thread` and remain pinned to the endpoint the user selected.
@@ -304,6 +322,7 @@ async fn run_with_client(
     continue_last: bool,
     fork: bool,
 ) -> Result<Option<PathBuf>> {
+    let initial_info = client.info().await.ok();
     let providers = client.providers().await.unwrap_or_default();
     let mut threads = client.threads().await?;
     let saved = config::load_state();
@@ -322,7 +341,10 @@ async fn run_with_client(
         if fork {
             anyhow::bail!("--fork requires an existing --session/--thread or --continue target");
         }
-        let mut request = CreateThreadRequest::default();
+        let mut request = CreateThreadRequest {
+            agent: initial_info.as_ref().and_then(|info| info.default_agent.clone()),
+            ..Default::default()
+        };
         let mut provider_overridden = false;
         if let Ok(provider) = std::env::var("HAARNESS_DEFAULT_PROVIDER") {
             request.provider = Some(provider);
@@ -338,6 +360,11 @@ async fn run_with_client(
             {
                 request.model = Some(model.id.clone());
             }
+        } else if let Some((provider, model)) = initial_info.as_ref().and_then(|info| {
+            Some((info.default_provider.clone()?, info.default_model.clone()?))
+        }) {
+            request.provider = Some(provider);
+            request.model = Some(model);
         } else if let Some((provider, model)) = default_connected_model(&providers) {
             request.provider = Some(provider);
             request.model = Some(model);

@@ -2,7 +2,7 @@
 
 Run `haarness login`, finish sign-in in your browser, then choose a model under **Haarness Cloud**. For an SSH or headless terminal, use `haarness login --device` and approve the displayed code from another device. `haarness auth login haarness` is an alias for the same account flow.
 
-Desktop has **Sign in to Haarness** in its sidebar and **Use Haarness Cloud** in Connect provider. The account dialog shows available credits and Cloud workspaces, with links to billing and usage. Existing provider keys and self-hosted router connections continue to work independently.
+Desktop has **Sign in to Haarness** in its sidebar and **Use Haarness Cloud** in Connect provider. The account dialog shows available credits and Cloud sessions, with links to billing and usage. Existing provider keys and self-hosted router connections continue to work independently.
 
 Signing in to OpenAI with ChatGPT connects the **OpenAI** provider. Choosing
 **Haarness Cloud** uses the signed-in Haarness account and Cloud's upstream API
@@ -26,9 +26,38 @@ An exhausted pending-request allowance is reported separately from upstream
 provider quota. Provider outages, retired models and API-account restrictions
 can still prevent a listed model from serving a request.
 
-`haarness account` shows the signed-in user and selected account; `haarness account --select <account-id>` switches it. `haarness logout` removes local credentials and revokes the login. Sign-out does not stop running Cloud workspaces; stop them separately to stop compute usage. If Cloud is unreachable during sign-out, credentials are removed locally and the command explains how to revoke the session online.
+`haarness account` shows the signed-in user and selected account; `haarness account --select <account-id>` switches it. `haarness logout` removes local credentials and revokes the login. Sign-out does not stop running Cloud sessions; stop them separately to stop compute usage. If Cloud is unreachable during sign-out, credentials are removed locally and the command explains how to revoke the session online.
 
-## Cloud workspaces
+## Cloud agents and sessions
+
+A cloud agent is a reusable template containing instructions, model/reasoning defaults,
+repository, SSH deploy key, pinned hosts, environment, startup command and runtime size.
+Each session starts an independent Fly runtime with its own persistent files and conversations.
+Editing a template affects future sessions; existing sessions retain their captured version.
+Templates have no compute charge. Running sessions use your plan's concurrency and compute allowance;
+stopped sessions retain billable storage.
+
+Create a template in the Cloud website's **Cloud agents** page, or pass its JSON definition
+to `haarness cloud agent create --file agent.json`. Environment values are write-only;
+the returned public deploy key can be added to your repository.
+
+```sh
+haarness cloud agent list
+haarness cloud agent show AGENT_ID
+haarness cloud session create --agent AGENT_ID --title "Investigate issue" --json
+haarness cloud session list
+haarness cloud session attach SESSION_ID
+haarness cloud session stop SESSION_ID
+haarness cloud session start SESSION_ID
+```
+
+Create/start/stop return once accepted. Wait for `running` before attaching. Attach resumes the
+most recent conversation. Desktop offers **Haarness account → Cloud sessions → New session**
+with a template picker; **Manage agent templates** opens the browser editor. New conversations
+honor the runtime's default agent and model in both TUI and Desktop.
+
+Existing workspaces appear as sessions with their files, conversations and old URLs intact.
+The previous CLI commands remain available for compatibility:
 
 ```
 haarness cloud workspace list

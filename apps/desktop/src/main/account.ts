@@ -85,21 +85,24 @@ export async function accountLogin(
 export async function connectCloud(
   workspace: string,
   expected?: { cloudAccount?: string; cloudApiUrl?: string },
+  session = false,
 ): Promise<Connection> {
   const status = await accountRequest({ action: "status" });
   if (!status.loggedIn)
-    throw new Error("Sign in to Haarness to open this workspace.");
+    throw new Error("Sign in to Haarness to open this session.");
   if (
     expected?.cloudAccount &&
     (expected.cloudAccount !== status.selectedAccountId ||
       expected.cloudApiUrl !== status.apiUrl)
   )
-    throw new Error("Switch to this workspace’s Haarness account to open it.");
-  let ticket = await accountRequest({ action: "attach", id: workspace });
+    throw new Error("Switch to this session’s Haarness account to open it.");
+  const metadata = session ? await accountRequest({ action: "session", id: workspace }) : undefined;
+  const attachAction = session ? "session-attach" : "attach";
+  let ticket = await accountRequest({ action: attachAction, id: workspace });
   let pending: Promise<void> | undefined;
   const resolveAuth = async (): Promise<ServerAuth> => {
     if (Date.parse(ticket.expiresAt) < Date.now() + 30_000) {
-      pending ??= accountRequest({ action: "attach", id: workspace })
+      pending ??= accountRequest({ action: attachAction, id: workspace })
         .then((value) => {
           ticket = value;
         })
@@ -118,22 +121,25 @@ export async function connectCloud(
       ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)
     )
   )
-    throw new Error("Cloud workspaces require HTTPS.");
-  const id = `cloud:${status.apiUrl}:${status.selectedAccountId}:${workspace}`;
+    throw new Error("Cloud sessions require HTTPS.");
+  const id = `${session ? "cloud-session" : "cloud"}:${status.apiUrl}:${status.selectedAccountId}:${workspace}`;
   const client = new Haarness({
     baseUrl: url.href,
     resolveAuth,
     timeoutMs: 30_000,
   });
   const info = await client.info();
+  // A captured template supplies the default during rolling upgrades of older runtimes.
+  if (metadata?.agentSnapshot && !info.defaultAgent) info.defaultAgent = "cloud-agent";
   const view: Connection = {
     id,
-    label: "Cloud workspace",
+    label: metadata?.title ?? "Cloud session",
     workspace: String(info.workspace),
     remote: true,
     trust: false,
     url: url.href,
-    cloudWorkspace: workspace,
+    cloudWorkspace: metadata?.workspace.id ?? workspace,
+    ...(session ? { cloudSession: workspace } : {}),
     cloudAccount: status.selectedAccountId,
     cloudApiUrl: status.apiUrl,
     info,

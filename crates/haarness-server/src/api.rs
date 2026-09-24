@@ -598,6 +598,7 @@ async fn send_pty_cursor(
 async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
     let (default_provider, default_model) = state.runtime.model_defaults();
     Json(ServerInfo {
+        default_agent: state.runtime.agent_default(),
         name: "haarness".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         schema_version: SCHEMA_VERSION.into(),

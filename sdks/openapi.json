@@ -3828,6 +3828,13 @@
             },
             "type": "array"
           },
+          "defaultAgent": {
+            "description": "Effective primary agent for new conversations; absent on older servers.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "defaultModel": {
             "type": [
               "string",

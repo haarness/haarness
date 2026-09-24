@@ -2949,6 +2949,7 @@ fn home_is_a_launch_masthead_settled_onto_the_composer() {
         git_branch: Some("main".into()),
         default_provider: None,
         default_model: None,
+        default_agent: None,
         project_trusted: Some(false),
     });
     let lines = app.lines((100, 30));
@@ -3232,6 +3233,7 @@ fn masthead_names_the_session_without_repeating_its_id() {
         git_branch: Some("main".into()),
         default_provider: None,
         default_model: None,
+        default_agent: None,
         project_trusted: Some(true),
     });
 
@@ -13924,6 +13926,7 @@ fn home_names_the_missing_provider_and_the_agent_mention() {
         git_branch: Some("main".into()),
         default_provider: None,
         default_model: None,
+        default_agent: None,
         project_trusted: Some(false),
     });
     let text = app

@@ -597,6 +597,9 @@ pub struct EventEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerInfo {
+    /// Effective primary agent for new conversations; absent on older servers.
+    #[serde(default)]
+    pub default_agent: Option<String>,
     pub name: String,
     pub version: String,
     pub schema_version: String,

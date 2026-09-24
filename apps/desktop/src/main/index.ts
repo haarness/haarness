@@ -529,7 +529,7 @@ function installHandlers() {
     return data().values[key] ?? null;
   });
   handle("account", async (win, raw: unknown) => {
-    const input = z.object({ action: z.enum(["status", "login", "cancel", "logout", "select", "workspaces", "create", "start", "stop", "billing", "usage", "web"]), id: z.string().uuid().optional(), name: z.string().max(200).optional(), repo: z.string().max(2000).optional(), page: z.enum(["billing", "usage"]).optional(), device: z.boolean().optional() }).strict().parse(raw);
+    const input = z.object({ action: z.enum(["status", "login", "cancel", "logout", "select", "workspaces", "create", "start", "stop", "agents", "sessions", "create-session", "session-start", "session-stop", "billing", "usage", "web"]), id: z.string().uuid().optional(), name: z.string().max(200).optional(), repo: z.string().max(2000).optional(), page: z.enum(["billing", "usage", "agents", "sessions"]).optional(), device: z.boolean().optional() }).strict().parse(raw);
     if (input.action === "cancel") { cancelAccountLogin(); return null; }
     if (input.action === "login") {
       await accountLogin(!!input.device, value => send(win, { kind: "menu", data: { action: "account-login", ...value as object } }));
@@ -551,6 +551,7 @@ function installHandlers() {
       .object({
         workspace: z.string().optional(),
         cloudWorkspace: z.string().uuid().optional(),
+        cloudSession: z.string().uuid().optional(),
         url: z.string().optional(),
         token: z.string().optional(),
         username: z.string().max(1024).optional(),
@@ -565,9 +566,10 @@ function installHandlers() {
       ? data().recent.find((item) => item.id === input.recent)
       : undefined;
     if (input.recent && !recent) throw new Error("Saved project was not found");
+    const cloudSession = input.cloudSession ?? recent?.cloudSession;
     const cloudWorkspace = input.cloudWorkspace ?? recent?.cloudWorkspace;
-    if (cloudWorkspace) {
-      const view = await connectCloud(cloudWorkspace, recent);
+    if (cloudSession || cloudWorkspace) {
+      const view = await connectCloud((cloudSession ?? cloudWorkspace)!, recent, !!cloudSession);
       const index = data().recent.findIndex(item => item.id === view.id);
       if (index >= 0) data().recent[index] = view; else data().recent.push(view);
       await persist(); watchNotifications(view.id, win.id); return view;
