@@ -3548,6 +3548,13 @@ fn qualified_run_model(provider: &str, model: &str) -> Result<(String, String)> 
         if qualified_provider.trim().is_empty() || qualified_model.trim().is_empty() {
             anyhow::bail!("--model must be a model id or provider/model");
         }
+        // Cloud model IDs themselves contain an upstream namespace. An explicit
+        // Cloud provider must not turn openai/gpt-* into a direct OpenAI login.
+        if haarness_protocol::provider_storage_id(provider) == "haarness"
+            && haarness_protocol::provider_storage_id(qualified_provider.trim()) != "haarness"
+        {
+            return Ok(("haarness".into(), model.trim().to_owned()));
+        }
         return Ok((
             haarness_protocol::provider_storage_id(qualified_provider.trim()).to_owned(),
             qualified_model.trim().to_owned(),
@@ -3571,7 +3578,13 @@ fn cloud_model_prefix_preserves_the_existing_provider_identity() {
             qualified_run_model(prefix, "gpt-6-sol").unwrap().0,
             "haarness"
         );
+        for model in ["openai/gpt-5-nano", "anthropic/claude-haiku-4.5", "google/gemini-3.5-flash-lite"] {
+            assert_eq!(qualified_run_model(prefix, model).unwrap(), ("haarness".into(), model.into()));
+            assert_eq!(qualified_run_model(prefix, &format!("{prefix}/{model}")).unwrap(), ("haarness".into(), model.into()));
+        }
+        assert!(qualified_run_model(prefix, "openai/").is_err());
     }
+    assert_eq!(qualified_run_model("openai", "openai/gpt-5-nano").unwrap(), ("openai".into(), "gpt-5-nano".into()));
 }
 
 fn run_title(requested: Option<&str>, prompt: &str) -> String {

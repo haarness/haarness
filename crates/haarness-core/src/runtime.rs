@@ -8655,6 +8655,20 @@ fn combine_browser_approvals(name: &str, plans: Vec<AskPlan>) -> Vec<AskPlan> {
 /// "always" rule, and touching paths outside the workspace raises a separate
 /// `external_directory` group.
 fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec<AskPlan> {
+    if matches!(name, "cloud_agent_manage" | "cloud_agent_session") {
+        let action = arguments["action"].as_str().unwrap_or("unknown");
+        let target = arguments["sessionId"]
+            .as_str()
+            .or_else(|| arguments["id"].as_str())
+            .or_else(|| arguments["cloudAgentId"].as_str())
+            .unwrap_or("*");
+        return vec![AskPlan {
+            permission: name.into(),
+            patterns: vec![format!("{action}:{target}")],
+            always: vec![format!("{action}:*")],
+            external_paths: Vec::new(),
+        }];
+    }
     if name.starts_with("browser_") {
         let resources = arguments["__browser"]["target"]["resources"].as_array().map(|values| values.iter().filter_map(|v| v.as_str()).map(str::to_owned).collect::<Vec<_>>()).unwrap_or_default();
         let targets = if resources.is_empty() { vec!["inventory".into()] } else { resources };
@@ -10191,6 +10205,22 @@ mod tests {
             ProviderMessage::ToolResult { call_id, name, .. }
                 if call_id == "call_1" && name == "list"
         ));
+    }
+
+    #[test]
+    fn cloud_permissions_are_scoped_to_action_and_target() {
+        for (name, args, target) in [
+            ("cloud_agent_session", json!({"action":"ask","sessionId":"session-id"}), "session-id"),
+            ("cloud_agent_manage", json!({"action":"get","id":"agent-id"}), "agent-id"),
+            ("cloud_agent_session", json!({"action":"create","cloudAgentId":"agent-id"}), "agent-id"),
+        ] {
+            let plans = super::ask_plans(name, &args, std::path::Path::new("/workspace"));
+            assert_eq!(plans.len(), 1);
+            assert_eq!(plans[0].permission, name);
+            assert_eq!(plans[0].patterns, vec![format!("{}:{target}", args["action"].as_str().unwrap())]);
+            assert_eq!(plans[0].always, vec![format!("{}:*", args["action"].as_str().unwrap())]);
+            assert!(plans[0].external_paths.is_empty());
+        }
     }
 
     #[test]

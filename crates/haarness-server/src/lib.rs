@@ -14,6 +14,7 @@ pub mod remote;
 pub mod sharing;
 pub mod skills;
 pub mod tools;
+mod cloud_tools;
 pub mod vcs;
 pub mod workflow;
 

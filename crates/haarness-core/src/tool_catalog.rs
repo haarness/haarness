@@ -87,6 +87,8 @@ fn classify(name: &str) -> Classification {
         ("memory", "Memory", false)
     } else if matches!(name, "get_goal" | "update_goal" | "propose_goal_criteria") {
         ("goals", "Goals", true)
+    } else if matches!(name, "cloud_agent_manage" | "cloud_agent_session") {
+        ("cloud", "Cloud agents", false)
     } else if name.starts_with("session_") {
         ("sessions", "Sessions", false)
     } else if matches!(name, "workflow" | "schedule") {
@@ -389,6 +391,14 @@ pub fn load_tool_result(ids: &[String], catalog: &ToolCatalogResponse) -> Value 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cloud_tools_are_deferred_in_the_cloud_group() {
+        for name in ["cloud_agent_manage", "cloud_agent_session"] {
+            let kind = super::classify(name);
+            assert_eq!(kind.group, "cloud");
+            assert!(!kind.essential);
+        }
+    }
     use super::*;
 
     fn definition(name: &str, description: &str) -> ToolDefinition {

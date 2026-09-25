@@ -1669,6 +1669,18 @@ impl ManagementRegistry for ManagementService {
             "session_message" => self.session_message(&arguments, &context).await,
             "session_wait" => self.session_wait(&arguments, &context).await,
             "agent_switch" => self.agent_switch(&arguments, &context).await,
+            "cloud_agent_manage" | "cloud_agent_session" => {
+                let client = super::account::client().map_err(|e| CoreError::Tool(e.to_string()))?;
+                let cloud = haarness_account::cloud::Cloud::new(client, context.cancel.clone())
+                    .await
+                    .map_err(|e| CoreError::Tool(e.to_string()))?;
+                if resource == "cloud_agent_manage" {
+                    cloud.agent(arguments.clone()).await
+                } else {
+                    cloud.session(arguments.clone()).await
+                }
+                .map_err(anyhow::Error::from)
+            }
             _ => Err(anyhow::anyhow!("unknown management resource '{resource}'")),
         }
         .map_err(|error| CoreError::Tool(error.to_string()))?;
