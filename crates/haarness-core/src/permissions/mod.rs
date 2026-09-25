@@ -348,6 +348,16 @@ pub fn plan_ceiling() -> Vec<PermissionRule> {
         ),
         rule("apply_patch:.haarness/plans/**", PermissionDecision::Allow),
         rule("media_generate:*", PermissionDecision::Deny),
+        rule("cloud_agent_manage:*", PermissionDecision::Deny),
+        rule("cloud_agent_manage:list:*", PermissionDecision::Allow),
+        rule("cloud_agent_manage:get:*", PermissionDecision::Allow),
+        rule("cloud_agent_manage:models:*", PermissionDecision::Allow),
+        rule("cloud_agent_manage:ssh_public_key:*", PermissionDecision::Allow),
+        rule("cloud_agent_session:*", PermissionDecision::Deny),
+        rule("cloud_agent_session:list:*", PermissionDecision::Allow),
+        rule("cloud_agent_session:get:*", PermissionDecision::Allow),
+        rule("cloud_agent_session:messages:*", PermissionDecision::Allow),
+        rule("cloud_agent_session:wait:*", PermissionDecision::Allow),
     ]
 }
 
@@ -484,6 +494,28 @@ mod tests {
             engine.evaluate("media_generate:image:generate"),
             PermissionDecision::Ask
         );
+    }
+
+    #[test]
+    fn cloud_plan_reads_cannot_escalate_to_remote_execution() {
+        let mut engine = PermissionEngine::plan_defaults();
+        engine.approve_always("cloud_agent_session:*");
+        engine.add_rule(rule("cloud_agent_manage:*", PermissionDecision::Allow));
+        for action in ["list", "get", "messages", "wait"] {
+            assert_eq!(engine.evaluate(&format!("cloud_agent_session:{action}:session-id")), PermissionDecision::Allow);
+        }
+        for action in ["create", "start", "ask", "stop", "abort", "rename", "archive", "delete"] {
+            assert_eq!(engine.evaluate(&format!("cloud_agent_session:{action}:session-id")), PermissionDecision::Deny);
+        }
+        for action in ["list", "get", "ssh_public_key", "models"] {
+            assert_eq!(engine.evaluate(&format!("cloud_agent_manage:{action}:agent-id")), PermissionDecision::Allow);
+        }
+        for action in ["create", "update", "delete"] {
+            assert_eq!(engine.evaluate(&format!("cloud_agent_manage:{action}:agent-id")), PermissionDecision::Deny);
+        }
+        let mut build = PermissionEngine::build_defaults();
+        build.add_rule(rule("cloud_agent_session:*", PermissionDecision::Deny));
+        assert_eq!(build.evaluate("cloud_agent_session:ask:session-id"), PermissionDecision::Deny);
     }
 
     #[test]

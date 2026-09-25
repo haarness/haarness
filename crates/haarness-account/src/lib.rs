@@ -1,6 +1,7 @@
 //! First-party account sessions shared by the terminal, Desktop and Cloud CLI.
 //! No project configuration or remote runtime is allowed to choose the issuer.
 pub mod credentials;
+pub mod cloud;
 pub mod loopback;
 pub mod pkce;
 

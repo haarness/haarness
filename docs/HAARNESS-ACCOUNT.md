@@ -68,6 +68,53 @@ haarness cloud workspace attach <id>
 haarness cloud workspace stop <id>
 ```
 
+### Ask your assistant to use Cloud
+
+After `haarness login`, the same tools are available to models in CLI, TUI and Desktop:
+
+- `cloud_agent_manage`: find, inspect, create, update and delete templates, discover Cloud models,
+  and retrieve a template's public SSH deploy key.
+- `cloud_agent_session`: launch independent sessions, chat and read results, wait for a turn,
+  interrupt, rename, archive, stop, resume or delete a session.
+
+For example, ask: "Find my Repository helper cloud agent. Launch a session from it, ask it
+to inspect the repository, and bring back the result." Follow up with "Ask that cloud session
+to run the tests" or "Stop that cloud session and keep its files." The assistant returns a
+session link you can open in Cloud to continue the same conversation and inspect files.
+
+You can also use a normal CLI run (with any connected tool-capable model):
+
+```sh
+haarness login
+haarness run --provider haarness --model openai/gpt-5-mini \
+  "List my cloud agents and sessions. Do not start anything."
+```
+
+`--model haarness-cloud/openai/gpt-5-mini` is the equivalent fully qualified form.
+With `--provider haarness`, upstream names such as `openai/...` remain Cloud model IDs.
+
+Signing into a model provider alone does not sign into Haarness Cloud. These tools require
+your existing Haarness login and selected account. They never start a login flow or accept
+tokens, issuer URLs, or credential paths from the model. Use the Cloud editor/API to configure
+write-only environment secrets. Ordinary tool permission rules also apply; for example,
+`cloud_agent_session:ask:*` controls remote chat. The plan agent can inspect templates,
+sessions and history but cannot launch or mutate them, even with an allow override.
+
+The tools are discoverable under **Cloud agents** in the tool catalog and can be loaded with
+`load_tool` when lazy loading is enabled. Reads never start a stopped runtime. `ask` without
+`sessionId` creates one from `cloudAgentId`; follow-ups use the returned session/thread IDs.
+`wait=false` submits the message after startup and returns without waiting for the reply.
+Waits default to 120 seconds (maximum 600). A startup timeout reports `messageSubmitted:false`;
+retry `ask` with that session ID once it is running. A running turn at timeout continues remotely:
+use `wait` with its IDs instead of submitting another message. History supports `after`/`nextAfter`
+cursors and `limit` (1–100); without `after`, it returns the latest page.
+
+Remote permission prompts remain user approvals in the session's Cloud chat. The tool returns
+`needs_attention` and its URL instead of approving them. Cancelling a synchronous ask attempts
+to interrupt only the turn it submitted; the session and files remain. Cancelling an observation
+does not interrupt someone else's work. Archive hides a session without stopping it; stop releases
+compute while retaining storage, and delete removes the session and its disk.
+
 Create/start/stop return once the operation is accepted. Use `list` to check its state. Desktop provides the same actions in the account dialog. Saved Cloud projects contain account/workspace identifiers; attach tickets are acquired again when opened and renewed while connected. Workspace access through a revoked native login is rejected within the gateway's existing ticket-cache window (10 seconds by default). Existing open connections follow the gateway's stream policy.
 
 ## Session storage and development

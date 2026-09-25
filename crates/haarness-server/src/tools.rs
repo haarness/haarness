@@ -176,6 +176,11 @@ impl NativeToolRegistry {
     /// constructors used by embedders.
     #[must_use]
     pub fn with_management(mut self, management: Arc<dyn ManagementRegistry>) -> Self {
+        for session in [false, true] {
+            let tool: Arc<dyn Tool> =
+                Arc::new(crate::cloud_tools::CloudTool::new(session, management.clone()));
+            self.tools.insert(tool.definition().name.clone(), tool);
+        }
         for kind in ManagementKind::ALL {
             let tool: Arc<dyn Tool> = Arc::new(ManagementTool {
                 kind,
@@ -3906,6 +3911,28 @@ mod tests {
                 text: format!("{resource}:{}", arguments["action"]),
                 metadata: json!({}),
             })
+        }
+    }
+
+    #[test]
+    fn cloud_tools_are_discoverable_validated_and_honor_read_parallelism() {
+        let registry = NativeToolRegistry::new(PathBuf::from("/workspace"))
+            .with_management(Arc::new(StubManagement));
+        for (name, read, mutation) in [
+            ("cloud_agent_manage", "models", "create"),
+            ("cloud_agent_session", "messages", "ask"),
+        ] {
+            let tool = registry.get(name).expect("Cloud tool registered");
+            assert!(tool.parallel_safe(&json!({"action":read})));
+            assert!(!tool.parallel_safe(&json!({"action":mutation})));
+            let validator = jsonschema::validator_for(&tool.definition().input_schema).unwrap();
+            assert!(validator.is_valid(&json!({"action":read})));
+            assert!(!validator.is_valid(&json!({"action":read,"token":"untrusted"})));
+            assert!(!validator.is_valid(&json!({"action":"invented"})));
+            if name == "cloud_agent_manage" {
+                assert!(validator.is_valid(&json!({"action":"create","name":"test","configuration":{"resourceClass":"performance-4cpu-8gb","diskGb":500}})));
+                assert!(!validator.is_valid(&json!({"action":"create","name":"test","configuration":{"environment":{"KEY":"secret"}}})));
+            }
         }
     }
 
