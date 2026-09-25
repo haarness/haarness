@@ -85,11 +85,32 @@ pub enum SessionCommand {
     },
     Create {
         #[arg(long)]
-        agent: String,
+        agent: Option<String>,
         #[arg(long)]
         title: Option<String>,
+        /// JSON creation body with configuration and optional encrypted environment values.
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+        #[arg(long)]
+        stopped: bool,
         #[arg(long)]
         json: bool,
+    },
+    /// Save configuration/environment while stopped. File must include the current version.
+    Update {
+        id: String,
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
+    /// Capture saved settings in an inert template with a fresh deploy key.
+    SaveAgent {
+        id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        version: i64,
+        #[arg(long)]
+        include_environment: bool,
     },
     Show {
         id: String,
@@ -282,7 +303,7 @@ pub async fn rpc(client: &Client, input: Value) -> Result<Value> {
                 .request(
                     Method::POST,
                     "api/v1/sessions",
-                    Some(json!({"cloudAgentId":id(&input)?,"title":input["name"]})),
+                    Some(json!({"accountId":client.config.selected_account(),"cloudAgentId":if input["id"].is_null() { None } else { Some(id(&input)?) },"title":input["name"],"configuration":input["configuration"]})),
                 )
                 .await?
         }
@@ -341,6 +362,7 @@ pub async fn rpc(client: &Client, input: Value) -> Result<Value> {
                 Some("usage") => "app/billing/usage",
                 Some("agents") => "app/agents",
                 Some("sessions") => "app/sessions",
+
                 _ => "app",
             };
             {
@@ -349,7 +371,7 @@ pub async fn rpc(client: &Client, input: Value) -> Result<Value> {
                     .map(|url| haarness_account::safe_url(&url))
                     .transpose()?
                     .unwrap_or_else(|| client.config.api_url.clone());
-                json!({"url":base.join(page)?.to_string()})
+                json!({"url":base.join(&if input["page"] == "session-settings" { format!("app/sessions/{}/settings", id(&input)?) } else {page.to_owned()})?.to_string()})
             }
         }
         _ => bail!("Unknown account action"),
@@ -432,21 +454,62 @@ pub async fn cloud(args: &CloudArgs) -> Result<()> {
             SessionCommand::Create {
                 agent,
                 title,
+                file,
+                stopped,
                 json: as_json,
             } => {
-                let value = rpc(
-                    &client,
-                    json!({"action":"create-session","id":agent,"name":title}),
-                )
-                .await?;
+                let mut body: Value = if let Some(file) = file {
+                    serde_json::from_slice(&std::fs::read(file)?)?
+                } else {
+                    json!({})
+                };
+                if !body.is_object() {
+                    bail!("Session file must contain a JSON object");
+                }
+                if let Some(agent) = agent {
+                    body["cloudAgentId"] = json!(id(&json!({"id":agent}))?);
+                }
+                if let Some(title) = title {
+                    body["title"] = json!(title);
+                }
+                if *stopped {
+                    body["start"] = json!(false);
+                }
+                if body.get("accountId").is_none() {
+                    body["accountId"] = json!(client.config.selected_account());
+                }
+                let value = client
+                    .request(Method::POST, "api/v1/sessions", Some(body))
+                    .await?;
                 if *as_json {
                     println!("{value}");
                 } else {
                     println!(
-                        "Session {} is starting. Use `haarness cloud session list`, then `haarness cloud session attach <id>`.",
+                        "Session {} created. Use `haarness cloud session list`, then `haarness cloud session attach <id>`.",
                         value["session"]["id"].as_str().unwrap_or("")
                     );
                 }
+            }
+            SessionCommand::Update { id: session, file } => {
+                let body: Value = serde_json::from_slice(&std::fs::read(file)?)?;
+                println!(
+                    "{}",
+                    client
+                        .request(
+                            Method::PATCH,
+                            &format!("api/v1/sessions/{}", id(&json!({"id":session}))?),
+                            Some(body)
+                        )
+                        .await?
+                );
+            }
+            SessionCommand::SaveAgent {
+                id: session,
+                name,
+                version,
+                include_environment,
+            } => {
+                println!("{}", client.request(Method::POST, &format!("api/v1/sessions/{}/save-agent", id(&json!({"id":session}))?), Some(json!({"name":name,"version":version,"includeEnvironment":include_environment}))).await?);
             }
             SessionCommand::Show { id } => println!(
                 "{}",
@@ -661,7 +724,31 @@ mod tests {
                 }
             }))
         ));
-        assert!(crate::Cli::try_parse_from(["haarness", "cloud", "session", "create"]).is_err());
+        assert!(crate::Cli::try_parse_from(["haarness", "cloud", "session", "create"]).is_ok());
+        assert!(
+            crate::Cli::try_parse_from([
+                "haarness",
+                "cloud",
+                "session",
+                "create",
+                "--file",
+                "session.json",
+                "--stopped"
+            ])
+            .is_ok()
+        );
+        assert!(
+            crate::Cli::try_parse_from([
+                "haarness",
+                "cloud",
+                "session",
+                "update",
+                "session-id",
+                "--file",
+                "settings.json"
+            ])
+            .is_ok()
+        );
         assert!(
             crate::Cli::try_parse_from([
                 "haarness",

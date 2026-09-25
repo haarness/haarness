@@ -356,6 +356,7 @@ pub fn plan_ceiling() -> Vec<PermissionRule> {
         rule("cloud_agent_session:*", PermissionDecision::Deny),
         rule("cloud_agent_session:list:*", PermissionDecision::Allow),
         rule("cloud_agent_session:get:*", PermissionDecision::Allow),
+        rule("cloud_agent_session:ssh_public_key:*", PermissionDecision::Allow),
         rule("cloud_agent_session:messages:*", PermissionDecision::Allow),
         rule("cloud_agent_session:wait:*", PermissionDecision::Allow),
     ]

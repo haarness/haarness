@@ -152,7 +152,7 @@ export interface BrowserLayout { visible:boolean; bounds:{x:number;y:number;widt
 export interface BrowserTab { id:string; url:string; title:string; loading:boolean; canGoBack:boolean; canGoForward:boolean; generation:number }
 export interface BrowserState { tabs:BrowserTab[]; focusedTabID:string|null }
 export interface Bridge {
-  account(input: { action: string; id?: string; name?: string; repo?: string; page?: string; device?: boolean }): Promise<any>;
+  account(input: { action: string; id?: string; name?: string; repo?: string; configuration?: Record<string, unknown>; page?: string; device?: boolean }): Promise<any>;
   openLink(connection: string | undefined, thread: string | undefined | null, url: string): Promise<"external" | "browser">;
   browserData(connection: string, input?: { action: "get" | "remove" | "clear" | "save"; kind?: "history" | "downloads" | "all"; id?: string }): Promise<import("./browser-settings").BrowserData>;
   browserAttach(connection:string,thread:string):Promise<BrowserState>;

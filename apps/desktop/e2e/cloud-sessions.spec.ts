@@ -20,7 +20,11 @@ test("shared account lists templates and opens a live Cloud session", async () =
     const dialog = page.getByRole("dialog",{name:"Haarness account",exact:true});
     await expect(dialog.getByRole("heading",{name:"Cloud sessions",exact:true})).toBeVisible();
     await dialog.getByRole("button",{name:"New session",exact:true}).click();
-    await expect(dialog.getByRole("combobox",{name:"Cloud agent",exact:true})).toBeVisible();
+    await expect(dialog.getByRole("combobox",{name:"Use Cloud agent (optional)",exact:true})).toBeVisible();
+    await expect(dialog.getByRole("combobox",{name:"Use Cloud agent (optional)",exact:true})).toHaveValue("");
+    await expect(dialog.getByRole("textbox",{name:"Session instructions",exact:true})).toBeVisible();
+    await dialog.getByText("Advanced session configuration", {exact:true}).click();
+    await expect(dialog.getByRole("textbox",{name:"Session configuration JSON",exact:true})).toBeVisible();
     await expect(dialog.getByRole("button",{name:"Manage agent templates",exact:true})).toBeVisible();
     const sessions = await page.evaluate(() => window.haarness.account({action:"sessions"}));
     const selected = sessions.items.find((s:any) => s.id===session);

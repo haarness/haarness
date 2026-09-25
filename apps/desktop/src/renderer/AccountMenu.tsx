@@ -32,6 +32,8 @@ export function AccountMenu(props: {
   const [name, setName] = createSignal("");
   const [agents, setAgents] = createSignal<CloudAgent[]>([]);
   const [agentId, setAgentId] = createSignal("");
+  const [configuration, setConfiguration] = createSignal("");
+  const [instructions, setInstructions] = createSignal("");
   const [creating, setCreating] = createSignal(false);
   const [credits, setCredits] = createSignal("");
   let dialog: HTMLDialogElement | undefined;
@@ -287,11 +289,14 @@ export function AccountMenu(props: {
                       await window.haarness.account({
                         action: "create-session",
                         name: name(),
-                        id: agentId() || agents()[0]?.id,
+                        id: agentId() || undefined,
+                        configuration: { ...(configuration().trim() ? JSON.parse(configuration()) : {}), ...(instructions().trim() ? { instructions: instructions() } : {}) },
                       });
                       setCreating(false);
                       setName("");
                       setAgentId("");
+                      setConfiguration("");
+                      setInstructions("");
                       await refresh();
                     });
                   }}
@@ -304,14 +309,15 @@ export function AccountMenu(props: {
                     onInput={(event) => setName(event.currentTarget.value)}
                   />
                   <label>
-                    {t("Cloud agent")}
+                    {t("Use Cloud agent (optional)")}
                     <select
-                      aria-label={t("Cloud agent")}
-                      value={agentId() || agents()[0]?.id || ""}
+                      aria-label={t("Use Cloud agent (optional)")}
+                      value={agentId()}
                       onChange={(event) =>
                         setAgentId(event.currentTarget.value)
                       }
                     >
+                      <option value="">{t("No template")}</option>
                       <For each={agents()}>
                         {(agent) => (
                           <option value={agent.id}>{agent.name}</option>
@@ -319,6 +325,8 @@ export function AccountMenu(props: {
                       </For>
                     </select>
                   </label>
+                  <label>{t("Instructions")}<textarea aria-label={t("Session instructions")} value={instructions()} onInput={e => setInstructions(e.currentTarget.value)} placeholder={t("Optional instructions for this session")} /></label>
+                  <details><summary>{t("Advanced session configuration")}</summary><p class="muted">{t("Optional JSON settings for model, reasoningEffort, mcp, agents, skills and permissions. Supplied fields override the template. Manage secrets in Cloud session settings.")}</p><textarea aria-label={t("Session configuration JSON")} rows={6} value={configuration()} onInput={e => setConfiguration(e.currentTarget.value)} placeholder={'{"mcp":{},"agents":{},"skills":{}}'} /></details>
                   <button
                     type="button"
                     class="secondary"
@@ -333,10 +341,10 @@ export function AccountMenu(props: {
                   </button>
                   <p class="muted">
                     {t(
-                      "Starts an independent session from the selected template. Compute and storage use your credits.",
+                      "Starts an independent session. A template is optional. Compute and storage use your credits.",
                     )}
                   </p>
-                  <button class="primary" disabled={busy() || !agents().length}>
+                  <button class="primary" disabled={busy()}>
                     {t("Start session")}
                   </button>
                 </form>
@@ -353,6 +361,7 @@ export function AccountMenu(props: {
                         <span class="muted">{w.workspace.observedState}</span>
                       </div>
                       <div class="account-actions">
+                        <button class="secondary" onClick={() => void window.haarness.account({action:"web", page:"session-settings", id:w.id})}>{t("Settings")}</button>
                         <Show
                           when={w.workspace.observedState === "running"}
                           fallback={
