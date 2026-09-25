@@ -1213,5 +1213,13 @@
   "One account for Cloud models and sessions.": "One account for Cloud models and sessions.",
   "Session title": "Session title",
   "Start session": "Start session",
-  "Starts an independent session from the selected template. Compute and storage use your credits.": "Starts an independent session from the selected template. Compute and storage use your credits."
+  "Starts an independent session from the selected template. Compute and storage use your credits.": "Starts an independent session from the selected template. Compute and storage use your credits.",
+  "Use Cloud agent (optional)": "Use Cloud agent (optional)",
+  "No template": "No template",
+  "Session instructions": "Session instructions",
+  "Optional instructions for this session": "Optional instructions for this session",
+  "Advanced session configuration": "Advanced session configuration",
+  "Optional JSON settings for model, reasoningEffort, mcp, agents, skills and permissions. Supplied fields override the template. Manage secrets in Cloud session settings.": "Optional JSON settings for model, reasoningEffort, mcp, agents, skills and permissions. Supplied fields override the template. Manage secrets in Cloud session settings.",
+  "Session configuration JSON": "Session configuration JSON",
+  "Starts an independent session. A template is optional. Compute and storage use your credits.": "Starts an independent session. A template is optional. Compute and storage use your credits."
 }

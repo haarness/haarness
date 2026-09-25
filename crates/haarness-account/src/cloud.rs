@@ -47,6 +47,9 @@ enum SessionAction {
     Start,
     Stop,
     Rename,
+    Update,
+    SaveAgent,
+    SshPublicKey,
     Archive,
     Delete,
     Ask,
@@ -60,6 +63,11 @@ enum SessionAction {
 struct SessionInput {
     action: SessionAction,
     session_id: Option<Uuid>,
+    configuration: Option<Value>,
+    version: Option<i64>,
+    name: Option<String>,
+    description: Option<String>,
+    start: Option<bool>,
     cloud_agent_id: Option<Uuid>,
     thread_id: Option<Uuid>,
     turn_id: Option<Uuid>,
@@ -90,6 +98,39 @@ fn limit(value: Option<u64>) -> Result<u64> {
 fn nonempty(value: &str, max: usize, name: &str) -> Result<()> {
     if value.trim().is_empty() || value.len() > max {
         return Err(invalid(format!("{name} must contain 1–{max} bytes")));
+    }
+    Ok(())
+}
+
+fn validate_configuration(configuration: Option<&Value>) -> Result<()> {
+    if let Some(configuration) = configuration {
+        let fields = configuration
+            .as_object()
+            .ok_or_else(|| invalid("configuration must be an object"))?;
+        for key in fields.keys() {
+            if !matches!(
+                key.as_str(),
+                "instructions"
+                    | "model"
+                    | "reasoningEffort"
+                    | "repository"
+                    | "knownHosts"
+                    | "startupCommand"
+                    | "region"
+                    | "resourceClass"
+                    | "diskGb"
+                    | "idleTimeoutSecs"
+                    | "schemaVersion"
+                    | "mcp"
+                    | "agents"
+                    | "skills"
+                    | "permissions"
+            ) {
+                return Err(invalid(format!(
+                    "Unsupported configuration field {key}; manage environment secrets in the Cloud UI/API"
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -175,30 +216,7 @@ impl Cloud {
     pub async fn agent(&self, arguments: Value) -> Result<Value> {
         let input: AgentInput = serde_json::from_value(arguments)?;
         let count = limit(input.limit)?;
-        if let Some(configuration) = &input.configuration {
-            let fields = configuration
-                .as_object()
-                .ok_or_else(|| invalid("configuration must be an object"))?;
-            for key in fields.keys() {
-                if !matches!(
-                    key.as_str(),
-                    "instructions"
-                        | "model"
-                        | "reasoningEffort"
-                        | "repository"
-                        | "knownHosts"
-                        | "startupCommand"
-                        | "region"
-                        | "resourceClass"
-                        | "diskGb"
-                        | "idleTimeoutSecs"
-                ) {
-                    return Err(invalid(format!(
-                        "Unsupported configuration field {key}; manage environment secrets in the Cloud UI/API"
-                    )));
-                }
-            }
-        }
+        validate_configuration(input.configuration.as_ref())?;
         match input.action {
             AgentAction::List => {
                 // Search spans pages, but every result includes a continuation cursor.
@@ -314,6 +332,12 @@ impl Cloud {
 
     pub async fn session(&self, arguments: Value) -> Result<Value> {
         let input: SessionInput = serde_json::from_value(arguments)?;
+        validate_configuration(input.configuration.as_ref())?;
+        if matches!(input.action, SessionAction::Ask) && input.start == Some(false) {
+            return Err(invalid(
+                "ask requires a running session; use create with start=false to prepare one",
+            ));
+        }
         let count = limit(input.limit)?;
         let seconds = input.timeout_seconds.unwrap_or(120);
         if !(1..=600).contains(&seconds) {
@@ -346,12 +370,13 @@ impl Cloud {
                     "A new session cannot use an existing sessionId, threadId or turnId",
                 ));
             }
-            let agent = required(input.cloud_agent_id, "cloudAgentId")?;
-            self.owned("cloud-agents", agent).await?;
+            if let Some(agent) = input.cloud_agent_id {
+                self.owned("cloud-agents", agent).await?;
+            }
             self.api(
                 Method::POST,
                 "api/v1/sessions",
-                Some(json!({"cloudAgentId":agent,"title":input.title})),
+                Some(json!({"accountId":self.account,"cloudAgentId":input.cloud_agent_id,"title":input.title,"configuration":input.configuration,"start":input.start})),
             )
             .await?["session"]
                 .clone()
@@ -364,6 +389,21 @@ impl Cloud {
         let url = self.url(id, "sessions")?;
         match input.action {
             SessionAction::Get => return Ok(json!({"session":session,"url":url})),
+            SessionAction::SshPublicKey => {
+                return Ok(json!({"sessionId":id,"sshPublicKey":session["sshPublicKey"]}));
+            }
+            SessionAction::Update => {
+                let version = required(input.version, "version")?;
+                if session["version"].as_i64() != Some(version) {
+                    return Err(invalid("Session changed; get it again before saving"));
+                }
+                return self.api(Method::PATCH, &path, Some(json!({"version":version,"configuration":required(input.configuration,"configuration")?}))).await;
+            }
+            SessionAction::SaveAgent => {
+                let name = required(input.name, "name")?;
+                nonempty(&name, 128, "name")?;
+                return self.api(Method::POST, &format!("{path}/save-agent"), Some(json!({"name":name,"description":input.description.unwrap_or_default(),"version":required(input.version,"version")?}))).await;
+            }
             SessionAction::Stop | SessionAction::Delete => {
                 let deleting = matches!(input.action, SessionAction::Delete);
                 let result = self
@@ -398,7 +438,9 @@ impl Cloud {
         if creating || matches!(input.action, SessionAction::Start) {
             // An asynchronous ask still needs a ready runtime to submit its message.
             // wait=false skips waiting for the response, never silently drops the prompt.
-            if matches!(input.action, SessionAction::Ask) || input.wait.unwrap_or(true) {
+            if input.start != Some(false)
+                && (matches!(input.action, SessionAction::Ask) || input.wait.unwrap_or(true))
+            {
                 session = self.ready(id, deadline).await?;
             } else {
                 session = self.owned("sessions", id).await?;
@@ -476,7 +518,7 @@ impl Cloud {
                 let turn = if asking {
                     // No nested control-plane access or interactive questions in remote delegated work.
                     let effort = input.reasoning_effort.as_ref().map_or_else(
-                        || session["agentSnapshot"]["configuration"]["reasoningEffort"].clone(),
+                        || session.get("configuration").unwrap_or(&session["agentSnapshot"]["configuration"])["reasoningEffort"].clone(),
                         |e| json!(e),
                     );
                     remote.request(Method::POST,&format!("{thread_path}/turns"),Some(json!({"requestId":Uuid::now_v7(),"text":input.message,"reasoningEffort":effort,"tools":{"question":false,"cloud_agent_manage":false,"cloud_agent_session":false}}))).await?

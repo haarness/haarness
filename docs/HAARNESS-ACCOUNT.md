@@ -128,3 +128,20 @@ For local development, set `HAARNESS_CLOUD_API_URL` to the API's loopback URL an
 The API exchanges an authenticated native session for a five-minute router credential. The router checks the login family, current membership, billing status and model restrictions. Automatic refresh does not create a user-visible developer API key. Explicit developer keys retain their own lifecycle.
 
 Deploy the Cloud migration and API/router changes before distributing the native client. No production configuration or deployment is performed by the local test suite.
+
+## Independently configured Cloud sessions
+
+Templates are optional. `haarness cloud session create --title "My work"` starts a blank session;
+`--file session.json` accepts a creation body with `configuration` (instructions, model/reasoning,
+MCP, agents, skills, permissions, repository/setup/resources) and optional write-only `environment`.
+Add `--agent ID` to inherit a template and override supplied fields, or `--stopped` to prepare SSH access.
+
+Stop and wait for a session to be stopped, then use `cloud session update ID --file settings.json`
+with its current `version` and changed `configuration`. `cloud session save-agent ID --version N
+--name "Template"` saves its last saved settings as an inert template with a fresh SSH key; environment
+is copied only with `--include-environment`. Restart applies the saved settings while retaining files/chat.
+
+The `cloud_agent_session` model tool supports inline `configuration` without `cloudAgentId`, plus
+`update`, `save_agent` and `ssh_public_key`. It never reads or sets environment secret values.
+Desktop offers blank/template creation, instructions and advanced JSON settings; its session Settings
+button opens the shared Cloud editor. CLI/TUI/Desktop continue to share the account login.

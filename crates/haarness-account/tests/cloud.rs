@@ -101,7 +101,7 @@ async fn handler(State(state): State<Shared>, req: Request) -> Response {
             } else {
                 "running"
             };
-            json!({"id":SESSION,"accountId":if d.foreign_account {OTHER}else{ACCOUNT},"agentSnapshot":agent(&d),"workspace":{"observedState":observed,"desiredState":if d.stopped {"stopped"} else {"running"}}})
+            json!({"id":SESSION,"accountId":if d.foreign_account {OTHER}else{ACCOUNT},"agentSnapshot":agent(&d),"configuration":agent(&d)["configuration"],"version":3,"sshPublicKey":"ssh-ed25519 session-public","workspace":{"observedState":observed,"desiredState":if d.stopped {"stopped"} else {"running"}}})
         }
         ("POST", p) if p == format!("/api/v1/sessions/{SESSION}/attach") => {
             d.attachments += 1;
@@ -121,6 +121,7 @@ async fn handler(State(state): State<Shared>, req: Request) -> Response {
             json!({"operation":{"id":"delete"}})
         }
         ("PATCH", p) if p == format!("/api/v1/sessions/{SESSION}") => body,
+        ("POST", p) if p == format!("/api/v1/sessions/{SESSION}/save-agent") => body,
         ("GET", "/runtime/v1/threads") => json!([]),
         ("GET", "/runtime/v1/info") => {
             json!({"defaultAgent":"cloud-agent","defaultProvider":"haarness","defaultModel":"openai/gpt-5-nano"})
@@ -554,4 +555,62 @@ async fn attachment_cannot_redirect_bearers_to_insecure_hosts() {
             .iter()
             .all(|r| !r.1.starts_with("/runtime/"))
     );
+}
+
+#[tokio::test]
+async fn independent_sessions_inline_configuration_revision_and_save_template() {
+    let fixture = Fixture::new(true).await;
+    let cloud = Cloud::new(
+        Client::new(fixture.config.clone()).unwrap(),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let configuration = json!({"instructions":"Independent","mcp":{"docs":{"command":"echo","args":["ok"]}},"agents":{"reviewer":{"prompt":"Review"}},"skills":{"review":{"files":{"SKILL.md":"Review"}}},"permissions":{"bash":"ask"}});
+    cloud
+        .session(json!({"action":"create","start":false,"configuration":configuration}))
+        .await
+        .unwrap();
+    {
+        let data = fixture.data.lock().unwrap();
+        let request = data
+            .requests
+            .iter()
+            .find(|(m, p, _)| m == "POST" && p.starts_with("/api/v1/sessions?"))
+            .unwrap();
+        assert!(request.2["cloudAgentId"].is_null());
+        assert_eq!(request.2["configuration"], configuration);
+        assert_eq!(request.2["accountId"], ACCOUNT);
+        assert_eq!(request.2["start"], false);
+        assert!(
+            !data
+                .requests
+                .iter()
+                .any(|(_, p, _)| p.contains("cloud-agents/"))
+        );
+    }
+    let updated = cloud
+        .session(
+            json!({"action":"update","sessionId":SESSION,"version":3,"configuration":{"mcp":{}}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated, json!({"version":3,"configuration":{"mcp":{}}}));
+    assert!(
+        cloud
+            .session(json!({"action":"update","sessionId":SESSION,"version":1,"configuration":{}}))
+            .await
+            .is_err()
+    );
+    let saved = cloud
+        .session(json!({"action":"save_agent","sessionId":SESSION,"version":3,"name":"Reusable"}))
+        .await
+        .unwrap();
+    assert_eq!(saved["name"], "Reusable");
+    assert!(saved.get("includeEnvironment").is_none());
+    let key = cloud
+        .session(json!({"action":"ssh_public_key","sessionId":SESSION}))
+        .await
+        .unwrap();
+    assert_eq!(key["sshPublicKey"], "ssh-ed25519 session-public");
 }
