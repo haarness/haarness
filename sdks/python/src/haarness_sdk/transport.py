@@ -18,11 +18,13 @@ _MISSING = object()
 
 class RequestOptions(TypedDict, total=False):
     timeout: float
+    headers: dict[str, str]
 
 
 class ApiError(Exception):
     def __init__(self, status: int, body: Any):
         record = body if isinstance(body, dict) else {}
+        if isinstance(record.get("error"), dict): record = record["error"]
         self.status = status
         self.code = str(record.get("code", "http_error"))
         self.retryable = record.get("retryable") is True
@@ -136,6 +138,7 @@ class Base:
             kwargs["headers"] = {
                 "Content-Type": "application/zip" if binary_body else "application/json"
             }
+        kwargs["headers"] = {**self._headers(), **kwargs.get("headers", {}), **(options or {}).get("headers", {})}
         return kwargs
 
 
@@ -189,6 +192,12 @@ class Transport(Base):
     def __exit__(self, *args) -> None:
         self.close()
 
+    def _prepare_events(self) -> None:
+        pass
+
+    def _retry_events(self, error: ApiError) -> bool:
+        return False
+
     def events(
         self,
         *,
@@ -198,8 +207,10 @@ class Transport(Base):
     ) -> Iterator[ServerEvent]:
         """Close the iterator to detach. A resync marker ends it; rehydrate REST state."""
         instance = None
+        renewed = False
         while True:
-            headers = {"Accept": "text/event-stream"}
+            self._prepare_events()
+            headers = {**self._headers(), "Accept": "text/event-stream"}
             if after is not None:
                 headers["Last-Event-ID"] = str(after)
             try:
@@ -212,6 +223,7 @@ class Transport(Base):
                     if not response.is_success:
                         response.read()
                         decode(response)
+                    renewed = False
                     data: list[str] = []
                     for line in response.iter_lines():
                         if not line and data:
@@ -232,6 +244,11 @@ class Transport(Base):
                             data.append(line[5:].removeprefix(" "))
                             if sum(map(len, data)) > 8 * 1024 * 1024:
                                 raise TransportError("Event exceeds 8 MiB")
+            except ApiError as error:
+                if renewed or not self._retry_events(error):
+                    raise
+                renewed = True
+                continue
             except httpx.HTTPError as error:
                 if not reconnect:
                     raise TransportError("Event stream failed") from error
@@ -289,6 +306,12 @@ class AsyncTransport(Base):
     async def __aexit__(self, *args) -> None:
         await self.close()
 
+    async def _prepare_events(self) -> None:
+        pass
+
+    async def _retry_events(self, error: ApiError) -> bool:
+        return False
+
     async def events(
         self,
         *,
@@ -297,8 +320,10 @@ class AsyncTransport(Base):
         retry_seconds: float = 0.5,
     ) -> AsyncIterator[ServerEvent]:
         instance = None
+        renewed = False
         while True:
-            headers = {"Accept": "text/event-stream"}
+            await self._prepare_events()
+            headers = {**self._headers(), "Accept": "text/event-stream"}
             if after is not None:
                 headers["Last-Event-ID"] = str(after)
             try:
@@ -311,6 +336,7 @@ class AsyncTransport(Base):
                     if not response.is_success:
                         await response.aread()
                         decode(response)
+                    renewed = False
                     data: list[str] = []
                     async for line in response.aiter_lines():
                         if not line and data:
@@ -331,6 +357,11 @@ class AsyncTransport(Base):
                             data.append(line[5:].removeprefix(" "))
                             if sum(map(len, data)) > 8 * 1024 * 1024:
                                 raise TransportError("Event exceeds 8 MiB")
+            except ApiError as error:
+                if renewed or not await self._retry_events(error):
+                    raise
+                renewed = True
+                continue
             except httpx.HTTPError as error:
                 if not reconnect:
                     raise TransportError("Event stream failed") from error

@@ -3,6 +3,10 @@
 | Python | TypeScript | HTTP |
 | --- | --- | --- |
 | `manage_resource` | `manageResource` | `POST /v1/manage/{resource}` |
+| `cloud_agents` | `cloudAgents` | `POST /v1/cloud/agents` |
+| `cloud_sessions` | `cloudSessions` | `POST /v1/cloud/sessions` |
+| `cloud_chats` | `cloudChats` | `POST /v1/cloud/chats` |
+| `cloud_schedules` | `cloudSchedules` | `POST /v1/cloud/schedules` |
 | `info` | `info` | `GET /v1/info` |
 | `analytics_stats` | `analyticsStats` | `GET /v1/stats` |
 | `analytics_insights` | `analyticsInsights` | `GET /v1/insights` |
@@ -111,3 +115,6 @@
 | `write_file` | `writeFile` | `PUT /v1/files/content` |
 | `mutate_file` | `mutateFile` | `POST /v1/files/action` |
 | `call_browser_tool` | `callBrowserTool` | `POST /v1/threads/{id}/browser/tool` |
+| `host_projects` | `hostProjects` | `GET /v1/host/projects` |
+| `host_directories` | `hostDirectories` | `GET /v1/host/directories` |
+| `host_open` | `hostOpen` | `POST /v1/host/open` |

@@ -8682,13 +8682,18 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         return vec![AskPlan { permission: name.into(), patterns: vec![pattern.clone()],
             always: vec![pattern], external_paths: Vec::new() }];
     }
-    if matches!(name, "cloud_agent_manage" | "cloud_agent_session") {
+    if matches!(name, "cloud_agent_manage" | "cloud_agent_session" | "cloud_chat" | "cloud_schedule") {
         let action = arguments["action"].as_str().unwrap_or("unknown");
         let target = arguments["sessionId"]
             .as_str()
             .or_else(|| arguments["id"].as_str())
             .or_else(|| arguments["cloudAgentId"].as_str())
             .unwrap_or("*");
+        let target = if name == "cloud_chat" {
+            format!("{target}:{}", arguments["chatId"].as_str().unwrap_or("*"))
+        } else {
+            target.to_string()
+        };
         return vec![AskPlan {
             permission: name.into(),
             patterns: vec![format!("{action}:{target}")],

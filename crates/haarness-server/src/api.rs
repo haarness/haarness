@@ -19,20 +19,21 @@ use futures::{Stream, StreamExt};
 use haarness_core::{AgentRuntime, CoreError, McpRegistry, SkillRegistry};
 use haarness_language::{FormatterStatus, LanguageService, LanguageStatus};
 use haarness_protocol::{
-    AgentProfile, ApiDoc, ApiError, BackgroundTaskInfo, BtwRequest, BtwResponse,
-    CommandExecutionResponse, CompactRequest, CreateThreadRequest, EventEnvelope,
-    ExecuteCommandRequest, FileDiff, ForkThreadRequest, GoalActionRequest, GoalActionResponse,
-    LazyToolSettingsUpdate, McpConfigureRequest, McpServerInfo, PTY_CAPABILITY,
-    PendingPermissionInfo, PendingQuestionInfo, PermissionReply, PluginActionRequest, PluginInfo,
-    ProviderInfo, PtyCreateRequest, PtyId, PtyInfo, PtyUpdateRequest, QuestionReply,
-    QueueInputRequest, QueueInputResponse, ReviewFile, SCHEMA_VERSION, SESSION_ARCHIVE_CAPABILITY,
-    ServerInfo, SessionArchive, SessionArchiveImportRequest, SessionArchiveImportResult, SkillInfo,
-    StartTurnRequest, Thread, ThreadId, ToolCatalogResponse, ToolSettingsUpdate, Turn, TurnId,
-    UpdateThreadRequest, WORKSPACE_CLEANUP_CAPABILITY, WORKSPACE_HISTORY_CAPABILITY, WorkflowId,
-    WorkflowRun, WorkflowRunStatus, WorkflowStartRequest, WorkspaceCleanupRequest,
-    WorkspaceCreateRequest, WorkspaceInfo, WorkspaceListResponse, WorkspaceOperationResponse,
-    WorkspaceRefsResponse, WorkspaceRemoveRequest, WorkspaceResetRequest,
-    WorkspaceResolveRefRequest, WorkspaceResolveRefResponse,
+    AgentProfile, ApiDoc, ApiError, BackgroundTaskInfo, BtwRequest, BtwResponse, CloudAgentInput,
+    CloudChatInput, CloudScheduleInput, CloudSessionInput, CommandExecutionResponse,
+    CompactRequest, CreateThreadRequest, EventEnvelope, ExecuteCommandRequest, FileDiff,
+    ForkThreadRequest, GoalActionRequest, GoalActionResponse, LazyToolSettingsUpdate,
+    McpConfigureRequest, McpServerInfo, PTY_CAPABILITY, PendingPermissionInfo, PendingQuestionInfo,
+    PermissionReply, PluginActionRequest, PluginInfo, ProviderInfo, PtyCreateRequest, PtyId,
+    PtyInfo, PtyUpdateRequest, QuestionReply, QueueInputRequest, QueueInputResponse, ReviewFile,
+    SCHEMA_VERSION, SESSION_ARCHIVE_CAPABILITY, ServerInfo, SessionArchive,
+    SessionArchiveImportRequest, SessionArchiveImportResult, SkillInfo, StartTurnRequest, Thread,
+    ThreadId, ToolCatalogResponse, ToolSettingsUpdate, Turn, TurnId, UpdateThreadRequest,
+    WORKSPACE_CLEANUP_CAPABILITY, WORKSPACE_HISTORY_CAPABILITY, WorkflowId, WorkflowRun,
+    WorkflowRunStatus, WorkflowStartRequest, WorkspaceCleanupRequest, WorkspaceCreateRequest,
+    WorkspaceInfo, WorkspaceListResponse, WorkspaceOperationResponse, WorkspaceRefsResponse,
+    WorkspaceRemoveRequest, WorkspaceResetRequest, WorkspaceResolveRefRequest,
+    WorkspaceResolveRefResponse,
 };
 use haarness_pty::{PtyManager, PtySubscription};
 use haarness_workflow_catalog::{CatalogError, WorkflowCatalog};
@@ -164,6 +165,10 @@ pub async fn serve_with_access(
     let shutdown = CancellationToken::new();
     let protected = Router::new()
         .route("/manage/{resource}", post(manage_resource))
+        .route("/cloud/agents", post(cloud_agents))
+        .route("/cloud/sessions", post(cloud_sessions))
+        .route("/cloud/chats", post(cloud_chats))
+        .route("/cloud/schedules", post(cloud_schedules))
         .merge(crate::profiles::routes())
         .route("/info", get(info))
         .route("/stats", get(analytics_stats))
@@ -376,6 +381,7 @@ async fn openapi() -> Json<Value> {
     document.merge(crate::files::FilesApi::openapi());
     document.merge(crate::browser::BrowserApi::openapi());
     document.merge(ManagementApi::openapi());
+    document.merge(crate::remote::HostApi::openapi());
     Json(serde_json::to_value(document).expect("OpenAPI serializes"))
 }
 
@@ -1843,7 +1849,13 @@ fn usage_totals(items: &[haarness_protocol::Item]) -> Value {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(manage_resource),
+    paths(
+        manage_resource,
+        cloud_agents,
+        cloud_sessions,
+        cloud_chats,
+        cloud_schedules
+    ),
     components(schemas(
         haarness_protocol::ManagementView,
         haarness_protocol::ManagementEntry,
@@ -1865,6 +1877,57 @@ async fn manage_resource(
         haarness_core::CoreError::Tool("Client management is unavailable on this server".into())
     })?;
     Ok(Json(registry.user_request(&resource, input).await?))
+}
+/// Account-authenticated Cloud agents, using this host's signed-in account.
+#[utoipa::path(post, path = "/v1/cloud/agents", request_body = CloudAgentInput, responses((status = 200, body = Value), (status = 401, description = "Authentication required")))]
+async fn cloud_agents(
+    State(state): State<ServerState>,
+    Json(input): Json<CloudAgentInput>,
+) -> ApiResult<Json<Value>> {
+    manage_resource(
+        State(state),
+        Path("cloud_agent_manage".into()),
+        Json(serde_json::to_value(input).expect("Cloud input serializes")),
+    )
+    .await
+}
+/// Account-authenticated Cloud sessions, using this host's signed-in account.
+#[utoipa::path(post, path = "/v1/cloud/sessions", request_body = CloudSessionInput, responses((status = 200, body = Value), (status = 401, description = "Authentication required")))]
+async fn cloud_sessions(
+    State(state): State<ServerState>,
+    Json(input): Json<CloudSessionInput>,
+) -> ApiResult<Json<Value>> {
+    manage_resource(
+        State(state),
+        Path("cloud_agent_session".into()),
+        Json(serde_json::to_value(input).expect("Cloud input serializes")),
+    )
+    .await
+}
+/// Account-authenticated Cloud chats, using this host's signed-in account.
+#[utoipa::path(post, path = "/v1/cloud/chats", request_body = CloudChatInput, responses((status = 200, body = Value), (status = 401, description = "Authentication required")))]
+async fn cloud_chats(
+    State(state): State<ServerState>,
+    Json(input): Json<CloudChatInput>,
+) -> ApiResult<Json<Value>> {
+    manage_resource(
+        State(state),
+        Path("cloud_chat".into()),
+        Json(serde_json::to_value(input).expect("Cloud input serializes")),
+    )
+    .await
+}
+#[utoipa::path(post, path="/v1/cloud/schedules", request_body=CloudScheduleInput, responses((status=200,body=Value)))]
+async fn cloud_schedules(
+    State(state): State<ServerState>,
+    Json(input): Json<CloudScheduleInput>,
+) -> ApiResult<Json<Value>> {
+    manage_resource(
+        State(state),
+        Path("cloud_schedule".into()),
+        Json(serde_json::to_value(input).expect("Cloud input serializes")),
+    )
+    .await
 }
 async fn get_turn(
     State(state): State<ServerState>,

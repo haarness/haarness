@@ -13,8 +13,9 @@ use haarness_protocol::{WorkspaceInfo, WorkspaceListResponse};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_tungstenite::tungstenite::{Message as UpstreamMessage, client::IntoClientRequest};
+use utoipa::{OpenApi, ToSchema};
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DirectoryListing {
     pub path: String,
@@ -32,7 +33,7 @@ pub struct BrowseOptions {
     pub limit: Option<usize>,
     pub after: Option<String>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct DirectoryEntry {
     pub name: String,
     pub path: String,
@@ -81,13 +82,14 @@ pub fn routes(
 fn failure(error: anyhow::Error) -> Response {
     (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": {"code":"remote_project", "message":error.to_string(), "retryable":false}}))).into_response()
 }
+#[utoipa::path(get, path="/v1/host/projects", responses((status=200, body=WorkspaceListResponse)))]
 async fn catalog(State(gateway): State<Gateway>) -> Response {
     match gateway.host.catalog().await {
         Ok(value) => Json(value).into_response(),
         Err(error) => failure(error),
     }
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct Browse {
     path: Option<String>,
     #[serde(default)]
@@ -97,6 +99,7 @@ struct Browse {
     limit: Option<usize>,
     after: Option<String>,
 }
+#[utoipa::path(get, path="/v1/host/directories", params(("path"=Option<String>,Query),("prefix"=Option<String>,Query),("hidden"=Option<bool>,Query),("limit"=Option<usize>,Query),("after"=Option<String>,Query)), responses((status=200, body=DirectoryListing)))]
 async fn browse(State(gateway): State<Gateway>, Query(input): Query<Browse>) -> Response {
     match gateway
         .host
@@ -115,11 +118,12 @@ async fn browse(State(gateway): State<Gateway>, Query(input): Query<Browse>) -> 
         Err(error) => failure(error),
     }
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct Open {
     path: String,
 }
+#[utoipa::path(post, path="/v1/host/open", request_body=Open, responses((status=200, body=WorkspaceInfo)))]
 async fn open(State(gateway): State<Gateway>, Json(input): Json<Open>) -> Response {
     match gateway.host.open(input.path).await {
         Ok(value) => Json(value).into_response(),
@@ -234,3 +238,7 @@ async fn forward(
         Err(_) => StatusCode::BAD_GATEWAY.into_response(),
     }
 }
+
+#[derive(OpenApi)]
+#[openapi(paths(catalog, browse, open))]
+pub struct HostApi;

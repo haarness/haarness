@@ -87,7 +87,10 @@ fn classify(name: &str) -> Classification {
         ("memory", "Memory", false)
     } else if matches!(name, "get_goal" | "update_goal" | "propose_goal_criteria") {
         ("goals", "Goals", true)
-    } else if matches!(name, "cloud_agent_manage" | "cloud_agent_session") {
+    } else if matches!(
+        name,
+        "cloud_agent_manage" | "cloud_agent_session" | "cloud_chat" | "cloud_schedule"
+    ) {
         ("cloud", "Cloud agents", false)
     } else if name.starts_with("session_") {
         ("sessions", "Sessions", false)

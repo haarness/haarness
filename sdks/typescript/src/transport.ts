@@ -39,12 +39,16 @@ export interface ClientOptions {
 export interface RequestOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
+  headers?: Record<string, string>;
 }
 type WireOptions = RequestOptions & {
   body?: unknown;
   query?: object;
   binaryBody?: boolean;
   binaryResponse?: boolean;
+  contentType?: string;
+  textResponse?: boolean;
+  redirectResponse?: boolean;
 };
 export class ApiError extends Error {
   constructor(
@@ -72,12 +76,12 @@ export interface EventOptions extends Omit<RequestOptions, "timeoutMs"> {
   retryMs?: number;
 }
 
-export class Transport {
+export class HttpTransport {
   readonly baseUrl: string;
   private readonly authentication: Record<string, string>;
   private readonly resolveAuth?: () => Promise<ServerAuth>;
   protected readonly timeoutMs: number;
-  private readonly fetcher: typeof globalThis.fetch;
+  protected readonly fetcher: typeof globalThis.fetch;
   private readonly lifetime = new AbortController();
   constructor(options: ClientOptions) {
     const url = new URL(options.baseUrl);
@@ -134,7 +138,7 @@ export class Transport {
       ? AbortSignal.any([signal, this.lifetime.signal])
       : this.lifetime.signal;
   }
-  private async failure(response: Response): Promise<never> {
+  protected async failure(response: Response): Promise<never> {
     const text = await response.text();
     let body: unknown = text;
     try {
@@ -142,8 +146,8 @@ export class Transport {
     } catch {
       /* Framework errors can be plain text. */
     }
-    const record =
-      body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+    const outer = body && typeof body === "object" ? body as Record<string, unknown> : {};
+    const record = outer.error && typeof outer.error === "object" ? outer.error as Record<string, unknown> : outer;
     throw new ApiError(
       response.status,
       String(record.code ?? "http_error"),
@@ -157,7 +161,7 @@ export class Transport {
     path: string,
     options: WireOptions = {},
   ): Promise<T> {
-    const headers = await this.headers();
+    const headers = { ...await this.headers(), ...options.headers };
     const deadline = new AbortController();
     const timeout = options.timeoutMs ?? this.timeoutMs;
     if (!(timeout > 0)) throw new TypeError("timeoutMs must be positive");
@@ -172,25 +176,32 @@ export class Transport {
     ]);
     try {
       if (options.body !== undefined)
-        headers["Content-Type"] = options.binaryBody
+        headers["Content-Type"] = options.contentType ?? (options.binaryBody
           ? "application/zip"
-          : "application/json";
+          : "application/json");
       const response = await this.fetcher(this.url(path, options.query), {
         method,
         headers,
-        redirect: "error",
+        redirect: options.redirectResponse ? "manual" : "error",
         signal,
         body:
           options.body === undefined
             ? undefined
             : options.binaryBody
               ? (options.body as BodyInit)
-              : JSON.stringify(options.body),
+              : options.contentType === "application/x-www-form-urlencoded"
+                ? new URLSearchParams(options.body as Record<string,string>).toString()
+                : options.contentType === "text/plain" ? String(options.body) : JSON.stringify(options.body),
       });
+      if (options.redirectResponse && response.status >= 300 && response.status < 400) {
+        await response.body?.cancel();
+        return { status: response.status, location: response.headers.get("location") } as T;
+      }
       if (!response.ok) return await this.failure(response);
       if (options.binaryResponse)
         return new Uint8Array(await response.arrayBuffer()) as T;
       const text = await response.text();
+      if (options.textResponse) return text as T;
       if (!text) return undefined as T;
       try {
         return JSON.parse(text) as T;
@@ -206,6 +217,9 @@ export class Transport {
       clearTimeout(timer);
     }
   }
+}
+
+export class Transport extends HttpTransport {
   /** Ordered events. Resync markers are yielded; hydrate REST snapshots before reconnecting. */
   async *events(options: EventOptions = {}): AsyncGenerator<ServerEvent> {
     const signal = this.signal(options.signal);

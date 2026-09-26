@@ -32,6 +32,12 @@ def result(turn: Turn, items: list[Item]) -> ChatResult:
 
 
 class Haarness(Api):
+    def workspace(self, id: str) -> Haarness:
+        """Bind the complete runtime API to an opaque host workspace ID."""
+        client = Haarness(self.base_url + '/v1/host/workspaces/' + self.segment(id), token='')
+        client._authentication = self._headers()
+        return client
+
     def chat(
         self,
         id: str,
@@ -64,6 +70,11 @@ class Haarness(Api):
 
 
 class AsyncHaarness(AsyncApi):
+    def workspace(self, id: str) -> AsyncHaarness:
+        client = AsyncHaarness(self.base_url + '/v1/host/workspaces/' + self.segment(id), token='')
+        client._authentication = self._headers()
+        return client
+
     async def chat(
         self,
         id: str,
