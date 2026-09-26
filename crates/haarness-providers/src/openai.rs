@@ -721,14 +721,14 @@ impl ModelProvider for OpenAiProvider {
                             yield ProviderEvent::ToolCall { call_id, name, arguments, provider_metadata };
                         }
                     }
-                    "response.completed" => {
+                    "response.completed" | "response.incomplete" => {
                         let usage = &event["response"]["usage"];
                         let cache_read = usage
                             .pointer("/input_tokens_details/cached_tokens")
                             .and_then(Value::as_u64)
                             .unwrap_or(0);
                         yield ProviderEvent::Usage { input_tokens: number(usage, "input_tokens"), output_tokens: number(usage, "output_tokens"), cache_read_tokens: cache_read, cache_write_tokens: 0 };
-                        yield ProviderEvent::Finished { reason: "completed".into() };
+                        yield ProviderEvent::Finished { reason: event["response"]["incomplete_details"]["reason"].as_str().unwrap_or("completed").into() };
                     }
                     "response.failed" | "error" => Err(CoreError::Provider(event.to_string()))?,
                     _ => {}

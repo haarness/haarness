@@ -66,6 +66,18 @@ fn headline(category: &str) -> &str {
 /// The one thing being approved: the command, path, or url the server sent as
 /// detail, else the raw patterns, else the operation string's subject half.
 fn subject(pending: &PendingPermissionInfo) -> Option<String> {
+    if category(pending) == "agent_switch" {
+        let details = &pending.detail["__agentSwitch"];
+        if let (Some(agent), Some(model)) = (details["agent"].as_str(), details["model"].as_str()) {
+            let previous = details["previousModel"].as_str().filter(|previous| *previous != model);
+            let mut text = format!("Agent: {agent}\nModel: {model}");
+            if let Some(previous) = previous { text.push_str(&format!("\nPrevious model: {previous}")); }
+            if let Some(reason) = pending.detail["reason"].as_str().filter(|value| !value.trim().is_empty()) {
+                text.push_str(&format!("\nReason: {reason}"));
+            }
+            return Some(text);
+        }
+    }
     for key in ["command", "path", "url"] {
         if let Some(value) = pending
             .detail
@@ -95,6 +107,9 @@ fn subject(pending: &PendingPermissionInfo) -> Option<String> {
 /// than the subject already did. The stored rule carries a `category:` prefix
 /// that the headline has just spelled out in words, so it comes off here.
 fn always_rules(pending: &PendingPermissionInfo, subject: Option<&str>) -> Vec<String> {
+    if category(pending) == "agent_switch" && pending.detail["__agentSwitch"]["agent"].is_string() {
+        return vec![format!("only agent {} in this session", pending.detail["__agentSwitch"]["agent"].as_str().unwrap())];
+    }
     let prefix = format!("{}:", category(pending));
     pending
         .always_patterns

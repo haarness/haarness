@@ -1830,7 +1830,10 @@ impl AgentRuntime {
             while let Some(event) = stream.next().await {
                 match event? {
                     ProviderEvent::TextDelta(delta) => answer.push_str(&delta),
-                    ProviderEvent::ReasoningDelta(_) | ProviderEvent::Finished { .. } => {}
+                    ProviderEvent::ReasoningDelta(_) => {}
+                    ProviderEvent::Finished { reason } => {
+                        if let Some(error) = ProviderEvent::finish_error(&reason) { return Err(error); }
+                    }
                     ProviderEvent::Usage {
                         input_tokens: input,
                         output_tokens: output,
@@ -4574,7 +4577,7 @@ impl RunnerTask {
             // so the retry operates on a stable queue and later input waits for
             // a fresh turn.
             let retryable = result.as_ref().is_err_and(|error_value| {
-                !matches!(error_value, CoreError::Cancelled)
+                !matches!(error_value, CoreError::Cancelled | CoreError::ProviderBlocked(_))
                     && !is_provider_usage_limit(error_value)
             });
             if retryable && self.has_unconsumed_queued().await {
@@ -5454,6 +5457,7 @@ impl RunnerTask {
                 let mut usage = None;
                 let mut calls = Vec::new();
                 let mut structured_output = None;
+                let mut blocked = None;
                 let mut saw_provider_event = false;
                 loop {
                     let event = tokio::select! {
@@ -5571,12 +5575,16 @@ impl RunnerTask {
                                 cache_write_tokens,
                             ));
                         }
-                        ProviderEvent::Finished { .. } => {}
+                        ProviderEvent::Finished { reason } => {
+                            if let Some(error) = ProviderEvent::finish_error(&reason) { blocked = Some(error); }
+                        }
                     }
                 }
                 drop(provider_span);
                 self.flush_reasoning_segment(&mut reasoning).await?;
-                if self.output_schema.is_some() {
+                if blocked.is_some() {
+                    self.flush_assistant_segment(&mut text, &mut goal_turn_assistant_text).await?;
+                } else if self.output_schema.is_some() {
                     if !text.trim().is_empty() {
                         return Err(CoreError::Provider(
                             "provider returned plain text for a structured-output turn".into(),
@@ -5630,6 +5638,15 @@ impl RunnerTask {
                     },
                 ))
                 .await?;
+                if let Some(error) = blocked {
+                    for (call_id, name, _) in calls {
+                        self.publish_item(ItemData::ToolResult {
+                            call_id, name, output: error.to_string(), is_error: true,
+                            metadata: serde_json::Value::Null,
+                        }).await?;
+                    }
+                    return Err(error);
+                }
                 if calls.is_empty() {
                     logical_turn.finish()?;
                     // A message can arrive after this round's request snapshot,
@@ -8655,6 +8672,16 @@ fn combine_browser_approvals(name: &str, plans: Vec<AskPlan>) -> Vec<AskPlan> {
 /// "always" rule, and touching paths outside the workspace raises a separate
 /// `external_directory` group.
 fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec<AskPlan> {
+    if name == "agent_switch" {
+        // Hex keeps glob syntax in custom agent names literal. Session identity also
+        // prevents a repository-level remembered answer from approving other chats.
+        let agent = arguments["agent"].as_str().unwrap_or_default().as_bytes()
+            .iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let scope = arguments["__agentSwitch"]["threadId"].as_str().unwrap_or("unprepared");
+        let pattern = format!("{scope}:{agent}");
+        return vec![AskPlan { permission: name.into(), patterns: vec![pattern.clone()],
+            always: vec![pattern], external_paths: Vec::new() }];
+    }
     if matches!(name, "cloud_agent_manage" | "cloud_agent_session") {
         let action = arguments["action"].as_str().unwrap_or("unknown");
         let target = arguments["sessionId"]
@@ -8838,6 +8865,24 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         external_paths: Vec::new(),
     });
     plans
+}
+
+#[cfg(test)]
+mod switch_permission_tests {
+    use super::*;
+    #[test]
+    fn remembered_switches_match_only_the_exact_session_and_agent() {
+        let plan = |thread: &str, agent: &str| ask_plans("agent_switch", &json!({
+            "agent": agent, "__agentSwitch": {"threadId": thread},
+        }), Path::new("/workspace")).remove(0);
+        let original = plan("session-one", "review*?\\agent");
+        let mut engine = PermissionEngine::default();
+        engine.approve_always(original.always_rules()[0].clone());
+        assert_eq!(engine.evaluate(&original.operation(&original.patterns[0])), PermissionDecision::Allow);
+        for other in [plan("session-two", "review*?\\agent"), plan("session-one", "reviewXX/agent"), plan("session-one", "build")] {
+            assert_eq!(engine.evaluate(&other.operation(&other.patterns[0])), PermissionDecision::Ask);
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

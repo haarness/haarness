@@ -1352,7 +1352,26 @@ impl ManagementService {
         Ok(json!({"threadId":target.id,"status":"idle"}))
     }
 
+    async fn switch_details(&self, input: &Value, thread: ThreadId) -> Result<Value> {
+        let runtime = self.runtime()?;
+        let current = runtime.get_thread(thread).await.map_err(core_error)?;
+        anyhow::ensure!(current.parent_id.is_none(), "agent_switch is available only in root sessions");
+        let target = required_string(input, "agent")?;
+        ensure_user_agent(target)?;
+        let profile = runtime.agent_profiles().into_iter().find(|profile| profile.id == target)
+            .with_context(|| format!("unknown agent '{target}'"))?;
+        anyhow::ensure!(profile.mode.as_deref() != Some("subagent"), "agent '{target}' is subagent-only");
+        let previous = format!("{}/{}", current.provider, current.model);
+        Ok(json!({
+            "threadId": thread, "agent": target, "previousAgent": current.agent,
+            "model": profile.model.unwrap_or_else(|| previous.clone()), "previousModel": previous,
+        }))
+    }
+
     async fn agent_switch(&self, input: &Value, context: &ToolContext) -> Result<Value> {
+        // Approval binds the exact destination and model resolved before the prompt.
+        anyhow::ensure!(input.get("__agentSwitch") == Some(&self.switch_details(input, context.thread_id).await?),
+            "Agent or model changed while awaiting approval. Request the switch again.");
         let runtime = self.runtime()?;
         let current = runtime
             .get_thread(context.thread_id)
@@ -1630,6 +1649,14 @@ pub(super) fn memory_root_for(paths: &Paths, workspace: &Path) -> PathBuf {
 
 #[async_trait]
 impl ManagementRegistry for ManagementService {
+    async fn prepare(&self, resource: &str, mut arguments: Value, thread: ThreadId) -> CoreResult<Value> {
+        if resource == "agent_switch" {
+            arguments["__agentSwitch"] = self.switch_details(&arguments, thread).await
+                .map_err(|error| CoreError::Tool(error.to_string()))?;
+        }
+        Ok(arguments)
+    }
+
     async fn user_request(&self, resource: &str, input: Value) -> CoreResult<Value> {
         self.ui_request(resource, &input)
             .await
