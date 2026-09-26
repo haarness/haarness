@@ -2,9 +2,10 @@
 use axum::{
     Json, Router,
     body::to_bytes,
-    extract::{Request, State},
+    extract::{Request, State, WebSocketUpgrade, ws::Message},
     http::StatusCode,
     response::{IntoResponse, Response},
+    routing::get,
 };
 use chrono::{Duration, Utc};
 use haarness_account::{Client, Config, Credentials, cloud::Cloud, credentials};
@@ -34,6 +35,17 @@ struct Data {
     reject_ticket: bool,
     invalid_gateway: bool,
     foreign_account: bool,
+    control_events: Option<tokio::sync::broadcast::Sender<Value>>,
+    runtime_events: Option<tokio::sync::broadcast::Sender<Value>>,
+    control_connections: usize,
+    runtime_connections: usize,
+    live_connections: usize,
+    hold_startup: bool,
+    reject_control_token: bool,
+    account_rotated: bool,
+    control_rejections: usize,
+    stale_generation: bool,
+    stale_generation_on_write: bool,
 }
 type Shared = Arc<Mutex<Data>>;
 fn agent(d: &Data) -> Value {
@@ -59,6 +71,11 @@ async fn handler(State(state): State<Shared>, req: Request) -> Response {
             bearer.starts_with("Bearer ticket-"),
             "Account bearer must never go to the runtime"
         );
+        if (d.stale_generation || d.stale_generation_on_write && method == "POST")
+            && bearer == "Bearer ticket-1"
+        {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error":{"code":"remote_project","message":"workspace restarted; re-attach"}}))).into_response();
+        }
         if d.reject_ticket && bearer == "Bearer ticket-1" {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -68,8 +85,18 @@ async fn handler(State(state): State<Shared>, req: Request) -> Response {
         }
     } else if path.starts_with("/router/") {
         assert_eq!(bearer, "Bearer router-secret");
+    } else if path == "/oauth/token" {
+        d.account_rotated = true;
+        return Json(json!({"access_token":"account-renewed","refresh_token":"refresh-renewed","expires_in":3600})).into_response();
     } else {
-        assert_eq!(bearer, "Bearer account-secret");
+        assert_eq!(
+            bearer,
+            if d.account_rotated {
+                "Bearer account-renewed"
+            } else {
+                "Bearer account-secret"
+            }
+        );
     }
     let value = match (method.as_str(), path.as_str()) {
         ("GET", "/api/v1/me") => json!({"user":{},"accounts":[],"defaultAccountId":ACCOUNT}),
@@ -96,7 +123,12 @@ async fn handler(State(state): State<Shared>, req: Request) -> Response {
         }
         ("GET", p) if p == format!("/api/v1/sessions/{SESSION}") => {
             d.session_reads += 1;
-            let observed = if (d.created || d.started) && d.session_reads <= 2 || d.stopped {
+            let starting = if d.control_events.is_some() {
+                d.hold_startup
+            } else {
+                d.session_reads <= 2
+            };
+            let observed = if (d.created || d.started) && starting || d.stopped {
                 "stopped"
             } else {
                 "running"
@@ -180,7 +212,11 @@ impl Fixture {
             base: base.clone(),
             ..Data::default()
         }));
-        let app = Router::new().fallback(handler).with_state(data.clone());
+        let app = Router::new()
+            .route("/api/v1/events", get(control_events))
+            .route("/runtime/v1/events", get(runtime_events))
+            .fallback(handler)
+            .with_state(data.clone());
         let server = tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
         let config = Config::new(
             &base,
@@ -220,6 +256,91 @@ impl Fixture {
             .filter(|r| r.0 == method && r.1.starts_with(&format!("{path}?")))
             .count()
     }
+    fn enable_events(&self) {
+        let mut d = self.data.lock().unwrap();
+        d.control_events = Some(tokio::sync::broadcast::channel(64).0);
+        d.runtime_events = Some(tokio::sync::broadcast::channel(64).0);
+    }
+}
+
+struct Connection(Shared);
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().live_connections -= 1;
+    }
+}
+async fn control_events(
+    State(data): State<Shared>,
+    ws: WebSocketUpgrade,
+    req: Request,
+) -> Response {
+    assert!(req.headers().get("origin").is_none());
+    assert!(req.uri().query().unwrap().contains(ACCOUNT));
+    let mut receiver = {
+        let mut d = data.lock().unwrap();
+        if d.reject_control_token && req.headers()["authorization"] == "Bearer account-secret" {
+            d.control_rejections += 1;
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        assert_eq!(
+            req.headers()["authorization"],
+            if d.account_rotated {
+                "Bearer account-renewed"
+            } else {
+                "Bearer account-secret"
+            }
+        );
+        let Some(events) = &d.control_events else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        let receiver = events.subscribe();
+        d.control_connections += 1;
+        d.live_connections += 1;
+        receiver
+    };
+    ws.on_upgrade(move |mut socket| async move {
+        let _connection = Connection(data);
+        socket.send(Message::Text(json!({"type":"ready","resync":true}).to_string().into())).await.unwrap();
+        loop {
+            tokio::select! {
+                event = receiver.recv() => {
+                    let Ok(event) = event else { break; };
+                    if event["_close"] == true { break; }
+                    if socket.send(Message::Text(event.to_string().into())).await.is_err() { break; }
+                }
+                _ = socket.recv() => break,
+            }
+        }
+    }).into_response()
+}
+async fn runtime_events(State(data): State<Shared>, req: Request) -> Response {
+    let mut receiver = {
+        let mut d = data.lock().unwrap();
+        assert!(
+            req.headers()["authorization"]
+                .to_str()
+                .unwrap()
+                .starts_with("Bearer ticket-")
+        );
+        let Some(events) = &d.runtime_events else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        let receiver = events.subscribe();
+        d.runtime_connections += 1;
+        d.live_connections += 1;
+        receiver
+    };
+    let connection = Connection(data);
+    let stream = async_stream::stream! {
+        let _connection = connection;
+        while let Ok(event) = receiver.recv().await {
+            if event["_close"] == true { break; }
+            yield Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(event.to_string()));
+        }
+    };
+    axum::response::Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::default())
+        .into_response()
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -613,4 +734,433 @@ async fn independent_sessions_inline_configuration_revision_and_save_template() 
         .await
         .unwrap();
     assert_eq!(key["sshPublicKey"], "ssh-ed25519 session-public");
+}
+
+async fn until(mut predicate: impl FnMut() -> bool) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !predicate() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("fixture condition");
+}
+fn turn_event(kind: &str) -> Value {
+    json!({"type":kind,"threadId":THREAD,"rootThreadId":THREAD,"turnId":TURN})
+}
+
+#[tokio::test]
+async fn startup_uses_websocket_and_ignores_other_sessions_without_polling() {
+    let f = Fixture::new(true).await;
+    f.enable_events();
+    f.data.lock().unwrap().hold_startup = true;
+    let cloud = f.cloud(CancellationToken::new()).await;
+    let task = tokio::spawn(async move {
+        cloud
+            .session(json!({"action":"start","sessionId":SESSION,"timeoutSeconds":10}))
+            .await
+    });
+    until(|| {
+        let connected = f.data.lock().unwrap().control_connections == 1;
+        connected && f.count("GET", &format!("/api/v1/sessions/{SESSION}")) >= 2
+    })
+    .await;
+    let reads = f.count("GET", &format!("/api/v1/sessions/{SESSION}"));
+    {
+        let d = f.data.lock().unwrap();
+        d.control_events
+            .as_ref()
+            .unwrap()
+            .send(
+                json!({"type":"entity.changed","accountId":ACCOUNT,"entity":"session","id":OTHER}),
+            )
+            .unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    assert_eq!(
+        f.count("GET", &format!("/api/v1/sessions/{SESSION}")),
+        reads,
+        "healthy stream must not poll"
+    );
+    let sent = std::time::Instant::now();
+    {
+        let mut d = f.data.lock().unwrap();
+        d.hold_startup = false;
+        d.control_events.as_ref().unwrap().send(json!({"type":"entity.changed","accountId":ACCOUNT,"entity":"session","id":SESSION})).unwrap();
+    }
+    let result = tokio::time::timeout(std::time::Duration::from_millis(700), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(result["status"], "running");
+    assert!(sent.elapsed() < std::time::Duration::from_millis(700));
+    until(|| f.data.lock().unwrap().live_connections == 0).await;
+}
+
+#[tokio::test]
+async fn runtime_completion_is_push_driven_and_tokens_do_not_trigger_reads() {
+    let f = Fixture::new(true).await;
+    f.enable_events();
+    f.data.lock().unwrap().running_turn = true;
+    let cloud = f.cloud(CancellationToken::new()).await;
+    let task = tokio::spawn(async move {
+        cloud
+            .session(
+                json!({"action":"ask","sessionId":SESSION,"threadId":THREAD,"message":"hello"}),
+            )
+            .await
+    });
+    until(|| f.count("GET", "/runtime/v1/permissions") == 1).await;
+    assert_eq!(f.data.lock().unwrap().runtime_connections, 1);
+    let reads = f.count("GET", &format!("/runtime/v1/turns/{TURN}"));
+    {
+        let d = f.data.lock().unwrap();
+        for _ in 0..20 {
+            d.runtime_events
+                .as_ref()
+                .unwrap()
+                .send(turn_event("item.delta"))
+                .unwrap();
+        }
+        d.runtime_events
+            .as_ref()
+            .unwrap()
+            .send(turn_event("turn.text_delta"))
+            .unwrap();
+        d.runtime_events
+            .as_ref()
+            .unwrap()
+            .send(turn_event("turn.reasoning_delta"))
+            .unwrap();
+        let mut unrelated = turn_event("turn.finished");
+        unrelated["turnId"] = json!(OTHER);
+        d.runtime_events.as_ref().unwrap().send(unrelated).unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    assert_eq!(f.count("GET", &format!("/runtime/v1/turns/{TURN}")), reads);
+    {
+        let mut d = f.data.lock().unwrap();
+        d.running_turn = false;
+        d.runtime_events
+            .as_ref()
+            .unwrap()
+            .send(turn_event("turn.finished"))
+            .unwrap();
+    }
+    let result = tokio::time::timeout(std::time::Duration::from_millis(700), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(result["status"], "completed");
+    assert_eq!(result["messages"]["items"].as_array().unwrap().len(), 5);
+    assert_eq!(
+        f.count("POST", &format!("/runtime/v1/threads/{THREAD}/turns")),
+        1
+    );
+    until(|| f.data.lock().unwrap().live_connections == 0).await;
+}
+
+#[tokio::test]
+async fn child_permission_event_wakes_wait_without_autoapproval() {
+    let f = Fixture::new(true).await;
+    f.enable_events();
+    f.data.lock().unwrap().running_turn = true;
+    let cloud = f.cloud(CancellationToken::new()).await;
+    let task = tokio::spawn(async move {
+        cloud
+            .session(json!({"action":"wait","sessionId":SESSION,"threadId":THREAD,"turnId":TURN}))
+            .await
+    });
+    until(|| f.count("GET", "/runtime/v1/permissions") == 1).await;
+    {
+        let mut d = f.data.lock().unwrap();
+        d.permission = true;
+        d.runtime_events
+            .as_ref()
+            .unwrap()
+            .send(json!({"type":"permission.requested","threadId":OTHER,"rootThreadId":THREAD}))
+            .unwrap();
+    }
+    let result = tokio::time::timeout(std::time::Duration::from_millis(700), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(result["status"], "needs_attention");
+    assert_eq!(result["turn"]["permissions"].as_array().unwrap().len(), 1);
+    assert!(
+        f.data
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .all(|(method, path, _)| method != "POST" || !path.contains("permissions"))
+    );
+}
+
+#[tokio::test]
+async fn runtime_reconnects_reattaches_and_resyncs_a_gap_without_resubmission() {
+    let f = Fixture::new(true).await;
+    f.enable_events();
+    f.data.lock().unwrap().running_turn = true;
+    let cloud = f.cloud(CancellationToken::new()).await;
+    let task = tokio::spawn(async move {
+        cloud
+            .session(json!({"action":"ask","sessionId":SESSION,"threadId":THREAD,"message":"once"}))
+            .await
+    });
+    until(|| f.count("GET", "/runtime/v1/permissions") == 1).await;
+    f.data
+        .lock()
+        .unwrap()
+        .runtime_events
+        .as_ref()
+        .unwrap()
+        .send(json!({"_close":true}))
+        .unwrap();
+    until(|| f.data.lock().unwrap().runtime_connections >= 2).await;
+    // A resync frame represents a server replay gap; completion itself was missed.
+    {
+        let mut d = f.data.lock().unwrap();
+        d.running_turn = false;
+        d.runtime_events
+            .as_ref()
+            .unwrap()
+            .send(json!({"type":"resync_required"}))
+            .unwrap();
+    }
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(result["status"], "completed");
+    assert!(f.data.lock().unwrap().attachments >= 2);
+    assert_eq!(
+        f.count("POST", &format!("/runtime/v1/threads/{THREAD}/turns")),
+        1
+    );
+}
+
+#[tokio::test]
+async fn unsupported_stream_falls_back_and_dropped_wait_closes_subscription() {
+    let f = Fixture::new(true).await;
+    f.data.lock().unwrap().running_turn = true;
+    let cloud = f.cloud(CancellationToken::new()).await;
+    let task = tokio::spawn(async move {
+        cloud
+            .session(json!({"action":"wait","sessionId":SESSION,"threadId":THREAD,"turnId":TURN}))
+            .await
+    });
+    until(|| f.count("GET", "/runtime/v1/permissions") == 1).await;
+    f.data.lock().unwrap().running_turn = false;
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()["status"],
+        "completed"
+    );
+
+    f.enable_events();
+    f.data.lock().unwrap().running_turn = true;
+    let cloud = f.cloud(CancellationToken::new()).await;
+    let task = tokio::spawn(async move {
+        cloud
+            .session(json!({"action":"wait","sessionId":SESSION,"threadId":THREAD,"turnId":TURN}))
+            .await
+    });
+    until(|| f.data.lock().unwrap().live_connections == 1).await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    until(|| f.data.lock().unwrap().live_connections == 0).await;
+    assert_eq!(
+        f.count("POST", &format!("/runtime/v1/turns/{TURN}/interrupt")),
+        0
+    );
+}
+
+#[tokio::test]
+async fn streaming_timeout_and_cancellation_preserve_continuation_and_ownership() {
+    let f = Fixture::new(true).await;
+    f.enable_events();
+    f.data.lock().unwrap().running_turn = true;
+    let cloud = f.cloud(CancellationToken::new()).await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), cloud.session(json!({"action":"ask","sessionId":SESSION,"threadId":THREAD,"message":"slow","timeoutSeconds":1}))).await.unwrap().unwrap();
+    assert_eq!(result["status"], "running");
+    assert_eq!(result["turnId"], TURN);
+    until(|| f.data.lock().unwrap().live_connections == 0).await;
+    for asking in [false, true] {
+        let cancel = CancellationToken::new();
+        let cloud = f.cloud(cancel.clone()).await;
+        let task = tokio::spawn(async move {
+            cloud.session(json!({"action":if asking {"ask"} else {"wait"},"sessionId":SESSION,"threadId":THREAD,"turnId":TURN,"message":"cancel"})).await
+        });
+        until(|| f.data.lock().unwrap().live_connections == 1).await;
+        cancel.cancel();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        until(|| f.data.lock().unwrap().live_connections == 0).await;
+        assert_eq!(
+            f.count("POST", &format!("/runtime/v1/turns/{TURN}/interrupt")),
+            usize::from(asking)
+        );
+    }
+    assert_eq!(
+        f.count("POST", &format!("/api/v1/sessions/{SESSION}/stop")),
+        0
+    );
+    assert_eq!(f.count("DELETE", &format!("/api/v1/sessions/{SESSION}")), 0);
+}
+
+#[tokio::test]
+async fn control_socket_refreshes_rejected_oauth_and_resyncs_after_reconnect() {
+    let f = Fixture::new(true).await;
+    f.enable_events();
+    {
+        let mut d = f.data.lock().unwrap();
+        d.hold_startup = true;
+        d.reject_control_token = true;
+    }
+    let cloud = f.cloud(CancellationToken::new()).await;
+    let task = tokio::spawn(async move {
+        cloud
+            .session(json!({"action":"start","sessionId":SESSION,"timeoutSeconds":10}))
+            .await
+    });
+    until(|| f.data.lock().unwrap().control_connections == 1).await;
+    assert!(f.data.lock().unwrap().account_rotated);
+    assert_eq!(f.data.lock().unwrap().control_rejections, 1);
+    f.data
+        .lock()
+        .unwrap()
+        .control_events
+        .as_ref()
+        .unwrap()
+        .send(json!({"_close":true}))
+        .unwrap();
+    until(|| f.data.lock().unwrap().control_connections == 2).await;
+    {
+        let mut d = f.data.lock().unwrap();
+        d.hold_startup = false;
+        d.control_events
+            .as_ref()
+            .unwrap()
+            .send(json!({"type":"resync_required"}))
+            .unwrap();
+    }
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()["status"],
+        "running"
+    );
+}
+
+#[tokio::test]
+async fn runtime_generation_changes_reattach_reads_but_never_replay_asks() {
+    let f = Fixture::new(true).await;
+    f.data.lock().unwrap().stale_generation = true;
+    let cloud = f.cloud(CancellationToken::new()).await;
+    let result = cloud
+        .session(json!({"action":"messages","sessionId":SESSION,"threadId":THREAD}))
+        .await
+        .unwrap();
+    assert_eq!(result["messages"]["items"].as_array().unwrap().len(), 5);
+    assert_eq!(f.data.lock().unwrap().attachments, 2);
+    let f = Fixture::new(true).await;
+    f.data.lock().unwrap().stale_generation_on_write = true;
+    let cloud = f.cloud(CancellationToken::new()).await;
+    assert!(
+        cloud
+            .session(json!({"action":"ask","sessionId":SESSION,"threadId":THREAD,"message":"once"}))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("workspace restarted")
+    );
+    assert_eq!(f.data.lock().unwrap().attachments, 1);
+    assert_eq!(
+        f.count("POST", &format!("/runtime/v1/threads/{THREAD}/turns")),
+        1
+    );
+}
+
+#[tokio::test]
+async fn ask_launches_freestyle_or_a_listed_template_with_inline_overrides() {
+    for templated in [false, true] {
+        let f = Fixture::new(true).await;
+        let cloud = f.cloud(CancellationToken::new()).await;
+        let mut arguments = json!({"action":"ask","message":"Review this","configuration":{"instructions":"Inline override","model":"openai/gpt-5-nano"},"wait":false});
+        if templated {
+            let listed = cloud
+                .agent(json!({"action":"list","search":"fixture"}))
+                .await
+                .unwrap();
+            arguments["cloudAgentId"] = listed["items"][0]["id"].clone();
+        }
+        let result = cloud.session(arguments).await.unwrap();
+        assert_eq!(result["messageSubmitted"], true);
+        let d = f.data.lock().unwrap();
+        let created = &d
+            .requests
+            .iter()
+            .find(|(m, p, _)| m == "POST" && p == "/api/v1/sessions?")
+            .unwrap()
+            .2;
+        assert_eq!(created["configuration"]["instructions"], "Inline override");
+        assert_eq!(
+            created["cloudAgentId"],
+            if templated { json!(AGENT) } else { Value::Null }
+        );
+        if !templated {
+            assert!(
+                d.requests
+                    .iter()
+                    .all(|(_, p, _)| !p.contains("cloud-agents"))
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn cancelled_startup_returns_the_retained_session_id_and_closes_socket() {
+    let f = Fixture::new(true).await;
+    f.enable_events();
+    f.data.lock().unwrap().hold_startup = true;
+    let cancel = CancellationToken::new();
+    let cloud = f.cloud(cancel.clone()).await;
+    let task = tokio::spawn(async move {
+        cloud
+            .session(json!({"action":"create","configuration":{"model":"openai/gpt-5-mini"}}))
+            .await
+    });
+    until(|| f.data.lock().unwrap().control_connections == 1).await;
+    cancel.cancel();
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("cancelled") && error.contains(SESSION),
+        "{error}"
+    );
+    until(|| f.data.lock().unwrap().live_connections == 0).await;
+    assert_eq!(f.count("POST", "/api/v1/sessions"), 1);
+    assert_eq!(
+        f.count("POST", &format!("/api/v1/sessions/{SESSION}/stop")),
+        0
+    );
+    assert_eq!(f.count("DELETE", &format!("/api/v1/sessions/{SESSION}")), 0);
 }

@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const MAX_RESPONSE: usize = 8 * 1024 * 1024;
+mod events;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -143,6 +144,7 @@ fn model_search_text(value: &str) -> String {
         .collect()
 }
 
+#[derive(Clone)]
 pub struct Cloud {
     client: Client,
     account: Uuid,
@@ -441,7 +443,10 @@ impl Cloud {
             if input.start != Some(false)
                 && (matches!(input.action, SessionAction::Ask) || input.wait.unwrap_or(true))
             {
-                session = self.ready(id, deadline).await?;
+                let workspace = session["workspace"]["id"]
+                    .as_str()
+                    .and_then(|id| id.parse().ok());
+                session = self.ready(id, workspace, deadline).await?;
             } else {
                 session = self.owned("sessions", id).await?;
             }
@@ -549,9 +554,17 @@ impl Cloud {
         }
     }
 
-    async fn ready(&self, id: Uuid, deadline: Instant) -> Result<Value> {
+    async fn ready(&self, id: Uuid, workspace: Option<Uuid>, deadline: Instant) -> Result<Value> {
+        let mut updates = events::Updates::control(self.clone(), id, workspace, deadline).await;
         loop {
-            let session = self.owned("sessions", id).await?;
+            let session = match self.owned("sessions", id).await {
+                Err(_) if self.cancel.is_cancelled() => {
+                    return Err(invalid(format!(
+                        "Cloud wait cancelled. Session {id} is retained; inspect or stop it explicitly."
+                    )));
+                }
+                result => result?,
+            };
             if matches!(
                 session["workspace"]["observedState"].as_str(),
                 Some("running" | "failed" | "deleted")
@@ -561,12 +574,12 @@ impl Cloud {
             {
                 return Ok(session);
             }
-            tokio::select! { ()=self.cancel.cancelled()=>return Err(invalid(format!("Cloud wait cancelled. Session {id} is retained; inspect or stop it explicitly."))), ()=tokio::time::sleep(Duration::from_secs(1))=>{} }
+            updates.wait(deadline, &self.cancel).await;
         }
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Attachment {
     gateway_url: String,
@@ -622,7 +635,23 @@ impl<'a> Remote<'a> {
                 self.attachment = Self::attach(self.cloud, self.id).await?;
                 continue;
             }
-            return response_json(response).await;
+            let (status, value) = tokio::select! {
+                () = self.cloud.cancel.cancelled() => return Err(invalid("Cloud operation cancelled")),
+                result = read_response(response) => result?,
+            };
+            if attempt == 0
+                && method == Method::GET
+                && status == StatusCode::BAD_REQUEST
+                && value["error"]["code"] == "remote_project"
+                && value["error"]["message"]
+                    .as_str()
+                    .is_some_and(|v| v.contains("workspace restarted"))
+            {
+                // Only repeat reads after a generation change; never replay an ask.
+                self.attachment = Self::attach(self.cloud, self.id).await?;
+                continue;
+            }
+            return checked_response(status, value);
         }
         Err(Error::NotLoggedIn)
     }
@@ -673,6 +702,15 @@ impl<'a> Remote<'a> {
         deadline: Instant,
         abort_on_cancel: bool,
     ) -> Result<Value> {
+        let mut updates = events::Updates::runtime(
+            self.cloud.clone(),
+            self.id,
+            self.attachment.clone(),
+            thread,
+            turn,
+            deadline,
+        )
+        .await;
         loop {
             if self.cloud.cancel.is_cancelled() {
                 if abort_on_cancel {
@@ -731,12 +769,17 @@ impl<'a> Remote<'a> {
                 result["permissions"] = json!(permissions);
                 return Ok(result);
             }
-            tokio::select! {()=self.cloud.cancel.cancelled()=>{},()=tokio::time::sleep(Duration::from_secs(1))=>{}}
+            updates.wait(deadline, &self.cloud.cancel).await;
         }
     }
 }
 
-async fn response_json(mut response: reqwest::Response) -> Result<Value> {
+async fn response_json(response: reqwest::Response) -> Result<Value> {
+    let (status, value) = read_response(response).await?;
+    checked_response(status, value)
+}
+
+async fn read_response(mut response: reqwest::Response) -> Result<(StatusCode, Value)> {
     let status = response.status();
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await? {
@@ -753,6 +796,10 @@ async fn response_json(mut response: reqwest::Response) -> Result<Value> {
         serde_json::from_slice::<Value>(&bytes)
             .map_err(|_| invalid(format!("Cloud returned an invalid response ({status})")))?
     };
+    Ok((status, value))
+}
+
+fn checked_response(status: StatusCode, value: Value) -> Result<Value> {
     if !status.is_success() {
         return Err(invalid(format!(
             "Cloud runtime {status}: {}",

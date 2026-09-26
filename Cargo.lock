@@ -1402,10 +1402,12 @@ dependencies = [
 name = "haarness-account"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "axum",
  "base64 0.22.1",
  "chrono",
  "fs2",
+ "futures",
  "rand 0.9.5",
  "reqwest",
  "serde",
@@ -1413,7 +1415,9 @@ dependencies = [
  "sha2",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-tungstenite 0.30.0",
  "tokio-util",
+ "tracing",
  "url",
  "uuid",
 ]

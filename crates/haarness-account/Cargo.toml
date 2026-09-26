@@ -9,6 +9,7 @@ license.workspace = true
 base64.workspace = true
 chrono.workspace = true
 fs2.workspace = true
+futures.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -17,8 +18,11 @@ sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+async-stream.workspace = true
