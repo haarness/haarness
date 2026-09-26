@@ -3945,6 +3945,11 @@ mod tests {
             if name == "cloud_agent_manage" {
                 assert!(validator.is_valid(&json!({"action":"create","name":"test","configuration":{"resourceClass":"performance-4cpu-8gb","diskGb":500}})));
                 assert!(!validator.is_valid(&json!({"action":"create","name":"test","configuration":{"environment":{"KEY":"secret"}}})));
+            } else {
+                for action in ["create", "ask"] {
+                    assert!(validator.is_valid(&json!({"action":action,"message":"freestyle","configuration":{"instructions":"Review the repository","model":"openai/gpt-5-nano"}})));
+                    assert!(validator.is_valid(&json!({"action":action,"message":"use template","cloudAgentId":"00000000-0000-4000-8000-000000000001","configuration":{"instructions":"Override template defaults"}})));
+                }
             }
         }
     }

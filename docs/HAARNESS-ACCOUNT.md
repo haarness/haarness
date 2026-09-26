@@ -102,12 +102,20 @@ sessions and history but cannot launch or mutate them, even with an allow overri
 
 The tools are discoverable under **Cloud agents** in the tool catalog and can be loaded with
 `load_tool` when lazy loading is enabled. Reads never start a stopped runtime. `ask` without
-`sessionId` creates one from `cloudAgentId`; follow-ups use the returned session/thread IDs.
+`sessionId` creates an independent session. Omit `cloudAgentId` for freestyle work with inline
+`configuration`, or list templates with `cloud_agent_manage` and pass a returned ID to inherit
+its defaults. Inline configuration overrides those defaults. Follow-ups use the returned session/thread IDs.
 `wait=false` submits the message after startup and returns without waiting for the reply.
 Waits default to 120 seconds (maximum 600). A startup timeout reports `messageSubmitted:false`;
 retry `ask` with that session ID once it is running. A running turn at timeout continues remotely:
 use `wait` with its IDs instead of submitting another message. History supports `after`/`nextAfter`
 cursors and `limit` (1–100); without `after`, it returns the latest page.
+
+Waits use the account WebSocket for startup and the runtime SSE stream for turn/approval
+changes. They subscribe before reading state, resync after reconnect, renew credentials/tickets,
+and coalesce events while a snapshot is in flight. Healthy connections reconcile at most once
+a minute; unsupported/disconnected streams retain the one-second HTTP fallback. Events never
+replay a submitted message. Cancelling or dropping a wait closes its event subscription.
 
 Remote permission prompts remain user approvals in the session's Cloud chat. The tool returns
 `needs_attention` and its URL instead of approving them. Cancelling a synchronous ask attempts
