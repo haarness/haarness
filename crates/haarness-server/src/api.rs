@@ -2059,6 +2059,7 @@ impl IntoResponse for ApiFailure {
             }
             CoreError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid_request", false),
             CoreError::Provider(_) => (StatusCode::BAD_GATEWAY, "provider_error", true),
+            CoreError::ProviderBlocked(_) => (StatusCode::BAD_GATEWAY, "provider_blocked", false),
             CoreError::Storage(_) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_error", true),
             CoreError::Tool(_) => (StatusCode::UNPROCESSABLE_ENTITY, "tool_error", false),
             CoreError::Cancelled => (StatusCode::CONFLICT, "cancelled", false),

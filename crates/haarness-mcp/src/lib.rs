@@ -1,6 +1,9 @@
 //! MCP configuration, transport lifecycle, capability discovery, and tool calls.
 
 mod executable;
+mod process;
+#[cfg(all(test, unix))]
+mod process_tests;
 mod credentials;
 use credentials::FileCredentialStore;
 
@@ -21,7 +24,7 @@ use rmcp::{
     transport::{
         AuthClient, AuthorizationManager, AuthorizationRequest,
         CredentialStore as OAuthCredentialStore, IntoTransport,
-        StreamableHttpClientTransport, TokioChildProcess, Transport, auth::OAuthState,
+        StreamableHttpClientTransport, Transport, auth::OAuthState,
         streamable_http_client::StreamableHttpClientTransportConfig,
     },
 };
@@ -386,7 +389,7 @@ impl NativeMcpRegistry {
                             if let Some((_, path)) = resolved {
                                 command.env("PATH", path);
                             }
-                            let transport = TokioChildProcess::new(command).map_err(mcp_error)?;
+                            let transport = process::Process::new(command).map_err(mcp_error)?;
                             let client =
                                 handler.clone().serve(transport).await.map_err(mcp_error)?;
                             let tools = client.list_all_tools().await.map_err(mcp_error)?;

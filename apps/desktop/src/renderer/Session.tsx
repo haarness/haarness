@@ -1941,6 +1941,18 @@ function Permission(props: {
     describeTool(props.permission.operation, props.permission.detail);
   const detail = () => {
     const value = props.permission.detail;
+    if (props.permission.permission === "agent_switch" && value && typeof value === "object" && !Array.isArray(value)) {
+      const switcher = value.__agentSwitch;
+      if (switcher && typeof switcher === "object" && !Array.isArray(switcher)) {
+        return [
+          `Agent: ${switcher.agent}`,
+          `Model: ${switcher.model}`,
+          switcher.previousModel !== switcher.model ? `Previous model: ${switcher.previousModel}` : undefined,
+          typeof value.reason === "string" ? `Reason: ${value.reason}` : undefined,
+          "Always allow applies only to this agent in this session.",
+        ].filter(Boolean).join("\n");
+      }
+    }
     if (!["browser", "browser_site", "multiple"].includes(props.permission.permission ?? "") ||
         !value || typeof value !== "object" || Array.isArray(value)) return stringify(value);
     // Keep the actual script, URL and file paths reviewable; broker leases,

@@ -33,6 +33,8 @@ pub enum CoreError {
     Invalid(String),
     #[error("provider error: {0}")]
     Provider(String),
+    #[error("Response was blocked by the provider content filter ({0}).")]
+    ProviderBlocked(String),
     #[error("storage error: {0}")]
     Storage(String),
     #[error("tool error: {0}")]
@@ -351,6 +353,17 @@ pub enum ProviderEvent {
     Finished {
         reason: String,
     },
+}
+
+impl ProviderEvent {
+    /// Providers spell policy stops differently; ordinary stop/length/tool finishes
+    /// remain successful. The typed error must never trigger automatic retries.
+    pub fn finish_error(reason: &str) -> Option<CoreError> {
+        matches!(reason.to_ascii_lowercase().replace('-', "_").as_str(),
+            "content_filter" | "safety" | "recitation" | "blocklist" | "prohibited_content"
+            | "spii" | "image_safety" | "image_prohibited_content")
+            .then(|| CoreError::ProviderBlocked(reason.to_owned()))
+    }
 }
 
 pub type ProviderStream = Pin<Box<dyn Stream<Item = CoreResult<ProviderEvent>> + Send>>;

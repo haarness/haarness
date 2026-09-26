@@ -168,7 +168,7 @@ impl OpenAiCompatibleProvider {
         self.refresh_models(true).await;
         self
     }
-    async fn fetch_models(&self) -> Option<Vec<ModelInfo>> {
+    pub(crate) async fn fetch_models(&self) -> Option<Vec<ModelInfo>> {
         if !self.discover_models {
             return None;
         }

@@ -6,7 +6,7 @@ use haarness_core::{
 };
 use haarness_language::{FileReport, LanguageService, Operation};
 use haarness_protocol::{
-    FileDiff, FileDiffStatus, SkillInfo, WorkflowId, WorkflowRun, WorkflowRunAgentStatus,
+    FileDiff, FileDiffStatus, SkillInfo, ThreadId, WorkflowId, WorkflowRun, WorkflowRunAgentStatus,
     WorkflowRunStatus, WorkflowStartRequest,
 };
 use haarness_scheduler::{CreateSchedule, Scheduler, Trigger, UpdateSchedule};
@@ -28,6 +28,12 @@ use tokio::io::AsyncWriteExt;
 /// adapter owns platform paths, compatibility discovery, and credential I/O.
 #[async_trait]
 pub trait ManagementRegistry: Send + Sync {
+    async fn prepare(&self, resource: &str, arguments: Value, _thread: ThreadId) -> CoreResult<Value> {
+        if resource == "agent_switch" {
+            return Err(CoreError::Tool("Agent switch preparation is unavailable".into()));
+        }
+        Ok(arguments)
+    }
     /// Explicit authenticated client actions; independent of model tool permissions.
     async fn user_request(&self, _resource: &str, _input: Value) -> CoreResult<Value> {
         Err(CoreError::Tool(
@@ -933,6 +939,13 @@ struct ManagementTool {
 
 #[async_trait]
 impl Tool for ManagementTool {
+    async fn prepare_arguments(&self, arguments: Value, thread: ThreadId, cancel: tokio_util::sync::CancellationToken) -> CoreResult<Value> {
+        tokio::select! {
+            () = cancel.cancelled() => Err(CoreError::Cancelled),
+            result = self.registry.prepare(self.kind.resource(), arguments, thread) => result,
+        }
+    }
+
     fn definition(&self) -> ToolDefinition {
         let scope = json!({
             "type": "string",

@@ -7528,6 +7528,30 @@ fn pending_permission_fixture(
     }
 }
 
+#[test]
+fn agent_switch_approval_discloses_destination_model_and_scope() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let mut pending = pending_permission_fixture(&thread, "switch");
+    pending.permission = "agent_switch".into();
+    pending.operation = "agent_switch:opaque".into();
+    pending.patterns = vec!["opaque".into()];
+    pending.always_patterns = vec!["agent_switch:opaque".into()];
+    pending.detail = serde_json::json!({"reason":"Review the changes", "__agentSwitch":{
+        "agent":"review", "model":"fixture/next", "previousModel":"fixture/previous",
+    }});
+    app.pending_permissions = vec![pending];
+    app.permission_focus = true;
+    app.confirm_always = Some('a');
+    for width in [55, 120] {
+        let frame = frame_text(&app, (width, 45));
+        for text in ["Agent: review", "Model: fixture/next", "Previous model: fixture/previous", "only agent review in this session"] {
+            assert!(frame.contains(text), "missing {text}: {frame}");
+        }
+        assert!(!frame.contains("opaque"));
+    }
+}
+
 async fn press_key(app: &mut App, code: KeyCode) {
     crate::input::handle_key(
         app,

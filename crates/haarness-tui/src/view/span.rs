@@ -1,6 +1,7 @@
 //! Line/span construction helpers shared by every view.
 
 use haarness_opentui::{Color, Line, Span, attr};
+use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::UnicodeWidthChar as _;
 use unicode_width::UnicodeWidthStr as _;
 
@@ -23,12 +24,12 @@ pub fn single_line(value: &str, width: usize) -> String {
     let budget = width.saturating_sub(1);
     let mut used = 0;
     let mut truncated = String::new();
-    for character in value.chars() {
-        let cells = character.width().unwrap_or(0);
+    for grapheme in value.graphemes(true) {
+        let cells = grapheme.width();
         if used + cells > budget {
             break;
         }
-        truncated.push(character);
+        truncated.push_str(grapheme);
         used += cells;
     }
     truncated.push('…');
@@ -202,8 +203,8 @@ pub fn dialog_item_region(line: &mut Line, from: usize, to: usize, theme: &Theme
     let mut rebuilt: Vec<Span> = Vec::with_capacity(line.spans.len());
     let mut column = 0usize;
     for span in line.spans.drain(..) {
-        for character in span.text.chars() {
-            let cell_width = character.width().unwrap_or(0);
+        for grapheme in span.text.graphemes(true) {
+            let cell_width = grapheme.width();
             let end = column.saturating_add(cell_width);
             let hovered = if cell_width == 0 {
                 column > from && column <= to
@@ -211,7 +212,7 @@ pub fn dialog_item_region(line: &mut Line, from: usize, to: usize, theme: &Theme
                 column < to && end > from
             };
             let mut styled = span.clone();
-            styled.text = character.to_string();
+            styled.text = grapheme.to_string();
             if hovered {
                 styled.bg = Some(theme.selected);
             }
@@ -233,8 +234,8 @@ fn style_cells(
     let mut rebuilt: Vec<Span> = Vec::with_capacity(line.spans.len() + 2);
     let mut column = 0usize;
     for span in line.spans.drain(..) {
-        for character in span.text.chars() {
-            let cell_width = character.width().unwrap_or(0);
+        for grapheme in span.text.graphemes(true) {
+            let cell_width = grapheme.width();
             let end = column.saturating_add(cell_width);
             let selected = if cell_width == 0 {
                 column > from && column <= to
@@ -242,7 +243,7 @@ fn style_cells(
                 column < to && end > from
             };
             let mut styled = span.clone();
-            styled.text = character.to_string();
+            styled.text = grapheme.to_string();
             if selected {
                 styled.bg = Some(theme.primary);
                 styled.fg = theme.bg;
@@ -288,5 +289,45 @@ fn styled_run(template: &Span, text: String) -> Span {
         fg: template.fg,
         bg: template.bg,
         attributes: template.attributes,
+    }
+}
+
+#[cfg(test)]
+mod truncation_tests {
+    use super::*;
+    #[test]
+    fn narrow_labels_preserve_complete_graphemes() {
+        for grapheme in ["👩‍💻", "👍🏽", "🇯🇵", "e\u{301}"] {
+            let width = unicode_width::UnicodeWidthStr::width(grapheme);
+            assert_eq!(single_line(&format!("{grapheme}abcd"), width + 1), format!("{grapheme}…"));
+            assert_eq!(single_line(&format!("{grapheme}abcd"), width), "…");
+        }
+        assert_eq!(single_line("日本語", 3), "日…");
+        assert_eq!(single_line("hello", 0), "");
+        assert_eq!(single_line("a\nb", 3), "a b");
+    }
+}
+
+#[cfg(test)]
+mod selection_grapheme_tests {
+    use super::*;
+
+    #[test]
+    fn selection_and_hover_keep_graphemes_in_one_styled_run() {
+        let theme = Theme::default();
+        let label = format!("{}…", "👩‍💻".repeat(25));
+        let mut line = Line::plain(&label, theme.text);
+        selected_row(&mut line, 54, &theme);
+        assert_eq!(line.width(), 54);
+        assert!(line.spans.iter().all(|span| !span.text.replace("👩‍💻", "").contains(['👩', '\u{200d}', '💻'])));
+        let mut renderer = haarness_opentui::Renderer::new(60, 4, true).unwrap();
+        assert!(renderer.snapshot_lines(&[line]).contains(&label));
+        for paint in [highlight_range, interactive_region, dialog_item_region] {
+            let mut line = Line::plain("a👩‍💻b", theme.text);
+            paint(&mut line, 1, 2, &theme);
+            assert_eq!(line.text(), "a👩‍💻b");
+            assert!(line.spans.iter().any(|span| span.text.contains("👩‍💻")));
+            assert!(renderer.snapshot_lines(&[line]).contains("a👩‍💻b"));
+        }
     }
 }
