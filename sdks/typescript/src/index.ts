@@ -15,6 +15,14 @@ export interface ChatResult {
   text: string;
 }
 export class Haarness extends Api {
+  /** Bind every runtime endpoint to a workspace returned by hostOpen/hostProjects. */
+  workspace(id: string): Haarness {
+    const headers = () => this.headers();
+    return new class extends Haarness {
+      protected override headers() { return headers(); }
+    }({baseUrl:this.url(`/v1/host/workspaces/${this.segment(id)}`), fetch:this.fetcher});
+  }
+
   /** Start and wait for one turn; approvals must be handled by a concurrent observer. */
   async chat(
     id: string,
@@ -110,3 +118,5 @@ export async function attachments(paths: string[]): Promise<string[]> {
   }
   return output;
 }
+
+export * from "./cloud.js";

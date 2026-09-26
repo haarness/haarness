@@ -214,10 +214,16 @@ def specification():
         "ItemsQuery": obj({"after": N}),
         "DiffReviewQuery": obj({"summary": B, "path": S}),
         "VcsDiffQuery": obj(
-            {"mode": {"enum": ["working", "branch", "worktree", "git"]}, "context": N, "summary": B, "path": S}
+            {
+                "mode": {"enum": ["working", "branch", "worktree", "git"]},
+                "context": N,
+                "summary": B,
+                "path": S,
+            }
         ),
         "FileSearchQuery": obj({"q": S, "limit": N}, ("q",)),
         "FileQuery": obj({"path": S, "hidden": B}),
+        "Browse": obj({"path": S, "prefix": S, "hidden": B, "limit": N, "after": S}),
         "BackgroundQuery": obj({"childThreadId": S}),
         "WaitQuery": obj({"timeout_ms": N}),
         "Filters": obj({"query": S, "offset": N, "limit": N}),
@@ -231,6 +237,9 @@ def specification():
         "manage_resource": "ManagementView",
         "interrupt_thread_tree": "InterruptResponse",
         "health": "HealthResponse",
+        "host_projects": "WorkspaceListResponse",
+        "host_directories": "DirectoryListing",
+        "host_open": "WorkspaceInfo",
     }
     operations = []
     doc["paths"] = {}
@@ -502,8 +511,9 @@ class PythonTypes:
         }.get(kind, "JsonValue")
 
 
-def generate():
-    doc, ops = specification()
+def generate(doc=None, ops=None):
+    if doc is None:
+        doc, ops = specification()
     schemas = doc["components"]["schemas"]
     outputs = {}
     outputs["openapi.json"] = json.dumps(doc, indent=2, sort_keys=True) + "\n"
@@ -623,12 +633,27 @@ def generate():
         pr = "bytes" if op.get("binaryResponse") else pyt(op["response"])
         hasbody = "body" in op or op.get("binaryBody")
         hasquery = "query" in op
+        tswire = "".join(
+            f"{key}: {json.dumps(op[key])}, "
+            for key in ("contentType", "textResponse", "redirectResponse")
+            if key in op
+        )
+        pywire = "".join(
+            f"{key}={op[wire]!r}, "
+            for key, wire in [
+                ("content_type", "contentType"),
+                ("text_response", "textResponse"),
+                ("redirect_response", "redirectResponse"),
+            ]
+            if wire in op
+        )
         tsclient += [
             "  /** " + op["method"] + " " + path + " */",
             f"  {tname}({', '.join(tsargs)}): Promise<{tr}> {{",
             f"    return this.request({json.dumps(op['method'])}, {tspath}, "
             + ("{ body, " if hasbody else "{ ")
             + ("query, " if hasquery else "")
+            + tswire
             + f"binaryBody: {str(bool(op.get('binaryBody'))).lower()}, binaryResponse: {str(bool(op.get('binaryResponse'))).lower()}, ...options"
             + " });",
             "  }",
@@ -642,6 +667,7 @@ def generate():
                 f"        return cast({json.dumps(pr)}, {await_}self.request({op['method']!r}, {pypath}, "
                 + ("body=body, " if hasbody else "")
                 + ("query=query, " if hasquery else "")
+                + pywire
                 + f"binary_body={bool(op.get('binaryBody'))}, binary_response={bool(op.get('binaryResponse'))}, options=options))",
                 "",
             ]
@@ -649,7 +675,7 @@ def generate():
     outputs["typescript/src/api.ts"] = "\n".join(tsclient) + "\n"
     pyclients[False][1] = "from typing import cast, Union"
     outputs["python/src/haarness_sdk/api.py"] = (
-        "\n".join(pyclients[False] + pyclients[True]) + "\n"
+        "\n".join(pyclients[False] + pyclients[True]).rstrip() + "\n"
     )
     outputs["OPERATIONS.md"] = "\n".join(docs) + "\n"
     outputs["typescript/OPERATIONS.md"] = outputs["OPERATIONS.md"]
@@ -661,7 +687,13 @@ if __name__ == "__main__":
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     dirty = []
-    for name, content in generate().items():
+    from cloud_generate import outputs as cloud_outputs, SOURCE, SNAPSHOT
+
+    if SOURCE.exists() and SOURCE.read_text() != SNAPSHOT.read_text():
+        raise SystemExit(
+            "Cloud OpenAPI snapshot drift: copy haarness-cloud/docs/openapi.json to sdks/cloud-openapi.json after regenerating it"
+        )
+    for name, content in {**generate(), **cloud_outputs()}.items():
         path = BASE / name
         if not path.exists() or path.read_text() != content:
             dirty.append(name)

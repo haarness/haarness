@@ -187,6 +187,12 @@ impl NativeToolRegistry {
                 Arc::new(crate::cloud_tools::CloudTool::new(session, management.clone()));
             self.tools.insert(tool.definition().name.clone(), tool);
         }
+        let chat: Arc<dyn Tool> = Arc::new(crate::cloud_tools::CloudChatTool(management.clone()));
+        self.tools.insert(chat.definition().name.clone(), chat);
+        let schedule: Arc<dyn Tool> =
+            Arc::new(crate::cloud_tools::CloudScheduleTool(management.clone()));
+        self.tools
+            .insert(schedule.definition().name.clone(), schedule);
         for kind in ManagementKind::ALL {
             let tool: Arc<dyn Tool> = Arc::new(ManagementTool {
                 kind,
@@ -1237,6 +1243,7 @@ impl Tool for ScheduleTool {
             name: "schedule".into(),
             description: [
                 "Manage durable local Haarness schedules backed by launchd on macOS, systemd --user on Linux, or Windows Task Scheduler.",
+                "For work on a Cloud session that must run while this device is off, use cloud_schedule instead. Local schedules execute on this device and do not select a Cloud session or chat.",
                 "Use this when the user asks to create, update, list, inspect history, run, enable, disable, or delete a scheduled task.",
                 "Schedules are for a future one-shot run or recurrence. Do not use this merely to start background work now; use task with background=true only when that task's independent-sidecar rules are satisfied.",
                 "Actions are create, list, update, delete, enable, disable, run, and history.",

@@ -6,6 +6,22 @@ export class Api extends Transport {
   manageResource(resource: string, body: T.JsonValue, options: RequestOptions = {}): Promise<T.ManagementView> {
     return this.request("POST", `/v1/manage/${this.segment(resource)}`, { body, binaryBody: false, binaryResponse: false, ...options });
   }
+  /** POST /v1/cloud/agents */
+  cloudAgents(body: T.CloudAgentInput, options: RequestOptions = {}): Promise<T.JsonValue> {
+    return this.request("POST", `/v1/cloud/agents`, { body, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /v1/cloud/sessions */
+  cloudSessions(body: T.CloudSessionInput, options: RequestOptions = {}): Promise<T.JsonValue> {
+    return this.request("POST", `/v1/cloud/sessions`, { body, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /v1/cloud/chats */
+  cloudChats(body: T.CloudChatInput, options: RequestOptions = {}): Promise<T.JsonValue> {
+    return this.request("POST", `/v1/cloud/chats`, { body, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /v1/cloud/schedules */
+  cloudSchedules(body: T.CloudScheduleInput, options: RequestOptions = {}): Promise<T.JsonValue> {
+    return this.request("POST", `/v1/cloud/schedules`, { body, binaryBody: false, binaryResponse: false, ...options });
+  }
   /** GET /v1/info */
   info(options: RequestOptions = {}): Promise<T.ServerInfo> {
     return this.request("GET", `/v1/info`, { binaryBody: false, binaryResponse: false, ...options });
@@ -429,5 +445,17 @@ export class Api extends Transport {
   /** POST /v1/threads/{id}/browser/tool */
   callBrowserTool(id: string, body: T.BrowserToolRequest, options: RequestOptions = {}): Promise<T.BrowserToolResponse> {
     return this.request("POST", `/v1/threads/${this.segment(id)}/browser/tool`, { body, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /v1/host/projects */
+  hostProjects(options: RequestOptions = {}): Promise<T.WorkspaceListResponse> {
+    return this.request("GET", `/v1/host/projects`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /v1/host/directories */
+  hostDirectories(query: T.Browse = {}, options: RequestOptions = {}): Promise<T.DirectoryListing> {
+    return this.request("GET", `/v1/host/directories`, { query, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /v1/host/open */
+  hostOpen(body: T.Open, options: RequestOptions = {}): Promise<T.WorkspaceInfo> {
+    return this.request("POST", `/v1/host/open`, { body, binaryBody: false, binaryResponse: false, ...options });
   }
 }

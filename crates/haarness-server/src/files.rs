@@ -253,7 +253,9 @@ pub async fn write_file(
     Json(input): Json<FileWrite>,
 ) -> Result<Json<FileContent>, Failure> {
     let _guard = EDIT.lock().await;
-    tokio::task::spawn_blocking(move || {
+    let events = state.runtime.events().clone();
+    let changed_path = input.path.clone();
+    let result = tokio::task::spawn_blocking(move || {
         let path = resolve(&state.workspace, &input.path, true)?;
         let data = decode_write(&input)?;
         let current = if path.exists() {
@@ -298,7 +300,15 @@ pub async fn write_file(
         }))
     })
     .await
-    .map_err(bad)?
+    .map_err(bad)??;
+    events.publish(
+        "files.updated",
+        None,
+        None,
+        None,
+        serde_json::json!({"path": changed_path}),
+    );
+    Ok(result)
 }
 
 #[utoipa::path(post,path="/v1/files/action",request_body=FileAction,responses((status=200,body=serde_json::Value)))]
@@ -307,7 +317,9 @@ pub async fn mutate_file(
     Json(input): Json<FileAction>,
 ) -> Result<Json<serde_json::Value>, Failure> {
     let _guard = EDIT.lock().await;
-    tokio::task::spawn_blocking(move || {
+    let events = state.runtime.events().clone();
+    let changed_path = input.path.clone();
+    let result = tokio::task::spawn_blocking(move || {
         if input.path.is_empty() || input.path == "." {
             return Err(bad("Select a workspace entry"));
         }
@@ -346,7 +358,15 @@ pub async fn mutate_file(
         Ok(Json(serde_json::json!({"ok":true})))
     })
     .await
-    .map_err(bad)?
+    .map_err(bad)??;
+    events.publish(
+        "files.updated",
+        None,
+        None,
+        None,
+        serde_json::json!({"path": changed_path}),
+    );
+    Ok(result)
 }
 
 #[cfg(test)]

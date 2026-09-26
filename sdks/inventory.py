@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def routes():
     result = []
-    for filename in ("api.rs", "profiles.rs", "files.rs", "browser.rs"):
+    for filename in ("api.rs", "profiles.rs", "files.rs", "browser.rs", "remote.rs"):
         text = (ROOT / "crates/haarness-server/src" / filename).read_text()
         for m in re.finditer(r'\.route\(\s*"([^"]+)",', text):
             pos = m.end()
@@ -22,7 +22,7 @@ def routes():
             ):
                 if filename == "browser.rs" and handler != "call_browser_tool":
                     continue  # Native host and tunnel transport are internal, not client operations.
-                path = m[1] if m[1] in ("/healthz", "/openapi.json") else "/v1" + m[1]
+                path = m[1] if m[1].startswith("/v1/") or m[1] in ("/healthz", "/openapi.json") else "/v1" + m[1]
                 name = (
                     {
                         "list": "list_profiles",
@@ -34,7 +34,9 @@ def routes():
                     if filename == "profiles.rs"
                     else handler
                 )
-                fn = re.search(r"async fn " + handler + r"\b([\s\S]*?)\{", text)
+                if filename == "remote.rs":
+                    name = {"catalog":"host_projects","browse":"host_directories","open":"host_open"}[handler]
+                fn = re.search(r"async fn " + handler + r"\b([\s\S]*?)\{", text[text.index("fn failure"): ] if filename == "remote.rs" else text)
                 result.append((name, method.upper(), path, fn[1], filename))
     return result
 

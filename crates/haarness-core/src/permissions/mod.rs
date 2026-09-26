@@ -353,6 +353,15 @@ pub fn plan_ceiling() -> Vec<PermissionRule> {
         rule("cloud_agent_manage:get:*", PermissionDecision::Allow),
         rule("cloud_agent_manage:models:*", PermissionDecision::Allow),
         rule("cloud_agent_manage:ssh_public_key:*", PermissionDecision::Allow),
+        rule("cloud_schedule:*", PermissionDecision::Deny),
+        rule("cloud_schedule:list:*", PermissionDecision::Allow),
+        rule("cloud_schedule:get:*", PermissionDecision::Allow),
+        rule("cloud_schedule:history:*", PermissionDecision::Allow),
+        rule("cloud_chat:*", PermissionDecision::Deny),
+        rule("cloud_chat:list:*", PermissionDecision::Allow),
+        rule("cloud_chat:get:*", PermissionDecision::Allow),
+        rule("cloud_chat:messages:*", PermissionDecision::Allow),
+        rule("cloud_chat:wait:*", PermissionDecision::Allow),
         rule("cloud_agent_session:*", PermissionDecision::Deny),
         rule("cloud_agent_session:list:*", PermissionDecision::Allow),
         rule("cloud_agent_session:get:*", PermissionDecision::Allow),
@@ -513,6 +522,32 @@ mod tests {
         }
         for action in ["create", "update", "delete"] {
             assert_eq!(engine.evaluate(&format!("cloud_agent_manage:{action}:agent-id")), PermissionDecision::Deny);
+        }
+        for (tool, reads, writes) in [
+            (
+                "cloud_chat",
+                vec!["list", "get", "messages", "wait"],
+                vec!["create", "rename", "archive", "ask", "abort"],
+            ),
+            (
+                "cloud_schedule",
+                vec!["list", "get", "history"],
+                vec!["create", "update", "pause", "resume", "run", "delete"],
+            ),
+        ] {
+            engine.approve_always(&format!("{tool}:*"));
+            for action in reads {
+                assert_eq!(
+                    engine.evaluate(&format!("{tool}:{action}:id")),
+                    PermissionDecision::Allow
+                );
+            }
+            for action in writes {
+                assert_eq!(
+                    engine.evaluate(&format!("{tool}:{action}:id")),
+                    PermissionDecision::Deny
+                );
+            }
         }
         let mut build = PermissionEngine::build_defaults();
         build.add_rule(rule("cloud_agent_session:*", PermissionDecision::Deny));

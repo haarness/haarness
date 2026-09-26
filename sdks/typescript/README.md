@@ -1,6 +1,6 @@
 # Haarness TypeScript SDK
 
-Unpublished, typed Node.js 22+ client for all 103 Haarness server operations,
+Unpublished, typed Node.js 22+ client for all 116 Haarness server operations and 126 Cloud operations,
 SSE events, PTY WebSockets, attachments and explicitly owned local servers.
 
 ```sh
@@ -51,8 +51,8 @@ to 20 MiB total. Profile upload/download accepts/returns Uint8Array ZIP bytes.
 
 `await LocalServer.start({workspace, executable, dataDir})` returns an owned
 server with `.client`; `await server.close()` stops only that child. Existing
-workspace servers are never replaced. Project trust and automatic approval
-remain off unless explicitly requested.
+workspace servers are never replaced. Project configuration loads by default; automatic tool approval remains a
+separate explicit choice.
 
 See [OPERATIONS.md](OPERATIONS.md) for every method. Server command execution is
 available through executeCommand; TUI-only and CLI-only commands are not HTTP
@@ -73,3 +73,19 @@ const protectedServer = new Haarness({
 Explicit `auth: { type: "none" }` ignores an ambient legacy token. Password
 credentials apply to HTTP requests, event streams and terminal WebSockets.
 The existing `token` option remains supported.
+
+## Cloud
+
+`HaarnessCloud` connects to the Cloud account API using an account token
+(`HAARNESS_CLOUD_TOKEN`), separately from runtime tokens and router keys.
+Python also exports `AsyncHaarnessCloud`. Select `session(sessionId)`, then
+`session.chats` for root chat handles with independent history and shared files.
+Connect the session to access the complete native API. Cloud account updates
+use authenticated WebSockets; chat/turn updates use runtime SSE.
+
+Cloud schedule CRUD, pause/resume, run-now and history are generated methods.
+Schedules target a session and chat and run on the Cloud worker with the laptop
+off. They differ from the device-local `schedule` tool. Closing a client only
+detaches; explicitly stop or delete sessions to release compute. The repository's
+`sdks/README.md` contains complete examples, authentication and lifecycle details,
+and `CLOUD-OPERATIONS.md` inventories every Cloud method.

@@ -27,6 +27,8 @@ struct Data {
     attachments: u32,
     session_reads: u32,
     created: bool,
+    chats: Vec<Value>,
+    schedule: Option<Value>,
     started: bool,
     stopped: bool,
     running_turn: bool,
@@ -117,6 +119,45 @@ async fn handler(State(state): State<Shared>, req: Request) -> Response {
         ("GET", p) if p == format!("/api/v1/cloud-agents/{AGENT}") => agent(&d),
         ("PUT", p) if p == format!("/api/v1/cloud-agents/{AGENT}") => body,
         ("DELETE", p) if p == format!("/api/v1/cloud-agents/{AGENT}") => Value::Null,
+        ("POST", "/api/v1/schedules") => {
+            let mut row = body.clone();
+            row["id"] = json!(AGENT);
+            row["accountId"] = json!(ACCOUNT);
+            row["version"] = json!(1);
+            row["enabled"] = json!(true);
+            d.schedule = Some(row.clone());
+            row
+        }
+        ("GET", "/api/v1/schedules") => {
+            json!({"items":d.schedule.iter().collect::<Vec<_>>(),"nextCursor":null})
+        }
+        ("GET", p) if p == format!("/api/v1/schedules/{AGENT}") => {
+            let mut row = d.schedule.clone().unwrap();
+            if d.foreign_account {
+                row["accountId"] = json!(OTHER);
+            }
+            row
+        }
+        ("PATCH", p) if p == format!("/api/v1/schedules/{AGENT}") => {
+            let row = d.schedule.as_mut().unwrap();
+            for (key, value) in body.as_object().unwrap() {
+                if !value.is_null() {
+                    row[key] = value.clone();
+                }
+            }
+            row["version"] = json!(row["version"].as_i64().unwrap() + 1);
+            row.clone()
+        }
+        ("POST", p) if p == format!("/api/v1/schedules/{AGENT}/run") => {
+            json!({"id":TURN,"sessionId":SESSION,"chatId":THREAD,"status":"pending"})
+        }
+        ("GET", p) if p == format!("/api/v1/schedules/{AGENT}/runs") => {
+            json!({"items":[{"id":TURN,"chatId":THREAD}],"nextCursor":null})
+        }
+        ("DELETE", p) if p == format!("/api/v1/schedules/{AGENT}") => {
+            d.schedule = None;
+            Value::Null
+        }
         ("POST", "/api/v1/sessions") => {
             d.created = true;
             json!({"session":{"id":SESSION,"workspace":{"observedState":"pending"}}})
@@ -154,11 +195,25 @@ async fn handler(State(state): State<Shared>, req: Request) -> Response {
         }
         ("PATCH", p) if p == format!("/api/v1/sessions/{SESSION}") => body,
         ("POST", p) if p == format!("/api/v1/sessions/{SESSION}/save-agent") => body,
-        ("GET", "/runtime/v1/threads") => json!([]),
+        ("GET", "/runtime/v1/threads") => json!(d.chats),
         ("GET", "/runtime/v1/info") => {
             json!({"defaultAgent":"cloud-agent","defaultProvider":"haarness","defaultModel":"openai/gpt-5-nano"})
         }
-        ("POST", "/runtime/v1/threads") => json!({"id":THREAD}),
+        ("POST", "/runtime/v1/threads") => {
+            let id = if d.chats.is_empty() { THREAD } else { OTHER };
+            let row = json!({"id":id,"title":body["title"],"parentId":null,"archived":false});
+            d.chats.push(row.clone());
+            row
+        }
+        ("PATCH", p) if p.starts_with("/runtime/v1/threads/") => {
+            let id = p.rsplit('/').next().unwrap();
+            let row = d.chats.iter_mut().find(|r| r["id"] == id).unwrap();
+            for (key, value) in body.as_object().unwrap() {
+                row[key] = value.clone();
+            }
+            row.clone()
+        }
+        ("GET", p) if p == format!("/runtime/v1/threads/{OTHER}") => json!({"id":OTHER}),
         ("GET", p) if p == format!("/runtime/v1/threads/{THREAD}") => json!({"id":THREAD}),
         ("POST", p) if p == format!("/runtime/v1/threads/{THREAD}/turns") => {
             json!({"id":TURN,"threadId":THREAD,"status":"running"})
@@ -1163,4 +1218,174 @@ async fn cancelled_startup_returns_the_retained_session_id_and_closes_socket() {
         0
     );
     assert_eq!(f.count("DELETE", &format!("/api/v1/sessions/{SESSION}")), 0);
+}
+
+#[tokio::test]
+async fn chats_share_one_session_but_require_explicit_conversation_targets() {
+    let fixture = Fixture::new(true).await;
+    let cloud = fixture.cloud(CancellationToken::new()).await;
+    let first = cloud
+        .chat(json!({"action":"create","sessionId":SESSION,"title":"Implement"}))
+        .await
+        .unwrap();
+    let second = cloud
+        .chat(json!({"action":"create","sessionId":SESSION,"title":"Review"}))
+        .await
+        .unwrap();
+    assert_ne!(first["chatId"], second["chatId"]);
+    assert_eq!(first["sessionId"], second["sessionId"]);
+    let list = cloud
+        .chat(json!({"action":"list","sessionId":SESSION,"limit":1}))
+        .await
+        .unwrap();
+    assert_eq!(list["chats"].as_array().unwrap().len(), 1);
+    assert_eq!(list["nextCursor"], THREAD);
+    let next = cloud
+        .chat(json!({"action":"list","sessionId":SESSION,"cursor":THREAD}))
+        .await
+        .unwrap();
+    assert_eq!(next["chats"][0]["id"], OTHER);
+    assert!(
+        cloud
+            .session(json!({"action":"ask","sessionId":SESSION,"message":"ambiguous"}))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Multiple chats")
+    );
+    assert!(
+        cloud
+            .chat(json!({"action":"ask","sessionId":SESSION,"message":"ambiguous"}))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("chatId")
+    );
+    let result = cloud.chat(json!({"action":"ask","sessionId":SESSION,"chatId":THREAD,"message":"explicit","wait":false})).await.unwrap();
+    assert_eq!(result["chatId"], THREAD);
+    cloud
+        .chat(json!({"action":"rename","sessionId":SESSION,"chatId":OTHER,"title":"Review only"}))
+        .await
+        .unwrap();
+    cloud
+        .chat(json!({"action":"archive","sessionId":SESSION,"chatId":OTHER}))
+        .await
+        .unwrap();
+    assert_eq!(
+        cloud
+            .chat(json!({"action":"list","sessionId":SESSION}))
+            .await
+            .unwrap()["chats"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        cloud
+            .chat(json!({"action":"list","sessionId":SESSION,"archived":true}))
+            .await
+            .unwrap()["chats"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let d = fixture.data.lock().unwrap();
+    assert!(!d.created && !d.started && !d.stopped);
+    assert!(
+        !d.requests
+            .iter()
+            .any(|(method, path, _)| method == "POST" && path.starts_with("/api/v1/sessions?"))
+    );
+}
+
+#[tokio::test]
+async fn chat_reads_and_creation_do_not_start_stopped_compute_or_cross_accounts() {
+    let fixture = Fixture::new(true).await;
+    let cloud = fixture.cloud(CancellationToken::new()).await;
+    fixture.data.lock().unwrap().stopped = true;
+    for action in ["list", "create"] {
+        assert!(
+            cloud
+                .chat(json!({"action":action,"sessionId":SESSION}))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Start the Cloud session")
+        );
+    }
+    fixture.data.lock().unwrap().foreign_account = true;
+    assert!(
+        cloud
+            .chat(json!({"action":"list","sessionId":SESSION}))
+            .await
+            .is_err()
+    );
+    assert_eq!(fixture.data.lock().unwrap().attachments, 0);
+}
+
+#[tokio::test]
+async fn cloud_schedule_adapter_is_explicit_scoped_versioned_and_never_installs_local_timers() {
+    let fixture = Fixture::new(true).await;
+    let cloud = fixture.cloud(CancellationToken::new()).await;
+    let created=cloud.schedule(json!({"action":"create","sessionId":SESSION,"chatId":THREAD,"name":"Hourly review","prompt":"Review changes","everySeconds":3600})).await.unwrap();
+    assert_eq!(created["chatId"], THREAD);
+    assert_eq!(
+        cloud
+            .schedule(json!({"action":"list","sessionId":SESSION}))
+            .await
+            .unwrap()["items"][0]["id"],
+        AGENT
+    );
+    let paused = cloud
+        .schedule(json!({"action":"pause","id":AGENT,"version":1}))
+        .await
+        .unwrap();
+    assert_eq!(paused["enabled"], false);
+    assert!(
+        cloud
+            .schedule(json!({"action":"resume","id":AGENT,"version":1}))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("changed")
+    );
+    assert_eq!(
+        cloud
+            .schedule(json!({"action":"resume","id":AGENT,"version":2}))
+            .await
+            .unwrap()["enabled"],
+        true
+    );
+    assert_eq!(
+        cloud
+            .schedule(json!({"action":"run","id":AGENT}))
+            .await
+            .unwrap()["chatId"],
+        THREAD
+    );
+    assert_eq!(
+        cloud
+            .schedule(json!({"action":"history","id":AGENT}))
+            .await
+            .unwrap()["items"][0]["chatId"],
+        THREAD
+    );
+    fixture.data.lock().unwrap().foreign_account = true;
+    assert!(
+        cloud
+            .schedule(json!({"action":"run","id":AGENT}))
+            .await
+            .is_err()
+    );
+    fixture.data.lock().unwrap().foreign_account = false;
+    cloud
+        .schedule(json!({"action":"delete","id":AGENT}))
+        .await
+        .unwrap();
+    let d = fixture.data.lock().unwrap();
+    assert!(d.schedule.is_none());
+    assert_eq!(d.attachments, 0);
+    assert!(!d.started && !d.created);
 }

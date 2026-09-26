@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+haarness-protocol = { path = "../haarness-protocol" }
 base64.workspace = true
 chrono.workspace = true
 fs2.workspace = true

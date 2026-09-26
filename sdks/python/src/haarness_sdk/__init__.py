@@ -22,3 +22,7 @@ __all__ = [
     "AsyncPtyConnection",
     "types",
 ]
+
+from .cloud import HaarnessCloud, AsyncHaarnessCloud, CloudSession, AsyncCloudSession, CloudChat, AsyncCloudChat
+from . import cloud_types
+__all__ += ["HaarnessCloud", "AsyncHaarnessCloud", "CloudSession", "AsyncCloudSession", "CloudChat", "AsyncCloudChat", "cloud_types"]

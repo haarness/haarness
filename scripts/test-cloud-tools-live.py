@@ -58,6 +58,8 @@ model="echo-1"
 [permissions]
 cloud_agent_manage="allow"
 cloud_agent_session="allow"
+cloud_chat="allow"
+cloud_schedule="allow"
 [lazy_tools]
 mode="off"
 [lsp]
@@ -129,7 +131,7 @@ enabled=false
         calls = [r['data'] for r in rows if r['data']['type'] == 'tool_call']
         launches = [c for c in calls if c['name'] == 'cloud_agent_session' and c['arguments'].get('action') in ['ask', 'create'] and not c['arguments'].get('sessionId')]
         assert len(launches) == int(new), calls
-        asks = [json.loads(r['output']) for r in results if r['name'] == 'cloud_agent_session' and json.loads(r['output']).get('turnId')]
+        asks = [json.loads(r['output']) for r in results if r['name'] in ['cloud_agent_session','cloud_chat'] and json.loads(r['output']).get('turnId')]
         assert asks, results
         (OUT / (label + '-tool-calls.json')).write_text(json.dumps(calls, indent=2))
         return asks[-1], calls, launches[0]['arguments'] if new else {}, thread
@@ -231,6 +233,46 @@ its answer and session ID. Please create only one session, and don't run the com
         stopped_turn = session('wait', sessionId=sid, threadId=remote_thread, turnId=pending['turnId'])
         assert stopped_turn['status'] == 'interrupted', stopped_turn
         proof('cancel-observer-then-explicit-abort', stopped_turn)
+
+        # The real model must create another chat, preserving the existing machine/filesystem.
+        second, chat_calls, _, _ = launch_with_model(
+            f"In Cloud session {sid}, open a second conversation named 'Separate review'. This must share the same machine and files and have its own history. Ask the new conversation to reply SECOND_CHAT_OK and bring back its reply. Do not create another Cloud session.",
+            'second-chat-natural-request', new=False)
+        assert second['sessionId'] == sid and second['chatId'] != remote_thread, second
+        assert any(c['name']=='cloud_chat' and c['arguments']['action']=='create' for c in chat_calls), chat_calls
+        assert 'SECOND_CHAT_OK' in json.dumps(second['messages']), second
+        proof('model-distinguishes-session-and-chat', second)
+        chat_listing=api('/cloud/chats',{'action':'list','sessionId':sid},'POST')
+        assert len(chat_listing['chats'])==2,chat_listing
+        # A natural Cloud scheduling request must not install a timer on this computer.
+        from datetime import datetime, timezone, timedelta
+        scheduled_at=(datetime.now(timezone.utc)+timedelta(seconds=60)).isoformat()
+        orchestrator=api('/threads',{'title':'Cloud schedule wording','provider':'haarness','model':ORCHESTRATOR})['id']
+        turn=api(f'/threads/{orchestrator}/turns',{'requestId':str(uuid.uuid4()),'text':f"At {scheduled_at}, have chat {second['chatId']} in Cloud session {sid} reply CLOUD_SCHEDULE_OK once. It must run in the cloud even if my computer is off. Schedule it now and report its ID; do not send it immediately or create another machine."})['id']
+        final=until(lambda: (r if (r:=api(f'/turns/{turn}'))['status'] not in ['running','pending','queued'] else None),'schedule model timeout',180)
+        assert final['status']=='completed',final
+        scheduled_rows=[r['data'] for r in api(f'/threads/{orchestrator}/items') if r.get('turnId')==turn]
+        scheduled_calls=[r for r in scheduled_rows if r['type']=='tool_call']
+        assert any(c['name']=='cloud_schedule' and c['arguments']['action']=='create' for c in scheduled_calls),scheduled_calls
+        assert not any(c['name']=='schedule' for c in scheduled_calls),scheduled_calls
+        created_schedules=[json.loads(r['output']) for r in scheduled_rows if r['type']=='tool_result' and r['name']=='cloud_schedule' and not r.get('is_error') and '"id"' in r['output']]
+        scheduled=next(r for r in created_schedules if r.get('chatId')==second['chatId'])
+        proof('model-selects-cloud-schedule',scheduled_calls)
+        def scheduled_done():
+            history=api('/cloud/schedules',{'action':'history','id':scheduled['id']},'POST')
+            for outcome in history['items']:
+                if outcome['status'] in ['completed','failed','cancelled','interrupted','needs_attention']:
+                    assert outcome['status']=='completed',outcome
+                    return outcome
+            time.sleep(1)
+        outcome=until(scheduled_done,'Cloud timed run did not finish',180)
+        scheduled_reply=tool('cloud_chat',{'action':'messages','sessionId':sid,'chatId':second['chatId']})
+        assert 'CLOUD_SCHEDULE_OK' in json.dumps(scheduled_reply),scheduled_reply
+        proof('real-timed-cloud-chat-run',outcome)
+        tool('cloud_schedule',{'action':'delete','id':scheduled['id']})
+        # Read-only API routes expose the same identities as the model tools.
+        assert api('/cloud/sessions',{'action':'get','sessionId':sid},'POST')['session']['id']==sid
+        assert api('/cloud/agents',{'action':'list'},'POST').get('items') is not None
 
         # Save, list, and use a reusable agent through the same LLM-visible tools.
         current = session('get', sessionId=sid)['session']

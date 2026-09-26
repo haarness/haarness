@@ -1,7 +1,7 @@
 # Haarness Python SDK
 
-Unpublished Python 3.10+ synchronous and asynchronous clients for all 103
-Haarness server operations. Includes typed requests/responses, SSE, PTYs,
+Unpublished Python 3.10+ synchronous and asynchronous clients for all 116 native and 126 Cloud
+operations. Includes typed requests/responses, SSE, PTYs,
 attachments and owned local-server helpers.
 
 ```sh
@@ -59,7 +59,7 @@ with LocalServer.start("/path/to/project", executable="/path/to/haarness") as se
 ```
 
 Local server helpers own and clean up only their child, fail on an existing
-workspace lease, and leave project trust/automatic approval off by default.
+workspace lease, and load project configuration by default without automatically approving tools.
 
 The repository's `sdks/OPERATIONS.md` lists every method; `sdks/README.md`
 describes generation and `scripts/test-sdks.sh` runs the real-server E2E gate.
@@ -80,3 +80,19 @@ The username defaults to `haarness`. An explicit empty password connects without
 authentication and ignores an ambient legacy token. `AsyncHaarness` accepts the
 same options. Credentials apply to requests, event streams and terminals; the
 existing `token` option remains compatible.
+
+## Cloud
+
+`HaarnessCloud` connects to the Cloud account API using an account token
+(`HAARNESS_CLOUD_TOKEN`), separately from runtime tokens and router keys.
+Python also exports `AsyncHaarnessCloud`. Select `session(sessionId)`, then
+`session.chats` for root chat handles with independent history and shared files.
+Connect the session to access the complete native API. Cloud account updates
+use authenticated WebSockets; chat/turn updates use runtime SSE.
+
+Cloud schedule CRUD, pause/resume, run-now and history are generated methods.
+Schedules target a session and chat and run on the Cloud worker with the laptop
+off. They differ from the device-local `schedule` tool. Closing a client only
+detaches; explicitly stop or delete sessions to release compute. The repository's
+`sdks/README.md` contains complete examples, authentication and lifecycle details,
+and `CLOUD-OPERATIONS.md` inventories every Cloud method.

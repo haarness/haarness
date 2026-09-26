@@ -12,6 +12,46 @@
     "body": {}
   },
   {
+    "name": "cloud_agents",
+    "method": "POST",
+    "path": "/v1/cloud/agents",
+    "pathParams": [],
+    "response": {},
+    "body": {
+      "$ref": "#/components/schemas/CloudAgentInput"
+    }
+  },
+  {
+    "name": "cloud_sessions",
+    "method": "POST",
+    "path": "/v1/cloud/sessions",
+    "pathParams": [],
+    "response": {},
+    "body": {
+      "$ref": "#/components/schemas/CloudSessionInput"
+    }
+  },
+  {
+    "name": "cloud_chats",
+    "method": "POST",
+    "path": "/v1/cloud/chats",
+    "pathParams": [],
+    "response": {},
+    "body": {
+      "$ref": "#/components/schemas/CloudChatInput"
+    }
+  },
+  {
+    "name": "cloud_schedules",
+    "method": "POST",
+    "path": "/v1/cloud/schedules",
+    "pathParams": [],
+    "response": {},
+    "body": {
+      "$ref": "#/components/schemas/CloudScheduleInput"
+    }
+  },
+  {
     "name": "info",
     "method": "GET",
     "path": "/v1/info",
@@ -1359,6 +1399,39 @@
     },
     "body": {
       "$ref": "#/components/schemas/BrowserToolRequest"
+    }
+  },
+  {
+    "name": "host_projects",
+    "method": "GET",
+    "path": "/v1/host/projects",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceListResponse"
+    }
+  },
+  {
+    "name": "host_directories",
+    "method": "GET",
+    "path": "/v1/host/directories",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/DirectoryListing"
+    },
+    "query": {
+      "$ref": "#/components/schemas/Browse"
+    }
+  },
+  {
+    "name": "host_open",
+    "method": "POST",
+    "path": "/v1/host/open",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceInfo"
+    },
+    "body": {
+      "$ref": "#/components/schemas/Open"
     }
   }
 ]

@@ -1,6 +1,6 @@
 # Haarness developer SDKs
 
-Unpublished TypeScript and Python clients for the complete Haarness server API.
+Unpublished TypeScript and Python clients for the complete Haarness server and Cloud APIs.
 The TypeScript package is private and has a publish guard. Python wheels carry
 `Private :: Do Not Upload`, which public PyPI rejects. No publishing workflow is
 included. Both packages can be built, packed and installed locally.
@@ -9,7 +9,7 @@ included. Both packages can be built, packed and installed locally.
   AbortSignal cancellation, SSE async iterators, authenticated PTY WebSockets.
 - **Python:** Python 3.10+, synchronous `Haarness` and asynchronous
   `AsyncHaarness`, generated TypedDicts/unions, HTTPX, SSE iterators, PTYs.
-- **All 103 registered operations:** sessions/turns, commands, goals, loops,
+- **All 116 registered native operations:** chats/turns, commands, goals, loops,
   background work, permissions/questions, MCP, plugins, skills,
   workspaces, Git review, PTYs, workflows, profile archives, analytics and shutdown.
 - Explicit owned local-server helpers, remote-safe attachments, and `chat()`.
@@ -252,6 +252,148 @@ and profile-catalog errors also become `ApiError`. Network/decoding errors are
 and async Python preserves `CancelledError`. Authentication is never placed in
 URLs, HTTP redirects are not followed, and PTY authentication uses headers.
 
+## Cloud accounts, sessions and chats
+
+`HaarnessCloud` (TypeScript/Python) and `AsyncHaarnessCloud` (Python) expose all
+126 documented Cloud operations: 125 HTTP methods plus the account WebSocket.
+This includes identity/OAuth, plans and wallets, billing, router keys/usage,
+marketplace, devices, reusable agents, session lifecycle and schedules.
+See [Cloud methods](CLOUD-OPERATIONS.md) and [Cloud schema](cloud-openapi.json).
+Access remains governed by the server's role and scope checks; administrative
+methods in the inventory do not grant administrative privileges.
+
+A **Cloud session** owns a machine, configuration and persistent filesystem.
+A **chat** is a root runtime thread on that machine with its own history.
+A **turn** is one response in a chat. Chats share files and compute, and may
+therefore modify the same files. A reusable Cloud agent is an optional template.
+Creating a chat allocates no machine; connecting to a stopped session does not
+start it. Start compute explicitly, then wait for `workspace.observedState` to
+be `running` before connecting.
+
+```ts
+import { HaarnessCloud } from "@haarness/sdk";
+const cloud = new HaarnessCloud({
+  baseUrl: process.env.HAARNESS_CLOUD_API_URL!,
+  token: process.env.HAARNESS_CLOUD_TOKEN,
+});
+const session = cloud.session(sessionId); // an existing running session
+try {
+  const chat = await session.chats.create({ title: "Investigate" });
+  const reply = await chat.ask("Read README.md and summarize this project");
+  console.log(session.id, chat.id, reply.turn.id, reply.text);
+  const runtime = await session.connect();
+  console.log(await runtime.listFiles({ path: "" }));
+} finally {
+  await session.close(); // detach only; does not stop compute
+  cloud.close();
+}
+```
+
+```python
+from haarness_sdk import HaarnessCloud
+with HaarnessCloud(api_url, token=account_access_token) as cloud:
+    session = cloud.session(session_id)  # already running
+    try:
+        chat = session.chats.create({"title": "Investigate"})
+        reply = chat.ask("Read README.md and summarize this project")
+        print(session.id, chat.id, reply["turn"]["id"], reply["text"])
+        print(session.connect().list_files({"path": ""}))
+    finally:
+        session.close()
+```
+
+Python async uses `AsyncHaarnessCloud`, `async with`, and awaits the same
+operations. `session.chats.list()` returns root chats, with native pagination
+options; `get(chatId)` selects one explicitly. Handles provide metadata,
+rename, archive/restore, messages, ask, send, wait and abort. Wait/abort reject
+a turn belonging to a different chat. The connected runtime exposes the entire
+native API, including files, Git, PTYs, permissions and SSE.
+
+Create a freestyle session with `createSession`/`create_session` and
+`{title, configuration, start}`. To use a template, list/get Cloud agents and
+include its `cloudAgentId`. Account credentials authenticate only the account
+API; runtime requests use short-lived attach tickets. Tickets renew before
+expiry and once after an authentication failure or a stale generation read.
+An event stream encountering a new runtime generation returns `resync_required`;
+reload snapshots before subscribing again.
+
+Supply a Cloud account access token explicitly or through `HAARNESS_CLOUD_TOKEN`.
+`HAARNESS_SERVER_TOKEN` and router keys are separate credentials. OAuth code/PKCE,
+refresh and device endpoints are generated methods; SDK construction does not
+log in, store secrets, or refresh an OAuth grant automatically. For long-lived
+clients, supply TypeScript `resolveAuth: async () => ({type: "bearer", token})`
+or Python `resolve_token: () -> str`, backed by your own serialized token store.
+The resolver runs on requests and WebSocket reconnections.
+
+For multiple accounts, pass the selected `accountId` in each HTTP method's
+query/body where supported; ID-addressed resources enforce their own ownership.
+The Cloud constructor's `accountId` (Python `account_id`) selects the default
+WebSocket subscription account; it does not rewrite HTTP request bodies.
+
+`cloud.events({reconnect: true})` in TypeScript, or
+`cloud.events(reconnect=True)` in Python, observes account invalidations over
+WebSocket. On `ready` or `resync_required`, reload snapshots. On `entity_changed`,
+refresh the affected entity. These events are hints, not a replayable event log.
+The socket is authenticated, bounded, heartbeat-monitored and reconnectable;
+close its iterator/client to detach. Runtime `session.connect().events()` is
+SSE carrying chat/turn/file events. Ordinary updates do not require a page reload.
+
+The native app also exposes typed `cloudAgents`, `cloudSessions`, `cloudChats`
+and `cloudSchedules` methods (snake_case in Python) through its signed-in host
+adapter. These use the same intent and permission boundary as the model tools.
+The host's `workspace(id)` helper scopes native methods to an opened workspace.
+
+## Cloud schedules
+
+Cloud schedules run in the Cloud worker even when your laptop and SDK are
+closed. They target explicit `sessionId` and `chatId`. The native `schedule`
+tool/CLI remains the device-local scheduler; `cloud_schedule` and the Cloud SDK
+methods are a separate surface.
+
+```ts
+const scheduled = await cloud.createCloudSchedule({
+  sessionId, chatId, name: "Daily review", prompt: "Review the latest changes",
+  everySeconds: 86400,
+}, { headers: { "Idempotency-Key": crypto.randomUUID() } });
+const paused = await cloud.updateCloudSchedule(scheduled.id, {
+  version: scheduled.version, enabled: false,
+});
+const run = await cloud.runCloudSchedule(scheduled.id, {
+  headers: { "Idempotency-Key": crypto.randomUUID() },
+});
+console.log(await cloud.cloudScheduleRuns(scheduled.id));
+await cloud.deleteCloudSchedule(scheduled.id);
+```
+
+Python methods are `create_cloud_schedule`, `list_cloud_schedules`,
+`get_cloud_schedule`, `update_cloud_schedule`, `run_cloud_schedule`,
+`cloud_schedule_runs`, and `delete_cloud_schedule`. Transport headers use
+`options={"headers": {"Idempotency-Key": ...}}`. Pause/resume is an update with
+`enabled`; supply the latest version from get. Use an RFC3339 `at` with a UTC
+offset for a one-shot run or an initial repeating date. Repeat intervals are
+60–31,536,000 seconds. Updating the cadence/target requires a new schedule;
+name, prompt, enabled and next date can be updated in place.
+
+The worker checks due work every five seconds. It coalesces missed repeats,
+prevents overlapping runs per schedule and reuses a stable runtime request ID
+on retries. It can wake an existing stopped session under normal plan and
+concurrency limits, with a ten-minute startup deadline. Normal permission
+prompts become `needs_attention`; schedules never auto-approve them. Archived
+or missing target chats pause future execution when detected. Archiving does
+not interrupt an already accepted turn. Pausing/deleting a schedule prevents
+future ticks; deleting cancels pending work but does not abort an accepted turn.
+Use chat abort explicitly for that. Session deletion cancels schedules and
+removes its machine, disk and all chats. Terminal schedule history is retained
+for 30 days. Stopping retains chats/files and disk charges; archiving only hides
+an item. Closing an SDK handle never stops billable compute.
+
+For upload, use the connected runtime's `writeFile`/`write_file` with `path`,
+`content`, `encoding` (`utf8` or `base64`) and the current `revision`. New files
+use the empty-content SHA-256 revision. Stale writes return 409. Successful file
+mutations emit `files.updated`; completed turns also invalidate the explorer.
+Model attachments and filesystem uploads are distinct: put ordinary documents
+on the session filesystem when the agent should read them with native tools.
+
 ## Generation and verification
 
 ```sh
@@ -272,7 +414,7 @@ operation inventory, TypeScript types/methods, and Python types/sync/async
 methods. `--check` detects source/generated drift without modifying files.
 
 The shared E2E scenario runs through each actual SDK and requires successful
-coverage of **all 103 registered operations**. Every JSON response is checked
+coverage of all 112 non-account native operations in each client; the four account adapters are covered by the live Cloud-tool scenario. Every JSON response is checked
 against its declared schema. Assertions check resulting files, history,
 idempotency, approvals, questions, workflow/background lifecycles, MCP
 stdio tools/resources/prompts, PTY IO/replay, binary profile round-trips,
@@ -281,3 +423,14 @@ cleanup, live event streaming, cancellation, timeout, SSE parsing/reconnect,
 URL encoding, errors, redirects and the unpublished package artifacts.
 The provider is Haarness's deterministic echo adapter and MCP uses a stdio
 fixture; these tests do not contact paid model services.
+
+Cloud generation imports the versioned sibling `haarness-cloud/docs/openapi.json`
+and includes every operation without a route allowlist. Copy the updated document
+to `sdks/cloud-openapi.json` before regeneration; the check catches sibling drift.
+Contract tests cover all 125 HTTP operations in TypeScript and Python sync/async,
+including form encoding, manual redirects and binary responses. Live fixture
+journeys in `sdks/tests/cloud_e2e.py` (sync/async) and `cloud_ts_e2e.mjs` exercise
+real account API, gateway, runtimes, two chats, uploads, all schedule operations,
+worker execution while disconnected, stop/start persistence and deletion. They
+require an isolated Cloud fixture stack and use fixture-only Stripe funding.
+The paid-provider/tmux scenario is opt-in: `scripts/test-cloud-tools-live.py`.

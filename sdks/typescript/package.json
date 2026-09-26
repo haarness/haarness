@@ -18,6 +18,7 @@
     "README.md",
     "LICENSE",
     "OPERATIONS.md",
+    "CLOUD-OPERATIONS.md",
     "src"
   ],
   "engines": {

@@ -7,6 +7,22 @@ class Api(Transport):
         """POST /v1/manage/{resource}."""
         return cast("T.ManagementView", self.request('POST', f'/v1/manage/{self.segment(resource)}', body=body, binary_body=False, binary_response=False, options=options))
 
+    def cloud_agents(self, body: T.CloudAgentInput, *, options: RequestOptions | None = None) -> T.JsonValue:
+        """POST /v1/cloud/agents."""
+        return cast("T.JsonValue", self.request('POST', f'/v1/cloud/agents', body=body, binary_body=False, binary_response=False, options=options))
+
+    def cloud_sessions(self, body: T.CloudSessionInput, *, options: RequestOptions | None = None) -> T.JsonValue:
+        """POST /v1/cloud/sessions."""
+        return cast("T.JsonValue", self.request('POST', f'/v1/cloud/sessions', body=body, binary_body=False, binary_response=False, options=options))
+
+    def cloud_chats(self, body: T.CloudChatInput, *, options: RequestOptions | None = None) -> T.JsonValue:
+        """POST /v1/cloud/chats."""
+        return cast("T.JsonValue", self.request('POST', f'/v1/cloud/chats', body=body, binary_body=False, binary_response=False, options=options))
+
+    def cloud_schedules(self, body: T.CloudScheduleInput, *, options: RequestOptions | None = None) -> T.JsonValue:
+        """POST /v1/cloud/schedules."""
+        return cast("T.JsonValue", self.request('POST', f'/v1/cloud/schedules', body=body, binary_body=False, binary_response=False, options=options))
+
     def info(self, *, options: RequestOptions | None = None) -> T.ServerInfo:
         """GET /v1/info."""
         return cast("T.ServerInfo", self.request('GET', f'/v1/info', binary_body=False, binary_response=False, options=options))
@@ -431,10 +447,38 @@ class Api(Transport):
         """POST /v1/threads/{id}/browser/tool."""
         return cast("T.BrowserToolResponse", self.request('POST', f'/v1/threads/{self.segment(id)}/browser/tool', body=body, binary_body=False, binary_response=False, options=options))
 
+    def host_projects(self, *, options: RequestOptions | None = None) -> T.WorkspaceListResponse:
+        """GET /v1/host/projects."""
+        return cast("T.WorkspaceListResponse", self.request('GET', f'/v1/host/projects', binary_body=False, binary_response=False, options=options))
+
+    def host_directories(self, query: T.Browse | None = None, *, options: RequestOptions | None = None) -> T.DirectoryListing:
+        """GET /v1/host/directories."""
+        return cast("T.DirectoryListing", self.request('GET', f'/v1/host/directories', query=query, binary_body=False, binary_response=False, options=options))
+
+    def host_open(self, body: T.Open, *, options: RequestOptions | None = None) -> T.WorkspaceInfo:
+        """POST /v1/host/open."""
+        return cast("T.WorkspaceInfo", self.request('POST', f'/v1/host/open', body=body, binary_body=False, binary_response=False, options=options))
+
 class AsyncApi(AsyncTransport):
     async def manage_resource(self, resource: str, body: T.JsonValue, *, options: RequestOptions | None = None) -> T.ManagementView:
         """POST /v1/manage/{resource}."""
         return cast("T.ManagementView", await self.request('POST', f'/v1/manage/{self.segment(resource)}', body=body, binary_body=False, binary_response=False, options=options))
+
+    async def cloud_agents(self, body: T.CloudAgentInput, *, options: RequestOptions | None = None) -> T.JsonValue:
+        """POST /v1/cloud/agents."""
+        return cast("T.JsonValue", await self.request('POST', f'/v1/cloud/agents', body=body, binary_body=False, binary_response=False, options=options))
+
+    async def cloud_sessions(self, body: T.CloudSessionInput, *, options: RequestOptions | None = None) -> T.JsonValue:
+        """POST /v1/cloud/sessions."""
+        return cast("T.JsonValue", await self.request('POST', f'/v1/cloud/sessions', body=body, binary_body=False, binary_response=False, options=options))
+
+    async def cloud_chats(self, body: T.CloudChatInput, *, options: RequestOptions | None = None) -> T.JsonValue:
+        """POST /v1/cloud/chats."""
+        return cast("T.JsonValue", await self.request('POST', f'/v1/cloud/chats', body=body, binary_body=False, binary_response=False, options=options))
+
+    async def cloud_schedules(self, body: T.CloudScheduleInput, *, options: RequestOptions | None = None) -> T.JsonValue:
+        """POST /v1/cloud/schedules."""
+        return cast("T.JsonValue", await self.request('POST', f'/v1/cloud/schedules', body=body, binary_body=False, binary_response=False, options=options))
 
     async def info(self, *, options: RequestOptions | None = None) -> T.ServerInfo:
         """GET /v1/info."""
@@ -860,3 +904,14 @@ class AsyncApi(AsyncTransport):
         """POST /v1/threads/{id}/browser/tool."""
         return cast("T.BrowserToolResponse", await self.request('POST', f'/v1/threads/{self.segment(id)}/browser/tool', body=body, binary_body=False, binary_response=False, options=options))
 
+    async def host_projects(self, *, options: RequestOptions | None = None) -> T.WorkspaceListResponse:
+        """GET /v1/host/projects."""
+        return cast("T.WorkspaceListResponse", await self.request('GET', f'/v1/host/projects', binary_body=False, binary_response=False, options=options))
+
+    async def host_directories(self, query: T.Browse | None = None, *, options: RequestOptions | None = None) -> T.DirectoryListing:
+        """GET /v1/host/directories."""
+        return cast("T.DirectoryListing", await self.request('GET', f'/v1/host/directories', query=query, binary_body=False, binary_response=False, options=options))
+
+    async def host_open(self, body: T.Open, *, options: RequestOptions | None = None) -> T.WorkspaceInfo:
+        """POST /v1/host/open."""
+        return cast("T.WorkspaceInfo", await self.request('POST', f'/v1/host/open', body=body, binary_body=False, binary_response=False, options=options))

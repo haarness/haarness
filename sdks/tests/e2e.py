@@ -132,7 +132,11 @@ def scenario(mode):
                 "list_questions",
             ):
                 c(name)
+            c("host_projects")
+            assert c("host_directories", {"path":str(fixture.workspace)})["path"] == str(fixture.workspace)
+            assert c("host_open", {"path":str(fixture.workspace)})["path"] == str(fixture.workspace)
             assert c("list_files", {"path": ""})["entries"]
+            file_cursor = c("info")["eventCursor"]
             document = c("read_file", {"path": "fixture.txt"})
             updated = c("write_file", {"path": "fixture.txt", "content": "edited via SDK\n", "revision": document["revision"]})
             assert updated["content"] == "edited via SDK\n"
@@ -142,6 +146,10 @@ def scenario(mode):
             c("mutate_file", {"action": "mkdir", "path": "empty-dir"})
             c("mutate_file", {"action": "rename", "path": "empty-dir", "target": "renamed-dir"})
             c("mutate_file", {"action": "delete", "path": "renamed-dir", "confirm": True})
+            file_events = c("events", file_cursor, 5)
+            assert all(e["type"] == "files.updated" for e in file_events), file_events
+            assert [e["payload"]["path"] for e in file_events] == ["fixture.txt", "fixture.txt", "empty-dir", "empty-dir", "renamed-dir"]
+
             assert c("bad_auth", error=401)["retryable"] is False
             c("get_thread", str(uuid4()), error=404)
             c("create_thread", {"title": []}, error=422)
@@ -476,6 +484,7 @@ def scenario(mode):
             expected = {
                 x["name"]
                 for x in json.loads((ROOT / "sdks/operations.json").read_text())
+                if not x["path"].startswith("/v1/cloud/")  # Separate authenticated Cloud live suite.
             }
             missing = expected - runner.covered
             assert not missing, "Missing successful operation coverage: " + str(

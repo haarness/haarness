@@ -13,75 +13,12 @@ use uuid::Uuid;
 const MAX_RESPONSE: usize = 8 * 1024 * 1024;
 mod events;
 
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum AgentAction {
-    List,
-    Get,
-    Create,
-    Update,
-    Delete,
-    SshPublicKey,
-    Models,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AgentInput {
-    action: AgentAction,
-    id: Option<Uuid>,
-    name: Option<String>,
-    description: Option<String>,
-    version: Option<i64>,
-    configuration: Option<Value>,
-    search: Option<String>,
-    cursor: Option<Uuid>,
-    limit: Option<u64>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum SessionAction {
-    List,
-    Get,
-    Create,
-    Start,
-    Stop,
-    Rename,
-    Update,
-    SaveAgent,
-    SshPublicKey,
-    Archive,
-    Delete,
-    Ask,
-    Messages,
-    Wait,
-    Abort,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SessionInput {
-    action: SessionAction,
-    session_id: Option<Uuid>,
-    configuration: Option<Value>,
-    version: Option<i64>,
-    name: Option<String>,
-    description: Option<String>,
-    start: Option<bool>,
-    cloud_agent_id: Option<Uuid>,
-    thread_id: Option<Uuid>,
-    turn_id: Option<Uuid>,
-    title: Option<String>,
-    message: Option<String>,
-    reasoning_effort: Option<String>,
-    archived: Option<bool>,
-    wait: Option<bool>,
-    timeout_seconds: Option<u64>,
-    cursor: Option<Uuid>,
-    limit: Option<u64>,
-    after: Option<u64>,
-}
+use haarness_protocol::{
+    CloudAgentAction as AgentAction, CloudAgentInput as AgentInput, CloudChatAction as ChatAction,
+    CloudChatInput as ChatInput, CloudScheduleAction as ScheduleAction,
+    CloudScheduleInput as ScheduleInput, CloudSessionAction as SessionAction,
+    CloudSessionInput as SessionInput,
+};
 
 fn invalid(message: impl Into<String>) -> Error {
     Error::Other(message.into())
@@ -332,6 +269,166 @@ impl Cloud {
         }
     }
 
+    /// Durable Cloud worker schedules, never device-local scheduling.
+    pub async fn schedule(&self, arguments: Value) -> Result<Value> {
+        let input: ScheduleInput = serde_json::from_value(arguments)?;
+        let count = limit(input.limit)?;
+        if matches!(input.action, ScheduleAction::List) {
+            let extra = input
+                .session_id
+                .map(|id| format!("&sessionId={id}"))
+                .unwrap_or_default();
+            return self.page("schedules", input.cursor, count, &extra).await;
+        }
+        if matches!(input.action, ScheduleAction::Create) {
+            let session = required(input.session_id, "sessionId")?;
+            self.owned("sessions", session).await?;
+            let name = required(input.name, "name")?;
+            nonempty(&name, 200, "name")?;
+            let prompt = required(input.prompt, "prompt")?;
+            nonempty(&prompt, 32768, "prompt")?;
+            return self.api(Method::POST,"api/v1/schedules",Some(json!({"sessionId":session,"chatId":required(input.chat_id,"chatId")?,"name":name,"prompt":prompt,"at":input.at,"everySeconds":input.every_seconds}))).await;
+        }
+        let id = required(input.id, "id")?;
+        let row = self.owned("schedules", id).await?;
+        let path = format!("api/v1/schedules/{id}");
+        match input.action {
+            ScheduleAction::Get => Ok(row),
+            ScheduleAction::Delete => self.api(Method::DELETE, &path, None).await,
+            ScheduleAction::Run => {
+                self.api(Method::POST, &format!("{path}/run"), Some(json!({})))
+                    .await
+            }
+            ScheduleAction::History => {
+                self.page(&format!("schedules/{id}/runs"), input.cursor, count, "")
+                    .await
+            }
+            ScheduleAction::Update | ScheduleAction::Pause | ScheduleAction::Resume => {
+                let version = required(input.version, "version")?;
+                if row["version"].as_i64() != Some(version) {
+                    return Err(invalid("Schedule changed; get it again before updating"));
+                }
+                let enabled = match input.action {
+                    ScheduleAction::Pause => Some(false),
+                    ScheduleAction::Resume => Some(true),
+                    _ => input.enabled,
+                };
+                self.api(Method::PATCH,&path,Some(json!({"version":version,"name":input.name,"prompt":input.prompt,"at":input.at,"enabled":enabled}))).await
+            }
+            _ => Err(invalid("Unsupported schedule action")),
+        }
+    }
+
+    /// Explicit chat management scoped to one session; never provisions compute.
+    pub async fn chat(&self, arguments: Value) -> Result<Value> {
+        let input: ChatInput = serde_json::from_value(arguments)?;
+        let count = limit(input.limit)? as usize;
+        if let Some(title) = &input.title {
+            nonempty(title, 200, "title")?;
+        }
+        let id = input.session_id;
+        let requires_chat = !matches!(input.action, ChatAction::List | ChatAction::Create);
+        if requires_chat && input.chat_id.is_none() {
+            return Err(invalid(
+                "chatId is required; list chats first or create a new chat in this session",
+            ));
+        }
+        if !requires_chat && (input.chat_id.is_some() || input.turn_id.is_some()) {
+            return Err(invalid(
+                "list/create cannot target an existing chat or turn",
+            ));
+        }
+        if matches!(input.action, ChatAction::Rename) {
+            required(input.title.as_ref(), "title")?;
+        }
+        if matches!(input.action, ChatAction::Ask) {
+            nonempty(
+                required(input.message.as_deref(), "message")?,
+                32768,
+                "message",
+            )?;
+        }
+        let session = self.owned("sessions", id).await?;
+        if session["workspace"]["observedState"] != "running" {
+            return Err(invalid(
+                "Start the Cloud session before using its chats; no message was submitted",
+            ));
+        }
+        let mut remote = Remote::new(self, id).await?;
+        let url = self.url(id, "sessions")?;
+        if matches!(input.action, ChatAction::List) {
+            let rows = remote
+                .request(
+                    Method::GET,
+                    &format!("v1/threads?archived={}", input.archived.unwrap_or(false)),
+                    None,
+                )
+                .await?;
+            let mut rows: Vec<Value> = rows
+                .as_array()
+                .ok_or_else(|| invalid("Invalid chat list"))?
+                .iter()
+                .filter(|r| {
+                    r["parentId"].is_null()
+                        && (input.archived == Some(true) || r["archived"] != true)
+                })
+                .cloned()
+                .collect();
+            // Stable identity ordering makes cursors independent of chat activity.
+            rows.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+            if let Some(cursor) = input.cursor {
+                let cursor = cursor.to_string();
+                rows.retain(|r| r["id"].as_str().is_some_and(|id| id > cursor.as_str()));
+            }
+            let next = if rows.len() > count {
+                rows[count - 1]["id"].clone()
+            } else {
+                Value::Null
+            };
+            rows.truncate(count);
+            return Ok(json!({"sessionId":id,"chats":rows,"nextCursor":next,"url":url}));
+        }
+        if matches!(input.action, ChatAction::Create) {
+            let info = remote.request(Method::GET, "v1/info", None).await?;
+            let chat = remote.request(Method::POST, "v1/threads", Some(json!({"title":input.title,
+                "agent":info["defaultAgent"],"provider":info["defaultProvider"],"model":info["defaultModel"]}))).await?;
+            return Ok(
+                json!({"sessionId":id,"chatId":chat["id"],"threadId":chat["id"],"chat":chat,"url":format!("{url}?thread={}",chat["id"].as_str().unwrap_or_default())}),
+            );
+        }
+        let chat_id = required(input.chat_id, "chatId")?;
+        let path = format!("v1/threads/{chat_id}");
+        let mut chat = remote.request(Method::GET, &path, None).await?;
+        if !chat["parentId"].is_null() {
+            return Err(invalid(
+                "chatId must identify a root chat, not a subagent thread",
+            ));
+        }
+        match input.action {
+            ChatAction::Get | ChatAction::Rename | ChatAction::Archive => {
+                if !matches!(input.action, ChatAction::Get) {
+                    let body = if matches!(input.action, ChatAction::Rename) {
+                        json!({"title":input.title})
+                    } else {
+                        json!({"archived":input.archived.unwrap_or(true)})
+                    };
+                    chat = remote.request(Method::PATCH, &path, Some(body)).await?;
+                }
+                Ok(
+                    json!({"sessionId":id,"chatId":chat_id,"threadId":chat_id,"chat":chat,"url":format!("{url}?thread={chat_id}")}),
+                )
+            }
+            _ => {
+                let mut args = serde_json::to_value(input)?;
+                args.as_object_mut().unwrap().remove("chatId");
+                args["threadId"] = json!(chat_id);
+                let mut result = self.session(args).await?;
+                result["chatId"] = json!(chat_id);
+                Ok(result)
+            }
+        }
+    }
+
     pub async fn session(&self, arguments: Value) -> Result<Value> {
         let input: SessionInput = serde_json::from_value(arguments)?;
         validate_configuration(input.configuration.as_ref())?;
@@ -471,10 +568,18 @@ impl Cloud {
             thread
         } else {
             let threads = remote.request(Method::GET, "v1/threads", None).await?;
-            let candidate = threads.as_array().and_then(|rows| {
-                rows.iter()
-                    .find(|row| row["parentId"].is_null() && row["archived"] != true)
-            });
+            let roots: Vec<&Value> = threads
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|row| row["parentId"].is_null() && row["archived"] != true)
+                .collect();
+            if roots.len() > 1 {
+                return Err(invalid(
+                    "Multiple chats in this session; list them with cloud_chat and supply chatId (or threadId for this legacy tool)",
+                ));
+            }
+            let candidate = roots.first();
             if let Some(thread) = candidate {
                 serde_json::from_value(thread["id"].clone())?
             } else if matches!(input.action, SessionAction::Ask) {
@@ -526,7 +631,7 @@ impl Cloud {
                         || session.get("configuration").unwrap_or(&session["agentSnapshot"]["configuration"])["reasoningEffort"].clone(),
                         |e| json!(e),
                     );
-                    remote.request(Method::POST,&format!("{thread_path}/turns"),Some(json!({"requestId":Uuid::now_v7(),"text":input.message,"reasoningEffort":effort,"tools":{"question":false,"cloud_agent_manage":false,"cloud_agent_session":false}}))).await?
+                    remote.request(Method::POST,&format!("{thread_path}/turns"),Some(json!({"requestId":Uuid::now_v7(),"text":input.message,"reasoningEffort":effort,"tools":{"question":false,"cloud_agent_manage":false,"cloud_agent_session":false,"cloud_chat":false,"cloud_schedule":false}}))).await?
                 } else if let Some(turn) = input.turn_id {
                     remote.turn(thread, turn).await?
                 } else {

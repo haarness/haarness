@@ -1,0 +1,1510 @@
+[
+  {
+    "name": "native_router_session",
+    "method": "POST",
+    "path": "/api/v1/account/router-session",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/NativeRouterSessionResponse"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/NativeRouterSessionRequest"
+    }
+  },
+  {
+    "name": "list_accounts",
+    "method": "GET",
+    "path": "/api/v1/accounts",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/Items_AccountDto"
+    }
+  },
+  {
+    "name": "get_account",
+    "method": "GET",
+    "path": "/api/v1/accounts/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/AccountDto"
+    }
+  },
+  {
+    "name": "patch_account",
+    "method": "PATCH",
+    "path": "/api/v1/accounts/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/AccountDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/UpdateAccountRequest"
+    }
+  },
+  {
+    "name": "list_members",
+    "method": "GET",
+    "path": "/api/v1/accounts/{id}/members",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/Items_MemberDto"
+    }
+  },
+  {
+    "name": "list_projects",
+    "method": "GET",
+    "path": "/api/v1/accounts/{id}/projects",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/Items_ProjectDto"
+    }
+  },
+  {
+    "name": "create_project",
+    "method": "POST",
+    "path": "/api/v1/accounts/{id}/projects",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/ProjectDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/CreateProjectRequest"
+    }
+  },
+  {
+    "name": "list_account_api_keys",
+    "method": "GET",
+    "path": "/api/v1/api-keys",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/Items_AccountApiKeyDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/ListAccountApiKeysQuery"
+    }
+  },
+  {
+    "name": "create_account_api_key",
+    "method": "POST",
+    "path": "/api/v1/api-keys",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/CreatedAccountApiKeyResponse"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/CreateAccountApiKeyRequest"
+    }
+  },
+  {
+    "name": "revoke_account_api_key",
+    "method": "DELETE",
+    "path": "/api/v1/api-keys/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    },
+    "query": {
+      "$ref": "#/components/schemas/RevokeAccountApiKeyQuery"
+    }
+  },
+  {
+    "name": "rotate_account_api_key",
+    "method": "POST",
+    "path": "/api/v1/api-keys/{id}/rotate",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/CreatedAccountApiKeyResponse"
+    },
+    "query": {
+      "$ref": "#/components/schemas/RotateAccountApiKeyQuery"
+    }
+  },
+  {
+    "name": "list_budgets",
+    "method": "GET",
+    "path": "/api/v1/billing/budgets",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/Items_BudgetDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/ListBudgetsQuery"
+    }
+  },
+  {
+    "name": "create_budget",
+    "method": "POST",
+    "path": "/api/v1/billing/budgets",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/BudgetDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/CreateBudgetRequest"
+    }
+  },
+  {
+    "name": "delete_budget",
+    "method": "DELETE",
+    "path": "/api/v1/billing/budgets/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "billing_checkout",
+    "method": "POST",
+    "path": "/api/v1/billing/checkout",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/CheckoutResponse"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/CheckoutRequest"
+    }
+  },
+  {
+    "name": "billing_entitlements",
+    "method": "GET",
+    "path": "/api/v1/billing/entitlements",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/EntitlementsDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/BillingEntitlementsQuery"
+    }
+  },
+  {
+    "name": "billing_ledger",
+    "method": "GET",
+    "path": "/api/v1/billing/ledger",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/Page_LedgerEntryDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/BillingLedgerQuery"
+    }
+  },
+  {
+    "name": "billing_payments",
+    "method": "GET",
+    "path": "/api/v1/billing/payments",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/Page_PaymentDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/BillingPaymentsQuery"
+    }
+  },
+  {
+    "name": "billing_plans",
+    "method": "GET",
+    "path": "/api/v1/billing/plans",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/PlansResponse"
+    }
+  },
+  {
+    "name": "billing_portal",
+    "method": "POST",
+    "path": "/api/v1/billing/portal",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/PortalResponse"
+    }
+  },
+  {
+    "name": "get_subscription",
+    "method": "GET",
+    "path": "/api/v1/billing/subscription",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/SubscriptionDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/GetSubscriptionQuery"
+    }
+  },
+  {
+    "name": "cancel_subscription",
+    "method": "POST",
+    "path": "/api/v1/billing/subscription/cancel",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/SubscriptionDto"
+    }
+  },
+  {
+    "name": "resume_subscription",
+    "method": "POST",
+    "path": "/api/v1/billing/subscription/resume",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/SubscriptionDto"
+    }
+  },
+  {
+    "name": "billing_usage",
+    "method": "GET",
+    "path": "/api/v1/billing/usage",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/Page_UsageItemDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/BillingUsageQuery"
+    }
+  },
+  {
+    "name": "get_wallet",
+    "method": "GET",
+    "path": "/api/v1/billing/wallet",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/WalletDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/GetWalletQuery"
+    }
+  },
+  {
+    "name": "patch_wallet",
+    "method": "PATCH",
+    "path": "/api/v1/billing/wallet",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/WalletDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/UpdateWalletRequest"
+    }
+  },
+  {
+    "name": "capabilities",
+    "method": "GET",
+    "path": "/api/v1/capabilities",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/CapabilitiesResponse"
+    }
+  },
+  {
+    "name": "list_cloud_agents",
+    "method": "GET",
+    "path": "/api/v1/cloud-agents",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/Page_CloudAgentDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/ListCloudAgentsQuery"
+    }
+  },
+  {
+    "name": "create_cloud_agent",
+    "method": "POST",
+    "path": "/api/v1/cloud-agents",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/CloudAgentDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/CreateCloudAgentRequest"
+    }
+  },
+  {
+    "name": "get_cloud_agent",
+    "method": "GET",
+    "path": "/api/v1/cloud-agents/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/CloudAgentDto"
+    }
+  },
+  {
+    "name": "update_cloud_agent",
+    "method": "PUT",
+    "path": "/api/v1/cloud-agents/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/CloudAgentDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/UpdateCloudAgentRequest"
+    }
+  },
+  {
+    "name": "delete_cloud_agent",
+    "method": "DELETE",
+    "path": "/api/v1/cloud-agents/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "csrf",
+    "method": "GET",
+    "path": "/api/v1/csrf",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/CsrfResponse"
+    }
+  },
+  {
+    "name": "device_details",
+    "method": "GET",
+    "path": "/api/v1/device/{userCode}",
+    "pathParams": [
+      "userCode"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/DeviceCodeDetailsResponse"
+    }
+  },
+  {
+    "name": "device_approve",
+    "method": "POST",
+    "path": "/api/v1/device/{userCode}/approve",
+    "pathParams": [
+      "userCode"
+    ],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "device_deny",
+    "method": "POST",
+    "path": "/api/v1/device/{userCode}/deny",
+    "pathParams": [
+      "userCode"
+    ],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "list_devices",
+    "method": "GET",
+    "path": "/api/v1/devices",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/DevicesResponse"
+    }
+  },
+  {
+    "name": "revoke_device",
+    "method": "DELETE",
+    "path": "/api/v1/devices/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "entity_events",
+    "method": "GET",
+    "path": "/api/v1/events",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/CloudEntityEvent"
+    },
+    "query": {
+      "$ref": "#/components/schemas/EntityEventsQuery"
+    },
+    "stream": "websocket"
+  },
+  {
+    "name": "upload_artifact",
+    "method": "POST",
+    "path": "/api/v1/marketplace/artifacts",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/UploadArtifactResponse"
+    },
+    "query": {
+      "$ref": "#/components/schemas/UploadArtifactQuery"
+    },
+    "contentType": "application/zip",
+    "binaryBody": true
+  },
+  {
+    "name": "list_collections",
+    "method": "GET",
+    "path": "/api/v1/marketplace/collections",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/Page_CollectionRefDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/ListCollectionsQuery"
+    }
+  },
+  {
+    "name": "get_collection",
+    "method": "GET",
+    "path": "/api/v1/marketplace/collections/{slug}",
+    "pathParams": [
+      "slug"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/CollectionDto"
+    }
+  },
+  {
+    "name": "get_publisher",
+    "method": "GET",
+    "path": "/api/v1/marketplace/publishers/{slug}",
+    "pathParams": [
+      "slug"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/PublisherPageDto"
+    }
+  },
+  {
+    "name": "list_resources",
+    "method": "GET",
+    "path": "/api/v1/marketplace/resources",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/Page_ResourceSummaryDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/ListResourcesQuery"
+    }
+  },
+  {
+    "name": "get_resource",
+    "method": "GET",
+    "path": "/api/v1/marketplace/resources/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/ResourceDetailDto"
+    }
+  },
+  {
+    "name": "install_manifest",
+    "method": "GET",
+    "path": "/api/v1/marketplace/resources/{id}/install-manifest",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/InstallManifestDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/InstallManifestQuery"
+    }
+  },
+  {
+    "name": "list_resource_versions",
+    "method": "GET",
+    "path": "/api/v1/marketplace/resources/{id}/versions",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/Items_VersionSummaryDto"
+    }
+  },
+  {
+    "name": "create_submission",
+    "method": "POST",
+    "path": "/api/v1/marketplace/submissions",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/SubmissionDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/CreateSubmissionQuery"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/CreateSubmissionRequest"
+    }
+  },
+  {
+    "name": "get_submission",
+    "method": "GET",
+    "path": "/api/v1/marketplace/submissions/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/SubmissionDto"
+    }
+  },
+  {
+    "name": "me",
+    "method": "GET",
+    "path": "/api/v1/me",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/MeResponse"
+    }
+  },
+  {
+    "name": "get_operation",
+    "method": "GET",
+    "path": "/api/v1/operations/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/OperationDto"
+    }
+  },
+  {
+    "name": "operation_events",
+    "method": "GET",
+    "path": "/api/v1/operations/{id}/events",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/OperationEventsResponse"
+    },
+    "query": {
+      "$ref": "#/components/schemas/OperationEventsQuery"
+    }
+  },
+  {
+    "name": "list_profiles",
+    "method": "GET",
+    "path": "/api/v1/profiles",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/Items_ProfileRecordDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/ListProfilesQuery"
+    }
+  },
+  {
+    "name": "upload_profile",
+    "method": "POST",
+    "path": "/api/v1/profiles",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/ProfileRecordDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/UploadProfileQuery"
+    },
+    "contentType": "application/zip",
+    "binaryBody": true
+  },
+  {
+    "name": "get_profile",
+    "method": "GET",
+    "path": "/api/v1/profiles/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/ProfileRecordDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/GetProfileQuery"
+    }
+  },
+  {
+    "name": "delete_profile",
+    "method": "DELETE",
+    "path": "/api/v1/profiles/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    },
+    "query": {
+      "$ref": "#/components/schemas/DeleteProfileQuery"
+    }
+  },
+  {
+    "name": "download_profile",
+    "method": "GET",
+    "path": "/api/v1/profiles/{id}/download",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "string"
+    },
+    "query": {
+      "$ref": "#/components/schemas/DownloadProfileQuery"
+    },
+    "binaryResponse": true
+  },
+  {
+    "name": "get_project",
+    "method": "GET",
+    "path": "/api/v1/projects/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/ProjectDto"
+    }
+  },
+  {
+    "name": "delete_project",
+    "method": "DELETE",
+    "path": "/api/v1/projects/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "patch_project",
+    "method": "PATCH",
+    "path": "/api/v1/projects/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/ProjectDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/CreateProjectRequest"
+    }
+  },
+  {
+    "name": "current_release",
+    "method": "GET",
+    "path": "/api/v1/releases",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/ReleaseManifestResponse"
+    },
+    "query": {
+      "$ref": "#/components/schemas/CurrentReleaseQuery"
+    }
+  },
+  {
+    "name": "product_release",
+    "method": "GET",
+    "path": "/api/v1/releases/{channel}/{product}",
+    "pathParams": [
+      "channel",
+      "product"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/ReleaseManifestResponse"
+    }
+  },
+  {
+    "name": "list_router_keys",
+    "method": "GET",
+    "path": "/api/v1/router/keys",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/Items_RouterKeyDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/ListRouterKeysQuery"
+    }
+  },
+  {
+    "name": "create_router_key",
+    "method": "POST",
+    "path": "/api/v1/router/keys",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/CreatedRouterKeyResponse"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/CreateRouterKeyRequest"
+    }
+  },
+  {
+    "name": "revoke_router_key",
+    "method": "DELETE",
+    "path": "/api/v1/router/keys/{keyId}",
+    "pathParams": [
+      "keyId"
+    ],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "rotate_router_key",
+    "method": "POST",
+    "path": "/api/v1/router/keys/{keyId}/rotate",
+    "pathParams": [
+      "keyId"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/CreatedRouterKeyResponse"
+    }
+  },
+  {
+    "name": "model_prices",
+    "method": "GET",
+    "path": "/api/v1/router/model-prices",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/ModelPricesResponse"
+    }
+  },
+  {
+    "name": "list_cloud_schedules",
+    "method": "GET",
+    "path": "/api/v1/schedules",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/Page_CloudScheduleDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/ListCloudSchedulesQuery"
+    }
+  },
+  {
+    "name": "create_cloud_schedule",
+    "method": "POST",
+    "path": "/api/v1/schedules",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/CloudScheduleDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/CreateCloudScheduleRequest"
+    }
+  },
+  {
+    "name": "get_cloud_schedule",
+    "method": "GET",
+    "path": "/api/v1/schedules/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/CloudScheduleDto"
+    }
+  },
+  {
+    "name": "delete_cloud_schedule",
+    "method": "DELETE",
+    "path": "/api/v1/schedules/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "update_cloud_schedule",
+    "method": "PATCH",
+    "path": "/api/v1/schedules/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/CloudScheduleDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/UpdateCloudScheduleRequest"
+    }
+  },
+  {
+    "name": "run_cloud_schedule",
+    "method": "POST",
+    "path": "/api/v1/schedules/{id}/run",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/CloudScheduleRunDto"
+    }
+  },
+  {
+    "name": "cloud_schedule_runs",
+    "method": "GET",
+    "path": "/api/v1/schedules/{id}/runs",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/Page_CloudScheduleRunDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/CloudScheduleRunsQuery"
+    }
+  },
+  {
+    "name": "list_agent_sessions",
+    "method": "GET",
+    "path": "/api/v1/sessions",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/Page_AgentSessionDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/ListAgentSessionsQuery"
+    }
+  },
+  {
+    "name": "create_agent_session",
+    "method": "POST",
+    "path": "/api/v1/sessions",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/AgentSessionCreatedResponse"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/CreateAgentSessionRequest"
+    }
+  },
+  {
+    "name": "get_agent_session",
+    "method": "GET",
+    "path": "/api/v1/sessions/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/AgentSessionDto"
+    }
+  },
+  {
+    "name": "delete_agent_session",
+    "method": "DELETE",
+    "path": "/api/v1/sessions/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceOperationResponse"
+    }
+  },
+  {
+    "name": "update_agent_session",
+    "method": "PATCH",
+    "path": "/api/v1/sessions/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/AgentSessionDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/UpdateAgentSessionRequest"
+    }
+  },
+  {
+    "name": "attach_agent_session",
+    "method": "POST",
+    "path": "/api/v1/sessions/{id}/attach",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/AttachResponse"
+    }
+  },
+  {
+    "name": "save_session_agent",
+    "method": "POST",
+    "path": "/api/v1/sessions/{id}/save-agent",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/CloudAgentDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/SaveSessionAgentRequest"
+    }
+  },
+  {
+    "name": "start_agent_session",
+    "method": "POST",
+    "path": "/api/v1/sessions/{id}/start",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceOperationResponse"
+    }
+  },
+  {
+    "name": "stop_agent_session",
+    "method": "POST",
+    "path": "/api/v1/sessions/{id}/stop",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceOperationResponse"
+    }
+  },
+  {
+    "name": "list_workspaces",
+    "method": "GET",
+    "path": "/api/v1/workspaces",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/Page_WorkspaceDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/ListWorkspacesQuery"
+    }
+  },
+  {
+    "name": "create_workspace",
+    "method": "POST",
+    "path": "/api/v1/workspaces",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceOperationResponse"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/CreateWorkspaceRequest"
+    }
+  },
+  {
+    "name": "workspace_options",
+    "method": "GET",
+    "path": "/api/v1/workspaces/options",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceOptionsResponse"
+    },
+    "query": {
+      "$ref": "#/components/schemas/WorkspaceOptionsQuery"
+    }
+  },
+  {
+    "name": "get_workspace",
+    "method": "GET",
+    "path": "/api/v1/workspaces/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceDto"
+    }
+  },
+  {
+    "name": "delete_workspace",
+    "method": "DELETE",
+    "path": "/api/v1/workspaces/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceOperationResponse"
+    }
+  },
+  {
+    "name": "patch_workspace",
+    "method": "PATCH",
+    "path": "/api/v1/workspaces/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/UpdateWorkspaceRequest"
+    }
+  },
+  {
+    "name": "attach_workspace",
+    "method": "POST",
+    "path": "/api/v1/workspaces/{id}/attach",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/AttachResponse"
+    }
+  },
+  {
+    "name": "export_workspace",
+    "method": "POST",
+    "path": "/api/v1/workspaces/{id}/export",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceOperationResponse"
+    }
+  },
+  {
+    "name": "download_export",
+    "method": "GET",
+    "path": "/api/v1/workspaces/{id}/exports/{operationId}/download",
+    "pathParams": [
+      "id",
+      "operationId"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/ExportDownloadResponse"
+    }
+  },
+  {
+    "name": "list_workspace_operations",
+    "method": "GET",
+    "path": "/api/v1/workspaces/{id}/operations",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/Page_OperationDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/ListWorkspaceOperationsQuery"
+    }
+  },
+  {
+    "name": "restore_workspace",
+    "method": "POST",
+    "path": "/api/v1/workspaces/{id}/restore",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceOperationResponse"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/RestoreRequest"
+    }
+  },
+  {
+    "name": "list_snapshots",
+    "method": "GET",
+    "path": "/api/v1/workspaces/{id}/snapshots",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/Items_SnapshotDto"
+    }
+  },
+  {
+    "name": "create_snapshot",
+    "method": "POST",
+    "path": "/api/v1/workspaces/{id}/snapshots",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceOperationResponse"
+    }
+  },
+  {
+    "name": "start_workspace",
+    "method": "POST",
+    "path": "/api/v1/workspaces/{id}/start",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceOperationResponse"
+    }
+  },
+  {
+    "name": "stop_workspace",
+    "method": "POST",
+    "path": "/api/v1/workspaces/{id}/stop",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/WorkspaceOperationResponse"
+    }
+  },
+  {
+    "name": "revoke_workspace_tickets",
+    "method": "POST",
+    "path": "/api/v1/workspaces/{id}/tickets/revoke",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "email_forgot",
+    "method": "POST",
+    "path": "/auth/email/forgot-password",
+    "pathParams": [],
+    "response": {},
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/EmailAccountRequest"
+    }
+  },
+  {
+    "name": "email_login",
+    "method": "POST",
+    "path": "/auth/email/login",
+    "pathParams": [],
+    "response": {},
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/EmailLoginRequest"
+    }
+  },
+  {
+    "name": "email_reset",
+    "method": "POST",
+    "path": "/auth/email/reset-password",
+    "pathParams": [],
+    "response": {},
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/EmailPasswordRequest"
+    }
+  },
+  {
+    "name": "email_signup",
+    "method": "POST",
+    "path": "/auth/email/signup",
+    "pathParams": [],
+    "response": {},
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/EmailAccountRequest"
+    }
+  },
+  {
+    "name": "email_verify",
+    "method": "POST",
+    "path": "/auth/email/verify",
+    "pathParams": [],
+    "response": {},
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/EmailPasswordRequest"
+    }
+  },
+  {
+    "name": "google_callback",
+    "method": "GET",
+    "path": "/auth/google/callback",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/HttpRedirect"
+    },
+    "query": {
+      "$ref": "#/components/schemas/GoogleCallbackQuery"
+    },
+    "redirectResponse": true
+  },
+  {
+    "name": "google_start",
+    "method": "GET",
+    "path": "/auth/google/start",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/HttpRedirect"
+    },
+    "query": {
+      "$ref": "#/components/schemas/GoogleStartQuery"
+    },
+    "redirectResponse": true
+  },
+  {
+    "name": "logout",
+    "method": "POST",
+    "path": "/auth/logout",
+    "pathParams": [],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "logout_all",
+    "method": "POST",
+    "path": "/auth/logout-all",
+    "pathParams": [],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "auth_options",
+    "method": "GET",
+    "path": "/auth/options",
+    "pathParams": [],
+    "response": {}
+  },
+  {
+    "name": "device_page",
+    "method": "GET",
+    "path": "/device",
+    "pathParams": [],
+    "response": {
+      "type": "string"
+    },
+    "query": {
+      "$ref": "#/components/schemas/DevicePageQuery"
+    },
+    "textResponse": true
+  },
+  {
+    "name": "healthz",
+    "method": "GET",
+    "path": "/healthz",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/HealthResponse"
+    }
+  },
+  {
+    "name": "internal_dead_jobs",
+    "method": "GET",
+    "path": "/internal/ops/jobs/dead",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/Items_DeadJobDto"
+    }
+  },
+  {
+    "name": "internal_retry_job",
+    "method": "POST",
+    "path": "/internal/ops/jobs/{id}/retry",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/DeadJobDto"
+    }
+  },
+  {
+    "name": "internal_ledger_check",
+    "method": "GET",
+    "path": "/internal/ops/ledger-check",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/LedgerCheckResponse"
+    },
+    "query": {
+      "$ref": "#/components/schemas/InternalLedgerCheckQuery"
+    }
+  },
+  {
+    "name": "internal_review_version",
+    "method": "POST",
+    "path": "/internal/ops/marketplace/versions/{id}/review",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/ReviewVersionResponse"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/ReviewVersionRequest"
+    }
+  },
+  {
+    "name": "internal_drain_bucket",
+    "method": "POST",
+    "path": "/internal/test/drain-bucket",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/DrainBucketResponse"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/DrainBucketRequest"
+    }
+  },
+  {
+    "name": "internal_enqueue_job",
+    "method": "POST",
+    "path": "/internal/test/enqueue-job",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/EnqueueJobResponse"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/EnqueueJobRequest"
+    }
+  },
+  {
+    "name": "internal_grant",
+    "method": "POST",
+    "path": "/internal/test/grant",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/GrantTestResponse"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/GrantTestRequest"
+    }
+  },
+  {
+    "name": "oauth_authorize_get",
+    "method": "GET",
+    "path": "/oauth/authorize",
+    "pathParams": [],
+    "response": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/components/schemas/HttpRedirect"
+        }
+      ]
+    },
+    "query": {
+      "$ref": "#/components/schemas/OauthAuthorizeGetQuery"
+    },
+    "redirectResponse": true,
+    "textResponse": true
+  },
+  {
+    "name": "oauth_authorize_post",
+    "method": "POST",
+    "path": "/oauth/authorize",
+    "pathParams": [],
+    "response": {
+      "anyOf": [
+        {
+          "$ref": "#/components/schemas/ConsentDecisionResponse"
+        },
+        {
+          "$ref": "#/components/schemas/HttpRedirect"
+        }
+      ]
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/ConsentDecisionRequest"
+    },
+    "redirectResponse": true
+  },
+  {
+    "name": "oauth_device_authorization",
+    "method": "POST",
+    "path": "/oauth/device_authorization",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/DeviceAuthorizationResponse"
+    },
+    "contentType": "application/x-www-form-urlencoded",
+    "body": {
+      "$ref": "#/components/schemas/OauthDeviceAuthorizationBody"
+    }
+  },
+  {
+    "name": "oauth_revoke",
+    "method": "POST",
+    "path": "/oauth/revoke",
+    "pathParams": [],
+    "response": {},
+    "contentType": "application/x-www-form-urlencoded",
+    "body": {
+      "$ref": "#/components/schemas/OauthRevokeBody"
+    }
+  },
+  {
+    "name": "oauth_token",
+    "method": "POST",
+    "path": "/oauth/token",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/TokenResponse"
+    },
+    "contentType": "application/x-www-form-urlencoded",
+    "body": {
+      "$ref": "#/components/schemas/OauthTokenBody"
+    }
+  },
+  {
+    "name": "openapi_document",
+    "method": "GET",
+    "path": "/openapi.json",
+    "pathParams": [],
+    "response": {}
+  },
+  {
+    "name": "readyz",
+    "method": "GET",
+    "path": "/readyz",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/ReadyResponse"
+    }
+  },
+  {
+    "name": "stripe_webhook",
+    "method": "POST",
+    "path": "/webhooks/stripe",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/StripeWebhookAck"
+    },
+    "contentType": "text/plain",
+    "body": {
+      "$ref": "#/components/schemas/StripeWebhookBody"
+    }
+  }
+]
