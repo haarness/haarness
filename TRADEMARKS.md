@@ -10,7 +10,7 @@ You may, without asking:
 - say truthfully that your software works with, is built on, or is a fork of Haarness;
 - use the name to refer to the unmodified project, in articles, talks and documentation.
 
-Please ask first (legal@haarness.dev) before you:
+Please ask first (admin@haarness.ai) before you:
 
 - distribute a modified build under the Haarness name or with the Haarness logo — rename
   a fork and replace the icons;
