@@ -6,9 +6,7 @@
     "pathParams": [
       "resource"
     ],
-    "response": {
-      "$ref": "#/components/schemas/ManagementView"
-    },
+    "response": {},
     "body": {}
   },
   {

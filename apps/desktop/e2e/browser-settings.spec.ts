@@ -291,7 +291,7 @@ async function choose(name: string, value: string) {
 }
 async function policy(scope = "project") {
   return (
-    await client.manageResource("browser-settings", { action: "get", scope })
+    await client.managementView("browser-settings", { action: "get", scope })
   ).data as unknown as BrowserSettingsValue;
 }
 async function savePolicy(
@@ -302,7 +302,7 @@ async function savePolicy(
   const next = structuredClone(before.scopePolicy ?? before.inheritedPolicy);
   change(next);
   return (
-    await client.manageResource("browser-settings", {
+    await client.managementView("browser-settings", {
       action: "set",
       scope,
       revision: before.revision,
@@ -762,7 +762,7 @@ test("global policy inheritance, project overrides, stale updates, and remote ro
   }, "global");
   expect((await policy()).policy.enabled).toBe(true); // Project override remains authoritative.
   const before = await policy();
-  await client.manageResource("browser-settings", {
+  await client.managementView("browser-settings", {
     action: "reset",
     revision: before.revision,
   } as any);
@@ -777,7 +777,7 @@ test("global policy inheritance, project overrides, stale updates, and remote ro
     .check();
   await expect.poll(async () => (await policy()).policy.enabled).toBe(true);
   await expect(
-    client.manageResource("browser-settings", {
+    client.managementView("browser-settings", {
       action: "set",
       revision: reset.revision,
       policy: before.policy,
@@ -797,23 +797,23 @@ test("global policy inheritance, project overrides, stale updates, and remote ro
     token: endpoint.token,
   });
   const remotePolicy = (
-    await remoteClient.manageResource("browser-settings", { action: "get" })
+    await remoteClient.managementView("browser-settings", { action: "get" })
   ).data as unknown as BrowserSettingsValue;
   expect(remotePolicy.policy.enabled).toBe(false);
-  await remoteClient.manageResource("browser-settings", {
+  await remoteClient.managementView("browser-settings", {
     action: "set",
     revision: remotePolicy.revision,
     policy: { ...remotePolicy.policy, enabled: true },
   } as any);
   expect(
     (
-      (await remoteClient.manageResource("browser-settings", { action: "get" }))
+      (await remoteClient.managementView("browser-settings", { action: "get" }))
         .data as unknown as BrowserSettingsValue
     ).policy.enabled,
   ).toBe(true);
   expect((await policy()).policy.enabled).toBe(true);
   const currentGlobal = await policy("global");
-  await client.manageResource("browser-settings", {
+  await client.managementView("browser-settings", {
     action: "set",
     scope: "global",
     revision: currentGlobal.revision,

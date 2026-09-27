@@ -85,6 +85,8 @@ pub struct RuntimeConfig {
     pub commands: Vec<haarness_protocol::CommandInfo>,
     /// User-defined agents (markdown files + config entries).
     pub custom_agents: Vec<CustomAgent>,
+    /// Disabled profiles stay installed but cannot admit new turns.
+    pub disabled_agents: Vec<String>,
 }
 
 impl RuntimeConfig {

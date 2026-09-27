@@ -29,6 +29,7 @@ use std::{
 use tokio::net::TcpListener;
 
 mod ui;
+mod capabilities;
 
 #[derive(Clone)]
 pub struct ManagementService {
@@ -267,7 +268,10 @@ impl ManagementService {
     }
 
     fn refresh_runtime_assets(&self, runtime: &AgentRuntime) {
-        let layers = asset_layers(&self.paths, &self.workspace, self.trust_project);
+        let mut layers = asset_layers(&self.paths, &self.workspace, self.trust_project);
+        if let Ok(disabled)=crate::capability_state::disabled(&self.paths,&self.workspace,self.trust_project,"skill") {
+            layers.commands.retain(|command| !disabled.contains(&command.name));
+        }
         runtime.replace_commands(layers.commands);
         runtime.replace_custom_agents(layers.agents);
         runtime.set_memory_context(self.memory_index().unwrap_or_default());
@@ -1658,6 +1662,8 @@ impl ManagementRegistry for ManagementService {
     }
 
     async fn user_request(&self, resource: &str, input: Value) -> CoreResult<Value> {
+        if resource == "capabilities" { return self.capability_request(&input).await.map_err(|e| CoreError::Tool(e.to_string())); }
+        if resource == "marketplace" { return self.marketplace_request(&input).await.map_err(|e| CoreError::Tool(e.to_string())); }
         if matches!(
             resource,
             "cloud_agent_manage" | "cloud_agent_session" | "cloud_chat" | "cloud_schedule"
@@ -1698,6 +1704,11 @@ impl ManagementRegistry for ManagementService {
             return Err(CoreError::Tool("Project memory is disabled".into()));
         }
         let mut result = match resource {
+            "marketplace" => {
+                if arguments.get("manifest").is_some() { return Err(CoreError::Invalid("Use a marketplace resource id".into())); }
+                self.marketplace_request(&arguments).await
+            },
+            "capabilities" => self.capability_request(&arguments).await,
             "skill" => self.skill(&arguments).await,
             "agent" => self.agent(&arguments),
             "plugin" => self.plugin(&arguments),
@@ -2337,7 +2348,7 @@ fn mcp_entry_from_add(input: &Value) -> Result<McpConfigureRequest> {
             transport: "stdio".into(),
             command: Some(required_string(input, "command")?.into()),
             args: string_array(input, "args")?,
-            env: string_map(input, "environment")?,
+            env: string_map(input, if input.get("environment").is_some() {"environment"} else {"env"})?,
             cwd: None,
             url: None,
             headers: BTreeMap::new(),
@@ -2376,14 +2387,15 @@ fn apply_mcp_edit(entry: &mut McpConfigureRequest, input: &Value) -> Result<()> 
     if input.get("args").is_some() {
         entry.args = string_array(input, "args")?;
     }
-    if input.get("environment").is_some() {
-        entry.env = string_map(input, "environment")?;
+    let environment=if input.get("environment").is_some() {"environment"} else {"env"};
+    if input.get(environment).is_some() {
+        entry.env = edited_secret_map(&entry.env, string_map(input, environment)?)?;
     }
     if let Some(url) = optional_string(input, "url") {
         entry.url = Some(url.into());
     }
     if input.get("headers").is_some() {
-        entry.headers = string_map(input, "headers")?;
+        entry.headers = edited_secret_map(&entry.headers, string_map(input, "headers")?)?;
     }
     if input.get("oauth").is_some() {
         entry.oauth = input.get("oauth").and_then(Value::as_bool);
@@ -2395,6 +2407,15 @@ fn apply_mcp_edit(entry: &mut McpConfigureRequest, input: &Value) -> Result<()> 
         entry.oauth_scopes = string_array(input, "oauthScopes")?;
     }
     Ok(())
+}
+
+// Management GET redacts credentials. Saving an unchanged editor must preserve
+// their values rather than replace them with the display placeholder.
+fn edited_secret_map(existing: &BTreeMap<String,String>, mut next: BTreeMap<String,String>) -> Result<BTreeMap<String,String>> {
+    for (name,value) in &mut next {
+        if value=="<redacted>" {*value=existing.get(name).with_context(||format!("Provide a value for {name}"))?.clone();}
+    }
+    Ok(next)
 }
 
 fn validate_mcp_entry(entry: &McpConfigureRequest) -> Result<()> {
@@ -2530,6 +2551,31 @@ mod tests {
     use super::*;
     use haarness_providers::CredentialStore;
     use haarness_server::FilesystemSkillRegistry;
+
+    #[tokio::test]
+    async fn extension_management_defaults_to_local_and_requires_project_trust() {
+        let root = std::env::temp_dir().join(format!("haarness-untrusted-extension-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let service = ManagementService::new(
+            Paths::new(Some(&root.join("home"))).unwrap(),
+            root.clone(),
+            false,
+            Arc::new(FilesystemSkillRegistry::new(vec![])),
+            Arc::new(NativeMcpRegistry::default()),
+        );
+        for scope in [Value::Null, json!("local")] {
+            let error = service.capability_request(&json!({"action":"disable", "kind":"extension", "name":"proof", "scope":scope})).await.unwrap_err();
+            assert!(error.to_string().contains("Project configuration is disabled"));
+        }
+        assert!(!root.join(".haarness").exists());
+        fs::create_dir_all(root.join(".haarness/extensions")).unwrap();
+        fs::write(root.join(".haarness/extensions/proof.ts"), "export default {};").unwrap();
+        fs::write(root.join(".haarness/extensions.json"), r#"{"enabled":true,"entries":[]}"#).unwrap();
+        let error = service.capability_request(&json!({"action":"disable", "kind":"extension", "name":"proof", "scope":"global"})).await.unwrap_err();
+        assert!(error.to_string().contains("Select a unique installed extension"));
+        assert!(!service.paths.config_dir().join("extensions.json").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn desktop_memory_crud_conflicts_settings_and_project_isolation() {
@@ -2981,6 +3027,10 @@ mod tests {
             read_mcp_entry(&mcp_config_target(&paths, &workspace, true), "fixture-mcp").unwrap();
         assert_eq!(mcp_add["config"]["headers"]["Authorization"], "<redacted>");
         assert_eq!(persisted.headers["Authorization"], "Bearer fixture-secret");
+        let mut edit=mcp_detail["config"].clone();
+        edit["action"]=json!("edit");edit["name"]=json!("fixture-mcp");edit["scope"]=json!("local");
+        service.mcp(&edit).await.unwrap();
+        assert_eq!(read_mcp_entry(&mcp_config_target(&paths,&workspace,true),"fixture-mcp").unwrap().headers["Authorization"],"Bearer fixture-secret");
         assert_eq!(persisted.oauth, Some(true));
         assert_eq!(persisted.oauth_client_id.as_deref(), Some("fixture-client"));
         assert_eq!(persisted.oauth_scopes, ["read", "write"]);

@@ -184,6 +184,21 @@ def scenario(mode):
             assert c("list_items", tid, {"after": items[-1]["sequence"]}) == []
             assert c("thread_usage", tid)["outputTokens"] > 0
             assert c("manage_resource", "profiles", {"action": "view"})["title"] == "Configuration profiles"
+            assert "skills" in c("capabilities")
+            c("capabilities", {"action":"create","kind":"skill","name":"sdk-marketplace","scope":"local","description":"SDK marketplace proof","instructions":"Return SDK marketplace proof."})
+            runner.until("skills", predicate=lambda rows:any(row["name"]=="sdk-marketplace" for row in rows))
+            c("capabilities", {"action":"disable","kind":"skill","name":"sdk-marketplace","scope":"local"})
+            runner.until("skills", predicate=lambda rows:all(row["name"]!="sdk-marketplace" for row in rows))
+            c("capabilities", {"action":"enable","kind":"skill","name":"sdk-marketplace","scope":"local"})
+            runner.until("skills", predicate=lambda rows:any(row["name"]=="sdk-marketplace" for row in rows))
+            c("capabilities", {"action":"remove","kind":"skill","name":"sdk-marketplace","scope":"local"})
+            resource_id,version_id=str(uuid4()),str(uuid4())
+            manifest={"manifestVersion":1,"resource":{"id":resource_id,"slug":"sdk-proof","kind":"mcp","name":"SDK proof"},"version":{"id":version_id,"number":1,"status":"approved","yanked":False},"lock":{"resourceId":resource_id,"versionId":version_id},"install":{"mcp":{"config":{"type":"remote","url":"http://127.0.0.1:9/mcp","enabled":False},"env_placeholders":[]}},"compatibility":{},"capabilities":{}}
+            c("marketplace",{"action":"install","manifest":manifest,"scope":"local"})
+            assert any(row["id"]==resource_id for row in c("marketplace",{"action":"installed"}))
+            for action in ("disable","enable","remove"):
+                c("marketplace",{"action":action,"id":resource_id,"scope":"local"})
+            assert not c("marketplace",{"action":"installed"})
             events = c("events", cursor, 2)
             assert (
                 len(events) == 2

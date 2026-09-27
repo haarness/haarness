@@ -538,12 +538,12 @@ test("draft browser endpoints require authentication and a matching lease and pr
 });
 test("manual browsing works with agent control disabled and clearing data includes new-chat tabs", async () => {
   const before = (
-    await client.manageResource("browser-settings", {
+    await client.managementView("browser-settings", {
       action: "get",
       scope: "project",
     } as any)
   ).data as any;
-  await client.manageResource("browser-settings", {
+  await client.managementView("browser-settings", {
     action: "set",
     scope: "project",
     revision: before.revision,
@@ -568,12 +568,12 @@ test("manual browsing works with agent control disabled and clearing data includ
   );
   expect(records).toEqual({ history: [], downloads: [] });
   const fresh = (
-    await client.manageResource("browser-settings", {
+    await client.managementView("browser-settings", {
       action: "get",
       scope: "project",
     } as any)
   ).data as any;
-  await client.manageResource("browser-settings", {
+  await client.managementView("browser-settings", {
     action: "set",
     scope: "project",
     revision: fresh.revision,

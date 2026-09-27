@@ -3,7 +3,7 @@ import { Transport, type RequestOptions } from "./transport.js";
 import type * as T from "./types.js";
 export class Api extends Transport {
   /** POST /v1/manage/{resource} */
-  manageResource(resource: string, body: T.JsonValue, options: RequestOptions = {}): Promise<T.ManagementView> {
+  manageResource(resource: string, body: T.JsonValue, options: RequestOptions = {}): Promise<T.JsonValue> {
     return this.request("POST", `/v1/manage/${this.segment(resource)}`, { body, binaryBody: false, binaryResponse: false, ...options });
   }
   /** POST /v1/cloud/agents */

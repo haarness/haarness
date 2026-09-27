@@ -5459,8 +5459,8 @@
   "info": {
     "description": "",
     "license": {
-      "identifier": "Apache-2.0",
-      "name": "Apache-2.0"
+      "identifier": "MIT",
+      "name": "MIT"
     },
     "title": "Haarness API",
     "version": "1"
@@ -5874,7 +5874,7 @@
         "operationId": "manage_resource",
         "parameters": [
           {
-            "description": "providers, mcp, schedules, hooks, memory, or profiles",
+            "description": "capabilities, marketplace, assets, providers, mcp, schedules, hooks, memory, profiles, or server-owned UI forms",
             "in": "path",
             "name": "resource",
             "required": true,
@@ -5895,9 +5895,7 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ManagementView"
-                }
+                "schema": {}
               }
             },
             "description": ""

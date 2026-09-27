@@ -6130,8 +6130,8 @@
   "info": {
     "description": "",
     "license": {
-      "identifier": "Apache-2.0",
-      "name": "Apache-2.0"
+      "identifier": "MIT",
+      "name": "MIT"
     },
     "title": "Haarness API",
     "version": "1"
@@ -6882,9 +6882,7 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ManagementView"
-                }
+                "schema": {}
               }
             },
             "description": "Success"

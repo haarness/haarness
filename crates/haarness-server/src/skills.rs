@@ -23,6 +23,7 @@ struct CachedSkill {
 pub struct FilesystemSkillRegistry {
     catalog: Arc<RwLock<BTreeMap<String, CachedSkill>>>,
     loaded: Arc<AsyncRwLock<HashSet<String>>>,
+    disabled: Arc<RwLock<HashSet<String>>>,
 }
 impl FilesystemSkillRegistry {
     #[must_use]
@@ -36,6 +37,7 @@ impl FilesystemSkillRegistry {
         Self {
             catalog: Arc::new(RwLock::new(catalog)),
             loaded: Arc::new(AsyncRwLock::new(HashSet::new())),
+            disabled: Arc::default(),
         }
     }
 
@@ -43,6 +45,7 @@ impl FilesystemSkillRegistry {
         Self {
             catalog: Arc::new(RwLock::new(catalog_for_roots(&roots))),
             loaded: Arc::new(AsyncRwLock::new(HashSet::new())),
+            disabled: Arc::default(),
         }
     }
     pub fn replace_scoped_roots(&self, roots: Vec<(PathBuf, bool, Option<PathBuf>)>) {
@@ -61,6 +64,10 @@ impl FilesystemSkillRegistry {
         *self.catalog.write() = catalog;
     }
 
+    pub fn set_disabled(&self, names: Vec<String>) {
+        *self.disabled.write() = names.into_iter().collect();
+    }
+
     fn locate(&self, name: &str) -> Option<(PathBuf, bool, String)> {
         let catalog = self.catalog.read();
         let skill = catalog.get(name).or_else(|| {
@@ -70,6 +77,8 @@ impl FilesystemSkillRegistry {
             let first = matches.next()?;
             matches.next().is_none().then_some(first)
         })?;
+        let canonical = catalog.iter().find(|(_, entry)| entry.path == skill.path)?.0;
+        if self.disabled.read().contains(canonical) { return None; }
         Some((skill.path.clone(), skill.trusted, skill.body.clone()))
     }
 }
@@ -82,6 +91,7 @@ impl SkillRegistry for FilesystemSkillRegistry {
             .read()
             .clone()
             .into_iter()
+            .filter(|(name, _)| !self.disabled.read().contains(name))
             .map(|(name, skill)| SkillInfo {
                 execution: skill.execution,
                 loaded: loaded.contains(&name),

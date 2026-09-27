@@ -47,6 +47,7 @@
 | `get_publisher` | `getPublisher` | `GET /api/v1/marketplace/publishers/{slug}` |
 | `list_resources` | `listResources` | `GET /api/v1/marketplace/resources` |
 | `get_resource` | `getResource` | `GET /api/v1/marketplace/resources/{id}` |
+| `download_marketplace_artifact` | `downloadMarketplaceArtifact` | `GET /api/v1/marketplace/resources/{id}/artifact` |
 | `install_manifest` | `installManifest` | `GET /api/v1/marketplace/resources/{id}/install-manifest` |
 | `list_resource_versions` | `listResourceVersions` | `GET /api/v1/marketplace/resources/{id}/versions` |
 | `create_submission` | `createSubmission` | `POST /api/v1/marketplace/submissions` |

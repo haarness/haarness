@@ -1865,9 +1865,9 @@ fn usage_totals(items: &[haarness_protocol::Item]) -> Value {
 struct ManagementApi;
 
 #[utoipa::path(post, path = "/v1/manage/{resource}",
-    params(("resource" = String, Path, description = "providers, mcp, schedules, hooks, memory, or profiles")),
+    params(("resource" = String, Path, description = "capabilities, marketplace, assets, providers, mcp, schedules, hooks, memory, profiles, or server-owned UI forms")),
     request_body = Value,
-    responses((status = 200, body = haarness_protocol::ManagementView), (status = 401, description = "Authentication required")))]
+    responses((status = 200, body = Value), (status = 401, description = "Authentication required")))]
 async fn manage_resource(
     State(state): State<ServerState>,
     Path(resource): Path<String>,

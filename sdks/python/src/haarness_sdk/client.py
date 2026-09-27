@@ -7,7 +7,7 @@ from urllib.parse import quote
 from uuid import uuid4
 from typing_extensions import TypedDict
 from .api import Api, AsyncApi
-from .types import StartTurnRequest, Turn, Item, ChatOptions
+from .types import StartTurnRequest, Turn, Item, ChatOptions, JsonValue
 from .transport import RequestOptions
 from .pty import PtyConnection, AsyncPtyConnection
 
@@ -32,6 +32,14 @@ def result(turn: Turn, items: list[Item]) -> ChatResult:
 
 
 class Haarness(Api):
+    def capabilities(self, input: dict[str, JsonValue] | None = None, *, options: RequestOptions | None = None) -> JsonValue:
+        """Manage installed runtime capabilities; changes persist and apply when idle."""
+        return self.request("POST", "/v1/manage/capabilities", body=input or {"action": "list"}, options={"timeout": 180.0, **(options or {})})
+
+    def marketplace(self, input: dict[str, JsonValue], *, options: RequestOptions | None = None) -> JsonValue:
+        """Browse, install, update, enable, disable and remove marketplace resources."""
+        return self.request("POST", "/v1/manage/marketplace", body=input, options={"timeout": 180.0, **(options or {})})
+
     def workspace(self, id: str) -> Haarness:
         """Bind the complete runtime API to an opaque host workspace ID."""
         client = Haarness(self.base_url + '/v1/host/workspaces/' + self.segment(id), token='')
@@ -70,6 +78,14 @@ class Haarness(Api):
 
 
 class AsyncHaarness(AsyncApi):
+    async def capabilities(self, input: dict[str, JsonValue] | None = None, *, options: RequestOptions | None = None) -> JsonValue:
+        """Manage persistent capability availability on this runtime."""
+        return await self.request("POST", "/v1/manage/capabilities", body=input or {"action": "list"}, options={"timeout": 180.0, **(options or {})})
+
+    async def marketplace(self, input: dict[str, JsonValue], *, options: RequestOptions | None = None) -> JsonValue:
+        """Use the same marketplace operations as CLI, tools, Desktop and Cloud."""
+        return await self.request("POST", "/v1/manage/marketplace", body=input, options={"timeout": 180.0, **(options or {})})
+
     def workspace(self, id: str) -> AsyncHaarness:
         client = AsyncHaarness(self.base_url + '/v1/host/workspaces/' + self.segment(id), token='')
         client._authentication = self._headers()
