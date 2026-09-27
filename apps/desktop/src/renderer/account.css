@@ -53,3 +53,10 @@
   border: 1px solid var(--border);
   border-radius: 8px;
 }
+.account-nav-label { min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; }
+.account-nav-label small { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.account-plan { padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px; text-transform: capitalize; font-weight: 600; }
+.account-balances { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
+.account-balances > div { border: 1px solid var(--border); border-radius: 10px; padding: 12px; min-width: 0; }
+.account-balances dt { font-size: 12px; color: var(--muted); }
+.account-balances dd { margin: 8px 0 0; font-size: 22px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }

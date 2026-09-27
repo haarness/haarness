@@ -518,6 +518,7 @@ pub struct App {
     pub notice: String,
     /// First non-empty line produced by the configured status-line command.
     pub custom_status_line: Option<String>,
+    pub billing: haarness_account::billing::State,
     pub language: crate::locale::Language,
     /// SSE health: while present, stale activity is explicitly labelled as
     /// reconnecting rather than looking like a hung model.
@@ -791,6 +792,7 @@ impl App {
             live_threads: std::collections::HashMap::new(),
             notice,
             custom_status_line: None,
+            billing: Default::default(),
             language: crate::locale::Language::default(),
             connection_lost: None,
             overlay: Overlay::None,

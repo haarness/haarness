@@ -1,4 +1,4 @@
-import { accountRequest, accountLogin, cancelAccountLogin, connectCloud, closeCloudConnections } from "./account";
+import { accountRequest, accountLogin, cancelAccountLogin, connectCloud, closeCloudConnections, billingState, startBillingWatch, stopBillingWatch } from "./account";
 import { createReviewStorage, type ReviewRequest } from "../review-drafts";
 import { browserLinkDestination } from "../browser-settings";
 import { browserData, removeBrowserData, saveBrowserDownload } from "./browser-data";
@@ -529,7 +529,8 @@ function installHandlers() {
     return data().values[key] ?? null;
   });
   handle("account", async (win, raw: unknown) => {
-    const input = z.object({ action: z.enum(["status", "login", "cancel", "logout", "select", "workspaces", "create", "start", "stop", "agents", "sessions", "create-session", "session-start", "session-stop", "billing", "usage", "web"]), id: z.string().uuid().optional(), name: z.string().max(200).optional(), repo: z.string().max(2000).optional(), configuration: z.record(z.string(), z.unknown()).optional(), page: z.enum(["billing", "usage", "agents", "sessions", "session-settings"]).optional(), device: z.boolean().optional() }).strict().parse(raw);
+    const input = z.object({ action: z.enum(["status", "login", "cancel", "logout", "select", "workspaces", "create", "start", "stop", "agents", "sessions", "create-session", "session-start", "session-stop", "billing", "billing-state", "usage", "web"]), id: z.string().uuid().optional(), name: z.string().max(200).optional(), repo: z.string().max(2000).optional(), configuration: z.record(z.string(), z.unknown()).optional(), page: z.enum(["billing", "topup", "usage", "agents", "sessions", "session-settings"]).optional(), device: z.boolean().optional() }).strict().parse(raw);
+    if (input.action === "billing-state") return billingState();
     if (input.action === "cancel") { cancelAccountLogin(); return null; }
     if (input.action === "login") {
       await accountLogin(!!input.device, value => send(win, { kind: "menu", data: { action: "account-login", ...value as object } }));
@@ -543,6 +544,7 @@ function installHandlers() {
       closeCloudConnections();
     }
     await Promise.allSettled([...connections.values()].filter(c => !c.view.remote).map(c => c.client.refreshProviders()));
+    startBillingWatch(state => broadcast({ kind: "menu", data: { action: "account-billing", state } }));
     broadcast({ kind: "menu", data: { action: "account-changed" } });
     return accountRequest({ action: "status" });
   });
@@ -1367,6 +1369,7 @@ else {
       await load();
       if (quitting) return;
       installHandlers();
+      startBillingWatch(state => broadcast({ kind: "menu", data: { action: "account-billing", state } }));
       menu();
       initialized = true;
       createWindow();
@@ -1392,6 +1395,7 @@ else {
   });
   app.on("will-quit", () => uiSession?.dispose());
   app.on("before-quit", () => {
+    stopBillingWatch();
     browserHost.dispose();
     notifications.dispose();
     for (const watch of notificationWatches.values()) watch.stop();

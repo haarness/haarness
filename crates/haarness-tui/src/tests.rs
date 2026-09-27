@@ -1504,8 +1504,7 @@ fn completed_tools_do_not_remain_stuck_on_running() {
     );
     let marker = row.spans.first().unwrap();
     assert_eq!(
-        marker.fg,
-        app.theme.muted,
+        marker.fg, app.theme.muted,
         "completed tools settle to the muted state"
     );
 }
@@ -2706,7 +2705,9 @@ fn renamed_builtin_theme_restores_saved_variants_and_respects_custom_overrides()
     }
     let custom = crate::theme::Theme::editorial_light();
     app.themes.push(crate::theme::ThemeEntry {
-        name: "opencode".into(), dark: Some(custom), light: None,
+        name: "opencode".into(),
+        dark: Some(custom),
+        light: None,
     });
     assert!(app.apply_theme("opencode", "dark"));
     assert_eq!(app.theme_name, "opencode");
@@ -7545,7 +7546,12 @@ fn agent_switch_approval_discloses_destination_model_and_scope() {
     app.confirm_always = Some('a');
     for width in [55, 120] {
         let frame = frame_text(&app, (width, 45));
-        for text in ["Agent: review", "Model: fixture/next", "Previous model: fixture/previous", "only agent review in this session"] {
+        for text in [
+            "Agent: review",
+            "Model: fixture/next",
+            "Previous model: fixture/previous",
+            "only agent review in this session",
+        ] {
             assert!(frame.contains(text), "missing {text}: {frame}");
         }
         assert!(!frame.contains("opaque"));
@@ -7567,6 +7573,37 @@ fn frame_text(app: &App, size: (u32, u32)) -> String {
         .iter()
         .map(|line| line_text(line) + "\n")
         .collect()
+}
+
+#[test]
+fn cloud_billing_balances_and_panel_fit_narrow_terminals() {
+    let mut app = selector_fixture();
+    assert!(!frame_text(&app, (160, 46)).contains(" · /billing"));
+    app.billing = serde_json::from_value(serde_json::json!({
+        "loggedIn":true,"error":null,"summary":{
+            "accountId":"test-account","accountName":"Test workspace","plan":"power","accountStatus":"active",
+            "subscriptionStatus":"active","includedCredits":"100.123456","purchasedCredits":"500.000000","heldCredits":"1.500000",
+            "cloudUnits":"2.00","cloudUnitsHeld":"0.10","resetsAt":"2026-10-27T00:00:00Z","periodEndsAt":"2026-10-27T00:00:00Z",
+            "cancelAtPeriodEnd":false,"overageOptIn":false,"billingUrl":"https://app.haarness.dev/app/billing","usageUrl":"https://app.haarness.dev/app/billing/usage"
+        }
+    })).unwrap();
+    assert!(frame_text(&app, (160, 46)).contains("100.12 included · 500 purchased"));
+    for width in [160, 100, 80] {
+        app.overlay = crate::state::Overlay::Panel {
+            title: "Cloud billing".into(),
+            lines: app.billing.lines(),
+        };
+        let lines = app.lines((width, 46));
+        assert!(lines.iter().all(|line| line.width() <= width as usize));
+        let text = frame_text(&app, (width, 46));
+        assert!(text.contains("Included AI"));
+        assert!(text.contains("Purchased"));
+        assert!(text.contains("Reserved"));
+        assert!(text.contains("Manage billing"));
+    }
+    app.billing.error = Some("Offline".into());
+    app.overlay = crate::state::Overlay::None;
+    assert!(frame_text(&app, (160, 46)).contains("Cloud credits unavailable"));
 }
 
 #[test]

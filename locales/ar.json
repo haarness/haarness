@@ -1221,5 +1221,21 @@
   "Advanced session configuration": "Advanced session configuration",
   "Optional JSON settings for model, reasoningEffort, mcp, agents, skills and permissions. Supplied fields override the template. Manage secrets in Cloud session settings.": "Optional JSON settings for model, reasoningEffort, mcp, agents, skills and permissions. Supplied fields override the template. Manage secrets in Cloud session settings.",
   "Session configuration JSON": "Session configuration JSON",
-  "Starts an independent session. A template is optional. Compute and storage use your credits.": "Starts an independent session. A template is optional. Compute and storage use your credits."
+  "Starts an independent session. A template is optional. Compute and storage use your credits.": "Starts an independent session. A template is optional. Compute and storage use your credits.",
+  "Allowance resets": "Allowance resets",
+  "Available balances exclude reserved credits.": "Available balances exclude reserved credits.",
+  "Billing unavailable": "Billing unavailable",
+  "Cloud units available": "Cloud units available",
+  "Included AI credits": "Included AI credits",
+  "Loading billing…": "Loading billing…",
+  "No subscription": "No subscription",
+  "Paid overage": "Paid overage",
+  "Plan and credits": "Plan and credits",
+  "Plan ends": "Plan ends",
+  "Plan renews": "Plan renews",
+  "Purchased credits": "Purchased credits",
+  "Reserved credits": "Reserved credits",
+  "Showing last known balances.": "Showing last known balances.",
+  "credits": "credits",
+  "Add credits": "Add credits"
 }

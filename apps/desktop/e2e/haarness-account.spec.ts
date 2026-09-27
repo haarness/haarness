@@ -81,7 +81,7 @@ test("Haarness account signs in through a browser, discovers Cloud models, and s
       dialog.getByRole("button", { name: "Sign out", exact: true }),
     ).toBeVisible();
     await expect(
-      dialog.getByText("Cloud workspaces", { exact: true }),
+      dialog.getByText("Cloud sessions", { exact: true }),
     ).toBeVisible();
     await expect(dialog.getByRole("alert")).toHaveCount(0);
     const connection = await page.evaluate(
@@ -118,6 +118,40 @@ test("Haarness account signs in through a browser, discovers Cloud models, and s
       await expect(dialog).toHaveCount(0);
     };
     await outside();
+    if (process.env.HAARNESS_ACCOUNT_E2E_BILLING === "1") {
+      const walletBefore = await page.evaluate(() => window.haarness.account({ action: "billing" }));
+      await app.evaluate(({ dialog }, directory) => {
+        const original = dialog.showOpenDialog;
+        dialog.showOpenDialog = async () => {
+          dialog.showOpenDialog = original;
+          return { canceled: false, filePaths: [directory] };
+        };
+      }, workspace);
+      await page.getByRole("region", { name: "Project home" }).getByRole("button", { name: "Open another project", exact: true }).click();
+      await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
+      const model = page.getByRole("combobox", { name: "Model", exact: true });
+      await model.click();
+      const list = page.locator(`[id=${JSON.stringify(await model.getAttribute("aria-controls"))}]`);
+      await list.locator('[role="option"][data-value="haarness/openai/gpt-4.1-nano"]').click();
+      await page.locator(".select-footer").getByRole("button", { name: "Done", exact: true }).click();
+      await page.getByRole("textbox", { name: "Message", exact: true }).fill("Without tools, reply with exactly DESKTOP_BILLING_OK");
+      await page.getByRole("button", { name: "Send message", exact: true }).click();
+      await expect(page.locator(".message.assistant").filter({ hasText: "DESKTOP_BILLING_OK" })).toBeVisible({ timeout: 120000 });
+      await expect(page.getByRole("button", { name: "Stop", exact: true })).toHaveCount(0, { timeout: 120000 });
+      await page.getByRole("button", { name: view.user?.displayName || "Haarness account", exact: true }).click();
+      await expect(dialog.getByRole("heading", {name:"Plan and credits"})).toBeVisible();
+      await expect(dialog.getByRole("button", { name:"Add credits", exact:true })).toBeVisible();
+      await expect.poll(async () => {
+        const wallet = await page.evaluate(() => window.haarness.account({ action: "billing" }));
+        return BigInt(wallet.includedAi.nanos) < BigInt(walletBefore.includedAi.nanos) && wallet.heldReserve.nanos === "0" && wallet.purchased.nanos === walletBefore.purchased.nanos;
+      }).toBe(true);
+      const wallet = await page.evaluate(() => window.haarness.account({ action: "billing" }));
+      const { credits } = await import("../src/billing");
+      await expect(dialog.getByTestId("included-credits")).toHaveText(credits(wallet.includedAi.credits));
+      await expect(dialog.getByTestId("purchased-credits")).toHaveText(credits(wallet.purchased.credits));
+      await page.screenshot({ path: test.info().outputPath("billing-live.png") });
+      await outside();
+    }
     if (process.env.HAARNESS_ACCOUNT_E2E_REASONING === "1") {
       // Real Cloud catalog -> IPC -> model picker -> reasoning selection ->
       // streamed native turn, using only this test's account and workspace.

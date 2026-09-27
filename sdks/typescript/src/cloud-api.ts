@@ -79,20 +79,23 @@ export class CloudApi extends Transport {
     return this.request("GET", `/api/v1/billing/plans`, { binaryBody: false, binaryResponse: false, ...options });
   }
   /** POST /api/v1/billing/portal */
-  billingPortal(options: RequestOptions = {}): Promise<T.PortalResponse> {
-    return this.request("POST", `/api/v1/billing/portal`, { binaryBody: false, binaryResponse: false, ...options });
+  billingPortal(query: T.BillingPortalQuery | RequestOptions = {}, options: RequestOptions = {}): Promise<T.PortalResponse> {
+    if ('signal' in query || 'headers' in query || 'timeoutMs' in query) { options = { ...query, ...options }; query = {}; }
+    return this.request("POST", `/api/v1/billing/portal`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /api/v1/billing/subscription */
   getSubscription(query: T.GetSubscriptionQuery = {}, options: RequestOptions = {}): Promise<T.SubscriptionDto> {
     return this.request("GET", `/api/v1/billing/subscription`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** POST /api/v1/billing/subscription/cancel */
-  cancelSubscription(options: RequestOptions = {}): Promise<T.SubscriptionDto> {
-    return this.request("POST", `/api/v1/billing/subscription/cancel`, { binaryBody: false, binaryResponse: false, ...options });
+  cancelSubscription(query: T.CancelSubscriptionQuery | RequestOptions = {}, options: RequestOptions = {}): Promise<T.SubscriptionDto> {
+    if ('signal' in query || 'headers' in query || 'timeoutMs' in query) { options = { ...query, ...options }; query = {}; }
+    return this.request("POST", `/api/v1/billing/subscription/cancel`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** POST /api/v1/billing/subscription/resume */
-  resumeSubscription(options: RequestOptions = {}): Promise<T.SubscriptionDto> {
-    return this.request("POST", `/api/v1/billing/subscription/resume`, { binaryBody: false, binaryResponse: false, ...options });
+  resumeSubscription(query: T.ResumeSubscriptionQuery | RequestOptions = {}, options: RequestOptions = {}): Promise<T.SubscriptionDto> {
+    if ('signal' in query || 'headers' in query || 'timeoutMs' in query) { options = { ...query, ...options }; query = {}; }
+    return this.request("POST", `/api/v1/billing/subscription/resume`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /api/v1/billing/usage */
   billingUsage(query: T.BillingUsageQuery = {}, options: RequestOptions = {}): Promise<T.Page_UsageItemDto> {
@@ -103,8 +106,9 @@ export class CloudApi extends Transport {
     return this.request("GET", `/api/v1/billing/wallet`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** PATCH /api/v1/billing/wallet */
-  patchWallet(body: T.UpdateWalletRequest, options: RequestOptions = {}): Promise<T.WalletDto> {
-    return this.request("PATCH", `/api/v1/billing/wallet`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  patchWallet(body: T.UpdateWalletRequest, query: T.PatchWalletQuery | RequestOptions = {}, options: RequestOptions = {}): Promise<T.WalletDto> {
+    if ('signal' in query || 'headers' in query || 'timeoutMs' in query) { options = { ...query, ...options }; query = {}; }
+    return this.request("PATCH", `/api/v1/billing/wallet`, { body, query, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /api/v1/capabilities */
   capabilities(options: RequestOptions = {}): Promise<T.CapabilitiesResponse> {

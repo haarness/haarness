@@ -26,6 +26,12 @@ pub struct AccountArgs {
     /// Private Desktop bridge: one request on stdin; no project configuration.
     #[arg(long, hide = true)]
     pub rpc: bool,
+    /// Show the selected account's plan, credit balances and billing links.
+    #[arg(long, conflicts_with_all = ["rpc", "watch_billing"])]
+    pub billing: bool,
+    /// Stream account billing snapshots as JSON lines for native clients.
+    #[arg(long, hide = true, conflicts_with_all = ["rpc", "select"])]
+    pub watch_billing: bool,
 }
 #[derive(Args)]
 pub struct CloudArgs {
@@ -186,6 +192,18 @@ pub async fn login(args: &LoginArgs) -> Result<()> {
 }
 pub async fn account(args: &AccountArgs) -> Result<()> {
     let client = client()?;
+    if args.watch_billing {
+        let mut watcher = haarness_account::billing::watch(client);
+        loop {
+            let state = watcher.updates.borrow_and_update().clone();
+            println!("{}", serde_json::to_string(&state)?);
+            std::io::stdout().flush()?;
+            if watcher.updates.changed().await.is_err() {
+                break;
+            }
+        }
+        return Ok(());
+    }
     if args.rpc {
         let mut input = String::new();
         std::io::stdin()
@@ -197,6 +215,15 @@ pub async fn account(args: &AccountArgs) -> Result<()> {
     }
     if let Some(id) = &args.select {
         client.select_account(id).await?;
+    }
+    if args.billing {
+        let state = client.billing_summary().await?;
+        if args.json {
+            println!("{}", serde_json::to_string(&state)?);
+        } else {
+            println!("{}", state.lines().join("\n"));
+        }
+        return Ok(());
     }
     let status = client.status().await?;
     if args.json {
@@ -277,6 +304,7 @@ pub async fn rpc(client: &Client, input: Value) -> Result<Value> {
         .unwrap_or_default();
     Ok(match action {
         "status" => client.status().await?,
+        "billing-summary" => serde_json::to_value(client.billing_summary().await?)?,
         "logout" => {
             client.logout().await?;
             json!({"loggedIn":false})
@@ -358,7 +386,7 @@ pub async fn rpc(client: &Client, input: Value) -> Result<Value> {
         }
         "web" => {
             let page = match input["page"].as_str() {
-                Some("billing") => "app/billing",
+                Some("billing" | "topup") => "app/billing",
                 Some("usage") => "app/billing/usage",
                 Some("agents") => "app/agents",
                 Some("sessions") => "app/sessions",
@@ -371,7 +399,14 @@ pub async fn rpc(client: &Client, input: Value) -> Result<Value> {
                     .map(|url| haarness_account::safe_url(&url))
                     .transpose()?
                     .unwrap_or_else(|| client.config.api_url.clone());
-                json!({"url":base.join(&if input["page"] == "session-settings" { format!("app/sessions/{}/settings", id(&input)?) } else {page.to_owned()})?.to_string()})
+                let mut url = base.join(&if input["page"] == "session-settings" { format!("app/sessions/{}/settings", id(&input)?) } else {page.to_owned()})?;
+                if matches!(input["page"].as_str(), Some("billing" | "topup" | "usage")) {
+                    if let Some(account) = client.config.selected_account() {
+                        url.query_pairs_mut().append_pair("accountId", &account);
+                    }
+                }
+                if input["page"] == "topup" { url.set_fragment(Some("top-up")); }
+                json!({"url":url.to_string()})
             }
         }
         _ => bail!("Unknown account action"),

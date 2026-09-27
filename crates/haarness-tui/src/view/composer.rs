@@ -264,7 +264,10 @@ fn left_variants(app: &App) -> Vec<Vec<Span>> {
     let model = vec![
         chip.clone(),
         Span::new(
-            format!("  {}/", haarness_protocol::provider_display_id(&app.thread.provider)),
+            format!(
+                "  {}/",
+                haarness_protocol::provider_display_id(&app.thread.provider)
+            ),
             theme.muted,
         )
         .on(theme.surface),
@@ -291,6 +294,23 @@ fn left_variants(app: &App) -> Vec<Vec<Span>> {
         ];
     }
     let mut full = model.clone();
+    if let Some(billing) = &app.billing.summary {
+        full.push(
+            Span::new(
+                if app.billing.error.is_some() {
+                    "  Cloud credits unavailable · /billing".to_owned()
+                } else {
+                    format!(
+                        "  Cloud {} included · {} purchased · /billing",
+                        haarness_account::billing::display_credits(&billing.included_credits),
+                        haarness_account::billing::display_credits(&billing.purchased_credits)
+                    )
+                },
+                theme.muted,
+            )
+            .on(theme.surface),
+        );
+    }
     for (badge, color) in badges(app) {
         full.push(Span::new("  ", theme.muted).on(theme.surface));
         full.push(
