@@ -526,3 +526,11 @@ npm run desktop:dev
 ```
 
 See [Desktop development, packaging, and verification](docs/DESKTOP.md) and [conversation notifications](docs/DESKTOP-NOTIFICATIONS.md).
+
+## Contributing
+
+Contributions are welcome — read [CONTRIBUTING.md](CONTRIBUTING.md) first. Everyone taking part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md). Report security problems privately as described in [SECURITY.md](SECURITY.md); see [SUPPORT.md](SUPPORT.md) for where to ask for help.
+
+## License
+
+Haarness is licensed under the [Apache License, Version 2.0](LICENSE). Bundled third-party components keep their own licenses; see [NOTICE](NOTICE). The Haarness name and logo are not covered by the license — see [TRADEMARKS.md](TRADEMARKS.md).
