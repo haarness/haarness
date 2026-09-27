@@ -79,21 +79,21 @@ class CloudApi(Transport):
         """GET /api/v1/billing/plans."""
         return cast("T.PlansResponse", self.request('GET', f'/api/v1/billing/plans', binary_body=False, binary_response=False, options=options))
 
-    def billing_portal(self, *, options: RequestOptions | None = None) -> T.PortalResponse:
+    def billing_portal(self, query: T.BillingPortalQuery | None = None, *, options: RequestOptions | None = None) -> T.PortalResponse:
         """POST /api/v1/billing/portal."""
-        return cast("T.PortalResponse", self.request('POST', f'/api/v1/billing/portal', binary_body=False, binary_response=False, options=options))
+        return cast("T.PortalResponse", self.request('POST', f'/api/v1/billing/portal', query=query, binary_body=False, binary_response=False, options=options))
 
     def get_subscription(self, query: T.GetSubscriptionQuery | None = None, *, options: RequestOptions | None = None) -> T.SubscriptionDto:
         """GET /api/v1/billing/subscription."""
         return cast("T.SubscriptionDto", self.request('GET', f'/api/v1/billing/subscription', query=query, binary_body=False, binary_response=False, options=options))
 
-    def cancel_subscription(self, *, options: RequestOptions | None = None) -> T.SubscriptionDto:
+    def cancel_subscription(self, query: T.CancelSubscriptionQuery | None = None, *, options: RequestOptions | None = None) -> T.SubscriptionDto:
         """POST /api/v1/billing/subscription/cancel."""
-        return cast("T.SubscriptionDto", self.request('POST', f'/api/v1/billing/subscription/cancel', binary_body=False, binary_response=False, options=options))
+        return cast("T.SubscriptionDto", self.request('POST', f'/api/v1/billing/subscription/cancel', query=query, binary_body=False, binary_response=False, options=options))
 
-    def resume_subscription(self, *, options: RequestOptions | None = None) -> T.SubscriptionDto:
+    def resume_subscription(self, query: T.ResumeSubscriptionQuery | None = None, *, options: RequestOptions | None = None) -> T.SubscriptionDto:
         """POST /api/v1/billing/subscription/resume."""
-        return cast("T.SubscriptionDto", self.request('POST', f'/api/v1/billing/subscription/resume', binary_body=False, binary_response=False, options=options))
+        return cast("T.SubscriptionDto", self.request('POST', f'/api/v1/billing/subscription/resume', query=query, binary_body=False, binary_response=False, options=options))
 
     def billing_usage(self, query: T.BillingUsageQuery | None = None, *, options: RequestOptions | None = None) -> T.Page_UsageItemDto:
         """GET /api/v1/billing/usage."""
@@ -103,9 +103,9 @@ class CloudApi(Transport):
         """GET /api/v1/billing/wallet."""
         return cast("T.WalletDto", self.request('GET', f'/api/v1/billing/wallet', query=query, binary_body=False, binary_response=False, options=options))
 
-    def patch_wallet(self, body: T.UpdateWalletRequest, *, options: RequestOptions | None = None) -> T.WalletDto:
+    def patch_wallet(self, body: T.UpdateWalletRequest, query: T.PatchWalletQuery | None = None, *, options: RequestOptions | None = None) -> T.WalletDto:
         """PATCH /api/v1/billing/wallet."""
-        return cast("T.WalletDto", self.request('PATCH', f'/api/v1/billing/wallet', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+        return cast("T.WalletDto", self.request('PATCH', f'/api/v1/billing/wallet', body=body, query=query, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     def capabilities(self, *, options: RequestOptions | None = None) -> T.CapabilitiesResponse:
         """GET /api/v1/capabilities."""
@@ -584,21 +584,21 @@ class AsyncCloudApi(AsyncTransport):
         """GET /api/v1/billing/plans."""
         return cast("T.PlansResponse", await self.request('GET', f'/api/v1/billing/plans', binary_body=False, binary_response=False, options=options))
 
-    async def billing_portal(self, *, options: RequestOptions | None = None) -> T.PortalResponse:
+    async def billing_portal(self, query: T.BillingPortalQuery | None = None, *, options: RequestOptions | None = None) -> T.PortalResponse:
         """POST /api/v1/billing/portal."""
-        return cast("T.PortalResponse", await self.request('POST', f'/api/v1/billing/portal', binary_body=False, binary_response=False, options=options))
+        return cast("T.PortalResponse", await self.request('POST', f'/api/v1/billing/portal', query=query, binary_body=False, binary_response=False, options=options))
 
     async def get_subscription(self, query: T.GetSubscriptionQuery | None = None, *, options: RequestOptions | None = None) -> T.SubscriptionDto:
         """GET /api/v1/billing/subscription."""
         return cast("T.SubscriptionDto", await self.request('GET', f'/api/v1/billing/subscription', query=query, binary_body=False, binary_response=False, options=options))
 
-    async def cancel_subscription(self, *, options: RequestOptions | None = None) -> T.SubscriptionDto:
+    async def cancel_subscription(self, query: T.CancelSubscriptionQuery | None = None, *, options: RequestOptions | None = None) -> T.SubscriptionDto:
         """POST /api/v1/billing/subscription/cancel."""
-        return cast("T.SubscriptionDto", await self.request('POST', f'/api/v1/billing/subscription/cancel', binary_body=False, binary_response=False, options=options))
+        return cast("T.SubscriptionDto", await self.request('POST', f'/api/v1/billing/subscription/cancel', query=query, binary_body=False, binary_response=False, options=options))
 
-    async def resume_subscription(self, *, options: RequestOptions | None = None) -> T.SubscriptionDto:
+    async def resume_subscription(self, query: T.ResumeSubscriptionQuery | None = None, *, options: RequestOptions | None = None) -> T.SubscriptionDto:
         """POST /api/v1/billing/subscription/resume."""
-        return cast("T.SubscriptionDto", await self.request('POST', f'/api/v1/billing/subscription/resume', binary_body=False, binary_response=False, options=options))
+        return cast("T.SubscriptionDto", await self.request('POST', f'/api/v1/billing/subscription/resume', query=query, binary_body=False, binary_response=False, options=options))
 
     async def billing_usage(self, query: T.BillingUsageQuery | None = None, *, options: RequestOptions | None = None) -> T.Page_UsageItemDto:
         """GET /api/v1/billing/usage."""
@@ -608,9 +608,9 @@ class AsyncCloudApi(AsyncTransport):
         """GET /api/v1/billing/wallet."""
         return cast("T.WalletDto", await self.request('GET', f'/api/v1/billing/wallet', query=query, binary_body=False, binary_response=False, options=options))
 
-    async def patch_wallet(self, body: T.UpdateWalletRequest, *, options: RequestOptions | None = None) -> T.WalletDto:
+    async def patch_wallet(self, body: T.UpdateWalletRequest, query: T.PatchWalletQuery | None = None, *, options: RequestOptions | None = None) -> T.WalletDto:
         """PATCH /api/v1/billing/wallet."""
-        return cast("T.WalletDto", await self.request('PATCH', f'/api/v1/billing/wallet', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+        return cast("T.WalletDto", await self.request('PATCH', f'/api/v1/billing/wallet', body=body, query=query, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     async def capabilities(self, *, options: RequestOptions | None = None) -> T.CapabilitiesResponse:
         """GET /api/v1/capabilities."""

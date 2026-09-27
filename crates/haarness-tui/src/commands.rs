@@ -328,6 +328,11 @@ pub const COMMANDS: &[CommandSpec] = &[
     ),
     command("status", &[], "Show server and thread status"),
     command(
+        "billing",
+        &["credits"],
+        "Show Cloud plan and credits · /billing open|topup|usage",
+    ),
+    command(
         "tasks",
         &["subagents", "children"],
         "Open a running child agent's live view",
@@ -2667,6 +2672,31 @@ impl App {
                     _ => {
                         self.notice = "Usage: /tools [list|show|hide|lazy <auto|always|off|reset>|enable <tool>|disable <tool>|reset <tool>]".into();
                     }
+                }
+            }
+            "billing" => {
+                if arguments.is_empty() {
+                    self.open_overlay(Overlay::Panel {
+                        title: "Cloud billing".into(),
+                        lines: self.billing.lines(),
+                    });
+                } else if matches!(arguments, "open" | "topup" | "usage") {
+                    if let Some(summary) = &self.billing.summary {
+                        let url = match arguments {
+                            "usage" => summary.usage_url.clone(),
+                            "topup" => format!("{}#top-up", summary.billing_url),
+                            _ => summary.billing_url.clone(),
+                        };
+                        self.notice = if crate::terminal::open_browser(&url) {
+                            "Opened Cloud billing in your browser".into()
+                        } else {
+                            format!("Open {url}")
+                        };
+                    } else {
+                        self.notice = self.billing.lines().join(" ");
+                    }
+                } else {
+                    self.notice = "Usage: /billing [open|topup|usage]".into();
                 }
             }
             "status" => {

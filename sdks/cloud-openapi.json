@@ -1159,9 +1159,19 @@
           "billing"
         ],
         "summary": "A Stripe billing-portal URL for the account's customer.",
-        "description": "Auth: `cookie+csrf|bearer`, role ∈ {owner, billing}. Always the caller's default account: this route takes\nno `accountId`.",
+        "description": "Auth: `cookie+csrf|bearer`, role ∈ {owner, billing}. Accepts an optional `accountId`; defaults to the personal account.",
         "operationId": "billing_portal",
         "parameters": [
+          {
+            "name": "accountId",
+            "in": "query",
+            "description": "Defaults to the caller's personal account",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
           {
             "name": "X-CSRF-Token",
             "in": "header",
@@ -1289,9 +1299,19 @@
           "billing"
         ],
         "summary": "Cancel at period end.",
-        "description": "Auth: `cookie+csrf|bearer`, role ∈ {owner, billing}. Sets `cancel_at_period_end` at Stripe and stores the\nrefreshed object. Always the caller's default account: this route takes no `accountId`.",
+        "description": "Auth: `cookie+csrf|bearer`, role ∈ {owner, billing}. Sets `cancel_at_period_end` at Stripe and stores the\nrefreshed object. Accepts an optional `accountId`; defaults to the personal account.",
         "operationId": "cancel_subscription",
         "parameters": [
+          {
+            "name": "accountId",
+            "in": "query",
+            "description": "Defaults to the caller's personal account",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
           {
             "name": "X-CSRF-Token",
             "in": "header",
@@ -1375,9 +1395,19 @@
           "billing"
         ],
         "summary": "Undo a pending cancellation.",
-        "description": "Auth: `cookie+csrf|bearer`, role ∈ {owner, billing}. Always the caller's default account: this route takes\nno `accountId`.",
+        "description": "Auth: `cookie+csrf|bearer`, role ∈ {owner, billing}. Accepts an optional `accountId`; defaults to the personal account.",
         "operationId": "resume_subscription",
         "parameters": [
+          {
+            "name": "accountId",
+            "in": "query",
+            "description": "Defaults to the caller's personal account",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
           {
             "name": "X-CSRF-Token",
             "in": "header",
@@ -1616,9 +1646,19 @@
           "billing"
         ],
         "summary": "Change overage opt-in.",
-        "description": "Auth: `cookie+csrf|bearer`, role ∈ {owner, billing}. Always the caller's default account: unlike the `GET`,\nthis route takes no `accountId` query parameter. `UpdateWalletRequest` carries `overageOptIn` only — auto\ntop-up is not settable in v1 — and the answer is the wallet as re-read after the change.",
+        "description": "Auth: `cookie+csrf|bearer`, role ∈ {owner, billing}. Accepts an optional `accountId`; defaults to the personal account. `UpdateWalletRequest` carries `overageOptIn` only — auto\ntop-up is not settable in v1 — and the answer is the wallet as re-read after the change.",
         "operationId": "patch_wallet",
         "parameters": [
+          {
+            "name": "accountId",
+            "in": "query",
+            "description": "Defaults to the caller's personal account",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
           {
             "name": "X-CSRF-Token",
             "in": "header",

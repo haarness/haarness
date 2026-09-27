@@ -3,6 +3,7 @@ import { useApp } from "./state";
 import { Button, dismissOnBackdrop, Icon } from "./ui";
 import { t } from "./i18n";
 import "./account.css";
+import { credits, type BillingState } from "../billing";
 
 type Account = {
   loggedIn: boolean;
@@ -35,7 +36,9 @@ export function AccountMenu(props: {
   const [configuration, setConfiguration] = createSignal("");
   const [instructions, setInstructions] = createSignal("");
   const [creating, setCreating] = createSignal(false);
-  const [credits, setCredits] = createSignal("");
+  const [billing, setBilling] = createSignal<BillingState>({ loggedIn: false });
+  const summary = () => billing().summary?.accountId === account().selectedAccountId ? billing().summary : undefined;
+  const date = (value: string) => new Date(value).toLocaleDateString();
   let dialog: HTMLDialogElement | undefined;
   let alive = true;
   async function refresh() {
@@ -43,9 +46,8 @@ export function AccountMenu(props: {
     if (!alive) return;
     setAccount(result);
     if (result.loggedIn && open()) {
-      const [spaces, billing, templates] = await Promise.allSettled([
+      const [spaces, templates] = await Promise.allSettled([
         window.haarness.account({ action: "sessions" }),
-        window.haarness.account({ action: "billing" }),
         window.haarness.account({ action: "agents" }),
       ]);
       if (!alive) return;
@@ -54,17 +56,10 @@ export function AccountMenu(props: {
       else setError(String(spaces.reason));
       if (templates.status === "fulfilled")
         setAgents(templates.value.items ?? []);
-      if (billing.status === "fulfilled") {
-        const remaining =
-          Number(billing.value.includedAi?.credits ?? 0) +
-          Number(billing.value.purchased?.credits ?? 0);
-        setCredits(
-          `${remaining.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${t("credits available")}`,
-        );
-      }
+
     } else {
       setWorkspaces([]);
-      setCredits("");
+      if (!result.loggedIn) setBilling({ loggedIn: false });
     }
   }
   async function act(fn: () => Promise<unknown>) {
@@ -103,6 +98,7 @@ export function AccountMenu(props: {
   }
   onMount(() => {
     void refresh().catch(() => {});
+    void window.haarness.account({ action: "billing-state" }).then(value => { if (alive) setBilling(value); });
     const timer = setInterval(() => {
       if (open() && !busy()) void refresh().catch(() => {});
     }, 5000);
@@ -110,7 +106,8 @@ export function AccountMenu(props: {
   });
   const off = window.haarness.onEvent((event) => {
     if (event.kind !== "menu") return;
-    const data = event.data as { action?: string; url?: string; code?: string };
+    const data = event.data as { action?: string; url?: string; code?: string; state?: BillingState };
+    if (data.action === "account-billing" && data.state) setBilling(data.state);
     if (data.action === "account-login") {
       setLoginUrl(data.url ?? "");
       setCode(data.code ?? "");
@@ -128,14 +125,17 @@ export function AccountMenu(props: {
     <>
       <button
         class={props.models ? "account-connect" : "nav-row"}
+        aria-label={props.models ? t("Use Haarness Cloud") : account().loggedIn ? account().user?.displayName || t("Haarness account") : t("Sign in to Haarness")}
         onClick={show}
       >
         <Icon name="cloud" size="md" />
-        {props.models
+        <span class="account-nav-label">{props.models
           ? t("Use Haarness Cloud")
           : account().loggedIn
             ? account().user?.displayName || t("Haarness account")
             : t("Sign in to Haarness")}
+        <Show when={!props.models && summary()}>{s => <small>{s().plan} · {billing().error ? t("Billing unavailable") : `${credits(s().includedCredits)} + ${credits(s().purchasedCredits)} ${t("credits")}`}</small>}</Show>
+        </span>
       </button>
       <Show when={open()}>
         <dialog
@@ -233,17 +233,23 @@ export function AccountMenu(props: {
                 </select>
               </label>
             </Show>
-            <section>
-              <h3>{t("Cloud models")}</h3>
-              <p>
-                {t(
-                  "Choose Haarness Cloud in the model picker to start a conversation.",
-                )}
-              </p>
-              <Show when={credits()}>
-                <p>{credits()}</p>
-              </Show>
+            <section class="account-billing" aria-label={t("Plan and credits")}>
+              <div class="account-heading"><h3>{t("Plan and credits")}</h3><Show when={summary()}>{s => <span class="account-plan">{s().plan}</span>}</Show></div>
+              <Show when={billing().error}><p class="form-error" role="status">{billing().error} {summary() ? t("Showing last known balances.") : ""}</p></Show>
+              <Show when={summary()} fallback={<Show when={!billing().error}><p class="muted">{t("Loading billing…")}</p></Show>}>{s => <>
+                <p class="muted">{s().accountName} · {s().subscriptionStatus ?? t("No subscription")}<Show when={s().accountStatus !== "active"}> · {s().accountStatus}</Show></p>
+                <dl class="account-balances">
+                  <div><dt>{t("Included AI credits")}</dt><dd data-testid="included-credits">{credits(s().includedCredits)}</dd></div>
+                  <div><dt>{t("Purchased credits")}</dt><dd data-testid="purchased-credits">{credits(s().purchasedCredits)}</dd></div>
+                  <div><dt>{t("Reserved credits")}</dt><dd>{credits(s().heldCredits)}</dd></div>
+                  <div><dt>{t("Cloud units available")}</dt><dd>{s().cloudUnits}</dd></div>
+                </dl>
+                <p class="muted">{t("Available balances exclude reserved credits.")} {t("Paid overage")}: {s().overageOptIn ? t("Enabled") : t("Disabled")}.</p>
+                <Show when={s().resetsAt}>{at => <p class="muted">{t("Allowance resets")}: {date(at())}</p>}</Show>
+                <Show when={s().periodEndsAt}>{at => <p class="muted">{s().cancelAtPeriodEnd ? t("Plan ends") : t("Plan renews")}: {date(at())}</p>}</Show>
+              </>}</Show>
               <div class="account-actions">
+                <button class="primary" onClick={() => void act(() => window.haarness.account({ action: "web", page: "topup" }))}>{t("Add credits")}</button>
                 <button
                   class="secondary"
                   onClick={() =>

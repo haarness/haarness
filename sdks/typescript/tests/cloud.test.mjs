@@ -12,6 +12,23 @@ const operations = JSON.parse(
   ),
 );
 const camel = (name) => name.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+test("billing account queries retain the original request-options call shape", async () => {
+  const seen = [];
+  const client = new HaarnessCloud({baseUrl:"http://localhost:12345", fetch:async (url, init) => {
+    seen.push({url:new URL(url), headers:init.headers});
+    return new Response("{}");
+  }});
+  for (const method of ["billingPortal", "cancelSubscription", "resumeSubscription", "patchWallet"]) {
+    const body = method === "patchWallet" ? [{overageOptIn:true}] : [];
+    await client[method](...body, {headers:{"x-proof":"legacy"}});
+    assert.equal(seen.at(-1).headers["x-proof"], "legacy");
+    assert.equal(seen.at(-1).url.search, "");
+    await client[method](...body, {accountId:"team"}, {headers:{"x-proof":"scoped"}});
+    assert.equal(seen.at(-1).headers["x-proof"], "scoped");
+    assert.equal(seen.at(-1).url.searchParams.get("accountId"), "team");
+  }
+  client.close();
+});
 test("every documented Cloud HTTP operation preserves method, path, auth and wire encoding", async () => {
   let current;
   let calls = 0;

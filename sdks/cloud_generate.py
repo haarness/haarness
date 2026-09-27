@@ -5,11 +5,12 @@ The sibling source is compared when present; standalone SDK consumers use the sn
 """
 
 import json
+import os
 import re
 from pathlib import Path
 from generate import BASE, generate, obj, ref
 
-SOURCE = BASE.parents[1] / "haarness-cloud/docs/openapi.json"
+SOURCE = Path(os.environ.get("HAARNESS_CLOUD_REPO", str(BASE.parents[1] / "haarness-cloud"))) / "docs/openapi.json"
 SNAPSHOT = BASE / "cloud-openapi.json"
 
 
@@ -130,6 +131,12 @@ def outputs():
                 .replace('"./types.js"', '"./cloud-types.js"')
                 .replace("export class Api ", "export class CloudApi ")
             )
+            # These existing mutations originally accepted options in the query slot.
+            # Preserve that call shape while adding the account query, including body+options.
+            for method, query_type in [("billingPortal", "BillingPortalQuery"), ("cancelSubscription", "CancelSubscriptionQuery"), ("resumeSubscription", "ResumeSubscriptionQuery"), ("patchWallet", "PatchWalletQuery")]:
+                pattern = rf"(  {method}\([^\n]*?)query: T\.{query_type} = \{{\}}, options: RequestOptions = \{{\}}(\): Promise<[^\n]+\{{\n)"
+                replacement = rf"\1query: T.{query_type} | RequestOptions = {{}}, options: RequestOptions = {{}}\2    if ('signal' in query || 'headers' in query || 'timeoutMs' in query) {{ options = {{ ...query, ...options }}; query = {{}}; }}\n"
+                content = re.sub(pattern, replacement, content)
         elif name.endswith("/api.py"):
             name = name.replace("/api.py", "/cloud_api.py")
             content = (

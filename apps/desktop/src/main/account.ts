@@ -3,6 +3,63 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { Haarness, type ServerAuth } from "@haarness/sdk";
 import { executable, environment, invoke, connections } from "./runtime";
 import type { Connection } from "../shared";
+import type { BillingState } from "../billing";
+
+let billingProcess: ChildProcess | undefined;
+let billingTimer: ReturnType<typeof setTimeout> | undefined;
+let billingGeneration = 0;
+let billingSnapshot: BillingState = { loggedIn: false };
+export function billingState() { return billingSnapshot; }
+export function stopBillingWatch() {
+  billingGeneration++;
+  clearTimeout(billingTimer);
+  billingProcess?.kill();
+  billingProcess = undefined;
+}
+export function startBillingWatch(publish: (state: BillingState) => void) {
+  stopBillingWatch();
+  const generation = billingGeneration;
+  billingSnapshot = { loggedIn: false };
+  publish(billingSnapshot);
+  const update = (value: BillingState) => {
+    if (generation !== billingGeneration) return;
+    billingSnapshot = value;
+    publish(value);
+  };
+  const start = async () => {
+    try {
+      const binary = await executable();
+      if (generation !== billingGeneration) return;
+      const child = spawn(binary, ["account", "--watch-billing"], {
+        env: environment(), stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
+      });
+      billingProcess = child;
+      let buffer = "";
+      child.stdout.on("data", data => {
+        buffer += String(data);
+        if (buffer.length > 128_000) { child.kill(); return; }
+        let end: number;
+        while ((end = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
+          try { update(JSON.parse(line) as BillingState); }
+          catch { child.kill(); return; }
+        }
+      });
+      child.on("error", () => {}); // close handles both launch failures and exits
+      child.once("close", () => {
+        if (generation !== billingGeneration) return;
+        billingProcess = undefined;
+        update({ ...billingSnapshot, error: "Could not update billing. Reconnecting…" });
+        billingTimer = setTimeout(() => void start(), 5000);
+      });
+    } catch {
+      if (generation !== billingGeneration) return;
+      update({ ...billingSnapshot, error: "Could not load billing. Retrying…" });
+      billingTimer = setTimeout(() => void start(), 5000);
+    }
+  };
+  void start();
+}
 
 let login: ChildProcess | undefined;
 export async function accountRequest(input: {

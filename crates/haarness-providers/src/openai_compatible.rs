@@ -646,9 +646,9 @@ fn discovered_model_info(
             .any(|tag| matches!(tag.as_str(), Some("reasoning" | "reasoning_effort")));
     }
 
-    // OpenRouter publishes per-token prices as strings. Convert only this
+    // OpenRouter and Haarness Cloud publish per-token prices as strings. Convert only this
     // documented shape; other compatible APIs use different units.
-    if provider == "openrouter"
+    if matches!(provider, "openrouter" | "haarness")
         && let (Some(input), Some(output)) = (
             entry.pointer("/pricing/prompt").and_then(json_number),
             entry.pointer("/pricing/completion").and_then(json_number),
@@ -1559,6 +1559,18 @@ mod tests {
                 }
             ]
         }))
+    }
+
+    #[test]
+    fn cloud_catalog_prices_override_builtin_estimates() {
+        let model = discovered_model_info("haarness", &serde_json::json!({
+            "id":"openai/gpt-4.1-nano",
+            "pricing":{"prompt":"0.0000001","completion":"0.0000004","input_cache_read":"0.000000025"}
+        }), CompatibleModelDefaults::default()).unwrap();
+        let price = model.pricing.unwrap();
+        assert!((price.input - 0.1).abs() < 1e-12);
+        assert!((price.output - 0.4).abs() < 1e-12);
+        assert!((price.cache_read - 0.025).abs() < 1e-12);
     }
 
     #[test]

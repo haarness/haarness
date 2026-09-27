@@ -342,7 +342,9 @@ async fn run_with_client(
             anyhow::bail!("--fork requires an existing --session/--thread or --continue target");
         }
         let mut request = CreateThreadRequest {
-            agent: initial_info.as_ref().and_then(|info| info.default_agent.clone()),
+            agent: initial_info
+                .as_ref()
+                .and_then(|info| info.default_agent.clone()),
             ..Default::default()
         };
         let mut provider_overridden = false;
@@ -360,9 +362,10 @@ async fn run_with_client(
             {
                 request.model = Some(model.id.clone());
             }
-        } else if let Some((provider, model)) = initial_info.as_ref().and_then(|info| {
-            Some((info.default_provider.clone()?, info.default_model.clone()?))
-        }) {
+        } else if let Some((provider, model)) = initial_info
+            .as_ref()
+            .and_then(|info| Some((info.default_provider.clone()?, info.default_model.clone()?)))
+        {
             request.provider = Some(provider);
             request.model = Some(model);
         } else if let Some((provider, model)) = default_connected_model(&providers) {
@@ -537,6 +540,10 @@ async fn run_with_client(
     let (statusline_context, mut statusline_rx, statusline_task) =
         statusline::spawn(statusline_config);
     let _ = statusline_context.send(statusline::Context::from_app(&app));
+    let mut billing = haarness_account::Config::from_env()
+        .and_then(haarness_account::Client::new)
+        .map(haarness_account::billing::watch)
+        .ok();
     loop {
         if let Some(connection) = app.pending_server.take() {
             match servers::save_current(&app, &client) {
@@ -545,6 +552,9 @@ async fn run_with_client(
                     client.disconnect_all_ptys();
                     client = connection.client;
                     app = connection.app;
+                    if let Some(watch) = &billing {
+                        app.billing = watch.updates.borrow().clone();
+                    }
                     let initial = app
                         .server_info
                         .as_ref()
@@ -862,6 +872,19 @@ async fn run_with_client(
                     statusline::Update::Output(value) => app.custom_status_line = Some(value),
                     statusline::Update::Error(error) => {
                         tracing::warn!(%error, "custom status line command failed");
+                    }
+                }
+            },
+            () = async {
+                match billing.as_mut() {
+                    Some(watch) => { let _ = watch.updates.changed().await; },
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                if let Some(watch) = &mut billing {
+                    app.billing = watch.updates.borrow_and_update().clone();
+                    if let state::Overlay::Panel { title, lines } = &mut app.overlay {
+                        if title == "Cloud billing" { *lines = app.billing.lines(); }
                     }
                 }
             },

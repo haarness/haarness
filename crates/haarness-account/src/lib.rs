@@ -1,7 +1,8 @@
 //! First-party account sessions shared by the terminal, Desktop and Cloud CLI.
 //! No project configuration or remote runtime is allowed to choose the issuer.
-pub mod credentials;
+pub mod billing;
 pub mod cloud;
+pub mod credentials;
 pub mod loopback;
 pub mod pkce;
 
@@ -29,6 +30,8 @@ pub enum Error {
     Config(String),
     #[error("{0}")]
     Other(String),
+    #[error("{message}")]
+    Api { status: u16, message: String },
     #[error("{0}")]
     Io(#[from] std::io::Error),
     #[error("{0}")]
@@ -266,14 +269,15 @@ impl Client {
                 serde_json::from_slice(&bytes)?
             };
             if !status.is_success() {
-                return Err(Error::Other(
-                    value
+                return Err(Error::Api {
+                    status: status.as_u16(),
+                    message: value
                         .pointer("/error/message")
                         .and_then(Value::as_str)
                         .or_else(|| value.get("message").and_then(Value::as_str))
                         .unwrap_or("Cloud request failed. Retry.")
                         .into(),
-                ));
+                });
             }
             return Ok(value);
         }
