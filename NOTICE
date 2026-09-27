@@ -1,0 +1,18 @@
+Haarness
+Copyright 2026 The Haarness Authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes third-party software distributed under its own license.
+The upstream notices are kept beside the code they cover:
+
+- OpenTUI native core (vendor/opentui) — MIT License, see vendor/opentui/LICENSE
+- ripgrep executables (vendor/ripgrep) — dual MIT / Unlicense,
+  see vendor/ripgrep/COPYING, vendor/ripgrep/LICENSE-MIT and vendor/ripgrep/UNLICENSE
+- Translated common terms (locales) — MIT License, see locales/THIRD-PARTY-NOTICES.md
+- Desktop browser control, diagnostics, profiling and proxy code
+  (apps/desktop/src/main/browser) — MIT License,
+  see apps/desktop/src/main/browser/THIRD-PARTY-NOTICES.md
+
+Rust crates and npm/Python packages pulled in as dependencies are distributed
+under their own licenses, recorded in Cargo.lock and the package lockfiles.

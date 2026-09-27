@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Typed synchronous and asynchronous Haarness server SDK"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT"
+license = "Apache-2.0"
 classifiers = ["Private :: Do Not Upload", "Typing :: Typed"]
 dependencies = ["httpx>=0.28,<1", "websockets>=15,<16", "typing-extensions>=4.12,<5"]
 
