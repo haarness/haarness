@@ -6,6 +6,7 @@ import { PtyConnection } from "./pty.js";
 import type { RequestOptions } from "./transport.js";
 import type { StartTurnRequest, Turn, Item } from "./types.js";
 export * from "./types.js";
+export * from "./capabilities.js";
 export * from "./transport.js";
 export * from "./pty.js";
 export * from "./server.js";
@@ -15,6 +16,20 @@ export interface ChatResult {
   text: string;
 }
 export class Haarness extends Api {
+  /** Server-owned management forms; raw domain operations use manageResource or the dedicated helpers. */
+  managementView(resource: string, body: import("./types.js").JsonValue, options: RequestOptions = {}): Promise<import("./types.js").ManagementView> {
+    return this.request("POST", `/v1/manage/${this.segment(resource)}`, { body, timeoutMs: 180_000, ...options });
+  }
+
+  /** Persistent availability and definition management on this runtime. Applies when idle. */
+  capabilities(input: import("./capabilities.js").CapabilityRequest = { action: "list" }, options: RequestOptions = {}): Promise<import("./types.js").JsonValue> {
+    return this.request("POST", "/v1/manage/capabilities", { body: input, timeoutMs: 180_000, ...options });
+  }
+  /** Catalog discovery, verified installation and version lifecycle on this runtime. */
+  marketplace(input: import("./capabilities.js").MarketplaceRequest, options: RequestOptions = {}): Promise<import("./types.js").JsonValue> {
+    return this.request("POST", "/v1/manage/marketplace", { body: input, timeoutMs: 180_000, ...options });
+  }
+
   /** Bind every runtime endpoint to a workspace returned by hostOpen/hostProjects. */
   workspace(id: string): Haarness {
     const headers = () => this.headers();

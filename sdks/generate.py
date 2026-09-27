@@ -234,7 +234,6 @@ def specification():
         "get_loop": "LoopResponse",
         "set_loop": "LoopResponse",
         "thread_usage": "UsageResponse",
-        "manage_resource": "ManagementView",
         "interrupt_thread_tree": "InterruptResponse",
         "health": "HealthResponse",
         "host_projects": "WorkspaceListResponse",

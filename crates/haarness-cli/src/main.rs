@@ -1,4 +1,6 @@
 mod account;
+mod capability_state;
+mod marketplace;
 mod acp;
 mod browser_settings;
 mod config_specs;
@@ -218,6 +220,13 @@ enum Command {
     SkillManage {
         #[command(subcommand)]
         command: SkillManageCommand,
+    },
+    /// Browse, install and manage Haarness marketplace resources.
+    Marketplace(marketplace::Args),
+    /// Manage runtime capability availability as JSON.
+    Capability {
+        #[arg(default_value = "{\"action\":\"list\"}")]
+        request: String,
     },
     /// Manage plugins (Claude Code marketplace format).
     Plugin {
@@ -1197,6 +1206,12 @@ async fn main() -> Result<()> {
             skill_manage_command(&paths, &workspace, project_config, command).await
         }
         Some(Command::Extension(args)) => extensions::run(&paths, &workspace, project_config, args).await,
+        Some(Command::Marketplace(args)) => marketplace::run(&paths, &workspace, project_config, args).await,
+        Some(Command::Capability { request }) => {
+            let service=marketplace::service(&paths,&workspace,project_config).await?;
+            println!("{}",serde_json::to_string_pretty(&service.capability_request(&serde_json::from_str(&request)?).await?)?);
+            Ok(())
+        },
         Some(Command::Plugin { command }) => {
             plugin_command(&paths, &workspace, project_config, &command)
         }
@@ -1260,6 +1275,8 @@ impl Command {
             Self::AgentManage { .. } => "agent",
             Self::Prompt { .. } => "command",
             Self::SkillManage { .. } => "skill",
+            Self::Marketplace(..) => "marketplace",
+            Self::Capability { .. } => "capability",
             Self::Plugin { .. } => "plugin",
             Self::Workflow { .. } => "workflow",
             Self::Schedule { .. } => "schedule",
@@ -4240,6 +4257,9 @@ fn compose_runtime_sources(
         anyhow::bail!(json_layers.errors.join("; "));
     }
     file_config.mcp.extend(json_layers.mcp.clone());
+    if let Some(overrides) = capability_state::load(paths, workspace, trust)?.get("mcp") {
+        for (name, enabled) in overrides { if let Some(entry) = file_config.mcp.get_mut(name) { entry.enabled = *enabled; } }
+    }
 
     let skill_roots = skill_roots(paths, workspace, trust, &file_config);
     // Remote skill caches are runtime data, so their slash commands are
@@ -4267,6 +4287,8 @@ fn compose_runtime_sources(
         persisted_rules,
         yolo,
     )?;
+    runtime_config.disabled_agents = capability_state::disabled(paths, workspace, trust, "agent")?;
+    runtime_config.disabled_agents.extend(json_layers.disabled_agents.clone());
     runtime_config.output_style = load_output_style(
         &config_dir,
         workspace,
@@ -4302,6 +4324,8 @@ fn compose_runtime_sources(
     runtime_config.read_roots.sort();
     runtime_config.read_roots.dedup();
     runtime_config.commands.clone_from(&json_layers.commands);
+    let disabled_skills = capability_state::disabled(paths, workspace, trust, "skill")?;
+    runtime_config.commands.retain(|command| !disabled_skills.contains(&command.name));
     memory_settings::load(&management::memory_root_for(paths, workspace))?
         .apply(&mut runtime_config);
     runtime_config.custom_agents.clone_from(&json_layers.agents);
@@ -4367,6 +4391,7 @@ fn load_output_style(
 }
 
 struct HotReloadCandidate {
+    disabled_skills: Vec<String>,
     providers: Arc<dyn ProviderRegistry>,
     tools: Arc<dyn ToolRegistry>,
     project_context: String,
@@ -4448,9 +4473,9 @@ impl HotReloadController {
             .await,
         );
         let candidate_mcp = mcp_from_config(&self.paths, &sources.file_config).await;
-        let candidate_skills: Arc<dyn SkillRegistry> = Arc::new(
-            FilesystemSkillRegistry::new_scoped(sources.skill_roots.clone()),
-        );
+        let candidate_skills = FilesystemSkillRegistry::new_scoped(sources.skill_roots.clone());
+        let disabled_skills = capability_state::disabled(&self.paths, &self.workspace, self.trust, "skill")?;
+        candidate_skills.set_disabled(disabled_skills.clone());
         let skill_infos = candidate_skills.discover().await.unwrap_or_default();
         let tools: Arc<dyn ToolRegistry> = Arc::new(
             NativeToolRegistry::with_workflows_and_scheduler(
@@ -4495,6 +4520,7 @@ impl HotReloadController {
             self.trust,
         ));
         Ok(HotReloadCandidate {
+            disabled_skills,
             providers,
             tools,
             project_context: sources.project_context,
@@ -4521,6 +4547,7 @@ impl HotReloadController {
 
     fn apply_components(&self, candidate: &HotReloadCandidate) -> bool {
         let skills = self.skills.clone();
+        let disabled_skills = candidate.disabled_skills.clone();
         let skill_roots = candidate.skill_roots.clone();
         let mcp = self.mcp.clone();
         let candidate_mcp = candidate.mcp.clone();
@@ -4539,6 +4566,7 @@ impl HotReloadController {
             candidate.hooks.clone(),
             move || {
                 skills.replace_scoped_roots(skill_roots);
+                skills.set_disabled(disabled_skills);
                 mcp.replace_from(&candidate_mcp);
                 workflows.replace_catalog(workflow_catalog);
                 language.replace_config(lsp, formatter);
@@ -4687,6 +4715,7 @@ fn runtime_source_fingerprint_for(
         config_dir.join("extensions.json"),
         config_dir.join("extensions"),
     ];
+    roots.extend(capability_state::sources(paths, workspace, trust));
     for name in [
         "haarness.json",
         "haarness.jsonc",
@@ -4916,6 +4945,7 @@ async fn application_at(
     );
     let mcp = mcp_from_config(paths, &file_config).await;
     let skills = Arc::new(FilesystemSkillRegistry::new_scoped(skill_roots));
+    skills.set_disabled(capability_state::disabled(paths, workspace, trust, "skill")?);
     let events = EventBus::new(2048);
     let workflow_host = WorkflowRuntimeAdapter::new();
     let workflows = Arc::new(WorkflowCoordinator::new(
@@ -6744,6 +6774,7 @@ fn runtime_config(
         auto_approve,
         commands: Vec::new(),
         custom_agents: Vec::new(),
+        disabled_agents: Vec::new(),
     })
 }
 

@@ -10875,7 +10875,7 @@ test("deferred input queue Steer promotes only the selected prompt", async () =>
 
 test("shared input settings apply project and global modes to real Desktop chat", async () => {
   const settingsApi = async (input: Record<string, string>) => {
-    const result = await client.manageResource("input-settings", input);
+    const result = await client.managementView("input-settings", input);
     return result.data as { delivery: string; scopeDelivery: string | null };
   };
   const globalFile = join(temporary, "state", "config", "haarness.jsonc");

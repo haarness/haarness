@@ -3447,6 +3447,7 @@ impl AgentRuntime {
             });
         }
         let config = self.components().config.clone();
+        profiles.retain(|profile| !config.disabled_agents.contains(&profile.id));
         for profile in &mut profiles {
             profile.max_subagents = if config.execution.subagent_depth == 0 || profile.max_subagents == 0 { 0 } else { u8::try_from(config.execution.subagent_concurrency).unwrap_or(u8::MAX) };
         }
@@ -3615,6 +3616,9 @@ impl AgentRuntime {
         }
         let thread = self.repository.get_thread(thread_id).await?;
         let effective_agent = request.agent.as_deref().unwrap_or(&thread.agent);
+        if components.config.disabled_agents.iter().any(|name| name == effective_agent) {
+            return Err(CoreError::Invalid(format!("Agent is disabled: {effective_agent}")));
+        }
         if self.custom_agent(effective_agent).is_none()
             && !crate::builtin_profiles()
                 .iter()

@@ -163,13 +163,13 @@ class CloudApi(Transport):
         """GET /api/v1/marketplace/collections."""
         return cast("T.Page_CollectionRefDto", self.request('GET', f'/api/v1/marketplace/collections', query=query, binary_body=False, binary_response=False, options=options))
 
-    def get_collection(self, slug: str, *, options: RequestOptions | None = None) -> T.CollectionDto:
+    def get_collection(self, slug: str, query: T.GetCollectionQuery | None = None, *, options: RequestOptions | None = None) -> T.CollectionDto:
         """GET /api/v1/marketplace/collections/{slug}."""
-        return cast("T.CollectionDto", self.request('GET', f'/api/v1/marketplace/collections/{self.segment(slug)}', binary_body=False, binary_response=False, options=options))
+        return cast("T.CollectionDto", self.request('GET', f'/api/v1/marketplace/collections/{self.segment(slug)}', query=query, binary_body=False, binary_response=False, options=options))
 
-    def get_publisher(self, slug: str, *, options: RequestOptions | None = None) -> T.PublisherPageDto:
+    def get_publisher(self, slug: str, query: T.GetPublisherQuery | None = None, *, options: RequestOptions | None = None) -> T.PublisherPageDto:
         """GET /api/v1/marketplace/publishers/{slug}."""
-        return cast("T.PublisherPageDto", self.request('GET', f'/api/v1/marketplace/publishers/{self.segment(slug)}', binary_body=False, binary_response=False, options=options))
+        return cast("T.PublisherPageDto", self.request('GET', f'/api/v1/marketplace/publishers/{self.segment(slug)}', query=query, binary_body=False, binary_response=False, options=options))
 
     def list_resources(self, query: T.ListResourcesQuery | None = None, *, options: RequestOptions | None = None) -> T.Page_ResourceSummaryDto:
         """GET /api/v1/marketplace/resources."""
@@ -178,6 +178,10 @@ class CloudApi(Transport):
     def get_resource(self, id: str, *, options: RequestOptions | None = None) -> T.ResourceDetailDto:
         """GET /api/v1/marketplace/resources/{id}."""
         return cast("T.ResourceDetailDto", self.request('GET', f'/api/v1/marketplace/resources/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    def download_marketplace_artifact(self, id: str, query: T.DownloadMarketplaceArtifactQuery | None = None, *, options: RequestOptions | None = None) -> bytes:
+        """GET /api/v1/marketplace/resources/{id}/artifact."""
+        return cast("bytes", self.request('GET', f'/api/v1/marketplace/resources/{self.segment(id)}/artifact', query=query, binary_body=False, binary_response=True, options=options))
 
     def install_manifest(self, id: str, query: T.InstallManifestQuery | None = None, *, options: RequestOptions | None = None) -> T.InstallManifestDto:
         """GET /api/v1/marketplace/resources/{id}/install-manifest."""
@@ -664,13 +668,13 @@ class AsyncCloudApi(AsyncTransport):
         """GET /api/v1/marketplace/collections."""
         return cast("T.Page_CollectionRefDto", await self.request('GET', f'/api/v1/marketplace/collections', query=query, binary_body=False, binary_response=False, options=options))
 
-    async def get_collection(self, slug: str, *, options: RequestOptions | None = None) -> T.CollectionDto:
+    async def get_collection(self, slug: str, query: T.GetCollectionQuery | None = None, *, options: RequestOptions | None = None) -> T.CollectionDto:
         """GET /api/v1/marketplace/collections/{slug}."""
-        return cast("T.CollectionDto", await self.request('GET', f'/api/v1/marketplace/collections/{self.segment(slug)}', binary_body=False, binary_response=False, options=options))
+        return cast("T.CollectionDto", await self.request('GET', f'/api/v1/marketplace/collections/{self.segment(slug)}', query=query, binary_body=False, binary_response=False, options=options))
 
-    async def get_publisher(self, slug: str, *, options: RequestOptions | None = None) -> T.PublisherPageDto:
+    async def get_publisher(self, slug: str, query: T.GetPublisherQuery | None = None, *, options: RequestOptions | None = None) -> T.PublisherPageDto:
         """GET /api/v1/marketplace/publishers/{slug}."""
-        return cast("T.PublisherPageDto", await self.request('GET', f'/api/v1/marketplace/publishers/{self.segment(slug)}', binary_body=False, binary_response=False, options=options))
+        return cast("T.PublisherPageDto", await self.request('GET', f'/api/v1/marketplace/publishers/{self.segment(slug)}', query=query, binary_body=False, binary_response=False, options=options))
 
     async def list_resources(self, query: T.ListResourcesQuery | None = None, *, options: RequestOptions | None = None) -> T.Page_ResourceSummaryDto:
         """GET /api/v1/marketplace/resources."""
@@ -679,6 +683,10 @@ class AsyncCloudApi(AsyncTransport):
     async def get_resource(self, id: str, *, options: RequestOptions | None = None) -> T.ResourceDetailDto:
         """GET /api/v1/marketplace/resources/{id}."""
         return cast("T.ResourceDetailDto", await self.request('GET', f'/api/v1/marketplace/resources/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    async def download_marketplace_artifact(self, id: str, query: T.DownloadMarketplaceArtifactQuery | None = None, *, options: RequestOptions | None = None) -> bytes:
+        """GET /api/v1/marketplace/resources/{id}/artifact."""
+        return cast("bytes", await self.request('GET', f'/api/v1/marketplace/resources/{self.segment(id)}/artifact', query=query, binary_body=False, binary_response=True, options=options))
 
     async def install_manifest(self, id: str, query: T.InstallManifestQuery | None = None, *, options: RequestOptions | None = None) -> T.InstallManifestDto:
         """GET /api/v1/marketplace/resources/{id}/install-manifest."""

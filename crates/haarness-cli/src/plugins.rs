@@ -442,7 +442,7 @@ fn git_clone(url: &str, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn validate_plugin_tree(root: &Path) -> Result<()> {
+pub(crate) fn validate_plugin_tree(root: &Path) -> Result<()> {
     let root = root.canonicalize()?;
     let mut pending = vec![root.clone()];
     while let Some(directory) = pending.pop() {

@@ -488,6 +488,9 @@
     ],
     "response": {
       "$ref": "#/components/schemas/CollectionDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/GetCollectionQuery"
     }
   },
   {
@@ -499,6 +502,9 @@
     ],
     "response": {
       "$ref": "#/components/schemas/PublisherPageDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/GetPublisherQuery"
     }
   },
   {
@@ -523,6 +529,26 @@
     "response": {
       "$ref": "#/components/schemas/ResourceDetailDto"
     }
+  },
+  {
+    "name": "download_marketplace_artifact",
+    "method": "GET",
+    "path": "/api/v1/marketplace/resources/{id}/artifact",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "format": "int32",
+        "minimum": 0
+      }
+    },
+    "query": {
+      "$ref": "#/components/schemas/DownloadMarketplaceArtifactQuery"
+    },
+    "binaryResponse": true
   },
   {
     "name": "install_manifest",

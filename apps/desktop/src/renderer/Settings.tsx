@@ -265,6 +265,9 @@ export function Settings() {
                 >
                   <ManagementPanel resource={app.state.settings!} />
                 </Show>
+                <Show when={app.state.settings === "marketplace" || app.state.settings === "capabilities"}>
+                  <ManagementPanel resource={`${app.state.settings}-ui`} />
+                </Show>
                 <Show when={app.state.settings === "models"}>
                   <Models />
                 </Show>

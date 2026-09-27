@@ -163,12 +163,12 @@ export class CloudApi extends Transport {
     return this.request("GET", `/api/v1/marketplace/collections`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /api/v1/marketplace/collections/{slug} */
-  getCollection(slug: string, options: RequestOptions = {}): Promise<T.CollectionDto> {
-    return this.request("GET", `/api/v1/marketplace/collections/${this.segment(slug)}`, { binaryBody: false, binaryResponse: false, ...options });
+  getCollection(slug: string, query: T.GetCollectionQuery = {}, options: RequestOptions = {}): Promise<T.CollectionDto> {
+    return this.request("GET", `/api/v1/marketplace/collections/${this.segment(slug)}`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /api/v1/marketplace/publishers/{slug} */
-  getPublisher(slug: string, options: RequestOptions = {}): Promise<T.PublisherPageDto> {
-    return this.request("GET", `/api/v1/marketplace/publishers/${this.segment(slug)}`, { binaryBody: false, binaryResponse: false, ...options });
+  getPublisher(slug: string, query: T.GetPublisherQuery = {}, options: RequestOptions = {}): Promise<T.PublisherPageDto> {
+    return this.request("GET", `/api/v1/marketplace/publishers/${this.segment(slug)}`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /api/v1/marketplace/resources */
   listResources(query: T.ListResourcesQuery = {}, options: RequestOptions = {}): Promise<T.Page_ResourceSummaryDto> {
@@ -177,6 +177,10 @@ export class CloudApi extends Transport {
   /** GET /api/v1/marketplace/resources/{id} */
   getResource(id: string, options: RequestOptions = {}): Promise<T.ResourceDetailDto> {
     return this.request("GET", `/api/v1/marketplace/resources/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /api/v1/marketplace/resources/{id}/artifact */
+  downloadMarketplaceArtifact(id: string, query: T.DownloadMarketplaceArtifactQuery = {}, options: RequestOptions = {}): Promise<Uint8Array> {
+    return this.request("GET", `/api/v1/marketplace/resources/${this.segment(id)}/artifact`, { query, binaryBody: false, binaryResponse: true, ...options });
   }
   /** GET /api/v1/marketplace/resources/{id}/install-manifest */
   installManifest(id: string, query: T.InstallManifestQuery = {}, options: RequestOptions = {}): Promise<T.InstallManifestDto> {

@@ -100,11 +100,21 @@ pub fn sources(paths: &Paths, workspace: &Path, trust: bool) -> Result<Config> {
         if path.exists() {
             // Absent fields inherit; changing one deadline must not reset the others.
             let fields: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
-            if fields.get("timeout_ms").is_some() { config.timeout_ms = layer.timeout_ms; }
-            if fields.get("init_timeout_ms").is_some() { config.init_timeout_ms = layer.init_timeout_ms; }
-            if fields.get("hook_timeout_ms").is_some() { config.hook_timeout_ms = layer.hook_timeout_ms; }
-            if fields.get("tool_timeout_ms").is_some() { config.tool_timeout_ms = layer.tool_timeout_ms; }
-            if fields.get("payload_max_bytes").is_some() { config.payload_max_bytes = layer.payload_max_bytes; }
+            if fields.get("timeout_ms").is_some() {
+                config.timeout_ms = layer.timeout_ms;
+            }
+            if fields.get("init_timeout_ms").is_some() {
+                config.init_timeout_ms = layer.init_timeout_ms;
+            }
+            if fields.get("hook_timeout_ms").is_some() {
+                config.hook_timeout_ms = layer.hook_timeout_ms;
+            }
+            if fields.get("tool_timeout_ms").is_some() {
+                config.tool_timeout_ms = layer.tool_timeout_ms;
+            }
+            if fields.get("payload_max_bytes").is_some() {
+                config.payload_max_bytes = layer.payload_max_bytes;
+            }
         }
         if layer.enabled {
             roots.push(root);
@@ -132,7 +142,10 @@ pub fn sources(paths: &Paths, workspace: &Path, trust: bool) -> Result<Config> {
     for spec in &declared.extensions {
         if let Ok(crate::config_specs::Resolution::Entry(entry)) =
             crate::config_specs::resolve_extension(spec, &paths.data)
-            && !config.entries.iter().any(|prior| prior.source == entry.source)
+            && !config
+                .entries
+                .iter()
+                .any(|prior| prior.source == entry.source)
         {
             config.enabled |= !explicit_switch;
             config.entries.push(entry);
@@ -142,14 +155,9 @@ pub fn sources(paths: &Paths, workspace: &Path, trust: bool) -> Result<Config> {
         return Ok(config);
     }
     roots.extend(
-        super::plugins::all_enabled_roots(
-            &paths.data,
-            paths.config_dir(),
-            workspace,
-            trust,
-        )
-        .into_iter()
-        .map(|root| root.join("extensions")),
+        super::plugins::all_enabled_roots(&paths.data, paths.config_dir(), workspace, trust)
+            .into_iter()
+            .map(|root| root.join("extensions")),
     );
     let mut discovered = Vec::new();
     for root in roots {
@@ -316,7 +324,9 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: ExtensionAr
             let mut config = sources(paths, workspace, trust)?;
             config.log_stderr = verbose;
             let extensions = Extensions::load(&config, workspace).await?;
-            let tools = extensions.wrap_tools(Arc::new(haarness_core::EmptyToolRegistry)).await?;
+            let tools = extensions
+                .wrap_tools(Arc::new(haarness_core::EmptyToolRegistry))
+                .await?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(
@@ -401,13 +411,229 @@ async fn install_npm(paths: &Paths, spec: &str) -> Result<PathBuf> {
         .env_remove("NODE_OPTIONS")
         .env_remove("BUN_OPTIONS")
         .kill_on_drop(true);
-    let status = tokio::time::timeout(std::time::Duration::from_secs(120), command.status())
+    let status = tokio::time::timeout(std::time::Duration::from_secs(120), command.output())
         .await
         .context("npm extension install timed out")??;
-    if !status.success() {
+    if !status.status.success() {
         bail!("npm extension install failed; no extension was enabled");
     }
     haarness_extensions::entrypoint(&root.join("node_modules").join(name))
+}
+
+fn normalize_entries(config: &mut Config, config_path: &Path) {
+    for entry in &mut config.entries {
+        if entry.source.is_relative() {
+            entry.source = config_path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(&entry.source);
+        }
+        if let Ok(path) = entry.source.canonicalize() {
+            entry.source = path;
+        }
+    }
+}
+
+pub fn catalog(paths: &Paths, workspace: &Path, trust: bool) -> Result<serde_json::Value> {
+    let mut scoped = Vec::new();
+    for local in [false, true] {
+        if local && !trust {
+            continue;
+        }
+        let path = scoped_config_path(paths, workspace, local);
+        let mut config = Config::read(&path)?;
+        normalize_entries(&mut config, &path);
+        scoped.push((local, config));
+    }
+    let entries=sources(paths,workspace,trust)?.entries.into_iter().map(|entry| {
+        let scope=scoped.iter().rev().find(|(_,config)|config.entries.iter().any(|e|e.source==entry.source)).map(|(local,_)|if *local {"local"} else {"global"});
+        let name=entry.name.as_deref().unwrap_or_else(||entry.source.file_stem().and_then(|s|s.to_str()).unwrap_or("extension"));
+        serde_json::json!({"name":name,"source":entry.source,"enabled":entry.enabled,"scope":scope,"managed":scope.is_some(),"readOnly":scope.is_none()})
+    }).collect::<Vec<_>>();
+    Ok(serde_json::json!(entries))
+}
+
+pub async fn marketplace_install(
+    paths: &Paths,
+    workspace: &Path,
+    trust: bool,
+    local: bool,
+    manifest: &serde_json::Value,
+    input: &serde_json::Value,
+    old: Option<&serde_json::Value>,
+    receipt_file: &Path,
+) -> Result<serde_json::Value> {
+    use anyhow::ensure;
+    use serde_json::json;
+    let package = &manifest["install"]["extension"];
+    ensure!(
+        package["extension_type"] == "core",
+        "Only Haarness core extensions can be loaded into the runtime"
+    );
+    let spec = package["npm_spec"]
+        .as_str()
+        .context("Missing npm package spec")?;
+    let (package_name, version) = spec
+        .rsplit_once('@')
+        .context("Marketplace extensions require an exact package version")?;
+    semver::Version::parse(version)
+        .context("Marketplace extensions require an exact package version")?;
+    let integrity = package["integrity"]
+        .as_str()
+        .filter(|s| s.starts_with("sha512-"))
+        .context("Marketplace extensions require SHA-512 integrity")?;
+    let source = install_npm(paths, spec).await?;
+    // Verify the catalog's digest before executing the extension initializer.
+    let install_root = source
+        .ancestors()
+        .find(|p| p.join("bun.lock").is_file())
+        .context("Missing npm installation lock")?;
+    let package_root = install_root.join("node_modules").join(package_name);
+    let lock_text = std::fs::read_to_string(install_root.join("bun.lock"))?;
+    let lock =
+        jsonc_parser::parse_to_serde_value::<serde_json::Value>(&lock_text, &Default::default())?;
+    let pinned = &lock["packages"][package_name];
+    ensure!(
+        pinned
+            .as_array()
+            .is_some_and(
+                |items| items.first().and_then(serde_json::Value::as_str) == Some(spec)
+                    && items.iter().any(|v| v == integrity)
+            ),
+        "Installed npm package does not match marketplace integrity"
+    );
+    let path = scoped_config_path(paths, workspace, local);
+    let _lock = crate::desktop::editor_lock(&paths.data, "extensions")?;
+    let previous = std::fs::read(&path).ok();
+    let mut config = scoped_config(paths, workspace, local)?;
+    normalize_entries(&mut config, &path);
+    let mut enabled = true;
+    let mut options = input.get("options").cloned();
+    if let Some(old) = old {
+        let old_path = Path::new(old["path"].as_str().context("Invalid extension receipt")?);
+        let digest_path = Path::new(
+            old["packageRoot"]
+                .as_str()
+                .unwrap_or(old["path"].as_str().unwrap_or_default()),
+        );
+        ensure!(
+            digest_path.starts_with(paths.data.join("extensions/packages"))
+                && !digest_path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir)),
+            "Invalid extension package root"
+        );
+        ensure!(
+            crate::marketplace::tree_digest(digest_path)? == old["installedDigest"],
+            "Extension was modified locally"
+        );
+        if let Some(entry) = config.entries.iter().find(|e| e.source == old_path) {
+            enabled = entry.enabled;
+            if options.is_none() {
+                options = Some(entry.options.clone());
+            }
+        }
+        config.entries.retain(|e| e.source != old_path);
+    }
+    let entry = Entry {
+        name: None,
+        source: source.clone(),
+        options: options.unwrap_or(json!({})),
+        enabled: true,
+    };
+    // Include inherited extensions when checking duplicate tools and names.
+    let mut validation = sources(paths, workspace, trust)?;
+    if let Some(old) = old {
+        validation
+            .entries
+            .retain(|e| Some(e.source.as_path()) != old["path"].as_str().map(Path::new));
+    }
+    validation.entries.push(entry.clone());
+    validation.enabled = true;
+    let loaded = Extensions::load(&validation, workspace).await?;
+    let name = loaded
+        .names()
+        .last()
+        .cloned()
+        .context("Extension did not register a name")?;
+    config.entries.push(Entry {
+        name: Some(name.clone()),
+        enabled,
+        ..entry
+    });
+    config.enabled = true;
+    let receipt = json!({"id":manifest["resource"]["id"],"kind":"extension","name":name,"scope":if local {"local"} else {"global"},"path":source,"packageRoot":package_root,"version":manifest["version"],"lock":manifest["lock"],"installedDigest":crate::marketplace::tree_digest(&package_root)?,"restartRequired":false});
+    save(&path, &config)?;
+    if let Err(error) =
+        haarness_profiles::write(receipt_file, &serde_json::to_vec_pretty(&receipt)?, true)
+    {
+        if let Some(bytes) = previous {
+            haarness_profiles::write(&path, &bytes, true)?;
+        } else {
+            std::fs::remove_file(&path)?;
+        }
+        return Err(error);
+    }
+    Ok(receipt)
+}
+
+pub async fn manage(
+    paths: &Paths,
+    workspace: &Path,
+    trust: bool,
+    input: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    use anyhow::ensure;
+    let action = input["action"]
+        .as_str()
+        .context("Extension action required")?;
+    let local = input["scope"] != "global";
+    let path = scoped_config_path(paths, workspace, local);
+    let _lock = crate::desktop::editor_lock(&paths.data, "extensions")?;
+    let mut config = scoped_config(paths, workspace, local)?;
+    normalize_entries(&mut config, &path);
+    if action == "list" {
+        return Ok(serde_json::to_value(config)?);
+    }
+    let name = input["name"].as_str().context("Extension name required")?;
+    ensure!(
+        matches!(action, "enable" | "disable" | "remove"),
+        "Use the marketplace or extension install command to install an extension"
+    );
+    let matches = |e: &Entry| {
+        e.name.as_deref() == Some(name)
+            || e.source.to_str() == Some(name)
+            || e.name.is_none() && e.source.file_stem().and_then(|s| s.to_str()) == Some(name)
+    };
+    let index = if let Some(index) = config.entries.iter().position(matches) {
+        index
+    } else {
+        ensure!(
+            action != "remove",
+            "Inherited extensions can be disabled; remove them from their owning plugin or scope"
+        );
+        let entries = sources(paths, workspace, trust)?
+            .entries
+            .into_iter()
+            .filter(matches)
+            .collect::<Vec<_>>();
+        ensure!(
+            entries.len() == 1,
+            "Select a unique installed extension by name or source path"
+        );
+        config.entries.push(entries[0].clone());
+        config.entries.len() - 1
+    };
+    if action == "remove" {
+        config.entries.remove(index);
+    } else {
+        config.entries[index].enabled = action == "enable";
+        if action == "enable" {
+            config.enabled = true;
+        }
+    }
+    save(&path, &config)?;
+    Ok(serde_json::json!({"action":action,"name":name,"restartRequired":false}))
 }
 
 /// Watch code and manifests, not files an extension writes while handling events.
@@ -532,11 +758,24 @@ mod tests {
         let source = source.canonicalize().unwrap();
         let config = sources(&paths, &workspace, true).unwrap();
         assert!(config.enabled, "declarations enable the extension system");
-        let entry = config.entries.iter().find(|entry| entry.source == source).unwrap();
+        let entry = config
+            .entries
+            .iter()
+            .find(|entry| entry.source == source)
+            .unwrap();
         assert!(entry.enabled);
         assert_eq!(entry.options, serde_json::json!({"greeting":"declared"}));
-        assert_eq!(config.entries.len(), 1, "pending npm packages are not entries");
-        assert!(sources(&paths, &workspace, false).unwrap().entries.is_empty());
+        assert_eq!(
+            config.entries.len(),
+            1,
+            "pending npm packages are not entries"
+        );
+        assert!(
+            sources(&paths, &workspace, false)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
         // An explicit extensions.json entry for the same source wins, and an
         // explicit global switch is respected.
         save(

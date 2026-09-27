@@ -255,12 +255,32 @@ URLs, HTTP redirects are not followed, and PTY authentication uses headers.
 ## Cloud accounts, sessions and chats
 
 `HaarnessCloud` (TypeScript/Python) and `AsyncHaarnessCloud` (Python) expose all
-126 documented Cloud operations: 125 HTTP methods plus the account WebSocket.
+127 documented Cloud operations: 126 HTTP methods plus the account WebSocket.
 This includes identity/OAuth, plans and wallets, billing, router keys/usage,
 marketplace, devices, reusable agents, session lifecycle and schedules.
 See [Cloud methods](CLOUD-OPERATIONS.md) and [Cloud schema](cloud-openapi.json).
 Access remains governed by the server's role and scope checks; administrative
 methods in the inventory do not grant administrative privileges.
+
+Cloud marketplace resources are public or private to a Haarness account. Members
+can read private resources; builder, admin and owner roles can submit them. The
+Cloud SDK supports ZIP upload, Git/npm/MCP submissions, validation status, catalog
+search, versions, install manifests and authenticated binary artifact downloads.
+
+Runtime clients share the CLI/Desktop installer through `marketplace()` and
+`capabilities()` in TypeScript, sync Python and async Python:
+
+```ts
+await runtime.marketplace({ action: "install", id: resourceId, scope: "local" });
+await runtime.capabilities({ action: "disable", kind: "skill", name: "review", scope: "local" });
+await runtime.capabilities({ action: "enable", kind: "skill", name: "review", scope: "local" });
+```
+
+Changes persist and apply when the runtime is idle. All chats in a Cloud session
+share these capabilities. Disabling preserves files. Local/global installation
+scope is separate from catalog privacy. `manageResource` / `manage_resource`
+returns resource-specific JSON; TypeScript `managementView()` retains the typed
+server-owned form adapter for management UI resources.
 
 A **Cloud session** owns a machine, configuration and persistent filesystem.
 A **chat** is a root runtime thread on that machine with its own history.

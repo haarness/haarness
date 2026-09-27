@@ -337,10 +337,10 @@ pub fn search_deferred_tools(
                     return true;
                 }
                 let haystack = by_id.get(entry.id.as_str()).map_or_else(
-                    || format!("{} {} {}", entry.id, entry.group, entry.source),
+                    || format!("tool tools {} {} {}", entry.id, entry.group, entry.source),
                     |tool| {
                         format!(
-                            "{} {} {} {} {}",
+                            "tool tools {} {} {} {} {}",
                             entry.id,
                             entry.group,
                             entry.group_title,
@@ -492,6 +492,39 @@ mod tests {
             &["memory".into(), "mcp__github__*".into()],
         );
         assert_eq!(found, ["memory_read", "mcp__github__pull_request"]);
+    }
+
+    #[test]
+    fn natural_tool_queries_find_skills_without_tool_in_the_description() {
+        let definitions = vec![
+            definition("skill", "Load a specialized Agent Skill"),
+            definition("mcp__docs__search", "Search documentation"),
+        ];
+        let selection = select_tools(
+            definitions.clone(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &LazyToolSettings {
+                mode: LazyToolMode::Always,
+                ..LazyToolSettings::default()
+            },
+            &HashSet::new(),
+            None,
+        );
+        for query in ["skill tool", "skill tools", "skill"] {
+            assert_eq!(
+                search_deferred_tools(&definitions, &selection.response, &[query.into()]),
+                ["skill"]
+            );
+        }
+        assert_eq!(
+            search_deferred_tools(
+                &definitions,
+                &selection.response,
+                &["documentation tool".into()]
+            ),
+            ["mcp__docs__search"]
+        );
     }
 
     #[test]

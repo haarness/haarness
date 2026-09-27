@@ -3,9 +3,9 @@ from typing import cast, Union
 from . import types as T
 from .transport import Transport, AsyncTransport, RequestOptions
 class Api(Transport):
-    def manage_resource(self, resource: str, body: T.JsonValue, *, options: RequestOptions | None = None) -> T.ManagementView:
+    def manage_resource(self, resource: str, body: T.JsonValue, *, options: RequestOptions | None = None) -> T.JsonValue:
         """POST /v1/manage/{resource}."""
-        return cast("T.ManagementView", self.request('POST', f'/v1/manage/{self.segment(resource)}', body=body, binary_body=False, binary_response=False, options=options))
+        return cast("T.JsonValue", self.request('POST', f'/v1/manage/{self.segment(resource)}', body=body, binary_body=False, binary_response=False, options=options))
 
     def cloud_agents(self, body: T.CloudAgentInput, *, options: RequestOptions | None = None) -> T.JsonValue:
         """POST /v1/cloud/agents."""
@@ -460,9 +460,9 @@ class Api(Transport):
         return cast("T.WorkspaceInfo", self.request('POST', f'/v1/host/open', body=body, binary_body=False, binary_response=False, options=options))
 
 class AsyncApi(AsyncTransport):
-    async def manage_resource(self, resource: str, body: T.JsonValue, *, options: RequestOptions | None = None) -> T.ManagementView:
+    async def manage_resource(self, resource: str, body: T.JsonValue, *, options: RequestOptions | None = None) -> T.JsonValue:
         """POST /v1/manage/{resource}."""
-        return cast("T.ManagementView", await self.request('POST', f'/v1/manage/{self.segment(resource)}', body=body, binary_body=False, binary_response=False, options=options))
+        return cast("T.JsonValue", await self.request('POST', f'/v1/manage/{self.segment(resource)}', body=body, binary_body=False, binary_response=False, options=options))
 
     async def cloud_agents(self, body: T.CloudAgentInput, *, options: RequestOptions | None = None) -> T.JsonValue:
         """POST /v1/cloud/agents."""
