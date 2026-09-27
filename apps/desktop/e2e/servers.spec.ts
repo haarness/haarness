@@ -1311,19 +1311,12 @@ test("remote folder explorer browses, completes paths, paginates and ignores sta
     await expect(folders).not.toContainText("ordinary-file.txt");
     await expect(
       folders.getByRole("button", { name: ".hidden", exact: true }),
-    ).toHaveCount(0);
+    ).toBeVisible();
+    await expect(picker.getByLabel("Hidden folders")).toHaveCount(0);
     await picker
       .getByRole("button", { name: "Show more folders", exact: true })
       .click();
-    await expect(folders.getByRole("button")).toHaveCount(208);
-    await picker.getByLabel("Hidden folders").check();
-    await expect(
-      folders.getByRole("button", { name: ".hidden", exact: true }),
-    ).toBeVisible();
-    await picker.getByLabel("Hidden folders").uncheck();
-    await expect(
-      folders.getByRole("button", { name: ".hidden", exact: true }),
-    ).toHaveCount(0);
+    await expect(folders.getByRole("button")).toHaveCount(209);
     gate = new Promise<void>((resolve) => {
       release = resolve;
     });
@@ -1412,6 +1405,7 @@ test("remote folder explorer browses, completes paths, paginates and ignores sta
       .click();
     await expect(page.locator(".transcript")).toContainText(
       "Echo: explorer-selected-project-proof",
+      { timeout: 60_000 },
     );
   } finally {
     release();

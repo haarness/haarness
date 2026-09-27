@@ -241,6 +241,7 @@ impl ModelProvider for AzureProvider {
             api_key,
             models: self.models.iter().map(|model| model.id.clone()).collect(),
             discover_models: false,
+            server_output_limit: false,
             model_defaults: self.instance.model_defaults,
             assume_authenticated: true,
             headers,
@@ -416,6 +417,7 @@ impl ModelProvider for CopilotProvider {
                 .map(|model| model.id.clone())
                 .collect(),
             discover_models: false,
+            server_output_limit: false,
             model_defaults: self.instance.model_defaults,
             assume_authenticated: false,
             headers,

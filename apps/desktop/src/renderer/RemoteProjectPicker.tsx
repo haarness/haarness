@@ -18,7 +18,6 @@ export function RemoteProjectPicker(props: {
   const [listing, setListing] = createSignal<DirectoryListing>();
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal("");
-  const [hidden, setHidden] = createSignal(false);
   const [history, setHistory] = createSignal<string[]>([]);
   const [suggestions, setSuggestions] = createSignal<Folder[]>([]);
   const [selected, setSelected] = createSignal(-1);
@@ -55,7 +54,7 @@ export function RemoteProjectPicker(props: {
         props.server.id,
         value,
         {
-          hidden: hidden(),
+          hidden: true,
           limit: 200,
           after:
             mode === "more" ? (previous?.nextCursor ?? undefined) : undefined,
@@ -111,18 +110,14 @@ export function RemoteProjectPicker(props: {
         const { listing: result } = await window.haarness.remoteProjects(
           props.server.id,
           parent,
-          { prefix, hidden: hidden(), limit: 20 },
+          { prefix, hidden: true, limit: 20 },
         );
         if (attempt !== completion) return;
         // Filtering here also supports hosts predating prefix queries.
         setSuggestions(
           result.directories
-            .filter(
-              (folder) =>
-                folder.name.toLowerCase().startsWith(prefix.toLowerCase()) &&
-                (hidden() ||
-                  prefix.startsWith(".") ||
-                  !folder.name.startsWith(".")),
+            .filter((folder) =>
+              folder.name.toLowerCase().startsWith(prefix.toLowerCase()),
             )
             .slice(0, 20),
         );
@@ -273,17 +268,6 @@ export function RemoteProjectPicker(props: {
             <span title={listing()?.path}>
               {listing()?.path ?? t("Folders")}
             </span>
-            <label>
-              <input
-                type="checkbox"
-                checked={hidden()}
-                onChange={(event) => {
-                  setHidden(event.currentTarget.checked);
-                  void browse(listing()?.path, "refresh");
-                }}
-              />
-              {t("Hidden folders")}
-            </label>
           </div>
           <div
             ref={browser}
@@ -340,11 +324,7 @@ export function RemoteProjectPicker(props: {
                   ]?.focus();
                 }}
               >
-                <For
-                  each={listing()?.directories.filter(
-                    (folder) => hidden() || !folder.name.startsWith("."),
-                  )}
-                >
+                <For each={listing()?.directories}>
                   {(folder) => (
                     <li>
                       <button
@@ -361,14 +341,7 @@ export function RemoteProjectPicker(props: {
                   )}
                 </For>
               </ul>
-              <Show
-                when={
-                  !loading() &&
-                  !listing()?.directories.filter(
-                    (folder) => hidden() || !folder.name.startsWith("."),
-                  ).length
-                }
-              >
+              <Show when={!loading() && !listing()?.directories.length}>
                 <p class="remote-folder-status">
                   {t("No subfolders. You can open this folder as a project.")}
                 </p>

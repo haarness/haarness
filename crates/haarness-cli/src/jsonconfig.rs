@@ -104,6 +104,13 @@ pub fn load_layers(
         .into_iter()
         .filter(|_| trust)
     {
+        // Session defaults are portable project files. Ordinary repository
+        // configuration keeps its existing precedence over Cloud defaults.
+        apply_json_config(
+            &mut layers,
+            &directory.join(".haarness/cloud/haarness.json"),
+            trust,
+        );
         apply_toml(&mut layers, &directory.join(".haarness/config.toml"));
         for root in [
             directory.clone(),
@@ -1782,6 +1789,38 @@ mod tests {
             }
         });
         format!("http://{address}")
+    }
+
+    #[test]
+    fn cloud_session_defaults_are_portable_and_project_overrides_still_win() {
+        let root = std::env::temp_dir().join(format!("haarness-cloud-config-{}", uuid::Uuid::now_v7()));
+        let config = root.join("config");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&config).unwrap();
+        fs::create_dir_all(workspace.join(".haarness/cloud/skills/review")).unwrap();
+        fs::write(config.join("haarness.json"), r#"{"model":"router/global"}"#).unwrap();
+        fs::write(workspace.join(".haarness/cloud/haarness.json"), r#"{
+            "model":"router/cloud", "default_agent":"cloud-agent",
+            "agent":{"cloud-agent":{"prompt":"cloud instructions"}},
+            "mcp":{"docs":{"url":"https://docs.example/mcp"}},
+            "skills":{"paths":[".haarness/cloud/skills"]}
+        }"#).unwrap();
+        let loaded = load_layers(&config, None, &workspace, true, &[]);
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        assert_eq!(loaded.model.as_deref(), Some("cloud"));
+        assert_eq!(loaded.default_agent.as_deref(), Some("cloud-agent"));
+        assert_eq!(loaded.mcp["docs"].url.as_deref(), Some("https://docs.example/mcp"));
+        assert!(loaded.agents.iter().any(|agent| agent.prompt == "cloud instructions"));
+        assert_eq!(configured_skill_paths(&loaded.native, None, &workspace), vec![workspace.join(".haarness/cloud/skills")]);
+        fs::write(workspace.join("haarness.json"), r#"{"model":"router/project","mcp":{"docs":{"url":"https://project.example/mcp"}}}"#).unwrap();
+        let overridden = load_layers(&config, None, &workspace, true, &[]);
+        assert_eq!(overridden.model.as_deref(), Some("project"));
+        assert_eq!(overridden.mcp["docs"].url.as_deref(), Some("https://project.example/mcp"));
+        let disabled = load_layers(&config, None, &workspace, false, &[]);
+        assert_eq!(disabled.model.as_deref(), Some("global"));
+        assert!(disabled.mcp.is_empty());
+        assert!(disabled.agents.is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

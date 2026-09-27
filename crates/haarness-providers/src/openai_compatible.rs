@@ -57,6 +57,9 @@ pub struct CompatibleInstance {
     /// Query the compatible `/models` route and replace fallback models when
     /// it succeeds. Explicit user model allowlists set this to false.
     pub discover_models: bool,
+    /// Let a managed gateway choose its budget-aware default output allowance.
+    /// Explicit request-hook limits still override this default.
+    pub server_output_limit: bool,
     /// Conservative capability/limit overrides for endpoints whose `/models`
     /// response omits metadata. Explicit config wins over discovered values.
     pub model_defaults: CompatibleModelDefaults,
@@ -103,7 +106,7 @@ impl OpenAiCompatibleProvider {
             reasoning_effort_models: HashSet::new(),
             model_defaults,
             discover_models: instance.discover_models,
-            server_output_limit: false,
+            server_output_limit: instance.server_output_limit,
             assume_authenticated: instance.assume_authenticated,
             headers: instance.headers,
         }
@@ -156,6 +159,7 @@ impl OpenAiCompatibleProvider {
                 std::env::var("OPENAI_COMPATIBLE_MODEL").unwrap_or_else(|_| "default".into()),
             ],
             discover_models: false,
+            server_output_limit: false,
             model_defaults: CompatibleModelDefaults::default(),
             assume_authenticated: false,
             headers: crate::ProviderHeaders::default(),
@@ -1475,6 +1479,7 @@ mod tests {
             api_key: None,
             models: vec!["grok-test".into()],
             discover_models: false,
+            server_output_limit: false,
             model_defaults: CompatibleModelDefaults::default(),
             assume_authenticated: false,
             headers: crate::ProviderHeaders::default(),
@@ -1514,6 +1519,7 @@ mod tests {
             api_key: None,
             models: vec!["company-model".into()],
             discover_models: false,
+            server_output_limit: false,
             model_defaults: CompatibleModelDefaults::default(),
             assume_authenticated: false,
             headers: crate::ProviderHeaders::default(),
@@ -1793,9 +1799,23 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        let provider =
-            OpenAiCompatibleProvider::for_test(format!("http://{address}/chat/completions"))
-                .with_server_output_limit();
+        let mut provider = OpenAiCompatibleProvider::new(CompatibleInstance {
+            id: "router".into(),
+            name: "Managed router".into(),
+            base_url: format!("http://{address}"),
+            api_key: None,
+            models: vec!["compat-test".into()],
+            discover_models: false,
+            server_output_limit: true,
+            model_defaults: CompatibleModelDefaults {
+                max_output_tokens: Some(8192),
+                ..Default::default()
+            },
+            assume_authenticated: true,
+            headers: crate::ProviderHeaders::default(),
+        });
+        provider.models[0].reasoning = true;
+        provider.models[0].reasoning_efforts = vec!["high".into()];
         assert_eq!(provider.info().models[0].max_output_tokens, Some(8192));
         for limit in [None, Some(512)] {
             let request = ProviderRequest {
@@ -2250,6 +2270,7 @@ mod tests {
             api_key: Some("fixture-secret".into()),
             models: vec!["openrouter/auto".into()],
             discover_models: true,
+            server_output_limit: false,
             model_defaults: CompatibleModelDefaults {
                 // Explicit config wins even when discovery advertises tools.
                 tools: Some(false),
@@ -2315,6 +2336,7 @@ mod tests {
             api_key: Some("fixture-secret".into()),
             models: vec!["glm-5.1".into()],
             discover_models: false,
+            server_output_limit: false,
             model_defaults: CompatibleModelDefaults::default(),
             assume_authenticated: false,
             headers: crate::ProviderHeaders::default(),
@@ -2361,6 +2383,7 @@ mod tests {
             api_key: Some("fixture-secret".into()),
             models: vec!["sonar-reasoning-pro".into()],
             discover_models: false,
+            server_output_limit: false,
             model_defaults: CompatibleModelDefaults::default(),
             assume_authenticated: false,
             headers: crate::ProviderHeaders::default(),

@@ -13,8 +13,8 @@ pub(super) fn files(root: &Path) -> Vec<PathBuf> {
     vec![root.join("haarness.jsonc"), root.join("haarness.json")]
 }
 pub(super) fn project_files(workspace: &Path) -> Vec<PathBuf> {
-    files(workspace)
-        .into_iter()
+    std::iter::once(workspace.join(".haarness/cloud/haarness.json"))
+        .chain(files(workspace))
         .chain(files(&workspace.join(".haarness")))
         .collect()
 }
