@@ -45,6 +45,14 @@ pub struct Config {
     pub api_url: Url,
     pub config_dir: PathBuf,
     pub client_id: String,
+    api_key: Option<ConfiguredApiKey>,
+}
+#[derive(Clone)]
+struct ConfiguredApiKey(String);
+impl std::fmt::Debug for ConfiguredApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[redacted API key]")
+    }
 }
 impl Config {
     pub fn from_env() -> Result<Self> {
@@ -62,12 +70,16 @@ impl Config {
                     })
                     .join("haarness-cloud")
             });
-        Self::new(
+        let mut config = Self::new(
             &std::env::var("HAARNESS_CLOUD_API_URL")
                 .unwrap_or_else(|_| "https://app.haarness.dev".into()),
             dir,
             &std::env::var("HAARNESS_CLOUD_CLIENT_ID").unwrap_or_else(|_| CLIENT_ID.into()),
-        )
+        )?;
+        if let Ok(key) = std::env::var("HAARNESS_API_KEY") {
+            config = config.with_api_key(key)?;
+        }
+        Ok(config)
     }
     pub fn new(api: &str, config_dir: PathBuf, client_id: &str) -> Result<Self> {
         let api_url = safe_url(api)?;
@@ -75,15 +87,34 @@ impl Config {
             api_url,
             config_dir,
             client_id: client_id.into(),
+            api_key: None,
         })
     }
     pub fn path(&self) -> PathBuf {
         self.config_dir.join("credentials.json")
     }
     pub fn signed_in(&self) -> bool {
-        self.path().is_file()
+        self.api_key.is_some() || self.path().is_file()
+    }
+    /// Explicit environment/API credentials never replace a stored browser login.
+    pub fn with_api_key(mut self, key: String) -> Result<Self> {
+        if !(key.starts_with("hck_") || key.starts_with("hcr_"))
+            || key.bytes().any(|b| b.is_ascii_whitespace())
+        {
+            return Err(Error::Config(
+                "HAARNESS_API_KEY must be a Haarness API key".into(),
+            ));
+        }
+        self.api_key = Some(ConfiguredApiKey(key));
+        Ok(self)
+    }
+    pub fn api_key(&self) -> Option<&str> {
+        self.api_key.as_ref().map(|key| key.0.as_str())
     }
     pub fn selected_account(&self) -> Option<String> {
+        if self.api_key.is_some() {
+            return None;
+        }
         fs::read_to_string(self.config_dir.join("account.json"))
             .ok()
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
@@ -214,6 +245,16 @@ impl Client {
         })
     }
     pub async fn bearer(&self, rejected: Option<&str>) -> Result<String> {
+        if let Some(key) = self.config.api_key() {
+            return if rejected.is_some() {
+                Err(Error::Api {
+                    status: 401,
+                    message: "API key invalid, expired or revoked. Update HAARNESS_API_KEY.".into(),
+                })
+            } else {
+                Ok(key.into())
+            };
+        }
         let _lock = self.config.lock().await?;
         let mut c = credentials::load(&self.config.path())?.ok_or(Error::NotLoggedIn)?;
         self.validate(&c)?;
@@ -287,6 +328,16 @@ impl Client {
         if !self.config.signed_in() {
             return Ok(json!({"loggedIn":false}));
         }
+        if self.config.api_key().is_some() {
+            let context = self.request(Method::GET, "api/v1/key", None).await?;
+            let key = &context["key"];
+            return Ok(
+                json!({"loggedIn":true,"authKind":"api_key","apiUrl":self.config.api_url,
+                "user":{"id":key["id"],"displayName":key["label"],"email":""},
+                "accounts":[{"id":key["accountId"],"name":context["accountName"],"role":"api_key"}],
+                "defaultAccountId":key["accountId"],"selectedAccountId":key["accountId"],"scopes":key["scopes"]}),
+            );
+        }
         match self.request(Method::GET, "api/v1/me", None).await {
             Ok(mut me) => {
                 me["loggedIn"] = json!(true);
@@ -302,6 +353,15 @@ impl Client {
         }
     }
     pub async fn select_account(&self, id: &str) -> Result<()> {
+        if self.config.api_key().is_some() {
+            return if self.status().await?["selectedAccountId"] == id {
+                Ok(())
+            } else {
+                Err(Error::Other(
+                    "API keys are bound to one account. Use a key for the other account.".into(),
+                ))
+            };
+        }
         let me = self.request(Method::GET, "api/v1/me", None).await?;
         if !me["accounts"]
             .as_array()
@@ -317,6 +377,9 @@ impl Client {
         Ok(())
     }
     pub async fn logout(&self) -> Result<()> {
+        if self.config.api_key().is_some() {
+            return Err(Error::Other("Unset HAARNESS_API_KEY to stop using this key. Revoke it in Cloud to disable all uses.".into()));
+        }
         let _lock = self.config.lock().await?;
         let _ = fs::remove_file(self.config.config_dir.join("login-generation"));
         let stored = credentials::load(&self.config.path())?;
@@ -389,6 +452,22 @@ impl Client {
         })
     }
     pub async fn router_session(&self) -> Result<RouterSession> {
+        if let Some(key) = self.config.api_key() {
+            let context = self.request(Method::GET, "api/v1/key", None).await?;
+            let router_url = context["routerUrl"]
+                .as_str()
+                .ok_or_else(|| Error::Other("Cloud did not return a model endpoint".into()))?;
+            safe_url(router_url)?;
+            let expires = context["key"]["expiresAt"]
+                .as_str()
+                .and_then(|value| value.parse::<DateTime<Utc>>().ok())
+                .unwrap_or_else(|| Utc::now() + chrono::Duration::minutes(5));
+            return Ok(RouterSession {
+                token: key.into(),
+                router_url: router_url.into(),
+                expires_at: expires.min(Utc::now() + chrono::Duration::minutes(5)),
+            });
+        }
         Ok(serde_json::from_value(
             self.request(
                 Method::POST,

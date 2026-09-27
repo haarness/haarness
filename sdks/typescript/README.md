@@ -77,7 +77,7 @@ The existing `token` option remains supported.
 ## Cloud
 
 `HaarnessCloud` connects to the Cloud account API using an account token
-(`HAARNESS_CLOUD_TOKEN`), separately from runtime tokens and router keys.
+(`HAARNESS_CLOUD_TOKEN`), or a scoped API key (`HAARNESS_API_KEY`), separately from runtime tokens.
 Python also exports `AsyncHaarnessCloud`. Select `session(sessionId)`, then
 `session.chats` for root chat handles with independent history and shared files.
 Connect the session to access the complete native API. Cloud account updates
@@ -89,3 +89,15 @@ off. They differ from the device-local `schedule` tool. Closing a client only
 detaches; explicitly stop or delete sessions to release compute. The repository's
 `sdks/README.md` contains complete examples, authentication and lifecycle details,
 and `CLOUD-OPERATIONS.md` inventories every Cloud method.
+
+### API key capabilities and lifecycle
+
+Use the same `hck_` API key as the Cloud SDK `token` and an OpenAI-compatible model client's
+`api_key`, with the returned `routerUrl` as its base URL. Cloud SDKs also read `HAARNESS_API_KEY`
+(before the legacy `HAARNESS_CLOUD_TOKEN`); explicit `token` takes precedence. Keys cannot
+manage other keys: creation, update, rotation and revocation require an owner/admin sign-in.
+The generated API includes key list/create/update/rotate/revoke and self-context methods.
+Grant `models:read` for discovery, `models:invoke` for inference, and appropriate `workspaces`,
+`schedules`, `marketplace` or `billing:read` permissions for Cloud calls. An attach capability
+authorizes full runtime chats, files, terminal and settings in sessions in the key's account.
+Expired or revoked keys fail; SDKs never implicitly replace them with OAuth credentials.

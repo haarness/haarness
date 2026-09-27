@@ -256,7 +256,7 @@ URLs, HTTP redirects are not followed, and PTY authentication uses headers.
 
 `HaarnessCloud` (TypeScript/Python) and `AsyncHaarnessCloud` (Python) expose all
 127 documented Cloud operations: 126 HTTP methods plus the account WebSocket.
-This includes identity/OAuth, plans and wallets, billing, router keys/usage,
+This includes identity/OAuth, plans and wallets, billing, API keys and model usage,
 marketplace, devices, reusable agents, session lifecycle and schedules.
 See [Cloud methods](CLOUD-OPERATIONS.md) and [Cloud schema](cloud-openapi.json).
 Access remains governed by the server's role and scope checks; administrative
@@ -294,7 +294,7 @@ be `running` before connecting.
 import { HaarnessCloud } from "@haarness/sdk";
 const cloud = new HaarnessCloud({
   baseUrl: process.env.HAARNESS_CLOUD_API_URL!,
-  token: process.env.HAARNESS_CLOUD_TOKEN,
+  token: process.env.HAARNESS_API_KEY,
 });
 const session = cloud.session(sessionId); // an existing running session
 try {
@@ -337,8 +337,9 @@ expiry and once after an authentication failure or a stale generation read.
 An event stream encountering a new runtime generation returns `resync_required`;
 reload snapshots before subscribing again.
 
-Supply a Cloud account access token explicitly or through `HAARNESS_CLOUD_TOKEN`.
-`HAARNESS_SERVER_TOKEN` and router keys are separate credentials. OAuth code/PKCE,
+Supply a scoped API key through `HAARNESS_API_KEY`, or an OAuth account access
+token explicitly or through `HAARNESS_CLOUD_TOKEN`.
+`HAARNESS_SERVER_TOKEN` authenticates the local runtime. Cloud API keys can authorize both Cloud operations and inference, depending on their capabilities. OAuth code/PKCE,
 refresh and device endpoints are generated methods; SDK construction does not
 log in, store secrets, or refresh an OAuth grant automatically. For long-lived
 clients, supply TypeScript `resolveAuth: async () => ({type: "bearer", token})`
@@ -454,3 +455,15 @@ real account API, gateway, runtimes, two chats, uploads, all schedule operations
 worker execution while disconnected, stop/start persistence and deletion. They
 require an isolated Cloud fixture stack and use fixture-only Stripe funding.
 The paid-provider/tmux scenario is opt-in: `scripts/test-cloud-tools-live.py`.
+
+### API key capabilities and lifecycle
+
+Use the same `hck_` API key as the Cloud SDK `token` and an OpenAI-compatible model client's
+`api_key`, with the returned `routerUrl` as its base URL. Cloud SDKs also read `HAARNESS_API_KEY`
+(before the legacy `HAARNESS_CLOUD_TOKEN`); explicit `token` takes precedence. Keys cannot
+manage other keys: creation, update, rotation and revocation require an owner/admin sign-in.
+The generated API includes key list/create/update/rotate/revoke and self-context methods.
+Grant `models:read` for discovery, `models:invoke` for inference, and appropriate `workspaces`,
+`schedules`, `marketplace` or `billing:read` permissions for Cloud calls. An attach capability
+authorizes full runtime chats, files, terminal and settings in sessions in the key's account.
+Expired or revoked keys fail; SDKs never implicitly replace them with OAuth credentials.

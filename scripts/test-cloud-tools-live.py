@@ -67,7 +67,7 @@ enabled=false
 ''')
     run(['git', 'init', '-q', str(workspace)])
     env = {k: os.environ[k] for k in ['PATH', 'HOME', 'USER', 'LANG', 'TMPDIR',
-           'HAARNESS_CLOUD_API_URL', 'HAARNESS_CLOUD_CONFIG_DIR'] if k in os.environ}
+           'HAARNESS_CLOUD_API_URL', 'HAARNESS_CLOUD_CONFIG_DIR', 'HAARNESS_API_KEY'] if k in os.environ}
     env.update(HAARNESS_DATA_DIR=str(root / 'data'), HAARNESS_HOME=str(root / 'home'),
                HAARNESS_TEST_PROVIDER='1', HAARNESS_LOG='warn,haarness_account::cloud::events=debug')
     args = [str(BINARY), '--workspace', str(workspace)]
@@ -127,13 +127,21 @@ enabled=false
         rows = [r for r in api(f'/threads/{thread}/items') if r.get('turnId') == turn]
         assert final['status'] == 'completed', final
         results = [r['data'] for r in rows if r['data']['type'] == 'tool_result']
-        assert results and not any(r.get('is_error') for r in results), results
+        assert results and not results[-1].get('is_error'), results
+        recovered = [r for r in results if r.get('is_error')]
+        if recovered:
+            (OUT / (label + '-recovered-errors.json')).write_text(json.dumps(recovered, indent=2))
+            print('Recovered tool errors:', label, len(recovered), flush=True)
         calls = [r['data'] for r in rows if r['data']['type'] == 'tool_call']
-        launches = [c for c in calls if c['name'] == 'cloud_agent_session' and c['arguments'].get('action') in ['ask', 'create'] and not c['arguments'].get('sessionId')]
-        assert len(launches) == int(new), calls
-        asks = [json.loads(r['output']) for r in results if r['name'] in ['cloud_agent_session','cloud_chat'] and json.loads(r['output']).get('turnId')]
-        assert asks, results
         (OUT / (label + '-tool-calls.json')).write_text(json.dumps(calls, indent=2))
+        # A schema-rejected call allocates no machine. Count completed launches so
+        # recovery is allowed, while two successfully created sessions still fail.
+        successful = {r['call_id'] for r in results if not r.get('is_error')}
+        launches = [c for c in calls if c['call_id'] in successful and c['name'] == 'cloud_agent_session' and c['arguments'].get('action') in ['ask', 'create'] and not c['arguments'].get('sessionId')]
+        assert len(launches) == int(new), calls
+        outputs = [json.loads(r['output']) for r in results if not r.get('is_error') and r['name'] in ['cloud_agent_session','cloud_chat']]
+        asks = [output for output in outputs if output.get('turnId')]
+        assert asks, results
         return asks[-1], calls, launches[0]['arguments'] if new else {}, thread
 
     def capture():
@@ -158,7 +166,7 @@ enabled=false
                 return None
 
         def deletion_finished():
-            saved = json.loads(credentials.read_text())
+            saved = {'apiUrl': env['HAARNESS_CLOUD_API_URL'], 'accessToken': env['HAARNESS_API_KEY']} if env.get('HAARNESS_API_KEY') else json.loads(credentials.read_text())
             assert saved['apiUrl'].rstrip('/') == env['HAARNESS_CLOUD_API_URL'].rstrip('/')
             req = urllib.request.Request(saved['apiUrl'].rstrip('/') + '/api/v1/operations/' + operation,
                 headers={'Authorization': 'Bearer ' + saved['accessToken']})
@@ -174,8 +182,11 @@ enabled=false
         proof('deleted-' + sid, state)
 
     try:
-        command = shlex.join(['env', *[f'{k}={v}' for k, v in env.items()], *args, '--thread', local])
-        run(['tmux', 'new-session', '-d', '-x', '155', '-y', '48', '-s', tmux, command])
+        command = shlex.join([*args, '--thread', local])
+        launcher = root / 'tui-env.sh'
+        launcher.write_text('\n'.join('export '+k+'='+shlex.quote(v) for k,v in env.items())+'\nexec '+command+'\n')
+        launcher.chmod(0o600)
+        run(['tmux', 'new-session', '-d', '-x', '155', '-y', '48', '-s', tmux, 'bash '+shlex.quote(str(launcher))])
         until(lambda: 'echo' in capture().lower(), 'TUI did not open', 30)
         models = tool('cloud_agent_manage', {'action': 'models', 'search': MODEL})
         assert any(m['id'] == MODEL for m in models['models']), models
@@ -195,7 +206,7 @@ its answer and session ID. Please create only one session, and don't run the com
         assert created['session']['title'] == name + ' freestyle', created
         proof('freestyle-start-websocket', created)
         assert reply['status'] == 'completed', reply
-        assert 'FREESTYLE_PUSH_OK' in json.dumps(reply['messages']) and 'Linux' in json.dumps(reply['messages']), reply
+        assert 'FREESTYLE_PUSH_OK' in json.dumps(reply['messages']) and os.environ.get('HAARNESS_CLOUD_TOOLS_OS', 'Linux') in json.dumps(reply['messages']), reply
         remote_thread = reply['threadId']
         proof('freestyle-real-model-reply', reply)
 
@@ -236,7 +247,7 @@ its answer and session ID. Please create only one session, and don't run the com
 
         # The real model must create another chat, preserving the existing machine/filesystem.
         second, chat_calls, _, _ = launch_with_model(
-            f"In Cloud session {sid}, open a second conversation named 'Separate review'. This must share the same machine and files and have its own history. Ask the new conversation to reply SECOND_CHAT_OK and bring back its reply. Do not create another Cloud session.",
+            f"In Cloud session {sid}, open a second conversation named 'Separate review'. This must share the same machine and files and have its own history. Send the new conversation the full instruction 'Reply with exactly SECOND_CHAT_OK and nothing else' and bring back its reply. Do not create another Cloud session.",
             'second-chat-natural-request', new=False)
         assert second['sessionId'] == sid and second['chatId'] != remote_thread, second
         assert any(c['name']=='cloud_chat' and c['arguments']['action']=='create' for c in chat_calls), chat_calls

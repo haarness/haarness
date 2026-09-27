@@ -82,7 +82,7 @@ class Transport(RuntimeTransport, CloudBase):
     ):
         super().__init__(
             base_url,
-            token=token if token is not None else os.getenv("HAARNESS_CLOUD_TOKEN", ""),
+            token=token if token is not None else os.getenv("HAARNESS_API_KEY", os.getenv("HAARNESS_CLOUD_TOKEN", "")),
             timeout=timeout,
         )
         self.cloud_init(account_id, resolve_token)
@@ -193,7 +193,7 @@ class AsyncTransport(AsyncRuntimeTransport, CloudBase):
     ):
         super().__init__(
             base_url,
-            token=token if token is not None else os.getenv("HAARNESS_CLOUD_TOKEN", ""),
+            token=token if token is not None else os.getenv("HAARNESS_API_KEY", os.getenv("HAARNESS_CLOUD_TOKEN", "")),
             timeout=timeout,
         )
         self.cloud_init(account_id, resolve_token)

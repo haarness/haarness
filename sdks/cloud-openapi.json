@@ -512,6 +512,85 @@
             }
           }
         }
+      },
+      "patch": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Edit an API key's name, capabilities, expiry and model limits. Derived tickets are revoked.",
+        "operationId": "update_account_api_key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "accountId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAccountApiKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountApiKeyDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid permissions or expiry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrator required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Active key unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/api-keys/{id}/rotate": {
@@ -2442,6 +2521,47 @@
         }
       }
     },
+    "/api/v1/key": {
+      "get": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Introspect the presented API key. Returns only its own account and permissions.",
+        "operationId": "api_key_context",
+        "responses": {
+          "200": {
+            "description": "Key context",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyContextDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "API key required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/marketplace/artifacts": {
       "post": {
         "tags": [
@@ -3835,7 +3955,7 @@
         "tags": [
           "router-keys"
         ],
-        "summary": "The managed router keys of an account.",
+        "summary": "Compatibility endpoint. Use `GET /api/v1/api-keys` for all application keys.",
         "description": "Auth: `cookie|bearer`, role ≥ viewer. Revoked keys are omitted and secrets are never returned here.",
         "operationId": "list_router_keys",
         "parameters": [
@@ -3887,7 +4007,7 @@
         "tags": [
           "router-keys"
         ],
-        "summary": "Create a router key.",
+        "summary": "Compatibility endpoint. Use `POST /api/v1/api-keys` with model capabilities.",
         "description": "Auth: `cookie+csrf|bearer`, role ≥ builder. `secretKey` is returned exactly once and never stored, so an\n`Idempotency-Replayed: true` answer carries `secretKey: null` and the client rotates instead (§5.1).",
         "operationId": "create_router_key",
         "parameters": [
@@ -7717,7 +7837,7 @@
           "prefix",
           "scopes",
           "createdAt",
-          "expiresAt"
+          "policy"
         ],
         "properties": {
           "accountId": {
@@ -7728,8 +7848,12 @@
             "format": "date-time"
           },
           "expiresAt": {
-            "type": "string",
-            "format": "date-time"
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Null only for legacy keys without an expiry. New keys always expire."
           },
           "id": {
             "type": "string",
@@ -7744,6 +7868,9 @@
               "null"
             ],
             "format": "date-time"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/KeyPolicyDto"
           },
           "prefix": {
             "type": "string"
@@ -8057,6 +8184,25 @@
             "type": "string"
           },
           "usd": {
+            "type": "string"
+          }
+        }
+      },
+      "ApiKeyContextDto": {
+        "type": "object",
+        "required": [
+          "key",
+          "accountName",
+          "routerUrl"
+        ],
+        "properties": {
+          "accountName": {
+            "type": "string"
+          },
+          "key": {
+            "$ref": "#/components/schemas/AccountApiKeyDto"
+          },
+          "routerUrl": {
             "type": "string"
           }
         }
@@ -8849,14 +8995,25 @@
           "label": {
             "type": "string"
           },
+          "policy": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/KeyPolicyDto"
+              }
+            ]
+          },
           "scopes": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "workspaces:read, workspaces:write, workspaces:agent (full runtime access)."
+            "description": "Explicit Cloud and model capabilities. Unlisted operations are denied."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CreateAgentSessionRequest": {
         "type": "object",
@@ -9211,11 +9368,15 @@
       "CreatedAccountApiKeyResponse": {
         "type": "object",
         "required": [
-          "key"
+          "key",
+          "routerUrl"
         ],
         "properties": {
           "key": {
             "$ref": "#/components/schemas/AccountApiKeyDto"
+          },
+          "routerUrl": {
+            "type": "string"
           },
           "secretKey": {
             "type": [
@@ -10276,7 +10437,7 @@
                 "prefix",
                 "scopes",
                 "createdAt",
-                "expiresAt"
+                "policy"
               ],
               "properties": {
                 "accountId": {
@@ -10287,8 +10448,12 @@
                   "format": "date-time"
                 },
                 "expiresAt": {
-                  "type": "string",
-                  "format": "date-time"
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time",
+                  "description": "Null only for legacy keys without an expiry. New keys always expire."
                 },
                 "id": {
                   "type": "string",
@@ -10303,6 +10468,9 @@
                     "null"
                   ],
                   "format": "date-time"
+                },
+                "policy": {
+                  "$ref": "#/components/schemas/KeyPolicyDto"
                 },
                 "prefix": {
                   "type": "string"
@@ -11412,10 +11580,6 @@
       },
       "KeyPolicyDto": {
         "type": "object",
-        "required": [
-          "maxConcurrency",
-          "ratePerMinute"
-        ],
         "properties": {
           "maxConcurrency": {
             "type": "integer",
@@ -11448,7 +11612,8 @@
             "format": "int32",
             "minimum": 0
           }
-        }
+        },
+        "additionalProperties": false
       },
       "LedgerCheckResponse": {
         "type": "object",
@@ -14034,6 +14199,45 @@
           "unit_seconds",
           "bytes"
         ]
+      },
+      "UpdateAccountApiKeyRequest": {
+        "type": "object",
+        "properties": {
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "A future expiry, at most 366 days away. Cannot make a key non-expiring."
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "policy": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/KeyPolicyDto"
+              }
+            ]
+          },
+          "scopes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
       },
       "UpdateAccountRequest": {
         "type": "object",

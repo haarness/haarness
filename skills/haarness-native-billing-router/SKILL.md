@@ -45,3 +45,11 @@ Wait for each request's settlement record and zero matching reserves, not merely
 Test included-first funding, purchased fallback with overage enabled, denial with overage disabled/insufficient balance, provider failure, and cancellation/reservation release. Fixture requests can verify edge cases deterministically; real provider calls prove adapter integration. Native displayed model pricing must use Cloud's published per-token prices rather than built-in estimates. A subscription purchase and router consumption are separate proofs.
 
 Revoke only keys created by the test, stop owned daemons/tmux sessions, and retain redacted evidence. See `haarness-router/docs/testing.md` for provider suites and `haarness-cloud/scripts/e2e.sh` for the account/ledger fixture journey.
+
+## API-key authentication
+
+Repeat relevant native tests with a disposable `HAARNESS_API_KEY` and no credentials file. Pass the key privately via the subprocess environment; do not put it in tmux command arguments or logs. The account adapter and Cloud provider must use that same key, and must not create an OAuth grant or child inference key.
+
+The opt-in Electron test `haarness-account.spec.ts --grep 'unified API key'` uses `HAARNESS_ACCOUNT_E2E_URL` and `HAARNESS_API_KEY`. Run once with model invocation, billing and session capabilities, and once with only `models:read`. It verifies the restricted account dialog, catalog discovery, no OAuth file, and a real model reply for the combined key. Keep key expiry long enough for the suite and revoke only those test keys afterward.
+
+`test-billing-tmux.py` and `test-cloud-tools-live.py` also accept `HAARNESS_API_KEY`. Cloud tools use a real orchestrator and remote model. Set `HAARNESS_CLOUD_TOOLS_OS` to the actual Cloud runtime OS when using a local provider; Linux is the default. When switching the sandbox from fixture inference to a real provider, configure the worker's `HAARNESS_CLOUD_DEFAULT_MODEL` to an available real model; `router/fixture/echo` is not in a real pricebook. Template launch must submit the requested chat message, not merely return a running session. Assert the eventual reply and clean every captured session/template ID even after a model assertion fails. A recovered invalid tool call is not success by itself; the expected remote operation and answer must complete.

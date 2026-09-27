@@ -19,7 +19,7 @@ export class Transport extends HttpTransport {
   constructor(options: CloudOptions) {
     super({
       ...options,
-      token: options.token ?? process.env.HAARNESS_CLOUD_TOKEN ?? "",
+      token: options.token ?? process.env.HAARNESS_API_KEY ?? process.env.HAARNESS_CLOUD_TOKEN ?? "",
     });
     this.accountId = options.accountId;
   }

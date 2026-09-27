@@ -7,6 +7,8 @@ import { credits, type BillingState } from "../billing";
 
 type Account = {
   loggedIn: boolean;
+  authKind?: string;
+  scopes?: string[];
   user?: { email?: string; displayName?: string };
   accounts?: { id: string; name: string }[];
   selectedAccountId?: string;
@@ -24,6 +26,7 @@ export function AccountMenu(props: {
 }) {
   const app = useApp();
   const [account, setAccount] = createSignal<Account>({ loggedIn: false });
+  const permits = (scope: string) => account().authKind !== "api_key" || account().scopes?.includes(scope);
   const [open, setOpen] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
@@ -45,7 +48,7 @@ export function AccountMenu(props: {
     const result = await window.haarness.account({ action: "status" });
     if (!alive) return;
     setAccount(result);
-    if (result.loggedIn && open()) {
+    if (result.loggedIn && open() && (result.authKind !== "api_key" || result.scopes?.includes("workspaces:read"))) {
       const [spaces, templates] = await Promise.allSettled([
         window.haarness.account({ action: "sessions" }),
         window.haarness.account({ action: "agents" }),
@@ -233,6 +236,8 @@ export function AccountMenu(props: {
                 </select>
               </label>
             </Show>
+            <Show when={account().authKind === "api_key"}><p class="muted">{t("Connected with HAARNESS_API_KEY. Manage its permissions and expiration in Cloud. Unset the environment variable to disconnect.")}</p></Show>
+            <Show when={permits("billing:read")} fallback={<p class="muted">{t("This API key does not include billing access.")}</p>}>
             <section class="account-billing" aria-label={t("Plan and credits")}>
               <div class="account-heading"><h3>{t("Plan and credits")}</h3><Show when={summary()}>{s => <span class="account-plan">{s().plan}</span>}</Show></div>
               <Show when={billing().error}><p class="form-error" role="status">{billing().error} {summary() ? t("Showing last known balances.") : ""}</p></Show>
@@ -275,12 +280,14 @@ export function AccountMenu(props: {
                 </button>
               </div>
             </section>
+            </Show>
+            <Show when={permits("workspaces:read")} fallback={<p class="muted">{t("This API key does not include Cloud session access.")}</p>}>
             <section>
               <div class="account-heading">
                 <h3>{t("Cloud sessions")}</h3>
                 <button
                   class="secondary"
-                  disabled={busy()}
+                  disabled={busy() || !permits("workspaces:write")}
                   onClick={() => setCreating(!creating())}
                 >
                   {t("New session")}
@@ -374,7 +381,7 @@ export function AccountMenu(props: {
                             <button
                               class="secondary"
                               disabled={
-                                busy() ||
+                                busy() || !permits("workspaces:write") ||
                                 w.workspace.observedState !== "stopped"
                               }
                               onClick={() =>
@@ -393,7 +400,7 @@ export function AccountMenu(props: {
                         >
                           <button
                             class="primary"
-                            disabled={busy()}
+                            disabled={busy() || !permits("workspaces:agent")}
                             onClick={() =>
                               void act(async () => {
                                 const connected = await app.connect({
@@ -407,7 +414,7 @@ export function AccountMenu(props: {
                           </button>
                           <button
                             class="secondary"
-                            disabled={busy()}
+                            disabled={busy() || !permits("workspaces:write")}
                             onClick={() =>
                               void act(async () => {
                                 await window.haarness.account({
@@ -434,8 +441,9 @@ export function AccountMenu(props: {
                 {t("Refresh")}
               </button>
             </section>
+            </Show>
             <footer>
-              <button
+              <Show when={account().authKind !== "api_key"}><button
                 class="secondary"
                 disabled={busy()}
                 onClick={() =>
@@ -447,7 +455,7 @@ export function AccountMenu(props: {
                 }
               >
                 {t("Sign out")}
-              </button>
+              </button></Show>
               <button class="primary" onClick={close}>
                 {t("Done")}
               </button>

@@ -288,3 +288,49 @@ test("Haarness account signs in through a browser, discovers Cloud models, and s
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("unified API key connects Desktop with its actual capabilities", async () => {
+  test.skip(!api || !process.env.HAARNESS_API_KEY, "Provide a disposable local Cloud API key");
+  test.setTimeout(180000);
+  expect(new URL(api!).hostname).toBe("127.0.0.1");
+  const root=await mkdtemp(join(tmpdir(),"haarness-key-desktop-"));
+  const workspace=join(root,"project");await mkdir(workspace);
+  execFileSync("git",["init","-q",workspace]);
+  const env: Record<string,string>={...Object.fromEntries(Object.entries(process.env).filter((entry):entry is [string,string]=>entry[1]!==undefined)),HAARNESS_BIN:resolve(process.env.HAARNESS_BIN??"../../target/debug/haarness"),HAARNESS_DATA_DIR:join(root,"data"),HAARNESS_CLOUD_CONFIG_DIR:join(root,"account"),HAARNESS_DESKTOP_DATA:join(root,"desktop"),HAARNESS_CLOUD_API_URL:api!,HAARNESS_DESKTOP_TEST:"1"};
+  delete env.ELECTRON_RUN_AS_NODE;
+  const app=await electron.launch({args:["."],env});
+  try {
+    const page=await app.firstWindow();
+    const status=await page.evaluate(()=>window.haarness.account({action:"status"}));
+    expect(status.authKind).toBe("api_key");
+    await page.getByRole("button",{name:status.user.displayName,exact:true}).click();
+    const dialog=page.getByRole("dialog",{name:"Haarness account",exact:true});
+    await expect(dialog.getByText(/Connected with HAARNESS_API_KEY/)).toBeVisible();
+    await expect(dialog.getByRole("button",{name:"Sign out",exact:true})).toHaveCount(0);
+    const canRead=status.scopes.includes("workspaces:read"),canBill=status.scopes.includes("billing:read");
+    await expect(dialog.getByRole("heading",{name:"Cloud sessions",exact:true})).toHaveCount(canRead?1:0);
+    if(canBill)await expect(dialog.getByTestId("included-credits")).toBeVisible();
+    else await expect(dialog.getByText("This API key does not include billing access.",{exact:true})).toBeVisible();
+    await expect(dialog.getByRole("alert")).toHaveCount(0);
+    await page.screenshot({path:test.info().outputPath(canRead?"api-key-connected.png":"api-key-models-only.png")});
+    await dialog.getByRole("button",{name:"Done",exact:true}).click();
+    const connection=await page.evaluate(directory=>window.haarness.connect({workspace:directory,trust:false}),workspace);
+    const providers=await page.evaluate(id=>window.haarness.api<any[]>(id!,"refreshProviders"),connection!.id);
+    const provider=providers.find(p=>p.id==="haarness");expect(provider?.authenticated).toBe(true);expect(provider?.models.length).toBeGreaterThan(0);
+    if(status.scopes.includes("models:invoke")) {
+      const reply=await page.evaluate(async id=>{
+        const thread=await window.haarness.api<any>(id!,"createThread",[{title:"Desktop unified key",provider:"haarness",model:"openai/gpt-4.1-nano"}]);
+        const turn=await window.haarness.api<any>(id!,"startTurn",[thread.id,{requestId:crypto.randomUUID(),text:"Reply DESKTOP_UNIFIED_KEY_OK, without tools."}]);
+        return {thread:thread.id,turn:turn.id};
+      },connection!.id);
+      await expect.poll(async ()=>await page.evaluate(async ({id,thread})=>{
+        const items=await window.haarness.api<any[]>(id!,"listItems",[thread]);return items.some(i=>i.data?.type==="assistant_message"&&i.data.text.includes("DESKTOP_UNIFIED_KEY_OK"));
+      },{id:connection!.id,thread:reply.thread}),{timeout:120000}).toBe(true);
+    }
+    await expect(readFile(join(root,"account/credentials.json"))).rejects.toThrow();
+  } finally {
+    await app.close();
+    execFileSync(env.HAARNESS_BIN,["--workspace",workspace,"serve","--stop"],{env,stdio:"ignore"});
+    await rm(root,{recursive:true,force:true});
+  }
+});

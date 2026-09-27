@@ -1237,5 +1237,8 @@
   "Reserved credits": "Reserved credits",
   "Showing last known balances.": "Showing last known balances.",
   "credits": "credits",
-  "Add credits": "Add credits"
+  "Add credits": "Add credits",
+  "Connected with HAARNESS_API_KEY. Manage its permissions and expiration in Cloud. Unset the environment variable to disconnect.": "Forbundet med HAARNESS_API_KEY. Administrer tilladelser og udløb i Cloud. Fjern miljøvariablen for at afbryde forbindelsen.",
+  "This API key does not include billing access.": "Denne API-nøgle giver ikke adgang til fakturering.",
+  "This API key does not include Cloud session access.": "Denne API-nøgle giver ikke adgang til Cloud-sessioner."
 }

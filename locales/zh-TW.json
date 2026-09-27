@@ -1237,5 +1237,8 @@
   "Reserved credits": "Reserved credits",
   "Showing last known balances.": "Showing last known balances.",
   "credits": "credits",
-  "Add credits": "Add credits"
+  "Add credits": "Add credits",
+  "Connected with HAARNESS_API_KEY. Manage its permissions and expiration in Cloud. Unset the environment variable to disconnect.": "已透過 HAARNESS_API_KEY 連線。請在 Cloud 中管理其權限和有效期限。取消設定此環境變數即可中斷連線。",
+  "This API key does not include billing access.": "此 API 金鑰沒有帳單存取權限。",
+  "This API key does not include Cloud session access.": "此 API 金鑰沒有 Cloud 工作階段存取權限。"
 }

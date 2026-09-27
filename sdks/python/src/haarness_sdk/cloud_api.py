@@ -43,6 +43,10 @@ class CloudApi(Transport):
         """DELETE /api/v1/api-keys/{id}."""
         return cast("None", self.request('DELETE', f'/api/v1/api-keys/{self.segment(id)}', query=query, binary_body=False, binary_response=False, options=options))
 
+    def update_account_api_key(self, id: str, body: T.UpdateAccountApiKeyRequest, query: T.UpdateAccountApiKeyQuery | None = None, *, options: RequestOptions | None = None) -> T.AccountApiKeyDto:
+        """PATCH /api/v1/api-keys/{id}."""
+        return cast("T.AccountApiKeyDto", self.request('PATCH', f'/api/v1/api-keys/{self.segment(id)}', body=body, query=query, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
     def rotate_account_api_key(self, id: str, query: T.RotateAccountApiKeyQuery | None = None, *, options: RequestOptions | None = None) -> T.CreatedAccountApiKeyResponse:
         """POST /api/v1/api-keys/{id}/rotate."""
         return cast("T.CreatedAccountApiKeyResponse", self.request('POST', f'/api/v1/api-keys/{self.segment(id)}/rotate', query=query, binary_body=False, binary_response=False, options=options))
@@ -154,6 +158,10 @@ class CloudApi(Transport):
     def revoke_device(self, id: str, *, options: RequestOptions | None = None) -> None:
         """DELETE /api/v1/devices/{id}."""
         return cast("None", self.request('DELETE', f'/api/v1/devices/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    def api_key_context(self, *, options: RequestOptions | None = None) -> T.ApiKeyContextDto:
+        """GET /api/v1/key."""
+        return cast("T.ApiKeyContextDto", self.request('GET', f'/api/v1/key', binary_body=False, binary_response=False, options=options))
 
     def upload_artifact(self, body: bytes, query: T.UploadArtifactQuery | None = None, *, options: RequestOptions | None = None) -> T.UploadArtifactResponse:
         """POST /api/v1/marketplace/artifacts."""
@@ -548,6 +556,10 @@ class AsyncCloudApi(AsyncTransport):
         """DELETE /api/v1/api-keys/{id}."""
         return cast("None", await self.request('DELETE', f'/api/v1/api-keys/{self.segment(id)}', query=query, binary_body=False, binary_response=False, options=options))
 
+    async def update_account_api_key(self, id: str, body: T.UpdateAccountApiKeyRequest, query: T.UpdateAccountApiKeyQuery | None = None, *, options: RequestOptions | None = None) -> T.AccountApiKeyDto:
+        """PATCH /api/v1/api-keys/{id}."""
+        return cast("T.AccountApiKeyDto", await self.request('PATCH', f'/api/v1/api-keys/{self.segment(id)}', body=body, query=query, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
     async def rotate_account_api_key(self, id: str, query: T.RotateAccountApiKeyQuery | None = None, *, options: RequestOptions | None = None) -> T.CreatedAccountApiKeyResponse:
         """POST /api/v1/api-keys/{id}/rotate."""
         return cast("T.CreatedAccountApiKeyResponse", await self.request('POST', f'/api/v1/api-keys/{self.segment(id)}/rotate', query=query, binary_body=False, binary_response=False, options=options))
@@ -659,6 +671,10 @@ class AsyncCloudApi(AsyncTransport):
     async def revoke_device(self, id: str, *, options: RequestOptions | None = None) -> None:
         """DELETE /api/v1/devices/{id}."""
         return cast("None", await self.request('DELETE', f'/api/v1/devices/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    async def api_key_context(self, *, options: RequestOptions | None = None) -> T.ApiKeyContextDto:
+        """GET /api/v1/key."""
+        return cast("T.ApiKeyContextDto", await self.request('GET', f'/api/v1/key', binary_body=False, binary_response=False, options=options))
 
     async def upload_artifact(self, body: bytes, query: T.UploadArtifactQuery | None = None, *, options: RequestOptions | None = None) -> T.UploadArtifactResponse:
         """POST /api/v1/marketplace/artifacts."""

@@ -124,6 +124,24 @@
     }
   },
   {
+    "name": "update_account_api_key",
+    "method": "PATCH",
+    "path": "/api/v1/api-keys/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/AccountApiKeyDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/UpdateAccountApiKeyQuery"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/UpdateAccountApiKeyRequest"
+    }
+  },
+  {
     "name": "rotate_account_api_key",
     "method": "POST",
     "path": "/api/v1/api-keys/{id}/rotate",
@@ -464,6 +482,15 @@
       "$ref": "#/components/schemas/EntityEventsQuery"
     },
     "stream": "websocket"
+  },
+  {
+    "name": "api_key_context",
+    "method": "GET",
+    "path": "/api/v1/key",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/ApiKeyContextDto"
+    }
   },
   {
     "name": "upload_artifact",

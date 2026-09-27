@@ -222,3 +222,18 @@ test("runtime attachment has one bearer and renews on a flat generation error", 
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test("unified API key environment takes precedence without a runtime-token fallback", async () => {
+  const before = {api:process.env.HAARNESS_API_KEY,cloud:process.env.HAARNESS_CLOUD_TOKEN,runtime:process.env.HAARNESS_SERVER_TOKEN};
+  try {
+    process.env.HAARNESS_API_KEY="hck_unified";process.env.HAARNESS_CLOUD_TOKEN="old-oauth";process.env.HAARNESS_SERVER_TOKEN="local-only";
+    for(const explicit of [undefined,"explicit-key"]){
+      const c=new HaarnessCloud({baseUrl:"http://localhost:12345",token:explicit,fetch:async (url,init)=>{
+        assert.equal(init.headers.Authorization,"Bearer "+(explicit ?? "hck_unified"));return Response.json({});
+      }});
+      await c.apiKeyContext();c.close();
+    }
+  } finally {
+    for(const [name,value] of [["HAARNESS_API_KEY",before.api],["HAARNESS_CLOUD_TOKEN",before.cloud],["HAARNESS_SERVER_TOKEN",before.runtime]]){if(value===undefined)delete process.env[name];else process.env[name]=value;}
+  }
+});
