@@ -118,3 +118,4 @@
 | `host_projects` | `hostProjects` | `GET /v1/host/projects` |
 | `host_directories` | `hostDirectories` | `GET /v1/host/directories` |
 | `host_open` | `hostOpen` | `POST /v1/host/open` |
+| `host_close` | `hostClose` | `DELETE /v1/host/projects/{id}` |

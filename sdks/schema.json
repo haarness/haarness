@@ -5814,6 +5814,27 @@
         "tags": []
       }
     },
+    "/v1/host/projects/{id}": {
+      "delete": {
+        "operationId": "close_remote_project",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          }
+        },
+        "tags": []
+      }
+    },
     "/v1/insights": {
       "get": {
         "operationId": "analytics_insights",

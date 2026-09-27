@@ -1431,5 +1431,16 @@
     "body": {
       "$ref": "#/components/schemas/Open"
     }
+  },
+  {
+    "name": "host_close",
+    "method": "DELETE",
+    "path": "/v1/host/projects/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    }
   }
 ]

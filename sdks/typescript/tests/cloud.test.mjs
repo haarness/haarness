@@ -237,3 +237,18 @@ test("unified API key environment takes precedence without a runtime-token fallb
     for(const [name,value] of [["HAARNESS_API_KEY",before.api],["HAARNESS_CLOUD_TOKEN",before.cloud],["HAARNESS_SERVER_TOKEN",before.runtime]]){if(value===undefined)delete process.env[name];else process.env[name]=value;}
   }
 });
+
+test("remote host and project adapters resolve current Cloud auth and never replay writes", async () => {
+  const seen=[]; let token="first";
+  const client=new HaarnessCloud({baseUrl:"http://localhost:12345", resolveAuth:async()=>({type:"bearer",token}),fetch:async(url,init)=>{
+    seen.push([new URL(url).pathname,init.method,init.headers.Authorization]);
+    return new Response(JSON.stringify(init.method==="GET"?{}:{error:{code:"offline",message:"offline"}}),{status:init.method==="GET"?200:409});
+  }});
+  const host=client.remoteHost("machine");const project=host.workspace("project");const shared=client.remoteSession("published");
+  await project.info();token="refreshed";await shared.info();await project.info();
+  assert.deepEqual(seen.map(x=>x[2]),["Bearer first","Bearer refreshed","Bearer refreshed"]);
+  assert.equal(seen[0][0],"/api/v1/remote-hosts/machine/runtime/v1/host/workspaces/project/v1/info");
+  assert.equal(seen[1][0],"/api/v1/remote-sessions/published/runtime/v1/info");
+  await assert.rejects(project.createThread({title:"never replay"}),ApiError);assert.equal(seen.length,4);
+  client.close();await assert.rejects(project.info());assert.equal(seen.length,4);host.close();project.close();shared.close();
+});

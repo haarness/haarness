@@ -286,6 +286,10 @@ pub async fn serve_with_access(
         .route("/events", get(events))
         .layer(axum::Extension(shutdown.clone()))
         .layer(axum::Extension(Arc::clone(&ptys)))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::remote_scope::enforce,
+        ))
         .route_layer(middleware::from_fn_with_state(auth, require_auth));
     let runtime = Arc::clone(&state.runtime);
     let mut app = Router::new()
@@ -611,6 +615,7 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
         server_instance_id: state.runtime.events().server_instance_id(),
         event_cursor: state.runtime.events().cursor(),
         capabilities: vec![
+            "remote-chat-scope.v1".into(),
             "rest".into(),
             "providers.refresh.v1".into(),
             "sse".into(),
@@ -2075,16 +2080,17 @@ async fn events(
         .get("last-event-id")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse().ok());
+    let root = crate::remote_scope::root(&headers);
     let subscription = state.runtime.events().subscribe(after);
     let output = stream! {
         if subscription.requires_resync { let payload=json!({"schemaVersion":SCHEMA_VERSION,"type":"resync_required"}); yield Ok(Event::default().event("resync_required").data(payload.to_string())); }
-        for event in subscription.replay { yield Ok(to_sse(&event)); }
+        for event in subscription.replay { if crate::remote_scope::event_allowed(&event,root,&state).await { yield Ok(to_sse(&event)); } }
         let mut live=BroadcastStream::new(subscription.receiver);
         loop {
             tokio::select! {
                 () = shutdown.cancelled() => break,
                 event = live.next() => match event {
-                    Some(Ok(event)) => yield Ok(to_sse(&event)),
+                    Some(Ok(event)) => if crate::remote_scope::event_allowed(&event,root,&state).await { yield Ok(to_sse(&event)); },
                     Some(Err(_)) => yield Ok(Event::default().event("resync_required").data("{\"type\":\"resync_required\"}")),
                     None => break,
                 }

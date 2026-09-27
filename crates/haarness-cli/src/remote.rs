@@ -20,7 +20,21 @@ pub struct Host {
 impl WorkspaceHost for Host {
     async fn catalog(&self) -> Result<WorkspaceListResponse> {
         let paths = self.paths.clone();
-        tokio::task::spawn_blocking(move || Ok(paths.workspace_manager()?.list(None)?)).await?
+        tokio::task::spawn_blocking(move || {
+            let mut catalog = paths.workspace_manager()?.list(None)?;
+            let hidden = hidden_projects(&paths)?;
+            catalog
+                .workspaces
+                .retain(|workspace| !hidden.contains(&workspace.id));
+            catalog.projects.retain(|project| {
+                catalog
+                    .workspaces
+                    .iter()
+                    .any(|workspace| workspace.project_id == project.id)
+            });
+            Ok(catalog)
+        })
+        .await?
     }
     async fn browse(
         &self,
@@ -41,10 +55,19 @@ impl WorkspaceHost for Host {
             Ok::<_, anyhow::Error>(paths.workspace_manager()?.register_local(&path)?)
         })
         .await??;
+        set_visible(&self.paths, &workspace.id, true)?;
         self.target(workspace.id.clone()).await?;
         Ok(workspace)
     }
+    async fn close(&self, id: String) -> Result<()> {
+        self.paths.workspace_manager()?.get(&id)?;
+        set_visible(&self.paths, &id, false)
+    }
     async fn target(&self, id: String) -> Result<WorkspaceTarget> {
+        ensure!(
+            !hidden_projects(&self.paths)?.contains(&id),
+            "Project is closed on this remote host; open its folder to reconnect"
+        );
         let paths = self.paths.clone();
         let workspace = tokio::task::spawn_blocking(move || {
             Ok::<_, anyhow::Error>(paths.workspace_manager()?.get(&id)?)
@@ -148,4 +171,36 @@ fn list_directories(
         directories: entries.into_values().collect(),
         next_cursor,
     })
+}
+
+fn hidden_projects(paths: &Paths) -> Result<std::collections::HashSet<String>> {
+    match std::fs::read(paths.config_dir().join("remote-hidden-projects.json")) {
+        Ok(data) => Ok(serde_json::from_slice(&data)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(std::collections::HashSet::default())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+fn set_visible(paths: &Paths, id: &str, visible: bool) -> Result<()> {
+    std::fs::create_dir_all(paths.config_dir())?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(paths.config_dir().join("remote-hidden-projects.lock"))?;
+    fs2::FileExt::lock_exclusive(&lock)?;
+    let mut hidden = hidden_projects(paths)?;
+    if visible {
+        hidden.remove(id);
+    } else {
+        hidden.insert(id.to_owned());
+    }
+    let temporary = paths.config_dir().join("remote-hidden-projects.json.tmp");
+    std::fs::write(&temporary, serde_json::to_vec(&hidden)?)?;
+    std::fs::rename(
+        temporary,
+        paths.config_dir().join("remote-hidden-projects.json"),
+    )?;
+    Ok(())
 }

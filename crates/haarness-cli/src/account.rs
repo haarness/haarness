@@ -266,7 +266,7 @@ fn id(input: &Value) -> Result<&str> {
     Ok(id)
 }
 
-async fn list_all(client: &Client, path: &str) -> Result<Value> {
+pub(super) async fn list_all(client: &Client, path: &str) -> Result<Value> {
     let mut items = Vec::new();
     let mut next = path.to_owned();
     let mut seen = std::collections::HashSet::new();

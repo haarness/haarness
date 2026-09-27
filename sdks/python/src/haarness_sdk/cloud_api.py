@@ -259,6 +259,42 @@ class CloudApi(Transport):
         """GET /api/v1/releases/{channel}/{product}."""
         return cast("T.ReleaseManifestResponse", self.request('GET', f'/api/v1/releases/{self.segment(channel)}/{self.segment(product)}', binary_body=False, binary_response=False, options=options))
 
+    def list_remote_hosts(self, query: T.ListRemoteHostsQuery | None = None, *, options: RequestOptions | None = None) -> T.Page_RemoteHostDto:
+        """GET /api/v1/remote-hosts."""
+        return cast("T.Page_RemoteHostDto", self.request('GET', f'/api/v1/remote-hosts', query=query, binary_body=False, binary_response=False, options=options))
+
+    def register_remote_host(self, body: T.RegisterRemoteHostRequest, *, options: RequestOptions | None = None) -> T.RemoteHostDto:
+        """POST /api/v1/remote-hosts."""
+        return cast("T.RemoteHostDto", self.request('POST', f'/api/v1/remote-hosts', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def get_remote_host(self, id: str, *, options: RequestOptions | None = None) -> T.RemoteHostDto:
+        """GET /api/v1/remote-hosts/{id}."""
+        return cast("T.RemoteHostDto", self.request('GET', f'/api/v1/remote-hosts/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    def revoke_remote_host(self, id: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /api/v1/remote-hosts/{id}."""
+        return cast("None", self.request('DELETE', f'/api/v1/remote-hosts/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    def update_remote_host(self, id: str, body: T.UpdateRemoteHostRequest, *, options: RequestOptions | None = None) -> T.RemoteHostDto:
+        """PATCH /api/v1/remote-hosts/{id}."""
+        return cast("T.RemoteHostDto", self.request('PATCH', f'/api/v1/remote-hosts/{self.segment(id)}', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def publish_remote_session(self, id: str, body: T.PublishRemoteSessionRequest, *, options: RequestOptions | None = None) -> T.RemoteSessionDto:
+        """POST /api/v1/remote-hosts/{id}/sessions."""
+        return cast("T.RemoteSessionDto", self.request('POST', f'/api/v1/remote-hosts/{self.segment(id)}/sessions', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def list_remote_sessions(self, query: T.ListRemoteSessionsQuery | None = None, *, options: RequestOptions | None = None) -> T.Page_RemoteSessionDto:
+        """GET /api/v1/remote-sessions."""
+        return cast("T.Page_RemoteSessionDto", self.request('GET', f'/api/v1/remote-sessions', query=query, binary_body=False, binary_response=False, options=options))
+
+    def get_remote_session(self, id: str, *, options: RequestOptions | None = None) -> T.RemoteSessionDto:
+        """GET /api/v1/remote-sessions/{id}."""
+        return cast("T.RemoteSessionDto", self.request('GET', f'/api/v1/remote-sessions/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    def unpublish_remote_session(self, id: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /api/v1/remote-sessions/{id}."""
+        return cast("None", self.request('DELETE', f'/api/v1/remote-sessions/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
     def list_router_keys(self, query: T.ListRouterKeysQuery | None = None, *, options: RequestOptions | None = None) -> T.Items_RouterKeyDto:
         """GET /api/v1/router/keys."""
         return cast("T.Items_RouterKeyDto", self.request('GET', f'/api/v1/router/keys', query=query, binary_body=False, binary_response=False, options=options))
@@ -771,6 +807,42 @@ class AsyncCloudApi(AsyncTransport):
     async def product_release(self, channel: str, product: str, *, options: RequestOptions | None = None) -> T.ReleaseManifestResponse:
         """GET /api/v1/releases/{channel}/{product}."""
         return cast("T.ReleaseManifestResponse", await self.request('GET', f'/api/v1/releases/{self.segment(channel)}/{self.segment(product)}', binary_body=False, binary_response=False, options=options))
+
+    async def list_remote_hosts(self, query: T.ListRemoteHostsQuery | None = None, *, options: RequestOptions | None = None) -> T.Page_RemoteHostDto:
+        """GET /api/v1/remote-hosts."""
+        return cast("T.Page_RemoteHostDto", await self.request('GET', f'/api/v1/remote-hosts', query=query, binary_body=False, binary_response=False, options=options))
+
+    async def register_remote_host(self, body: T.RegisterRemoteHostRequest, *, options: RequestOptions | None = None) -> T.RemoteHostDto:
+        """POST /api/v1/remote-hosts."""
+        return cast("T.RemoteHostDto", await self.request('POST', f'/api/v1/remote-hosts', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def get_remote_host(self, id: str, *, options: RequestOptions | None = None) -> T.RemoteHostDto:
+        """GET /api/v1/remote-hosts/{id}."""
+        return cast("T.RemoteHostDto", await self.request('GET', f'/api/v1/remote-hosts/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    async def revoke_remote_host(self, id: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /api/v1/remote-hosts/{id}."""
+        return cast("None", await self.request('DELETE', f'/api/v1/remote-hosts/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    async def update_remote_host(self, id: str, body: T.UpdateRemoteHostRequest, *, options: RequestOptions | None = None) -> T.RemoteHostDto:
+        """PATCH /api/v1/remote-hosts/{id}."""
+        return cast("T.RemoteHostDto", await self.request('PATCH', f'/api/v1/remote-hosts/{self.segment(id)}', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def publish_remote_session(self, id: str, body: T.PublishRemoteSessionRequest, *, options: RequestOptions | None = None) -> T.RemoteSessionDto:
+        """POST /api/v1/remote-hosts/{id}/sessions."""
+        return cast("T.RemoteSessionDto", await self.request('POST', f'/api/v1/remote-hosts/{self.segment(id)}/sessions', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def list_remote_sessions(self, query: T.ListRemoteSessionsQuery | None = None, *, options: RequestOptions | None = None) -> T.Page_RemoteSessionDto:
+        """GET /api/v1/remote-sessions."""
+        return cast("T.Page_RemoteSessionDto", await self.request('GET', f'/api/v1/remote-sessions', query=query, binary_body=False, binary_response=False, options=options))
+
+    async def get_remote_session(self, id: str, *, options: RequestOptions | None = None) -> T.RemoteSessionDto:
+        """GET /api/v1/remote-sessions/{id}."""
+        return cast("T.RemoteSessionDto", await self.request('GET', f'/api/v1/remote-sessions/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    async def unpublish_remote_session(self, id: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /api/v1/remote-sessions/{id}."""
+        return cast("None", await self.request('DELETE', f'/api/v1/remote-sessions/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
 
     async def list_router_keys(self, query: T.ListRouterKeysQuery | None = None, *, options: RequestOptions | None = None) -> T.Items_RouterKeyDto:
         """GET /api/v1/router/keys."""

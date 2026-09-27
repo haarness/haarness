@@ -459,6 +459,10 @@ class Api(Transport):
         """POST /v1/host/open."""
         return cast("T.WorkspaceInfo", self.request('POST', f'/v1/host/open', body=body, binary_body=False, binary_response=False, options=options))
 
+    def host_close(self, id: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /v1/host/projects/{id}."""
+        return cast("None", self.request('DELETE', f'/v1/host/projects/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
 class AsyncApi(AsyncTransport):
     async def manage_resource(self, resource: str, body: T.JsonValue, *, options: RequestOptions | None = None) -> T.JsonValue:
         """POST /v1/manage/{resource}."""
@@ -915,3 +919,7 @@ class AsyncApi(AsyncTransport):
     async def host_open(self, body: T.Open, *, options: RequestOptions | None = None) -> T.WorkspaceInfo:
         """POST /v1/host/open."""
         return cast("T.WorkspaceInfo", await self.request('POST', f'/v1/host/open', body=body, binary_body=False, binary_response=False, options=options))
+
+    async def host_close(self, id: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /v1/host/projects/{id}."""
+        return cast("None", await self.request('DELETE', f'/v1/host/projects/{self.segment(id)}', binary_body=False, binary_response=False, options=options))

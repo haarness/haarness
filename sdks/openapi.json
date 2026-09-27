@@ -6743,6 +6743,34 @@
         ]
       }
     },
+    "/v1/host/projects/{id}": {
+      "delete": {
+        "operationId": "host_close",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No content"
+          },
+          "401": {
+            "description": "Bearer authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/v1/info": {
       "get": {
         "operationId": "info",

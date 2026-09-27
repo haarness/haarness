@@ -52,6 +52,9 @@ pub trait WorkspaceHost: Send + Sync {
         options: BrowseOptions,
     ) -> anyhow::Result<DirectoryListing>;
     async fn open(&self, path: String) -> anyhow::Result<WorkspaceInfo>;
+    async fn close(&self, _id: String) -> anyhow::Result<()> {
+        anyhow::bail!("Closing advertised projects is not supported by this host")
+    }
     async fn target(&self, id: String) -> anyhow::Result<WorkspaceTarget>;
 }
 #[derive(Clone)]
@@ -68,6 +71,10 @@ pub fn routes(
         .route("/v1/host/projects", get(catalog))
         .route("/v1/host/directories", get(browse))
         .route("/v1/host/open", post(open))
+        .route(
+            "/v1/host/projects/{id}",
+            axum::routing::delete(close_project),
+        )
         .route("/v1/host/workspaces/{id}/{*path}", any(forward))
         .with_state(Gateway {
             host,
@@ -127,6 +134,13 @@ struct Open {
 async fn open(State(gateway): State<Gateway>, Json(input): Json<Open>) -> Response {
     match gateway.host.open(input.path).await {
         Ok(value) => Json(value).into_response(),
+        Err(error) => failure(error),
+    }
+}
+#[utoipa::path(delete,path="/v1/host/projects/{id}",operation_id="close_remote_project",params(("id"=String,Path)),responses((status=204)))]
+async fn close_project(State(gateway): State<Gateway>, Path(id): Path<String>) -> Response {
+    match gateway.host.close(id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => failure(error),
     }
 }
@@ -205,7 +219,12 @@ async fn forward(
         .client
         .request(parts.method, url)
         .bearer_auth(target.token);
-    for name in ["content-type", "accept", "last-event-id"] {
+    for name in [
+        "content-type",
+        "accept",
+        "last-event-id",
+        "x-haarness-remote-thread",
+    ] {
         if let Some(value) = parts.headers.get(name) {
             upstream = upstream.header(name, value);
         }
@@ -240,5 +259,5 @@ async fn forward(
 }
 
 #[derive(OpenApi)]
-#[openapi(paths(catalog, browse, open))]
+#[openapi(paths(catalog, browse, open, close_project))]
 pub struct HostApi;

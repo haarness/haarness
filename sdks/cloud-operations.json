@@ -806,6 +806,151 @@
     }
   },
   {
+    "name": "list_remote_hosts",
+    "method": "GET",
+    "path": "/api/v1/remote-hosts",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/Page_RemoteHostDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/ListRemoteHostsQuery"
+    }
+  },
+  {
+    "name": "register_remote_host",
+    "method": "POST",
+    "path": "/api/v1/remote-hosts",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/RemoteHostDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/RegisterRemoteHostRequest"
+    }
+  },
+  {
+    "name": "get_remote_host",
+    "method": "GET",
+    "path": "/api/v1/remote-hosts/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/RemoteHostDto"
+    }
+  },
+  {
+    "name": "revoke_remote_host",
+    "method": "DELETE",
+    "path": "/api/v1/remote-hosts/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "update_remote_host",
+    "method": "PATCH",
+    "path": "/api/v1/remote-hosts/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/RemoteHostDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/UpdateRemoteHostRequest"
+    }
+  },
+  {
+    "name": "connect_remote_host",
+    "method": "GET",
+    "path": "/api/v1/remote-hosts/{id}/connect",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    },
+    "stream": "native_connector"
+  },
+  {
+    "name": "remote_host",
+    "method": "GET",
+    "path": "/api/v1/remote-hosts/{id}/runtime/{path}",
+    "pathParams": [
+      "id",
+      "path"
+    ],
+    "response": {},
+    "stream": "runtime_adapter"
+  },
+  {
+    "name": "publish_remote_session",
+    "method": "POST",
+    "path": "/api/v1/remote-hosts/{id}/sessions",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/RemoteSessionDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/PublishRemoteSessionRequest"
+    }
+  },
+  {
+    "name": "list_remote_sessions",
+    "method": "GET",
+    "path": "/api/v1/remote-sessions",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/Page_RemoteSessionDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/ListRemoteSessionsQuery"
+    }
+  },
+  {
+    "name": "get_remote_session",
+    "method": "GET",
+    "path": "/api/v1/remote-sessions/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/RemoteSessionDto"
+    }
+  },
+  {
+    "name": "unpublish_remote_session",
+    "method": "DELETE",
+    "path": "/api/v1/remote-sessions/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "remote_session",
+    "method": "GET",
+    "path": "/api/v1/remote-sessions/{id}/runtime/{path}",
+    "pathParams": [
+      "id",
+      "path"
+    ],
+    "response": {},
+    "stream": "runtime_adapter"
+  },
+  {
     "name": "list_router_keys",
     "method": "GET",
     "path": "/api/v1/router/keys",

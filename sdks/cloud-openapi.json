@@ -3950,6 +3950,721 @@
         }
       }
     },
+    "/api/v1/remote-hosts": {
+      "get": {
+        "tags": [
+          "remote"
+        ],
+        "operationId": "list_remote_hosts",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_RemoteHostDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "remote"
+        ],
+        "operationId": "register_remote_host",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterRemoteHostRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteHostDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/remote-hosts/{id}": {
+      "get": {
+        "tags": [
+          "remote"
+        ],
+        "operationId": "get_remote_host",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteHostDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "remote"
+        ],
+        "operationId": "revoke_remote_host",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "remote"
+        ],
+        "operationId": "update_remote_host",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateRemoteHostRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteHostDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/remote-hosts/{id}/connect": {
+      "get": {
+        "tags": [
+          "remote"
+        ],
+        "summary": "Native connector only: authenticated WebSocket carrying version 1 bounded relay frames.\nSee docs/REMOTE-ACCESS.md. SDK consumers use remoteHost/remoteSession runtime adapters.",
+        "operationId": "connect_remote_host",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "Relay WebSocket; native connector protocol"
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/remote-hosts/{id}/runtime/{path}": {
+      "get": {
+        "tags": [
+          "remote"
+        ],
+        "summary": "Proxies every native /v1 operation, including HTTP writes, SSE and terminal `WebSockets`.\nAppend /v1/host/projects to discover projects, then /v1/host/workspaces/{project}/v1/...\nUse HaarnessCloud.remoteHost(id).workspace(project) in SDKs; remote:control is required.",
+        "operationId": "remote_host",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Native runtime response or event stream"
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/remote-hosts/{id}/sessions": {
+      "post": {
+        "tags": [
+          "remote"
+        ],
+        "operationId": "publish_remote_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublishRemoteSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteSessionDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/remote-sessions": {
+      "get": {
+        "tags": [
+          "remote"
+        ],
+        "operationId": "list_remote_sessions",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_RemoteSessionDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/remote-sessions/{id}": {
+      "get": {
+        "tags": [
+          "remote"
+        ],
+        "operationId": "get_remote_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteSessionDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "remote"
+        ],
+        "operationId": "unpublish_remote_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/remote-sessions/{id}/runtime/{path}": {
+      "get": {
+        "tags": [
+          "remote"
+        ],
+        "summary": "Proxies native /v1 operations within the published conversation tree and shared files.\nSupports HTTP writes and SSE. Host management, PTYs and unrelated chats are denied.\nUse HaarnessCloud.remoteSession(id) in SDKs; remote:control is required.",
+        "operationId": "remote_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Scoped native runtime response or event stream"
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/router/keys": {
       "get": {
         "tags": [
@@ -12757,6 +13472,128 @@
           }
         }
       },
+      "Page_RemoteHostDto": {
+        "type": "object",
+        "description": "`{items, nextCursor}`.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "accountId",
+                "name",
+                "mode",
+                "connected",
+                "metadata",
+                "createdAt"
+              ],
+              "properties": {
+                "accountId": {
+                  "$ref": "#/components/schemas/AccountId"
+                },
+                "connected": {
+                  "type": "boolean"
+                },
+                "createdAt": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "lastSeenAt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time"
+                },
+                "metadata": {},
+                "mode": {
+                  "type": "string",
+                  "description": "`host` exposes projects; `sessions` exposes only explicitly published chats."
+                },
+                "name": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "Page_RemoteSessionDto": {
+        "type": "object",
+        "description": "`{items, nextCursor}`.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "hostId",
+                "accountId",
+                "projectId",
+                "threadId",
+                "title",
+                "connected",
+                "createdAt"
+              ],
+              "properties": {
+                "accountId": {
+                  "$ref": "#/components/schemas/AccountId"
+                },
+                "connected": {
+                  "type": "boolean"
+                },
+                "createdAt": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "hostId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "projectId": {
+                  "type": "string"
+                },
+                "threadId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "title": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "Page_ResourceSummaryDto": {
         "type": "object",
         "description": "`{items, nextCursor}`.",
@@ -13299,6 +14136,27 @@
       "ProjectId": {
         "type": "string"
       },
+      "PublishRemoteSessionRequest": {
+        "type": "object",
+        "required": [
+          "projectId",
+          "threadId",
+          "title"
+        ],
+        "properties": {
+          "projectId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "PublisherId": {
         "type": "string"
       },
@@ -13369,6 +14227,39 @@
           }
         }
       },
+      "RegisterRemoteHostRequest": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "mode"
+        ],
+        "properties": {
+          "accountId": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AccountId"
+              }
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Stable installation ID. Re-registering never revives revoked access."
+          },
+          "metadata": {},
+          "mode": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "ReleaseManifestResponse": {
         "type": "object",
         "required": [
@@ -13384,6 +14275,49 @@
           "publishedAt": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "RemoteHostDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "accountId",
+          "name",
+          "mode",
+          "connected",
+          "metadata",
+          "createdAt"
+        ],
+        "properties": {
+          "accountId": {
+            "$ref": "#/components/schemas/AccountId"
+          },
+          "connected": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "lastSeenAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "metadata": {},
+          "mode": {
+            "type": "string",
+            "description": "`host` exposes projects; `sessions` exposes only explicitly published chats."
+          },
+          "name": {
+            "type": "string"
           }
         }
       },
@@ -13415,6 +14349,49 @@
           },
           "retryable": {
             "type": "boolean"
+          }
+        }
+      },
+      "RemoteSessionDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "hostId",
+          "accountId",
+          "projectId",
+          "threadId",
+          "title",
+          "connected",
+          "createdAt"
+        ],
+        "properties": {
+          "accountId": {
+            "$ref": "#/components/schemas/AccountId"
+          },
+          "connected": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "hostId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "title": {
+            "type": "string"
           }
         }
       },
@@ -14365,6 +15342,18 @@
         },
         "additionalProperties": false
       },
+      "UpdateRemoteHostRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "UpdateWalletRequest": {
         "type": "object",
         "properties": {
@@ -14943,6 +15932,10 @@
     }
   },
   "tags": [
+    {
+      "name": "remote",
+      "description": "Connected computers and explicitly published local chats"
+    },
     {
       "name": "cloud-schedules",
       "description": "Durable Cloud prompts targeting session chats"

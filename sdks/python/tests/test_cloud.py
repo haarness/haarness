@@ -353,3 +353,26 @@ def test_unified_key_env_precedence_and_explicit_override(monkeypatch, asynchron
                     client._http=httpx.Client(transport=httpx.MockTransport(handler))
                     client.api_key_context()
     asyncio.run(run())
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_remote_project_auth_refresh_and_close(asynchronous, monkeypatch):
+    monkeypatch.setenv("HAARNESS_SERVER_TOKEN", "must-never-leak")
+    token=["first"]
+    cloud=(AsyncHaarnessCloud if asynchronous else HaarnessCloud)("http://localhost:12345",resolve_token=lambda:token[0])
+    host=cloud.remote_host("machine")
+    project=host.workspace("project")
+    shared=cloud.remote_session("published")
+    assert project._headers()["Authorization"]=="Bearer first"
+    token[0]="refreshed"
+    assert project._headers()["Authorization"]=="Bearer refreshed"
+    assert shared._headers()["Authorization"]=="Bearer refreshed"
+    assert project.base_url.endswith("/api/v1/remote-hosts/machine/runtime/v1/host/workspaces/project")
+    async def close_all():
+        await cloud.close()
+        with pytest.raises(Exception,match="closed"):project._headers()
+        await host.close();await project.close();await shared.close()
+    if asynchronous:asyncio.run(close_all())
+    else:
+        cloud.close()
+        with pytest.raises(Exception,match="closed"):project._headers()
+        host.close();project.close();shared.close()
