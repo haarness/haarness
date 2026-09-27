@@ -8,7 +8,7 @@ Report it privately, by either:
 
 - GitHub's private vulnerability reporting on this repository
   (**Security → Report a vulnerability**), or
-- email to **security@haarness.dev**.
+- email to **admin@haarness.ai**.
 
 Include what you need us to reproduce it: the Haarness version (`haarness --version`),
 the platform, the configuration involved (redact secrets), and the steps or a proof of
