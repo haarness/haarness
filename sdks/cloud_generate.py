@@ -99,6 +99,10 @@ def specification():
             if name == "entity_events":
                 op["stream"] = "websocket"
                 op["response"] = ref("CloudEntityEvent")
+            if name in ("remote_host", "remote_session"):
+                op["stream"] = "runtime_adapter"
+            if name == "connect_remote_host":
+                op["stream"] = "native_connector"
             ops.append(op)
     names = [o["name"] for o in ops]
     assert len(names) == len(set(names)), "Duplicate Cloud operation ID"

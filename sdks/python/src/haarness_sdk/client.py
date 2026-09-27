@@ -42,9 +42,11 @@ class Haarness(Api):
 
     def workspace(self, id: str) -> Haarness:
         """Bind the complete runtime API to an opaque host workspace ID."""
-        client = Haarness(self.base_url + '/v1/host/workspaces/' + self.segment(id), token='')
-        client._authentication = self._headers()
-        return client
+        parent = self
+        class WorkspaceRuntime(Haarness):
+            def _headers(self) -> dict[str, str]:
+                return parent._headers()
+        return WorkspaceRuntime(self.base_url + '/v1/host/workspaces/' + self.segment(id), token='', timeout=self._timeout)
 
     def chat(
         self,
@@ -87,9 +89,11 @@ class AsyncHaarness(AsyncApi):
         return await self.request("POST", "/v1/manage/marketplace", body=input, options={"timeout": 180.0, **(options or {})})
 
     def workspace(self, id: str) -> AsyncHaarness:
-        client = AsyncHaarness(self.base_url + '/v1/host/workspaces/' + self.segment(id), token='')
-        client._authentication = self._headers()
-        return client
+        parent = self
+        class WorkspaceRuntime(AsyncHaarness):
+            def _headers(self) -> dict[str, str]:
+                return parent._headers()
+        return WorkspaceRuntime(self.base_url + '/v1/host/workspaces/' + self.segment(id), token='', timeout=self._timeout)
 
     async def chat(
         self,

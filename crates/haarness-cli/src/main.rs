@@ -16,6 +16,7 @@ mod memory_settings;
 mod plugins;
 mod profile;
 mod remote;
+mod remote_cloud;
 mod router_connection;
 
 use anyhow::{Context, Result};
@@ -140,6 +141,8 @@ enum Command {
     Account(account::AccountArgs),
     /// Use Haarness Cloud services.
     Cloud(account::CloudArgs),
+    /// Access this machine and selected chats through Haarness Cloud.
+    Remote(remote_cloud::RemoteArgs),
     /// Private, versioned desktop bridge. Requests are read from standard input.
     #[command(hide = true)]
     Desktop,
@@ -1099,6 +1102,7 @@ async fn main() -> Result<()> {
             "haarness starting"
         );
         match cli.command {
+        Some(Command::Remote(args)) => remote_cloud::run(&paths, &workspace, project_config, args).await,
         Some(Command::Desktop) => desktop::run(&paths, &workspace, project_config).await,
         Some(Command::Login(_) | Command::Logout | Command::Account(_) | Command::Cloud(_)) => unreachable!("account command handled before project setup"),
         Some(Command::Stats(_) | Command::Insights(_) | Command::Profile(_)) => unreachable!("standalone commands dispatched before runtime setup"),
@@ -1255,6 +1259,7 @@ impl Command {
             Self::Logout => "logout",
             Self::Account(_) => "account",
             Self::Cloud(_) => "cloud",
+            Self::Remote(_) => "remote",
             Self::Profile(_) => "profile",
             Self::Extension(_) => "extension",
             Self::Stats(_) => "stats",

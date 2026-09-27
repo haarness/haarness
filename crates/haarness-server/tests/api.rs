@@ -9593,3 +9593,191 @@ async fn concurrent_task_resumptions_recheck_the_child_after_waiting_for_capacit
 
 #[path = "cases/permission_parity.rs"]
 mod permission_parity;
+
+#[tokio::test]
+async fn published_remote_chat_cannot_read_or_control_other_conversations() {
+    let workspace = std::env::temp_dir().join(format!("haarness-remote-scope-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let runtime = Arc::new(AgentRuntime::new(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Echo) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(64),
+    ));
+    let handle = serve(
+        TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        "remote-fixture",
+        ServerState {
+            browser: None,
+            management: None,
+            runtime: runtime.clone(),
+            mcp: Arc::new(NoMcp),
+            skills: Arc::new(NoSkills),
+            plugins: None,
+            workflows: None,
+            workspaces: None,
+            workspace_id: None,
+            workspace: workspace.clone(),
+            project_trusted: false,
+            language: None,
+        },
+    )
+    .await
+    .unwrap();
+    let base = format!("http://{}", handle.address);
+    let http = reqwest::Client::new();
+    let mut chats = vec![];
+    for _ in 0..2 {
+        chats.push(
+            http.post(format!("{base}/v1/threads"))
+                .bearer_auth("remote-fixture")
+                .json(&serde_json::json!({"provider":"echo","model":"echo-1"}))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json::<Thread>()
+                .await
+                .unwrap(),
+        );
+    }
+    let shared = &chats[0];
+    let private = &chats[1];
+    let scoped = reqwest::Client::builder()
+        .default_headers({
+            let mut h = reqwest::header::HeaderMap::new();
+            h.insert("authorization", "Bearer remote-fixture".parse().unwrap());
+            h.insert(
+                "x-haarness-remote-thread",
+                shared.id.to_string().parse().unwrap(),
+            );
+            h
+        })
+        .build()
+        .unwrap();
+    let rows = scoped
+        .get(format!("{base}/v1/threads"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Vec<Thread>>()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, shared.id);
+    for path in [
+        format!("/threads/{}", private.id),
+        format!("/threads/{}/items", private.id),
+        "/workspaces".into(),
+        "/ptys".into(),
+    ] {
+        assert_eq!(
+            scoped
+                .get(format!("{base}/v1{path}"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::FORBIDDEN,
+            "{path}"
+        );
+    }
+    for path in [
+        "/threads".into(),
+        "/shutdown".into(),
+        format!("/threads/{}/turns", private.id),
+        format!("/threads/{}/fork", shared.id),
+    ] {
+        assert_eq!(
+            scoped
+                .post(format!("{base}/v1{path}"))
+                .json(&serde_json::json!({}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::FORBIDDEN,
+            "{path}"
+        );
+    }
+    let stream = scoped
+        .get(format!("{base}/v1/events"))
+        .send()
+        .await
+        .unwrap();
+    let mut stream = stream.bytes_stream();
+    scoped.put(format!("{base}/v1/files/content"))
+        .json(&serde_json::json!({"path":"shared-file-proof.txt","content":"shared","revision":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}))
+        .send().await.unwrap().error_for_status().unwrap();
+    let private_turn = runtime
+        .start_turn(private.id, turn_request("PRIVATE_MARKER"))
+        .await
+        .unwrap();
+    wait_done(&runtime, &private_turn).await;
+    let shared_turn = scoped
+        .post(format!("{base}/v1/threads/{}/turns", shared.id))
+        .json(&turn_request("SHARED_MARKER"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Turn>()
+        .await
+        .unwrap();
+    wait_done(&runtime, &shared_turn).await;
+    let mut seen = String::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !seen.contains("SHARED_MARKER") {
+            let bytes = stream.next().await.unwrap().unwrap();
+            seen.push_str(&String::from_utf8_lossy(&bytes));
+        }
+    })
+    .await
+    .unwrap();
+    assert!(seen.contains("files.updated"));
+    assert!(seen.contains("shared-file-proof.txt"));
+    assert!(!seen.contains("PRIVATE_MARKER"));
+    assert!(!seen.contains(&private.id.to_string()));
+    assert_eq!(
+        scoped
+            .get(format!("{base}/v1/turns/{}", private_turn.id))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
+    assert!(
+        scoped
+            .get(format!("{base}/v1/turns/{}", shared_turn.id))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let info = scoped
+        .get(format!("{base}/v1/info"))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert!(
+        !info["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "pty.v1")
+    );
+    drop(stream);
+    handle.shutdown().await.unwrap();
+    std::fs::remove_dir_all(workspace).unwrap();
+}

@@ -14,8 +14,22 @@ import type {
 export type * as CloudTypes from "./cloud-types.js";
 export type { CloudOptions, CloudEventOptions } from "./cloud-transport.js";
 
-/** Cloud account API. Runtime access is always scoped to an explicit session. */
+/** Cloud account API. Runtime access is scoped to an explicit session or remote host. */
 export class HaarnessCloud extends CloudApi {
+  /** Full host gateway: discover projects, then use .workspace(projectId). */
+  remoteHost(id: string): Haarness {
+    return this.remoteRuntime(`/api/v1/remote-hosts/${this.segment(id)}/runtime`);
+  }
+  /** One published conversation tree, including its shared workspace files. */
+  remoteSession(id: string): Haarness {
+    return this.remoteRuntime(`/api/v1/remote-sessions/${this.segment(id)}/runtime`);
+  }
+  private remoteRuntime(path: string): Haarness {
+    const headers = () => { this.signal().throwIfAborted(); return this.headers(); };
+    return new class extends Haarness {
+      protected override headers() { return headers(); }
+    }({baseUrl: this.baseUrl + path, token: "", fetch: this.fetcher, timeoutMs: this.timeoutMs});
+  }
   session(sessionId: string): CloudSession {
     this.segment(sessionId);
     return new CloudSession(this, sessionId);

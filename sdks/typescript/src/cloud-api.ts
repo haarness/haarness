@@ -262,6 +262,42 @@ export class CloudApi extends Transport {
   productRelease(channel: string, product: string, options: RequestOptions = {}): Promise<T.ReleaseManifestResponse> {
     return this.request("GET", `/api/v1/releases/${this.segment(channel)}/${this.segment(product)}`, { binaryBody: false, binaryResponse: false, ...options });
   }
+  /** GET /api/v1/remote-hosts */
+  listRemoteHosts(query: T.ListRemoteHostsQuery = {}, options: RequestOptions = {}): Promise<T.Page_RemoteHostDto> {
+    return this.request("GET", `/api/v1/remote-hosts`, { query, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /api/v1/remote-hosts */
+  registerRemoteHost(body: T.RegisterRemoteHostRequest, options: RequestOptions = {}): Promise<T.RemoteHostDto> {
+    return this.request("POST", `/api/v1/remote-hosts`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /api/v1/remote-hosts/{id} */
+  getRemoteHost(id: string, options: RequestOptions = {}): Promise<T.RemoteHostDto> {
+    return this.request("GET", `/api/v1/remote-hosts/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** DELETE /api/v1/remote-hosts/{id} */
+  revokeRemoteHost(id: string, options: RequestOptions = {}): Promise<void> {
+    return this.request("DELETE", `/api/v1/remote-hosts/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** PATCH /api/v1/remote-hosts/{id} */
+  updateRemoteHost(id: string, body: T.UpdateRemoteHostRequest, options: RequestOptions = {}): Promise<T.RemoteHostDto> {
+    return this.request("PATCH", `/api/v1/remote-hosts/${this.segment(id)}`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /api/v1/remote-hosts/{id}/sessions */
+  publishRemoteSession(id: string, body: T.PublishRemoteSessionRequest, options: RequestOptions = {}): Promise<T.RemoteSessionDto> {
+    return this.request("POST", `/api/v1/remote-hosts/${this.segment(id)}/sessions`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /api/v1/remote-sessions */
+  listRemoteSessions(query: T.ListRemoteSessionsQuery = {}, options: RequestOptions = {}): Promise<T.Page_RemoteSessionDto> {
+    return this.request("GET", `/api/v1/remote-sessions`, { query, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /api/v1/remote-sessions/{id} */
+  getRemoteSession(id: string, options: RequestOptions = {}): Promise<T.RemoteSessionDto> {
+    return this.request("GET", `/api/v1/remote-sessions/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** DELETE /api/v1/remote-sessions/{id} */
+  unpublishRemoteSession(id: string, options: RequestOptions = {}): Promise<void> {
+    return this.request("DELETE", `/api/v1/remote-sessions/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
+  }
   /** GET /api/v1/router/keys */
   listRouterKeys(query: T.ListRouterKeysQuery = {}, options: RequestOptions = {}): Promise<T.Items_RouterKeyDto> {
     return this.request("GET", `/api/v1/router/keys`, { query, binaryBody: false, binaryResponse: false, ...options });

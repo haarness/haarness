@@ -45,6 +45,22 @@ def current(ticket: C.AttachResponse | None) -> bool:
 
 
 class HaarnessCloud(CloudApi):
+    def remote_host(self, id: str) -> Haarness:
+        """Full host gateway. Use workspace(project_id) for chats, files and PTYs."""
+        return self._remote_runtime("/api/v1/remote-hosts/" + self.segment(id) + "/runtime")
+
+    def remote_session(self, id: str) -> Haarness:
+        """A published conversation tree and its shared workspace files."""
+        return self._remote_runtime("/api/v1/remote-sessions/" + self.segment(id) + "/runtime")
+
+    def _remote_runtime(self, path: str) -> Haarness:
+        cloud = self
+        class RemoteRuntime(Haarness):
+            def _headers(self):
+                _, options = cloud.cloud_options(None, None, None)
+                return {**cloud._headers(), **options["headers"]}
+        return RemoteRuntime(self.base_url + path, token="", timeout=self._timeout)
+
     def session(self, session_id: str) -> CloudSession:
         self.segment(session_id)
         return CloudSession(self, session_id)
@@ -277,6 +293,22 @@ class CloudChat:
 
 
 class AsyncHaarnessCloud(AsyncCloudApi):
+    def remote_host(self, id: str) -> AsyncHaarness:
+        """Full host gateway. Use workspace(project_id) for chats, files and PTYs."""
+        return self._remote_runtime("/api/v1/remote-hosts/" + self.segment(id) + "/runtime")
+
+    def remote_session(self, id: str) -> AsyncHaarness:
+        """A published conversation tree and its shared workspace files."""
+        return self._remote_runtime("/api/v1/remote-sessions/" + self.segment(id) + "/runtime")
+
+    def _remote_runtime(self, path: str) -> AsyncHaarness:
+        cloud = self
+        class RemoteRuntime(AsyncHaarness):
+            def _headers(self):
+                _, options = cloud.cloud_options(None, None, None)
+                return {**cloud._headers(), **options["headers"]}
+        return RemoteRuntime(self.base_url + path, token="", timeout=self._timeout)
+
     def session(self, session_id: str) -> AsyncCloudSession:
         self.segment(session_id)
         return AsyncCloudSession(self, session_id)

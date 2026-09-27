@@ -35,7 +35,7 @@ def routes():
                     else handler
                 )
                 if filename == "remote.rs":
-                    name = {"catalog":"host_projects","browse":"host_directories","open":"host_open"}[handler]
+                    name = {"catalog":"host_projects","browse":"host_directories","open":"host_open","close_project":"host_close"}[handler]
                 fn = re.search(r"async fn " + handler + r"\b([\s\S]*?)\{", text[text.index("fn failure"): ] if filename == "remote.rs" else text)
                 result.append((name, method.upper(), path, fn[1], filename))
     return result

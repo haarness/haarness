@@ -134,7 +134,11 @@ def scenario(mode):
                 c(name)
             c("host_projects")
             assert c("host_directories", {"path":str(fixture.workspace)})["path"] == str(fixture.workspace)
-            assert c("host_open", {"path":str(fixture.workspace)})["path"] == str(fixture.workspace)
+            opened = c("host_open", {"path":str(fixture.workspace)})
+            assert opened["path"] == str(fixture.workspace)
+            c("host_close", opened["id"])
+            assert all(row["id"] != opened["id"] for row in c("host_projects")["workspaces"])
+            assert c("host_open", {"path":str(fixture.workspace)})["id"] == opened["id"]
             assert c("list_files", {"path": ""})["entries"]
             file_cursor = c("info")["eventCursor"]
             document = c("read_file", {"path": "fixture.txt"})

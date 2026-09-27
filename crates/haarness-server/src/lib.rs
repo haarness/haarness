@@ -11,6 +11,7 @@ pub mod hooks;
 pub mod plugins;
 mod profiles;
 pub mod remote;
+mod remote_scope;
 pub mod sharing;
 pub mod skills;
 pub mod tools;
