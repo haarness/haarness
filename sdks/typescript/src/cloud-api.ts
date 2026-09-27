@@ -42,6 +42,10 @@ export class CloudApi extends Transport {
   revokeAccountApiKey(id: string, query: T.RevokeAccountApiKeyQuery = {}, options: RequestOptions = {}): Promise<void> {
     return this.request("DELETE", `/api/v1/api-keys/${this.segment(id)}`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
+  /** PATCH /api/v1/api-keys/{id} */
+  updateAccountApiKey(id: string, body: T.UpdateAccountApiKeyRequest, query: T.UpdateAccountApiKeyQuery = {}, options: RequestOptions = {}): Promise<T.AccountApiKeyDto> {
+    return this.request("PATCH", `/api/v1/api-keys/${this.segment(id)}`, { body, query, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
   /** POST /api/v1/api-keys/{id}/rotate */
   rotateAccountApiKey(id: string, query: T.RotateAccountApiKeyQuery = {}, options: RequestOptions = {}): Promise<T.CreatedAccountApiKeyResponse> {
     return this.request("POST", `/api/v1/api-keys/${this.segment(id)}/rotate`, { query, binaryBody: false, binaryResponse: false, ...options });
@@ -157,6 +161,10 @@ export class CloudApi extends Transport {
   /** DELETE /api/v1/devices/{id} */
   revokeDevice(id: string, options: RequestOptions = {}): Promise<void> {
     return this.request("DELETE", `/api/v1/devices/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /api/v1/key */
+  apiKeyContext(options: RequestOptions = {}): Promise<T.ApiKeyContextDto> {
+    return this.request("GET", `/api/v1/key`, { binaryBody: false, binaryResponse: false, ...options });
   }
   /** POST /api/v1/marketplace/artifacts */
   uploadArtifact(body: Uint8Array, query: T.UploadArtifactQuery = {}, options: RequestOptions = {}): Promise<T.UploadArtifactResponse> {

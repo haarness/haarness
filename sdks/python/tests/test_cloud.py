@@ -331,3 +331,25 @@ def test_concurrent_chat_connections_share_one_runtime_client(asynchronous):
             finally:
                 session.close()
     assert calls == ["session"]
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_unified_key_env_precedence_and_explicit_override(monkeypatch, asynchronous):
+    monkeypatch.setenv("HAARNESS_API_KEY", "hck_unified")
+    monkeypatch.setenv("HAARNESS_CLOUD_TOKEN", "old-oauth")
+    monkeypatch.setenv("HAARNESS_SERVER_TOKEN", "local-only")
+    async def run():
+        for explicit in [None, "explicit-key"]:
+            def handler(request):
+                assert request.headers["Authorization"] == "Bearer " + (explicit or "hck_unified")
+                return httpx.Response(200,json={})
+            if asynchronous:
+                async with AsyncHaarnessCloud("http://localhost:12345",token=explicit) as client:
+                    await client._http.aclose()
+                    client._http=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+                    await client.api_key_context()
+            else:
+                with HaarnessCloud("http://localhost:12345",token=explicit) as client:
+                    client._http.close()
+                    client._http=httpx.Client(transport=httpx.MockTransport(handler))
+                    client.api_key_context()
+    asyncio.run(run())

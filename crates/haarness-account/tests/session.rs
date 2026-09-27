@@ -130,3 +130,57 @@ async fn cloud_requests_preserve_flat_and_legacy_error_messages() {
     server.abort();
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn explicit_api_key_is_account_bound_redacted_and_never_falls_back_to_oauth() {
+    let revoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let state = revoked.clone();
+    let app=Router::new().route("/api/v1/key",get(move |h:HeaderMap| {
+        let state=state.clone();async move {
+            assert_eq!(h["authorization"],"Bearer hck_test_unified");
+            if state.load(Ordering::SeqCst) { return (StatusCode::UNAUTHORIZED,Json(json!({"message":"revoked"}))); }
+            (StatusCode::OK,Json(json!({"key":{"id":"key-id","accountId":"account-one","label":"test","scopes":["models:read","models:invoke"],"expiresAt":Utc::now()+Duration::hours(1)},"accountName":"Test","routerUrl":"http://127.0.0.1:19082/v1"})))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dir = std::env::temp_dir().join(format!("haarness-key-test-{}", uuid::Uuid::now_v7()));
+    let config = Config::new(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        dir.clone(),
+        "haarness-cli",
+    )
+    .unwrap()
+    .with_api_key("hck_test_unified".into())
+    .unwrap();
+    assert!(!format!("{config:?}").contains("hck_test_unified"));
+    let stored = Credentials {
+        api_url: config.api_url.to_string(),
+        access_token: "old-oauth".into(),
+        refresh_token: "old-refresh".into(),
+        access_expires_at: Utc::now() - Duration::hours(1),
+    };
+    credentials::save(&config.path(), &stored).unwrap();
+    let server = tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
+    let client = Client::new(config.clone()).unwrap();
+    assert_eq!(
+        client.status().await.unwrap()["defaultAccountId"],
+        "account-one"
+    );
+    assert!(client.select_account("another-account").await.is_err());
+    let inference = client.router_session().await.unwrap();
+    assert_eq!(inference.token, "hck_test_unified");
+    assert!(inference.expires_at <= Utc::now() + Duration::minutes(5));
+    assert!(client.logout().await.is_err());
+    revoked.store(true, Ordering::SeqCst);
+    assert!(client.status().await.is_err());
+    assert!(client.router_session().await.is_err());
+    assert_eq!(
+        credentials::load(&config.path())
+            .unwrap()
+            .unwrap()
+            .refresh_token,
+        "old-refresh"
+    );
+    server.abort();
+    std::fs::remove_dir_all(dir).unwrap();
+}

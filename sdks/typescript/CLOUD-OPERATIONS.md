@@ -12,6 +12,7 @@
 | `list_account_api_keys` | `listAccountApiKeys` | `GET /api/v1/api-keys` |
 | `create_account_api_key` | `createAccountApiKey` | `POST /api/v1/api-keys` |
 | `revoke_account_api_key` | `revokeAccountApiKey` | `DELETE /api/v1/api-keys/{id}` |
+| `update_account_api_key` | `updateAccountApiKey` | `PATCH /api/v1/api-keys/{id}` |
 | `rotate_account_api_key` | `rotateAccountApiKey` | `POST /api/v1/api-keys/{id}/rotate` |
 | `list_budgets` | `listBudgets` | `GET /api/v1/billing/budgets` |
 | `create_budget` | `createBudget` | `POST /api/v1/billing/budgets` |
@@ -41,6 +42,7 @@
 | `list_devices` | `listDevices` | `GET /api/v1/devices` |
 | `revoke_device` | `revokeDevice` | `DELETE /api/v1/devices/{id}` |
 | `entity_events` | `entityEvents` | `GET /api/v1/events` |
+| `api_key_context` | `apiKeyContext` | `GET /api/v1/key` |
 | `upload_artifact` | `uploadArtifact` | `POST /api/v1/marketplace/artifacts` |
 | `list_collections` | `listCollections` | `GET /api/v1/marketplace/collections` |
 | `get_collection` | `getCollection` | `GET /api/v1/marketplace/collections/{slug}` |

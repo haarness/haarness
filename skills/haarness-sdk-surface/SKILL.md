@@ -30,3 +30,13 @@ Cover independent session launch, agent-template launch, multiple chats, shared 
 For live streams, test ready/resync, correct account filtering, updates during a snapshot fetch, disconnect/reconnect, refreshed credentials and stopping the iterator. Assert state converges from authoritative HTTP snapshots without duplicate monetary effects.
 
 Capture exact source SHAs, generated-contract checks, test results, real provider/fixture distinction and cleanup outcomes. Existing verification reports are references, not current pass results.
+
+## Unified API keys
+
+`HAARNESS_API_KEY` authenticates Cloud API requests and model inference according to the key's capabilities. An explicit SDK token takes precedence; the environment key takes precedence over the older `HAARNESS_CLOUD_TOKEN`. It must never fall back to OAuth or `HAARNESS_SERVER_TOKEN` after rejection.
+
+Run the opt-in `sdks/tests/api_keys_e2e.py` with the SDK Python environment, a freshly built router/API, `HAARNESS_KEY_E2E=1`, the loopback `HAARNESS_CLOUD_API_URL`, and `HAARNESS_E2E_OAUTH_FILE` pointing to private fixture OAuth JSON. It invokes `api_keys_ts_e2e.mjs` too. It creates/revokes its own keys and deletes its session. It covers real inference, model allowlists, sync/async chats, shared file uploads, Cloud schedules, denied payment/key administration, permission edits, old attach-ticket invalidation, rotation without budget reset, and actual expiry. Do not print the credential JSON.
+
+In the Cloud checkout, `scripts/test-api-keys-cli-live.py` uses the same opt-in, API URL and fresh fixture OAuth file plus `HAARNESS_CLOUD_BIN`. It exercises create/list/edit/rotate/revoke through the CLI and proves that denied or revoked API keys do not fall back to saved OAuth. Credits serialize as decimal strings; compare their numeric decimal value, not a fixed number of trailing zeroes.
+
+For Chrome, check the single API keys entry, edit form preservation during WebSocket updates, expiry, inactive rows and the legacy `/app/router/keys` redirect. Follow the applicable browser permission policy for credential mutations; backend tests and Chrome observation are distinct evidence. Key model caps apply to direct calls through that key, while session compute and scheduled agent work use account/runtime limits.

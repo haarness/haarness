@@ -1237,5 +1237,8 @@
   "Reserved credits": "Reserved credits",
   "Showing last known balances.": "Showing last known balances.",
   "credits": "credits",
-  "Add credits": "Add credits"
+  "Add credits": "Add credits",
+  "Connected with HAARNESS_API_KEY. Manage its permissions and expiration in Cloud. Unset the environment variable to disconnect.": "Подключено через HAARNESS_API_KEY. Управляйте разрешениями и сроком действия в Cloud. Удалите переменную окружения, чтобы отключиться.",
+  "This API key does not include billing access.": "Этот ключ API не предоставляет доступ к платёжной информации.",
+  "This API key does not include Cloud session access.": "Этот ключ API не предоставляет доступ к сеансам Cloud."
 }

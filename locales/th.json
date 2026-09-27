@@ -1237,5 +1237,8 @@
   "Reserved credits": "Reserved credits",
   "Showing last known balances.": "Showing last known balances.",
   "credits": "credits",
-  "Add credits": "Add credits"
+  "Add credits": "Add credits",
+  "Connected with HAARNESS_API_KEY. Manage its permissions and expiration in Cloud. Unset the environment variable to disconnect.": "เชื่อมต่อด้วย HAARNESS_API_KEY จัดการสิทธิ์และวันหมดอายุใน Cloud ยกเลิกการตั้งค่าตัวแปรสภาพแวดล้อมเพื่อตัดการเชื่อมต่อ",
+  "This API key does not include billing access.": "คีย์ API นี้ไม่มีสิทธิ์เข้าถึงข้อมูลการเรียกเก็บเงิน",
+  "This API key does not include Cloud session access.": "คีย์ API นี้ไม่มีสิทธิ์เข้าถึงเซสชัน Cloud"
 }

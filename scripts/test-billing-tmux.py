@@ -73,12 +73,11 @@ with tempfile.TemporaryDirectory(prefix="haarness-billing-tmux-") as directory:
         run(["tmux", "send-keys", "-t", session, "Enter"])
 
     try:
-        command = shlex.join(["env", "HAARNESS_DATA_DIR=" + env["HAARNESS_DATA_DIR"],
-            "HAARNESS_CLOUD_API_URL=" + env["HAARNESS_CLOUD_API_URL"],
-            "HAARNESS_CLOUD_CONFIG_DIR=" + env["HAARNESS_CLOUD_CONFIG_DIR"],
-            "HAARNESS_CLOUD_WEB_ORIGIN=" + env.get("HAARNESS_CLOUD_WEB_ORIGIN", env["HAARNESS_CLOUD_API_URL"]),
-            *args, "--thread", thread])
-        run(["tmux", "new-session", "-d", "-x", "160", "-y", "46", "-s", session, command])
+        command = shlex.join([*args, "--thread", thread])
+        launcher = root / "tui-env.sh"
+        launcher.write_text("\n".join("export "+k+"="+shlex.quote(v) for k,v in env.items())+"\nexec "+command+"\n")
+        launcher.chmod(0o600)
+        run(["tmux", "new-session", "-d", "-x", "160", "-y", "46", "-s", session, "bash "+shlex.quote(str(launcher))])
         until(lambda: "/billing" in capture(), "Cloud credit indicator missing")
         send("/billing")
         until(lambda: "Purchased" in capture() and "Included AI" in capture(), "Billing panel missing")
