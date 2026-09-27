@@ -162,6 +162,7 @@ impl HaarnessCloudProvider {
             api_key: Some(g.token.clone()),
             models: Vec::new(),
             discover_models: true,
+            server_output_limit: false,
             model_defaults: CompatibleModelDefaults::default(),
             assume_authenticated: false,
             headers: ProviderHeaders::default(),

@@ -11,7 +11,6 @@ const emptyHash =
 export function Explorer() {
   const app = useApp();
   const [version, setVersion] = createSignal(0),
-    [hidden, setHidden] = createSignal(false),
     [query, setQuery] = createSignal(""),
     [results, setResults] = createSignal<string[]>([]),
     [tabs, setTabs] = createSignal<OpenFile[]>([]),
@@ -212,13 +211,6 @@ export function Explorer() {
         icon: "refresh",
         action: action(() => setVersion((value) => value + 1)),
       },
-      {
-        key: "file-hidden",
-        group: "Editor actions",
-        name: hidden() ? "Hide hidden files" : "Show hidden files",
-        icon: "eye",
-        action: action(() => setHidden((value) => !value)),
-      },
       ...tabs().map((item) => ({
         key: "open-file:" + item.path,
         group: "Open files",
@@ -376,12 +368,6 @@ export function Explorer() {
           onClick={() => app.run(() => create(true))}
         />
         <Button
-          icon={hidden() ? "eye" : "eye-off"}
-          label={t("Show hidden files")}
-          active={hidden()}
-          onClick={() => setHidden((value) => !value)}
-        />
-        <Button
           icon="refresh"
           label={t("Refresh file tree")}
           onClick={() => setVersion((v) => v + 1)}
@@ -395,7 +381,7 @@ export function Explorer() {
               <Tree
                 path=""
                 version={version()}
-                hidden={hidden()}
+                hidden={true}
                 selected={selected()}
                 open={(path) => app.run(() => open(path))}
               />

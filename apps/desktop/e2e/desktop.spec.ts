@@ -10743,6 +10743,7 @@ test("self-hosted router completes a live Desktop tool round trip", async () => 
 test("file explorer highlights configuration and programming languages in both themes", async () => {
   test.setTimeout(90000);
   const fixtures = [
+    { path: ".explorer-proof.txt", text: 'Visible dotfile.\n', token: null },
     { path: "build.yml", text: '---\n# Build configuration\nhosts: "localhost"\nretries: 3\nenabled: true\n', token: "hosts" },
     { path: "config.toml", text: '[package]\nname = "demo"\nversion = 3\n', token: '"demo"' },
     { path: "env.sh", text: '#!/bin/sh\nif true; then echo "hello"; fi\n', token: "if" },
@@ -10761,6 +10762,8 @@ test("file explorer highlights configuration and programming languages in both t
   await openProjectPanel("Files");
   await page.getByRole("button", { name: "Refresh file tree", exact: true }).click();
   const tree = page.locator(".file-tree");
+  await expect(tree.getByRole("button", { name: ".haarness", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Show hidden files", exact: true })).toHaveCount(0);
   const editor = page.locator(".file-preview .cm-content");
   const colored = () => editor.evaluate(element => {
     const base = getComputedStyle(element).color;

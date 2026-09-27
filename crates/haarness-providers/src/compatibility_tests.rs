@@ -311,6 +311,7 @@ async fn compatible_reasoning_is_provider_scoped_and_replayed() {
             api_key: Some("fixture".into()),
             models: vec![model.into()],
             discover_models: false,
+            server_output_limit: false,
             model_defaults: CompatibleModelDefaults::default(),
             assume_authenticated: false,
             headers: ProviderHeaders::default(),

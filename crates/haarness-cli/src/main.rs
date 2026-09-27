@@ -5649,6 +5649,7 @@ fn scoped_config_files(paths: &Paths, workspace: &Path, project: bool) -> Vec<Pa
     let mut files = Vec::new();
     if project {
         for directory in layout::project_directories(workspace) {
+            files.push(directory.join(".haarness/cloud/haarness.json"));
             files.push(directory.join(".haarness/config.toml"));
             for root in [
                 directory.clone(),
@@ -6073,6 +6074,8 @@ struct ProviderSection {
     tools: Option<bool>,
     context_window: Option<u64>,
     max_output_tokens: Option<u64>,
+    /// Let managed Chat Completions gateways choose a budget-aware output allowance.
+    server_output_limit: bool,
     /// Set false only for an endpoint that intentionally accepts unauthenticated calls.
     requires_auth: bool,
     enabled: bool,
@@ -6094,6 +6097,7 @@ impl Default for ProviderSection {
             tools: None,
             context_window: None,
             max_output_tokens: None,
+            server_output_limit: false,
             requires_auth: true,
             enabled: true,
         }
@@ -6234,6 +6238,7 @@ fn provider_instances(
                         api_key: instance.api_key,
                         models: instance.models,
                         discover_models: instance.discover_models,
+                        server_output_limit: section.server_output_limit,
                         model_defaults: instance.model_defaults,
                         assume_authenticated: instance.assume_authenticated,
                         headers: instance.headers,
@@ -9533,6 +9538,7 @@ mod tests {
 
             [providers.autodiscover]
             base_url = "https://models.example.test/v1"
+            server_output_limit = true
 
             [providers.badvideo]
             base_url = "https://example.invalid/v1"
@@ -9556,6 +9562,19 @@ mod tests {
         assert_eq!(groq.name, "Groq");
         assert_eq!(groq.models, vec!["llama-3.3-70b".to_owned()]);
         assert!(!groq.discover_models, "explicit model list is an allowlist");
+        assert!(
+            !groq.server_output_limit,
+            "ordinary providers retain client defaults"
+        );
+        let haarness_providers::ProviderInstance::OpenAiChatCompletions(managed) = instances
+            .iter()
+            .find(|instance| instance.id() == "autodiscover")
+            .unwrap()
+        else {
+            panic!("managed gateway must use Chat Completions")
+        };
+        assert!(managed.server_output_limit);
+        assert!(managed.discover_models);
         assert!(
             groq.api_key.is_none(),
             "stored auth stays live in CredentialStore"
