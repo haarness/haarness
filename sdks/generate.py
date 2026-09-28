@@ -152,6 +152,8 @@ def specification():
                 ("name", "description", "input_schema"),
             ),
             "ToolOutput": obj({"text": S, "metadata": J}, ("text", "metadata")),
+            "AdoptDraft": obj({"thread": S, "lease": S}, ("thread", "lease")),
+            "HostOptions": obj({"version": {"type": "integer", "enum": [1, 2]}}),
             "SkillContent": obj(
                 {"name": S, "instructions": S}, ("name", "instructions")
             ),
@@ -222,6 +224,7 @@ def specification():
             }
         ),
         "FileSearchQuery": obj({"q": S, "limit": N}, ("q",)),
+        "HostOptions": obj({"version": {"type": "integer", "enum": [1, 2]}}),
         "FileQuery": obj({"path": S, "hidden": B}),
         "Browse": obj({"path": S, "prefix": S, "hidden": B, "limit": N, "after": S}),
         "BackgroundQuery": obj({"childThreadId": S}),
@@ -271,7 +274,12 @@ def specification():
             operation[
                 "binaryResponse" if name == "download_profile" else "binaryBody"
             ] = True
-        if name == "connect_pty":
+        if name in ("browser_tunnel", "draft_browser_tunnel"):
+            operation["response"] = J
+        if name == "read_shared_session":
+            operation["response"] = S
+            operation["textResponse"] = True
+        if name in ("connect_pty", "connect_browser_host", "connect_draft_browser_host"):
             operation["stream"] = "websocket"
         if name == "events":
             operation["stream"] = "sse"
@@ -336,6 +344,8 @@ def specification():
                     "description": "Accepted" if name == "run_shell" else "No content"
                 }
             }
+        if operation.get("textResponse"):
+            entry["responses"]["200"]["content"] = {"text/html": {"schema": S}}
         if operation.get("stream"):
             entry["responses"] = {
                 "101" if name == "connect_pty" else "200": {

@@ -4,6 +4,26 @@ Haarness is a durable agentic coding harness written in Rust. A versioned REST/S
 
 > Haarness permissions are application-level policy, not an operating-system sandbox. Review approval prompts before allowing tools to operate.
 
+## Install binaries
+
+Once the public release service is deployed and a stable release is published:
+
+```sh
+curl -fsSL https://app.haarness.dev/install.sh | sh
+# Desktop (macOS/Linux):
+curl -fsSL https://app.haarness.dev/install.sh | HAARNESS_PRODUCT=desktop sh
+# Upgrade an installed CLI:
+haarness upgrade
+```
+
+Windows: `irm https://app.haarness.dev/install.ps1 | iex`; set
+`$env:HAARNESS_PRODUCT='desktop'` first for the Desktop installer. Installers verify
+SHA-256 before replacement. macOS curl installations clear quarantine on the verified
+payload, including nested Desktop executables. Use `HAARNESS_CHANNEL=preview` for
+preview builds and `HAARNESS_VERSION` to pin one. See the
+[release testing skill](skills/haarness-release/SKILL.md) for local installation,
+publishing, platform validation and rollback.
+
 ## What works
 
 - [Haarness Router integration](docs/ROUTER.md): connect a self-hosted router by

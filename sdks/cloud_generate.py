@@ -49,7 +49,7 @@ def specification():
             if contents:
                 content, wire = next(iter(contents.items()))
                 op["contentType"] = content
-                if content == "application/zip":
+                if content in ("application/zip", "application/octet-stream"):
                     op["binaryBody"] = True
                 else:
                     schema = wire.get("schema", {})
@@ -81,9 +81,9 @@ def specification():
                 if contents:
                     content, wire = next(iter(contents.items()))
                     op["response"] = wire.get("schema", {})
-                    if content == "application/zip":
+                    if content in ("application/zip", "application/octet-stream"):
                         op["binaryResponse"] = True
-                    if content == "text/html":
+                    if content in ("text/html", "text/plain"):
                         op["textResponse"] = True
                         op["response"] = {"type": "string"}
                 elif code == "200":
@@ -102,7 +102,7 @@ def specification():
             if name in ("remote_host", "remote_session"):
                 op["stream"] = "runtime_adapter"
             if name == "connect_remote_host":
-                op["stream"] = "native_connector"
+                op["stream"] = "websocket"
             ops.append(op)
     names = [o["name"] for o in ops]
     assert len(names) == len(set(names)), "Duplicate Cloud operation ID"

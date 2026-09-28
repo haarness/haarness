@@ -2,6 +2,7 @@
 from typing import Dict, List, Union, Literal, TypeAlias
 from typing_extensions import TypedDict, Required, NotRequired
 JsonValue: TypeAlias = Union[None, bool, int, float, str, List["JsonValue"], Dict[str, "JsonValue"]]
+AdoptDraft = TypedDict('AdoptDraft', {'thread': Required[str], 'lease': Required[str]})
 AgentProfile = TypedDict('AgentProfile', {'description': Required[str], 'hidden': Required[bool], 'id': Required[str], 'maxSubagents': Required[int], 'mode': NotRequired[Union[str, None]], 'model': NotRequired[Union[str, None]], 'name': Required[str]})
 AnalyticsDocument = TypedDict('AnalyticsDocument', {'html': Required[str], 'summary': Required[str]})
 AnalyticsQuery = TypedDict('AnalyticsQuery', {'days': NotRequired[int], 'project': NotRequired[str], 'currentProject': NotRequired[bool], 'limit': NotRequired[int]})
@@ -74,6 +75,7 @@ GoalUpdatedEvent = TypedDict('GoalUpdatedEvent', {'completion': NotRequired[Unio
 GoalVerdict: TypeAlias = Literal['done', 'continue', 'skipped', 'blocked', 'error', 'inactive']
 Group = TypedDict('Group', {'id': Required[str], 'metrics': Required['Metrics'], 'name': Required[str]})
 HealthResponse = TypedDict('HealthResponse', {'status': Required[str]})
+HostOptions = TypedDict('HostOptions', {'version': NotRequired[Literal[1, 2]]})
 InputDelivery: TypeAlias = Literal['steer', 'queue']
 InputQueue = TypedDict('InputQueue', {'items': Required[List['PendingInput']], 'revision': Required[int]})
 InputQueueAction0 = TypedDict('InputQueueAction0', {'action': Required[Literal['edit']], 'id': Required['RequestId'], 'revision': Required[int], 'text': Required[str]})

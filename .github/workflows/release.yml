@@ -3,50 +3,122 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing v-prefixed tag to package
+        description: Existing immutable v-prefixed tag (CLI and Desktop versions must match)
         required: true
+      channel:
+        type: choice
+        options: [preview, stable]
+        default: preview
+      publish:
+        type: boolean
+        description: Publish all verified platforms to the configured Cloud release service
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ inputs.channel }}
+  cancel-in-progress: false
 jobs:
   build:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14, target: aarch64-apple-darwin, output: haarness }
-          - { os: macos-13, target: x86_64-apple-darwin, output: haarness }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, output: haarness }
-          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, output: haarness }
-          - { os: windows-11-arm, target: aarch64-pc-windows-msvc, output: haarness.exe }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, output: haarness.exe }
+          - { os: macos-14, platform: mac, arch: arm64, target: aarch64-apple-darwin }
+          - { os: macos-15-intel, platform: mac, arch: x64, target: x86_64-apple-darwin }
+          - { os: ubuntu-24.04-arm, platform: linux, arch: arm64, target: aarch64-unknown-linux-gnu }
+          - { os: ubuntu-24.04, platform: linux, arch: x64, target: x86_64-unknown-linux-gnu }
+          - { os: windows-11-arm, platform: win, arch: arm64, target: aarch64-pc-windows-msvc }
+          - { os: windows-latest, platform: win, arch: x64, target: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-        with: { ref: "${{ inputs.tag }}" }
+        with: { ref: '${{ inputs.tag }}' }
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: 1.3.14 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
       - uses: dtolnay/rust-toolchain@stable
-        with: { toolchain: 1.94.0, targets: "${{ matrix.target }}" }
+        with: { toolchain: 1.94.0 }
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
-      - run: cargo build --release -p haarness-cli --target ${{ matrix.target }}
-      - shell: bash
+      - name: Verify release tag and versions
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          cp "target/${{ matrix.target }}/release/${{ matrix.output }}" "haarness-${{ matrix.target }}${{ runner.os == 'Windows' && '.exe' || '' }}"
-          shasum -a 256 "haarness-${{ matrix.target }}${{ runner.os == 'Windows' && '.exe' || '' }}" > SHA256SUM
+          python - <<'PY'
+          import json, os, pathlib, tomllib
+          version=tomllib.loads(pathlib.Path('Cargo.toml').read_text())['workspace']['package']['version']
+          assert os.environ['RELEASE_TAG']=='v'+version
+          assert json.loads(pathlib.Path('apps/desktop/package.json').read_text())['version']==version
+          PY
+      - run: cargo test --workspace
+      - run: cargo build --release -p haarness-cli
+      - run: npm --prefix sdks/typescript ci
+      - run: npm --prefix sdks/typescript run build
+      - run: npm --prefix sdks/typescript test
+      - run: npm --prefix apps/desktop ci
+      - run: npm --prefix apps/desktop test
+      - name: Installer verification
+        if: runner.os != 'Windows'
+        run: python scripts/test-release-install.py
+      - name: macOS quarantine regression
+        if: runner.os == 'macOS'
+        run: python scripts/test-release-quarantine.py
+      - name: Require public distribution signing for stable
+        shell: bash
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          CSC_LINK: ${{ runner.os == 'macOS' && secrets.MAC_CSC_LINK || secrets.WIN_CSC_LINK }}
+          CSC_NAME: ${{ secrets.CSC_NAME }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          if [ "$CHANNEL" = stable ] && [ "$RUNNER_OS" != Linux ]; then
+            test -n "$CSC_LINK" || { echo 'Stable Desktop requires a signing certificate'; exit 1; }
+            if [ "$RUNNER_OS" = macOS ]; then
+              test -n "$CSC_NAME" && test -n "$APPLE_API_KEY" || { echo 'Stable macOS requires Developer ID and notarization credentials'; exit 1; }
+            fi
+          fi
+      - name: Package CLI and Desktop
+        shell: bash
+        env:
+          CSC_LINK: ${{ runner.os == 'macOS' && secrets.MAC_CSC_LINK || secrets.WIN_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.MAC_CSC_KEY_PASSWORD || secrets.WIN_CSC_KEY_PASSWORD }}
+          CSC_NAME: ${{ secrets.CSC_NAME }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          args=()
+          if [ "$RUNNER_OS" = macOS ] && [ -n "$CSC_NAME" ]; then args+=("--config.mac.identity=$CSC_NAME"); fi
+          npm --prefix apps/desktop run package -- --${{ matrix.platform }} --${{ matrix.arch }} "${args[@]}"
+      - name: Verify packaged backend and JS runtime
+        shell: bash
+        run: |
+          python scripts/test-release-package.py
+          python scripts/release.py collect
       - uses: actions/upload-artifact@v4
         with:
-          name: haarness-${{ matrix.target }}
-          path: |
-            haarness-${{ matrix.target }}*
-            SHA256SUM
+          name: release-${{ matrix.target }}
+          path: dist/releases/*
+          if-no-files-found: error
   publish:
+    if: inputs.publish
     needs: build
     runs-on: ubuntu-latest
-    permissions: { contents: write, id-token: write }
+    environment: releases
     steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ inputs.tag }}' }
       - uses: actions/download-artifact@v4
-        with: { path: artifacts }
-      - run: find artifacts -type f -name 'haarness-*' -exec sha256sum {} \; | sed 's#  artifacts/[^/]*/#  #' > SHA256SUMS
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ inputs.tag }}
-          files: |
-            artifacts/**/haarness-*
-            SHA256SUMS
+        with: { pattern: 'release-*', path: dist/releases, merge-multiple: true }
+      - name: Publish and verify all binary downloads
+        env:
+          HAARNESS_RELEASE_TOKEN: ${{ secrets.HAARNESS_RELEASE_TOKEN }}
+          HAARNESS_RELEASE_URL: ${{ vars.HAARNESS_RELEASE_URL }}
+          CHANNEL: ${{ inputs.channel }}
+        run: python scripts/release.py publish --index dist/releases/index-*.json --url "$HAARNESS_RELEASE_URL" --channel "$CHANNEL" --receipt dist/releases/receipt.json
+      - uses: actions/upload-artifact@v4
+        with: { name: release-receipt, path: dist/releases/receipt.json }

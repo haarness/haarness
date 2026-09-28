@@ -255,9 +255,21 @@ class CloudApi(Transport):
         """GET /api/v1/releases."""
         return cast("T.ReleaseManifestResponse", self.request('GET', f'/api/v1/releases', query=query, binary_body=False, binary_response=False, options=options))
 
+    def download_release_artifact(self, id: str, *, options: RequestOptions | None = None) -> bytes:
+        """GET /api/v1/releases/artifacts/{id}."""
+        return cast("bytes", self.request('GET', f'/api/v1/releases/artifacts/{self.segment(id)}', binary_body=False, binary_response=True, options=options))
+
+    def release_history(self, query: T.ReleaseHistoryQuery | None = None, *, options: RequestOptions | None = None) -> list[T.ReleasePublication]:
+        """GET /api/v1/releases/history."""
+        return cast("list[T.ReleasePublication]", self.request('GET', f'/api/v1/releases/history', query=query, binary_body=False, binary_response=False, options=options))
+
     def product_release(self, channel: str, product: str, *, options: RequestOptions | None = None) -> T.ReleaseManifestResponse:
         """GET /api/v1/releases/{channel}/{product}."""
         return cast("T.ReleaseManifestResponse", self.request('GET', f'/api/v1/releases/{self.segment(channel)}/{self.segment(product)}', binary_body=False, binary_response=False, options=options))
+
+    def download_release(self, channel: str, product: str, query: T.DownloadReleaseQuery, *, options: RequestOptions | None = None) -> bytes:
+        """GET /api/v1/releases/{channel}/{product}/download."""
+        return cast("bytes", self.request('GET', f'/api/v1/releases/{self.segment(channel)}/{self.segment(product)}/download', query=query, binary_body=False, binary_response=True, options=options))
 
     def list_remote_hosts(self, query: T.ListRemoteHostsQuery | None = None, *, options: RequestOptions | None = None) -> T.Page_RemoteHostDto:
         """GET /api/v1/remote-hosts."""
@@ -515,6 +527,14 @@ class CloudApi(Transport):
         """GET /healthz."""
         return cast("T.HealthResponse", self.request('GET', f'/healthz', binary_body=False, binary_response=False, options=options))
 
+    def release_install_ps1(self, *, options: RequestOptions | None = None) -> str:
+        """GET /install.ps1."""
+        return cast("str", self.request('GET', f'/install.ps1', text_response=True, binary_body=False, binary_response=False, options=options))
+
+    def release_install_sh(self, *, options: RequestOptions | None = None) -> str:
+        """GET /install.sh."""
+        return cast("str", self.request('GET', f'/install.sh', text_response=True, binary_body=False, binary_response=False, options=options))
+
     def internal_dead_jobs(self, *, options: RequestOptions | None = None) -> T.Items_DeadJobDto:
         """GET /internal/ops/jobs/dead."""
         return cast("T.Items_DeadJobDto", self.request('GET', f'/internal/ops/jobs/dead', binary_body=False, binary_response=False, options=options))
@@ -530,6 +550,22 @@ class CloudApi(Transport):
     def internal_review_version(self, id: str, body: T.ReviewVersionRequest, *, options: RequestOptions | None = None) -> T.ReviewVersionResponse:
         """POST /internal/ops/marketplace/versions/{id}/review."""
         return cast("T.ReviewVersionResponse", self.request('POST', f'/internal/ops/marketplace/versions/{self.segment(id)}/review', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def publish_release(self, body: T.PublishReleaseRequest, *, options: RequestOptions | None = None) -> T.ReleasePublication:
+        """POST /internal/releases."""
+        return cast("T.ReleasePublication", self.request('POST', f'/internal/releases', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def upload_release_artifact(self, body: bytes, query: T.UploadReleaseArtifactQuery, *, options: RequestOptions | None = None) -> T.ReleaseUpload:
+        """POST /internal/releases/artifacts."""
+        return cast("T.ReleaseUpload", self.request('POST', f'/internal/releases/artifacts', body=body, query=query, content_type='application/octet-stream', binary_body=True, binary_response=False, options=options))
+
+    def withdraw_release(self, id: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /internal/releases/{id}."""
+        return cast("None", self.request('DELETE', f'/internal/releases/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    def promote_release(self, id: str, *, options: RequestOptions | None = None) -> T.ReleasePublication:
+        """POST /internal/releases/{id}/promote."""
+        return cast("T.ReleasePublication", self.request('POST', f'/internal/releases/{self.segment(id)}/promote', binary_body=False, binary_response=False, options=options))
 
     def internal_drain_bucket(self, body: T.DrainBucketRequest, *, options: RequestOptions | None = None) -> T.DrainBucketResponse:
         """POST /internal/test/drain-bucket."""
@@ -828,9 +864,21 @@ class AsyncCloudApi(AsyncTransport):
         """GET /api/v1/releases."""
         return cast("T.ReleaseManifestResponse", await self.request('GET', f'/api/v1/releases', query=query, binary_body=False, binary_response=False, options=options))
 
+    async def download_release_artifact(self, id: str, *, options: RequestOptions | None = None) -> bytes:
+        """GET /api/v1/releases/artifacts/{id}."""
+        return cast("bytes", await self.request('GET', f'/api/v1/releases/artifacts/{self.segment(id)}', binary_body=False, binary_response=True, options=options))
+
+    async def release_history(self, query: T.ReleaseHistoryQuery | None = None, *, options: RequestOptions | None = None) -> list[T.ReleasePublication]:
+        """GET /api/v1/releases/history."""
+        return cast("list[T.ReleasePublication]", await self.request('GET', f'/api/v1/releases/history', query=query, binary_body=False, binary_response=False, options=options))
+
     async def product_release(self, channel: str, product: str, *, options: RequestOptions | None = None) -> T.ReleaseManifestResponse:
         """GET /api/v1/releases/{channel}/{product}."""
         return cast("T.ReleaseManifestResponse", await self.request('GET', f'/api/v1/releases/{self.segment(channel)}/{self.segment(product)}', binary_body=False, binary_response=False, options=options))
+
+    async def download_release(self, channel: str, product: str, query: T.DownloadReleaseQuery, *, options: RequestOptions | None = None) -> bytes:
+        """GET /api/v1/releases/{channel}/{product}/download."""
+        return cast("bytes", await self.request('GET', f'/api/v1/releases/{self.segment(channel)}/{self.segment(product)}/download', query=query, binary_body=False, binary_response=True, options=options))
 
     async def list_remote_hosts(self, query: T.ListRemoteHostsQuery | None = None, *, options: RequestOptions | None = None) -> T.Page_RemoteHostDto:
         """GET /api/v1/remote-hosts."""
@@ -1088,6 +1136,14 @@ class AsyncCloudApi(AsyncTransport):
         """GET /healthz."""
         return cast("T.HealthResponse", await self.request('GET', f'/healthz', binary_body=False, binary_response=False, options=options))
 
+    async def release_install_ps1(self, *, options: RequestOptions | None = None) -> str:
+        """GET /install.ps1."""
+        return cast("str", await self.request('GET', f'/install.ps1', text_response=True, binary_body=False, binary_response=False, options=options))
+
+    async def release_install_sh(self, *, options: RequestOptions | None = None) -> str:
+        """GET /install.sh."""
+        return cast("str", await self.request('GET', f'/install.sh', text_response=True, binary_body=False, binary_response=False, options=options))
+
     async def internal_dead_jobs(self, *, options: RequestOptions | None = None) -> T.Items_DeadJobDto:
         """GET /internal/ops/jobs/dead."""
         return cast("T.Items_DeadJobDto", await self.request('GET', f'/internal/ops/jobs/dead', binary_body=False, binary_response=False, options=options))
@@ -1103,6 +1159,22 @@ class AsyncCloudApi(AsyncTransport):
     async def internal_review_version(self, id: str, body: T.ReviewVersionRequest, *, options: RequestOptions | None = None) -> T.ReviewVersionResponse:
         """POST /internal/ops/marketplace/versions/{id}/review."""
         return cast("T.ReviewVersionResponse", await self.request('POST', f'/internal/ops/marketplace/versions/{self.segment(id)}/review', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def publish_release(self, body: T.PublishReleaseRequest, *, options: RequestOptions | None = None) -> T.ReleasePublication:
+        """POST /internal/releases."""
+        return cast("T.ReleasePublication", await self.request('POST', f'/internal/releases', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def upload_release_artifact(self, body: bytes, query: T.UploadReleaseArtifactQuery, *, options: RequestOptions | None = None) -> T.ReleaseUpload:
+        """POST /internal/releases/artifacts."""
+        return cast("T.ReleaseUpload", await self.request('POST', f'/internal/releases/artifacts', body=body, query=query, content_type='application/octet-stream', binary_body=True, binary_response=False, options=options))
+
+    async def withdraw_release(self, id: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /internal/releases/{id}."""
+        return cast("None", await self.request('DELETE', f'/internal/releases/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    async def promote_release(self, id: str, *, options: RequestOptions | None = None) -> T.ReleasePublication:
+        """POST /internal/releases/{id}/promote."""
+        return cast("T.ReleasePublication", await self.request('POST', f'/internal/releases/{self.segment(id)}/promote', binary_body=False, binary_response=False, options=options))
 
     async def internal_drain_bucket(self, body: T.DrainBucketRequest, *, options: RequestOptions | None = None) -> T.DrainBucketResponse:
         """POST /internal/test/drain-bucket."""

@@ -1386,6 +1386,32 @@
     }
   },
   {
+    "name": "connect_browser_host",
+    "method": "GET",
+    "path": "/v1/threads/{id}/browser/host",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    },
+    "query": {
+      "$ref": "#/components/schemas/HostOptions"
+    },
+    "stream": "websocket"
+  },
+  {
+    "name": "browser_tunnel",
+    "method": "POST",
+    "path": "/v1/threads/{id}/browser/tunnel/{action}",
+    "pathParams": [
+      "id",
+      "action"
+    ],
+    "response": {},
+    "body": {}
+  },
+  {
     "name": "call_browser_tool",
     "method": "POST",
     "path": "/v1/threads/{id}/browser/tool",
@@ -1397,6 +1423,41 @@
     },
     "body": {
       "$ref": "#/components/schemas/BrowserToolRequest"
+    }
+  },
+  {
+    "name": "connect_draft_browser_host",
+    "method": "GET",
+    "path": "/v1/browser/drafts/{id}/host",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    },
+    "stream": "websocket"
+  },
+  {
+    "name": "draft_browser_tunnel",
+    "method": "POST",
+    "path": "/v1/browser/drafts/{id}/tunnel/{action}",
+    "pathParams": [
+      "id",
+      "action"
+    ],
+    "response": {},
+    "body": {}
+  },
+  {
+    "name": "adopt_browser_draft",
+    "method": "POST",
+    "path": "/v1/browser/drafts/{id}/adopt",
+    "pathParams": [
+      "id"
+    ],
+    "response": {},
+    "body": {
+      "$ref": "#/components/schemas/AdoptDraft"
     }
   },
   {
@@ -1442,5 +1503,17 @@
     "response": {
       "type": "null"
     }
+  },
+  {
+    "name": "read_shared_session",
+    "method": "GET",
+    "path": "/s/{token}",
+    "pathParams": [
+      "token"
+    ],
+    "response": {
+      "type": "string"
+    },
+    "textResponse": true
   }
 ]

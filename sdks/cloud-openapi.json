@@ -3898,6 +3898,96 @@
         }
       }
     },
+    "/api/v1/releases/artifacts/{id}": {
+      "get": {
+        "tags": [
+          "releases"
+        ],
+        "summary": "Download immutable published bytes. Verify x-content-sha256 before execution.",
+        "operationId": "download_release_artifact",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Binary artifact; SHA-256 in x-content-sha256",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not published",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/history": {
+      "get": {
+        "tags": [
+          "releases"
+        ],
+        "summary": "List published release history, newest first.",
+        "operationId": "release_history",
+        "parameters": [
+          {
+            "name": "channel",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Release history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ReleasePublication"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/releases/{channel}/{product}": {
       "get": {
         "tags": [
@@ -3950,11 +4040,98 @@
         }
       }
     },
+    "/api/v1/releases/{channel}/{product}/download": {
+      "get": {
+        "tags": [
+          "releases"
+        ],
+        "summary": "Select the current or pinned release binary for a platform.",
+        "operationId": "download_release",
+        "parameters": [
+          {
+            "name": "channel",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "product",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "os",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "arch",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Binary artifact; SHA-256 and version response headers",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Platform or version unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/remote-hosts": {
       "get": {
         "tags": [
           "remote"
         ],
+        "summary": "List remote hosts.",
         "operationId": "list_remote_hosts",
         "parameters": [
           {
@@ -3988,7 +4165,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success",
             "content": {
               "application/json": {
                 "schema": {
@@ -3998,7 +4175,7 @@
             }
           },
           "401": {
-            "description": "",
+            "description": "Authentication required",
             "content": {
               "application/json": {
                 "schema": {
@@ -4008,7 +4185,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "Permission denied",
             "content": {
               "application/json": {
                 "schema": {
@@ -4018,7 +4195,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -4033,6 +4210,7 @@
         "tags": [
           "remote"
         ],
+        "summary": "Register remote host.",
         "operationId": "register_remote_host",
         "requestBody": {
           "content": {
@@ -4046,7 +4224,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success",
             "content": {
               "application/json": {
                 "schema": {
@@ -4056,7 +4234,7 @@
             }
           },
           "401": {
-            "description": "",
+            "description": "Authentication required",
             "content": {
               "application/json": {
                 "schema": {
@@ -4066,7 +4244,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "Permission denied",
             "content": {
               "application/json": {
                 "schema": {
@@ -4076,7 +4254,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -4093,6 +4271,7 @@
         "tags": [
           "remote"
         ],
+        "summary": "Get remote host.",
         "operationId": "get_remote_host",
         "parameters": [
           {
@@ -4107,7 +4286,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success",
             "content": {
               "application/json": {
                 "schema": {
@@ -4117,7 +4296,7 @@
             }
           },
           "401": {
-            "description": "",
+            "description": "Authentication required",
             "content": {
               "application/json": {
                 "schema": {
@@ -4127,7 +4306,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "Permission denied",
             "content": {
               "application/json": {
                 "schema": {
@@ -4137,7 +4316,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -4152,6 +4331,7 @@
         "tags": [
           "remote"
         ],
+        "summary": "Revoke remote host.",
         "operationId": "revoke_remote_host",
         "parameters": [
           {
@@ -4166,10 +4346,10 @@
         ],
         "responses": {
           "204": {
-            "description": ""
+            "description": "Removed"
           },
           "401": {
-            "description": "",
+            "description": "Authentication required",
             "content": {
               "application/json": {
                 "schema": {
@@ -4179,7 +4359,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "Permission denied",
             "content": {
               "application/json": {
                 "schema": {
@@ -4189,7 +4369,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -4204,6 +4384,7 @@
         "tags": [
           "remote"
         ],
+        "summary": "Update remote host.",
         "operationId": "update_remote_host",
         "parameters": [
           {
@@ -4228,7 +4409,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success",
             "content": {
               "application/json": {
                 "schema": {
@@ -4238,7 +4419,7 @@
             }
           },
           "401": {
-            "description": "",
+            "description": "Authentication required",
             "content": {
               "application/json": {
                 "schema": {
@@ -4248,7 +4429,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "Permission denied",
             "content": {
               "application/json": {
                 "schema": {
@@ -4258,7 +4439,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -4293,7 +4474,7 @@
             "description": "Relay WebSocket; native connector protocol"
           },
           "403": {
-            "description": "",
+            "description": "Permission denied",
             "content": {
               "application/json": {
                 "schema": {
@@ -4336,7 +4517,7 @@
             "description": "Native runtime response or event stream"
           },
           "409": {
-            "description": "",
+            "description": "Conflict",
             "content": {
               "application/json": {
                 "schema": {
@@ -4353,6 +4534,7 @@
         "tags": [
           "remote"
         ],
+        "summary": "Publish remote session.",
         "operationId": "publish_remote_session",
         "parameters": [
           {
@@ -4377,7 +4559,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success",
             "content": {
               "application/json": {
                 "schema": {
@@ -4387,7 +4569,7 @@
             }
           },
           "401": {
-            "description": "",
+            "description": "Authentication required",
             "content": {
               "application/json": {
                 "schema": {
@@ -4397,7 +4579,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "Permission denied",
             "content": {
               "application/json": {
                 "schema": {
@@ -4407,7 +4589,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -4424,6 +4606,7 @@
         "tags": [
           "remote"
         ],
+        "summary": "List remote sessions.",
         "operationId": "list_remote_sessions",
         "parameters": [
           {
@@ -4457,7 +4640,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success",
             "content": {
               "application/json": {
                 "schema": {
@@ -4467,7 +4650,7 @@
             }
           },
           "401": {
-            "description": "",
+            "description": "Authentication required",
             "content": {
               "application/json": {
                 "schema": {
@@ -4477,7 +4660,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "Permission denied",
             "content": {
               "application/json": {
                 "schema": {
@@ -4487,7 +4670,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -4504,6 +4687,7 @@
         "tags": [
           "remote"
         ],
+        "summary": "Get remote session.",
         "operationId": "get_remote_session",
         "parameters": [
           {
@@ -4518,7 +4702,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success",
             "content": {
               "application/json": {
                 "schema": {
@@ -4528,7 +4712,7 @@
             }
           },
           "401": {
-            "description": "",
+            "description": "Authentication required",
             "content": {
               "application/json": {
                 "schema": {
@@ -4538,7 +4722,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "Permission denied",
             "content": {
               "application/json": {
                 "schema": {
@@ -4548,7 +4732,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -4563,6 +4747,7 @@
         "tags": [
           "remote"
         ],
+        "summary": "Unpublish remote session.",
         "operationId": "unpublish_remote_session",
         "parameters": [
           {
@@ -4577,10 +4762,10 @@
         ],
         "responses": {
           "204": {
-            "description": ""
+            "description": "Removed"
           },
           "401": {
-            "description": "",
+            "description": "Authentication required",
             "content": {
               "application/json": {
                 "schema": {
@@ -4590,7 +4775,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "Permission denied",
             "content": {
               "application/json": {
                 "schema": {
@@ -4600,7 +4785,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -4643,7 +4828,7 @@
             "description": "Scoped native runtime response or event stream"
           },
           "403": {
-            "description": "",
+            "description": "Permission denied",
             "content": {
               "application/json": {
                 "schema": {
@@ -4653,7 +4838,7 @@
             }
           },
           "409": {
-            "description": "",
+            "description": "Conflict",
             "content": {
               "application/json": {
                 "schema": {
@@ -5005,6 +5190,7 @@
         "tags": [
           "routers"
         ],
+        "summary": "List routers.",
         "operationId": "list_routers",
         "parameters": [
           {
@@ -5019,7 +5205,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success",
             "content": {
               "application/json": {
                 "schema": {
@@ -5029,7 +5215,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "Permission denied",
             "content": {
               "application/json": {
                 "schema": {
@@ -5044,6 +5230,7 @@
         "tags": [
           "routers"
         ],
+        "summary": "Create router.",
         "operationId": "create_router",
         "requestBody": {
           "content": {
@@ -5057,7 +5244,7 @@
         },
         "responses": {
           "201": {
-            "description": "",
+            "description": "Created",
             "content": {
               "application/json": {
                 "schema": {
@@ -5067,7 +5254,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "Permission denied",
             "content": {
               "application/json": {
                 "schema": {
@@ -5077,7 +5264,7 @@
             }
           },
           "409": {
-            "description": "",
+            "description": "Conflict",
             "content": {
               "application/json": {
                 "schema": {
@@ -5094,6 +5281,7 @@
         "tags": [
           "routers"
         ],
+        "summary": "Get router.",
         "operationId": "get_router",
         "parameters": [
           {
@@ -5108,7 +5296,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success",
             "content": {
               "application/json": {
                 "schema": {
@@ -5118,7 +5306,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -5133,6 +5321,7 @@
         "tags": [
           "routers"
         ],
+        "summary": "Delete router.",
         "operationId": "delete_router",
         "parameters": [
           {
@@ -5147,10 +5336,10 @@
         ],
         "responses": {
           "204": {
-            "description": ""
+            "description": "Removed"
           },
           "403": {
-            "description": "",
+            "description": "Permission denied",
             "content": {
               "application/json": {
                 "schema": {
@@ -5160,7 +5349,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -5170,7 +5359,7 @@
             }
           },
           "409": {
-            "description": "",
+            "description": "Conflict",
             "content": {
               "application/json": {
                 "schema": {
@@ -5185,6 +5374,7 @@
         "tags": [
           "routers"
         ],
+        "summary": "Update router.",
         "operationId": "update_router",
         "parameters": [
           {
@@ -5209,7 +5399,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success",
             "content": {
               "application/json": {
                 "schema": {
@@ -5219,7 +5409,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "Permission denied",
             "content": {
               "application/json": {
                 "schema": {
@@ -5229,7 +5419,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -5239,7 +5429,7 @@
             }
           },
           "409": {
-            "description": "",
+            "description": "Conflict",
             "content": {
               "application/json": {
                 "schema": {
@@ -5256,6 +5446,7 @@
         "tags": [
           "routers"
         ],
+        "summary": "Set router credential.",
         "operationId": "set_router_credential",
         "parameters": [
           {
@@ -5288,7 +5479,7 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "Success",
             "content": {
               "application/json": {
                 "schema": {
@@ -5298,7 +5489,7 @@
             }
           },
           "403": {
-            "description": "",
+            "description": "Permission denied",
             "content": {
               "application/json": {
                 "schema": {
@@ -5308,7 +5499,7 @@
             }
           },
           "404": {
-            "description": "",
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -5318,7 +5509,7 @@
             }
           },
           "409": {
-            "description": "",
+            "description": "Conflict",
             "content": {
               "application/json": {
                 "schema": {
@@ -8094,6 +8285,48 @@
         }
       }
     },
+    "/install.ps1": {
+      "get": {
+        "tags": [
+          "releases"
+        ],
+        "summary": "Windows CLI and Desktop installer.",
+        "operationId": "release_install_ps1",
+        "responses": {
+          "200": {
+            "description": "Installer script",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/install.sh": {
+      "get": {
+        "tags": [
+          "releases"
+        ],
+        "summary": "POSIX CLI and Desktop installer.",
+        "operationId": "release_install_sh",
+        "responses": {
+          "200": {
+            "description": "Installer script",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/internal/ops/jobs/dead": {
       "get": {
         "tags": [
@@ -8297,6 +8530,277 @@
           },
           "404": {
             "description": "Unknown version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/releases": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Publish uploaded artifacts atomically to a release channel.",
+        "operationId": "publish_release",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublishReleaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Published release",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleasePublication"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Internal token required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Immutable version conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/releases/artifacts": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Upload a private immutable payload with a required checksum and byte length.",
+        "operationId": "upload_release_artifact",
+        "parameters": [
+          {
+            "name": "version",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "product",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "file",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "os",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "arch",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-content-sha256",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "content-length",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Registered upload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseUpload"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Internal token required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Immutable artifact conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/releases/{id}": {
+      "delete": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Withdraw a publication. The channel remains empty if it was current.",
+        "operationId": "withdraw_release",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Withdrawn"
+          },
+          "401": {
+            "description": "Internal token required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown release",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/releases/{id}/promote": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Promote a historical release on its original channel (explicit rollback).",
+        "operationId": "promote_release",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Promoted release",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleasePublication"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Internal token required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown or withdrawn release",
             "content": {
               "application/json": {
                 "schema": {
@@ -14510,6 +15014,46 @@
       "ProjectId": {
         "type": "string"
       },
+      "PublishReleaseRequest": {
+        "type": "object",
+        "required": [
+          "channel",
+          "version",
+          "sourceRevision",
+          "releasedAt",
+          "artifacts"
+        ],
+        "properties": {
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "channel": {
+            "type": "string"
+          },
+          "notesUrl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "releasedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "sourceRevision": {
+            "type": "string",
+            "description": "Full Git commit used to build every artifact."
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "PublishRemoteSessionRequest": {
         "type": "object",
         "required": [
@@ -14649,6 +15193,76 @@
           "publishedAt": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "ReleasePublication": {
+        "type": "object",
+        "required": [
+          "id",
+          "current",
+          "release"
+        ],
+        "properties": {
+          "current": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "release": {
+            "$ref": "#/components/schemas/ReleaseManifestResponse"
+          }
+        }
+      },
+      "ReleaseUpload": {
+        "type": "object",
+        "description": "An immutable, checksum-verified payload. Uploads are private until published.",
+        "required": [
+          "id",
+          "version",
+          "product",
+          "file",
+          "kind",
+          "os",
+          "arch",
+          "size",
+          "sha256",
+          "url"
+        ],
+        "properties": {
+          "arch": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "os": {
+            "type": "string"
+          },
+          "product": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "url": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
           }
         }
       },
@@ -16469,6 +17083,10 @@
     {
       "name": "billing",
       "description": "Plans, checkout, wallet, usage, ledger, budgets and payments"
+    },
+    {
+      "name": "routers",
+      "description": "Account router configurations and provider credentials"
     },
     {
       "name": "router-keys",

@@ -1,3 +1,5 @@
+import { HaarnessRouter } from "./router.js";
+import { JsonSocket } from "./json-socket.js";
 import { CloudApi } from "./cloud-api.js";
 import { Haarness } from "./index.js";
 import { type RequestOptions } from "./transport.js";
@@ -16,6 +18,15 @@ export type { CloudOptions, CloudEventOptions } from "./cloud-transport.js";
 
 /** Cloud account API. Runtime access is scoped to an explicit session or remote host. */
 export class HaarnessCloud extends CloudApi {
+  /** Explicit inference key; account OAuth/session credentials are never forwarded. */
+  async router(id: string, apiKey: string): Promise<HaarnessRouter> {
+    const router = await this.getRouter(id);
+    return new HaarnessRouter({baseUrl:validateGateway(router.routerUrl), token:apiKey, fetch:this.fetcher, timeoutMs:this.timeoutMs});
+  }
+  /** Host-side relay protocol. Authenticate with the dedicated connector token. */
+  async connectRemoteHost(id: string, options: RequestOptions = {}): Promise<JsonSocket> {
+    return JsonSocket.connect(this.url(`/api/v1/remote-hosts/${this.segment(id)}/connect`).replace(/^http/, "ws"), {...await this.headers(), ...options.headers}, this.signal(options.signal), options.timeoutMs ?? this.timeoutMs);
+  }
   /** Full host gateway: discover projects, then use .workspace(projectId). */
   remoteHost(id: string): Haarness {
     return this.remoteRuntime(`/api/v1/remote-hosts/${this.segment(id)}/runtime`);

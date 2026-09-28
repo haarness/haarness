@@ -9,7 +9,7 @@ included. Both packages can be built, packed and installed locally.
   AbortSignal cancellation, SSE async iterators, authenticated PTY WebSockets.
 - **Python:** Python 3.10+, synchronous `Haarness` and asynchronous
   `AsyncHaarness`, generated TypedDicts/unions, HTTPX, SSE iterators, PTYs.
-- **All 116 registered native operations:** chats/turns, commands, goals, loops,
+- **All 123 registered native operations:** chats/turns, commands, goals, loops,
   background work, permissions/questions, MCP, plugins, skills,
   workspaces, Git review, PTYs, workflows, profile archives, analytics and shutdown.
 - Explicit owned local-server helpers, remote-safe attachments, and `chat()`.
@@ -255,7 +255,7 @@ URLs, HTTP redirects are not followed, and PTY authentication uses headers.
 ## Cloud accounts, sessions and chats
 
 `HaarnessCloud` (TypeScript/Python) and `AsyncHaarnessCloud` (Python) expose all
-147 documented Cloud operations: 146 HTTP methods plus the account WebSocket.
+156 documented Cloud operations, including account events, host relay sockets, and scoped runtime adapters.
 This includes identity/OAuth, plans and wallets, billing, API keys and model usage,
 marketplace, devices, reusable agents, session lifecycle and schedules.
 See [Cloud methods](CLOUD-OPERATIONS.md) and [Cloud schema](cloud-openapi.json).
@@ -482,7 +482,7 @@ operation inventory, TypeScript types/methods, and Python types/sync/async
 methods. `--check` detects source/generated drift without modifying files.
 
 The shared E2E scenario runs through each actual SDK and requires successful
-coverage of all 112 non-account native operations in each client; the four account adapters are covered by the live Cloud-tool scenario. Every JSON response is checked
+coverage of all 119 non-account native operations in each client; the four account adapters are covered by the live Cloud-tool scenario. Every JSON response is checked
 against its declared schema. Assertions check resulting files, history,
 idempotency, approvals, questions, workflow/background lifecycles, MCP
 stdio tools/resources/prompts, PTY IO/replay, binary profile round-trips,
@@ -514,3 +514,32 @@ Grant `models:read` for discovery, `models:invoke` for inference, and appropriat
 `schedules`, `marketplace` or `billing:read` permissions for Cloud calls. An attach capability
 authorizes full runtime chats, files, terminal and settings in sessions in the key's account.
 Expired or revoked keys fail; SDKs never implicitly replace them with OAuth credentials.
+
+
+### Releases and inference
+
+`HaarnessCloud` now includes current/product manifests, release history, artifact and
+platform downloads, and the installer scripts. Download methods return bytes; verify
+SHA-256 against the manifest before running them. Operator-only upload, publish,
+promote and withdraw methods require `x-haarness-internal-token` in request options.
+Uploads require `x-content-sha256` and `content-length`; ordinary API keys cannot publish.
+
+Use `HaarnessRouter({baseUrl, token})` in TypeScript, or
+`HaarnessRouter(base_url, token=...)` / `AsyncHaarnessRouter` in Python. Pass the
+Cloud router URL ending in `/v1`, including `/routers/{id}/v1` for a named router.
+`models`, `chatCompletions` / `chat_completions`, and `streamChatCompletions` /
+`stream_chat_completions` cover model discovery and JSON/SSE inference. Provider
+options and tool messages pass through unchanged. `cloud.router(id, apiKey)`
+(Python: `cloud.router(id, api_key=...)`) discovers the named URL without forwarding
+account authentication as inference credentials. Streams fail on malformed/error
+frames or a missing `[DONE]`, never replay inference, and close on cancellation.
+Python callers stopping consumption early should close the generator (`close` /
+`aclose`, or `contextlib.closing` / `aclosing`).
+
+Native browser hosts use `connectBrowserHost`, `connectDraftBrowserHost`,
+`browserTunnel`, `draftBrowserTunnel`, and `adoptBrowserDraft` (snake_case in Python).
+Preserve the returned lease when tunnelling/adopting; these are host protocol APIs,
+not a replacement for browser tool calls. `readSharedSession` returns published HTML.
+Cloud `connectRemoteHost` implements the host-side relay WebSocket; authenticate with
+native account credentials or a key allowed to connect hosts. Public control clients
+normally use `remoteHost(id).workspace(projectId)` or `remoteSession(id)` instead.

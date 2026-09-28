@@ -66,7 +66,10 @@
 | `delete_project` | `deleteProject` | `DELETE /api/v1/projects/{id}` |
 | `patch_project` | `patchProject` | `PATCH /api/v1/projects/{id}` |
 | `current_release` | `currentRelease` | `GET /api/v1/releases` |
+| `download_release_artifact` | `downloadReleaseArtifact` | `GET /api/v1/releases/artifacts/{id}` |
+| `release_history` | `releaseHistory` | `GET /api/v1/releases/history` |
 | `product_release` | `productRelease` | `GET /api/v1/releases/{channel}/{product}` |
+| `download_release` | `downloadRelease` | `GET /api/v1/releases/{channel}/{product}/download` |
 | `list_remote_hosts` | `listRemoteHosts` | `GET /api/v1/remote-hosts` |
 | `register_remote_host` | `registerRemoteHost` | `POST /api/v1/remote-hosts` |
 | `get_remote_host` | `getRemoteHost` | `GET /api/v1/remote-hosts/{id}` |
@@ -134,10 +137,16 @@
 | `auth_options` | `authOptions` | `GET /auth/options` |
 | `device_page` | `devicePage` | `GET /device` |
 | `healthz` | `healthz` | `GET /healthz` |
+| `release_install_ps1` | `releaseInstallPs1` | `GET /install.ps1` |
+| `release_install_sh` | `releaseInstallSh` | `GET /install.sh` |
 | `internal_dead_jobs` | `internalDeadJobs` | `GET /internal/ops/jobs/dead` |
 | `internal_retry_job` | `internalRetryJob` | `POST /internal/ops/jobs/{id}/retry` |
 | `internal_ledger_check` | `internalLedgerCheck` | `GET /internal/ops/ledger-check` |
 | `internal_review_version` | `internalReviewVersion` | `POST /internal/ops/marketplace/versions/{id}/review` |
+| `publish_release` | `publishRelease` | `POST /internal/releases` |
+| `upload_release_artifact` | `uploadReleaseArtifact` | `POST /internal/releases/artifacts` |
+| `withdraw_release` | `withdrawRelease` | `DELETE /internal/releases/{id}` |
+| `promote_release` | `promoteRelease` | `POST /internal/releases/{id}/promote` |
 | `internal_drain_bucket` | `internalDrainBucket` | `POST /internal/test/drain-bucket` |
 | `internal_enqueue_job` | `internalEnqueueJob` | `POST /internal/test/enqueue-job` |
 | `internal_grant` | `internalGrant` | `POST /internal/test/grant` |

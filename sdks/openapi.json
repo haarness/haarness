@@ -1,6 +1,21 @@
 {
   "components": {
     "schemas": {
+      "AdoptDraft": {
+        "properties": {
+          "lease": {
+            "type": "string"
+          },
+          "thread": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread",
+          "lease"
+        ],
+        "type": "object"
+      },
       "AgentProfile": {
         "properties": {
           "description": {
@@ -2121,6 +2136,19 @@
         "required": [
           "status"
         ],
+        "type": "object"
+      },
+      "HostOptions": {
+        "properties": {
+          "version": {
+            "enum": [
+              1,
+              2
+            ],
+            "type": "integer"
+          }
+        },
+        "required": [],
         "type": "object"
       },
       "InputDelivery": {
@@ -6172,6 +6200,33 @@
         }
       }
     },
+    "/s/{token}": {
+      "get": {
+        "operationId": "read_shared_session",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Success"
+          }
+        }
+      }
+    },
     "/v1/agents": {
       "get": {
         "operationId": "agents",
@@ -6186,6 +6241,126 @@
                   },
                   "type": "array"
                 }
+              }
+            },
+            "description": "Success"
+          },
+          "401": {
+            "description": "Bearer authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/browser/drafts/{id}/adopt": {
+      "post": {
+        "operationId": "adopt_browser_draft",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdoptDraft"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Success"
+          },
+          "401": {
+            "description": "Bearer authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/browser/drafts/{id}/host": {
+      "get": {
+        "operationId": "connect_draft_browser_host",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "websocket stream"
+          },
+          "401": {
+            "description": "Bearer authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/browser/drafts/{id}/tunnel/{action}": {
+      "post": {
+        "operationId": "draft_browser_tunnel",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "action",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
               }
             },
             "description": "Success"
@@ -8530,6 +8705,46 @@
         ]
       }
     },
+    "/v1/threads/{id}/browser/host": {
+      "get": {
+        "operationId": "connect_browser_host",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "version",
+            "required": false,
+            "schema": {
+              "enum": [
+                1,
+                2
+              ],
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "websocket stream"
+          },
+          "401": {
+            "description": "Bearer authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/v1/threads/{id}/browser/tool": {
       "post": {
         "operationId": "call_browser_tool",
@@ -8560,6 +8775,55 @@
                 "schema": {
                   "$ref": "#/components/schemas/BrowserToolResponse"
                 }
+              }
+            },
+            "description": "Success"
+          },
+          "401": {
+            "description": "Bearer authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/threads/{id}/browser/tunnel/{action}": {
+      "post": {
+        "operationId": "browser_tunnel",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "action",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
               }
             },
             "description": "Success"

@@ -50,3 +50,25 @@ For Chrome, check the single API keys entry, edit form preservation during WebSo
 ## Explore beyond this guide
 
 Treat the documented flows as a starting point. Do not hesitate to test relevant behavior that is not documented here: inspect the current implementation, follow unexpected results, and cover interactions and failure paths suggested by the task. Stay within the authorized environment and scope. Fix discovered bugs when authorized, verify the fixes, and record newly validated steps and remaining gaps so this skill improves with use.
+
+## Release, browser-host and router additions
+
+Run `sdks/tests/releases_e2e.mjs` and `releases_e2e.py` against an owned local Cloud
+stack with `RELEASE_TEST_URL` and an environment-only `HAARNESS_RELEASE_TOKEN`.
+These publish a disposable preview, verify binary/text downloads, withdraw it and
+restore the prior publication in `finally`. Never point this mutation test at production.
+See [release testing](../haarness-release/SKILL.md) for real packages and quarantine.
+
+The native scenario now exercises 119 non-account operations in each of TypeScript,
+Python sync and Python async, including actual browser-host WebSockets, TCP tunnels,
+draft adoption, lease rejection and shared HTML. Four native account adapters still
+need the authenticated Cloud tool suite. New route modules and unmatched Cloud route
+registrations must fail coverage checks, rather than relying on a stale route count.
+
+For real inference, run `router_inference.mjs` and `router_inference.py` with an
+expiring disposable API key (models:read, models:invoke; routers:write for discovery),
+`SDK_ROUTER_URL`, `SDK_ROUTER_ID`, `SDK_NAMED_ROUTER_URL`, and `SDK_CLOUD_URL`.
+Test the default paid router and a named BYOK router; compare billing readbacks and
+revoke the key in cleanup. These tests call a real model and consume credits on the
+default route. `relay_socket.mjs` / `.py` take `SDK_CLOUD_URL` and `SDK_CLOUD_TOKEN`,
+register disposable hosts, exchange JSON frames, confirm connected state and revoke.

@@ -1,6 +1,6 @@
 {
   "name": "@haarness/desktop",
-  "version": "0.1.0",
+  "version": "0.1.1-preview.1",
   "private": true,
   "description": "Haarness Desktop",
   "author": "Haarness",
@@ -67,6 +67,7 @@
   "build": {
     "appId": "dev.haarness.desktop",
     "productName": "Haarness",
+    "artifactName": "Haarness-${version}-${os}-${arch}.${ext}",
     "directories": {
       "output": "release",
       "buildResources": "assets"

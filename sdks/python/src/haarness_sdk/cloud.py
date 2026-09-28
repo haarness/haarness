@@ -10,6 +10,8 @@ from .client import Haarness, AsyncHaarness
 from .transport import ApiError, RequestOptions
 from . import types as T, cloud_types as C
 from .client import ChatResult
+from .router import HaarnessRouter, AsyncHaarnessRouter
+from .json_socket import JsonSocket, AsyncJsonSocket
 from .pty import PtyConnection, AsyncPtyConnection
 
 
@@ -45,6 +47,18 @@ def current(ticket: C.AttachResponse | None) -> bool:
 
 
 class HaarnessCloud(CloudApi):
+    def router(self, id: str, *, api_key: str) -> HaarnessRouter:
+        """Select a router; supply an explicit inference-capable API key."""
+        return HaarnessRouter(gateway(self.get_router(id)["routerUrl"]),token=api_key,timeout=self._timeout)
+
+    def connect_remote_host(self, id: str, *, timeout: float | None = None) -> JsonSocket:
+        """Host-side protocol; use the dedicated connector token as this client's token."""
+        _, options = self.cloud_options(None, None, None)
+        socket = JsonSocket(self.base_url.replace("http", "ws", 1) + "/api/v1/remote-hosts/" + self.segment(id) + "/connect", {**self._headers(), **options["headers"]}, timeout or self._timeout)
+        self._sockets.add(socket)
+        socket._on_close = lambda: self._sockets.discard(socket)
+        return socket
+
     def remote_host(self, id: str) -> Haarness:
         """Full host gateway. Use workspace(project_id) for chats, files and PTYs."""
         return self._remote_runtime("/api/v1/remote-hosts/" + self.segment(id) + "/runtime")
@@ -293,6 +307,16 @@ class CloudChat:
 
 
 class AsyncHaarnessCloud(AsyncCloudApi):
+    async def router(self, id: str, *, api_key: str) -> AsyncHaarnessRouter:
+        return AsyncHaarnessRouter(gateway((await self.get_router(id))["routerUrl"]),token=api_key,timeout=self._timeout)
+
+    async def connect_remote_host(self, id: str, *, timeout: float | None = None) -> AsyncJsonSocket:
+        _, options = self.cloud_options(None, None, None)
+        socket = await AsyncJsonSocket.connect(self.base_url.replace("http", "ws", 1) + "/api/v1/remote-hosts/" + self.segment(id) + "/connect", {**self._headers(), **options["headers"]}, timeout or self._timeout)
+        self._sockets.add(socket)
+        socket._on_close = lambda: self._sockets.discard(socket)
+        return socket
+
     def remote_host(self, id: str) -> AsyncHaarness:
         """Full host gateway. Use workspace(project_id) for chats, files and PTYs."""
         return self._remote_runtime("/api/v1/remote-hosts/" + self.segment(id) + "/runtime")

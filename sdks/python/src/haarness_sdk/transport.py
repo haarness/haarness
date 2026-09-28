@@ -46,7 +46,7 @@ class ResyncEvent(TypedDict, total=False):
 ServerEvent = EventEnvelope | ResyncEvent
 
 
-def decode(response: httpx.Response, binary: bool = False) -> Any:
+def decode(response: httpx.Response, binary: bool = False, text: bool = False) -> Any:
     if not response.is_success:
         try:
             body = response.json()
@@ -55,6 +55,8 @@ def decode(response: httpx.Response, binary: bool = False) -> Any:
         raise ApiError(response.status_code, body)
     if binary:
         return response.content
+    if text:
+        return response.text
     if not response.content:
         return None
     try:
@@ -168,6 +170,7 @@ class Transport(Base):
         query: Any = None,
         binary_body: bool = False,
         binary_response: bool = False,
+        text_response: bool = False,
         options: RequestOptions | None = None,
     ) -> Any:
         try:
@@ -178,6 +181,7 @@ class Transport(Base):
                     **self._kwargs(body, query, binary_body, options),
                 ),
                 binary_response,
+                text_response,
             )
         except httpx.HTTPError as error:
             raise TransportError("Haarness request failed") from error
@@ -283,6 +287,7 @@ class AsyncTransport(Base):
         query: Any = None,
         binary_body: bool = False,
         binary_response: bool = False,
+        text_response: bool = False,
         options: RequestOptions | None = None,
     ) -> Any:
         try:
@@ -293,6 +298,7 @@ class AsyncTransport(Base):
                     **self._kwargs(body, query, binary_body, options),
                 ),
                 binary_response,
+                text_response,
             )
         except httpx.HTTPError as error:
             raise TransportError("Haarness request failed") from error
