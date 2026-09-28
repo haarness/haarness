@@ -84,6 +84,12 @@
 | `revoke_router_key` | `revokeRouterKey` | `DELETE /api/v1/router/keys/{keyId}` |
 | `rotate_router_key` | `rotateRouterKey` | `POST /api/v1/router/keys/{keyId}/rotate` |
 | `model_prices` | `modelPrices` | `GET /api/v1/router/model-prices` |
+| `list_routers` | `listRouters` | `GET /api/v1/routers` |
+| `create_router` | `createRouter` | `POST /api/v1/routers` |
+| `get_router` | `getRouter` | `GET /api/v1/routers/{id}` |
+| `delete_router` | `deleteRouter` | `DELETE /api/v1/routers/{id}` |
+| `update_router` | `updateRouter` | `PATCH /api/v1/routers/{id}` |
+| `set_router_credential` | `setRouterCredential` | `PUT /api/v1/routers/{id}/credentials/{provider}` |
 | `list_cloud_schedules` | `listCloudSchedules` | `GET /api/v1/schedules` |
 | `create_cloud_schedule` | `createCloudSchedule` | `POST /api/v1/schedules` |
 | `get_cloud_schedule` | `getCloudSchedule` | `GET /api/v1/schedules/{id}` |

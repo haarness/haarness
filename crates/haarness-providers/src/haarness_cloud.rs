@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 pub struct HaarnessCloudProvider {
     client: Client,
-    grant: Mutex<Option<(String, Option<String>, RouterSession)>>,
+    grant: Mutex<Option<(String, Option<String>, Option<String>, RouterSession)>>,
     models: RwLock<Option<([u8; 32], Arc<crate::live_models::LiveModels>)>>,
 }
 
@@ -179,7 +179,12 @@ impl HaarnessCloudProvider {
         if let Some(key) = self.client.config.api_key() {
             return Some(
                 Sha256::digest(
-                    serde_json::to_vec(&(self.client.config.api_url.as_str(), key)).ok()?,
+                    serde_json::to_vec(&(
+                        self.client.config.api_url.as_str(),
+                        key,
+                        self.client.config.selected_router().ok()?,
+                    ))
+                    .ok()?,
                 )
                 .into(),
             );
@@ -197,6 +202,7 @@ impl HaarnessCloudProvider {
                     credentials.api_url,
                     credentials.access_token,
                     self.client.config.selected_account(),
+                    self.client.config.selected_router().ok()?,
                 ))
                 .ok()?,
             )
@@ -228,19 +234,25 @@ impl HaarnessCloudProvider {
     async fn transport(&self) -> CoreResult<OpenAiCompatibleProvider> {
         let bearer = self.client.bearer(None).await.map_err(error)?;
         let account = self.client.config.selected_account();
+        let router = self.client.config.selected_router().map_err(error)?;
         let mut grant = self.grant.lock().await;
-        if grant.as_ref().is_none_or(|(token, selected, g)| {
-            token != &bearer
-                || selected != &account
-                || g.expires_at <= chrono::Utc::now() + chrono::Duration::seconds(30)
-        }) {
+        if grant
+            .as_ref()
+            .is_none_or(|(token, selected, selected_router, g)| {
+                token != &bearer
+                    || selected != &account
+                    || selected_router != &router
+                    || g.expires_at <= chrono::Utc::now() + chrono::Duration::seconds(30)
+            })
+        {
             *grant = Some((
                 bearer,
                 account,
+                router,
                 self.client.router_session().await.map_err(error)?,
             ));
         }
-        let g = &grant.as_ref().expect("grant initialized").2;
+        let g = &grant.as_ref().expect("grant initialized").3;
         haarness_account::safe_url(&g.router_url).map_err(error)?;
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())

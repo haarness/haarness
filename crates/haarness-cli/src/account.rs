@@ -23,6 +23,12 @@ pub struct AccountArgs {
     /// Switch the account used for Cloud models and sessions.
     #[arg(long)]
     pub select: Option<String>,
+    /// List the account’s Cloud routers.
+    #[arg(long)]
+    pub routers: bool,
+    /// Choose the Cloud router used by native model requests.
+    #[arg(long)]
+    pub router: Option<String>,
     /// Private Desktop bridge: one request on stdin; no project configuration.
     #[arg(long, hide = true)]
     pub rpc: bool,
@@ -216,6 +222,13 @@ pub async fn account(args: &AccountArgs) -> Result<()> {
     if let Some(id) = &args.select {
         client.select_account(id).await?;
     }
+    if let Some(id) = &args.router {
+        client.select_router(id).await?;
+    }
+    if args.routers {
+        println!("{}", client.routers().await?);
+        return Ok(());
+    }
     if args.billing {
         let state = client.billing_summary().await?;
         if args.json {
@@ -304,6 +317,8 @@ pub async fn rpc(client: &Client, input: Value) -> Result<Value> {
         .unwrap_or_default();
     Ok(match action {
         "status" => client.status().await?,
+        "routers" => client.routers().await?,
+        "select-router" => client.select_router(id(&input)?).await?,
         "billing-summary" => serde_json::to_value(client.billing_summary().await?)?,
         "logout" => {
             client.logout().await?;

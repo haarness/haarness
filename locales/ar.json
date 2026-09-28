@@ -1240,5 +1240,9 @@
   "Add credits": "Add credits",
   "Connected with HAARNESS_API_KEY. Manage its permissions and expiration in Cloud. Unset the environment variable to disconnect.": "متصل باستخدام HAARNESS_API_KEY. يمكنك إدارة الأذونات وتاريخ الانتهاء في Cloud. أزل متغير البيئة لقطع الاتصال.",
   "This API key does not include billing access.": "لا يتيح مفتاح API هذا الوصول إلى الفوترة.",
-  "This API key does not include Cloud session access.": "لا يتيح مفتاح API هذا الوصول إلى جلسات Cloud."
+  "This API key does not include Cloud session access.": "لا يتيح مفتاح API هذا الوصول إلى جلسات Cloud.",
+  "Cloud router": "موجّه Cloud",
+  "Your keys — no Cloud credits": "مفاتيحك — دون أرصدة Cloud",
+  "Cloud credits": "أرصدة Cloud",
+  "Applies to future Haarness Cloud model requests on this computer. Manage routers and provider keys in Cloud.": "ينطبق على طلبات نماذج Haarness Cloud المستقبلية على هذا الكمبيوتر. يمكنك إدارة الموجّهات ومفاتيح المزوّدين في Cloud."
 }

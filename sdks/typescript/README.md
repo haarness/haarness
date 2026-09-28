@@ -1,6 +1,6 @@
 # Haarness TypeScript SDK
 
-Unpublished, typed Node.js 22+ client for all 116 Haarness server operations and 126 Cloud operations,
+Unpublished, typed Node.js 22+ client for all 116 Haarness server operations and 146 Cloud HTTP operations,
 SSE events, PTY WebSockets, attachments and explicitly owned local servers.
 
 ```sh

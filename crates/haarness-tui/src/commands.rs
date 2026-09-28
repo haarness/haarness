@@ -328,6 +328,11 @@ pub const COMMANDS: &[CommandSpec] = &[
     ),
     command("status", &[], "Show server and thread status"),
     command(
+        "router",
+        &["routers"],
+        "Choose the Haarness Cloud router used on this computer",
+    ),
+    command(
         "billing",
         &["credits"],
         "Show Cloud plan and credits · /billing open|topup|usage",
@@ -2024,6 +2029,21 @@ impl App {
                 self.submit_connect_key(&value, client).await?;
                 Ok(AppAction::Continue)
             }
+            OverlayChoice::Option(OptionsKind::CloudRouter, value) => {
+                let account = haarness_account::Client::new(haarness_account::Config::from_env()?)?;
+                let router = account.select_router(&value).await?;
+                self.providers = client.refresh_providers().await?;
+                self.notice = format!(
+                    "Cloud router: {} · {}",
+                    router["name"].as_str().unwrap_or(""),
+                    if router["credentialMode"] == "byok" {
+                        "Your keys; no Cloud credits"
+                    } else {
+                        "Cloud credits"
+                    }
+                );
+                Ok(AppAction::Continue)
+            }
             OverlayChoice::Option(OptionsKind::ReasoningEffort, value) => {
                 self.set_reasoning_option(&value, client).await?;
                 Ok(AppAction::Continue)
@@ -2674,6 +2694,40 @@ impl App {
                     }
                 }
             }
+            "router" => {
+                let account = haarness_account::Client::new(haarness_account::Config::from_env()?)?;
+                let catalog = account.routers().await?;
+                let selected = account.config.selected_router()?;
+                let entries = catalog["items"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|router| OptionEntry {
+                        label: format!(
+                            "{}{}",
+                            if selected.as_deref() == router["id"].as_str()
+                                || (selected.is_none() && router["isDefault"] == true)
+                            {
+                                "✓ "
+                            } else {
+                                ""
+                            },
+                            router["name"].as_str().unwrap_or("Router")
+                        ),
+                        description: if router["credentialMode"] == "byok" {
+                            "Your provider keys · no Cloud credits".into()
+                        } else {
+                            "System provider keys · uses Cloud credits".into()
+                        },
+                        value: router["id"].as_str().unwrap_or_default().into(),
+                    })
+                    .collect();
+                self.open_overlay(Overlay::Options {
+                    title: "Cloud router on this computer".into(),
+                    kind: OptionsKind::CloudRouter,
+                    entries,
+                });
+            }
             "billing" => {
                 if arguments.is_empty() {
                     self.open_overlay(Overlay::Panel {
@@ -2947,7 +3001,8 @@ impl App {
     pub fn apply_option(&mut self, kind: OptionsKind, value: &str) {
         match kind {
             // Handled async in execute_choice; nothing to do here.
-            OptionsKind::InputQueue
+            OptionsKind::CloudRouter
+            | OptionsKind::InputQueue
             | OptionsKind::InputQueueActions
             | OptionsKind::InputQueueEdit
             | OptionsKind::Management

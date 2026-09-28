@@ -315,6 +315,30 @@ class CloudApi(Transport):
         """GET /api/v1/router/model-prices."""
         return cast("T.ModelPricesResponse", self.request('GET', f'/api/v1/router/model-prices', binary_body=False, binary_response=False, options=options))
 
+    def list_routers(self, query: T.ListRoutersQuery | None = None, *, options: RequestOptions | None = None) -> T.RoutersResponse:
+        """GET /api/v1/routers."""
+        return cast("T.RoutersResponse", self.request('GET', f'/api/v1/routers', query=query, binary_body=False, binary_response=False, options=options))
+
+    def create_router(self, body: T.CreateRouterRequest, *, options: RequestOptions | None = None) -> T.RouterDto:
+        """POST /api/v1/routers."""
+        return cast("T.RouterDto", self.request('POST', f'/api/v1/routers', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def get_router(self, id: str, *, options: RequestOptions | None = None) -> T.RouterDto:
+        """GET /api/v1/routers/{id}."""
+        return cast("T.RouterDto", self.request('GET', f'/api/v1/routers/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    def delete_router(self, id: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /api/v1/routers/{id}."""
+        return cast("None", self.request('DELETE', f'/api/v1/routers/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    def update_router(self, id: str, body: T.UpdateRouterRequest, *, options: RequestOptions | None = None) -> T.RouterDto:
+        """PATCH /api/v1/routers/{id}."""
+        return cast("T.RouterDto", self.request('PATCH', f'/api/v1/routers/{self.segment(id)}', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def set_router_credential(self, id: str, provider: str, body: T.SetRouterCredentialRequest, *, options: RequestOptions | None = None) -> T.RouterDto:
+        """PUT /api/v1/routers/{id}/credentials/{provider}."""
+        return cast("T.RouterDto", self.request('PUT', f'/api/v1/routers/{self.segment(id)}/credentials/{self.segment(provider)}', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
     def list_cloud_schedules(self, query: T.ListCloudSchedulesQuery | None = None, *, options: RequestOptions | None = None) -> T.Page_CloudScheduleDto:
         """GET /api/v1/schedules."""
         return cast("T.Page_CloudScheduleDto", self.request('GET', f'/api/v1/schedules', query=query, binary_body=False, binary_response=False, options=options))
@@ -863,6 +887,30 @@ class AsyncCloudApi(AsyncTransport):
     async def model_prices(self, *, options: RequestOptions | None = None) -> T.ModelPricesResponse:
         """GET /api/v1/router/model-prices."""
         return cast("T.ModelPricesResponse", await self.request('GET', f'/api/v1/router/model-prices', binary_body=False, binary_response=False, options=options))
+
+    async def list_routers(self, query: T.ListRoutersQuery | None = None, *, options: RequestOptions | None = None) -> T.RoutersResponse:
+        """GET /api/v1/routers."""
+        return cast("T.RoutersResponse", await self.request('GET', f'/api/v1/routers', query=query, binary_body=False, binary_response=False, options=options))
+
+    async def create_router(self, body: T.CreateRouterRequest, *, options: RequestOptions | None = None) -> T.RouterDto:
+        """POST /api/v1/routers."""
+        return cast("T.RouterDto", await self.request('POST', f'/api/v1/routers', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def get_router(self, id: str, *, options: RequestOptions | None = None) -> T.RouterDto:
+        """GET /api/v1/routers/{id}."""
+        return cast("T.RouterDto", await self.request('GET', f'/api/v1/routers/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    async def delete_router(self, id: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /api/v1/routers/{id}."""
+        return cast("None", await self.request('DELETE', f'/api/v1/routers/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    async def update_router(self, id: str, body: T.UpdateRouterRequest, *, options: RequestOptions | None = None) -> T.RouterDto:
+        """PATCH /api/v1/routers/{id}."""
+        return cast("T.RouterDto", await self.request('PATCH', f'/api/v1/routers/{self.segment(id)}', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def set_router_credential(self, id: str, provider: str, body: T.SetRouterCredentialRequest, *, options: RequestOptions | None = None) -> T.RouterDto:
+        """PUT /api/v1/routers/{id}/credentials/{provider}."""
+        return cast("T.RouterDto", await self.request('PUT', f'/api/v1/routers/{self.segment(id)}/credentials/{self.segment(provider)}', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     async def list_cloud_schedules(self, query: T.ListCloudSchedulesQuery | None = None, *, options: RequestOptions | None = None) -> T.Page_CloudScheduleDto:
         """GET /api/v1/schedules."""

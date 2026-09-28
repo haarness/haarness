@@ -1007,6 +1007,84 @@
     }
   },
   {
+    "name": "list_routers",
+    "method": "GET",
+    "path": "/api/v1/routers",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/RoutersResponse"
+    },
+    "query": {
+      "$ref": "#/components/schemas/ListRoutersQuery"
+    }
+  },
+  {
+    "name": "create_router",
+    "method": "POST",
+    "path": "/api/v1/routers",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/RouterDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/CreateRouterRequest"
+    }
+  },
+  {
+    "name": "get_router",
+    "method": "GET",
+    "path": "/api/v1/routers/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/RouterDto"
+    }
+  },
+  {
+    "name": "delete_router",
+    "method": "DELETE",
+    "path": "/api/v1/routers/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "update_router",
+    "method": "PATCH",
+    "path": "/api/v1/routers/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/RouterDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/UpdateRouterRequest"
+    }
+  },
+  {
+    "name": "set_router_credential",
+    "method": "PUT",
+    "path": "/api/v1/routers/{id}/credentials/{provider}",
+    "pathParams": [
+      "id",
+      "provider"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/RouterDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/SetRouterCredentialRequest"
+    }
+  },
+  {
     "name": "list_cloud_schedules",
     "method": "GET",
     "path": "/api/v1/schedules",

@@ -1240,5 +1240,9 @@
   "Add credits": "Add credits",
   "Connected with HAARNESS_API_KEY. Manage its permissions and expiration in Cloud. Unset the environment variable to disconnect.": "HAARNESS_API_KEY로 연결되었습니다. Cloud에서 권한과 만료일을 관리하세요. 연결을 해제하려면 환경 변수를 해제하세요.",
   "This API key does not include billing access.": "이 API 키에는 결제 정보 접근 권한이 없습니다.",
-  "This API key does not include Cloud session access.": "이 API 키에는 Cloud 세션 접근 권한이 없습니다."
+  "This API key does not include Cloud session access.": "이 API 키에는 Cloud 세션 접근 권한이 없습니다.",
+  "Cloud router": "Cloud 라우터",
+  "Your keys — no Cloud credits": "내 키 — Cloud 크레딧 미사용",
+  "Cloud credits": "Cloud 크레딧",
+  "Applies to future Haarness Cloud model requests on this computer. Manage routers and provider keys in Cloud.": "이 컴퓨터의 향후 Haarness Cloud 모델 요청에 적용됩니다. Cloud에서 라우터와 공급자 키를 관리하세요."
 }

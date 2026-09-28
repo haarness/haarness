@@ -12,6 +12,7 @@ type Account = {
   user?: { email?: string; displayName?: string };
   accounts?: { id: string; name: string }[];
   selectedAccountId?: string;
+  selectedRouterId?: string;
 };
 type CloudSession = {
   id: string;
@@ -19,6 +20,7 @@ type CloudSession = {
   agentSnapshot?: { name: string };
   workspace: { observedState: string };
 };
+type CloudRouter = { id: string; name: string; isDefault: boolean; credentialMode: string };
 type CloudAgent = { id: string; name: string };
 export function AccountMenu(props: {
   models?: boolean;
@@ -34,6 +36,7 @@ export function AccountMenu(props: {
   const [code, setCode] = createSignal("");
   const [workspaces, setWorkspaces] = createSignal<CloudSession[]>([]);
   const [name, setName] = createSignal("");
+  const [routers, setRouters] = createSignal<CloudRouter[]>([]);
   const [agents, setAgents] = createSignal<CloudAgent[]>([]);
   const [agentId, setAgentId] = createSignal("");
   const [configuration, setConfiguration] = createSignal("");
@@ -48,6 +51,16 @@ export function AccountMenu(props: {
     const result = await window.haarness.account({ action: "status" });
     if (!alive) return;
     setAccount(result);
+    if (result.loggedIn && open() && (result.authKind !== "api_key" || result.scopes?.includes("models:read"))) {
+      try {
+        const catalog = await window.haarness.account({ action: "routers" });
+        if (!alive) return;
+        setRouters(catalog.items ?? []);
+      } catch (cause) {
+        if (!alive) return;
+        setRouters([]); setError(String(cause));
+      }
+    } else setRouters([]);
     if (result.loggedIn && open() && (result.authKind !== "api_key" || result.scopes?.includes("workspaces:read"))) {
       const [spaces, templates] = await Promise.allSettled([
         window.haarness.account({ action: "sessions" }),
@@ -235,6 +248,19 @@ export function AccountMenu(props: {
                   </For>
                 </select>
               </label>
+            </Show>
+            <Show when={routers().length}>
+              <label>{t("Cloud router")}
+                <select aria-label={t("Cloud router")} value={account().selectedRouterId ?? routers().find(r => r.isDefault)?.id} disabled={busy()}
+                  onChange={event => { const id = event.currentTarget.value; void act(async () => {
+                    await window.haarness.account({ action: "select-router", id });
+                    await refresh();
+                    if (app.state.connection) await app.catalogs(true);
+                  }); }}>
+                  <For each={routers()}>{router => <option value={router.id}>{router.name} · {router.credentialMode === "byok" ? t("Your keys — no Cloud credits") : t("Cloud credits")}</option>}</For>
+                </select>
+              </label>
+              <p class="muted">{t("Applies to future Haarness Cloud model requests on this computer. Manage routers and provider keys in Cloud.")}</p>
             </Show>
             <Show when={account().authKind === "api_key"}><p class="muted">{t("Connected with HAARNESS_API_KEY. Manage its permissions and expiration in Cloud. Unset the environment variable to disconnect.")}</p></Show>
             <Show when={permits("billing:read")} fallback={<p class="muted">{t("This API key does not include billing access.")}</p>}>

@@ -529,7 +529,7 @@ function installHandlers() {
     return data().values[key] ?? null;
   });
   handle("account", async (win, raw: unknown) => {
-    const input = z.object({ action: z.enum(["status", "login", "cancel", "logout", "select", "workspaces", "create", "start", "stop", "agents", "sessions", "create-session", "session-start", "session-stop", "billing", "billing-state", "usage", "web"]), id: z.string().uuid().optional(), name: z.string().max(200).optional(), repo: z.string().max(2000).optional(), configuration: z.record(z.string(), z.unknown()).optional(), page: z.enum(["billing", "topup", "usage", "agents", "sessions", "session-settings"]).optional(), device: z.boolean().optional() }).strict().parse(raw);
+    const input = z.object({ action: z.enum(["status", "login", "cancel", "logout", "select", "routers", "select-router", "workspaces", "create", "start", "stop", "agents", "sessions", "create-session", "session-start", "session-stop", "billing", "billing-state", "usage", "web"]), id: z.string().uuid().optional(), name: z.string().max(200).optional(), repo: z.string().max(2000).optional(), configuration: z.record(z.string(), z.unknown()).optional(), page: z.enum(["billing", "topup", "usage", "agents", "sessions", "session-settings"]).optional(), device: z.boolean().optional() }).strict().parse(raw);
     if (input.action === "billing-state") return billingState();
     if (input.action === "cancel") { cancelAccountLogin(); return null; }
     if (input.action === "login") {
@@ -540,8 +540,8 @@ function installHandlers() {
       if (["logout", "select"].includes(input.action)) cancelAccountLogin();
       if (input.action === "logout") closeCloudConnections();
       const result = await accountRequest(input);
-      if (!["logout", "select"].includes(input.action)) return result;
-      closeCloudConnections();
+      if (!["logout", "select", "select-router"].includes(input.action)) return result;
+      if (input.action !== "select-router") closeCloudConnections();
     }
     await Promise.allSettled([...connections.values()].filter(c => !c.view.remote).map(c => c.client.refreshProviders()));
     startBillingWatch(state => broadcast({ kind: "menu", data: { action: "account-billing", state } }));

@@ -1240,5 +1240,9 @@
   "Add credits": "Add credits",
   "Connected with HAARNESS_API_KEY. Manage its permissions and expiration in Cloud. Unset the environment variable to disconnect.": "已透過 HAARNESS_API_KEY 連線。請在 Cloud 中管理其權限和有效期限。取消設定此環境變數即可中斷連線。",
   "This API key does not include billing access.": "此 API 金鑰沒有帳單存取權限。",
-  "This API key does not include Cloud session access.": "此 API 金鑰沒有 Cloud 工作階段存取權限。"
+  "This API key does not include Cloud session access.": "此 API 金鑰沒有 Cloud 工作階段存取權限。",
+  "Cloud router": "Cloud 路由器",
+  "Your keys — no Cloud credits": "使用自己的金鑰 — 不消耗 Cloud 點數",
+  "Cloud credits": "Cloud 點數",
+  "Applies to future Haarness Cloud model requests on this computer. Manage routers and provider keys in Cloud.": "適用於此電腦上後續的 Haarness Cloud 模型請求。請在 Cloud 中管理路由器和供應商金鑰。"
 }

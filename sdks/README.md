@@ -255,7 +255,7 @@ URLs, HTTP redirects are not followed, and PTY authentication uses headers.
 ## Cloud accounts, sessions and chats
 
 `HaarnessCloud` (TypeScript/Python) and `AsyncHaarnessCloud` (Python) expose all
-127 documented Cloud operations: 126 HTTP methods plus the account WebSocket.
+147 documented Cloud operations: 146 HTTP methods plus the account WebSocket.
 This includes identity/OAuth, plans and wallets, billing, API keys and model usage,
 marketplace, devices, reusable agents, session lifecycle and schedules.
 See [Cloud methods](CLOUD-OPERATIONS.md) and [Cloud schema](cloud-openapi.json).
@@ -363,6 +363,53 @@ The native app also exposes typed `cloudAgents`, `cloudSessions`, `cloudChats`
 and `cloudSchedules` methods (snake_case in Python) through its signed-in host
 adapter. These use the same intent and permission boundary as the model tools.
 The host's `workspace(id)` helper scopes native methods to an opened workspace.
+
+## Cloud routers and provider keys
+
+Every account has a default router. Additional routers share the inference service
+and have their own model allowlist and provider credentials. `system` uses Cloud
+credits; `byok` uses your upstream provider account and consumes no Cloud credits
+for model requests. Cloud session compute is billed separately. A BYOK router
+never falls back to system credentials when a key is missing or fails.
+
+```ts
+const { items } = await cloud.listRouters({ accountId });
+let router = await cloud.createRouter({
+  accountId, name: "My OpenAI", credentialMode: "byok",
+  modelAllowlist: ["openai/gpt-4.1-nano"],
+});
+router = await cloud.setRouterCredential(router.id, "openai", {
+  revision: router.revision, apiKey: providerApiKey,
+});
+// Use router.routerUrl as an OpenAI-compatible client's base URL,
+// with your Haarness API key as that client's api_key.
+```
+
+```python
+routers = cloud.list_routers({"accountId": account_id})["items"]
+router = cloud.create_router({
+    "accountId": account_id, "name": "My OpenAI", "credentialMode": "byok",
+    "modelAllowlist": ["openai/gpt-4.1-nano"],
+})
+router = cloud.set_router_credential(router["id"], "openai", {
+    "revision": router["revision"], "apiKey": provider_api_key,
+})
+```
+
+Keep the returned revision for the next update; stale writes return 409. Provider
+keys are write-only. Explicit `apiKey: null` (Python `None`) removes a key;
+omitting `apiKey` is rejected. `getRouter`, `updateRouter`, and `deleteRouter`
+(snake_case in Python) complete the management surface. The default cannot be
+deleted. Management requires the account's admin role and `routers:write` for API
+keys; discovery requires `models:read`, inference requires `models:invoke`.
+
+The returned `routerUrl` includes `/routers/{id}/v1`; append `/models` or
+`/chat/completions` once. The standard `/v1` endpoint uses the default router.
+An explicit `x-haarness-router-id` header also selects a router; conflicting URL
+and header IDs fail. Usage records include `routerId` and `credentialMode`, and
+BYOK catalog prices represent zero Cloud cost. Account WebSocket events use
+`entity: "router"`. Native users can select with `haarness account --router UUID`,
+TUI `/router`, or Desktop's Cloud router selector.
 
 ## Cloud schedules
 

@@ -18,3 +18,7 @@ For MCP, consult current official docs before selecting a public endpoint. Previ
 Use varied LLM prompts to select a skill, call an MCP tool, and delegate through an installed agent. Verify real tool traces and outputs, not prose claims. Check CLI/SDK parity and use Desktop Electron tests for native installation. For browser file-picker failures, report the exact unverified UI step separately from a successful binary upload API test.
 
 Record installed IDs, artifact versions/hashes, session/chat IDs, actual tool names and output proof. Remove only test submissions/installs/resources using normal reversible lifecycle operations.
+
+## Explore beyond this guide
+
+Treat the documented flows as a starting point. Do not hesitate to test relevant behavior that is not documented here: inspect the current implementation, follow unexpected results, and cover interactions and failure paths suggested by the task. Stay within the authorized environment and scope. Fix discovered bugs when authorized, verify the fixes, and record newly validated steps and remaining gaps so this skill improves with use.
