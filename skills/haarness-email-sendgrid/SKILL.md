@@ -49,6 +49,23 @@ Use only the mailbox explicitly authorized by the user. Identify it in their Gma
 
 Run an isolated API/worker fixture or an explicitly selected test environment with the real notifier. Do not switch a shared fixture stack to SendGrid while it has queued `example.invalid` or fixture-user recipients. For queued tests, scope every send to the authorized recipient and stop the owned worker afterward. A notification's `sent` state and SendGrid HTTP 202 mean provider acceptance, not confirmed delivery.
 
+Two opt-in fixtures are available in Cloud. Neither runs during the normal suite:
+
+```sh
+# Provide real SendGrid settings and the disposable test database in the process environment.
+# Choose an absent stop-file path first. The API listens on 19188; Vite uses 19189.
+HAARNESS_EMAIL_TEST_STOP_FILE=/absolute/private/path/email-test.stop \
+  cargo test -p cloud-api --test email_accounts live_sendgrid_browser_fixture -- --ignored --exact --nocapture
+# Set HAARNESS_EMAIL_TEST_RECIPIENT to the authorized mailbox and HAARNESS_EMAIL_TEST_RUN to a unique label.
+cargo test -p cloud-worker --test job_loop live_sendgrid_queued_notifications -- --ignored --exact --nocapture
+```
+
+Start Vite with `HAARNESS_CLOUD_API_ORIGIN=http://127.0.0.1:19188 npm --prefix web run dev -- --port 19189`.
+Create the configured stop file when finished. Require a zero test exit and removal of the printed owned
+schema. Interrupting Cargo can skip Rust destructors, so Ctrl-C alone is not cleanup proof. The browser
+fixture has a 45-minute deadline as a fallback. If a run crashes, verify the exact printed schema and test
+account before deleting that schema; never sweep unrelated `test_*` schemas. Stop the owned frontend too.
+
 Exercise signup from the web, inspect the arriving message and its original headers in Gmail, follow the unchanged verification link, finish signup, sign in, request reset, follow that message, and prove the old password no longer works. Check expired/reused links and provider rejection using the hermetic suite rather than repeatedly sending real emails. Per-address mail requests are limited to five per 15 minutes.
 
 For each operational kind, exercise the producer in a disposable funded/unfunded session fixture where feasible; otherwise identify the narrower queue-only proof explicitly. Inspect subject/body and confirm arrival. In Gmail's original headers require aligned DKIM and DMARC/SPF results for `haarness.ai`; a message in spam or merely accepted by SendGrid is not an inbox-delivery success. Inspect SendGrid activity for rejected, bounced, or deferred messages before retrying.
