@@ -327,6 +327,10 @@ class CloudApi(Transport):
         """GET /api/v1/router/model-prices."""
         return cast("T.ModelPricesResponse", self.request('GET', f'/api/v1/router/model-prices', binary_body=False, binary_response=False, options=options))
 
+    def router_providers(self, *, options: RequestOptions | None = None) -> T.RouterProvidersResponse:
+        """GET /api/v1/router/providers."""
+        return cast("T.RouterProvidersResponse", self.request('GET', f'/api/v1/router/providers', binary_body=False, binary_response=False, options=options))
+
     def list_routers(self, query: T.ListRoutersQuery | None = None, *, options: RequestOptions | None = None) -> T.RoutersResponse:
         """GET /api/v1/routers."""
         return cast("T.RoutersResponse", self.request('GET', f'/api/v1/routers', query=query, binary_body=False, binary_response=False, options=options))
@@ -935,6 +939,10 @@ class AsyncCloudApi(AsyncTransport):
     async def model_prices(self, *, options: RequestOptions | None = None) -> T.ModelPricesResponse:
         """GET /api/v1/router/model-prices."""
         return cast("T.ModelPricesResponse", await self.request('GET', f'/api/v1/router/model-prices', binary_body=False, binary_response=False, options=options))
+
+    async def router_providers(self, *, options: RequestOptions | None = None) -> T.RouterProvidersResponse:
+        """GET /api/v1/router/providers."""
+        return cast("T.RouterProvidersResponse", await self.request('GET', f'/api/v1/router/providers', binary_body=False, binary_response=False, options=options))
 
     async def list_routers(self, query: T.ListRoutersQuery | None = None, *, options: RequestOptions | None = None) -> T.RoutersResponse:
         """GET /api/v1/routers."""

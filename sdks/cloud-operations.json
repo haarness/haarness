@@ -1060,6 +1060,15 @@
     }
   },
   {
+    "name": "router_providers",
+    "method": "GET",
+    "path": "/api/v1/router/providers",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/RouterProvidersResponse"
+    }
+  },
+  {
     "name": "list_routers",
     "method": "GET",
     "path": "/api/v1/routers",
