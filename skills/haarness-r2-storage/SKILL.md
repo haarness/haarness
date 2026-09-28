@@ -34,7 +34,10 @@ Set these only in a private environment file or deployment secret store:
 - `HAARNESS_CLOUD_S3_ACCESS_KEY`, `HAARNESS_CLOUD_S3_SECRET_KEY`
 
 Do not put production credentials in the development environment. Keep private files mode 0600 and out
-of Git; do not print expanded Compose configuration. Do not enable wildcard CORS speculatively: current
+of Git; do not print expanded Compose configuration. The primary Cloud checkout retains separate S3-only
+configuration in `.local/r2/dev.env` and `.local/r2/prod.env`; `.env` uses the development key. Check the
+selected bucket and credential scope before reuse, without printing secrets. A saved production file is
+not evidence that a production runtime has been configured. Do not enable wildcard CORS speculatively: current
 web uploads go through Haarness's API. Add narrowly scoped CORS only if an actual browser consumer needs it.
 Keep the default rule aborting abandoned multipart uploads after seven days.
 
@@ -63,8 +66,9 @@ profile tenant isolation, release checksum rejection, immutable publication, rol
 The API scenarios use an isolated database, so they do not publish releases to the production application.
 
 After provisioning a scoped credential, set `HAARNESS_R2_FORBIDDEN_BUCKET` to the *other Haarness environment*
-and run this dedicated check. It must receive an authorization failure for read/write there, while the
-positive tests above must succeed in the intended bucket. Do not target another application's bucket.
+and run this dedicated check. HEAD, GET, PUT and DELETE must each receive explicit 403/Forbidden permission
+denial; a timeout, network error or not-found response is not isolation proof. The positive tests above
+must succeed in the intended bucket. Do not target another application's bucket.
 
 ```sh
 cargo test -p cloud-integrations --test object_store_s3 live_r2_bucket_isolation -- --ignored --exact --nocapture
