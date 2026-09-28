@@ -95,10 +95,10 @@ curl -fsSL http://127.0.0.1:19080/install.sh | \
 
 Default destinations: CLI `~/.local/bin`, macOS Desktop `~/Applications`, Linux
 Desktop `~/.local/bin/Haarness.AppImage`, Windows CLI `%LOCALAPPDATA%\Haarness\bin`.
-The canonical production command is `curl -fsSL https://app.haarness.dev/install.sh | sh`;
+The canonical production command is `curl -fsSL https://app.haarness.ai/install.sh | sh`;
 it is usable only after DNS, API deployment and stable publication are verified.
 For Desktop add `HAARNESS_PRODUCT=desktop` to the `sh` environment. Windows uses
-`irm https://app.haarness.dev/install.ps1 | iex` with equivalent environment variables.
+`irm https://app.haarness.ai/install.ps1 | iex` with equivalent environment variables.
 
 The installer checks SHA-256 before replacing/running anything. On macOS it uses
 `/usr/bin/xattr -dr com.apple.quarantine` on the verified staged executable/app,

@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$Base = if ($env:HAARNESS_RELEASE_URL) { $env:HAARNESS_RELEASE_URL.TrimEnd('/') } else { 'https://app.haarness.dev' }
+$Base = if ($env:HAARNESS_RELEASE_URL) { $env:HAARNESS_RELEASE_URL.TrimEnd('/') } else { 'https://app.haarness.ai' }
 $Uri = [Uri]$Base
 if ($Uri.Scheme -ne 'https' -and -not ($Uri.Scheme -eq 'http' -and $Uri.IsLoopback)) { throw 'Release URL requires HTTPS' }
 $Channel = if ($env:HAARNESS_CHANNEL) { $env:HAARNESS_CHANNEL } else { 'stable' }

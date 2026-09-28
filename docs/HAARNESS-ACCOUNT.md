@@ -129,7 +129,7 @@ Create/start/stop return once the operation is accepted. Use `list` to check its
 
 CLI and Desktop use the same account client: PKCE with a loopback callback, or device authorization, rotating refresh tokens, a single retry after a rejected access token, and an OS file lock across processes. Credentials are written atomically with owner-only permissions. Account refresh tokens are never passed to a workspace, renderer, project configuration or model provider upstream.
 
-The default issuer is `https://app.haarness.dev`. Credentials use `~/.config/haarness-cloud` (or `$XDG_CONFIG_HOME/haarness-cloud`), shared with `haarness-cloud`. An explicit `HAARNESS_CLOUD_CONFIG_DIR` overrides this; when `HAARNESS_DATA_DIR` is set, native Haarness defaults to its `config/account` directory for isolated development. Set the explicit Cloud config directory when mixing both CLIs in such an isolated environment. `--data-dir` changes runtime data, not the global account.
+The default issuer is `https://app.haarness.ai`. Credentials use `~/.config/haarness-cloud` (or `$XDG_CONFIG_HOME/haarness-cloud`), shared with `haarness-cloud`. An explicit `HAARNESS_CLOUD_CONFIG_DIR` overrides this; when `HAARNESS_DATA_DIR` is set, native Haarness defaults to its `config/account` directory for isolated development. Set the explicit Cloud config directory when mixing both CLIs in such an isolated environment. `--data-dir` changes runtime data, not the global account.
 
 For local development, set `HAARNESS_CLOUD_API_URL` to the API's loopback URL and optionally `HAARNESS_CLOUD_WEB_ORIGIN` when the web UI is on a separate origin. Only HTTPS and loopback HTTP are accepted for account/router traffic; token-bearing requests do not follow redirects.
 

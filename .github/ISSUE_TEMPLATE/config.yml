@@ -1,11 +1,11 @@
 blank_issues_enabled: false
 contact_links:
   - name: Report a security vulnerability
-    url: https://haarness.dev/security
+    url: https://haarness.ai/security
     about: Please report security problems privately, never in a public issue (see SECURITY.md).
   - name: Documentation
-    url: https://haarness.dev/docs
+    url: https://haarness.ai/docs
     about: Guides and reference for the CLI, TUI, Desktop, server and SDKs.
   - name: Haarness Cloud account or billing
-    url: https://haarness.dev/support
+    url: https://haarness.ai/support
     about: Questions about a hosted account go to Haarness Cloud support.

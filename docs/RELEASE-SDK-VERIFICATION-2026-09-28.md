@@ -91,8 +91,9 @@ Installed fixtures retained for inspection:
 
 This is complete **local macOS ARM64 release proof**, not a production or six-platform pass.
 
-- `app.haarness.dev` did not resolve during final validation, so the public curl command is
-  prepared but cannot work there until DNS, Cloud deployment/storage and publication exist.
+- The initial release validation used an incorrect public hostname. The canonical domain
+  is `haarness.ai` (Cloud API: `app.haarness.ai`); public deployment and publication were
+  not verified by this local release run.
 - Native [release workflow](https://github.com/orex-haarness/haarness/actions/runs/36393744069)
   and [Cloud CI](https://github.com/orex-haarness/haarness-cloud/actions/runs/36388959499)
   failed before executing steps: GitHub reports failed account payments or a spending limit.

@@ -9,14 +9,14 @@ Haarness is a durable agentic coding harness written in Rust. A versioned REST/S
 Once the public release service is deployed and a stable release is published:
 
 ```sh
-curl -fsSL https://app.haarness.dev/install.sh | sh
+curl -fsSL https://app.haarness.ai/install.sh | sh
 # Desktop (macOS/Linux):
-curl -fsSL https://app.haarness.dev/install.sh | HAARNESS_PRODUCT=desktop sh
+curl -fsSL https://app.haarness.ai/install.sh | HAARNESS_PRODUCT=desktop sh
 # Upgrade an installed CLI:
 haarness upgrade
 ```
 
-Windows: `irm https://app.haarness.dev/install.ps1 | iex`; set
+Windows: `irm https://app.haarness.ai/install.ps1 | iex`; set
 `$env:HAARNESS_PRODUCT='desktop'` first for the Desktop installer. Installers verify
 SHA-256 before replacement. macOS curl installations clear quarantine on the verified
 payload, including nested Desktop executables. Use `HAARNESS_CHANNEL=preview` for

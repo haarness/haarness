@@ -1616,7 +1616,7 @@ pub fn migrate_toml(config_toml: &Path, notices: &mut Vec<String>) -> Result<()>
     let mut json = serde_json::Map::new();
     json.insert(
         "$schema".into(),
-        Value::String("https://haarness.dev/schema/config.json".into()),
+        Value::String("https://haarness.ai/schema/config.json".into()),
     );
     if let Some(defaults) = parsed.get("defaults").and_then(toml::Value::as_table) {
         if let (Some(provider), Some(model)) = (
