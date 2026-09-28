@@ -379,6 +379,10 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: ExtensionAr
 }
 
 async fn install_npm(paths: &Paths, spec: &str) -> Result<PathBuf> {
+    install_npm_source(paths, spec, npm_package_name(spec)?).await
+}
+
+fn npm_package_name(spec: &str) -> Result<&str> {
     if spec.is_empty()
         || spec.starts_with('-')
         || !spec
@@ -398,6 +402,12 @@ async fn install_npm(paths: &Paths, spec: &str) -> Result<PathBuf> {
     {
         bail!("invalid npm package name");
     }
+    Ok(name)
+}
+
+// A mirrored marketplace package is passed as a verified local tarball. Bun may
+// resolve its dependencies, but never re-fetches the top-level package by name.
+async fn install_npm_source(paths: &Paths, source: &str, name: &str) -> Result<PathBuf> {
     let root = paths
         .data
         .join("extensions/packages")
@@ -406,7 +416,13 @@ async fn install_npm(paths: &Paths, spec: &str) -> Result<PathBuf> {
     std::fs::write(root.join("package.json"), "{\"private\":true}")?;
     let mut command = tokio::process::Command::new(haarness_extensions::bun()?);
     command
-        .args(["add", "--ignore-scripts", "--no-progress", "--exact", spec])
+        .args([
+            "add",
+            "--ignore-scripts",
+            "--no-progress",
+            "--exact",
+            source,
+        ])
         .current_dir(&root)
         .env_remove("NODE_OPTIONS")
         .env_remove("BUN_OPTIONS")
@@ -462,6 +478,7 @@ pub async fn marketplace_install(
     input: &serde_json::Value,
     old: Option<&serde_json::Value>,
     receipt_file: &Path,
+    archive: Option<&Path>,
 ) -> Result<serde_json::Value> {
     use anyhow::ensure;
     use serde_json::json;
@@ -476,32 +493,52 @@ pub async fn marketplace_install(
     let (package_name, version) = spec
         .rsplit_once('@')
         .context("Marketplace extensions require an exact package version")?;
+    npm_package_name(spec)?;
     semver::Version::parse(version)
         .context("Marketplace extensions require an exact package version")?;
     let integrity = package["integrity"]
         .as_str()
         .filter(|s| s.starts_with("sha512-"))
         .context("Marketplace extensions require SHA-512 integrity")?;
-    let source = install_npm(paths, spec).await?;
+    let source = if let Some(archive) = archive {
+        install_npm_source(
+            paths,
+            archive.to_str().context("Invalid package archive path")?,
+            package_name,
+        )
+        .await?
+    } else {
+        // Compatibility with catalogs published before R2-backed npm artifacts.
+        install_npm(paths, spec).await?
+    };
     // Verify the catalog's digest before executing the extension initializer.
     let install_root = source
         .ancestors()
         .find(|p| p.join("bun.lock").is_file())
         .context("Missing npm installation lock")?;
     let package_root = install_root.join("node_modules").join(package_name);
-    let lock_text = std::fs::read_to_string(install_root.join("bun.lock"))?;
-    let lock =
-        jsonc_parser::parse_to_serde_value::<serde_json::Value>(&lock_text, &Default::default())?;
-    let pinned = &lock["packages"][package_name];
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(package_root.join("package.json"))?)?;
     ensure!(
-        pinned
-            .as_array()
-            .is_some_and(
-                |items| items.first().and_then(serde_json::Value::as_str) == Some(spec)
-                    && items.iter().any(|v| v == integrity)
-            ),
-        "Installed npm package does not match marketplace integrity"
+        metadata["name"] == package_name && metadata["version"] == version,
+        "Installed package identity does not match marketplace version"
     );
+    if archive.is_none() {
+        let lock_text = std::fs::read_to_string(install_root.join("bun.lock"))?;
+        let lock = jsonc_parser::parse_to_serde_value::<serde_json::Value>(
+            &lock_text,
+            &Default::default(),
+        )?;
+        let pinned = &lock["packages"][package_name];
+        ensure!(
+            pinned.as_array().is_some_and(|items| items
+                .first()
+                .and_then(serde_json::Value::as_str)
+                == Some(spec)
+                && items.iter().any(|v| v == integrity)),
+            "Installed npm package does not match marketplace integrity"
+        );
+    }
     let path = scoped_config_path(paths, workspace, local);
     let _lock = crate::desktop::editor_lock(&paths.data, "extensions")?;
     let previous = std::fs::read(&path).ok();

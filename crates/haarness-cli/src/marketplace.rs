@@ -181,24 +181,9 @@ pub async fn catalog(path: &str, query: &[(&str, String)]) -> Result<Value> {
             "Cloud catalog request failed ({})",
             response.status()
         );
-        let mut result: Value = response.json().await?;
-        if path.ends_with("/install-manifest") && result["artifact"].is_object() {
-            let id = result["resource"]["id"]
-                .as_str()
-                .context("Missing catalog resource id")?;
-            uuid::Uuid::parse_str(id)?;
-            let version = result["version"]["number"]
-                .as_u64()
-                .context("Missing catalog version")?;
-            result["artifact"]["url"] = json!(
-                reqwest::Url::parse(&base)?
-                    .join(&format!(
-                        "api/v1/marketplace/resources/{id}/artifact?version={version}"
-                    ))?
-                    .to_string()
-            );
-        }
-        return Ok(result);
+        // The authorized manifest carries a short-lived object-store URL.
+        // Preserve it for Cloud runtimes too; never forward runtime credentials to R2.
+        return Ok(response.json().await?);
     }
     let config = haarness_account::Config::from_env()?;
     let mut url = config.api_url.join(path)?;
@@ -341,7 +326,7 @@ async fn download(url: &str, limit: usize) -> Result<Vec<u8>> {
                 .bearer_auth(token);
         }
     }
-    let mut response = request.send().await?;
+    let mut response = request.send().await.map_err(reqwest::Error::without_url)?;
     ensure!(
         response.status().is_success(),
         "Marketplace download failed ({})",
@@ -352,7 +337,11 @@ async fn download(url: &str, limit: usize) -> Result<Vec<u8>> {
         "Download exceeds size limit"
     );
     let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(reqwest::Error::without_url)?
+    {
         ensure!(
             bytes.len().saturating_add(chunk.len()) <= limit,
             "Download exceeds size limit"
@@ -646,12 +635,26 @@ pub async fn install(
     let result = async {
         let unpacked = stage.join("unpacked");
         fs::create_dir(&unpacked)?;
-        if let Some(artifact) = manifest.get("artifact").filter(|v| !v.is_null()) {
+        let mut npm_archive = None;
+        let artifact = if kind == "extension" {
+            manifest["install"]["extension"].get("artifact").filter(|v| !v.is_null())
+                .or_else(|| manifest.get("artifact").filter(|v| !v.is_null()))
+        } else { manifest.get("artifact").filter(|v| !v.is_null()) };
+        if let Some(artifact) = artifact {
             let bytes = download(artifact["url"].as_str().context("Missing artifact URL")?, MAX_ARCHIVE).await?;
             ensure!(artifact["sizeBytes"].as_u64() == Some(bytes.len() as u64), "Artifact size mismatch");
             ensure!(artifact["sha256"].as_str() == Some(format!("{:x}", Sha256::digest(&bytes)).as_str()), "Artifact checksum mismatch");
-            let destination=unpacked.clone();
-            tokio::task::spawn_blocking(move || extract(&bytes,&destination)).await??;
+            if kind == "extension" {
+                use base64::Engine as _;
+                let integrity = format!("sha512-{}", base64::engine::general_purpose::STANDARD.encode(sha2::Sha512::digest(&bytes)));
+                ensure!(manifest["install"]["extension"]["integrity"] == integrity, "Extension package integrity mismatch");
+                let path = stage.join("package.tgz");
+                fs::write(&path, bytes)?;
+                npm_archive = Some(path);
+            } else {
+                let destination=unpacked.clone();
+                tokio::task::spawn_blocking(move || extract(&bytes,&destination)).await??;
+            }
         } else { ensure!(matches!(kind,"mcp"|"extension"), "This resource requires an artifact"); }
         let (source, target) = match kind {
             "skill" => {
@@ -678,7 +681,16 @@ pub async fn install(
                 // A dedicated, discoverable bundle owns config and optional support files.
                 // This lets unload remove the whole server without losing its settings.
                 let bundle = stage.join("bundle");
-                fs::rename(&unpacked, &bundle)?;
+                // The catalog scanner accepts a single enclosing ZIP directory.
+                // Keep CLAUDE_PLUGIN_ROOT relative to the same .mcp.json directory.
+                let mut source = unpacked.clone();
+                if !source.join(".mcp.json").is_file() {
+                    let entries = fs::read_dir(&source)?.collect::<std::io::Result<Vec<_>>>()?;
+                    if entries.len() == 1 && entries[0].path().join(".mcp.json").is_file() {
+                        source = entries[0].path();
+                    }
+                }
+                fs::rename(&source, &bundle)?;
                 let mut config = manifest["install"]["mcp"]["config"].clone();
                 ensure!(config.is_object(), "MCP configuration must be an object");
                 substitute(&mut config, input.get("values").unwrap_or(&Value::Null))?;
@@ -688,7 +700,7 @@ pub async fn install(
                 haarness_profiles::write(&bundle.join(".mcp.json"), &serde_json::to_vec_pretty(&json!({"mcpServers":{name:config}}))?, true)?;
                 (bundle, root.join(if local {"plugins"} else {"plugins/local"}).join(format!("mcp-{name}")))
             }
-            "extension" => return crate::extensions::marketplace_install(paths, workspace, trust, local, manifest, input, old.as_ref(), &receipt_file).await,
+            "extension" => return crate::extensions::marketplace_install(paths, workspace, trust, local, manifest, input, old.as_ref(), &receipt_file, npm_archive.as_deref()).await,
             _ => unreachable!(),
         };
         let _lock = crate::desktop::editor_lock(&paths.data, "marketplace")?;
@@ -814,6 +826,82 @@ mod tests {
             json!({"manifestVersion":1,"resource":{"id":id,"kind":kind,"slug":"demo","name":"Demo"},"version":{"id":version,"number":1,"status":"approved","yanked":false},"compatibility":{"platforms":[]},"capabilities":{},"artifact":{"url":format!("http://{address}/artifact"),"sizeBytes":size,"sha256":sha},"install":{kind:{}},"lock":{"resourceId":id,"versionId":version}}),
             server,
         )
+    }
+
+    #[tokio::test]
+    async fn mcp_support_files_keep_the_same_bundle_root_with_or_without_a_zip_wrapper() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-mcp-bundle-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let paths = Paths::new(Some(&root.join("data"))).unwrap();
+        for (index, prefix) in ["", "wrapped/"].into_iter().enumerate() {
+            let workspace = root.join(format!("workspace-{index}"));
+            fs::create_dir_all(&workspace).unwrap();
+            let config = json!({"command":"python3", "args":["${CLAUDE_PLUGIN_ROOT}/server.py"]});
+            let bytes = archive(&[
+                (
+                    &format!("{prefix}.mcp.json"),
+                    &json!({"mcpServers":{"demo":config}}).to_string(),
+                ),
+                (&format!("{prefix}server.py"), "print('MCP_BUNDLE_PROOF')"),
+            ]);
+            let (mut manifest, server) = manifest("mcp", bytes).await;
+            manifest["install"]["mcp"] = json!({"config":config});
+            let receipt = install(
+                &paths,
+                &workspace,
+                true,
+                &manifest,
+                &json!({"scope":"local"}),
+            )
+            .await
+            .unwrap();
+            let bundle = Path::new(receipt["path"].as_str().unwrap());
+            assert_eq!(
+                fs::read_to_string(bundle.join("server.py")).unwrap(),
+                "print('MCP_BUNDLE_PROOF')"
+            );
+            let installed: Value =
+                serde_json::from_slice(&fs::read(bundle.join(".mcp.json")).unwrap()).unwrap();
+            assert_eq!(installed["mcpServers"]["demo"], config);
+            assert!(!bundle.join("wrapped").exists());
+            server.abort();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn mirrored_extension_checks_integrity_before_running_package_manager() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-marketplace-integrity-{}",
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let paths = Paths::new(Some(&root.join("data"))).unwrap();
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let (mut manifest, server) = manifest("extension", b"tampered npm package".to_vec()).await;
+        manifest["install"]["extension"] =
+            json!({"extension_type":"core", "npm_spec":"demo@1.0.0", "integrity":"sha512-wrong"});
+        let error = install(
+            &paths,
+            &workspace,
+            true,
+            &manifest,
+            &json!({"scope":"local"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("integrity mismatch"));
+        assert!(
+            !paths.data.join("extensions/packages").exists(),
+            "must fail before Bun runs"
+        );
+        assert_eq!(installed(&paths, &workspace, true).unwrap(), json!([]));
+        server.abort();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
