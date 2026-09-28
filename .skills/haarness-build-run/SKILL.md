@@ -15,6 +15,7 @@ Run commands from the repository containing `Cargo.toml` and `apps/desktop`, not
 | Electron main/preload | Use the same dev process; restart its Electron instance when needed |
 | TypeScript SDK | Build `sdks/typescript`, then use Desktop dev; reinstall only if dependencies changed |
 | Rust CLI/TUI/server | `cargo build -p haarness-cli`, then run the new binary; restart the affected development daemon if backend code changed |
+| Remote hosts/published chats/Cloud relay | Use the [remote-access testing skill](../../skills/haarness-remote-access/SKILL.md) with matching native/Cloud versions; include Chrome, tmux and reconnect proof for user-facing changes |
 | One Rust library | `cargo check -p` or `cargo test -p` for that crate before building the app if needed |
 | Installer/release requested | Follow [Desktop packaging](../../docs/DESKTOP.md#package-and-launch) using the correct binaries and Bun version |
 

@@ -5,7 +5,9 @@ description: Verify Haarness Cloud agents, independent sessions, multiple chats 
 
 # Sessions, chats and Cloud schedules
 
-Read `haarness-cloud/docs/CLOUD-SCHEDULES.md`, `haarness/docs/CLOUD-SDK-VERIFICATION-2026-09-27.md` and the native build skill. Use disposable names/IDs and keep a cleanup manifest. A Cloud session owns the machine, workspace and filesystem. Chats own conversation histories and turns inside that session. An agent is an optional reusable template. Local schedules and Cloud worker schedules are separate products.
+Read `haarness-cloud/docs/CLOUD-SCHEDULES.md`, `haarness/docs/CLOUD-SDK-VERIFICATION-2026-09-27.md` and the native build skill. Use disposable names/IDs and keep a cleanup manifest. A rented Cloud session owns the machine, workspace and filesystem. Chats own conversation histories and turns inside that session. An agent is an optional reusable template. Local schedules and Cloud worker schedules are separate products.
+
+For user-owned machines, remote hosts or published native chats, use the [remote-access skill](../haarness-remote-access/SKILL.md). A published remote session is a sharing record for a native chat tree, not rented compute. Its publication ID differs from its native thread ID. Remote project close/unpublish/revoke retains local files and history; the worker/storage deletion procedure below applies only to rented test sessions. Native schedules reached through a remote runtime remain native schedules.
 
 ## API/SDK lifecycle
 

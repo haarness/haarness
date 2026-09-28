@@ -1,6 +1,6 @@
 ---
 name: haarness-sdk-surface
-description: Verify Haarness Python sync/async and TypeScript SDK coverage of runtime and Cloud APIs, including billing, sessions/chats, schedules, files, marketplace and WebSocket events.
+description: Verify Haarness Python sync/async and TypeScript SDK coverage of runtime and Cloud APIs, including remote hosts/published chats, billing, rented sessions, schedules, files, marketplace and WebSocket events.
 ---
 
 # SDK contract and end-to-end coverage
@@ -30,6 +30,12 @@ Cover independent session launch, agent-template launch, multiple chats, shared 
 For live streams, test ready/resync, correct account filtering, updates during a snapshot fetch, disconnect/reconnect, refreshed credentials and stopping the iterator. Assert state converges from authoritative HTTP snapshots without duplicate monetary effects.
 
 Capture exact source SHAs, generated-contract checks, test results, real provider/fixture distinction and cleanup outcomes. Existing verification reports are references, not current pass results.
+
+## Remote host and published-chat adapters
+
+Follow the [remote-access skill](../haarness-remote-access/SKILL.md) and its live connector test. Python sync/async use `cloud.remote_host(host_id).workspace(project_id)` or `cloud.remote_session(publication_id)`; TypeScript uses `cloud.remoteHost(hostId).workspace(projectId)` or `cloud.remoteSession(publicationId)`. Rented compute uses the separate `cloud.session(cloud_session_id)` adapter. Resolve project IDs from the host catalog; publication records contain the native `threadId` used for chat operations.
+
+Test both registry APIs and nested runtime HTTP, SSE and PTY behavior, including dynamic credential refresh/revocation, cancellation, binary files, reconnect and account boundaries. Published adapters allow the selected chat tree and shared project files while denying siblings and host/terminal controls. The native CLI implements the low-level connector WebSocket protocol; a generated JSON method for its upgrade endpoint is not connector coverage. `scripts/test-remote-live.py` orchestrates Python sync/async plus `sdks/tests/remote_e2e.mjs` and owns fixture cleanup. Browser/real-model proof is separate.
 
 ## Unified API keys
 
