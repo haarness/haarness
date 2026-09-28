@@ -330,6 +330,10 @@ export class CloudApi extends Transport {
   modelPrices(options: RequestOptions = {}): Promise<T.ModelPricesResponse> {
     return this.request("GET", `/api/v1/router/model-prices`, { binaryBody: false, binaryResponse: false, ...options });
   }
+  /** GET /api/v1/router/providers */
+  routerProviders(options: RequestOptions = {}): Promise<T.RouterProvidersResponse> {
+    return this.request("GET", `/api/v1/router/providers`, { binaryBody: false, binaryResponse: false, ...options });
+  }
   /** GET /api/v1/routers */
   listRouters(query: T.ListRoutersQuery = {}, options: RequestOptions = {}): Promise<T.RoutersResponse> {
     return this.request("GET", `/api/v1/routers`, { query, binaryBody: false, binaryResponse: false, ...options });

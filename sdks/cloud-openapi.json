@@ -5185,6 +5185,36 @@
         }
       }
     },
+    "/api/v1/router/providers": {
+      "get": {
+        "tags": [
+          "routers"
+        ],
+        "operationId": "router_providers",
+        "responses": {
+          "200": {
+            "description": "Providers available in every environment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouterProvidersResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/routers": {
       "get": {
         "tags": [
@@ -15597,6 +15627,7 @@
           "isDefault",
           "credentialMode",
           "configuredProviders",
+          "providerSettings",
           "routerUrl",
           "revision",
           "createdAt",
@@ -15641,6 +15672,16 @@
           },
           "name": {
             "type": "string"
+          },
+          "providerSettings": {
+            "type": "object",
+            "description": "Non-secret connection settings, keyed by provider ID.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/RouterProviderSettings"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           },
           "revision": {
             "type": "integer",
@@ -15723,6 +15764,78 @@
       "RouterKeyId": {
         "type": "string",
         "description": "Public part of an `hcr_` router key (16 lowercase hex characters)."
+      },
+      "RouterProviderDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "credentialLabel",
+          "fields"
+        ],
+        "properties": {
+          "credentialLabel": {
+            "type": "string"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "RouterProviderSettings": {
+        "type": "object",
+        "description": "Safe connection parameters. Endpoints are constructed from a trusted provider registry.",
+        "properties": {
+          "models": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Upstream model/deployment IDs to advertise, including providers without discovery APIs."
+          },
+          "project": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "resource": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "RouterProvidersResponse": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RouterProviderDto"
+            }
+          }
+        }
       },
       "RoutersResponse": {
         "type": "object",
@@ -15890,6 +16003,9 @@
           "revision": {
             "type": "integer",
             "format": "int64"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/RouterProviderSettings"
           }
         },
         "additionalProperties": false

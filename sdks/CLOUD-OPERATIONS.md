@@ -87,6 +87,7 @@
 | `revoke_router_key` | `revokeRouterKey` | `DELETE /api/v1/router/keys/{keyId}` |
 | `rotate_router_key` | `rotateRouterKey` | `POST /api/v1/router/keys/{keyId}/rotate` |
 | `model_prices` | `modelPrices` | `GET /api/v1/router/model-prices` |
+| `router_providers` | `routerProviders` | `GET /api/v1/router/providers` |
 | `list_routers` | `listRouters` | `GET /api/v1/routers` |
 | `create_router` | `createRouter` | `POST /api/v1/routers` |
 | `get_router` | `getRouter` | `GET /api/v1/routers/{id}` |
