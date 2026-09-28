@@ -15,6 +15,29 @@ Use Chrome management pages and the runtime Capabilities pane to install from th
 
 For MCP, consult current official docs before selecting a public endpoint. Previously used examples: Microsoft Learn, Cloudflare docs and DeepWiki. An actual successful tool call with a cited result is stronger than a `connected` badge. For Claude Code plugins, inspect the current official plugin manifest and test bundled skills, agents and MCP configuration; exclude Apple-only integrations. Never copy private workspace content into a public MCP request merely to test connectivity.
 
+For storage changes, run Cloud's opt-in `cargo test -p cloud-worker --test marketplace_r2 -- --ignored --nocapture`
+with the scoped development R2 settings, a disposable `HAARNESS_CLOUD_TEST_DATABASE_URL`, and a freshly built
+`HAARNESS_BIN`. Set `HAARNESS_TEST_PYTHON` to Python 3.10+ with the native Python SDK dependencies, and
+`PYTHONPATH` to the native repository's `sdks/python/src`. The fixture launches the API and validation worker,
+invokes `scripts/test-marketplace-r2.py`, and cleans its own R2 prefix and database schema. The script covers
+ZIP upload/deduplication, tenant isolation, signed download hashes, Git imports, MCP support files, and native
+installation/live update/removal through CLI and SDK. It disables its synthetic npm registry after publishing
+two versions so successful extension installs prove the tarballs come from R2. Its model is deterministic;
+run the separate live LLM flow when prompt/tool selection is part of the change.
+
+Verify signed links remain intact in both API-key and Cloud generation-token modes. ZIP links are in the
+manifest's `artifact`; npm tarball links are in `install.extension.artifact`, preserving older ZIP-only clients.
+Metadata and MCP templates remain in PostgreSQL; installed runtime files remain local. Neither is a missing
+R2 blob. Transitive npm dependencies still use the package manager. Reject wrong hashes and external registry
+tarball origins, and simulate a storage outage to verify the submission can recover on retry. For MCP ZIPs,
+require one server in root `.mcp.json` and call a tool whose script was downloaded in that ZIP. Test both
+flat and single-folder ZIP layouts: `${CLAUDE_PLUGIN_ROOT}` must resolve beside the original `.mcp.json`.
+
+On macOS, if Rust's native certificate enumeration fails with `UnknownIssuer` while the system HTTPS client
+validates the same endpoint, an explicit trusted system CA bundle (`SSL_CERT_FILE=/etc/ssl/cert.pem`) can be
+used for the local test process. Keep TLS verification enabled. Record the override and verify cleanup even
+after a failed run; never sweep prefixes or database schemas belonging to other tests.
+
 Use varied LLM prompts to select a skill, call an MCP tool, and delegate through an installed agent. Verify real tool traces and outputs, not prose claims. Check CLI/SDK parity and use Desktop Electron tests for native installation. For browser file-picker failures, report the exact unverified UI step separately from a successful binary upload API test.
 
 Record installed IDs, artifact versions/hashes, session/chat IDs, actual tool names and output proof. Remove only test submissions/installs/resources using normal reversible lifecycle operations.

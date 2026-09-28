@@ -54,6 +54,10 @@ cargo test -p cloud-api --test marketplace_routes live_r2_marketplace_and_profil
 cargo test -p cloud-api --test releases live_r2_release_lifecycle -- --ignored --exact --nocapture
 ```
 
+For complete marketplace delivery, use the `marketplace_r2` worker integration test described in
+[marketplace capabilities](../haarness-marketplace-capabilities/SKILL.md). It combines real R2, the HTTP API,
+durable validation jobs, the native binary and Python SDK rather than stopping after upload/queueing.
+
 `tests/support/live_r2.rs` puts each run beneath its own `tests/<uuid>/` prefix, tracks attempted writes,
 and deletes only those objects even after an assertion panic. Require cleanup output and zero exit status.
 An externally killed process cannot run that cleanup: record and inspect only its exact prefix before
