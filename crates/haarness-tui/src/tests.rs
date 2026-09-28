@@ -7584,7 +7584,7 @@ fn cloud_billing_balances_and_panel_fit_narrow_terminals() {
             "accountId":"test-account","accountName":"Test workspace","plan":"power","accountStatus":"active",
             "subscriptionStatus":"active","includedCredits":"100.123456","purchasedCredits":"500.000000","heldCredits":"1.500000",
             "cloudUnits":"2.00","cloudUnitsHeld":"0.10","resetsAt":"2026-10-27T00:00:00Z","periodEndsAt":"2026-10-27T00:00:00Z",
-            "cancelAtPeriodEnd":false,"overageOptIn":false,"billingUrl":"https://app.haarness.dev/app/billing","usageUrl":"https://app.haarness.dev/app/billing/usage"
+            "cancelAtPeriodEnd":false,"overageOptIn":false,"billingUrl":"https://app.haarness.ai/app/billing","usageUrl":"https://app.haarness.ai/app/billing/usage"
         }
     })).unwrap();
     assert!(frame_text(&app, (160, 46)).contains("100.12 included · 500 purchased"));

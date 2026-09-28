@@ -46,5 +46,5 @@ Things that are **by design** and not vulnerabilities on their own:
   bypasses a permission check or an approval prompt is in scope.
 - Exposing the server beyond loopback without authentication after explicitly opting in.
 
-Haarness Cloud (the hosted service at haarness.dev) has its own disclosure policy at
-<https://haarness.dev/security>.
+Haarness Cloud (the hosted service at haarness.ai) has its own disclosure policy at
+<https://haarness.ai/security>.

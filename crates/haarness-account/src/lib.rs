@@ -73,7 +73,7 @@ impl Config {
             });
         let mut config = Self::new(
             &std::env::var("HAARNESS_CLOUD_API_URL")
-                .unwrap_or_else(|_| "https://app.haarness.dev".into()),
+                .unwrap_or_else(|_| "https://app.haarness.ai".into()),
             dir,
             &std::env::var("HAARNESS_CLOUD_CLIENT_ID").unwrap_or_else(|_| CLIENT_ID.into()),
         )?;
