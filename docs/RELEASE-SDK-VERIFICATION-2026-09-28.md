@@ -56,7 +56,7 @@ Installed fixtures retained for inspection:
 
 ## Passed validation
 
-- CLI crate: 117 unit tests and 7 integration tests (ACP, hot reload, OpenAI WebSockets,
+- CLI crate: 117 unit tests and 7 integration tests (ACP, hot reload, insights,
   telemetry and profiles). Desktop: 148 unit tests.
 - Cloud web: 155 tests, TypeScript checking, production build and static prerender.
   Updated install documentation also passed 5 prerender tests.
