@@ -18,6 +18,7 @@ async def main():
         value = getattr(client, name)(*args, **(kwargs or {}))
         return await value if asynchronous else value
 
+    browser_sockets = []
     try:
         for line in sys.stdin:
             command = json.loads(line)
@@ -28,6 +29,16 @@ async def main():
                     args[0] = base64.b64decode(args[0])
                 if name == "attachments":
                     value = attachments(args[0])
+                elif name in ("connect_browser_host", "connect_draft_browser_host"):
+                    socket = await call(name, args)
+                    browser_sockets.append(socket)
+                    value = await socket.recv() if asynchronous else socket.recv(timeout=5)
+                    if asynchronous:
+                        await socket.send({"type":"ping"})
+                        assert (await socket.recv())["type"] == "pong"
+                    else:
+                        socket.send({"type":"ping"})
+                        assert socket.recv(timeout=5)["type"] == "pong"
                 elif name == "events":
                     events = client.events(after=args[0])
                     value = []
@@ -118,6 +129,9 @@ async def main():
                     flush=True,
                 )
     finally:
+        for socket in browser_sockets:
+            if asynchronous: await socket.close()
+            else: socket.close()
         if asynchronous:
             await client.close()
         else:

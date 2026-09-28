@@ -172,6 +172,31 @@ def scenario(mode):
                 assert len(browser_calls) == 2
                 assert browser_calls[0]["inspect"] is True
                 c("call_browser_tool", tid, {"name": "bash", "arguments": {}}, error=400)
+            host = c("connect_browser_host", tid)
+            assert host["type"] == "attached"
+            # Real TCP tunnel to the fixture server through the browser host API.
+            from urllib.parse import urlsplit
+            target = {"host": "127.0.0.1", "port": urlsplit(fixture.url).port}
+            tunnel = c("browser_tunnel", tid, "open", {"lease":host["lease"], "target": target})
+            c("browser_tunnel", tid, "write", {"lease":host["lease"], "id": tunnel, "data": base64.b64encode(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").decode()})
+            data = c("browser_tunnel", tid, "read", {"lease":host["lease"], "id": tunnel})
+            assert b"200 OK" in base64.b64decode(data["data"])
+            c("browser_tunnel", tid, "close", {"lease":host["lease"], "id": tunnel})
+            draft = str(uuid4())
+            host = c("connect_draft_browser_host", draft)
+            lease = host["lease"]
+            tunnel = c("draft_browser_tunnel", draft, "open", {"lease": lease, "target": target})
+            c("draft_browser_tunnel", draft, "close", {"lease": lease, "id": tunnel})
+            adopted_thread = c("create_thread", {"title":"Draft browser adoption"})["id"]
+            assert c("adopt_browser_draft", draft, {"thread": adopted_thread, "lease": lease})["adopted"]
+            c("update_thread", adopted_thread, {"archived": True})
+            c("draft_browser_tunnel", draft, "close", {"lease": "incorrect-lease", "id": tunnel}, error=400)
+            # A pre-existing published share is read through the SDK's HTML route.
+            share = uuid4().hex + uuid4().hex
+            shares = fixture.data / "data" / "shares"
+            shares.mkdir(parents=True, exist_ok=True)
+            (shares / (share + ".json")).write_text(json.dumps({"token":share,"threadId":tid,"title":"SDK shared chat","createdAt":"2026-09-28T00:00:00Z","expiresAt":"2099-01-01T00:00:00Z","messages":[{"role":"You","text":"SDK_SHARE_PROOF"}]}))
+            assert "SDK_SHARE_PROOF" in c("read_shared_session", share)
             assert c("update_thread", tid, {"title": "Renamed"})["title"] == "Renamed"
             cursor = c("info")["eventCursor"]
             turn = c(

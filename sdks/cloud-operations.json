@@ -794,6 +794,38 @@
     }
   },
   {
+    "name": "download_release_artifact",
+    "method": "GET",
+    "path": "/api/v1/releases/artifacts/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "format": "int32",
+        "minimum": 0
+      }
+    },
+    "binaryResponse": true
+  },
+  {
+    "name": "release_history",
+    "method": "GET",
+    "path": "/api/v1/releases/history",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/ReleasePublication"
+      }
+    },
+    "query": {
+      "$ref": "#/components/schemas/ReleaseHistoryQuery"
+    }
+  },
+  {
     "name": "product_release",
     "method": "GET",
     "path": "/api/v1/releases/{channel}/{product}",
@@ -804,6 +836,27 @@
     "response": {
       "$ref": "#/components/schemas/ReleaseManifestResponse"
     }
+  },
+  {
+    "name": "download_release",
+    "method": "GET",
+    "path": "/api/v1/releases/{channel}/{product}/download",
+    "pathParams": [
+      "channel",
+      "product"
+    ],
+    "response": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "format": "int32",
+        "minimum": 0
+      }
+    },
+    "query": {
+      "$ref": "#/components/schemas/DownloadReleaseQuery"
+    },
+    "binaryResponse": true
   },
   {
     "name": "list_remote_hosts",
@@ -877,7 +930,7 @@
     "response": {
       "type": "null"
     },
-    "stream": "native_connector"
+    "stream": "websocket"
   },
   {
     "name": "remote_host",
@@ -1602,6 +1655,26 @@
     }
   },
   {
+    "name": "release_install_ps1",
+    "method": "GET",
+    "path": "/install.ps1",
+    "pathParams": [],
+    "response": {
+      "type": "string"
+    },
+    "textResponse": true
+  },
+  {
+    "name": "release_install_sh",
+    "method": "GET",
+    "path": "/install.sh",
+    "pathParams": [],
+    "response": {
+      "type": "string"
+    },
+    "textResponse": true
+  },
+  {
     "name": "internal_dead_jobs",
     "method": "GET",
     "path": "/internal/ops/jobs/dead",
@@ -1646,6 +1719,55 @@
     "contentType": "application/json",
     "body": {
       "$ref": "#/components/schemas/ReviewVersionRequest"
+    }
+  },
+  {
+    "name": "publish_release",
+    "method": "POST",
+    "path": "/internal/releases",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/ReleasePublication"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/PublishReleaseRequest"
+    }
+  },
+  {
+    "name": "upload_release_artifact",
+    "method": "POST",
+    "path": "/internal/releases/artifacts",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/ReleaseUpload"
+    },
+    "query": {
+      "$ref": "#/components/schemas/UploadReleaseArtifactQuery"
+    },
+    "contentType": "application/octet-stream",
+    "binaryBody": true
+  },
+  {
+    "name": "withdraw_release",
+    "method": "DELETE",
+    "path": "/internal/releases/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "promote_release",
+    "method": "POST",
+    "path": "/internal/releases/{id}/promote",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/ReleasePublication"
     }
   },
   {

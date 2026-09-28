@@ -9,6 +9,7 @@ from typing_extensions import TypedDict
 from .api import Api, AsyncApi
 from .types import StartTurnRequest, Turn, Item, ChatOptions, JsonValue
 from .transport import RequestOptions
+from .json_socket import JsonSocket, AsyncJsonSocket
 from .pty import PtyConnection, AsyncPtyConnection
 
 
@@ -65,6 +66,12 @@ class Haarness(Api):
         )
         return result(turn, self.list_items(id, options=options))
 
+    def connect_browser_host(self, id: str, *, version: int = 2, timeout: float | None = None) -> JsonSocket:
+        return JsonSocket(self.base_url.replace("http", "ws", 1) + "/v1/threads/" + self.segment(id) + "/browser/host?version=" + str(version), self._headers(), timeout or self._timeout)
+
+    def connect_draft_browser_host(self, id: str, *, timeout: float | None = None) -> JsonSocket:
+        return JsonSocket(self.base_url.replace("http", "ws", 1) + "/v1/browser/drafts/" + self.segment(id) + "/host", self._headers(), timeout or self._timeout)
+
     def connect_pty(
         self, id: str, *, cursor: int = 0, timeout: float | None = None
     ) -> PtyConnection:
@@ -111,6 +118,12 @@ class AsyncHaarness(AsyncApi):
             turn["id"], {"timeout_ms": 300000}, options=options or {"timeout": 305}
         )
         return result(turn, await self.list_items(id, options=options))
+
+    async def connect_browser_host(self, id: str, *, version: int = 2, timeout: float | None = None) -> AsyncJsonSocket:
+        return await AsyncJsonSocket.connect(self.base_url.replace("http", "ws", 1) + "/v1/threads/" + self.segment(id) + "/browser/host?version=" + str(version), self._headers(), timeout or self._timeout)
+
+    async def connect_draft_browser_host(self, id: str, *, timeout: float | None = None) -> AsyncJsonSocket:
+        return await AsyncJsonSocket.connect(self.base_url.replace("http", "ws", 1) + "/v1/browser/drafts/" + self.segment(id) + "/host", self._headers(), timeout or self._timeout)
 
     async def connect_pty(
         self, id: str, *, cursor: int = 0, timeout: float | None = None

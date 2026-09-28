@@ -1,4 +1,5 @@
 mod account;
+mod upgrade;
 mod capability_state;
 mod marketplace;
 mod acp;
@@ -262,7 +263,8 @@ enum Command {
         #[arg(long)]
         tail: Option<usize>,
     },
-    Upgrade,
+    /// Install a checksum-verified release from Haarness Cloud.
+    Upgrade(upgrade::UpgradeArgs),
 }
 
 #[derive(Args)]
@@ -1237,12 +1239,7 @@ async fn main() -> Result<()> {
         }
         Some(Command::Doctor) => doctor(&paths),
         Some(Command::Logs { tail }) => logs_command(&paths, tail),
-        Some(Command::Upgrade) => {
-            println!(
-                "Upgrade manifests are supported by the release workflow; no public release channel is configured yet."
-            );
-            Ok(())
-        }
+        Some(Command::Upgrade(args)) => upgrade::run(args),
         }
     }
     .instrument(command_span)
@@ -1288,7 +1285,7 @@ impl Command {
             Self::Models { .. } => "models",
             Self::Doctor => "doctor",
             Self::Logs { .. } => "logs",
-            Self::Upgrade => "upgrade",
+            Self::Upgrade(_) => "upgrade",
         }
     }
 }

@@ -443,9 +443,21 @@ class Api(Transport):
         """POST /v1/files/action."""
         return cast("T.JsonValue", self.request('POST', f'/v1/files/action', body=body, binary_body=False, binary_response=False, options=options))
 
+    def browser_tunnel(self, id: str, action: str, body: T.JsonValue, *, options: RequestOptions | None = None) -> T.JsonValue:
+        """POST /v1/threads/{id}/browser/tunnel/{action}."""
+        return cast("T.JsonValue", self.request('POST', f'/v1/threads/{self.segment(id)}/browser/tunnel/{self.segment(action)}', body=body, binary_body=False, binary_response=False, options=options))
+
     def call_browser_tool(self, id: str, body: T.BrowserToolRequest, *, options: RequestOptions | None = None) -> T.BrowserToolResponse:
         """POST /v1/threads/{id}/browser/tool."""
         return cast("T.BrowserToolResponse", self.request('POST', f'/v1/threads/{self.segment(id)}/browser/tool', body=body, binary_body=False, binary_response=False, options=options))
+
+    def draft_browser_tunnel(self, id: str, action: str, body: T.JsonValue, *, options: RequestOptions | None = None) -> T.JsonValue:
+        """POST /v1/browser/drafts/{id}/tunnel/{action}."""
+        return cast("T.JsonValue", self.request('POST', f'/v1/browser/drafts/{self.segment(id)}/tunnel/{self.segment(action)}', body=body, binary_body=False, binary_response=False, options=options))
+
+    def adopt_browser_draft(self, id: str, body: T.AdoptDraft, *, options: RequestOptions | None = None) -> T.JsonValue:
+        """POST /v1/browser/drafts/{id}/adopt."""
+        return cast("T.JsonValue", self.request('POST', f'/v1/browser/drafts/{self.segment(id)}/adopt', body=body, binary_body=False, binary_response=False, options=options))
 
     def host_projects(self, *, options: RequestOptions | None = None) -> T.WorkspaceListResponse:
         """GET /v1/host/projects."""
@@ -462,6 +474,10 @@ class Api(Transport):
     def host_close(self, id: str, *, options: RequestOptions | None = None) -> None:
         """DELETE /v1/host/projects/{id}."""
         return cast("None", self.request('DELETE', f'/v1/host/projects/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    def read_shared_session(self, token: str, *, options: RequestOptions | None = None) -> str:
+        """GET /s/{token}."""
+        return cast("str", self.request('GET', f'/s/{self.segment(token)}', text_response=True, binary_body=False, binary_response=False, options=options))
 
 class AsyncApi(AsyncTransport):
     async def manage_resource(self, resource: str, body: T.JsonValue, *, options: RequestOptions | None = None) -> T.JsonValue:
@@ -904,9 +920,21 @@ class AsyncApi(AsyncTransport):
         """POST /v1/files/action."""
         return cast("T.JsonValue", await self.request('POST', f'/v1/files/action', body=body, binary_body=False, binary_response=False, options=options))
 
+    async def browser_tunnel(self, id: str, action: str, body: T.JsonValue, *, options: RequestOptions | None = None) -> T.JsonValue:
+        """POST /v1/threads/{id}/browser/tunnel/{action}."""
+        return cast("T.JsonValue", await self.request('POST', f'/v1/threads/{self.segment(id)}/browser/tunnel/{self.segment(action)}', body=body, binary_body=False, binary_response=False, options=options))
+
     async def call_browser_tool(self, id: str, body: T.BrowserToolRequest, *, options: RequestOptions | None = None) -> T.BrowserToolResponse:
         """POST /v1/threads/{id}/browser/tool."""
         return cast("T.BrowserToolResponse", await self.request('POST', f'/v1/threads/{self.segment(id)}/browser/tool', body=body, binary_body=False, binary_response=False, options=options))
+
+    async def draft_browser_tunnel(self, id: str, action: str, body: T.JsonValue, *, options: RequestOptions | None = None) -> T.JsonValue:
+        """POST /v1/browser/drafts/{id}/tunnel/{action}."""
+        return cast("T.JsonValue", await self.request('POST', f'/v1/browser/drafts/{self.segment(id)}/tunnel/{self.segment(action)}', body=body, binary_body=False, binary_response=False, options=options))
+
+    async def adopt_browser_draft(self, id: str, body: T.AdoptDraft, *, options: RequestOptions | None = None) -> T.JsonValue:
+        """POST /v1/browser/drafts/{id}/adopt."""
+        return cast("T.JsonValue", await self.request('POST', f'/v1/browser/drafts/{self.segment(id)}/adopt', body=body, binary_body=False, binary_response=False, options=options))
 
     async def host_projects(self, *, options: RequestOptions | None = None) -> T.WorkspaceListResponse:
         """GET /v1/host/projects."""
@@ -923,3 +951,7 @@ class AsyncApi(AsyncTransport):
     async def host_close(self, id: str, *, options: RequestOptions | None = None) -> None:
         """DELETE /v1/host/projects/{id}."""
         return cast("None", await self.request('DELETE', f'/v1/host/projects/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    async def read_shared_session(self, token: str, *, options: RequestOptions | None = None) -> str:
+        """GET /s/{token}."""
+        return cast("str", await self.request('GET', f'/s/{self.segment(token)}', text_response=True, binary_body=False, binary_response=False, options=options))

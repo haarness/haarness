@@ -442,9 +442,21 @@ export class Api extends Transport {
   mutateFile(body: T.FileAction, options: RequestOptions = {}): Promise<T.JsonValue> {
     return this.request("POST", `/v1/files/action`, { body, binaryBody: false, binaryResponse: false, ...options });
   }
+  /** POST /v1/threads/{id}/browser/tunnel/{action} */
+  browserTunnel(id: string, action: string, body: T.JsonValue, options: RequestOptions = {}): Promise<T.JsonValue> {
+    return this.request("POST", `/v1/threads/${this.segment(id)}/browser/tunnel/${this.segment(action)}`, { body, binaryBody: false, binaryResponse: false, ...options });
+  }
   /** POST /v1/threads/{id}/browser/tool */
   callBrowserTool(id: string, body: T.BrowserToolRequest, options: RequestOptions = {}): Promise<T.BrowserToolResponse> {
     return this.request("POST", `/v1/threads/${this.segment(id)}/browser/tool`, { body, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /v1/browser/drafts/{id}/tunnel/{action} */
+  draftBrowserTunnel(id: string, action: string, body: T.JsonValue, options: RequestOptions = {}): Promise<T.JsonValue> {
+    return this.request("POST", `/v1/browser/drafts/${this.segment(id)}/tunnel/${this.segment(action)}`, { body, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /v1/browser/drafts/{id}/adopt */
+  adoptBrowserDraft(id: string, body: T.AdoptDraft, options: RequestOptions = {}): Promise<T.JsonValue> {
+    return this.request("POST", `/v1/browser/drafts/${this.segment(id)}/adopt`, { body, binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /v1/host/projects */
   hostProjects(options: RequestOptions = {}): Promise<T.WorkspaceListResponse> {
@@ -461,5 +473,9 @@ export class Api extends Transport {
   /** DELETE /v1/host/projects/{id} */
   hostClose(id: string, options: RequestOptions = {}): Promise<void> {
     return this.request("DELETE", `/v1/host/projects/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /s/{token} */
+  readSharedSession(token: string, options: RequestOptions = {}): Promise<string> {
+    return this.request("GET", `/s/${this.segment(token)}`, { textResponse: true, binaryBody: false, binaryResponse: false, ...options });
   }
 }

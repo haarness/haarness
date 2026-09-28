@@ -7,6 +7,7 @@ const client = new Haarness({
   token: process.env.SDK_TOKEN,
   timeoutMs: 40000,
 });
+const browserSockets = [];
 const camel = (name) => name.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
 try {
   for await (const line of readline.createInterface({ input: process.stdin })) {
@@ -17,6 +18,14 @@ try {
       if (name === "upload_profile") args[0] = Buffer.from(args[0], "base64");
       let value;
       if (name === "attachments") value = await attachments(args[0]);
+      else if (["connect_browser_host", "connect_draft_browser_host"].includes(name)) {
+        const socket = await client[camel(name)](...args);
+        browserSockets.push(socket);
+        const iterator = socket[Symbol.asyncIterator]();
+        value = (await iterator.next()).value;
+        socket.send({type: "ping"});
+        if ((await iterator.next()).value.type !== "pong") throw new Error("Browser ping failed");
+      }
       else if (name === "events") {
         value = [];
         const abort = new AbortController();
@@ -91,5 +100,6 @@ try {
     }
   }
 } finally {
+  for (const socket of browserSockets) socket.close();
   client.close();
 }

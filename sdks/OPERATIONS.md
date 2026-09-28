@@ -114,8 +114,14 @@
 | `read_file` | `readFile` | `GET /v1/files/content` |
 | `write_file` | `writeFile` | `PUT /v1/files/content` |
 | `mutate_file` | `mutateFile` | `POST /v1/files/action` |
+| `connect_browser_host` | `connectBrowserHost` | `GET /v1/threads/{id}/browser/host` |
+| `browser_tunnel` | `browserTunnel` | `POST /v1/threads/{id}/browser/tunnel/{action}` |
 | `call_browser_tool` | `callBrowserTool` | `POST /v1/threads/{id}/browser/tool` |
+| `connect_draft_browser_host` | `connectDraftBrowserHost` | `GET /v1/browser/drafts/{id}/host` |
+| `draft_browser_tunnel` | `draftBrowserTunnel` | `POST /v1/browser/drafts/{id}/tunnel/{action}` |
+| `adopt_browser_draft` | `adoptBrowserDraft` | `POST /v1/browser/drafts/{id}/adopt` |
 | `host_projects` | `hostProjects` | `GET /v1/host/projects` |
 | `host_directories` | `hostDirectories` | `GET /v1/host/directories` |
 | `host_open` | `hostOpen` | `POST /v1/host/open` |
 | `host_close` | `hostClose` | `DELETE /v1/host/projects/{id}` |
+| `read_shared_session` | `readSharedSession` | `GET /s/{token}` |

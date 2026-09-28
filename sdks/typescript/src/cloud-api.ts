@@ -258,9 +258,21 @@ export class CloudApi extends Transport {
   currentRelease(query: T.CurrentReleaseQuery = {}, options: RequestOptions = {}): Promise<T.ReleaseManifestResponse> {
     return this.request("GET", `/api/v1/releases`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
+  /** GET /api/v1/releases/artifacts/{id} */
+  downloadReleaseArtifact(id: string, options: RequestOptions = {}): Promise<Uint8Array> {
+    return this.request("GET", `/api/v1/releases/artifacts/${this.segment(id)}`, { binaryBody: false, binaryResponse: true, ...options });
+  }
+  /** GET /api/v1/releases/history */
+  releaseHistory(query: T.ReleaseHistoryQuery = {}, options: RequestOptions = {}): Promise<Array<T.ReleasePublication>> {
+    return this.request("GET", `/api/v1/releases/history`, { query, binaryBody: false, binaryResponse: false, ...options });
+  }
   /** GET /api/v1/releases/{channel}/{product} */
   productRelease(channel: string, product: string, options: RequestOptions = {}): Promise<T.ReleaseManifestResponse> {
     return this.request("GET", `/api/v1/releases/${this.segment(channel)}/${this.segment(product)}`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /api/v1/releases/{channel}/{product}/download */
+  downloadRelease(channel: string, product: string, query: T.DownloadReleaseQuery, options: RequestOptions = {}): Promise<Uint8Array> {
+    return this.request("GET", `/api/v1/releases/${this.segment(channel)}/${this.segment(product)}/download`, { query, binaryBody: false, binaryResponse: true, ...options });
   }
   /** GET /api/v1/remote-hosts */
   listRemoteHosts(query: T.ListRemoteHostsQuery = {}, options: RequestOptions = {}): Promise<T.Page_RemoteHostDto> {
@@ -518,6 +530,14 @@ export class CloudApi extends Transport {
   healthz(options: RequestOptions = {}): Promise<T.HealthResponse> {
     return this.request("GET", `/healthz`, { binaryBody: false, binaryResponse: false, ...options });
   }
+  /** GET /install.ps1 */
+  releaseInstallPs1(options: RequestOptions = {}): Promise<string> {
+    return this.request("GET", `/install.ps1`, { textResponse: true, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /install.sh */
+  releaseInstallSh(options: RequestOptions = {}): Promise<string> {
+    return this.request("GET", `/install.sh`, { textResponse: true, binaryBody: false, binaryResponse: false, ...options });
+  }
   /** GET /internal/ops/jobs/dead */
   internalDeadJobs(options: RequestOptions = {}): Promise<T.Items_DeadJobDto> {
     return this.request("GET", `/internal/ops/jobs/dead`, { binaryBody: false, binaryResponse: false, ...options });
@@ -533,6 +553,22 @@ export class CloudApi extends Transport {
   /** POST /internal/ops/marketplace/versions/{id}/review */
   internalReviewVersion(id: string, body: T.ReviewVersionRequest, options: RequestOptions = {}): Promise<T.ReviewVersionResponse> {
     return this.request("POST", `/internal/ops/marketplace/versions/${this.segment(id)}/review`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /internal/releases */
+  publishRelease(body: T.PublishReleaseRequest, options: RequestOptions = {}): Promise<T.ReleasePublication> {
+    return this.request("POST", `/internal/releases`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /internal/releases/artifacts */
+  uploadReleaseArtifact(body: Uint8Array, query: T.UploadReleaseArtifactQuery, options: RequestOptions = {}): Promise<T.ReleaseUpload> {
+    return this.request("POST", `/internal/releases/artifacts`, { body, query, contentType: "application/octet-stream", binaryBody: true, binaryResponse: false, ...options });
+  }
+  /** DELETE /internal/releases/{id} */
+  withdrawRelease(id: string, options: RequestOptions = {}): Promise<void> {
+    return this.request("DELETE", `/internal/releases/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /internal/releases/{id}/promote */
+  promoteRelease(id: string, options: RequestOptions = {}): Promise<T.ReleasePublication> {
+    return this.request("POST", `/internal/releases/${this.segment(id)}/promote`, { binaryBody: false, binaryResponse: false, ...options });
   }
   /** POST /internal/test/drain-bucket */
   internalDrainBucket(body: T.DrainBucketRequest, options: RequestOptions = {}): Promise<T.DrainBucketResponse> {

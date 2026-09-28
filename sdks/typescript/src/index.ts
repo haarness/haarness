@@ -1,3 +1,5 @@
+import { JsonSocket } from "./json-socket.js";
+export { JsonSocket } from "./json-socket.js";
 import { randomUUID } from "node:crypto";
 import { open } from "node:fs/promises";
 import { basename, extname } from "node:path";
@@ -65,6 +67,12 @@ export class Haarness extends Api {
       )
       .join("");
     return { turn: result, items, text: output };
+  }
+  async connectBrowserHost(id: string, query: {version?: 1 | 2} = {version: 2}, options: RequestOptions = {}): Promise<JsonSocket> {
+    return JsonSocket.connect(this.url(`/v1/threads/${this.segment(id)}/browser/host`, query).replace(/^http/, "ws"), {...await this.headers(), ...options.headers}, this.signal(options.signal), options.timeoutMs ?? this.timeoutMs);
+  }
+  async connectDraftBrowserHost(id: string, options: RequestOptions = {}): Promise<JsonSocket> {
+    return JsonSocket.connect(this.url(`/v1/browser/drafts/${this.segment(id)}/host`).replace(/^http/, "ws"), {...await this.headers(), ...options.headers}, this.signal(options.signal), options.timeoutMs ?? this.timeoutMs);
   }
   async connectPty(
     id: string,
@@ -135,3 +143,5 @@ export async function attachments(paths: string[]): Promise<string[]> {
 }
 
 export * from "./cloud.js";
+
+export * from "./router.js";
