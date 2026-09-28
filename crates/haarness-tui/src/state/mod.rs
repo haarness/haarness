@@ -350,6 +350,7 @@ pub enum WorkflowTarget {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum OptionsKind {
+    CloudRouter,
     InputQueue,
     InputQueueActions,
     InputQueueEdit,

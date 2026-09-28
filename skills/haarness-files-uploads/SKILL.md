@@ -22,3 +22,7 @@ Stop/restart and confirm intended persistence. For rented compute, delete the te
 Use the [remote-access skill](../haarness-remote-access/SKILL.md) for native fixtures, adapter IDs and reconnect/cleanup. Files remain on the user-owned host. Chats in one project, including a published chat tree, share its filesystem; publishing restricts conversation access, not per-chat files. Prove an SDK upload appears in the published Chrome explorer through shared file events and a real model reads its marker. Check hidden files, byte equality and browser picker behavior separately.
 
 Closing a remote project advertisement, unpublishing or revoking a host must retain local files/history. Reopen the project and read the original marker. Never apply rented-session worker deletion to a remote fixture or infer filesystem isolation from a denied sibling-history request.
+
+## Explore beyond this guide
+
+Treat the documented flows as a starting point. Do not hesitate to test relevant behavior that is not documented here: inspect the current implementation, follow unexpected results, and cover interactions and failure paths suggested by the task. Stay within the authorized environment and scope. Fix discovered bugs when authorized, verify the fixes, and record newly validated steps and remaining gaps so this skill improves with use.

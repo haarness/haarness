@@ -1,6 +1,6 @@
 # Haarness Python SDK
 
-Unpublished Python 3.10+ synchronous and asynchronous clients for all 116 native and 126 Cloud
+Unpublished Python 3.10+ synchronous and asynchronous clients for all 116 native and 146 Cloud HTTP
 operations. Includes typed requests/responses, SSE, PTYs,
 attachments and owned local-server helpers.
 

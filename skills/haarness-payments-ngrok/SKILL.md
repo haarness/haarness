@@ -52,3 +52,7 @@ For a fixed handler, replay an already stored, signature-verified event with `cl
 Run Cloud store billing tests, API billing/event tests, integration signature/parser tests, frontend tests and the nine-step fixture journey (`scripts/e2e.sh`) against a separate fixture stack. Keep the real Stripe stack available for Chrome checks. Record source SHAs, sandbox ID, endpoint/domain, invoice/event IDs, before/after balances, test results and screenshots, without secrets. See `haarness-cloud/docs/BILLING-VERIFICATION-2026-09-27.md` for the worked run.
 
 Official references: [Stripe testing](https://docs.stripe.com/testing), [Test clocks](https://docs.stripe.com/billing/testing/test-clocks), [webhooks](https://docs.stripe.com/webhooks), [ngrok agent](https://ngrok.com/docs/agent/).
+
+## Explore beyond this guide
+
+Treat the documented flows as a starting point. Do not hesitate to test relevant behavior that is not documented here: inspect the current implementation, follow unexpected results, and cover interactions and failure paths suggested by the task. Stay within the authorized environment and scope. Fix discovered bugs when authorized, verify the fixes, and record newly validated steps and remaining gaps so this skill improves with use.

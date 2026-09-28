@@ -5,6 +5,7 @@ pub mod cloud;
 pub mod credentials;
 pub mod loopback;
 pub mod pkce;
+pub mod routers;
 
 use chrono::{DateTime, Utc};
 pub use credentials::Credentials;
@@ -335,13 +336,14 @@ impl Client {
                 json!({"loggedIn":true,"authKind":"api_key","apiUrl":self.config.api_url,
                 "user":{"id":key["id"],"displayName":key["label"],"email":""},
                 "accounts":[{"id":key["accountId"],"name":context["accountName"],"role":"api_key"}],
-                "defaultAccountId":key["accountId"],"selectedAccountId":key["accountId"],"scopes":key["scopes"]}),
+                "defaultAccountId":key["accountId"],"selectedAccountId":key["accountId"],"scopes":key["scopes"],"selectedRouterId":self.config.selected_router()?}),
             );
         }
         match self.request(Method::GET, "api/v1/me", None).await {
             Ok(mut me) => {
                 me["loggedIn"] = json!(true);
                 me["apiUrl"] = json!(self.config.api_url);
+                me["selectedRouterId"] = json!(self.config.selected_router()?);
                 me["selectedAccountId"] =
                     json!(self.config.selected_account().unwrap_or_else(|| {
                         me["defaultAccountId"].as_str().unwrap_or_default().into()
@@ -452,9 +454,16 @@ impl Client {
         })
     }
     pub async fn router_session(&self) -> Result<RouterSession> {
+        let router_id = self.config.selected_router()?;
         if let Some(key) = self.config.api_key() {
             let context = self.request(Method::GET, "api/v1/key", None).await?;
-            let router_url = context["routerUrl"]
+            let selected = if let Some(id) = &router_id {
+                self.request(Method::GET, &format!("api/v1/routers/{id}"), None)
+                    .await?
+            } else {
+                context.clone()
+            };
+            let router_url = selected["routerUrl"]
                 .as_str()
                 .ok_or_else(|| Error::Other("Cloud did not return a model endpoint".into()))?;
             safe_url(router_url)?;
@@ -472,7 +481,7 @@ impl Client {
             self.request(
                 Method::POST,
                 "api/v1/account/router-session",
-                Some(json!({"accountId":self.config.selected_account()})),
+                Some(json!({"accountId":self.config.selected_account(),"routerId":router_id})),
             )
             .await?,
         )?)

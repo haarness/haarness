@@ -65,3 +65,7 @@ Follow the [test plan](references/remote-session-test-plan.md) for full-host and
 Use `remote run --chat THREAD_ID` to publish. The global `--session` flag is an alias for native thread selection, not publication. Background `remote enable` does not install boot/login startup integration.
 
 Stop sharing/revoke/disable only owned fixtures and close their streams, PTYs and tmux sessions. Project close, unpublish and host revocation must retain native files/history; never apply rented-session deletion to remote hosts. Report exact revisions, automated/Chrome/tmux/provider evidence separately, cleanup status and any untested boundary. Leave a demo running only when needed for user testing.
+
+## Explore beyond this guide
+
+Treat the documented flows as a starting point. Do not hesitate to test relevant behavior that is not documented here: inspect the current implementation, follow unexpected results, and cover interactions and failure paths suggested by the task. Stay within the authorized environment and scope. Fix discovered bugs when authorized, verify the fixes, and record newly validated steps and remaining gaps so this skill improves with use.

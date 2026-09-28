@@ -31,3 +31,7 @@ Check actual tool calls/results and persisted IDs, not just an assistant claim. 
 Open sessions/agents/schedules in Chrome control. Watch transitions, chat creation/switching, streaming, live list changes, disconnect/reconnect and attach recovery. Preserve editor/composer state across WebSocket invalidations; no page reload or flickering empty list. Verify pane navigation and outside-click dismissal.
 
 Delete only owned schedules/templates/sessions. Wait for worker reconciliation, runtime shutdown, gateway ticket rejection, chat/runtime storage cleanup and intended retained schedule history. Retain failed resource IDs if cleanup fails. Don't delete an unrelated running session to satisfy limits. Test both independent and template-created session cleanup.
+
+## Explore beyond this guide
+
+Treat the documented flows as a starting point. Do not hesitate to test relevant behavior that is not documented here: inspect the current implementation, follow unexpected results, and cover interactions and failure paths suggested by the task. Stay within the authorized environment and scope. Fix discovered bugs when authorized, verify the fixes, and record newly validated steps and remaining gaps so this skill improves with use.

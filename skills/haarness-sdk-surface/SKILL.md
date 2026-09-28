@@ -46,3 +46,7 @@ Run the opt-in `sdks/tests/api_keys_e2e.py` with the SDK Python environment, a f
 In the Cloud checkout, `scripts/test-api-keys-cli-live.py` uses the same opt-in, API URL and fresh fixture OAuth file plus `HAARNESS_CLOUD_BIN`. It exercises create/list/edit/rotate/revoke through the CLI and proves that denied or revoked API keys do not fall back to saved OAuth. Credits serialize as decimal strings; compare their numeric decimal value, not a fixed number of trailing zeroes.
 
 For Chrome, check the single API keys entry, edit form preservation during WebSocket updates, expiry, inactive rows and the legacy `/app/router/keys` redirect. Follow the applicable browser permission policy for credential mutations; backend tests and Chrome observation are distinct evidence. Key model caps apply to direct calls through that key, while session compute and scheduled agent work use account/runtime limits.
+
+## Explore beyond this guide
+
+Treat the documented flows as a starting point. Do not hesitate to test relevant behavior that is not documented here: inspect the current implementation, follow unexpected results, and cover interactions and failure paths suggested by the task. Stay within the authorized environment and scope. Fix discovered bugs when authorized, verify the fixes, and record newly validated steps and remaining gaps so this skill improves with use.

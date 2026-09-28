@@ -403,7 +403,8 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
                             .as_ref()
                             .and_then(|catalog| catalog.current_workspace_id.as_deref())
                             .is_some_and(|current| entry.value == format!("workspace:{current}")),
-                        crate::state::OptionsKind::InputQueue
+                        crate::state::OptionsKind::CloudRouter
+                        | crate::state::OptionsKind::InputQueue
                         | crate::state::OptionsKind::InputQueueActions
                         | crate::state::OptionsKind::InputQueueEdit
                         | crate::state::OptionsKind::Management

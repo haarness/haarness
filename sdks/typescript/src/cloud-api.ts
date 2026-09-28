@@ -318,6 +318,30 @@ export class CloudApi extends Transport {
   modelPrices(options: RequestOptions = {}): Promise<T.ModelPricesResponse> {
     return this.request("GET", `/api/v1/router/model-prices`, { binaryBody: false, binaryResponse: false, ...options });
   }
+  /** GET /api/v1/routers */
+  listRouters(query: T.ListRoutersQuery = {}, options: RequestOptions = {}): Promise<T.RoutersResponse> {
+    return this.request("GET", `/api/v1/routers`, { query, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /api/v1/routers */
+  createRouter(body: T.CreateRouterRequest, options: RequestOptions = {}): Promise<T.RouterDto> {
+    return this.request("POST", `/api/v1/routers`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /api/v1/routers/{id} */
+  getRouter(id: string, options: RequestOptions = {}): Promise<T.RouterDto> {
+    return this.request("GET", `/api/v1/routers/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** DELETE /api/v1/routers/{id} */
+  deleteRouter(id: string, options: RequestOptions = {}): Promise<void> {
+    return this.request("DELETE", `/api/v1/routers/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** PATCH /api/v1/routers/{id} */
+  updateRouter(id: string, body: T.UpdateRouterRequest, options: RequestOptions = {}): Promise<T.RouterDto> {
+    return this.request("PATCH", `/api/v1/routers/${this.segment(id)}`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** PUT /api/v1/routers/{id}/credentials/{provider} */
+  setRouterCredential(id: string, provider: string, body: T.SetRouterCredentialRequest, options: RequestOptions = {}): Promise<T.RouterDto> {
+    return this.request("PUT", `/api/v1/routers/${this.segment(id)}/credentials/${this.segment(provider)}`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
   /** GET /api/v1/schedules */
   listCloudSchedules(query: T.ListCloudSchedulesQuery = {}, options: RequestOptions = {}): Promise<T.Page_CloudScheduleDto> {
     return this.request("GET", `/api/v1/schedules`, { query, binaryBody: false, binaryResponse: false, ...options });
