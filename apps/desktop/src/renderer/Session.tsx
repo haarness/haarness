@@ -9,6 +9,7 @@ import {
   historyKey,
   navigateHistory,
   type PromptHistoryEntry,
+  matchingHistory,
 } from "./prompt-history";
 import { ConversationFind } from "./ConversationFind";
 import {
@@ -320,7 +321,7 @@ export function Session() {
       )
     )
       return false;
-    if (historyIndex === -1) recalled = history.entries(recallKey(), state.selected ?? undefined);
+    if (historyIndex === -1) recalled = matchingHistory(history.entries(recallKey(), state.selected ?? undefined), draft());
     const next = navigateHistory(
       recalled,
       historyIndex,

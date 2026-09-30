@@ -324,7 +324,11 @@ function HookForm(props: {
               />
               <small class="muted">
                 {t(
-                  "Use * for every tool, or tool names such as Bash|Edit. Events without a tool ignore this field.",
+                  form.event === "PostCompact"
+                    ? "Use manual, automatic, or * for every compaction."
+                    : form.event === "StopFailure"
+                      ? "Use incomplete, content_filter, provider, tool, other, or * for every failure."
+                      : "Use * for every event, tool names such as Bash|Edit, or the event source or reason.",
                 )}
               </small>
             </label>

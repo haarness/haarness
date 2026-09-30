@@ -728,7 +728,7 @@ impl ModelProvider for OpenAiProvider {
                             .and_then(Value::as_u64)
                             .unwrap_or(0);
                         yield ProviderEvent::Usage { input_tokens: number(usage, "input_tokens"), output_tokens: number(usage, "output_tokens"), cache_read_tokens: cache_read, cache_write_tokens: 0 };
-                        yield ProviderEvent::Finished { reason: event["response"]["incomplete_details"]["reason"].as_str().unwrap_or("completed").into() };
+                        yield ProviderEvent::Finished { reason: event["response"]["incomplete_details"]["reason"].as_str().unwrap_or(if event["type"] == "response.completed" { "completed" } else { "incomplete" }).into() };
                     }
                     "response.failed" | "error" => Err(CoreError::Provider(event.to_string()))?,
                     _ => {}

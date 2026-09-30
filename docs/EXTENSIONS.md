@@ -169,6 +169,8 @@ correspond to runtime lifecycle events; `threadId` stands in for `sessionID`.
 | `shell.env` | `threadId`, `cwd` | `{env}` adds environment variables to that bash tool invocation |
 | `session.start` | `threadId`, `agent`, `directory` | Observation; no result |
 | `session.end` | `threadId`, `reason`, `directory` | Observation; no result |
+| `session.compacted` | `threadId`, `trigger`, `compaction` | After a committed manual or automatic compaction; no result |
+| `chat.turn.failed` | `threadId`, `turnId`, `detail` | Terminal failure after recovery, excluding cancellation; no result |
 | `chat.turn.end` | `threadId`, `turnId`, `agent`, `provider`, `model`, `finishReason` | Observation; no result |
 | `config` | Effective configuration summary (`workspace`, `provider`, `model`, `permission`, `mcp`, `agents`, `commands`, `execution`, …) | Observation; no result |
 | `stop` | `threadId` | Completion notification; no result |

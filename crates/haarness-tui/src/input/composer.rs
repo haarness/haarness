@@ -46,6 +46,7 @@ pub struct Composer {
     redo: Vec<EditSnapshot>,
     history: Vec<String>,
     history_index: Option<usize>,
+    history_prefix: String,
     history_owner: Option<(String, String)>,
     pending_history: Option<String>,
     stash: Option<EditSnapshot>,
@@ -366,14 +367,22 @@ impl Composer {
         if self.history.is_empty() {
             return false;
         }
-        let next_index = match self.history_index {
-            None => {
-                self.stash = Some(self.edit_snapshot());
-                self.history.len() - 1
-            }
-            Some(0) => return false,
-            Some(index) => index - 1,
+        let prefix = if self.history_index.is_none() {
+            self.expanded_text()
+        } else {
+            self.history_prefix.clone()
         };
+        let end = self.history_index.unwrap_or(self.history.len());
+        let Some(next_index) = self.history[..end]
+            .iter()
+            .rposition(|entry| entry.starts_with(&prefix))
+        else {
+            return false;
+        };
+        if self.history_index.is_none() {
+            self.stash = Some(self.edit_snapshot());
+            self.history_prefix = prefix;
+        }
         self.history_index = Some(next_index);
         self.text = self.history[next_index].clone();
         self.expansions.clear();
@@ -387,9 +396,11 @@ impl Composer {
         let Some(index) = self.history_index else {
             return false;
         };
-        if index + 1 < self.history.len() {
-            self.history_index = Some(index + 1);
-            self.text = self.history[index + 1].clone();
+        if let Some(next) = (index + 1..self.history.len())
+            .find(|&next| self.history[next].starts_with(&self.history_prefix))
+        {
+            self.history_index = Some(next);
+            self.text = self.history[next].clone();
             self.expansions.clear();
         } else {
             self.history_index = None;
@@ -695,18 +706,48 @@ mod tests {
     }
 
     #[test]
+    fn prefix_recall_keeps_unmatched_drafts_and_restarts_after_edits() {
+        let mut c = Composer::with_history(vec![
+            "git status".into(),
+            "npm test".into(),
+            "git diff".into(),
+        ]);
+        c.insert_str("git ");
+        assert!(c.history_prev());
+        assert_eq!(c.text(), "git diff");
+        assert!(c.history_prev());
+        assert_eq!(c.text(), "git status");
+        assert!(!c.history_prev());
+        assert!(c.history_next());
+        assert_eq!(c.text(), "git diff");
+        assert!(c.history_next());
+        assert_eq!(c.text(), "git ");
+        c.insert_str("unmatched");
+        assert!(!c.history_prev());
+        assert!(!c.history_next());
+        assert_eq!(c.text(), "git unmatched");
+        c.set_text(String::new());
+        assert!(c.history_prev());
+        assert_eq!(c.text(), "git diff");
+        c.insert_str(" --stat");
+        assert!(!c.history_prev());
+        assert!(!c.history_next());
+        assert_eq!(c.text(), "git diff --stat");
+    }
+
+    #[test]
     fn history_recall_stashes_the_draft() {
-        let mut composer = Composer::with_history(vec!["one".into(), "two".into()]);
+        let mut composer = Composer::with_history(vec!["draft one".into(), "draft two".into()]);
         for character in "draft".chars() {
             composer.insert_char(character);
         }
         assert!(composer.history_prev());
-        assert_eq!(composer.text(), "two");
+        assert_eq!(composer.text(), "draft two");
         assert!(composer.history_prev());
-        assert_eq!(composer.text(), "one");
+        assert_eq!(composer.text(), "draft one");
         assert!(!composer.history_prev());
         assert!(composer.history_next());
-        assert_eq!(composer.text(), "two");
+        assert_eq!(composer.text(), "draft two");
         assert!(composer.history_next());
         assert_eq!(composer.text(), "draft");
     }
@@ -881,11 +922,11 @@ mod boundary_tests {
 
     #[test]
     fn history_and_context_payloads_keep_their_own_expansion_ranges() {
-        let mut c = Composer::with_history(vec!["literal [#1 pasted 1 lines]".into()]);
+        let mut c = Composer::with_history(vec![format!("{} suffix", "x".repeat(1100))]);
         c.paste(&"x".repeat(1100));
         let original = c.expanded_text();
         c.history_prev();
-        assert_eq!(c.expanded_text(), "literal [#1 pasted 1 lines]");
+        assert_eq!(c.expanded_text(), format!("{} suffix", "x".repeat(1100)));
         c.history_next();
         assert_eq!(c.expanded_text(), original);
         c.move_end();

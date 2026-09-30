@@ -521,6 +521,34 @@ impl HookPort for ConfiguredHooks {
         .into()
     }
 
+    async fn post_compact(&self, thread: ThreadId, trigger: &str, item: &haarness_protocol::Item) {
+        let _ = self
+            .run_event(
+                "PostCompact",
+                Some(trigger),
+                &json!({
+                    "hook_event_name":"PostCompact", "session_id":thread, "cwd":self.workspace,
+                    "trigger":trigger, "compaction":item,
+                }),
+            )
+            .await;
+    }
+    async fn stop_failure(
+        &self,
+        thread: ThreadId,
+        turn: haarness_protocol::TurnId,
+        detail: &Value,
+    ) {
+        let mut payload = detail.clone();
+        payload["hook_event_name"] = json!("StopFailure");
+        payload["session_id"] = json!(thread);
+        payload["turn_id"] = json!(turn);
+        payload["cwd"] = json!(self.workspace);
+        let _ = self
+            .run_event("StopFailure", detail["error"].as_str(), &payload)
+            .await;
+    }
+
     async fn stop(&self, thread: ThreadId) {
         let _ = self
             .run_event(
@@ -862,6 +890,39 @@ mod tests {
         assert_eq!(events[3]["message"], "Permission needed: bash");
         assert_eq!(events[4]["source"], "reload");
         assert!(events.iter().all(|event| event["cwd"].is_string()));
+    }
+
+    #[tokio::test]
+    async fn recovery_lifecycle_hooks_filter_and_deliver_payloads() {
+        let thread = ThreadId::new();
+        let turn = haarness_protocol::TurnId::new();
+        let item: haarness_protocol::Item = serde_json::from_value(json!({
+            "id":haarness_protocol::ItemId::new(), "threadId":thread, "turnId":null,
+            "sequence":1, "createdAt":"2026-09-30T00:00:00Z",
+            "data":{"type":"compaction","summary":"saved summary","files_touched":[],"outstanding":[]}
+        })).unwrap();
+        let events = captured(json!({
+            "PostCompact":[{"matcher":"manual"}],
+            "StopFailure":[{"matcher":"incomplete|content_filter"}]
+        }), async |hooks| {
+            hooks.post_compact(thread, "automatic", &item).await;
+            hooks.post_compact(thread, "manual", &item).await;
+            hooks.stop_failure(thread, turn, &json!({"error":"provider"})).await;
+            hooks.stop_failure(thread, turn, &json!({"error":"incomplete","error_details":"truncated","provider_id":"echo","model_id":"echo-1"})).await;
+        }).await;
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["hook_event_name"], "PostCompact");
+        assert_eq!(events[0]["compaction"]["id"], json!(item.id));
+        assert_eq!(events[0]["trigger"], "manual");
+        assert_eq!(events[1]["hook_event_name"], "StopFailure");
+        assert_eq!(events[1]["turn_id"], json!(turn));
+        assert_eq!(events[1]["error_details"], "truncated");
+        assert_eq!(events[1]["model_id"], "echo-1");
+        assert!(
+            events
+                .iter()
+                .all(|event| event["session_id"] == json!(thread) && event["cwd"].is_string())
+        );
     }
 
     #[tokio::test]

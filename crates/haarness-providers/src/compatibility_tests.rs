@@ -360,3 +360,49 @@ async fn compatible_reasoning_is_provider_scoped_and_replayed() {
     }
     task.abort();
 }
+
+#[tokio::test]
+async fn truncated_http_streams_never_fabricate_successful_completion() {
+    async fn truncated(uri: Uri) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+        let data = if uri.path().ends_with("/responses") {
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\ndata: {\"type\":\"response.incomplete\",\"response\":{}}\n\n"
+        } else {
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\ndata: [DONE]\n\n"
+        };
+        ([(CONTENT_TYPE, "text/event-stream")], data.into())
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, Router::new().fallback(truncated))
+            .await
+            .unwrap()
+    });
+    let responses = OpenAiProvider::for_test(format!("{base}/responses"), "fixture");
+    let compatible = OpenAiCompatibleProvider::new(CompatibleInstance {
+        id: "custom".into(),
+        name: "Fixture".into(),
+        base_url: base,
+        api_key: Some("fixture".into()),
+        models: vec!["fixture-model".into()],
+        discover_models: false,
+        server_output_limit: false,
+        model_defaults: CompatibleModelDefaults::default(),
+        assume_authenticated: false,
+        headers: ProviderHeaders::default(),
+    });
+    for provider in [
+        &responses as &dyn ModelProvider,
+        &compatible as &dyn ModelProvider,
+    ] {
+        let received = events(provider, request("fixture-model", None)).await;
+        assert!(
+            received
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::TextDelta(text) if text=="partial"))
+        );
+        assert!(received.iter().any(|event| matches!(event, ProviderEvent::Finished {reason} if matches!(ProviderEvent::finish_error(reason), Some(haarness_core::CoreError::ProviderIncomplete(_))))));
+        assert!(!received.iter().any(|event| matches!(event, ProviderEvent::Finished {reason} if ProviderEvent::finish_error(reason).is_none())));
+    }
+    task.abort();
+}
