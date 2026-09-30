@@ -607,7 +607,6 @@ fn substitutions(
             "CLAUDE_PLUGIN_ROOT",
             "HAARNESS_PLUGIN_ROOT",
             "OPENCODE_PLUGIN_ROOT",
-            "UPSTREAM_PLUGIN_ROOT",
         ] {
             template = template.replace(&format!("${{{key}}}"), root);
         }

@@ -284,7 +284,6 @@ impl WorkflowCatalog {
         for directory in workflow_project_directories(workspace) {
             roots.extend([
                 WorkflowRoot::project(directory.join(".haarness/workflows"), false),
-                WorkflowRoot::project(directory.join(".upstream/workflows"), false),
                 WorkflowRoot::project(directory.join(".opencode/workflows"), true),
             ]);
         }
@@ -303,17 +302,9 @@ impl WorkflowCatalog {
 
         if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
             roots.extend([
-                WorkflowRoot::global(home.join(".upstream/workflows"), false),
                 WorkflowRoot::global(home.join(".opencode/workflows"), true),
-                WorkflowRoot::global(home.join(".config/upstream/workflows"), false),
                 WorkflowRoot::global(home.join(".config/opencode/workflows"), true),
             ]);
-        }
-        if let Some(root) = std::env::var_os("UPSTREAM_CONFIG_DIR") {
-            roots.push(WorkflowRoot::global(
-                PathBuf::from(root).join("workflows"),
-                false,
-            ));
         }
 
         let mut seen = HashSet::new();
@@ -1402,7 +1393,7 @@ return client.fetch(labels.fetch + prose)
     fn workspace_catalog_walks_to_the_nearest_worktree_root() {
         let temp = TempDir::new("ancestor-roots");
         fs::create_dir_all(temp.0.join(".git")).unwrap();
-        let root_workflows = temp.0.join(".upstream/workflows");
+        let root_workflows = temp.0.join(".haarness/workflows");
         let nested = temp.0.join("crates/demo");
         let nested_workflows = nested.join(".haarness/workflows");
         fs::create_dir_all(&root_workflows).unwrap();

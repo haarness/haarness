@@ -102,7 +102,7 @@ For Desktop add `HAARNESS_PRODUCT=desktop` to the `sh` environment. Windows uses
 
 The installer checks SHA-256 before replacing/running anything. On macOS it uses
 `/usr/bin/xattr -dr com.apple.quarantine` on the verified staged executable/app,
-including nested executables, matching Upstream's targeted cleanup. It leaves other
+including nested executables. It leaves other
 attributes and system security settings intact. Windows unblocks verified bytes.
 Never clear quarantine on a downloaded file until its provenance/hash is verified.
 
