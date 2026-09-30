@@ -35,6 +35,8 @@ pub enum CoreError {
     Provider(String),
     #[error("Response was blocked by the provider content filter ({0}).")]
     ProviderBlocked(String),
+    #[error("Provider response ended before completion ({0}).")]
+    ProviderIncomplete(String),
     #[error("storage error: {0}")]
     Storage(String),
     #[error("tool error: {0}")]
@@ -356,13 +358,27 @@ pub enum ProviderEvent {
 }
 
 impl ProviderEvent {
-    /// Providers spell policy stops differently; ordinary stop/length/tool finishes
-    /// remain successful. The typed error must never trigger automatic retries.
+    /// Classify incomplete and failed responses while retaining ordinary
+    /// stop/length/tool finishes. Policy blocks must never trigger retries.
     pub fn finish_error(reason: &str) -> Option<CoreError> {
-        matches!(reason.to_ascii_lowercase().replace('-', "_").as_str(),
-            "content_filter" | "safety" | "recitation" | "blocklist" | "prohibited_content"
-            | "spii" | "image_safety" | "image_prohibited_content")
-            .then(|| CoreError::ProviderBlocked(reason.to_owned()))
+        let normalized = reason.to_ascii_lowercase().replace('-', "_");
+        match normalized.as_str() {
+            "content_filter"
+            | "safety"
+            | "recitation"
+            | "blocklist"
+            | "prohibited_content"
+            | "spii"
+            | "image_safety"
+            | "image_prohibited_content" => Some(CoreError::ProviderBlocked(reason.to_owned())),
+            "" | "unknown" | "other" | "incomplete" => {
+                Some(CoreError::ProviderIncomplete(reason.to_owned()))
+            }
+            "error" | "failed" => Some(CoreError::Provider(
+                "provider ended the response with an error".into(),
+            )),
+            _ => None,
+        }
     }
 }
 
@@ -606,6 +622,10 @@ pub trait HookPort: Send + Sync {
         detail: &Value,
     ) -> HookDecision;
     async fn stop(&self, thread: ThreadId);
+    /// Observes only a committed compaction, never a discarded summary.
+    async fn post_compact(&self, _thread: ThreadId, _trigger: &str, _item: &Item) {}
+    /// Observes a terminal failure once, after automatic recovery is exhausted.
+    async fn stop_failure(&self, _thread: ThreadId, _turn: TurnId, _detail: &Value) {}
     /// A thread was created (`SessionStart` / `session.start`).
     async fn session_start(&self, _thread: ThreadId, _agent: &str) {}
     /// A thread was archived (`SessionEnd` / `session.end`).

@@ -53,7 +53,7 @@ Press **Cmd+F** on macOS or **Ctrl+F** elsewhere while in a conversation to sear
 
 Open **Settings → Hooks** to add, edit, enable, disable, or remove command hooks. Choose **This project** or **All projects** when adding a hook, then select an event and enter the command. For example, a `Stop` hook can run a script after a response finishes. Tool events accept a matcher such as `Bash|Edit`; `*` matches every tool. Advanced fields include arguments, a shell, timeout, and asynchronous execution.
 
-The editor shows hooks from the same configuration sources the runtime loads, including compatible configuration files. Plugin hooks are read-only. Project hooks remain inactive when project configuration is not trusted; change that separately under **Settings → Projects**. Supported events are `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `UserPromptSubmit`, `PermissionRequest`, `Stop`, `SessionStart`, `SessionEnd`, `TurnEnd`, `Notification`, `FileChanged`, and `ConfigChange`.
+The editor shows hooks from the same configuration sources the runtime loads, including compatible configuration files. Plugin hooks are read-only. Project hooks remain inactive when project configuration is not trusted; change that separately under **Settings → Projects**. Supported events are `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `UserPromptSubmit`, `PermissionRequest`, `Stop`, `PostCompact`, `StopFailure`, `SessionStart`, `SessionEnd`, `TurnEnd`, `Notification`, `FileChanged`, and `ConfigChange`.
 
 Enter **`/memory`** in the composer, or search for **Manage memory**, to manage the active project's memories. Add or edit a named memory with its description, type, and content, or delete an obsolete memory. The dialog shows the storage directory outside the repository. **Index limit** controls how many summaries enter the prompt (1–1000, default 200). Turning memory off removes its prompt index and disables memory tools without deleting saved memories.
 
@@ -258,3 +258,6 @@ Settings and search, and cannot be edited through definition management.
 ## Embedded browser
 
 Open **Browser** in the side panel to browse alongside a conversation, or ask Haarness to operate it. See [Browser alongside chat](BROWSER.md) for local and remote networking, tools, files and diagnostics.
+
+
+Composer history uses the unsent text as a prefix: Up recalls only prompts beginning with that draft, and does nothing when there are no matches. An empty draft browses all history, with the current conversation first. Down past the newest match restores the exact draft, attachments and context. Editing a recalled prompt begins a new search.

@@ -843,6 +843,31 @@ impl HookPort for CombinedHooks {
         }
         self.observe("session.end", json!({"threadId":thread,"reason":reason,"directory":self.extensions.workspace})).await;
     }
+    async fn post_compact(&self, thread: ThreadId, trigger: &str, item: &haarness_protocol::Item) {
+        if let Some(inner) = &self.inner {
+            inner.post_compact(thread, trigger, item).await;
+        }
+        self.observe(
+            "session.compacted",
+            json!({"threadId":thread,"trigger":trigger,"compaction":item}),
+        )
+        .await;
+    }
+    async fn stop_failure(
+        &self,
+        thread: ThreadId,
+        turn: haarness_protocol::TurnId,
+        detail: &Value,
+    ) {
+        if let Some(inner) = &self.inner {
+            inner.stop_failure(thread, turn, detail).await;
+        }
+        self.observe(
+            "chat.turn.failed",
+            json!({"threadId":thread,"turnId":turn,"detail":detail}),
+        )
+        .await;
+    }
     async fn turn_end(&self, thread: ThreadId, turn: haarness_protocol::TurnId, detail: &Value) {
         if let Some(inner) = &self.inner {
             inner.turn_end(thread, turn, detail).await;

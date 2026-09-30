@@ -43,6 +43,10 @@ export interface Hooks {
   /** A thread was archived. */
   "session.end"?(input: { threadId: string; reason: string; directory: string }, context: Context): Reply<never>;
   "chat.turn.end"?(input: { threadId: string; turnId: string; agent: string; provider: string; model: string; finishReason: string }, context: Context): Reply<never>;
+  /** A committed manual or automatic context compaction. */
+  "session.compacted"?(input: { threadId: string; trigger: "manual" | "automatic"; compaction: Json }, context: Context): Reply<never>;
+  /** An uncancelled turn failed after recovery was exhausted. */
+  "chat.turn.failed"?(input: { threadId: string; turnId: string; detail: Json }, context: Context): Reply<never>;
   /** Effective runtime configuration summary, once per loaded generation. */
   config?(input: { workspace: string; [key: string]: Json }, context: Context): Reply<never>;
   stop?(input: { threadId: string }, context: Context): Reply<never>;
