@@ -334,6 +334,8 @@ export default (ctx) => {
       'session.start'(input) { log('session.start', input); },
       'session.end'(input) { log('session.end', input); },
       'chat.turn.end'(input) { log('chat.turn.end', input); },
+      'session.compacted'(input) { log('session.compacted', input); },
+      'chat.turn.failed'(input) { log('chat.turn.failed', input); },
       config(input) { writeFileSync(ctx.workspace + '/config.json', JSON.stringify(input)); },
       'chat.params'(input) { return {temperature: 0.2, topP: 0.9, maxOutputTokens: 1234, reasoningEffort: 'low', options: {seed: 7, echo: input.model}}; },
       'chat.headers'(input) { return {headers: {'x-fixture': 'yes', 'x-model': input.model}}; },
@@ -386,7 +388,19 @@ async fn lifecycle_params_env_and_permission_hooks_reach_extensions() {
         .turn_end(thread, turn, &json!({"agent":"build","finishReason":"stop"}))
         .await;
     hooks.session_end(thread, "archived").await;
-    extensions.notify_config(&json!({"model":"echo/echo-1"})).await;
+    let compaction: haarness_protocol::Item = serde_json::from_value(json!({
+        "id":haarness_protocol::ItemId::new(), "threadId":thread, "turnId":null,
+        "sequence":1, "createdAt":"2026-09-30T00:00:00Z",
+        "data":{"type":"compaction","summary":"saved summary","files_touched":[],"outstanding":[]}
+    }))
+    .unwrap();
+    hooks.post_compact(thread, "automatic", &compaction).await;
+    hooks
+        .stop_failure(thread, turn, &json!({"error":"incomplete"}))
+        .await;
+    extensions
+        .notify_config(&json!({"model":"echo/echo-1"}))
+        .await;
     let lifecycle: Vec<Value> = std::fs::read_to_string(root.path().join("lifecycle.jsonl"))
         .unwrap()
         .lines()
@@ -401,6 +415,11 @@ async fn lifecycle_params_env_and_permission_hooks_reach_extensions() {
     assert_eq!(lifecycle[1]["finishReason"], "stop");
     assert_eq!(lifecycle[2]["type"], "session.end");
     assert_eq!(lifecycle[2]["reason"], "archived");
+    assert_eq!(lifecycle[3]["type"], "session.compacted");
+    assert_eq!(lifecycle[3]["trigger"], "automatic");
+    assert_eq!(lifecycle[3]["compaction"]["id"], json!(compaction.id));
+    assert_eq!(lifecycle[4]["type"], "chat.turn.failed");
+    assert_eq!(lifecycle[4]["detail"]["error"], "incomplete");
     let delivered: Value =
         serde_json::from_str(&std::fs::read_to_string(root.path().join("config.json")).unwrap())
             .unwrap();
@@ -456,6 +475,8 @@ async fn lifecycle_params_env_and_permission_hooks_reach_extensions() {
         "tool.definition",
         "session.start",
         "chat.turn.end",
+        "session.compacted",
+        "chat.turn.failed",
         "session.end",
         "config",
         "chat.params",

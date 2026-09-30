@@ -59,14 +59,14 @@ def main():
             run(["tmux", "new-session", "-d", "-x", "140", "-y", "40", "-s", session, command])
             until(lambda: "review" in capture().lower(), "TUI did not open")
 
-        def submit(index, thread, text=None, expected=None):
+        def submit(index, thread, text=None, expected=None, recall=True):
             api = clients[index]
             def users():
                 return [item["data"]["text"] for item in api(f"/threads/{thread}/items") if item["data"]["type"] == "user_message"]
             count = len(users())
             if text:
                 run(["tmux", "send-keys", "-l", "-t", session, text])
-            else:
+            elif recall:
                 run(["tmux", "send-keys", "-t", session, "Up"])
             run(["tmux", "send-keys", "-t", session, "Enter"])
             until(lambda: len(users()) > count, "recalled prompt was not submitted")
@@ -87,8 +87,21 @@ def main():
         submit(1, other, "other-workspace-marker")
         launch(0, first)
         proof = submit(0, first, expected="first-conversation-marker")
+        for prompt in ["git status", "npm test", "git diff"]:
+            submit(0, first, prompt)
+        run(["tmux", "send-keys", "-l", "-t", session, "git "])
+        run(["tmux", "send-keys", "-t", session, "Up", "Up"])
+        submit(0, first, expected="git status", recall=False)
+        run(["tmux", "send-keys", "-l", "-t", session, "git "])
+        run(["tmux", "send-keys", "-t", session, "Up", "Down"])
+        # Inspect and submit the restored draft, including its trailing space.
+        until(lambda: "git " in capture(), "prefix draft was not restored")
+        submit(0, first, expected="git ", recall=False)
+        run(["tmux", "send-keys", "-l", "-t", session, "unmatched draft"])
+        run(["tmux", "send-keys", "-t", session, "Up"])
+        proof = submit(0, first, expected="unmatched draft", recall=False)
         (root / "history-tui.txt").write_text(proof)
-        print(json.dumps({"passed": ["conversation-first recall", "TUI restart", "workspace isolation", "server switching"], "fixture": str(root)}, indent=2))
+        print(json.dumps({"passed": ["conversation-first recall", "TUI restart", "workspace isolation", "server switching", "prefix filtering", "prefix draft restoration", "unmatched draft preservation"], "fixture": str(root)}, indent=2))
     finally:
         subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True)
         for workspace in workspaces:

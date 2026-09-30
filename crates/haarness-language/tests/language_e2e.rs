@@ -68,6 +68,7 @@ fn service(workspace: &Path, enabled: bool) -> Arc<LanguageService> {
             diagnostic_timeout_ms: 2_000,
             request_timeout_ms: 2_000,
             servers: BTreeMap::from([("mock".into(), server(&extensions))]),
+            ..LspConfig::default()
         },
         FormatterConfig {
             enabled,
@@ -266,5 +267,131 @@ async fn per_server_timeouts_override_global_limits_and_remain_cancellable() {
             .await
             .is_err()
     );
+    service.shutdown().await;
+}
+
+#[tokio::test]
+async fn idle_clients_are_reaped_and_restart_on_demand() {
+    let workspace = Workspace::new();
+    let file = workspace.0.join("sample.mock");
+    std::fs::write(&file, "hello").unwrap();
+    let service = LanguageService::new(
+        workspace.0.clone(),
+        LspConfig {
+            builtins: false,
+            idle_timeout_ms: 50,
+            servers: BTreeMap::from([("mock".into(), server(&[".mock"]))]),
+            ..LspConfig::default()
+        },
+        FormatterConfig {
+            enabled: false,
+            ..FormatterConfig::default()
+        },
+    );
+    let cancel = CancellationToken::new();
+    service
+        .query(Operation::Hover, &file, 0, 0, None, &cancel)
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if service.status().await[0].status == "idle" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    service
+        .query(Operation::Hover, &file, 0, 0, None, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(service.status().await[0].status, "running");
+    service.shutdown().await;
+}
+
+#[tokio::test]
+async fn capacity_reaps_idle_clients_but_preserves_inflight_requests() {
+    let workspace = Workspace::new();
+    let first = workspace.0.join("a.first");
+    let second = workspace.0.join("b.second");
+    std::fs::write(&first, "hello").unwrap();
+    std::fs::write(&second, "hello").unwrap();
+    let mut slow = server(&[".first"]);
+    slow.environment
+        .insert("REQUEST_DELAY".into(), "0.2".into());
+    let service = Arc::new(LanguageService::new(
+        workspace.0.clone(),
+        LspConfig {
+            builtins: false,
+            idle_timeout_ms: 50,
+            max_clients: 1,
+            servers: BTreeMap::from([
+                ("first".into(), slow),
+                ("second".into(), server(&[".second"])),
+            ]),
+            ..LspConfig::default()
+        },
+        FormatterConfig {
+            enabled: false,
+            ..FormatterConfig::default()
+        },
+    ));
+    let worker = service.clone();
+    let active = tokio::spawn(async move {
+        worker
+            .query(
+                Operation::Hover,
+                &first,
+                0,
+                0,
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if service.status().await[0].status == "running" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        service
+            .query(
+                Operation::Hover,
+                &second,
+                0,
+                0,
+                None,
+                &CancellationToken::new()
+            )
+            .await
+            .unwrap_err()
+            .contains("capacity")
+    );
+    assert!(
+        active.await.unwrap().is_ok(),
+        "idle sweeper killed an active request"
+    );
+    service
+        .query(
+            Operation::Hover,
+            &second,
+            0,
+            0,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let statuses = service.status().await;
+    assert_eq!(statuses[0].status, "idle");
+    assert_eq!(statuses[1].status, "running");
     service.shutdown().await;
 }

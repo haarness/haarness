@@ -24,6 +24,8 @@ const CONTRACTS: Record<string, Record<string, Kind>> = {
   "session.start": {},
   "session.end": {},
   "chat.turn.end": {},
+  "session.compacted": {},
+  "chat.turn.failed": {},
   config: {},
   stop: {},
   event: {},

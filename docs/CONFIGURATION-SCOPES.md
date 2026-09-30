@@ -145,9 +145,19 @@ The `hooks` object in any configuration layer (and `hooks/hooks.json` in a plugi
 | `PostToolUse` / `PostToolUseFailure` | after a tool finishes | `tool_name`, `tool_input`, `tool_response`, `error` | tool name |
 | `FileChanged` | after a successful `write`, `edit`, `multiedit` or notebook edit | `tool_name`, `tool_input`, `file_path` | tool name |
 | `Stop` | a root turn completed | — | — |
+| `PostCompact` | after a compaction commits | `trigger`, `compaction` | `manual` or `automatic` |
+| `StopFailure` | once after terminal failure and exhausted recovery | `error`, `error_details`, `provider_id`, `model_id` | `incomplete`, `content_filter`, `provider`, `tool`, `other` |
 | `TurnEnd` | after `Stop`, once per completed root turn | `turn_id`, `agent`, `provider`, `model`, `finish_reason` | — |
 | `Notification` | a permission prompt is waiting (`permission_prompt`) or a turn completed (`turn_completed`) | `notification_type`, `message` | `notification_type` |
 | `SessionEnd` | a thread is archived | `reason` (`archived`) | `reason` |
 | `ConfigChange` | a hot-reloaded configuration generation became active | `source` (`reload`); no `session_id` | — |
 
-`SessionStart`, `SessionEnd`, `TurnEnd`, `Notification`, `FileChanged` and `ConfigChange` are observational: their output is logged, never applied. The desktop hook editor accepts the same twelve events. JavaScript extensions receive the matching `session.start`, `session.end`, `chat.turn.end` and `config` hooks; see [extensions](EXTENSIONS.md#hooks).
+`SessionStart`, `SessionEnd`, `TurnEnd`, `Notification`, `FileChanged` and `ConfigChange` are observational: their output is logged, never applied. The desktop hook editor accepts these lifecycle events. `PostCompact` and `StopFailure` are observational: hook output never changes the compaction or retries a failed response. Cancellation does not emit `StopFailure`. JavaScript extensions receive the matching `session.start`, `session.end`, `session.compacted`, `chat.turn.failed`, `chat.turn.end` and `config` hooks; see [extensions](EXTENSIONS.md#hooks).
+
+### Recovery and language-server limits
+
+Incomplete provider streams retain partial text and usage and receive at most three recovery attempts per run. Empty responses retry the request; responses with partial output continue from durable history. Tools from an incomplete response are closed with an error instead of being executed, and completed earlier tool results remain in history. Incomplete-response recovery does not retry explicit provider errors or policy blocks. Every attempt contributes to usage accounting; context size remains based on the current conversation.
+
+Language servers stop after ten idle minutes by default. Configure `[lsp] idle_timeout_ms` and `max_clients` (default 6) to adjust retention per workspace daemon. Active operations, including diagnostic waits, are protected. At capacity, the oldest idle client is stopped; when all clients are busy, optional language work reports a capacity error. Reaped clients restart on demand without a failure backoff.
+
+A subagent whose configured model is absent from its authenticated provider's catalog uses the parent's model and includes a substitution notice in foreground and background task results. An explicit model argument takes precedence. Unknown providers and authentication/configuration errors are reported instead of triggering fallback.

@@ -707,6 +707,7 @@ fn phase_text(app: &App) -> String {
             }
         }
         "compacting" => format!("compacting   {elapsed}s"),
+        "retrying" => format!("recovering incomplete response   {elapsed}s"),
         "stopping" => app.language.text("stopping").into(),
         "done" => app.language.text("finishing").into(),
         _ => format!("{}   {turn_elapsed}s", app.language.text("thinking")),

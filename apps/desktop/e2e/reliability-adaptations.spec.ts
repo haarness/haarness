@@ -105,6 +105,12 @@ test("review drafts survive navigation, reload and failed delivery; recall prior
     await message.fill("unfinished draft");
     await message.evaluate(element => (element as HTMLTextAreaElement).setSelectionRange(0, 0));
     await message.press("ArrowUp");
+    await expect(message).toHaveValue("unfinished draft");
+    await page.reload();
+    await expect(message).toHaveValue("unfinished draft");
+    // Empty drafts retain conversation-first ordering across the workspace.
+    await message.fill("");
+    await message.press("ArrowUp");
     await expect(message).toHaveValue("first conversation recall");
     await message.press("ArrowUp");
     await expect(message).toHaveValue(delivery.note);
@@ -115,12 +121,29 @@ test("review drafts survive navigation, reload and failed delivery; recall prior
     await message.press("ArrowDown");
     await expect(message).toHaveValue("first conversation recall");
     await message.press("ArrowDown");
-    await expect(message).toHaveValue("unfinished draft");
-    await page.reload();
-    await expect(message).toHaveValue("unfinished draft");
+    await expect(message).toHaveValue("");
+    await send("git status");
+    await send("npm test");
+    await send("git diff");
+    await message.fill("git ");
     await message.evaluate(element => (element as HTMLTextAreaElement).setSelectionRange(0, 0));
     await message.press("ArrowUp");
-    await expect(message).toHaveValue("first conversation recall");
+    await expect(message).toHaveValue("git diff");
+    await message.press("ArrowUp");
+    await expect(message).toHaveValue("git status");
+    await message.press("ArrowUp");
+    await expect(message).toHaveValue("git status");
+    await message.press("ArrowDown");
+    await expect(message).toHaveValue("git diff");
+    await message.press("ArrowDown");
+    await expect(message).toHaveValue("git ");
+    // Editing a recall starts a fresh prefix without losing the edited text.
+    await message.evaluate(element => (element as HTMLTextAreaElement).setSelectionRange(0, 0));
+    await message.press("ArrowUp");
+    await message.fill("git diff --stat");
+    await message.evaluate(element => (element as HTMLTextAreaElement).setSelectionRange(0, 0));
+    await message.press("ArrowUp");
+    await expect(message).toHaveValue("git diff --stat");
     await page.screenshot({ path: info.outputPath("conversation-history.png") });
     expect(errors).toEqual([]);
   } finally {

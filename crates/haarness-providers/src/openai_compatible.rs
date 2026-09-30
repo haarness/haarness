@@ -1314,7 +1314,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             if let Some((input_tokens, output_tokens, cache_read_tokens)) = usage {
                 yield ProviderEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens: 0 };
             }
-            yield ProviderEvent::Finished{reason:finish_reason.unwrap_or_else(||"completed".into())};
+            yield ProviderEvent::Finished{reason:finish_reason.unwrap_or_else(||"incomplete".into())};
         }))
     }
 }
