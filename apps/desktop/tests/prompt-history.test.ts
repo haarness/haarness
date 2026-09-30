@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   canRecall,
+  matchingHistory,
   createHistoryStore,
   historyKey,
   navigateHistory,
@@ -113,4 +114,18 @@ test("history hydrates before appending, serializes writes, and separates worksp
   );
   assert.equal(store.entries(other)[0].text, "other prompt");
   assert.deepEqual(store.entries(historyKey("workspace-c")), []);
+});
+
+
+test("prefix recall skips unrelated entries, preserves ordering and leaves unmatched drafts alone", () => {
+  const entries = [entry("git diff"), entry("gitk"), entry("npm test"), entry("git status")];
+  const matches = matchingHistory(entries, "git ");
+  assert.deepEqual(matches.map(entry => entry.text), ["git diff", "git status"]);
+  assert.equal(navigateHistory(matches, -1, "up"), 0);
+  assert.equal(navigateHistory(matches, 0, "up"), 1);
+  assert.equal(navigateHistory(matches, 0, "down"), -1);
+  assert.deepEqual(matchingHistory(entries, "unrelated draft"), []);
+  assert.equal(navigateHistory(matchingHistory(entries, "unrelated draft"), -1, "up"), undefined);
+  assert.deepEqual(matchingHistory(entries, ""), entries);
+  assert.deepEqual(matchingHistory([entry("修正 tests"), entry("fix tests")], "修正"), [entry("修正 tests")]);
 });

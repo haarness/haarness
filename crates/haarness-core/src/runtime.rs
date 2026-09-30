@@ -242,6 +242,7 @@ impl TurnSnapshotState {
 }
 
 struct BackgroundTask {
+    notice: Option<String>,
     info: Mutex<BackgroundTaskInfo>,
     cancel: CancellationToken,
     promoted: AtomicBool,
@@ -259,6 +260,13 @@ struct BackgroundTask {
 }
 
 impl BackgroundTask {
+    fn envelope(&self, info: &BackgroundTaskInfo, state: &str, text: &str) -> String {
+        let text = match &self.notice {
+            Some(notice) => format!("{notice}\nTell the user about this substitution.\n{text}"),
+            None => text.to_owned(),
+        };
+        task_envelope(info, state, &text)
+    }
     fn info(&self) -> BackgroundTaskInfo {
         self.info.lock().clone()
     }
@@ -1827,11 +1835,13 @@ impl AgentRuntime {
                 .await?;
             let mut answer = String::new();
             let mut calls = Vec::new();
+            let mut finished = false;
             while let Some(event) = stream.next().await {
                 match event? {
                     ProviderEvent::TextDelta(delta) => answer.push_str(&delta),
                     ProviderEvent::ReasoningDelta(_) => {}
                     ProviderEvent::Finished { reason } => {
+                        finished = true;
                         if let Some(error) = ProviderEvent::finish_error(&reason) { return Err(error); }
                     }
                     ProviderEvent::Usage {
@@ -1861,6 +1871,11 @@ impl AgentRuntime {
                         ));
                     }
                 }
+            }
+            if !finished {
+                return Err(CoreError::ProviderIncomplete(
+                    "side question ended without a completion event".into(),
+                ));
             }
             if calls.is_empty() {
                 if answer.trim().is_empty() {
@@ -2170,7 +2185,7 @@ impl AgentRuntime {
         // item commits; a turn already in progress is rejected instead of
         // having its live transcript truncated.
         let admission_lock = turn_admission_lock(&self.turn_admissions, id);
-        let _admission_guard = admission_lock.lock().await;
+        let admission_guard = admission_lock.lock().await;
         if self.active.contains_key(&id) {
             return Err(CoreError::Conflict(
                 "cannot compact while a turn is running".into(),
@@ -2182,7 +2197,12 @@ impl AgentRuntime {
         let expected_tail = items.last().map(|item| (item.id, item.sequence));
         let input_limit = self.compaction_input_limit_for(&thread.provider, &thread.model);
         let request = self.complete_compaction_request(&items, request, Some(input_limit));
-        self.repository.compact(id, request, expected_tail).await
+        let item = self.repository.compact(id, request, expected_tail).await?;
+        drop(admission_guard);
+        if let Some(hooks) = &self.components().hooks {
+            hooks.post_compact(id, "manual", &item).await;
+        }
+        Ok(item)
     }
     /// Generate the compaction summary with the thread's model, then record
     /// it. Refused while a turn is active.
@@ -2225,7 +2245,7 @@ impl AgentRuntime {
         // for commit, reject an active turn, and also compare the full durable
         // item revision so a turn that started *and finished* during the await
         // cannot be silently replaced by a stale summary.
-        let _admission_guard = admission_lock.lock().await;
+        let admission_guard = admission_lock.lock().await;
         if self.active.contains_key(&id) {
             return Err(CoreError::Conflict(
                 "cannot compact while a turn is running".into(),
@@ -2271,6 +2291,10 @@ impl AgentRuntime {
             Some(item.id),
             json!(item),
         );
+        drop(admission_guard);
+        if let Some(hooks) = &self.components().hooks {
+            hooks.post_compact(id, "manual", &item).await;
+        }
         Ok(item)
     }
     pub async fn fork_thread(
@@ -4703,6 +4727,25 @@ impl RunnerTask {
                 );
             }
         }
+        if let Err(error) = &result
+            && !matches!(error, CoreError::Cancelled)
+            && !self.cancel.is_cancelled()
+            && let Some(hooks) = &self.hooks
+        {
+            let category = match error {
+                CoreError::ProviderIncomplete(_) => "incomplete",
+                CoreError::ProviderBlocked(_) => "content_filter",
+                CoreError::Provider(_) => "provider",
+                CoreError::Tool(_) => "tool",
+                _ => "other",
+            };
+            let detail = json!({"error":category,"error_details":user_facing_error(error),"provider_id":self.turn.provider,"model_id":self.turn.model});
+            tokio::select! {
+                biased;
+                () = self.cancel.cancelled() => {},
+                () = hooks.stop_failure(self.thread.id, self.turn.id, &detail) => {}
+            }
+        }
         self.close_acceptance().await;
         result
     }
@@ -4891,6 +4934,13 @@ impl RunnerTask {
             json!(item),
         );
         drop(accepting);
+        if let Some(hooks) = &self.hooks {
+            tokio::select! {
+                biased;
+                () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
+                () = hooks.post_compact(self.thread.id, "automatic", &item) => {}
+            }
+        }
         self.set_status("thinking", None);
         Ok(true)
     }
@@ -4964,6 +5014,8 @@ impl RunnerTask {
                 .filter(|turns| *turns > 0)
                 .unwrap_or(crate::goal::MAX_GOAL_TURNS);
             let mut compactions_this_turn = 0_u8;
+            let mut recoveries = 0_u8;
+            let mut recovering = false;
             // UserPromptSubmit hooks may block the turn or inject context.
             let mut prompt_context: Option<String> = None;
             if self.depth == 0 {
@@ -5183,6 +5235,7 @@ impl RunnerTask {
                             ));
                         };
                         let accepting = active.accepting.lock().await;
+                        let mut compacted = None;
                         let current_items =
                             self.repository.list_items(self.thread.id, None).await?;
                         if self.depth == 0
@@ -5226,9 +5279,17 @@ impl RunnerTask {
                                 Some(item.id),
                                 json!(item),
                             );
+                            compacted = Some(item);
                             items = self.repository.list_items(self.thread.id, None).await?;
                         }
                         drop(accepting);
+                        if let (Some(hooks), Some(item)) = (&self.hooks, compacted) {
+                            tokio::select! {
+                                biased;
+                                () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
+                                () = hooks.post_compact(self.thread.id, "automatic", &item) => {}
+                            }
+                        }
                         self.set_status("thinking", None);
                     }
                 }
@@ -5243,6 +5304,11 @@ impl RunnerTask {
                 }
                 let mut messages = provider_messages(items);
                 let source_messages = messages.clone();
+                if recovering {
+                    messages.push(ProviderMessage::Text { role: "user".into(), content:
+                        "The previous provider response ended before completion. Continue from the saved partial response without repeating it. Completed tool results are already in the conversation; do not repeat those actions.".into() });
+                    recovering = false;
+                }
                 let goal_for_request = if self.depth == 0 {
                     self.repository
                         .goal_state(self.thread.id)
@@ -5462,6 +5528,7 @@ impl RunnerTask {
                 let mut calls = Vec::new();
                 let mut structured_output = None;
                 let mut blocked = None;
+                let mut finished = false;
                 let mut saw_provider_event = false;
                 loop {
                     let event = tokio::select! {
@@ -5483,7 +5550,8 @@ impl RunnerTask {
                                 compactions_this_turn = compactions_this_turn.saturating_add(1);
                                 continue 'provider_round;
                             }
-                            return Err(error_value);
+                            blocked = Some(error_value);
+                            break;
                         }
                     };
                     saw_provider_event = true;
@@ -5580,11 +5648,19 @@ impl RunnerTask {
                             ));
                         }
                         ProviderEvent::Finished { reason } => {
+                            finished = true;
                             if let Some(error) = ProviderEvent::finish_error(&reason) { blocked = Some(error); }
                         }
                     }
                 }
                 drop(provider_span);
+                if !finished && blocked.is_none() {
+                    blocked = Some(CoreError::ProviderIncomplete(
+                        "missing completion event".into(),
+                    ));
+                }
+                let partial = saw_provider_event
+                    && (!text.is_empty() || !reasoning.is_empty() || !calls.is_empty());
                 self.flush_reasoning_segment(&mut reasoning).await?;
                 if blocked.is_some() {
                     self.flush_assistant_segment(&mut text, &mut goal_turn_assistant_text).await?;
@@ -5648,6 +5724,17 @@ impl RunnerTask {
                             call_id, name, output: error.to_string(), is_error: true,
                             metadata: serde_json::Value::Null,
                         }).await?;
+                    }
+                    if matches!(error, CoreError::ProviderIncomplete(_)) && recoveries < 3 {
+                        recoveries += 1;
+                        recovering = partial;
+                        self.set_status("retrying", None);
+                        tokio::select! {
+                            biased;
+                            () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
+                            () = tokio::time::sleep(std::time::Duration::from_millis(250 * (1 << (recoveries - 1)))) => {}
+                        }
+                        continue 'provider_round;
                     }
                     return Err(error);
                 }
@@ -7297,19 +7384,14 @@ impl RunnerTask {
         if let Some(custom) = self.custom_agent(&agent) {
             validate_custom_agent_mode(&custom, true)?;
         }
-        let requested_model = arguments
-            .get("model")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| self.custom_agent(&agent).and_then(|a| a.model));
-        let (provider, model) = requested_model
-            .as_deref()
-            .map(|model| {
-                resolve_definition_model(self.providers.as_ref(), Some(&self.turn.provider), model)
-            })
-            .transpose()?
-            .flatten()
-            .unwrap_or_else(|| (self.turn.provider.clone(), self.turn.model.clone()));
+        let configured = self.custom_agent(&agent).and_then(|agent| agent.model);
+        let ((provider, model), notice) = subagent_model(
+            self.providers.as_ref(),
+            &self.turn.provider,
+            &self.turn.model,
+            arguments.get("model").and_then(serde_json::Value::as_str),
+            configured.as_deref(),
+        )?;
 
         let title = subagent_title(&prompt, &agent);
         let child = if let Some(child) = resumed_child {
@@ -7402,7 +7484,7 @@ impl RunnerTask {
                         "background",
                     )
                     .await?;
-                    return Ok(task_envelope(
+                    return Ok(existing.envelope(
                         &info,
                         "running",
                         "Additional context was sent to the existing background subagent. Its result will be delivered automatically; do not poll or duplicate its work.",
@@ -7569,6 +7651,7 @@ impl RunnerTask {
         });
         child_task.publish_task_update("running");
         let task = Arc::new(BackgroundTask {
+            notice,
             info: Mutex::new(BackgroundTaskInfo {
                 parent_thread_id: self.thread.id,
                 parent_turn_id: self.turn.id,
@@ -7667,7 +7750,7 @@ impl RunnerTask {
             )
             .await?;
             self.launch_background_delivery(Arc::clone(&task));
-            return Ok(task_envelope(
+            return Ok(task.envelope(
                 &task.info(),
                 "running",
                 "The subagent is working in the background. Its result will be delivered automatically; do not poll or duplicate its work.",
@@ -7685,7 +7768,7 @@ impl RunnerTask {
                 )
                 .await?;
                 self.launch_background_delivery(Arc::clone(&task));
-                return Ok(task_envelope(
+                return Ok(task.envelope(
                     &task.info(),
                     "running",
                     "The foreground subagent was moved to the background. Its result will be delivered automatically; do not poll or duplicate its work.",
@@ -7698,12 +7781,13 @@ impl RunnerTask {
                     task.delivered.store(true, Ordering::SeqCst);
                     task.delivery_done.notify_waiters();
                     return match result {
-                        Ok(text) => Ok(task_envelope(&task.info(), "completed", &text)),
-                        Err(CoreError::Cancelled) => Ok(task_envelope(
+                        Ok(text) => Ok(task.envelope(&task.info(), "completed", &text)),
+                        Err(CoreError::Cancelled) => Ok(task.envelope(
                             &task.info(),
                             "cancelled",
                             "This subagent was stopped intentionally. Do not relaunch or retry it.",
                         )),
+                        Err(error) if task.notice.is_some() => Err(CoreError::Tool(task.envelope(&task.info(), "error", &user_facing_error(&error)))),
                         Err(error) => Err(error),
                     };
                 }
@@ -7743,7 +7827,7 @@ impl RunnerTask {
                     QueueInputRequest {
                         delivery: haarness_protocol::InputDelivery::Steer,
                         request_id: RequestId::new(),
-                        text: task_envelope(&info, state, &text),
+                        text: task.envelope(&info, state, &text),
                         attachments: Vec::new(),
                         synthetic: true,
                     },
@@ -8021,6 +8105,51 @@ fn merge_agent_tools(
         merged.insert(name.clone(), permitted);
     }
     *request = Some(merged);
+}
+
+fn subagent_model(
+    registry: &dyn ProviderRegistry,
+    parent_provider: &str,
+    parent_model: &str,
+    explicit: Option<&str>,
+    configured: Option<&str>,
+) -> CoreResult<((String, String), Option<String>)> {
+    let parent = (parent_provider.to_owned(), parent_model.to_owned());
+    if let Some(model) = explicit {
+        return Ok((
+            resolve_definition_model(registry, Some(parent_provider), model)?.unwrap_or(parent),
+            None,
+        ));
+    }
+    let Some(configured) = configured.filter(|model| *model != "inherit") else {
+        return Ok((parent, None));
+    };
+    let resolved = match resolve_definition_model(registry, Some(parent_provider), configured) {
+        Ok(value) => value,
+        Err(_) if matches!(configured, "sonnet" | "opus" | "haiku") => None,
+        Err(error) => return Err(error),
+    };
+    if let Some((provider, model)) = resolved {
+        let available = registry
+            .get(&provider)
+            .ok_or_else(|| CoreError::Invalid(format!("unknown provider {provider}")))?;
+        if !available.info().authenticated {
+            return Err(CoreError::Provider(format!(
+                "configured provider {provider} is not authenticated"
+            )));
+        }
+        if registry
+            .models(&provider)
+            .iter()
+            .any(|entry| entry.id == model)
+        {
+            return Ok(((provider, model), None));
+        }
+    }
+    let notice = format!(
+        "Configured model \"{configured}\" unavailable. Using parent model \"{parent_provider}/{parent_model}\"."
+    );
+    Ok((parent, Some(notice)))
 }
 
 fn resolve_definition_model(
@@ -8496,6 +8625,7 @@ async fn summarize_context(
         result = provider.stream(request, cancel.clone()) => result?,
     };
     let mut text = String::new();
+    let mut finished = false;
     loop {
         let event = tokio::select! {
             biased;
@@ -8505,9 +8635,21 @@ async fn summarize_context(
         let Some(event) = event else {
             break;
         };
-        if let ProviderEvent::TextDelta(delta) = event? {
-            text.push_str(&delta);
+        match event? {
+            ProviderEvent::TextDelta(delta) => text.push_str(&delta),
+            ProviderEvent::Finished { reason } => {
+                finished = true;
+                if let Some(error) = ProviderEvent::finish_error(&reason) {
+                    return Err(error);
+                }
+            }
+            _ => {}
         }
+    }
+    if !finished {
+        return Err(CoreError::ProviderIncomplete(
+            "compaction ended without a completion event".into(),
+        ));
     }
     if text.trim().is_empty() {
         return Err(CoreError::Provider(

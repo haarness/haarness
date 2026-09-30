@@ -54,6 +54,10 @@ export function orderHistory(entries: PromptHistoryEntry[], thread?: string) {
   for (const entry of ordered) if (!result.some(item => samePrompt(item, entry))) result.push(entry);
   return result;
 }
+/** Capture matches once: a recalled entry must not become the next search prefix. */
+export function matchingHistory(entries: PromptHistoryEntry[], draft: string) {
+  return entries.filter(entry => entry.text.startsWith(draft));
+}
 /** Large media remains recallable in memory, without exceeding desktop storage limits. */
 export function persistedHistory(entries: PromptHistoryEntry[]) {
   let bytes = 2;

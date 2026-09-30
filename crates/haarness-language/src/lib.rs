@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::RwLock as SyncRwLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
@@ -49,6 +49,9 @@ pub struct LspConfig {
     pub diagnostic_timeout_ms: u64,
     pub request_timeout_ms: u64,
     pub servers: BTreeMap<String, LspServerConfig>,
+    /// Idle clients are stopped and restarted on demand.
+    pub idle_timeout_ms: u64,
+    pub max_clients: usize,
 }
 
 impl Default for LspConfig {
@@ -59,6 +62,8 @@ impl Default for LspConfig {
             diagnostic_timeout_ms: default_diagnostic_timeout_ms(),
             request_timeout_ms: default_request_timeout_ms(),
             servers: BTreeMap::new(),
+            idle_timeout_ms: 600_000,
+            max_clients: 6,
         }
     }
 }
@@ -231,6 +236,9 @@ pub struct LanguageService {
 }
 
 struct LanguageState {
+    lifecycle: Mutex<()>,
+    sweeping: AtomicBool,
+    closed: AtomicBool,
     lsp: LspConfig,
     formatters: BTreeMap<String, FormatterDefinition>,
     servers: BTreeMap<String, Arc<ServerSlot>>,
@@ -284,6 +292,9 @@ impl LanguageService {
         Self {
             workspace,
             state: SyncRwLock::new(Arc::new(LanguageState {
+                lifecycle: Mutex::new(()),
+                sweeping: AtomicBool::new(false),
+                closed: AtomicBool::new(false),
                 lsp,
                 formatters,
                 servers,
@@ -573,16 +584,41 @@ impl LanguageService {
 
     async fn client(
         &self,
-        state: &LanguageState,
+        state: &Arc<LanguageState>,
         id: &str,
         slot: &Arc<ServerSlot>,
         cancel: &CancellationToken,
-    ) -> Result<Arc<Client>, String> {
+    ) -> Result<Lease, String> {
+        let _lifecycle = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err("language server request cancelled".into()),
+            guard = state.lifecycle.lock() => guard,
+        };
+        if state.closed.load(Ordering::SeqCst) {
+            return Err("language service is shutting down".into());
+        }
+        if !state.sweeping.swap(true, Ordering::SeqCst) {
+            let weak = Arc::downgrade(state);
+            let interval = Duration::from_millis((state.lsp.idle_timeout_ms / 2).clamp(10, 60_000));
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(interval).await;
+                    let Some(state) = weak.upgrade() else {
+                        break;
+                    };
+                    let _lifecycle = state.lifecycle.lock().await;
+                    if state.closed.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    reap(&state, false).await;
+                }
+            });
+        }
         let mut current = slot.client.lock().await;
         if let Some(client) = current.as_ref()
             && client.status.read().await.as_str() == "running"
         {
-            return Ok(Arc::clone(client));
+            return Ok(Lease::new(Arc::clone(client)).await);
         }
         if slot.config.command.is_empty() {
             return Err("server command is empty".into());
@@ -598,6 +634,18 @@ impl LanguageService {
                     .unwrap_or_else(|| "server launch is in retry backoff".into()));
             }
         }
+        drop(current);
+        reap(state, true).await;
+        let mut count = 0;
+        for slot in state.servers.values() {
+            if slot.client.lock().await.is_some() {
+                count += 1;
+            }
+        }
+        if count >= state.lsp.max_clients.max(1) {
+            return Err("language server capacity is busy".into());
+        }
+        current = slot.client.lock().await;
         match Client::spawn(
             id.to_owned(),
             slot.config.clone(),
@@ -614,7 +662,7 @@ impl LanguageService {
                 *slot.error.write().await = None;
                 *slot.retry_after.lock().await = None;
                 *current = Some(Arc::clone(&client));
-                Ok(client)
+                Ok(Lease::new(client).await)
             }
             Err(error) => {
                 *slot.error.write().await = Some(error.clone());
@@ -707,6 +755,8 @@ impl LanguageService {
 }
 
 async fn shutdown_language_state(state: &LanguageState) {
+    let _lifecycle = state.lifecycle.lock().await;
+    state.closed.store(true, Ordering::SeqCst);
     for slot in state.servers.values() {
         let client = slot.client.lock().await.clone();
         if let Some(client) = client {
@@ -715,7 +765,68 @@ async fn shutdown_language_state(state: &LanguageState) {
     }
 }
 
+// A lease covers touch + all requests in one operation, including diagnostic waits.
+struct Lease {
+    client: Arc<Client>,
+    _guard: tokio::sync::OwnedRwLockReadGuard<()>,
+}
+impl Lease {
+    async fn new(client: Arc<Client>) -> Self {
+        let guard = client.activity.clone().read_owned().await;
+        Self {
+            client,
+            _guard: guard,
+        }
+    }
+}
+impl std::ops::Deref for Lease {
+    type Target = Client;
+    fn deref(&self) -> &Client {
+        &self.client
+    }
+}
+impl Drop for Lease {
+    fn drop(&mut self) {
+        *self
+            .client
+            .used
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
+    }
+}
+
+// Called under lifecycle: choosing a victim and taking a new lease cannot race.
+async fn reap(state: &LanguageState, capacity: bool) {
+    let mut count = 0;
+    let mut idle = Vec::new();
+    for slot in state.servers.values() {
+        let current = slot.client.lock().await;
+        if let Some(client) = current.as_ref() {
+            count += 1;
+            if let Ok(guard) = client.activity.clone().try_write_owned() {
+                let used = *client
+                    .used
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                idle.push((used, slot.clone(), client.clone(), guard));
+            }
+        }
+    }
+    idle.sort_by_key(|entry| entry.0);
+    for (used, slot, client, _guard) in idle {
+        if used.elapsed() >= Duration::from_millis(state.lsp.idle_timeout_ms.max(1))
+            || (capacity && count >= state.lsp.max_clients.max(1))
+        {
+            slot.client.lock().await.take();
+            client.shutdown().await;
+            count -= 1;
+        }
+    }
+}
+
 struct Client {
+    activity: Arc<RwLock<()>>,
+    used: std::sync::Mutex<Instant>,
     id: String,
     config: LspServerConfig,
     workspace: PathBuf,
@@ -751,6 +862,8 @@ impl Client {
         let stdin = child.stdin.take().ok_or("language server has no stdin")?;
         let stdout = child.stdout.take().ok_or("language server has no stdout")?;
         let client = Arc::new(Self {
+            activity: Arc::new(RwLock::new(())),
+            used: std::sync::Mutex::new(Instant::now()),
             id,
             config,
             workspace,
@@ -1283,6 +1396,33 @@ mod tests {
         assert!(matches_file(&[".rs".into()], &[], path));
         assert!(matches_file(&["rs".into()], &[], path));
         assert!(!matches_file(&[".go".into()], &[], path));
+    }
+
+    #[tokio::test]
+    async fn cancellation_does_not_wait_for_another_server_lifecycle() {
+        let service = LanguageService::new(
+            std::env::temp_dir(),
+            LspConfig::default(),
+            FormatterConfig::default(),
+        );
+        let state = service.state();
+        let _held = state.lifecycle.lock().await;
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            service.query(
+                Operation::Hover,
+                Path::new("cancelled.rs"),
+                0,
+                0,
+                None,
+                &cancel,
+            ),
+        )
+        .await
+        .expect("cancellation must not wait for an unrelated startup or shutdown");
+        assert!(result.unwrap_err().contains("cancelled"));
     }
 
     #[test]

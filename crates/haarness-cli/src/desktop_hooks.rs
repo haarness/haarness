@@ -12,6 +12,8 @@ pub const EVENTS: &[&str] = &[
     "UserPromptSubmit",
     "PermissionRequest",
     "Stop",
+    "PostCompact",
+    "StopFailure",
     "SessionStart",
     "SessionEnd",
     "TurnEnd",
