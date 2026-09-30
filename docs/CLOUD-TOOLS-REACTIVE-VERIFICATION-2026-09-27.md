@@ -11,7 +11,7 @@ Remote sessions ran on Fly.io with real Cloud model calls. No production deploym
 `cloud_agent_manage` keeps authoritative HTTP commands and queries. The long waits in
 `cloud_agent_session` now use push notifications: the account WebSocket for provisioning,
 and the existing authenticated runtime SSE stream for turn state and permission changes.
-This follows Upstream's subscribe/snapshot/recovery pattern without replacing Haarness's
+The subscribe/snapshot/recovery flow preserves Haarness's
 already-streaming runtime protocol. Token deltas do not cause extra state reads.
 
 Subscriptions start before snapshots, coalesce notifications while HTTP is in flight,

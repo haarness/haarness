@@ -4074,7 +4074,6 @@ fn goal_idle_timeout_from(value: Option<&str>) -> Duration {
 fn goal_idle_timeout() -> Duration {
     let configured = [
         "HAARNESS_RUN_GOAL_IDLE_TIMEOUT_MS",
-        "UPSTREAM_RUN_GOAL_IDLE_TIMEOUT_MS",
         "OPENCODE_RUN_GOAL_IDLE_TIMEOUT_MS",
     ]
     .into_iter()
@@ -4727,7 +4726,7 @@ fn runtime_source_fingerprint_for(
     ] {
         roots.push(workspace.join(name));
     }
-    for name in [".haarness", ".opencode", ".upstream", ".agents"] {
+    for name in [".haarness", ".opencode", ".agents"] {
         roots.push(workspace.join(name));
     }
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
@@ -4736,9 +4735,6 @@ fn runtime_source_fingerprint_for(
             home.join(".opencode/commands"),
             home.join(".opencode/agents"),
             home.join(".opencode/skills"),
-            home.join(".upstream/commands"),
-            home.join(".upstream/agents"),
-            home.join(".upstream/skills"),
         ]);
     }
     roots.extend(plugins::all_enabled_roots(
@@ -4795,12 +4791,9 @@ fn runtime_source_fingerprint_for(
         for name in [
             "haarness.json",
             "haarness.jsonc",
-            "upstream.json",
-            "upstream.jsonc",
             "opencode.json",
             "opencode.jsonc",
             ".haarness",
-            ".upstream",
             ".opencode",
             ".agents",
             "AGENTS.md",
@@ -5686,14 +5679,11 @@ fn scoped_config_files(paths: &Paths, workspace: &Path, project: bool) -> Vec<Pa
             for root in [
                 directory.clone(),
                 directory.join(".opencode"),
-                directory.join(".upstream"),
                 directory.join(".haarness"),
             ] {
                 for name in [
                     "opencode.jsonc",
                     "opencode.json",
-                    "upstream.jsonc",
-                    "upstream.json",
                     "haarness.jsonc",
                     "haarness.json",
                 ] {
@@ -7985,7 +7975,7 @@ mod tests {
                     ProviderMessage::ToolResult { name, .. } if name == "update_goal"
                 )
             });
-            let events = if goal_updated {
+            let mut events = if goal_updated {
                 vec![
                     Ok(ProviderEvent::TextDelta(
                         "The goal is complete after the non-interactive fallback.".into(),
@@ -8027,6 +8017,11 @@ mod tests {
                     provider_metadata: serde_json::Value::Null,
                 })]
             };
+            if !goal_updated {
+                events.push(Ok(ProviderEvent::Finished {
+                    reason: "tool_calls".into(),
+                }));
+            }
             Ok(Box::pin(stream::iter(events)))
         }
     }

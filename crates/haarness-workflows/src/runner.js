@@ -242,7 +242,7 @@ function context(runID) {
   }
 }
 
-const pluginSpecifiers = ["@haarness-ai/plugin", "@upstream-ai/plugin", "@opencode-ai/plugin"]
+const pluginSpecifiers = ["@haarness-ai/plugin", "@opencode-ai/plugin"]
 
 function installPluginRuntime() {
   const exports = {

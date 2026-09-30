@@ -26,7 +26,7 @@ if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum "$stage/payload
 [ "$actual" = "$expected" ] || { echo 'Checksum mismatch; installation left unchanged.' >&2; exit 1; }
 [ -n "$released" ] || { echo 'Missing release version' >&2; exit 1; }
 if [ "$version" != latest ] && [ "$released" != "$version" ]; then echo 'Release version mismatch' >&2; exit 1; fi
-# Match the Upstream curl installer: clear quarantine only on the verified payload.
+# Clear quarantine only on the verified installation payload.
 # Pin the system utility; Python packages also sometimes provide an incompatible xattr.
 clear_quarantine() {
   if [ "$os" = macos ]; then

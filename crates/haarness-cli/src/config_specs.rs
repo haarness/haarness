@@ -69,14 +69,11 @@ pub fn config_files(config_dir: &Path, workspace: &Path, trust: bool) -> Vec<Pat
             for root in [
                 directory.clone(),
                 directory.join(".opencode"),
-                directory.join(".upstream"),
                 directory.join(".haarness"),
             ] {
                 for name in [
                     "opencode.jsonc",
                     "opencode.json",
-                    "upstream.jsonc",
-                    "upstream.json",
                     "haarness.jsonc",
                     "haarness.json",
                 ] {

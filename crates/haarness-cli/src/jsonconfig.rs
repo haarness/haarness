@@ -115,14 +115,11 @@ pub fn load_layers(
         for root in [
             directory.clone(),
             directory.join(".opencode"),
-            directory.join(".upstream"),
             directory.join(".haarness"),
         ] {
             for name in [
                 "opencode.jsonc",
                 "opencode.json",
-                "upstream.jsonc",
-                "upstream.json",
                 "haarness.jsonc",
                 "haarness.json",
             ] {
@@ -355,7 +352,7 @@ fn trusted_instruction_roots(config_dir: &Path, home: Option<&Path>) -> Vec<Path
     let mut roots = vec![config_dir.to_path_buf()];
     if let Some(home) = home {
         roots.extend(
-            [".haarness", ".upstream", ".opencode", ".claude"]
+            [".haarness", ".opencode", ".claude"]
                 .iter()
                 .map(|name| home.join(name)),
         );

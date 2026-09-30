@@ -220,14 +220,14 @@ pub fn resource_roots(
 ) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(home) = home {
-        roots.extend([".opencode", ".upstream", ".haarness"].map(|name| home.join(name)));
+        roots.extend([".opencode", ".haarness"].map(|name| home.join(name)));
     }
     roots.push(config.to_path_buf());
     for directory in project_directories(workspace)
         .into_iter()
         .filter(|_| project_config)
     {
-        roots.extend([".opencode", ".upstream", ".haarness"].map(|name| directory.join(name)));
+        roots.extend([".opencode", ".haarness"].map(|name| directory.join(name)));
     }
     roots
 }
