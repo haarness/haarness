@@ -1291,50 +1291,12 @@ impl Command {
 }
 
 fn normalize_natural_language_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
-    const COMMANDS: &[&str] = &[
-        "login",
-        "logout",
-        "account",
-        "cloud",
-        "profile",
-        "stats",
-        "insights",
-        "acp",
-        "serve",
-        "attach",
-        "tui",
-        "run",
-        "auth",
-        "mcp",
-        "sessions",
-        "session",
-        "btw",
-        "worktree",
-        "worktrees",
-        "workspace",
-        "workspaces",
-        "providers",
-        "provider",
-        "agents",
-        "agent",
-        "command",
-        "skill",
-        "skills",
-        "plugin",
-        "workflow",
-        "schedule",
-        "models",
-        "doctor",
-        "logs",
-        "upgrade",
-        "help",
-    ];
     let mut args = args.into_iter().collect::<Vec<_>>();
     let Some(first) = args.get(1).and_then(|value| value.to_str()) else {
         return args;
     };
     if first.starts_with('-')
-        || COMMANDS.contains(&first)
+        || is_cli_subcommand(first)
         || pathlike_cli_argument(first)
         || Path::new(first).exists()
     {
@@ -1354,6 +1316,18 @@ fn normalize_natural_language_args(args: impl IntoIterator<Item = OsString>) -> 
     }
     args.insert(1, OsString::from("run"));
     args
+}
+
+/// Whether `name` is a subcommand or alias the parser accepts. Read from
+/// the clap definition rather than a hand-kept list, which fell behind when
+/// `remote`, `extension`, `marketplace` and `capability` were added and
+/// turned `haarness remote enable` into a one-shot prompt.
+fn is_cli_subcommand(name: &str) -> bool {
+    use clap::CommandFactory;
+    name == "help"
+        || Cli::command().get_subcommands().any(|command| {
+            command.get_name() == name || command.get_all_aliases().any(|alias| alias == name)
+        })
 }
 
 fn pathlike_cli_argument(value: &str) -> bool {
@@ -8147,6 +8121,12 @@ mod tests {
             vec!["haarness", "models"],
             vec!["haarness", "./workspace"],
             vec!["haarness", "--help"],
+            vec!["haarness", "remote", "enable", "--name", "Studio Mac"],
+            vec!["haarness", "remote", "status"],
+            vec!["haarness", "extensions", "list"],
+            vec!["haarness", "marketplace", "search", "lint"],
+            vec!["haarness", "capability", "list"],
+            vec!["haarness", "session", "list"],
         ] {
             let normalized = normalize_natural_language_args(argv.iter().map(OsString::from));
             assert_ne!(

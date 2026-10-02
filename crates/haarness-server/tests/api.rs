@@ -1514,7 +1514,21 @@ async fn detached_sse_client_and_thread_switch_leave_turn_owned_by_server_until_
             .is_some_and(|value| value.starts_with("text/event-stream")),
         "the departing client established an SSE response"
     );
-    let event_stream = response.bytes_stream();
+    assert_eq!(
+        response
+            .headers()
+            .get(reqwest::header::X_CONTENT_TYPE_OPTIONS)
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff"),
+        "Apple clients buffer a sniffed stream until 512 bytes arrive"
+    );
+    let mut event_stream = response.bytes_stream();
+    let first = tokio::time::timeout(Duration::from_secs(2), event_stream.next())
+        .await
+        .expect("a stream with nothing to replay still sends a first byte at once")
+        .unwrap()
+        .unwrap();
+    assert!(first.starts_with(b":"), "the first frame is an SSE comment");
 
     let turn: Turn = departing
         .post(format!("{base}/v1/threads/{}/turns", thread.id))

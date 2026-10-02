@@ -2075,6 +2075,19 @@ async fn events(
     State(state): State<ServerState>,
     axum::Extension(shutdown): axum::Extension<CancellationToken>,
     headers: HeaderMap,
+) -> impl IntoResponse {
+    // nosniff: Apple's URL loading holds a response until 512 bytes arrive
+    // while it sniffs the MIME type, which would stall the first events.
+    (
+        [(axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")],
+        event_stream(state, shutdown, headers),
+    )
+}
+
+fn event_stream(
+    state: ServerState,
+    shutdown: CancellationToken,
+    headers: HeaderMap,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let after = headers
         .get("last-event-id")
@@ -2083,6 +2096,10 @@ async fn events(
     let root = crate::remote_scope::root(&headers);
     let subscription = state.runtime.events().subscribe(after);
     let output = stream! {
+        // A first byte at once: Apple's URL loading, and many proxies, hold a
+        // streaming response until body data arrives, so a client resuming
+        // from a cursor with nothing to replay would wait for the keepalive.
+        yield Ok(Event::default().comment("connected"));
         if subscription.requires_resync { let payload=json!({"schemaVersion":SCHEMA_VERSION,"type":"resync_required"}); yield Ok(Event::default().event("resync_required").data(payload.to_string())); }
         for event in subscription.replay { if crate::remote_scope::event_allowed(&event,root,&state).await { yield Ok(to_sse(&event)); } }
         let mut live=BroadcastStream::new(subscription.receiver);
