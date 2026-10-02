@@ -16,7 +16,12 @@ mkdir -p "$destination"
 stage=$(mktemp -d "$destination/.haarness-install.XXXXXXXX")
 trap 'rm -rf "$stage"' EXIT HUP INT TERM
 url="${base%/}/api/v1/releases/$channel/$product/download?os=$os&arch=$arch&kind=$kind"
-if [ "$version" != latest ]; then url="$url&version=$version"; fi
+if [ "$version" != latest ]; then
+  # All other allowed version characters are URL-unreserved. A literal + in
+  # SemVer build metadata must not be decoded as a space by the query parser.
+  encoded_version=$(printf '%s' "$version" | sed 's/+/%2B/g')
+  url="$url&version=$encoded_version"
+fi
 curl --fail --silent --show-error --connect-timeout 20 --max-time 900 --proto '=https,http' "$url" -D "$stage/headers" -o "$stage/payload"
 expected=$(awk 'tolower($1)=="x-content-sha256:" {gsub("\r", "", $2); print $2}' "$stage/headers")
 released=$(awk 'tolower($1)=="x-haarness-version:" {gsub("\r", "", $2); print $2}' "$stage/headers")

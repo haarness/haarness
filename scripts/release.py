@@ -5,7 +5,7 @@ No npm/Docker publication. Tokens are read from the environment, never arguments
 import argparse, hashlib, http.client, json, os, platform, shutil, subprocess, sys
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlsplit, urlencode
+from urllib.parse import urlsplit, urlunsplit, urlencode
 ROOT = Path(__file__).resolve().parents[1]
 
 def digest(path):
@@ -76,16 +76,26 @@ def publish(args):
             ids.append(saved['id']);print(f'Uploaded {a["file"]}: {a["sha256"]}')
     body=dict(channel=args.channel,version=first['version'],sourceRevision=first['sourceRevision'],releasedAt=first['releasedAt'],artifacts=ids,notesUrl=args.notes_url)
     result=request(args.url,'POST','/internal/releases',body)
+    # Publication already happened. Retain the receipt even if public delivery
+    # fails, so operators can inspect or roll back the exact publication.
+    Path(args.receipt).write_text(json.dumps(result,indent=2)+'\n')
     for product in result['release']['manifest']['products'].values():
         for a in product['artifacts']:
-            c=connection(args.url);c.request('GET',urlsplit(a['url']).path);r=c.getresponse()
-            if r.status!=200: raise RuntimeError(f'Download failed: {r.status}')
-            h=hashlib.sha256();size=0
-            while chunk:=r.read(1024*1024):h.update(chunk);size+=len(chunk)
-            c.close()
+            # Test the same URL the frontend gives users, including its query.
+            # Never attach the operator token to a public artifact request.
+            u=urlsplit(a['url'])
+            if u.username or u.password or u.fragment: raise ValueError('Invalid public artifact URL')
+            c=connection(urlunsplit((u.scheme,u.netloc,'','','')))
+            try:
+                c.request('GET',urlunsplit(('','',u.path or '/',u.query,'')));r=c.getresponse()
+                if r.status!=200: raise RuntimeError(f'Public download failed: {r.status} ({u.hostname})')
+                h=hashlib.sha256();size=0
+                while chunk:=r.read(1024*1024):h.update(chunk);size+=len(chunk)
+            finally:
+                c.close()
             if h.hexdigest()!=a['digest']['sha256'] or size!=a['size']: raise ValueError('Published download integrity failure')
             print(f'Verified public download: {a["file"]} ({size} bytes)')
-    Path(args.receipt).write_text(json.dumps(result,indent=2)+'\n');print('Release ID:',result['id'])
+    print('Release ID:',result['id'])
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);sub=p.add_subparsers(dest='command',required=True)

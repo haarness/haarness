@@ -55,6 +55,8 @@ jobs:
           assert json.loads(pathlib.Path('apps/desktop/package.json').read_text())['version']==version
           PY
       - run: cargo test --workspace
+      - name: Public release URL verification regression
+        run: python scripts/test-release-publish.py
       - run: cargo build --release -p haarness-cli
       - run: npm --prefix sdks/typescript ci
       - run: npm --prefix sdks/typescript run build
