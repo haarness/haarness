@@ -65,6 +65,8 @@ jobs:
       - run: npm --prefix apps/desktop test
       - name: Installer verification
         if: runner.os != 'Windows'
+        env:
+          HAARNESS_BIN: ./target/release/haarness
         run: python scripts/test-release-install.py
       - name: macOS quarantine regression
         if: runner.os == 'macOS'
@@ -123,4 +125,5 @@ jobs:
           CHANNEL: ${{ inputs.channel }}
         run: python scripts/release.py publish --index dist/releases/index-*.json --url "$HAARNESS_RELEASE_URL" --channel "$CHANNEL" --receipt dist/releases/receipt.json
       - uses: actions/upload-artifact@v4
+        if: always()
         with: { name: release-receipt, path: dist/releases/receipt.json }

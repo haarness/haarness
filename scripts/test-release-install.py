@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Installer failure atomicity with a deliberately faulty loopback release service."""
-import hashlib, http.server, os, subprocess, tempfile, threading, sys
+import hashlib, http.server, os, shutil, subprocess, tempfile, threading, sys
 from urllib.parse import parse_qs, urlsplit
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
@@ -32,5 +32,11 @@ with tempfile.TemporaryDirectory(prefix='haarness-install-test-') as d:
         assert r.returncode==0,(r.stdout,r.stderr)
         assert subprocess.check_output([str(installed),'--version'],text=True).strip()=='haarness 1.2.3+build.4'
         print('PASS: pinned SemVer build metadata installs and executes')
+        if os.environ.get('HAARNESS_BIN'):
+            shutil.copy2(os.environ['HAARNESS_BIN'], installed)
+            r=subprocess.run([str(installed),'upgrade','--channel','preview','--version','1.2.3+build.4','--release-url',env['HAARNESS_RELEASE_URL']],env=env,capture_output=True,text=True)
+            assert r.returncode==0,(r.stdout,r.stderr)
+            assert subprocess.check_output([str(installed),'--version'],text=True).strip()=='haarness 1.2.3+build.4'
+            print('PASS: built CLI upgrades to a pinned SemVer build-metadata version')
         print('PASS: corrupt/missing checksum rejected; previous binary and clean staging preserved')
     finally: server.shutdown();server.server_close();thread.join()
