@@ -666,7 +666,7 @@ impl ModelProvider for OpenAiProvider {
             request = request.headers(headers);
         }
         request = request.json(&body);
-        let response = request.send().await.map_err(provider_error)?;
+        let response = request.send().await.map_err(crate::sse::transport_error)?;
         let mut events = json_stream(response, cancel.clone());
         Ok(Box::pin(try_stream! {
             // Reasoning streams as indexed parts, each a self-contained

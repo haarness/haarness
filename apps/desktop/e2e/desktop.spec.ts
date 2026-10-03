@@ -3904,6 +3904,46 @@ test("SSE cross-client updates and durable recovery after window reload and serv
   expect(errors).toEqual([]);
 });
 
+test("focusing earlier history during streaming preserves the reading position", async () => {
+  await newSession();
+  const history = "[Earlier details](https://example.test/history)\n\n" + Array.from(
+    { length: 50 },
+    (_, index) => `History paragraph ${index + 1}. Keep this readable while the answer streams.`,
+  ).join("\n\n");
+  await send(history);
+  await expect.poll(async () => (await client.activeTurns()).length).toBe(0);
+  const transcript = page.locator(".transcript");
+  const position = () => transcript.evaluate((element) => ({
+    top: element.scrollTop,
+    gap: element.scrollHeight - element.clientHeight - element.scrollTop,
+  }));
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await expect.poll(async () => (await position()).gap).toBeLessThan(5);
+  // Focusing the pane itself must keep ordinary streaming follow enabled.
+  await transcript.focus();
+  await expect(jump).toHaveCount(0);
+  await send("::scrollstream");
+  await expect(page.getByTestId("streaming-reply")).toContainText("STREAM_REFLOW_STAGE_ONE");
+  const link = transcript.getByRole("link", { name: "Earlier details", exact: true }).last();
+  await link.focus();
+  await expect(link).toBeFocused();
+  await expect(jump).toBeVisible();
+  const paused = await position();
+  expect(paused.gap).toBeGreaterThan(100);
+  await expect.poll(async () => (await client.activeTurns()).length).toBe(0);
+  await expect.poll(async () => (await position()).top).toBeLessThanOrEqual(paused.top + 2);
+  await expect(link).toBeInViewport();
+  await page.screenshot({ path: test.info().outputPath("focus-history.png") });
+  await jump.click();
+  await expect.poll(async () => (await position()).gap).toBeLessThan(5);
+  await expect(jump).toHaveCount(0);
+  const latest = transcript.getByRole("link", { name: "release notes", exact: true }).last();
+  await expect(latest).toBeInViewport();
+  await latest.focus();
+  await expect(jump).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
 test("streaming respects upward scrolling and resumes only at the latest output", async () => {
   await newSession();
   const history = Array.from(

@@ -7,6 +7,18 @@ use tokio_util::sync::CancellationToken;
 
 pub type JsonStream = Pin<Box<dyn Stream<Item = CoreResult<Value>> + Send>>;
 
+/// Keep the transport failure and endpoint useful in logs and persisted turn
+/// errors without copying credentials from a configurable provider URL.
+pub(crate) fn transport_error(mut error: reqwest::Error) -> CoreError {
+    if let Some(url) = error.url_mut() {
+        let _ = url.set_username("");
+        let _ = url.set_password(None);
+        url.set_query(None);
+        url.set_fragment(None);
+    }
+    CoreError::Provider(error.to_string())
+}
+
 pub fn json_stream(response: reqwest::Response, cancel: CancellationToken) -> JsonStream {
     Box::pin(try_stream! {
         let response = if response.status().is_success() {
@@ -32,7 +44,7 @@ pub fn json_stream(response: reqwest::Response, cancel: CancellationToken) -> Js
                 () = cancel.cancelled() => Err(CoreError::Cancelled),
                 chunk = chunks.next() => match chunk {
                     Some(Ok(chunk)) => Ok(Some(chunk)),
-                    Some(Err(error)) => Err(CoreError::Provider(error.to_string())),
+                    Some(Err(error)) => Err(transport_error(error)),
                     None => Ok(None),
                 }
             }?;

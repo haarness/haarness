@@ -393,6 +393,18 @@ export function Session() {
     if (!follow() && top > lastTop && remaining <= 4) setFollow(true);
     lastTop = top;
   }
+  function onHistoryFocus(event: FocusEvent) {
+    const target = event.target;
+    if (!(target instanceof HTMLElement) || target === scrolling) return;
+    const view = scrolling.getBoundingClientRect();
+    const box = target.getBoundingClientRect();
+    // Chromium can scroll a control into view before focusin. Compare with
+    // the previous scroll position as well as its already-visible bounds.
+    if (scrolling.scrollTop >= lastTop - 2 && box.top >= view.top && box.bottom <= view.bottom)
+      return;
+    pauseFollowing();
+    lastTop = scrolling.scrollTop;
+  }
   onMount(() => {
     // Markdown, images, virtual rows and panel resizing can change height
     // without a new token. Only follow these reflows while following output.
@@ -1205,6 +1217,7 @@ export function Session() {
         tabIndex={0}
         aria-label={t("Conversation history")}
         onScroll={onScroll}
+        onFocusIn={onHistoryFocus}
         onWheel={(event) => {
           if (event.deltaY < 0) pauseFollowing();
         }}

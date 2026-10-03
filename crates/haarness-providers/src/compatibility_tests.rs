@@ -118,6 +118,79 @@ async fn events(provider: &dyn ModelProvider, request: ProviderRequest) -> Vec<P
         .map(Result::unwrap)
         .collect()
 }
+
+#[tokio::test]
+async fn transport_failures_keep_endpoint_context_without_url_credentials() {
+    for transport in ["responses", "compatible", "messages", "gemini", "bedrock"] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            // Close a real connection before HTTP headers arrive.
+            drop(socket);
+        });
+        let endpoint = format!(
+            "http://fixture-user:fixture-password@{address}/endpoint?key=private-query#private-fragment"
+        );
+        let provider: Box<dyn ModelProvider> = match transport {
+            "responses" => Box::new(OpenAiProvider::for_test(endpoint, "fixture")),
+            "compatible" => Box::new(OpenAiCompatibleProvider::new(CompatibleInstance {
+                id: "fixture".into(),
+                name: "Fixture".into(),
+                base_url: endpoint,
+                api_key: Some("fixture".into()),
+                models: vec!["fixture-model".into()],
+                discover_models: false,
+                server_output_limit: false,
+                model_defaults: CompatibleModelDefaults::default(),
+                assume_authenticated: false,
+                headers: ProviderHeaders::default(),
+            })),
+            "messages" => Box::new(AnthropicProvider::new(native(
+                &endpoint,
+                "fixture",
+                "fixture-model",
+            ))),
+            "gemini" => Box::new(GeminiProvider::new(native(
+                &endpoint,
+                "fixture",
+                "fixture-model",
+            ))),
+            "bedrock" => Box::new(BedrockProvider::new(
+                native(&endpoint, "fixture", "fixture-model"),
+                None,
+            )),
+            _ => unreachable!(),
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            provider.stream(request("fixture-model", None), CancellationToken::new()),
+        )
+        .await
+        .expect("transport failure must settle");
+        let error = match result {
+            Ok(_) => panic!("the disconnected endpoint must fail: {transport}"),
+            Err(error) => error.to_string(),
+        };
+        task.await.unwrap();
+        assert!(
+            error.contains(&format!("{address}/endpoint")),
+            "{transport} endpoint context missing: {error}"
+        );
+        for secret in [
+            "fixture-user",
+            "fixture-password",
+            "private-query",
+            "private-fragment",
+        ] {
+            assert!(
+                !error.contains(secret),
+                "{transport} transport error exposed {secret}"
+            );
+        }
+    }
+}
+
 fn continuation(request: &mut ProviderRequest, events: Vec<ProviderEvent>) {
     let mut results = vec![];
     for event in events {
