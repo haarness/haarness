@@ -65,7 +65,7 @@ export const defaults: Preferences = {
   showReasoning: false,
   sendKey: "enter",
   editorWrap: false,
-  diffLayout: "unified",
+  diffLayout: "split",
   terminalFontSize: 13,
   shortcuts: {
     new: "Mod+N",
