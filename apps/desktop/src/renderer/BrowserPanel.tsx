@@ -184,12 +184,8 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
               class="browser-tab"
               classList={{ active: item.id === browser().focusedTabID }}
             >
-              <Show when={item.loading}>
-                <span class="browser-tab-busy" aria-hidden="true">
-                  ◌
-                </span>
-              </Show>
               <button
+                class="browser-tab-title"
                 role="tab"
                 aria-selected={item.id === browser().focusedTabID}
                 title={
@@ -201,9 +197,24 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
                   void command({ type: "tabs.focus", tabID: item.id })
                 }
               >
-                {item.title || item.url || t("New tab")}
+                {/* Like any browser: the site's icon, a spinner in its place
+                    while loading, and the title read from its start. */}
+                <span class="browser-tab-icon" aria-hidden="true">
+                  <Show
+                    when={!item.loading}
+                    fallback={<span class="browser-tab-spinner" />}
+                  >
+                    <Show when={item.favicon} fallback={<Icon name="web" size="sm" />}>
+                      {(src) => <img src={src()} alt="" draggable={false} />}
+                    </Show>
+                  </Show>
+                </span>
+                <span class="browser-tab-label">
+                  {item.title || item.url || t("New tab")}
+                </span>
               </button>
               <button
+                class="browser-tab-close"
                 aria-label={t("Close browser tab {name}", {
                   name: item.title || item.url || t("New tab"),
                 })}
@@ -245,7 +256,7 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
           disabled={!tab()?.canGoBack}
           onClick={() => void command({ type: "back", tabID: tab()?.id })}
         >
-          ←
+          <Icon name="back" size="sm" />
         </button>
         <button
           type="button"
@@ -253,7 +264,7 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
           disabled={!tab()?.canGoForward}
           onClick={() => void command({ type: "forward", tabID: tab()?.id })}
         >
-          →
+          <Icon name="forward" size="sm" />
         </button>
         <button
           type="button"
@@ -261,7 +272,7 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
           disabled={!tab()}
           onClick={() => void command({ type: "reload", tabID: tab()?.id })}
         >
-          ↻
+          <Icon name="refresh" size="sm" />
         </button>
         <input
           aria-label={t("Browser address")}
@@ -271,7 +282,7 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
           onBlur={() => setEditingAddress(false)}
           onInput={(event) => setAddress(event.currentTarget.value)}
         />
-        <button type="button" aria-label={t("Browser settings")} onClick={() => void app.openSettings("browser")}>⚙</button>
+        <button type="button" aria-label={t("Browser settings")} onClick={() => void app.openSettings("browser")}><Icon name="settings" size="sm" /></button>
         <button type="submit" disabled={!state.connection}>
           Go
         </button>

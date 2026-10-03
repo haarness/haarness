@@ -151,7 +151,7 @@ export interface DirectoryListing {
   nextCursor?: string | null;
 }
 export interface BrowserLayout { visible:boolean; bounds:{x:number;y:number;width:number;height:number} }
-export interface BrowserTab { id:string; url:string; title:string; loading:boolean; canGoBack:boolean; canGoForward:boolean; generation:number }
+export interface BrowserTab { id:string; url:string; title:string; loading:boolean; canGoBack:boolean; canGoForward:boolean; generation:number; /** Desktop-only: the site icon as a small data URL. */ favicon?: string }
 export interface BrowserState { tabs:BrowserTab[]; focusedTabID:string|null }
 export interface Bridge {
   account(input: { action: string; id?: string; name?: string; repo?: string; configuration?: Record<string, unknown>; page?: string; device?: boolean }): Promise<any>;

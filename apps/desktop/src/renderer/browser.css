@@ -48,27 +48,61 @@
   padding: var(--s1);
   cursor: pointer;
 }
-.browser-tab button:first-child {
+/* The title reads from its start and truncates at its end, as in any browser.
+   Buttons centre their content, which clipped a long title on both sides, so
+   the text lives in its own span that owns the ellipsis. */
+.browser-tab button.browser-tab-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: flex-start;
+  gap: var(--s2);
+  padding-inline: var(--s2) var(--s1);
+  font-size: var(--ui);
+}
+.browser-tab-label {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 1 1 auto;
-  min-width: 0;
-  text-align: start;
-  font-size: var(--ui);
 }
-/* The throbber holds a fixed slot, so a long title truncates around it rather
-   than shunting it out of the tab. */
-.browser-tab-busy {
+/* The icon slot is fixed, so loading and loaded tabs line up. */
+.browser-tab-icon {
   flex: none;
-  margin-inline-start: var(--s1);
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
   color: var(--muted);
-  font-size: var(--ui-sm);
-  line-height: 1;
+}
+.browser-tab-icon img {
+  width: 14px;
+  height: 14px;
+  object-fit: contain;
+  border-radius: 2px;
+}
+.browser-tab-spinner {
+  width: 11px;
+  height: 11px;
+  border-radius: var(--r-pill);
+  border: 1.5px solid color-mix(in srgb, var(--muted) 35%, transparent);
+  border-top-color: var(--muted);
+  animation: browser-tab-spin 0.8s linear infinite;
+}
+@keyframes browser-tab-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .browser-tab-spinner {
+    animation: none;
+    border-color: var(--muted);
+    opacity: 0.6;
+  }
 }
 /* Closing stays reachable at any width: the button keeps its box while the
    title gives up space. */
-.browser-tab button:last-child {
+.browser-tab button.browser-tab-close {
   flex: none;
   display: grid;
   place-items: center;
@@ -79,7 +113,7 @@
   color: var(--muted);
   line-height: 1;
 }
-.browser-tab button:last-child:hover {
+.browser-tab button.browser-tab-close:hover {
   background: var(--selected);
   color: var(--text);
 }
