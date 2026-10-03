@@ -39,7 +39,7 @@ test("Marketplace and runtime capability settings install, disable and remove a 
     await settings.getByRole("button", { name: "Marketplace", exact: true }).click();
     await settings.getByRole("button", { name: "Desktop proof · mcp · private", exact: true }).click();
     await expect(settings.getByLabel("Installation scope")).toBeVisible();
-    await settings.getByRole("button", { name: "Save", exact: true }).click();
+    await settings.getByRole("button", { name: "Install", exact: true }).click();
     await expect.poll(() => client!.marketplace({ action: "installed" })).toMatchObject([{ id, scope: "local" }]);
     await settings.getByRole("button", { name: "Runtime capabilities", exact: true }).click();
     await settings.getByRole("button", { name: "Disable mcp-desktop-proof · plugin", exact: true }).click();
