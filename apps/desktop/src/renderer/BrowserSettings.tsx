@@ -309,6 +309,22 @@ export function BrowserSettings() {
         />
       </Row>
       <Row
+        title="Show the agent’s cursor"
+        description="See where Haarness points, clicks and types while it controls the browser. Turning it off makes browser actions a little faster."
+      >
+        <input
+          type="checkbox"
+          role="switch"
+          aria-label={t("Show the agent’s cursor")}
+          checked={app.state.preferences.browserAgentCursor}
+          onChange={(event) =>
+            app.run(() =>
+              app.settings({ browserAgentCursor: event.currentTarget.checked }),
+            )
+          }
+        />
+      </Row>
+      <Row
         title="Browsing data"
         description="Clear this project’s tabs, cookies, site storage, cache, history, and retained downloads on this desktop. Saved files and conversation attachments remain."
       >

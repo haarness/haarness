@@ -316,15 +316,15 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
           </div>
         </Show>
       </div>
-      <div class="browser-status">
-        {connected()
-          ? state.selected ? "Connected to this conversation" : "Ready for your next chat"
-          : "Browser disconnected"}{" "}
-        ·{" "}
-        {state.connection?.remote
-          ? "Remote server network"
-          : "Local server network"}
-      </div>
+      {/* Only what changes how browsing behaves: a lost connection, or a
+          remote server whose network (and localhost) the pages use. */}
+      <Show when={!connected() || state.connection?.remote}>
+        <div class="browser-status" role="status">
+          {!connected()
+            ? t("Browser disconnected. It reconnects automatically.")
+            : t("Pages load through the remote server, so localhost is that machine.")}
+        </div>
+      </Show>
     </section>
   );
 }

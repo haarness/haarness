@@ -129,6 +129,7 @@ export async function preferences(input: Partial<Preferences>) {
       browserLocalLinks: z.enum(["external", "browser"]),
       browserShowFullURL: z.boolean(),
       browserAskDownloadLocation: z.boolean(),
+      browserAgentCursor: z.boolean(),
       sound: z.boolean(),
       compactTools: z.boolean(),
       showReasoning: z.boolean(),

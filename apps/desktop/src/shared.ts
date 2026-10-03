@@ -38,6 +38,8 @@ export interface Preferences {
   browserLocalLinks: "external" | "browser";
   browserShowFullURL: boolean;
   browserAskDownloadLocation: boolean;
+  /** Draw the agent's cursor over the page while it controls the browser. */
+  browserAgentCursor: boolean;
   sound: boolean;
   compactTools: boolean;
   showReasoning: boolean;
@@ -60,6 +62,7 @@ export const defaults: Preferences = {
   browserLocalLinks: "browser",
   browserShowFullURL: true,
   browserAskDownloadLocation: false,
+  browserAgentCursor: true,
   sound: false,
   compactTools: true,
   showReasoning: false,

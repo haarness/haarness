@@ -8,10 +8,12 @@ import { createBrowserFiles } from "./browser/files";
 import { createDiagnostics } from "./browser/diagnostics";
 import { createProfiling } from "./browser/profiling";
 import { createCornerImages } from "./browser/corners";
+import { createAgentCursor, cursorLabel, type CursorAction } from "./browser/agent-cursor";
 import type { BrowserNetwork } from "./browser/network";
 import { destinationOrigin, normalizeURL } from "./browser/policy";
 
-type Element = { backendID: number; frameID: string; sessionID?: string };
+/** `name` is the accessible name from the snapshot, for the agent cursor's label. */
+type Element = { backendID: number; frameID: string; sessionID?: string; name?: string };
 let nextRef = 0;
 // Captures and downloads belong to the tab, not whichever document it now shows; navigate replaces it anyway.
 const retainedOperations = new Set<Browser.Method>([
@@ -40,6 +42,10 @@ export function createBrowserPage(
     downloaded?: (file: { id: string; name: string; path: string; url: string; bytes: number; state: "completed" | "failed" }) => void;
     /** The page's icon candidates, for the Desktop tab strip only. */
     favicon?: (urls: string[]) => void;
+    /** Whether the agent's cursor is drawn over the page while it acts. */
+    agentCursor?: () => boolean;
+    /** The interface language's text for an English key. */
+    translate?: (key: string) => string;
     popup: (options: Electron.BrowserWindowConstructorOptions) => WebContents;
     initialize?: boolean;
     restore?: Browser.Tab;
@@ -100,6 +106,9 @@ export function createBrowserPage(
   const files = createBrowserFiles(sourceURLs);
   const diagnostics = createDiagnostics(cdp);
   const profiling = createProfiling(contents, cdp, files, sourceURLs);
+  const cursor = createAgentCursor(contents, () => options.agentCursor?.() ?? true);
+  const tr = (key: string) => options.translate?.(key) ?? key;
+  const label = (action: CursorAction, element: Element) => cursorLabel(action, element.name, tr);
   const refs = new Map<string, Element>();
   const sessions = new Map<string, string>();
   const parents = new Map<string, string>();
@@ -562,6 +571,9 @@ export function createBrowserPage(
       }
       case "click": {
         const element = target(action.ref);
+        const position = await point(element);
+        await cursor.move(position, label("click", element));
+        cursor.click(position);
         await click(
           element,
           action.button ?? "left",
@@ -579,12 +591,16 @@ export function createBrowserPage(
           observation: await observe(element.frameID),
         });
       }
-      case "hover":
+      case "hover": {
+        const element = target(action.ref);
+        const position = await point(element);
+        await cursor.move(position, label("point", element));
         await cdp.send("Input.dispatchMouseEvent", {
           type: "mouseMoved",
-          ...(await point(target(action.ref))),
+          ...position,
         });
         break;
+      }
       case "drag": {
         const source = target(action.from);
         const destination = target(action.to);
@@ -592,6 +608,8 @@ export function createBrowserPage(
         const from = await point(source);
         const box = await rect(destination);
         const to = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+        await cursor.move(from, label("drag", source));
+        cursor.click(from);
         const html5 = await call(
           source,
           "function() { return this.draggable; }",
@@ -613,6 +631,7 @@ export function createBrowserPage(
           clickCount: 1,
         });
         try {
+          await cursor.move(to, label("drop", destination));
           for (let i = 1; i <= 10; i++) {
             abortError(signal);
             await cdp.send("Input.dispatchMouseEvent", {
@@ -640,31 +659,59 @@ export function createBrowserPage(
         }
         break;
       }
-      case "fill":
-        await fill(target(action.ref), action.text, signal);
+      case "fill": {
+        const element = target(action.ref);
+        await cursor.move(await point(element), label("type", element), true);
+        await fill(element, action.text, signal);
         break;
+      }
       case "fill_form":
         for (const field of action.fields) {
           abortError(signal);
-          if (field.type === "text")
-            await fill(target(field.ref), field.value, signal);
-          if (field.type === "select")
-            await select(target(field.ref), field.values);
-          if (field.type === "check")
-            await check(target(field.ref), field.checked);
+          const element = target(field.ref);
+          const position = await point(element);
+          if (field.type === "text") {
+            await cursor.move(position, label("type", element), true);
+            await fill(element, field.value, signal);
+          }
+          if (field.type === "select") {
+            await cursor.move(position, label("choose", element));
+            cursor.click(position);
+            await select(element, field.values);
+          }
+          if (field.type === "check") {
+            await cursor.move(position, label(field.checked ? "check" : "uncheck", element));
+            cursor.click(position);
+            await check(element, field.checked);
+          }
         }
         break;
-      case "select":
-        await select(target(action.ref), action.values);
+      case "select": {
+        const element = target(action.ref);
+        const position = await point(element);
+        await cursor.move(position, label("choose", element));
+        cursor.click(position);
+        await select(element, action.values);
         break;
-      case "check":
-        await check(target(action.ref), action.checked);
+      }
+      case "check": {
+        const element = target(action.ref);
+        const position = await point(element);
+        await cursor.move(position, label(action.checked ? "check" : "uncheck", element));
+        cursor.click(position);
+        await check(element, action.checked);
         break;
+      }
       case "press":
+        cursor.note(tr("Pressing {key}").replace("{key}", action.key));
         await key(action.key);
         break;
       case "scroll": {
         const bounds = view.getBounds();
+        await cursor.move(
+          { x: bounds.width / 2, y: bounds.height / 2 },
+          tr(action.deltaY < 0 ? "Scrolling up" : action.deltaY > 0 ? "Scrolling down" : "Scrolling"),
+        );
         await cdp.send("Input.dispatchMouseEvent", {
           type: "mouseWheel",
           x: bounds.width / 2,
@@ -764,12 +811,14 @@ export function createBrowserPage(
             "Screenshot exceeds 16 megapixels; capture an element or use a smaller maxWidth.",
           );
         const format = action.format ?? "png";
-        const capture = await cdp.send("Page.captureScreenshot", {
-          format,
-          quality: format === "png" ? undefined : (action.quality ?? 80),
-          captureBeyondViewport: true,
-          clip: { ...bounds, scale },
-        });
+        const capture = await cursor.hidden(() =>
+          cdp.send("Page.captureScreenshot", {
+            format,
+            quality: format === "png" ? undefined : (action.quality ?? 80),
+            captureBeyondViewport: true,
+            clip: { ...bounds, scale },
+          }),
+        );
         const id = await files.save(
           `screenshot.${format}`,
           `image/${format}`,
@@ -1375,7 +1424,7 @@ export function createBrowserPage(
         ].includes(role);
         const ref = actionable && node.backendDOMNodeId ? `e${++nextRef}` : "";
         const element = node.backendDOMNodeId
-          ? { backendID: node.backendDOMNodeId, frameID, sessionID }
+          ? { backendID: node.backendDOMNodeId, frameID, sessionID, name: node.name?.value as string | undefined }
           : undefined;
         if (ref && element) refs.set(ref, element);
         const flags = (
