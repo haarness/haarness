@@ -1376,5 +1376,8 @@
   "Editing queued message · Enter saves · Click to cancel": "Редактирование сообщения в очереди · Enter сохраняет · Щёлкните для отмены",
   "Already sent or removed · Esc or click restores your draft": "Уже отправлено или удалено · Esc или щелчок вернёт черновик",
   "Changed elsewhere · Esc or click restores your draft": "Изменено в другом месте · Esc или щелчок вернёт черновик",
-  "Queue changed elsewhere · Enter saves again · Click to cancel": "Очередь изменена в другом месте · Enter сохранит снова · Щёлкните для отмены"
+  "Queue changed elsewhere · Enter saves again · Click to cancel": "Очередь изменена в другом месте · Enter сохранит снова · Щёлкните для отмены",
+  "Conversation outline": "Структура беседы",
+  "Jump to prompt {index}": "Перейти к запросу {index}",
+  "Attachment": "Вложение"
 }

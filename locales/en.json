@@ -1376,5 +1376,8 @@
   "Editing queued message · Enter saves · Click to cancel": "Editing queued message · Enter saves · Click to cancel",
   "Already sent or removed · Esc or click restores your draft": "Already sent or removed · Esc or click restores your draft",
   "Changed elsewhere · Esc or click restores your draft": "Changed elsewhere · Esc or click restores your draft",
-  "Queue changed elsewhere · Enter saves again · Click to cancel": "Queue changed elsewhere · Enter saves again · Click to cancel"
+  "Queue changed elsewhere · Enter saves again · Click to cancel": "Queue changed elsewhere · Enter saves again · Click to cancel",
+  "Conversation outline": "Conversation outline",
+  "Jump to prompt {index}": "Jump to prompt {index}",
+  "Attachment": "Attachment"
 }

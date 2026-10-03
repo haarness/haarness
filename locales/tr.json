@@ -1376,5 +1376,8 @@
   "Editing queued message · Enter saves · Click to cancel": "Sıradaki mesaj düzenleniyor · Enter kaydeder · İptal için tıklayın",
   "Already sent or removed · Esc or click restores your draft": "Zaten gönderildi veya kaldırıldı · Esc veya tıklama taslağınızı geri getirir",
   "Changed elsewhere · Esc or click restores your draft": "Başka bir yerde değiştirildi · Esc veya tıklama taslağınızı geri getirir",
-  "Queue changed elsewhere · Enter saves again · Click to cancel": "Sıra başka bir yerde değişti · Enter yeniden kaydeder · İptal için tıklayın"
+  "Queue changed elsewhere · Enter saves again · Click to cancel": "Sıra başka bir yerde değişti · Enter yeniden kaydeder · İptal için tıklayın",
+  "Conversation outline": "Konuşma ana hatları",
+  "Jump to prompt {index}": "{index}. isteme git",
+  "Attachment": "Ek"
 }

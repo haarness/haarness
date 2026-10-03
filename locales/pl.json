@@ -1376,5 +1376,8 @@
   "Editing queued message · Enter saves · Click to cancel": "Edycja wiadomości w kolejce · Enter zapisuje · Kliknij, aby anulować",
   "Already sent or removed · Esc or click restores your draft": "Już wysłana lub usunięta · Esc lub kliknięcie przywraca wersję roboczą",
   "Changed elsewhere · Esc or click restores your draft": "Zmieniono gdzie indziej · Esc lub kliknięcie przywraca wersję roboczą",
-  "Queue changed elsewhere · Enter saves again · Click to cancel": "Kolejka zmieniona gdzie indziej · Enter zapisuje ponownie · Kliknij, aby anulować"
+  "Queue changed elsewhere · Enter saves again · Click to cancel": "Kolejka zmieniona gdzie indziej · Enter zapisuje ponownie · Kliknij, aby anulować",
+  "Conversation outline": "Konspekt rozmowy",
+  "Jump to prompt {index}": "Przejdź do polecenia {index}",
+  "Attachment": "Załącznik"
 }

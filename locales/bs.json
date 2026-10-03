@@ -1376,5 +1376,8 @@
   "Editing queued message · Enter saves · Click to cancel": "Uređivanje poruke u redu · Enter čuva · Klikni za otkazivanje",
   "Already sent or removed · Esc or click restores your draft": "Već poslano ili uklonjeno · Esc ili klik vraća nacrt",
   "Changed elsewhere · Esc or click restores your draft": "Promijenjeno negdje drugdje · Esc ili klik vraća nacrt",
-  "Queue changed elsewhere · Enter saves again · Click to cancel": "Red je promijenjen negdje drugdje · Enter čuva ponovo · Klikni za otkazivanje"
+  "Queue changed elsewhere · Enter saves again · Click to cancel": "Red je promijenjen negdje drugdje · Enter čuva ponovo · Klikni za otkazivanje",
+  "Conversation outline": "Pregled razgovora",
+  "Jump to prompt {index}": "Idi na upit {index}",
+  "Attachment": "Prilog"
 }
