@@ -1352,5 +1352,7 @@
   "Pressing {key}": "正在按 {key}",
   "Scrolling": "滚动中",
   "Scrolling up": "向上滚动中",
-  "Scrolling down": "向下滚动中"
+  "Scrolling down": "向下滚动中",
+  "Enable agent {name}": "启用智能体 {name}",
+  "Enable skill {name}": "启用技能 {name}"
 }

@@ -1352,5 +1352,7 @@
   "Pressing {key}": "Appui sur {key}",
   "Scrolling": "Défilement",
   "Scrolling up": "Défilement vers le haut",
-  "Scrolling down": "Défilement vers le bas"
+  "Scrolling down": "Défilement vers le bas",
+  "Enable agent {name}": "Activer l'agent {name}",
+  "Enable skill {name}": "Activer la compétence {name}"
 }

@@ -1352,5 +1352,7 @@
   "Pressing {key}": "Trykker på {key}",
   "Scrolling": "Ruller",
   "Scrolling up": "Ruller op",
-  "Scrolling down": "Ruller ned"
+  "Scrolling down": "Ruller ned",
+  "Enable agent {name}": "Aktivér agenten {name}",
+  "Enable skill {name}": "Aktivér færdigheden {name}"
 }

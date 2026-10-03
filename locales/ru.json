@@ -1352,5 +1352,7 @@
   "Pressing {key}": "Нажатие {key}",
   "Scrolling": "Прокрутка",
   "Scrolling up": "Прокрутка вверх",
-  "Scrolling down": "Прокрутка вниз"
+  "Scrolling down": "Прокрутка вниз",
+  "Enable agent {name}": "Включить агента {name}",
+  "Enable skill {name}": "Включить навык {name}"
 }

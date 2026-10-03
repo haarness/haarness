@@ -1352,5 +1352,7 @@
   "Pressing {key}": "{key} を押しています",
   "Scrolling": "スクロール中",
   "Scrolling up": "上にスクロール中",
-  "Scrolling down": "下にスクロール中"
+  "Scrolling down": "下にスクロール中",
+  "Enable agent {name}": "エージェント {name} を有効にする",
+  "Enable skill {name}": "スキル {name} を有効にする"
 }

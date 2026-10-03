@@ -1352,5 +1352,7 @@
   "Pressing {key}": "{key} 누르는 중",
   "Scrolling": "스크롤 중",
   "Scrolling up": "위로 스크롤 중",
-  "Scrolling down": "아래로 스크롤 중"
+  "Scrolling down": "아래로 스크롤 중",
+  "Enable agent {name}": "에이전트 {name} 사용",
+  "Enable skill {name}": "기술 {name} 사용"
 }

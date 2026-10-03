@@ -1352,5 +1352,7 @@
   "Pressing {key}": "กำลังกด {key}",
   "Scrolling": "กำลังเลื่อน",
   "Scrolling up": "กำลังเลื่อนขึ้น",
-  "Scrolling down": "กำลังเลื่อนลง"
+  "Scrolling down": "กำลังเลื่อนลง",
+  "Enable agent {name}": "เปิดใช้งานเอเจนต์ {name}",
+  "Enable skill {name}": "เปิดใช้งานทักษะ {name}"
 }
