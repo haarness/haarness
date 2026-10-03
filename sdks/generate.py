@@ -226,6 +226,7 @@ def specification():
         "FileSearchQuery": obj({"q": S, "limit": N}, ("q",)),
         "HostOptions": obj({"version": {"type": "integer", "enum": [1, 2]}}),
         "FileQuery": obj({"path": S, "hidden": B}),
+        "PreviewVersionQuery": obj({"path": S, "hash": S}, ("path", "hash")),
         "Browse": obj({"path": S, "prefix": S, "hidden": B, "limit": N, "after": S}),
         "BackgroundQuery": obj({"childThreadId": S}),
         "WaitQuery": obj({"timeout_ms": N}),

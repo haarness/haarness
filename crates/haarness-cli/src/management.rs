@@ -1261,6 +1261,7 @@ impl ManagementService {
                 .queue_input(
                     target.id,
                     QueueInputRequest {
+                        preview: false,
                         delivery: haarness_protocol::InputDelivery::Steer,
                         request_id: RequestId::new(),
                         text: payload,
@@ -1283,6 +1284,7 @@ impl ManagementService {
                 .queue_input(
                     target.id,
                     QueueInputRequest {
+                        preview: false,
                         delivery: haarness_protocol::InputDelivery::Steer,
                         request_id: RequestId::new(),
                         text: payload,

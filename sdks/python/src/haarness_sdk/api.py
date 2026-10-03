@@ -443,6 +443,18 @@ class Api(Transport):
         """POST /v1/files/action."""
         return cast("T.JsonValue", self.request('POST', f'/v1/files/action', body=body, binary_body=False, binary_response=False, options=options))
 
+    def preview_version(self, query: T.PreviewVersionQuery, *, options: RequestOptions | None = None) -> T.FileContent:
+        """GET /v1/files/preview."""
+        return cast("T.FileContent", self.request('GET', f'/v1/files/preview', query=query, binary_body=False, binary_response=False, options=options))
+
+    def current_preview(self, query: T.FileQuery | None = None, *, options: RequestOptions | None = None) -> T.PreviewCurrent:
+        """GET /v1/files/preview/current."""
+        return cast("T.PreviewCurrent", self.request('GET', f'/v1/files/preview/current', query=query, binary_body=False, binary_response=False, options=options))
+
+    def restore_preview(self, body: T.PreviewRestoreRequest, *, options: RequestOptions | None = None) -> T.PreviewRestoreResult:
+        """POST /v1/files/preview/restore."""
+        return cast("T.PreviewRestoreResult", self.request('POST', f'/v1/files/preview/restore', body=body, binary_body=False, binary_response=False, options=options))
+
     def browser_tunnel(self, id: str, action: str, body: T.JsonValue, *, options: RequestOptions | None = None) -> T.JsonValue:
         """POST /v1/threads/{id}/browser/tunnel/{action}."""
         return cast("T.JsonValue", self.request('POST', f'/v1/threads/{self.segment(id)}/browser/tunnel/{self.segment(action)}', body=body, binary_body=False, binary_response=False, options=options))
@@ -919,6 +931,18 @@ class AsyncApi(AsyncTransport):
     async def mutate_file(self, body: T.FileAction, *, options: RequestOptions | None = None) -> T.JsonValue:
         """POST /v1/files/action."""
         return cast("T.JsonValue", await self.request('POST', f'/v1/files/action', body=body, binary_body=False, binary_response=False, options=options))
+
+    async def preview_version(self, query: T.PreviewVersionQuery, *, options: RequestOptions | None = None) -> T.FileContent:
+        """GET /v1/files/preview."""
+        return cast("T.FileContent", await self.request('GET', f'/v1/files/preview', query=query, binary_body=False, binary_response=False, options=options))
+
+    async def current_preview(self, query: T.FileQuery | None = None, *, options: RequestOptions | None = None) -> T.PreviewCurrent:
+        """GET /v1/files/preview/current."""
+        return cast("T.PreviewCurrent", await self.request('GET', f'/v1/files/preview/current', query=query, binary_body=False, binary_response=False, options=options))
+
+    async def restore_preview(self, body: T.PreviewRestoreRequest, *, options: RequestOptions | None = None) -> T.PreviewRestoreResult:
+        """POST /v1/files/preview/restore."""
+        return cast("T.PreviewRestoreResult", await self.request('POST', f'/v1/files/preview/restore', body=body, binary_body=False, binary_response=False, options=options))
 
     async def browser_tunnel(self, id: str, action: str, body: T.JsonValue, *, options: RequestOptions | None = None) -> T.JsonValue:
         """POST /v1/threads/{id}/browser/tunnel/{action}."""

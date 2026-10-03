@@ -23,6 +23,7 @@ impl App {
             .queue_input(
                 self.thread.id,
                 QueueInputRequest {
+                    preview: false,
                     delivery: InputDelivery::Queue,
                     request_id: RequestId::new(),
                     text,

@@ -4140,6 +4140,7 @@ async fn queued_input_during_summarization_cancels_compaction_until_exact_delive
         .queue_input(
             thread.id,
             haarness_protocol::QueueInputRequest {
+                preview: false,
                 delivery: haarness_protocol::InputDelivery::Steer,
                 request_id: RequestId::new(),
                 text: exact_steering.into(),
@@ -4473,6 +4474,7 @@ async fn rest_compaction_rejects_active_turn_and_preserves_queued_steering() {
         .queue_input(
             thread.id,
             haarness_protocol::QueueInputRequest {
+                preview: false,
                 delivery: haarness_protocol::InputDelivery::Steer,
                 request_id: RequestId::new(),
                 text: exact_steering.into(),
@@ -6617,6 +6619,7 @@ async fn queued_message_during_text_stream_runs_in_a_follow_up_round() {
         .queue_input(
             thread.id,
             haarness_protocol::QueueInputRequest {
+                preview: false,
                 delivery: haarness_protocol::InputDelivery::Steer,
                 request_id: RequestId::new(),
                 text: "arrived during streaming".into(),
@@ -6683,6 +6686,7 @@ async fn queued_message_steers_into_running_turn() {
         .queue_input(
             thread.id,
             haarness_protocol::QueueInputRequest {
+                preview: false,
                 delivery: haarness_protocol::InputDelivery::Steer,
                 request_id: RequestId::new(),
                 text: "hi".into(),
@@ -6772,6 +6776,7 @@ async fn queue_input_on_idle_thread_starts_a_turn() {
         .queue_input(
             thread.id,
             haarness_protocol::QueueInputRequest {
+                preview: false,
                 delivery: haarness_protocol::InputDelivery::Steer,
                 request_id: RequestId::new(),
                 text: "hello there".into(),
@@ -7683,6 +7688,7 @@ async fn queued_goal_steering_tool_followup_keeps_current_doctrine() {
         .queue_input(
             thread.id,
             haarness_protocol::QueueInputRequest {
+                preview: false,
                 delivery: haarness_protocol::InputDelivery::Steer,
                 request_id: RequestId::new(),
                 text: "steer through the status tool".into(),
@@ -8356,6 +8362,7 @@ async fn replacing_a_goal_mid_turn_resets_the_goal_boundary() {
         .queue_input(
             thread.id,
             haarness_protocol::QueueInputRequest {
+                preview: false,
                 delivery: haarness_protocol::InputDelivery::Steer,
                 request_id: RequestId::new(),
                 text: "begin the new objective".into(),
@@ -9080,6 +9087,7 @@ impl DeferredGate {
 }
 fn deferred_request(text: &str) -> haarness_protocol::QueueInputRequest {
     haarness_protocol::QueueInputRequest {
+        preview: false,
         delivery: haarness_protocol::InputDelivery::Queue,
         request_id: RequestId::new(),
         text: text.into(),
@@ -9795,5 +9803,40 @@ async fn published_remote_chat_cannot_read_or_control_other_conversations() {
     );
     drop(stream);
     handle.shutdown().await.unwrap();
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+#[tokio::test]
+async fn preview_tool_and_prompt_are_opt_in_for_graphical_turns() {
+    let workspace = std::env::temp_dir().join(format!("haarness-preview-gating-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let provider = Capturing::default();
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![Arc::new(provider.clone()) as Arc<dyn ModelProvider>])),
+        Arc::new(NativeToolRegistry::new(workspace.clone())),
+        EventBus::new(64), workspace.clone(), String::new(), RuntimeConfig::default(),
+    );
+    let thread = echo_thread(&runtime).await;
+    for preview in [None, Some(true), Some(false)] {
+        let mut request = turn_request("Return an answer");
+        request.tools = preview.map(|enabled| std::collections::HashMap::from([("preview".into(), enabled)]));
+        let turn = runtime.start_turn(thread.id, request).await.unwrap();
+        wait_done(&runtime, &turn).await;
+        wait_idle(&runtime, thread.id).await;
+        let requests = provider.requests.lock().unwrap();
+        let request = requests.last().unwrap();
+        assert_eq!(request.tools.iter().any(|tool| tool.name == "preview"), preview == Some(true));
+        assert_eq!(request.system.contains("The user's client can preview"), preview == Some(true));
+    }
+    runtime.set_tool_enabled("preview", Some(false)).await.unwrap();
+    let mut request = turn_request("Disabled preview must not be advertised");
+    request.tools = Some(std::collections::HashMap::from([("preview".into(), true)]));
+    let turn = runtime.start_turn(thread.id, request).await.unwrap();
+    wait_done(&runtime, &turn).await;
+    let requests = provider.requests.lock().unwrap();
+    let request = requests.last().unwrap();
+    assert!(!request.tools.iter().any(|tool| tool.name == "preview"));
+    assert!(!request.system.contains("The user's client can preview"));
     std::fs::remove_dir_all(workspace).unwrap();
 }

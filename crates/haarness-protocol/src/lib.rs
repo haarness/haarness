@@ -980,6 +980,9 @@ pub struct BackgroundTaskInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueInputRequest {
+    /// The submitting graphical client supports sandboxed file previews.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preview: bool,
     /// Steer by default for compatibility; queue waits for an idle boundary.
     #[serde(default)]
     pub delivery: InputDelivery,

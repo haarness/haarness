@@ -7,6 +7,7 @@ pub mod browser_policy;
 pub mod auth;
 mod command;
 pub mod files;
+pub mod preview;
 pub mod hooks;
 pub mod plugins;
 mod profiles;

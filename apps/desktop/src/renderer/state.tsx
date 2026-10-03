@@ -1,3 +1,4 @@
+import { previewInfo } from "./preview-actions";
 import { createAttachmentDrafts } from "./attachment-drafts";
 import { applyLanguage } from "./i18n";
 import {
@@ -103,6 +104,10 @@ interface State extends Live {
     connection: string;
     path: string;
     sequence: number;
+    mode?: "preview" | "code";
+    version?: string;
+    thread?: string;
+    preview?: boolean;
     action?: "file" | "folder";
   } | null;
   terminal: boolean;
@@ -1388,6 +1393,8 @@ function createApp() {
     await window.haarness.storage(key, pending);
     const input = {
       delivery,
+      preview: true,
+      tools: { preview: true },
       text: promptWithContext(text, context),
       attachments,
       requestId: pending.requestId,
@@ -1396,6 +1403,7 @@ function createApp() {
     if (pending.method === "executeCommand" && command)
       await targetApi("executeCommand", thread.id, {
         name: command[1],
+        tools: { preview: true },
         arguments: promptWithContext(command[2], context),
         requestId: pending.requestId,
       });
@@ -1552,6 +1560,15 @@ function createApp() {
     lastCursor = envelope.eventId;
     for (const journal of journals) journal.push(item as T.EventEnvelope);
     reduceEvent(state, set, item as T.EventEnvelope);
+    if (envelope.type === "item.created" && envelope.threadId === state.selected && !state.loadingChat) {
+      const entry = envelope.payload as T.Item;
+      const data = entry.data;
+      if (data?.type === "tool_result" && data.name === "preview" && !data.is_error) {
+        const info = previewInfo(data.metadata);
+        if (info) set("fileRequest", { connection: state.connection!.id, path: info.path, mode: info.mode, thread: state.selected, preview: true, sequence: envelope.eventId });
+      }
+    }
+
     if (item.type === "permission.resolved")
       retainPermissionErrors(state.connection!.id, state.permissions);
     if (item.type === "assets.updated")

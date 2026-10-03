@@ -16,6 +16,9 @@ pub enum InputDelivery {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingInput {
+    /// The submitting graphical client supports sandboxed file previews.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preview: bool,
     pub id: RequestId,
     pub text: String,
     #[serde(default)]

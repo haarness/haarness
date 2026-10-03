@@ -1,3 +1,5 @@
+import { PreviewBanner } from "./PreviewBanner";
+import { previewInfo } from "./preview-actions";
 import { t } from "./i18n";
 import {
   For,
@@ -70,7 +72,7 @@ export function ToolActivity(props: {
     () => props.result && toolOutput(props.name, props.result.output),
   );
   return (
-    <details
+    <Show when={toolName(props.name) === "preview" && props.result && !props.result.is_error && previewInfo(props.result.metadata)} fallback={<details
       class="tool-call"
       classList={{
         "tool-child": props.nested,
@@ -185,7 +187,7 @@ export function ToolActivity(props: {
           </Show>
         </div>
       </Show>
-    </details>
+    </details>}><PreviewBanner metadata={props.result?.metadata} /></Show>
   );
 }
 function ChangePreview(props: { change: Change; showPath?: boolean }) {

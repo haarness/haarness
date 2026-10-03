@@ -707,6 +707,7 @@ impl WorkflowRuntimeHost for WorkflowRuntimeAdapter {
         };
         let runtime = self.runtime()?;
         let request = QueueInputRequest {
+            preview: false,
             delivery: haarness_protocol::InputDelivery::Steer,
             request_id: RequestId::new(),
             text,

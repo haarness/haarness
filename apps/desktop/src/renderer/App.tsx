@@ -153,6 +153,10 @@ export function App() {
     if (value === "files") setFilesVisited(true);
     set("panel", "chat");
   }
+  createEffect(() => {
+    const request = state.fileRequest;
+    if (request?.preview && request.connection === state.connection?.id && (!request.thread || request.thread === state.selected)) openDock("files");
+  });
   function closeDock(value: Dock) {
     setDockTabs((tabs) => tabs.filter((tab) => tab !== value));
     if (dock() === value) setDock(dockTabs().at(-1) ?? "tools");

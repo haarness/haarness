@@ -1,3 +1,5 @@
+import { Preview } from "./preview";
+import { PreviewContent } from "./PreviewContent";
 import { t } from "./i18n";
 import { For, Show, createSignal, createEffect, onCleanup } from "solid-js";
 import type { FileContent, FileEntry } from "../shared";
@@ -5,7 +7,7 @@ import { useApp } from "./state";
 import { Button, Icon, ask, confirm, Empty } from "./ui";
 import { Editor, type EditorSession } from "./Editor";
 import { fileContext } from "./prompt-context";
-type OpenFile = FileContent & { editor: EditorSession };
+type OpenFile = FileContent & { editor: EditorSession; mode?: "preview" | "code"; pin?: string };
 const emptyHash =
   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 export function Explorer() {
@@ -29,7 +31,7 @@ export function Explorer() {
     setSelection({ from: 0, to: 0 });
   });
   const canAttach = () =>
-    file()?.encoding === "utf8" &&
+    !file()?.pin && file()?.encoding === "utf8" &&
     !app.state.threads.find((thread) => thread.id === app.state.selected)
       ?.isSubagent;
   async function attachContext() {
@@ -83,6 +85,11 @@ export function Explorer() {
     setVersion((v) => v + 1);
   });
   createEffect(() => {
+    app.state.selected;
+    selectionGeneration++;
+    setTabs((items) => items.filter((item) => !item.pin));
+  });
+  createEffect(() => {
     const connection = app.state.connection?.id;
     const q = query();
     const current = ++searchGeneration;
@@ -114,28 +121,39 @@ export function Explorer() {
     selectionGeneration++;
     setSelected(path);
   }
-  async function open(path: string) {
+  async function open(path: string, options?: { mode?: "preview" | "code"; version?: string; preview?: boolean }) {
     const intent = ++selectionGeneration;
     const generation = workspaceGeneration;
     const id = app.state.connection?.id;
     if (!id) return;
-    if (!tabs().some((item) => item.path === path)) {
-      let pending = pendingOpens.get(path);
+    if (options?.preview && dirty(path)) {
+      app.notify("Save or discard your edits before opening another preview version.");
+      return;
+    }
+    if (!tabs().some((item) => item.path === path) || options?.preview) {
+      const key = JSON.stringify([path, options?.version ?? "current", options?.preview ? intent : 0]);
+      let pending = pendingOpens.get(key);
       if (!pending) {
-        pending = window.haarness.files<FileContent>(id, "read", { path })
+        pending = window.haarness.files<FileContent>(id, options?.version ? "preview" : "read", { path, ...(options?.version ? { hash: options.version } : {}) })
           .then((value) => {
-            if (generation !== workspaceGeneration) return;
+            if (generation !== workspaceGeneration || (options?.preview && intent !== selectionGeneration)) return;
+            if (options?.preview && dirty(path)) {
+              app.notify("Save or discard your edits before refreshing this preview.");
+              return;
+            }
+            if (options?.preview) setEdits((items) => { const next = { ...items }; delete next[path]; return next; });
+            const tab: OpenFile = { ...value, editor: {}, mode: options?.mode ?? (["html", "svg"].includes(Preview.kind(path) ?? "") ? "preview" : "code"), pin: options?.version };
             setTabs((items) => items.some((item) => item.path === path)
-              ? items : [...items, { ...value, editor: {} }]);
+              ? items.map((item) => item.path === path ? tab : item) : [...items, tab]);
           });
-        pendingOpens.set(path, pending);
+        pendingOpens.set(key, pending);
       }
       try {
         await pending;
       } catch (error) {
         if (generation === workspaceGeneration) throw error;
       } finally {
-        if (pendingOpens.get(path) === pending) pendingOpens.delete(path);
+        if (pendingOpens.get(key) === pending) pendingOpens.delete(key);
       }
     }
     if (generation === workspaceGeneration && intent === selectionGeneration)
@@ -144,7 +162,7 @@ export function Explorer() {
   function save(): Promise<void> {
     const value = file();
     const id = app.state.connection?.id;
-    if (!value || !id) return Promise.resolve();
+    if (!value || !id || value.pin) return Promise.resolve();
     const existing = pendingSaves.get(value.editor);
     if (existing) return existing;
     if (!dirty(value.path)) return Promise.resolve();
@@ -157,7 +175,7 @@ export function Explorer() {
           !tabs().some((item) => item.editor === value.editor)) return;
       // A save advances the disk revision, never the current editing buffer.
       setTabs((items) => items.map((item) => item.editor === value.editor
-        ? { ...result, editor: value.editor } : item));
+        ? { ...item, ...result, editor: value.editor } : item));
       setEdits((items) => {
         if (items[value.path] !== content) return items;
         const next = { ...items };
@@ -176,11 +194,11 @@ export function Explorer() {
     const request = app.state.fileRequest;
     if (!request) return;
     app.set("fileRequest", null);
-    if (request.connection !== app.state.connection?.id) return;
+    if (request.connection !== app.state.connection?.id || (request.thread && request.thread !== app.state.selected)) return;
     void app.run(() =>
       request.action
         ? create(request.action === "folder")
-        : open(request.path),
+        : open(request.path, request),
     );
   });
   app.registerSearch("editor", () => {
@@ -330,6 +348,15 @@ export function Explorer() {
       },
     });
   }
+  async function restorePreview() {
+    const value = file(), id = app.state.connection?.id;
+    const generation = workspaceGeneration;
+    const intent = selectionGeneration;
+    if (!value?.pin || !id || !await confirm("Restore preview version?", "The current file is backed up before this version replaces it.")) return;
+    const current = await window.haarness.files<FileContent>(id, "read", { path: value.path }).catch(() => undefined);
+    await window.haarness.files(id, "restore", { path: value.path, hash: value.pin, revision: current?.revision ?? emptyHash });
+    if (generation === workspaceGeneration && intent === selectionGeneration) await open(value.path, { preview: true });
+  }
   async function remove() {
     const value = file();
     const id = app.state.connection?.id;
@@ -431,6 +458,11 @@ export function Explorer() {
               </div>
               <Show when={file()}>
                 <div class="file-actions">
+                  <Show when={Preview.kind(file()!.path) && Preview.kind(file()!.path) !== "image"}>
+                    <button aria-pressed={file()?.mode !== "code"} onClick={() => setTabs((items) => items.map((item) => item.path === selected() ? { ...item, mode: "preview" } : item))}>Preview</button>
+                    <button aria-pressed={file()?.mode === "code"} onClick={() => setTabs((items) => items.map((item) => item.path === selected() ? { ...item, mode: "code" } : item))}>Code</button>
+                  </Show>
+
                   <Button
                     icon="file"
                     label={
@@ -488,6 +520,10 @@ export function Explorer() {
           >
             {(value) => (
               <>
+                <Show when={value().pin}>
+                  <div class="preview-version-strip">Saved preview version <button onClick={() => app.run(restorePreview)}>Restore this version</button><button onClick={() => app.run(() => open(value().path, { preview: true }))}>Show current</button></div>
+                </Show>
+                <Show when={Preview.kind(value().path) && value().mode !== "code"} fallback={<>
                 <Show
                   when={value().encoding === "utf8"}
                   fallback={
@@ -533,6 +569,7 @@ export function Explorer() {
                     session={value().editor}
                     path={value().path}
                     value={edits()[value().path] ?? value().content}
+                    readonly={!!value().pin}
                     wrap={app.state.preferences.editorWrap}
                     onChange={(text) =>
                       setEdits((items) => ({ ...items, [value().path]: text }))
@@ -542,6 +579,7 @@ export function Explorer() {
                     onAddContext={() => void app.run(attachContext)}
                   />
                 </Show>
+                </>}><PreviewContent file={{ ...value(), content: edits()[value().path] ?? value().content }} /></Show>
               </>
             )}
           </Show>
