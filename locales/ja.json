@@ -1376,5 +1376,8 @@
   "Editing queued message · Enter saves · Click to cancel": "キューのメッセージを編集中 · Enter で保存 · クリックでキャンセル",
   "Already sent or removed · Esc or click restores your draft": "送信済みか削除済み · Esc またはクリックで下書きを復元",
   "Changed elsewhere · Esc or click restores your draft": "別の場所で変更されました · Esc またはクリックで下書きを復元",
-  "Queue changed elsewhere · Enter saves again · Click to cancel": "キューが別の場所で変更されました · Enter で再保存 · クリックでキャンセル"
+  "Queue changed elsewhere · Enter saves again · Click to cancel": "キューが別の場所で変更されました · Enter で再保存 · クリックでキャンセル",
+  "Conversation outline": "会話のアウトライン",
+  "Jump to prompt {index}": "プロンプト {index} へ移動",
+  "Attachment": "添付ファイル"
 }

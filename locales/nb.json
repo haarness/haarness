@@ -1376,5 +1376,8 @@
   "Editing queued message · Enter saves · Click to cancel": "Redigerer meldingen i køen · Enter lagrer · Klikk for å avbryte",
   "Already sent or removed · Esc or click restores your draft": "Allerede sendt eller fjernet · Esc eller klikk gjenoppretter utkastet",
   "Changed elsewhere · Esc or click restores your draft": "Endret et annet sted · Esc eller klikk gjenoppretter utkastet",
-  "Queue changed elsewhere · Enter saves again · Click to cancel": "Køen er endret et annet sted · Enter lagrer på nytt · Klikk for å avbryte"
+  "Queue changed elsewhere · Enter saves again · Click to cancel": "Køen er endret et annet sted · Enter lagrer på nytt · Klikk for å avbryte",
+  "Conversation outline": "Samtaleoversikt",
+  "Jump to prompt {index}": "Gå til ledetekst {index}",
+  "Attachment": "Vedlegg"
 }

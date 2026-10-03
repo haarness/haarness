@@ -52,6 +52,8 @@ import { Button, Icon, ask, stringify, time, type IconName } from "./ui";
 import { attachmentName, type Attachment } from "./media";
 import { createFileDrop } from "./file-drop";
 import { Markdown } from "./Markdown";
+import { ConversationOutline } from "./ConversationOutline";
+import { promptTitle, readingMark } from "./outline-layout";
 import { MenuButton, type MenuAction } from "./MenuButton";
 import { isWorktree, locationName } from "../projects";
 import { createWorktree } from "./worktrees";
@@ -385,6 +387,7 @@ export function Session() {
     });
   }
   function onScroll() {
+    trackOutline();
     const top = scrolling.scrollTop;
     const remaining = scrolling.scrollHeight - top - scrolling.clientHeight;
     // Height contraction and virtual-row measurement can reduce scrollTop
@@ -727,6 +730,83 @@ export function Session() {
     overscan: 8,
     getItemKey: (index) => rows()[index]?.id ?? index,
   });
+  // The outline lists every prompt the user wrote and marks the one being
+  // read. It is measured from the virtualizer's own row offsets, at most once
+  // a frame, so streaming and scrolling never read every row's layout.
+  const outline = createMemo(() =>
+    rows().flatMap((item, index) =>
+      item.data.type === "user_message"
+        ? [{
+            id: item.id,
+            index,
+            title: promptTitle(item.data.text, item.data.attachments ?? [], attachmentName, t("Attachment")),
+          }]
+        : [],
+    ),
+  );
+  const [readingPrompt, setReadingPrompt] = createSignal<string>();
+  const [laneHeight, setLaneHeight] = createSignal(0);
+  // A prompt is being read once its row reaches this far below the top.
+  const readLine = 80;
+  let outlineFrame = 0;
+  function trackOutline() {
+    if (outlineFrame || !scrolling) return;
+    outlineFrame = requestAnimationFrame(() => {
+      outlineFrame = 0;
+      if (!scrolling) return;
+      setLaneHeight(scrolling.clientHeight);
+      const body = scrolling.querySelector<HTMLElement>(".transcript-body");
+      const base = body
+        ? body.getBoundingClientRect().top - scrolling.getBoundingClientRect().top + scrolling.scrollTop
+        : 0;
+      // Brings the offset cache up to date with every row measured so far.
+      virtual.getTotalSize();
+      const cache = virtual.measurementsCache;
+      const marks = outline().flatMap((prompt) => {
+        const row = cache[prompt.index];
+        return row ? [{ id: prompt.id, offset: base + row.start }] : [];
+      });
+      setReadingPrompt(
+        readingMark(marks, scrolling.scrollTop, scrolling.scrollHeight - scrolling.clientHeight, readLine),
+      );
+    });
+  }
+  createEffect(on(outline, trackOutline));
+  onMount(() => {
+    // The viewport and the content: rows measured after a scroll move the
+    // prompts' offsets without another scroll event.
+    const resize = new ResizeObserver(trackOutline);
+    resize.observe(scrolling);
+    const body = scrolling.querySelector(".transcript-body");
+    if (body) resize.observe(body);
+    onCleanup(() => {
+      resize.disconnect();
+      cancelAnimationFrame(outlineFrame);
+    });
+  });
+  function jumpToPrompt(position: number) {
+    const prompt = outline()[position];
+    if (!prompt) return;
+    cancelAnimationFrame(scrollFrame);
+    scrollFrame = 0;
+    setFollow(false);
+    setReadingPrompt(prompt.id);
+    virtual.scrollToIndex(prompt.index, { align: "start" });
+  }
+  // The outline's lane sits over the transcript, so wheel input it does not
+  // use scrolls the conversation here, as the user's own gesture.
+  function outlineWheel(event: WheelEvent) {
+    const delta =
+      event.deltaMode === WheelEvent.DOM_DELTA_LINE
+        ? event.deltaY * 16
+        : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+          ? event.deltaY * scrolling.clientHeight
+          : event.deltaY;
+    if (!delta) return;
+    event.preventDefault();
+    if (delta < 0) pauseFollowing();
+    scrolling.scrollBy({ top: delta });
+  }
   const revealFind = (id: string) => {
     cancelAnimationFrame(scrollFrame);
     scrollFrame = 0;
@@ -1178,7 +1258,12 @@ export function Session() {
     <section
       ref={fileDrop.ref}
       class="conversation"
-      classList={{ "empty-start": empty(), "file-drop-active": fileDrop.dragging() }}
+      classList={{
+        "empty-start": empty(),
+        "file-drop-active": fileDrop.dragging(),
+        // Room for the outline from the first prompt, so text never moves when it appears.
+        "with-outline": !empty(),
+      }}
       aria-label={t("Conversation")}
     >
       <Show when={fileDrop.dragging()}>
@@ -1211,148 +1296,160 @@ export function Session() {
           {t("Updating conversation history…")}
         </div>
       </Show>
-      <div
-        class="transcript"
-        ref={scrolling}
-        tabIndex={0}
-        aria-label={t("Conversation history")}
-        onScroll={onScroll}
-        onFocusIn={onHistoryFocus}
-        onWheel={(event) => {
-          if (event.deltaY < 0) pauseFollowing();
-        }}
-        onTouchStart={(event) => {
-          touchY = event.touches[0]?.clientY ?? 0;
-        }}
-        onTouchMove={(event) => {
-          const next = event.touches[0]?.clientY ?? touchY;
-          if (next > touchY) pauseFollowing();
-          touchY = next;
-        }}
-        onKeyDown={(event) => {
-          if (
-            ["ArrowUp", "PageUp", "Home"].includes(event.key) ||
-            (event.key === " " && event.shiftKey)
-          )
-            pauseFollowing();
-        }}
-        onPointerDown={(event) => {
-          // Include overlay scrollbars, which may report a zero-width gutter.
-          if (event.clientX >= scrolling.getBoundingClientRect().right - 16)
-            pauseFollowing();
-        }}
-      >
-        <Show when={empty()}>
-          <div class="conversation-empty">
-            <div class="start-mark" aria-hidden="true">
-              <Mark />
-            </div>
-            <h2>
-              <Show
-                when={project()}
-                fallback={splitAround(t("{project} to get started"), () => (
-                  <ProjectPicker heading />
-                ))}
-              >
-                {splitAround(t("What should we work on in {project}?"), () => (
-                  <ProjectPicker heading />
-                ))}
-              </Show>
-            </h2>
-            <Show when={project()}>
-              <div class="suggestions" aria-label={t("Conversation starters")}>
-                <For each={projectStarters}>
-                  {(item) => (
-                    <button
-                      aria-label={t(item.label)}
-                      onClick={() => {
-                        change(t(item.text));
-                        composer.focus();
-                      }}
-                    >
-                      <span class="starter-icon" aria-hidden="true">
-                        <Icon name={item.icon} size="md" />
-                      </span>
-                      <span class="starter-copy">
-                        <strong>{t(item.label)}</strong>
-                        <span>{t(item.detail)}</span>
-                      </span>
-                    </button>
-                  )}
-                </For>
-              </div>
-            </Show>
-          </div>
-        </Show>
+      <div class="transcript-frame">
         <div
-          class="transcript-body"
-          style={{ height: virtual.getTotalSize() + "px" }}
+          class="transcript"
+          ref={scrolling}
+          tabIndex={0}
+          aria-label={t("Conversation history")}
+          onScroll={onScroll}
+          onFocusIn={onHistoryFocus}
+          onWheel={(event) => {
+            if (event.deltaY < 0) pauseFollowing();
+          }}
+          onTouchStart={(event) => {
+            touchY = event.touches[0]?.clientY ?? 0;
+          }}
+          onTouchMove={(event) => {
+            const next = event.touches[0]?.clientY ?? touchY;
+            if (next > touchY) pauseFollowing();
+            touchY = next;
+          }}
+          onKeyDown={(event) => {
+            if (
+              ["ArrowUp", "PageUp", "Home"].includes(event.key) ||
+              (event.key === " " && event.shiftKey)
+            )
+              pauseFollowing();
+          }}
+          onPointerDown={(event) => {
+            // Include overlay scrollbars, which may report a zero-width gutter.
+            if (event.clientX >= scrolling.getBoundingClientRect().right - 16)
+              pauseFollowing();
+          }}
         >
-          <For each={virtual.getVirtualItems()}>
-            {(row) => (
-              <div
-                ref={(element) =>
-                  measureRow(element, virtual.measureElement)
-                }
-                data-index={row.index}
-                data-item-id={rows()[row.index]?.id}
-                classList={{
-                  "conversation-match": rows()[row.index]?.id === findMatch(),
-                }}
-                style={{
-                  position: "absolute",
-                  top: 0,
-                  left: 0,
-                  width: "100%",
-                  transform: `translateY(${row.start}px)`,
-                }}
-              >
-                <Show
-                  when={hasForkOrigin() && forkDividerIndex() === row.index}
-                >
-                  <ForkDivider />
-                </Show>
-                <Message
-                  item={rows()[row.index]}
-                  task={(() => {
-                    const item = rows()[row.index];
-                    return item && "call_id" in item.data
-                      ? tasks().get(taskKey(item.turnId, item.data.call_id))
-                      : undefined;
-                  })()}
-                  result={toolResult(
-                    state.items,
-                    rows()[row.index],
-                    thread()?.revert?.sequence,
-                  )}
-                  fork={() => app.run(() => fork(rows()[row.index]))}
-                />
+          <Show when={empty()}>
+            <div class="conversation-empty">
+              <div class="start-mark" aria-hidden="true">
+                <Mark />
               </div>
-            )}
-          </For>
-        </div>
-        <Show when={hasForkOrigin() && forkDividerIndex() === -1}>
-          <ForkDivider />
-        </Show>
-        <Show when={stream()?.reasoning && state.preferences.showReasoning}>
-          <div class="message reasoning">
-            <div class="message-label">
-              <span class="author">{t("Thinking")}</span>
+              <h2>
+                <Show
+                  when={project()}
+                  fallback={splitAround(t("{project} to get started"), () => (
+                    <ProjectPicker heading />
+                  ))}
+                >
+                  {splitAround(t("What should we work on in {project}?"), () => (
+                    <ProjectPicker heading />
+                  ))}
+                </Show>
+              </h2>
+              <Show when={project()}>
+                <div class="suggestions" aria-label={t("Conversation starters")}>
+                  <For each={projectStarters}>
+                    {(item) => (
+                      <button
+                        aria-label={t(item.label)}
+                        onClick={() => {
+                          change(t(item.text));
+                          composer.focus();
+                        }}
+                      >
+                        <span class="starter-icon" aria-hidden="true">
+                          <Icon name={item.icon} size="md" />
+                        </span>
+                        <span class="starter-copy">
+                          <strong>{t(item.label)}</strong>
+                          <span>{t(item.detail)}</span>
+                        </span>
+                      </button>
+                    )}
+                  </For>
+                </div>
+              </Show>
             </div>
-            <Markdown text={stream()!.reasoning} live />
+          </Show>
+          <div
+            class="transcript-body"
+            style={{ height: virtual.getTotalSize() + "px" }}
+          >
+            <For each={virtual.getVirtualItems()}>
+              {(row) => (
+                <div
+                  ref={(element) =>
+                    measureRow(element, virtual.measureElement)
+                  }
+                  data-index={row.index}
+                  data-item-id={rows()[row.index]?.id}
+                  classList={{
+                    "conversation-match": rows()[row.index]?.id === findMatch(),
+                  }}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    transform: `translateY(${row.start}px)`,
+                  }}
+                >
+                  <Show
+                    when={hasForkOrigin() && forkDividerIndex() === row.index}
+                  >
+                    <ForkDivider />
+                  </Show>
+                  <Message
+                    item={rows()[row.index]}
+                    task={(() => {
+                      const item = rows()[row.index];
+                      return item && "call_id" in item.data
+                        ? tasks().get(taskKey(item.turnId, item.data.call_id))
+                        : undefined;
+                    })()}
+                    result={toolResult(
+                      state.items,
+                      rows()[row.index],
+                      thread()?.revert?.sequence,
+                    )}
+                    fork={() => app.run(() => fork(rows()[row.index]))}
+                  />
+                </div>
+              )}
+            </For>
           </div>
+          <Show when={hasForkOrigin() && forkDividerIndex() === -1}>
+            <ForkDivider />
+          </Show>
+          <Show when={stream()?.reasoning && state.preferences.showReasoning}>
+            <div class="message reasoning">
+              <div class="message-label">
+                <span class="author">{t("Thinking")}</span>
+              </div>
+              <Markdown text={stream()!.reasoning} live />
+            </div>
+          </Show>
+          <Show when={stream()?.text}>
+            <div class="message assistant" data-testid="streaming-reply">
+              <Markdown text={stream()!.text} live />
+            </div>
+          </Show>
+          <Show when={active() && !pending()}>
+            <div class="assistant-activity" role="status" aria-live="polite">
+              <Shimmer>{activity()}</Shimmer>
+            </div>
+          </Show>
+          <div class="transcript-tail" />
+        </div>
+        {/* Keyed by conversation, so an open panel never carries over. */}
+        <Show when={!empty() && outline().length > 1 ? state.selected : undefined} keyed>
+          <ConversationOutline
+            prompts={outline}
+            reading={readingPrompt}
+            height={laneHeight}
+            onJump={jumpToPrompt}
+            onWheel={outlineWheel}
+          />
         </Show>
-        <Show when={stream()?.text}>
-          <div class="message assistant" data-testid="streaming-reply">
-            <Markdown text={stream()!.text} live />
-          </div>
-        </Show>
-        <Show when={active() && !pending()}>
-          <div class="assistant-activity" role="status" aria-live="polite">
-            <Shimmer>{activity()}</Shimmer>
-          </div>
-        </Show>
-        <div class="transcript-tail" />
       </div>
       <Show when={editable() || pending() || !follow() || todos().length}>
         <div class="composer-area">

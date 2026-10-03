@@ -1376,5 +1376,8 @@
   "Editing queued message · Enter saves · Click to cancel": "Wartende Nachricht wird bearbeitet · Eingabe speichert · Klicken bricht ab",
   "Already sent or removed · Esc or click restores your draft": "Bereits gesendet oder entfernt · Esc oder Klicken stellt Ihren Entwurf wieder her",
   "Changed elsewhere · Esc or click restores your draft": "An anderer Stelle geändert · Esc oder Klicken stellt Ihren Entwurf wieder her",
-  "Queue changed elsewhere · Enter saves again · Click to cancel": "Warteschlange an anderer Stelle geändert · Eingabe speichert erneut · Klicken bricht ab"
+  "Queue changed elsewhere · Enter saves again · Click to cancel": "Warteschlange an anderer Stelle geändert · Eingabe speichert erneut · Klicken bricht ab",
+  "Conversation outline": "Gesprächsübersicht",
+  "Jump to prompt {index}": "Zu Prompt {index} springen",
+  "Attachment": "Anhang"
 }

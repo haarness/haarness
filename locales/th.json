@@ -1376,5 +1376,8 @@
   "Editing queued message · Enter saves · Click to cancel": "กำลังแก้ไขข้อความในคิว · Enter เพื่อบันทึก · คลิกเพื่อยกเลิก",
   "Already sent or removed · Esc or click restores your draft": "ส่งหรือนำออกแล้ว · Esc หรือคลิกเพื่อกู้คืนแบบร่าง",
   "Changed elsewhere · Esc or click restores your draft": "ถูกเปลี่ยนจากที่อื่น · Esc หรือคลิกเพื่อกู้คืนแบบร่าง",
-  "Queue changed elsewhere · Enter saves again · Click to cancel": "คิวถูกเปลี่ยนจากที่อื่น · Enter เพื่อบันทึกอีกครั้ง · คลิกเพื่อยกเลิก"
+  "Queue changed elsewhere · Enter saves again · Click to cancel": "คิวถูกเปลี่ยนจากที่อื่น · Enter เพื่อบันทึกอีกครั้ง · คลิกเพื่อยกเลิก",
+  "Conversation outline": "โครงร่างการสนทนา",
+  "Jump to prompt {index}": "ไปยังพรอมต์ที่ {index}",
+  "Attachment": "ไฟล์แนบ"
 }

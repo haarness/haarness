@@ -1376,5 +1376,8 @@
   "Editing queued message · Enter saves · Click to cancel": "正在編輯排隊訊息 · Enter 儲存 · 點擊取消",
   "Already sent or removed · Esc or click restores your draft": "已傳送或已移除 · 按 Esc 或點擊還原草稿",
   "Changed elsewhere · Esc or click restores your draft": "已在其他地方修改 · 按 Esc 或點擊還原草稿",
-  "Queue changed elsewhere · Enter saves again · Click to cancel": "佇列已在其他地方變更 · Enter 再次儲存 · 點擊取消"
+  "Queue changed elsewhere · Enter saves again · Click to cancel": "佇列已在其他地方變更 · Enter 再次儲存 · 點擊取消",
+  "Conversation outline": "對話大綱",
+  "Jump to prompt {index}": "跳至提示 {index}",
+  "Attachment": "附件"
 }

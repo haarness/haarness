@@ -1,0 +1,159 @@
+/*
+ * The conversation outline: prompt dashes at the top of the transcript's
+ * leading edge, and the panel of prompts they open.
+ *
+ * The lane overlays the transcript instead of scrolling inside it, so its
+ * position is plain CSS and holds still while the composer grows.
+ */
+.transcript-frame {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.outline {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  z-index: 5;
+  width: 0;
+  pointer-events: none;
+}
+.outline button {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  white-space: nowrap;
+}
+.outline button:active:not(:disabled) {
+  transform: none;
+}
+.outline-dash {
+  position: absolute;
+  display: block;
+  translate: 0 -50%;
+  pointer-events: none;
+}
+/* Short and dim at rest; the prompt being read is longer and brighter. */
+.outline-mark {
+  display: block;
+  flex: none;
+  width: 10px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--faint);
+  transition:
+    width var(--fast) var(--ease),
+    background-color var(--fast) var(--ease);
+}
+.outline-mark.reading {
+  width: 16px;
+  background: var(--text);
+}
+:root[data-theme="light"] .outline-mark.reading {
+  background: var(--accent);
+}
+.outline-lane {
+  position: absolute;
+  inset-inline-start: 0;
+  pointer-events: auto;
+}
+.outline-panel {
+  position: absolute;
+  width: 280px;
+  max-width: calc(100cqi - var(--s5));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  pointer-events: auto;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  background: var(--raised);
+  background-clip: padding-box;
+  box-shadow: var(--shadow-2);
+  transform-origin: left center;
+  animation: outline-open 150ms var(--ease);
+}
+:root[dir="rtl"] .outline-panel {
+  transform-origin: right center;
+}
+.outline-panel::-webkit-scrollbar {
+  display: none;
+}
+.outline-rows {
+  position: relative;
+}
+.outline .outline-row {
+  position: absolute;
+  inset-inline: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--s2);
+  padding-inline: var(--s2);
+  border-radius: var(--r-md);
+  font-size: var(--ui);
+  color: var(--text);
+  text-align: start;
+}
+.outline .outline-row[data-state="hot"],
+.outline .outline-row:hover {
+  background: var(--hover);
+}
+.outline-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.outline-row[aria-current="location"] .outline-title {
+  font-weight: 500;
+}
+:root[data-theme="light"] .outline-row[aria-current="location"] .outline-title {
+  color: var(--accent);
+}
+@keyframes outline-open {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .outline-mark,
+  .outline-panel {
+    transition: none;
+    animation: none;
+  }
+}
+/*
+ * Conversation text never sits under the stack. Where the reading column is
+ * centred with a wide margin nothing changes; where text reaches the edge it
+ * keeps clear of the widest dash. The composer follows, so the two still line
+ * up. The room is there from a conversation's first prompt, so nothing moves
+ * when the outline appears with the second.
+ */
+.with-outline {
+  --outline-clear: 38px;
+}
+.with-outline .transcript,
+.with-outline .composer-area {
+  padding-inline: max(var(--outline-clear), calc((100% - var(--measure)) / 2));
+}
+@media (max-width: 1100px) {
+  .with-outline .transcript,
+  .with-outline .composer-area {
+    padding-inline: var(--outline-clear);
+  }
+}
+/* A narrow conversation has no room beside its text for the stack. */
+@container (max-width: 459px) {
+  .outline {
+    display: none;
+  }
+  .with-outline .transcript,
+  .with-outline .composer-area {
+    padding-inline: var(--s4);
+  }
+}

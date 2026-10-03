@@ -1376,5 +1376,8 @@
   "Editing queued message · Enter saves · Click to cancel": "Modification du message en file d'attente · Entrée enregistre · Cliquez pour annuler",
   "Already sent or removed · Esc or click restores your draft": "Déjà envoyé ou retiré · Échap ou un clic restaure votre brouillon",
   "Changed elsewhere · Esc or click restores your draft": "Modifié ailleurs · Échap ou un clic restaure votre brouillon",
-  "Queue changed elsewhere · Enter saves again · Click to cancel": "File modifiée ailleurs · Entrée enregistre à nouveau · Cliquez pour annuler"
+  "Queue changed elsewhere · Enter saves again · Click to cancel": "File modifiée ailleurs · Entrée enregistre à nouveau · Cliquez pour annuler",
+  "Conversation outline": "Plan de la conversation",
+  "Jump to prompt {index}": "Aller à l'invite {index}",
+  "Attachment": "Pièce jointe"
 }

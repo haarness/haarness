@@ -1376,5 +1376,8 @@
   "Editing queued message · Enter saves · Click to cancel": "대기 메시지 편집 중 · Enter로 저장 · 클릭하여 취소",
   "Already sent or removed · Esc or click restores your draft": "이미 전송되었거나 제거됨 · Esc 또는 클릭으로 초안 복원",
   "Changed elsewhere · Esc or click restores your draft": "다른 곳에서 변경됨 · Esc 또는 클릭으로 초안 복원",
-  "Queue changed elsewhere · Enter saves again · Click to cancel": "대기열이 다른 곳에서 변경됨 · Enter로 다시 저장 · 클릭하여 취소"
+  "Queue changed elsewhere · Enter saves again · Click to cancel": "대기열이 다른 곳에서 변경됨 · Enter로 다시 저장 · 클릭하여 취소",
+  "Conversation outline": "대화 개요",
+  "Jump to prompt {index}": "프롬프트 {index}(으)로 이동",
+  "Attachment": "첨부 파일"
 }

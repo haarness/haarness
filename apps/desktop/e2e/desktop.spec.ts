@@ -10842,6 +10842,241 @@ test("file explorer highlights configuration and programming languages in both t
   expect(errors).toEqual([]);
 });
 
+// A conversation with these prompts, the first sent through the composer and
+// the rest through the server, so the transcript fills the way a user's does.
+async function outlineSession(prompts: string[]) {
+  await newSession();
+  await send(prompts[0]);
+  const first = prompts[0].split("\n")[0];
+  await expect
+    .poll(async () => (await client.listThreads()).find((thread) => thread.title.includes(first))?.id)
+    .toBeTruthy();
+  const id = (await client.listThreads()).find((thread) => thread.title.includes(first))!.id;
+  await expect.poll(() => client.activeTurn(id)).toBeNull();
+  for (const text of prompts.slice(1)) {
+    const turn = await client.startTurn(id, { requestId: crypto.randomUUID(), text });
+    await client.waitTurn(turn.id, { timeout_ms: 20000 });
+  }
+  await expect(page.locator(".transcript")).toContainText("Echo: " + prompts.at(-1)!.split("\n")[0]);
+  return id;
+}
+const outline = () => page.locator(".outline");
+const outlineDashes = () => page.locator(".outline-dash");
+const outlineRows = () => page.locator(".outline-row");
+// Hover a dash the way a pointer does, moving onto it until the panel opens.
+async function openOutlineOn(index: number) {
+  await expect
+    .poll(async () => {
+      const box = (await outlineDashes().nth(index).boundingBox())!;
+      await page.mouse.move(box.x + 4, box.y + 3);
+      await page.mouse.move(box.x + 4, box.y + 1);
+      return outline().getAttribute("data-state");
+    })
+    .toBe("open");
+}
+const transcriptTop = async () => (await page.locator(".transcript").boundingBox())!.y;
+
+test("conversation outline rests as dashes at the top left and opens into a panel of prompts", async () => {
+  await page.setViewportSize({ width: 1420, height: 940 });
+  const prompts = Array.from({ length: 14 }, (_, i) => {
+    const lines = (i + 1) % 4 === 0 ? 60 : 1;
+    return Array.from({ length: lines }, (_, line) => `outline turn ${i + 1} line ${line + 1}`).join("\n");
+  });
+  await outlineSession(prompts);
+  // One dash per prompt, stacked 10px apart at the top of the transcript.
+  await expect(outlineDashes()).toHaveCount(14);
+  const tops = async () =>
+    Promise.all((await outlineDashes().all()).map(async (dash) => (await dash.boundingBox())!.y));
+  const rest = await tops();
+  for (let i = 1; i < rest.length; i += 1) expect(rest[i] - rest[i - 1]).toBeLessThanOrEqual(10.5);
+  expect(rest[0] - (await transcriptTop())).toBeLessThan(60);
+  // At the end of the conversation the newest prompt is the one being read.
+  await expect(outlineDashes().last()).toHaveAttribute("aria-current", "location");
+  await expect(outline()).toHaveAttribute("aria-label", "Conversation outline");
+
+  // A shorter window shrinks the transcript from the bottom; the stack holds still.
+  const dashTop = async () => (await outlineDashes().first().boundingBox())!.y;
+  const startTop = await dashTop();
+  for (const height of [820, 700, 940]) {
+    await page.setViewportSize({ width: 1420, height });
+    await page.waitForTimeout(100);
+    expect(Math.abs((await dashTop()) - startTop)).toBeLessThanOrEqual(1);
+  }
+
+  // The panel lists every prompt by its first line; the row the pointer opened on is under it.
+  await openOutlineOn(4);
+  await expect(outlineRows()).toHaveCount(14);
+  await expect(outlineRows().nth(4)).toHaveText("outline turn 5 line 1");
+  await expect(outlineRows().nth(3)).toHaveText("outline turn 4 line 1");
+  await expect(page.locator('.outline-row[data-state="hot"]')).toHaveCount(1);
+  await outlineRows().nth(4).hover();
+  await expect(outlineRows().nth(4)).toHaveAttribute("data-state", "hot");
+  await page.screenshot({ path: "test-results/outline-open.png" });
+
+  // A panel with nothing to scroll hands the wheel to the conversation.
+  const transcript = page.locator(".transcript");
+  const before = await transcript.evaluate((root) => root.scrollTop);
+  await page.mouse.wheel(0, -300);
+  await expect.poll(() => transcript.evaluate((root) => root.scrollTop)).toBeLessThan(before);
+
+  // Clicking a row lands on that prompt, even one far above the rendered window.
+  const target = outlineRows().nth(1);
+  const id = (await target.getAttribute("data-prompt-id"))!;
+  await target.click();
+  const prompt = page.locator(`[data-item-id="${id}"]`);
+  await expect
+    .poll(async () => ((await prompt.boundingBox())?.y ?? 9999) - (await transcriptTop()))
+    .toBeLessThan(80);
+  await expect(prompt).toContainText("outline turn 2 line 1");
+  // Jumping away from the end stops following new output.
+  await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toBeVisible();
+  await page.mouse.move(900, 500);
+  await expect(outline()).toHaveAttribute("data-state", "folded");
+  await expect(outlineDashes().nth(1)).toHaveAttribute("aria-current", "location");
+  await expect(page.locator(".outline-dash[aria-current]")).toHaveCount(1);
+  await page.screenshot({ path: "test-results/outline-rest.png" });
+  expect(errors).toEqual([]);
+});
+
+test("conversation outline follows the prompt being read as the conversation scrolls", async () => {
+  await page.setViewportSize({ width: 1420, height: 940 });
+  const prompts = Array.from({ length: 12 }, (_, i) =>
+    Array.from({ length: (i % 4) * 10 + 1 }, (_, line) => `reading turn ${i + 1} line ${line}`).join("\n"),
+  );
+  await outlineSession(prompts);
+  await expect(outlineDashes()).toHaveCount(12);
+  const transcript = page.locator(".transcript");
+  // Scrolling up by hand stops following new output, as a reader does.
+  const view = (await transcript.boundingBox())!;
+  await page.mouse.move(view.x + view.width / 2, view.y + view.height / 2);
+  await page.mouse.wheel(0, -400);
+  await expect(page.getByRole("button", { name: "Jump to latest", exact: true })).toBeVisible();
+  for (const fraction of [0.15, 0.5, 0.8]) {
+    await transcript.evaluate((root, value) => {
+      root.scrollTop = (root.scrollHeight - root.clientHeight) * value;
+    }, fraction);
+    await page.waitForTimeout(300);
+    const result = await transcript.evaluate((root) => {
+      const line = root.getBoundingClientRect().top + 80;
+      const ids = [...document.querySelectorAll<HTMLElement>(".outline-dash")].map((dash) => dash.dataset.promptId!);
+      const active = document.querySelector<HTMLElement>('.outline-dash[aria-current="location"]')!.dataset.promptId!;
+      const top = (id: string | undefined) =>
+        id ? root.querySelector(`[data-item-id="${id}"]`)?.getBoundingClientRect().top : undefined;
+      return { own: top(active), next: top(ids[ids.indexOf(active) + 1]), line };
+    });
+    expect(result.own).toBeDefined();
+    expect(result.own!).toBeLessThanOrEqual(result.line + 1);
+    if (result.next !== undefined) expect(result.next).toBeGreaterThan(result.line);
+  }
+  // At the very top the first prompt is being read.
+  await transcript.evaluate((root) => (root.scrollTop = 0));
+  await expect(outlineDashes().first()).toHaveAttribute("aria-current", "location");
+  // Wheel input over the stack scrolls the conversation.
+  const dash = (await outlineDashes().nth(2).boundingBox())!;
+  await page.mouse.move(dash.x + 4, dash.y);
+  await page.mouse.wheel(0, 400);
+  await expect.poll(() => transcript.evaluate((root) => root.scrollTop)).toBeGreaterThan(0);
+  await page.mouse.move(900, 500);
+});
+
+test("conversation outline folds a long session into a short stack and a scrolling panel", async () => {
+  test.setTimeout(240000);
+  await page.setViewportSize({ width: 1420, height: 940 });
+  await outlineSession(Array.from({ length: 60 }, (_, i) => `long session prompt ${i + 1}`));
+  // Sixty prompts fold into 24 slices; the slice with the newest prompt is being read.
+  await expect(outlineDashes()).toHaveCount(24);
+  await expect(outlineDashes().last()).toHaveAttribute("aria-current", "location");
+  // Opened, only the rows in view are drawn, and the panel scrolls through the rest.
+  await openOutlineOn(12);
+  expect(await outlineRows().count()).toBeLessThanOrEqual(26);
+  const panel = page.locator(".outline-panel");
+  const height = (await panel.boundingBox())!.height;
+  expect(height).toBeLessThanOrEqual(16 * 28 + 6 * 2 + 2 + 1);
+  const before = await outlineRows().first().getAttribute("data-prompt-id");
+  await panel.hover();
+  await page.mouse.wheel(0, 400);
+  await expect.poll(() => outlineRows().first().getAttribute("data-prompt-id")).not.toBe(before);
+  await expect(page.locator('.outline-row[data-state="hot"]')).toContainText("long session prompt");
+  await page.mouse.move(900, 500);
+  await expect(outline()).toHaveAttribute("data-state", "folded");
+});
+
+test("conversation outline keeps text clear of its stack and hides where there is no room", async () => {
+  await page.setViewportSize({ width: 1420, height: 940 });
+  await outlineSession(["gutter prompt one", "gutter prompt two", "gutter prompt three"]);
+  await expect(outlineDashes()).toHaveCount(3);
+  const geometry = () =>
+    page.evaluate(() => {
+      const outline = document.querySelector(".outline");
+      const shown = !!outline && getComputedStyle(outline).display !== "none";
+      const stack = Math.max(
+        ...[...document.querySelectorAll(".outline-mark")].map((mark) => mark.getBoundingClientRect().right),
+      );
+      const transcript = document.querySelector<HTMLElement>(".transcript")!;
+      const box = transcript.getBoundingClientRect();
+      const text = box.left + parseFloat(getComputedStyle(transcript).paddingInlineStart);
+      const composer = document.querySelector(".composer")!.getBoundingClientRect().left;
+      return { shown, gap: text - stack, text, composer, width: box.width };
+    });
+  for (const width of [1420, 1100, 900]) {
+    await page.setViewportSize({ width, height: 940 });
+    await page.waitForTimeout(200);
+    const value = await geometry();
+    expect(value.shown).toBe(true);
+    // Text starts at least 12px past the widest dash, and the composer lines up with it.
+    expect(value.gap).toBeGreaterThanOrEqual(12);
+    expect(Math.abs(value.composer - value.text)).toBeLessThan(1);
+    await page.screenshot({ path: `test-results/outline-gutter-${width}.png` });
+  }
+  // A conversation too narrow for a margin has no room for the stack; its
+  // text falls back to the ordinary inset.
+  await page.setViewportSize({ width: 700, height: 940 });
+  await expect.poll(async () => (await geometry()).width).toBeLessThan(460);
+  await expect.poll(async () => (await geometry()).shown).toBe(false);
+  expect((await geometry()).text - (await page.locator(".transcript").boundingBox())!.x).toBeLessThanOrEqual(17);
+  await page.setViewportSize({ width: 1420, height: 940 });
+  await expect.poll(async () => (await geometry()).shown).toBe(true);
+  // A single prompt has nowhere to move to, so there is no outline.
+  await newSession();
+  await send("only one outline prompt");
+  await expect(page.locator(".transcript")).toContainText("Echo: only one outline prompt");
+  await expect(outline()).toHaveCount(0);
+});
+
+test("conversation outline is operable by assistive technology and mirrors in right-to-left languages", async () => {
+  await page.setViewportSize({ width: 1420, height: 940 });
+  const long = (text: string) =>
+    [text, ...Array.from({ length: 40 }, (_, line) => `${text} detail ${line + 1}`)].join("\n");
+  await outlineSession([long("accessible outline first"), long("accessible outline second"), long("accessible outline third")]);
+  await expect(outlineDashes()).toHaveCount(3);
+  await expect(outlineDashes().first()).toHaveAttribute("aria-label", "Jump to prompt 1");
+  // Assistive technology activates a dash directly; pointer input goes to the lane.
+  await outlineDashes().first().dispatchEvent("click");
+  const first = await outlineDashes().first().getAttribute("data-prompt-id");
+  await expect
+    .poll(async () => ((await page.locator(`[data-item-id="${first}"]`).boundingBox())?.y ?? 9999) - (await transcriptTop()))
+    .toBeLessThan(80);
+  await send("/language ar");
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  // In Arabic the stack sits at the inline start, the right edge, and the panel opens leftwards.
+  const transcript = (await page.locator(".transcript").boundingBox())!;
+  const dash = (await outlineDashes().first().boundingBox())!;
+  expect(transcript.x + transcript.width - (dash.x + dash.width)).toBeLessThan(40);
+  await openOutlineOn(1);
+  const panel = (await page.locator(".outline-panel").boundingBox())!;
+  expect(panel.x + panel.width).toBeLessThanOrEqual(transcript.x + transcript.width);
+  expect(panel.x).toBeLessThan(dash.x);
+  // Latin prompts keep their own direction, so they truncate at their end.
+  await expect(outlineRows().first().locator(".outline-title")).toHaveAttribute("dir", "auto");
+  await page.screenshot({ path: "test-results/outline-rtl.png" });
+  await page.mouse.move(400, 500);
+  // The send button's name is now Arabic; Enter sends the command either way.
+  const input = page.locator("textarea[data-composer-input]");
+  await input.fill("/language en");
+  await input.press("Enter");
+  await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
+});
+
 test("deferred input queue edits in the composer, reorders, reconnects and stays paused after Stop", async () => {
   await newSession();
   await send('!tool bash {"command":"printf original-queue-proof"}');

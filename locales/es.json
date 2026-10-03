@@ -1376,5 +1376,8 @@
   "Editing queued message · Enter saves · Click to cancel": "Editando el mensaje en cola · Intro guarda · Haz clic para cancelar",
   "Already sent or removed · Esc or click restores your draft": "Ya enviado o quitado · Esc o un clic recupera tu borrador",
   "Changed elsewhere · Esc or click restores your draft": "Cambiado en otro lugar · Esc o un clic recupera tu borrador",
-  "Queue changed elsewhere · Enter saves again · Click to cancel": "La cola cambió en otro lugar · Intro guarda de nuevo · Haz clic para cancelar"
+  "Queue changed elsewhere · Enter saves again · Click to cancel": "La cola cambió en otro lugar · Intro guarda de nuevo · Haz clic para cancelar",
+  "Conversation outline": "Esquema de la conversación",
+  "Jump to prompt {index}": "Ir a la instrucción {index}",
+  "Attachment": "Adjunto"
 }

@@ -1376,5 +1376,8 @@
   "Editing queued message · Enter saves · Click to cancel": "تعديل الرسالة في الانتظار · Enter للحفظ · انقر للإلغاء",
   "Already sent or removed · Esc or click restores your draft": "أُرسلت أو أُزيلت بالفعل · Esc أو النقر يستعيد مسودتك",
   "Changed elsewhere · Esc or click restores your draft": "تم التغيير في مكان آخر · Esc أو النقر يستعيد مسودتك",
-  "Queue changed elsewhere · Enter saves again · Click to cancel": "تغيّرت قائمة الانتظار في مكان آخر · Enter للحفظ مجددًا · انقر للإلغاء"
+  "Queue changed elsewhere · Enter saves again · Click to cancel": "تغيّرت قائمة الانتظار في مكان آخر · Enter للحفظ مجددًا · انقر للإلغاء",
+  "Conversation outline": "مخطط المحادثة",
+  "Jump to prompt {index}": "الانتقال إلى الطلب {index}",
+  "Attachment": "مرفق"
 }
