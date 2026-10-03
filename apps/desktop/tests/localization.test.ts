@@ -83,6 +83,19 @@ test("keys translated through a variable are in the catalog", () => {
     "Fix a problem", "Fix issues and failures",
     "Help me investigate and fix this issue: ",
     "This computer", "Project folder", "Worktree",
+    // Settings copy for agents, commands and skills, from `assetCopy`.
+    "Agents are assistants with their own instructions, model and tools. Switch between them in the composer.",
+    "No agents yet", "Create one for a role you repeat, like a reviewer or a release helper.",
+    "Commands are saved prompts you run with / in any conversation.",
+    "No commands yet", "Save a prompt you use often, then run it with /name.",
+    "Skills are instructions and files an agent loads when a task calls for them.",
+    "No skills yet", "Teach Haarness a workflow once, and it will use it whenever it fits.",
+    // Cloud session and subscription states in the account dialog.
+    "Preparing…", "Starting…", "Running", "Stopping…", "Stopped", "Failed", "Deleting…",
+    "Active", "Trial", "Payment due", "Canceled", "Incomplete", "Paused",
+    // Server switcher labels and Servers settings descriptions.
+    "Haarness Cloud", "Cloud sessions", "Local projects",
+    "Cloud sessions in your Haarness account", "Local projects on this computer",
     "signed in", "API key", "from the environment",
     // Custom-provider API formats, kept as English keys in the `protocols`
     // constant and translated at the render site.

@@ -66,3 +66,58 @@
   line-height: 1.55;
   margin: 0;
 }
+
+/* Server-owned views read like the rest of Settings: sentences in the
+   interface face, a list of rows for things with a description, and chips
+   only for bare actions. */
+.management-text {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--ui);
+  line-height: 1.5;
+  max-width: 68ch;
+}
+.management-entries {
+  display: flex;
+  flex-direction: column;
+  border-block: 1px solid var(--hairline);
+}
+.management-entry {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--s3) var(--s2);
+  border-block-end: 1px solid var(--hairline);
+  border-radius: 0;
+  cursor: pointer;
+  transition: background var(--fast) var(--ease);
+}
+.management-entry:last-child {
+  border-block-end: 0;
+}
+.management-entry:hover {
+  background: var(--hover);
+}
+.management-entry:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+  border-radius: var(--r-sm);
+}
+.management-entry-label {
+  color: var(--text);
+  font-size: var(--ui);
+  font-weight: 500;
+}
+.management-entry-description {
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+/* A form's submit and the list under it are separate blocks. */
+.management-panel fieldset > .management-entries,
+.management-panel fieldset > .management-actions:not(:empty) {
+  margin-block-start: var(--s4);
+}

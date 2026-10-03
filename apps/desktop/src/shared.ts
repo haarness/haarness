@@ -65,7 +65,7 @@ export const defaults: Preferences = {
   showReasoning: false,
   sendKey: "enter",
   editorWrap: false,
-  diffLayout: "split",
+  diffLayout: "unified",
   terminalFontSize: 13,
   shortcuts: {
     new: "Mod+N",
@@ -86,6 +86,8 @@ export interface SavedServer {
   id: string;
   label: string;
   url?: string;
+  /** Haarness Cloud sessions of one account, derived from saved locations. */
+  cloud?: boolean;
 }
 export interface Recent extends ProjectLocation {
   id: string;

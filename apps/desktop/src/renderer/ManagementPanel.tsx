@@ -7,18 +7,41 @@ import {
   onCleanup,
   untrack,
 } from "solid-js";
-import type { ManagementEntry, ManagementView } from "@haarness/sdk";
+import type {
+  ManagementEntry,
+  ManagementField,
+  ManagementView,
+} from "@haarness/sdk";
 import { useApp } from "./state";
 import { Select } from "./Select";
 import { ProviderLabel } from "./ProviderIcon";
 import "./management.css";
 
+/** A sentence reads as text; JSON, commands and paths keep the code face. */
+const prose = (line: string) =>
+  !line.includes("\n") && /\s/.test(line) && !/^[[{$>]|[{}]|^\S+=/.test(line.trim());
+/** Long or structured values get a text area; names, URLs and searches a field. */
+const multiline = (field: ManagementField) =>
+  field.value.includes("\n") ||
+  /json|content|hostnames|arguments|instructions|prompt|environment|headers|body|description|values/i.test(
+    field.label,
+  );
+/** A form's button says what it does. */
+function submitLabel(submit: unknown) {
+  const action = (submit as Record<string, unknown> | undefined)?.action;
+  if (action === "router_connect") return t("Connect");
+  if (action === "search") return t("Search");
+  if (action === "install") return t("Install");
+  return t("Save");
+}
 /** Server-owned forms keep remote and local mutations on the same domain API. */
 export function ManagementPanel(props: {
   resource: string;
   threadId?: string;
   pending?: (value: boolean) => void;
   initialRequest?: Record<string, unknown>;
+  /** The settings page already names this resource; repeat it only in sub-views. */
+  rootHeading?: boolean;
 }) {
   const app = useApp();
   const [view, setView] = createSignal<ManagementView>();
@@ -26,6 +49,8 @@ export function ManagementPanel(props: {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const [confirmation, setConfirmation] = createSignal<ManagementEntry>();
+  // The list a "Back to list" returns to; on that list the button goes nowhere.
+  const [rootTitle, setRootTitle] = createSignal<string>();
   let generation = 0;
   onCleanup(() => {
     generation++;
@@ -52,6 +77,8 @@ export function ManagementPanel(props: {
         [resource, { ...(input as object), ...(threadId ? { threadId } : {}) }],
       );
       if (current !== generation || id !== app.state.connection?.id) return;
+      if ((input as Record<string, unknown>)?.action === "view")
+        setRootTitle(result.title);
       setView(result);
       setValues(
         Object.fromEntries(
@@ -82,6 +109,18 @@ export function ManagementPanel(props: {
       ? request.name
       : undefined;
   };
+  const entrySetting = (entry: ManagementEntry) => {
+    const request = entry.request as Record<string, unknown> | null;
+    return request?.action === "inspect"
+      ? (props.resource === "mcp"
+          ? "mcp"
+          : props.resource === "providers"
+            ? "provider"
+            : props.resource) +
+          ":" +
+          (request.name ?? request.id)
+      : entry.label;
+  };
   const activate = (entry: ManagementEntry) => {
     const input = entry.request as Record<string, unknown>;
     const draft = input.action === "router_form"
@@ -107,16 +146,22 @@ export function ManagementPanel(props: {
       >
         {(current) => (
           <>
-            <header class="management-card-heading">
-              <h3>{current.title}</h3>
-              <button
-                type="button"
-                disabled={busy()}
-                onClick={() => void request({ action: "view" })}
-              >
-                {t("Back to list")}
-              </button>
-            </header>
+            <Show
+              when={current.title !== rootTitle() || props.rootHeading !== false}
+            >
+              <header class="management-card-heading">
+                <h3>{current.title}</h3>
+                <Show when={current.title !== rootTitle()}>
+                  <button
+                    type="button"
+                    disabled={busy()}
+                    onClick={() => void request({ action: "view" })}
+                  >
+                    {t("Back to list")}
+                  </button>
+                </Show>
+              </header>
+            </Show>
             <For each={current.lines}>
               {(line) =>
                 /^https?:\/\/\S+$/.test(line) ? (
@@ -127,6 +172,8 @@ export function ManagementPanel(props: {
                   >
                     {line}
                   </button>
+                ) : prose(line) ? (
+                  <p class="management-text">{line}</p>
                 ) : (
                   <pre class="management-source">{line}</pre>
                 )
@@ -141,7 +188,7 @@ export function ManagementPanel(props: {
                       when={field.choices?.length}
                       fallback={
                         <Show
-                          when={field.secret || field.key === "name" || ((current.submit as Record<string, unknown> | undefined)?.action === "router_connect" && ["url", "label"].includes(field.key))}
+                          when={field.secret || !multiline(field)}
                           fallback={
                             <textarea
                               rows={
@@ -174,6 +221,19 @@ export function ManagementPanel(props: {
                                 [field.key]: event.currentTarget.value,
                               })
                             }
+                            onKeyDown={(event) => {
+                              if (
+                                event.key !== "Enter" ||
+                                event.isComposing ||
+                                !current.submit
+                              )
+                                return;
+                              event.preventDefault();
+                              void request({
+                                ...(current.submit as object),
+                                ...values(),
+                              });
+                            }}
                           />
                         </Show>
                       }
@@ -201,19 +261,42 @@ export function ManagementPanel(props: {
                     void request({ ...(current.submit as object), ...values() })
                   }
                 >
-                  {(current.submit as Record<string, unknown>).action ===
-                  "router_connect"
-                    ? t("Connect")
-                    : t("Save")}
+                  {submitLabel(current.submit)}
                 </button>
               </Show>
+              <Show when={current.entries?.some((entry) => entry.description)}>
+                <div class="management-entries">
+                  <For each={current.entries?.filter((entry) => entry.description)}>
+                    {(entry) => (
+                      <button
+                        type="button"
+                        class="management-entry"
+                        aria-label={entry.label}
+                        aria-description={entry.description}
+                        data-setting={entrySetting(entry)}
+                        onClick={() => activate(entry)}
+                      >
+                        <span class="management-entry-label">
+                          <Show when={provider(entry)} fallback={entry.label}>
+                            <ProviderLabel provider={provider(entry)}>
+                              {entry.label}
+                            </ProviderLabel>
+                          </Show>
+                        </span>
+                        <span class="management-entry-description">
+                          {entry.description}
+                        </span>
+                      </button>
+                    )}
+                  </For>
+                </div>
+              </Show>
               <div class="management-actions">
-                <For each={current.entries}>
+                <For each={current.entries?.filter((entry) => !entry.description)}>
                   {(entry) => (
                     <button
                       type="button"
-                      data-setting={(entry.request as Record<string, unknown>)?.action === "inspect" ? (props.resource === "mcp" ? "mcp" : props.resource === "providers" ? "provider" : props.resource) + ":" + ((entry.request as Record<string, unknown>).name ?? (entry.request as Record<string, unknown>).id) : entry.label}
-                      title={entry.description}
+                      data-setting={entrySetting(entry)}
                       onClick={() => activate(entry)}
                     >
                       <Show when={provider(entry)} fallback={entry.label}>

@@ -44,6 +44,8 @@ export function MenuButton(props: {
   class?: string;
   title?: string;
   items: MenuAction[];
+  /** A menu that replaces its trigger's value is at least as wide as it. */
+  matchWidth?: boolean;
   onKeyDown?: (
     event: KeyboardEvent & { currentTarget: HTMLButtonElement },
   ) => void;
@@ -51,7 +53,7 @@ export function MenuButton(props: {
   const [open, setOpen] = createSignal(false);
   /** The submenu currently unfolded, keyed by its parent item's label. */
   const [branch, setBranch] = createSignal("");
-  const [position, setPosition] = createSignal({ left: 0, top: 0 });
+  const [position, setPosition] = createSignal({ left: 0, top: 0, width: 0 });
   const id = createUniqueId();
   let handle!: HTMLButtonElement;
   let menu!: HTMLDivElement;
@@ -74,6 +76,7 @@ export function MenuButton(props: {
         const anchor = handle.getBoundingClientRect();
         const box = menu.getBoundingClientRect();
         setPosition({
+          width: props.matchWidth ? anchor.width : 0,
           left: Math.max(
             8,
             Math.min(anchor.left, window.innerWidth - box.width - 8),
@@ -161,7 +164,11 @@ export function MenuButton(props: {
             role="menu"
             aria-label={props.label}
             tabIndex={-1}
-            style={{ left: position().left + "px", top: position().top + "px" }}
+            style={{
+              left: position().left + "px",
+              top: position().top + "px",
+              ...(position().width ? { "min-width": position().width + "px" } : {}),
+            }}
             onKeyDown={(event) => {
               if (event.key === "Escape") {
                 event.preventDefault();

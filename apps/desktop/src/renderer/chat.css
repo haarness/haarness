@@ -461,6 +461,25 @@
 .tool-label.activity-shimmer > .tool-target {
   color: inherit;
 }
+/* An edit names its files and then its size, so the count sits right after
+   the target instead of drifting to the far edge of a wide transcript. */
+.tool-label:has(.tool-stats) > .tool-target {
+  flex: 0 1 auto;
+}
+.tool-stats {
+  flex: none;
+  display: inline-flex;
+  gap: var(--s1);
+  font-family: var(--mono);
+  font-size: var(--ui-xs);
+  font-variant-numeric: tabular-nums;
+}
+.tool-stat-add {
+  color: var(--green);
+}
+.tool-stat-remove {
+  color: var(--danger);
+}
 /* A step without a result is the one state that still needs a word; it
    surfaces on hover or when the step is open. */
 .tool-status {
@@ -915,8 +934,17 @@
   margin-inline-start: 2px;
   opacity: 0.55;
 }
+/* The chevron's drawing fills only the middle of its box, so the box's empty
+   right side would read as a space before the question mark. Pull it in and
+   centre it on the x-height instead of letting it hang like a subscript. */
+.conversation-empty .heading-project-picker {
+  padding-inline-end: 0;
+}
 .conversation-empty .picker-caret {
-  margin-bottom: 3px;
+  width: 16px;
+  height: 16px;
+  vertical-align: 0.08em;
+  margin-inline: 0 -3px;
 }
 .suggestions {
   display: grid;
@@ -1292,7 +1320,8 @@
 }
 .composer .agent-select {
   color: var(--composer-agent, var(--muted));
-  max-width: 90px;
+  /* Room for names like "cloud-agent"; the model pill still gets most of it. */
+  max-width: 140px;
 }
 .composer .send-button {
   width: 34px;

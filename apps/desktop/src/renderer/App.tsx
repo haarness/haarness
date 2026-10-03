@@ -95,6 +95,9 @@ const MemoryDialog = lazy(() => import("./MemoryDialog").then((module) => ({defa
 const Settings = lazy(() =>
   import("./Settings").then((module) => ({ default: module.Settings })),
 );
+/** This computer, a remote host, or Haarness Cloud, each with its own picture. */
+const serverIcon = (server: { url?: string; cloud?: boolean }): IconName =>
+  server.cloud ? "cloud" : server.url ? "server" : "computer";
 export function App() {
   const app = useApp();
   const { state, set } = app;
@@ -676,9 +679,10 @@ export function App() {
             <MenuButton
               label={t("Switch server")}
               class="server-switcher-button"
+              matchWidth
               content={
                 <>
-                  <Icon name="link" size="md" />
+                  <Icon name={serverIcon(app.currentServer())} size="md" />
                   <span>{t(app.currentServer().label)}</span>
                   <Icon name="down" size="xs" />
                 </>
@@ -686,10 +690,12 @@ export function App() {
               items={[
                 ...app.servers().map((server) => ({
                   label: t(server.label),
-                  detail: server.url ?? "Local projects",
+                  detail:
+                    server.url ??
+                    t(server.cloud ? "Cloud sessions" : "Local projects"),
                   icon: (server.id === state.activeServer
                     ? "check"
-                    : "link") as IconName,
+                    : serverIcon(server)) as IconName,
                   run: () => void app.run(() => app.switchServer(server.id)),
                 })),
                 {

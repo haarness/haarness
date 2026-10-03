@@ -21,6 +21,7 @@ import {
   toolName,
   toolOutput,
   toolFailed,
+  routineEditOutput,
   CHANGE_PREVIEW_LINES,
   type Change,
   type ToolResult,
@@ -65,8 +66,24 @@ export function ToolActivity(props: {
   const live = () =>
     status() === "running" || (status() === "pending" && !props.settled);
   const changes = createMemo(() =>
-    toolChanges(toolName(props.name), props.args),
+    toolChanges(toolName(props.name), props.args, props.result),
   );
+  // An edit's size is the first thing a reader wants after its file name.
+  const stats = createMemo(() => {
+    let additions = 0,
+      deletions = 0;
+    for (const change of changes()) {
+      if (change.additions !== undefined && change.deletions !== undefined) {
+        additions += change.additions;
+        deletions += change.deletions;
+        continue;
+      }
+      for (const row of changeRows(change))
+        if (row.kind === "add") additions++;
+        else if (row.kind === "remove") deletions++;
+    }
+    return additions || deletions ? { additions, deletions } : undefined;
+  });
   const input = createMemo(() => toolInput(props.name, props.args));
   const output = createMemo(
     () => props.result && toolOutput(props.name, props.result.output),
@@ -93,6 +110,18 @@ export function ToolActivity(props: {
           <span class="tool-target" title={shape().target}>
             {shape().target}
           </span>
+          <Show when={stats()}>
+            {(count) => (
+              <span class="tool-stats">
+                <Show when={count().additions}>
+                  <span class="tool-stat-add">+{count().additions}</span>
+                </Show>
+                <Show when={count().deletions}>
+                  <span class="tool-stat-remove">−{count().deletions}</span>
+                </Show>
+              </span>
+            )}
+          </Show>
         </Shimmer>
         <Show when={live()}>
           <span class="sr-only">
@@ -151,7 +180,12 @@ export function ToolActivity(props: {
                       />
                     )}
                   </For>
-                  <Show when={output()}>
+                  <Show
+                    when={
+                      output() &&
+                      (props.result?.is_error || !routineEditOutput(output()!))
+                    }
+                  >
                     <div class="tool-console">
                       <pre class="tool-output">{output()}</pre>
                     </div>
@@ -190,15 +224,16 @@ export function ToolActivity(props: {
     </details>}><PreviewBanner metadata={props.result?.metadata} /></Show>
   );
 }
+function changeRows(change: Change) {
+  return lines({
+    file: change.path || "change",
+    patch: change.patch,
+    before: change.before,
+    after: change.after,
+  } as Parameters<typeof lines>[0]).filter((row) => row.kind !== "hunk");
+}
 function ChangePreview(props: { change: Change; showPath?: boolean }) {
-  const rows = createMemo(() =>
-    lines({
-      file: props.change.path || "change",
-      patch: props.change.patch,
-      before: props.change.before,
-      after: props.change.after,
-    } as Parameters<typeof lines>[0]).filter((row) => row.kind !== "hunk"),
-  );
+  const rows = createMemo(() => changeRows(props.change));
   const shown = () => rows().slice(0, CHANGE_PREVIEW_LINES);
   const hidden = () => rows().length - shown().length;
   return (

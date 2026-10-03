@@ -14,7 +14,7 @@ import {
 import { createStore } from "solid-js/store";
 import { Select } from "./Select";
 import { useApp } from "./state";
-import { Button, confirm, dismissOnBackdrop, Icon } from "./ui";
+import { Button, confirm, dismissOnBackdrop, Empty, Icon } from "./ui";
 import { parseModel, selectModel } from "./model-selection";
 import {
   describeSchedule,
@@ -68,6 +68,12 @@ export function Schedules(props: {
           {t("Create schedule")}
         </button>
       </div>
+      <Show when={!rows().length && !editing()}>
+        <Empty
+          title={t("No schedules yet")}
+          detail={t("Run a prompt every morning, every hour, or on any cron schedule.")}
+        />
+      </Show>
       <For each={rows()}>
         {(item) => (
           <div class="setting-block schedule-card" data-setting={"schedules:" + item.id}>

@@ -1,4 +1,4 @@
-import { t } from "./i18n";
+import { language, t } from "./i18n";
 import { Select } from "./Select";
 import { For, Show, createSignal, onMount, type JSX } from "solid-js";
 import { Icon, type IconName, type IconSize } from "./icons";
@@ -245,9 +245,14 @@ export const Empty = (props: {
 export function stringify(value: unknown) {
   return typeof value === "string" ? value : JSON.stringify(value, null, 2);
 }
+/** "5:51 PM" today; "Oct 2, 5:51 PM" for anything older, so a long
+ * conversation never shows two identical-looking times from different days. */
 export function time(value: string) {
-  return new Date(value).toLocaleTimeString([], {
-    hour: "2-digit",
+  const date = new Date(value);
+  const today = date.toDateString() === new Date().toDateString();
+  return date.toLocaleString(language(), {
+    ...(today ? {} : { month: "short", day: "numeric" }),
+    hour: "numeric",
     minute: "2-digit",
   });
 }
