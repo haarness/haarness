@@ -1324,5 +1324,9 @@
   "Haarness Cloud": "Haarness Cloud",
   "Local projects": "ローカルプロジェクト",
   "Cloud sessions in your Haarness account": "Haarness アカウントのクラウドセッション",
-  "Local projects on this computer": "このコンピューターのローカルプロジェクト"
+  "Local projects on this computer": "このコンピューターのローカルプロジェクト",
+  "Ask first": "先に確認",
+  "Auto-approve": "自動承認",
+  "{count} result": "{count} 件",
+  "Top models with one Haarness account. No API keys to manage.": "Haarness アカウントひとつで主要モデルを利用。API キーの管理は不要です。"
 }

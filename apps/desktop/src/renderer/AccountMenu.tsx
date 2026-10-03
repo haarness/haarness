@@ -222,14 +222,29 @@ export function AccountMenu(props: {
         aria-label={props.models ? t("Use Haarness Cloud") : account().loggedIn ? account().user?.displayName || t("Haarness account") : t("Sign in to Haarness")}
         onClick={show}
       >
-        <Icon name="cloud" size="md" />
-        <span class="account-nav-label">{props.models
-          ? t("Use Haarness Cloud")
-          : account().loggedIn
-            ? account().user?.displayName || t("Haarness account")
-            : t("Sign in to Haarness")}
-        <Show when={!props.models && navSummary()}>{text => <small>{text()}</small>}</Show>
-        </span>
+        <Show
+          when={props.models}
+          fallback={
+            <>
+              <Icon name="cloud" size="md" />
+              <span class="account-nav-label">
+                {account().loggedIn
+                  ? account().user?.displayName || t("Haarness account")
+                  : t("Sign in to Haarness")}
+                <Show when={navSummary()}>{text => <small>{text()}</small>}</Show>
+              </span>
+            </>
+          }
+        >
+          <span class="account-connect-icon" aria-hidden="true">
+            <Icon name="cloud" size="lg" />
+          </span>
+          <span class="account-connect-text">
+            <strong>{t("Use Haarness Cloud")}</strong>
+            <small>{t("Top models with one Haarness account. No API keys to manage.")}</small>
+          </span>
+          <Icon name="chevron" size="sm" />
+        </Show>
       </button>
       <Show when={open()}>
         <dialog

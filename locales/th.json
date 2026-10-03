@@ -1324,5 +1324,9 @@
   "Haarness Cloud": "Haarness Cloud",
   "Local projects": "โปรเจกต์ในเครื่อง",
   "Cloud sessions in your Haarness account": "เซสชันคลาวด์ในบัญชี Haarness ของคุณ",
-  "Local projects on this computer": "โปรเจกต์ในเครื่องนี้"
+  "Local projects on this computer": "โปรเจกต์ในเครื่องนี้",
+  "Ask first": "ถามก่อน",
+  "Auto-approve": "อนุมัติอัตโนมัติ",
+  "{count} result": "{count} ผลลัพธ์",
+  "Top models with one Haarness account. No API keys to manage.": "ใช้โมเดลชั้นนำด้วยบัญชี Haarness เดียว ไม่ต้องจัดการคีย์ API"
 }
