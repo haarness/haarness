@@ -1044,6 +1044,11 @@ html[data-order-dragging] * {
   top: calc(var(--s1) * -1);
   margin-inline-start: var(--s0);
 }
+.action-menu .menu-branch-panel[data-side="start"] {
+  inset-inline-start: auto;
+  inset-inline-end: 100%;
+  margin-inline: 0 var(--s0);
+}
 /* Groups of related choices are separated by a hairline. */
 .action-menu .menu-divider {
   flex: none;

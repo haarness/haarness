@@ -626,6 +626,15 @@ export function createBrowserHost(
     hide(win: BrowserWindow) {
       for (const e of entries.values()) if (e.win === win) layout(e, undefined);
     },
+    /** The focused page as drawn now, so the window can hold a still copy
+        while a menu or dialog has to paint where the native view sits. */
+    async snapshot(win: BrowserWindow, connection: string, thread: string) {
+      const e = entries.get(key(connection, thread));
+      const page = e?.focusedTabID ? e.pages.get(e.focusedTabID) : undefined;
+      if (!e || e.win !== win || e.disposed || !page || !page.view.getVisible()) return null;
+      const image = await page.contents.capturePage();
+      return image.isEmpty() ? null : "data:image/jpeg;base64," + image.toJPEG(85).toString("base64");
+    },
     async clear(connection: string) {
       const owned = [...entries.values()].filter((entry) => entry.connection === connection);
       for (const entry of owned) {

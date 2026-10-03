@@ -164,6 +164,8 @@ export interface Bridge {
   browserAdopt(connection:string,thread:string):Promise<void>;
   browserCommand(connection:string,thread:string,action:unknown):Promise<unknown>;
   browserLayout(connection:string,thread:string,layout:BrowserLayout):Promise<void>;
+  /** A JPEG data URL of the focused page, or null when nothing is drawn. */
+  browserSnapshot(connection:string,thread:string):Promise<string | null>;
 
   notificationReady(): Promise<NotificationTarget | null>;
   notificationHandled(target: NotificationTarget): Promise<void>;

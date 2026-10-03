@@ -1086,7 +1086,7 @@ export function App() {
               <Show when={state.connection && dock() === "context"}>
                 <ConversationContext />
               </Show>
-              <BrowserPanel visible={dockVisible() && dock() === "browser" && !palette()} onOpen={() => openDock("browser")} />
+              <BrowserPanel visible={dockVisible() && dock() === "browser"} onOpen={() => openDock("browser")} />
             </aside>
           </div>
           <Show when={state.connection && state.terminal}>

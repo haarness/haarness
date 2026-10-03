@@ -12,6 +12,7 @@ import {
 } from "solid-js";
 import { Portal } from "solid-js/web";
 import { Icon } from "./icons";
+import { floatingBox } from "./native-area";
 
 export interface SelectOption {
   value: string | number;
@@ -200,17 +201,12 @@ export function Select(props: {
       const place = () => {
         if (!popup) return;
         const anchor = trigger.getBoundingClientRect();
-        const width = Math.min(
-          Math.max(anchor.width, searchable() ? 360 : 240),
-          window.innerWidth - 16,
-        );
+        const preferred = Math.max(anchor.width, searchable() ? 360 : 240);
+        const { left, width } = floatingBox(anchor, preferred, Math.min(preferred, 260));
         const height = popup.getBoundingClientRect().height;
         setPosition({
           width,
-          left: Math.max(
-            8,
-            Math.min(anchor.left, window.innerWidth - width - 8),
-          ),
+          left,
           top: Math.max(
             8,
             anchor.bottom + height + 6 <= window.innerHeight - 8
@@ -336,6 +332,10 @@ export function Select(props: {
                 aria-controls={id}
                 aria-activedescendant={activeId()}
                 onInput={(event) => {
+                  // Filtering must not make the list jump; hold the height
+                  // the popover opened with.
+                  if (popup && !popup.style.minHeight)
+                    popup.style.minHeight = popup.getBoundingClientRect().height + "px";
                   setQuery(event.currentTarget.value);
                   setCursor(String(enabled()[0]?.value ?? ""));
                   reveal();

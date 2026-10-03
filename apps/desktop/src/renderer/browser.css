@@ -160,6 +160,17 @@
   min-height: 80px;
   position: relative;
 }
+/* A still frame of the page while a menu or dialog paints over it. */
+.browser-still {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top left;
+  pointer-events: none;
+  user-select: none;
+}
 /* The viewport is as tall as the panel, so the placeholder centres in it
    rather than hanging off the address bar. */
 .browser-empty {

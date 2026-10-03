@@ -10,6 +10,7 @@ import {
 import { Portal } from "solid-js/web";
 import type { JSX } from "solid-js";
 import { Icon, type IconName } from "./ui";
+import { floatingBox, floatingSpan } from "./native-area";
 
 export interface MenuAction {
   label: string;
@@ -77,10 +78,7 @@ export function MenuButton(props: {
         const box = menu.getBoundingClientRect();
         setPosition({
           width: props.matchWidth ? anchor.width : 0,
-          left: Math.max(
-            8,
-            Math.min(anchor.left, window.innerWidth - box.width - 8),
-          ),
+          left: floatingBox(anchor, box.width).left,
           top: Math.max(
             8,
             anchor.bottom + box.height + 6 <= window.innerHeight - 8
@@ -121,6 +119,14 @@ export function MenuButton(props: {
       });
     }),
   );
+  /** A branch opens toward the inline end. It folds back the other way when
+      that would run off the window or under the embedded browser. */
+  const fold = (panel: HTMLElement) => {
+    if (!panel.isConnected) return;
+    const box = panel.getBoundingClientRect();
+    const { start, end } = floatingSpan(menu.getBoundingClientRect());
+    if (box.left < start + 8 || box.right > end - 8) panel.dataset.side = "start";
+  };
   return (
     <>
       <button
@@ -284,6 +290,7 @@ export function MenuButton(props: {
                     </button>
                     <Show when={branch() === item.label}>
                       <div
+                        ref={(panel) => queueMicrotask(() => fold(panel))}
                         class="action-menu popover menu-branch-panel"
                         role="menu"
                         aria-label={item.label}
