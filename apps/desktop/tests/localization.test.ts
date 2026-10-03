@@ -96,6 +96,8 @@ test("keys translated through a variable are in the catalog", () => {
     // Server switcher labels and Servers settings descriptions.
     "Haarness Cloud", "Cloud sessions", "Local projects",
     "Cloud sessions in your Haarness account", "Local projects on this computer",
+    // The palette's count picks its singular or plural key.
+    "{count} result",
     "signed in", "API key", "from the environment",
     // Custom-provider API formats, kept as English keys in the `protocols`
     // constant and translated at the render site.

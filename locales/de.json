@@ -1324,5 +1324,9 @@
   "Haarness Cloud": "Haarness Cloud",
   "Local projects": "Lokale Projekte",
   "Cloud sessions in your Haarness account": "Cloud-Sitzungen in deinem Haarness-Konto",
-  "Local projects on this computer": "Lokale Projekte auf diesem Computer"
+  "Local projects on this computer": "Lokale Projekte auf diesem Computer",
+  "Ask first": "Erst fragen",
+  "Auto-approve": "Automatisch erlauben",
+  "{count} result": "{count} Ergebnis",
+  "Top models with one Haarness account. No API keys to manage.": "Top-Modelle mit einem Haarness-Konto. Keine API-Schlüssel zu verwalten."
 }

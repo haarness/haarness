@@ -15,7 +15,9 @@ export function Markdown(props: { text: string; live?: boolean }) {
     for (const block of host.querySelectorAll("pre")) {
       const code = block.querySelector("code");
       const language = /language-([\w+#-]+)/.exec(code?.className ?? "")?.[1];
-      if (language) block.dataset.language = language;
+      // "text" and "plaintext" say nothing a reader needs; label real languages only.
+      if (language && !/^(text|plain|plaintext|txt|none|output|console)$/i.test(language))
+        block.dataset.language = language;
       else delete block.dataset.language;
       if (live) { block.querySelector(":scope > .code-copy")?.remove(); continue; }
       if (block.querySelector(":scope > .code-copy")) continue;

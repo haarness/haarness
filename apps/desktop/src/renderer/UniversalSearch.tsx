@@ -325,7 +325,10 @@ export function UniversalSearch(props: { close: () => void }) {
           <span class="palette-count">
             {loading() || indexing()
               ? t("Searching…")
-              : problem() || t("{count} results", { count: entries().length })}
+              : problem() ||
+                t(entries().length === 1 ? "{count} result" : "{count} results", {
+                  count: entries().length,
+                })}
           </span>
           {/* Keys stay Latin-ordered so the arrows do not migrate in RTL. */}
           <span class="palette-hint">

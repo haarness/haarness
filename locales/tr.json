@@ -1324,5 +1324,9 @@
   "Haarness Cloud": "Haarness Cloud",
   "Local projects": "Yerel projeler",
   "Cloud sessions in your Haarness account": "Haarness hesabınızdaki bulut oturumları",
-  "Local projects on this computer": "Bu bilgisayardaki yerel projeler"
+  "Local projects on this computer": "Bu bilgisayardaki yerel projeler",
+  "Ask first": "Önce sor",
+  "Auto-approve": "Otomatik onayla",
+  "{count} result": "{count} sonuç",
+  "Top models with one Haarness account. No API keys to manage.": "Tek bir Haarness hesabıyla en iyi modeller. Yönetilecek API anahtarı yok."
 }

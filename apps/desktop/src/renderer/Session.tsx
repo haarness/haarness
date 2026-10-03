@@ -1573,7 +1573,7 @@ export function Session() {
                       }
                     >
                       <Icon name="shield" size="sm" />
-                      {app.isAutoApproval() ? t("Auto approvals") : t("Review")}
+                      {app.isAutoApproval() ? t("Auto-approve") : t("Ask first")}
                     </button>
                   </Show>
                 </div>

@@ -1324,5 +1324,9 @@
   "Haarness Cloud": "Haarness Cloud",
   "Local projects": "本機專案",
   "Cloud sessions in your Haarness account": "你的 Haarness 帳戶中的雲端工作階段",
-  "Local projects on this computer": "此電腦上的本機專案"
+  "Local projects on this computer": "此電腦上的本機專案",
+  "Ask first": "先詢問",
+  "Auto-approve": "自動核准",
+  "{count} result": "{count} 個結果",
+  "Top models with one Haarness account. No API keys to manage.": "一個 Haarness 帳戶即可使用頂尖模型，無需管理 API 金鑰。"
 }
