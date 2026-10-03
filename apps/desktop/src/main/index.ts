@@ -433,6 +433,7 @@ function installHandlers() {
   handle("browserAdopt", (win, connection:string, thread:string) => browserHost.adopt(win, z.string().max(2048).parse(connection), z.string().min(1).max(128).parse(thread)));
   handle("browserCommand", (win, connection:string, thread:string, action:unknown) => browserHost.command(win, z.string().max(2048).parse(connection), z.string().max(128).parse(thread), action));
   handle("browserLayout", (win, connection:string, thread:string, raw:unknown) => browserHost.layout(win, connection, thread, z.object({visible:z.boolean(),bounds:z.object({x:z.number().finite(),y:z.number().finite(),width:z.number().finite(),height:z.number().finite()})}).parse(raw)));
+  handle("browserSnapshot", (win, connection:string, thread:string) => browserHost.snapshot(win, z.string().max(2048).parse(connection), z.string().max(128).parse(thread)));
   handle("projects", () => refreshProjects());
   handle(
     "remoteProjects",

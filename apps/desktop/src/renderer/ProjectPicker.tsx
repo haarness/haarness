@@ -12,6 +12,7 @@ import {
 import { Portal } from "solid-js/web";
 import { useApp } from "./state";
 import { Icon } from "./ui";
+import { floatingBox } from "./native-area";
 
 /** The same project choice in the welcome heading and the new-chat composer. */
 export function ProjectPicker(props: { heading?: boolean }) {
@@ -81,10 +82,7 @@ export function ProjectPicker(props: { heading?: boolean }) {
           box = popup.getBoundingClientRect();
         const above = anchor.top - box.height - 8;
         setPosition({
-          left: Math.max(
-            8,
-            Math.min(anchor.left, window.innerWidth - box.width - 8),
-          ),
+          left: floatingBox(anchor, box.width).left,
           top: Math.max(
             8,
             above >= 8

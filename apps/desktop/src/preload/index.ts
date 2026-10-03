@@ -13,6 +13,7 @@ const bridge: Bridge = {
   browserAdopt:(connection,thread)=>invoke("browserAdopt",connection,thread),
   browserCommand:(connection,thread,action)=>invoke("browserCommand",connection,thread,action),
   browserLayout:(connection,thread,layout)=>invoke("browserLayout",connection,thread,layout),
+  browserSnapshot:(connection,thread)=>invoke("browserSnapshot",connection,thread),
   notificationReady: () => invoke("notificationReady"),
   notificationHandled: (target) => invoke("notificationHandled", target),
   windowAction: (action) => invoke("windowAction", action),

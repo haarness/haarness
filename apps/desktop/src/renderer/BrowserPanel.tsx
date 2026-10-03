@@ -12,8 +12,44 @@ import {
 import { Icon } from "./ui";
 import { useApp } from "./state";
 import type { BrowserState } from "../shared";
+import { setNativeArea } from "./native-area";
 import "./browser.css";
 const empty = (): BrowserState => ({ tabs: [], focusedTabID: null });
+/** Everything that floats above the page: menus, pickers, popovers, dialogs, toasts. */
+const FLOATING = [
+  "dialog[open]",
+  '[role="dialog"]',
+  '[role="alertdialog"]',
+  '[role="menu"]',
+  '[role="listbox"]',
+  '[role="tooltip"]',
+  ".popover",
+  ".select-popover",
+  ".project-popover",
+  ".search-overlay",
+  ".modal-backdrop",
+  ".notifications > *",
+].join(", ");
+/** Whether a floating layer paints where the native page is drawn. */
+function covered(area: DOMRect) {
+  for (const layer of document.querySelectorAll<HTMLElement>(FLOATING)) {
+    // A modal's backdrop dims the whole window, including the page.
+    if (layer.matches("dialog:modal")) return true;
+    if (!layer.checkVisibility({ opacityProperty: true, visibilityProperty: true }))
+      continue;
+    const box = layer.getBoundingClientRect();
+    if (
+      box.width > 0 &&
+      box.height > 0 &&
+      box.left < area.right &&
+      box.right > area.left &&
+      box.top < area.bottom &&
+      box.bottom > area.top
+    )
+      return true;
+  }
+  return false;
+}
 export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
   const app = useApp();
   const { state } = app;
@@ -22,6 +58,13 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
   const [address, setAddress] = createSignal("");
   const [error, setError] = createSignal("");
   const [connected, setConnected] = createSignal(false);
+  // The native page draws above the DOM, so a layer that must cover it gets
+  // a still frame of the page to paint over instead of a blank hole.
+  const [still, setStill] = createSignal<string>();
+  let held = false;
+  let freezing = 0;
+  let frames = 0;
+  let stillImage: HTMLImageElement | undefined;
   let viewport!: HTMLDivElement;
   let epoch = 0;
   let lastLayout = "";
@@ -54,6 +97,9 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
     const { connection, thread } = owner();
     const version = ++epoch;
     lastLayout = "";
+    held = false;
+    freezing = 0;
+    setStill(undefined);
     clearTimeout(retry);
     setEditingAddress(false);
     setAddress("");
@@ -75,7 +121,6 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
   });
   createEffect(() => {
     props.visible;
-    state.settings;
     browser().focusedTabID;
     queueMicrotask(updateLayout);
   });
@@ -83,17 +128,17 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
     if (!viewport) return;
     const { connection, thread } = owner();
     const bounds = viewport.getBoundingClientRect();
-    const overlay = !!document.querySelector(
-      'dialog[open], [role="dialog"], [role="menu"], .menu-popover, .search-overlay',
-    );
+    const live =
+      props.visible && connected() && bounds.width > 0 && bounds.height > 0;
+    setNativeArea(live && tab() ? bounds : undefined);
+    if (live && covered(bounds)) {
+      if (!held) freeze(connection, thread);
+    } else {
+      freezing = 0;
+      held = false;
+    }
     const layout = {
-      visible:
-        props.visible &&
-        connected() &&
-        !state.settings &&
-        !overlay &&
-        bounds.width > 0 &&
-        bounds.height > 0,
+      visible: live && !held,
       bounds: {
         x: bounds.x,
         y: bounds.y,
@@ -104,9 +149,42 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
     const identity = JSON.stringify([connection, thread, layout]);
     if (identity === lastLayout) return;
     lastLayout = identity;
-    void window.haarness.browserLayout(connection, thread, layout).catch(() => {
-      lastLayout = "";
-    });
+    const thawed = !held && !!still();
+    void window.haarness
+      .browserLayout(connection, thread, layout)
+      .then(() => {
+        // Drop the still only once the live page is back on top of it.
+        const frame = ++frames;
+        if (thawed)
+          requestAnimationFrame(() => {
+            if (frame === frames && !held && !freezing) setStill(undefined);
+          });
+      })
+      .catch(() => {
+        lastLayout = "";
+      });
+  }
+  /** Swap the live page for a still frame, then let the layer above paint. */
+  function freeze(connection: string, thread: string) {
+    if (freezing) return;
+    const version = (freezing = ++frames);
+    const current = () => freezing === version && belongs(connection, thread);
+    void window.haarness
+      .browserSnapshot(connection, thread)
+      .catch(() => null)
+      .then(async (image) => {
+        if (!current()) return;
+        if (image) {
+          setStill(image);
+          // Hide the live page only once the still is ready to paint.
+          await stillImage?.decode().catch(() => {});
+          await new Promise(requestAnimationFrame);
+          if (!current()) return;
+        }
+        freezing = 0;
+        held = true;
+        updateLayout();
+      });
   }
   async function command(action: unknown) {
     const { connection, thread } = owner();
@@ -164,6 +242,7 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
       mutation.disconnect();
       window.removeEventListener("resize", updateLayout);
       document.removeEventListener("scroll", updateLayout, true);
+      setNativeArea(undefined);
       const { connection, thread } = owner();
       void window.haarness.browserLayout(connection, thread, {
         visible: false,
@@ -301,6 +380,16 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
         </div>
       </Show>
       <div class="browser-viewport" ref={viewport}>
+        <Show when={still()}>
+          <img
+            ref={stillImage}
+            class="browser-still"
+            src={still()}
+            alt=""
+            aria-hidden="true"
+            draggable={false}
+          />
+        </Show>
         <Show when={!tab()}>
           <div class="browser-empty">
             <strong>{t("Browse alongside your work")}</strong>
