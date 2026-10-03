@@ -10802,7 +10802,7 @@ test("file explorer highlights configuration and programming languages in both t
   expect(errors).toEqual([]);
 });
 
-test("deferred input queue edits, reorders, reconnects and stays parked after Stop", async () => {
+test("deferred input queue edits in the composer, reorders, reconnects and stays paused after Stop", async () => {
   await newSession();
   await send('!tool bash {"command":"printf original-queue-proof"}');
   await expect.poll(async () => (await client.listPermissions()).length).toBeGreaterThan(0);
@@ -10810,57 +10810,78 @@ test("deferred input queue edits, reorders, reconnects and stays parked after St
   const id = permission.threadId;
   const composer = page.getByRole("textbox", { name: "Message", exact: true });
   const queue = page.getByRole("region", { name: "Queued messages", exact: true });
+  const row = (text: string) => queue.getByRole("listitem").filter({ hasText: text });
+  // While work runs, the send button says what sending does.
   await composer.fill("documentation later");
-  await page.getByRole("textbox", { name: "Message", exact: true }).press("Alt+Enter");
-  await expect(queue).toContainText("documentation later");
+  await expect(page.locator(".send-button")).toHaveAttribute("title", "Steer message");
+  await composer.press("Alt+Enter");
+  await expect(row("documentation later")).toBeVisible();
+  await expect(queue.locator("header")).toContainText("Queued");
   await composer.fill("release notes later");
   await composer.press("Alt+Enter");
   await expect.poll(async () => (await client.inputQueue(id)).items.length).toBe(2);
+  await expect(queue.locator("header")).toContainText("2");
   expect((await client.listItems(id)).some((item) => item.data.type === "user_message" && item.data.text === "documentation later")).toBe(false);
+  // Editing loads the message into the composer and sets the draft aside.
   await composer.fill("preserve my unsent draft");
-  await queue.getByRole("button", { name: "documentation later", exact: true }).click();
-  await queue.getByRole("textbox", { name: "Edit queued message" }).fill("edited documentation");
-  await queue.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(queue).toContainText("edited documentation");
+  await row("documentation later").getByRole("button", { name: "Edit queued message", exact: true }).click();
+  await expect(composer).toHaveValue("documentation later");
+  await expect(queue.locator("header")).toContainText("Editing — sending saves it in place");
+  await expect(page.getByRole("button", { name: "Save queued message", exact: true })).toBeVisible();
+  // Esc leaves the edit and never stops the running work.
+  await composer.press("Escape");
   await expect(composer).toHaveValue("preserve my unsent draft");
-  await queue.getByRole("button", { name: "Move queued message up", exact: true }).nth(1).click();
+  expect(await client.activeTurn(id)).not.toBeNull();
+  await row("documentation later").getByRole("button", { name: "Edit queued message", exact: true }).click();
+  await composer.fill("edited documentation");
+  await composer.press("Enter");
+  await expect(row("edited documentation")).toBeVisible();
+  await expect(composer).toHaveValue("preserve my unsent draft");
+  expect((await client.inputQueue(id)).items.map((item) => item.text)).toEqual(["edited documentation", "release notes later"]);
+  await row("release notes later").hover();
+  await row("release notes later").getByRole("button", { name: "Move queued message up", exact: true }).click();
   await expect.poll(async () => (await client.inputQueue(id)).items[0].text).toBe("release notes later");
   await page.reload();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
-  await expect(queue).toContainText("release notes later");
-  await expect(queue).toContainText("edited documentation");
+  await expect(row("release notes later")).toBeVisible();
+  await expect(row("edited documentation")).toBeVisible();
   await expect(composer).toHaveValue("preserve my unsent draft");
-  await queue.getByRole("button", { name: "release notes later", exact: true }).click();
-  await queue.getByRole("textbox", { name: "Edit queued message" }).fill("my conflicting edit");
+  // Another client changing the same message stops the save; it never overwrites.
+  await row("release notes later").getByRole("button", { name: "Edit queued message", exact: true }).click();
+  await composer.fill("my conflicting edit");
   const snapshot = await client.inputQueue(id);
   await client.changeInputQueue(id, { action: "edit", revision: snapshot.revision, id: snapshot.items[0].id, text: "changed by another client" });
-  await queue.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(queue.getByRole("alert")).toBeVisible();
-  await expect(queue.getByRole("textbox", { name: "Edit queued message" })).toHaveValue("my conflicting edit");
+  await composer.press("Enter");
+  await expect(queue.getByRole("alert")).toContainText("changed somewhere else");
+  await expect(composer).toHaveValue("my conflicting edit");
   expect((await client.inputQueue(id)).items[0].text).toBe("changed by another client");
   const changed = await client.inputQueue(id);
   await client.changeInputQueue(id, { action: "remove", revision: changed.revision, id: changed.items[0].id });
-  await expect(queue.getByRole("textbox", { name: "Unsaved queued message edit", exact: true })).toHaveValue("my conflicting edit");
-  await queue.getByRole("button", { name: "Discard edit", exact: true }).click();
+  await composer.press("Enter");
+  await expect(queue.getByRole("alert")).toContainText("already sent or removed");
+  await expect(composer).toHaveValue("my conflicting edit");
+  await queue.getByRole("button", { name: "Cancel editing", exact: true }).click();
+  await expect(composer).toHaveValue("preserve my unsent draft");
   await composer.fill("remove through the UI");
-  await page.getByRole("textbox", { name: "Message", exact: true }).press("Alt+Enter");
-  await expect(queue).toContainText("remove through the UI");
-  await queue.getByRole("button", { name: "Remove queued message", exact: true }).last().click();
+  await composer.press("Alt+Enter");
+  await expect(row("remove through the UI")).toBeVisible();
+  await row("remove through the UI").getByRole("button", { name: "Remove queued message", exact: true }).click();
   await expect.poll(async () => (await client.inputQueue(id)).items.length).toBe(1);
   await composer.fill("preserve my unsent draft");
   await client.interruptThreadTree(id);
   await expect.poll(async () => (await client.activeTurn(id))).toBeNull();
-  await expect(queue).toContainText("paused");
+  await expect(queue.locator("header")).toContainText("Queue paused — send when ready");
   await expect(page.getByRole("button", { name: "Allow once", exact: true })).toHaveCount(0);
   await page.screenshot({ path: "test-results/deferred-input-queue.png" });
-  await queue.getByRole("button", { name: "Send", exact: true }).click();
+  await row("edited documentation").getByRole("button", { name: "Send now", exact: true }).click();
   await expect.poll(async () => (await client.inputQueue(id)).items.length).toBe(0);
   await expect.poll(async () => (await client.listItems(id)).some((item) => item.data.type === "assistant_message" && item.data.text.includes("edited documentation"))).toBe(true);
+  await expect(queue).toHaveCount(0);
   await expect(composer).toHaveValue("preserve my unsent draft");
   await composer.fill("");
 });
 
-test("deferred input queue Steer promotes only the selected prompt", async () => {
+test("deferred input queue Steer now promotes only the selected prompt, and each queued prompt is its own turn", async () => {
   await newSession();
   await send('!tool bash {"command":"printf queue-steering-proof"}');
   await expect.poll(async () => (await client.listPermissions()).length).toBeGreaterThan(0);
@@ -10868,19 +10889,60 @@ test("deferred input queue Steer promotes only the selected prompt", async () =>
   const id = permission.threadId;
   const composer = page.getByRole("textbox", { name: "Message", exact: true });
   const queue = page.getByRole("region", { name: "Queued messages", exact: true });
-  for (const text of ["keep this for later", "change the active work now"]) {
+  for (const text of ["keep this for later", "change the active work now", "and this one after"]) {
     await composer.fill(text);
-    await page.getByRole("textbox", { name: "Message", exact: true }).press("Alt+Enter");
+    await composer.press("Alt+Enter");
     await expect(queue).toContainText(text);
   }
-  await queue.getByRole("button", { name: "Steer", exact: true }).nth(1).click();
-  await expect.poll(async () => (await client.inputQueue(id)).items.map((item) => item.text)).toEqual(["keep this for later"]);
+  await queue.getByRole("listitem").filter({ hasText: "change the active work now" }).getByRole("button", { name: "Steer now", exact: true }).click();
+  await expect.poll(async () => (await client.inputQueue(id)).items.map((item) => item.text)).toEqual(["keep this for later", "and this one after"]);
   expect((await client.listItems(id)).some((item) => item.data.type === "user_message" && item.data.text === "change the active work now")).toBe(true);
   expect((await client.listItems(id)).some((item) => item.data.type === "user_message" && item.data.text === "keep this for later")).toBe(false);
+  const first = (await client.activeTurn(id))!;
   await client.replyPermission(permission.permissionId, { decision: "once" });
+  await expect.poll(async () => (await client.inputQueue(id)).items.length).toBe(0);
   await expect.poll(async () => (await client.activeTurn(id))).toBeNull();
-  const messages = (await client.listItems(id)).filter((item) => item.data.type === "user_message").map((item) => item.data.type === "user_message" ? item.data.text : "");
-  expect(messages.slice(-2)).toEqual(["change the active work now", "keep this for later"]);
+  const items = await client.listItems(id);
+  const users = items.filter((item) => item.data.type === "user_message");
+  const messages = users.map((item) => item.data.type === "user_message" ? item.data.text : "");
+  expect(messages.slice(-3)).toEqual(["change the active work now", "keep this for later", "and this one after"]);
+  // Steering joined the running turn; each queued prompt started its own.
+  const turns = users.slice(-3).map((item) => item.turnId);
+  expect(turns[0]).toBe(first.id);
+  expect(new Set(turns).size).toBe(3);
+  await expect(queue).toHaveCount(0);
+});
+
+test("Stop answers steering the agent has not read yet and leaves the queue paused", async () => {
+  await newSession();
+  await send('!tool bash {"command":"printf stop-steering-proof"}');
+  await expect.poll(async () => (await client.listPermissions()).length).toBeGreaterThan(0);
+  const id = (await client.listPermissions())[0].threadId;
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
+  const queue = page.getByRole("region", { name: "Queued messages", exact: true });
+  await composer.fill("queued until I say so");
+  await composer.press("Alt+Enter");
+  await expect(queue).toContainText("queued until I say so");
+  await send("actually, just explain the plan");
+  await expect.poll(async () => (await client.listItems(id)).some((item) => item.data.type === "user_message" && item.data.text === "actually, just explain the plan")).toBe(true);
+  await page.getByRole("button", { name: "Stop session", exact: true }).click();
+  // A continuation answers the unread steering instead of dropping it.
+  await expect.poll(async () => (await client.listItems(id)).some((item) => item.data.type === "assistant_message" && item.data.text.includes("stopped your previous work"))).toBe(true);
+  await expect.poll(async () => (await client.activeTurn(id))).toBeNull();
+  const items = await client.listItems(id);
+  expect(items.some((item) => item.data.type === "error" && item.data.message.includes("Queued input could not be delivered"))).toBe(false);
+  // The continuation does not drain the queue Stop paused.
+  await page.waitForTimeout(800);
+  expect((await client.inputQueue(id)).items.map((item) => item.text)).toEqual(["queued until I say so"]);
+  await expect(queue.locator("header")).toContainText("Queue paused — send when ready");
+  // A new message runs first, then the paused queue continues.
+  await send("something new first");
+  await expect.poll(async () => (await client.inputQueue(id)).items.length).toBe(0);
+  await expect.poll(async () => (await client.listItems(id)).some((item) => item.data.type === "assistant_message" && item.data.text.includes("queued until I say so"))).toBe(true);
+  await expect.poll(async () => (await client.activeTurn(id))).toBeNull();
+  const order = (await client.listItems(id)).filter((item) => item.data.type === "user_message" && !item.data.synthetic).map((item) => item.data.type === "user_message" ? item.data.text : "");
+  expect(order.slice(-2)).toEqual(["something new first", "queued until I say so"]);
+  await page.screenshot({ path: "test-results/stop-answers-steering.png" });
 });
 
 test("shared input settings apply project and global modes to real Desktop chat", async () => {

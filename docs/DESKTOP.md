@@ -2,7 +2,7 @@
 
 Haarness Desktop is an Electron application in `apps/desktop`. Its SolidJS interface uses Haarness's directory-scoped server for every conversation, turn, tool, approval, workflow, and terminal. The server remains the durable owner of work and can be shared with the CLI and TUI.
 
-Normal Send steers active work; **Queue** or **Alt+Enter** saves a follow-up until that work finishes. The pending list supports edit, reorder, remove, and Steer/Send. See [Steer and Queue](INPUT-QUEUE.md).
+Normal Send steers active work; **Queue** or **Alt+Enter** saves a follow-up until that work finishes. Queued messages wait in a tray above the composer. Each can be edited in the composer, sent now, reordered or removed, and each runs as its own turn. Stop answers steering the agent has not read yet and pauses the queue. See [Steer and Queue](INPUT-QUEUE.md).
 
 ## Development
 

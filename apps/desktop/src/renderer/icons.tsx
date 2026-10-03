@@ -28,6 +28,7 @@ import BookOpen from "lucide-solid/icons/book-open";
 import Bot from "lucide-solid/icons/bot";
 import Check from "lucide-solid/icons/check";
 import ChevronDown from "lucide-solid/icons/chevron-down";
+import ChevronUp from "lucide-solid/icons/chevron-up";
 import ChevronRight from "lucide-solid/icons/chevron-right";
 import ChartColumn from "lucide-solid/icons/chart-column";
 import Circle from "lucide-solid/icons/circle";
@@ -115,6 +116,9 @@ const catalog = {
   chevron: ChevronRight,
   down: ChevronDown,
   up: ArrowUp,
+  // Reordering in a list, kept apart from `up`/`send`, which are arrows.
+  "move-up": ChevronUp,
+  "move-down": ChevronDown,
   check: Check,
   plus: Plus,
 

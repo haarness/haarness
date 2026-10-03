@@ -53,7 +53,7 @@ Primary resources:
 Scheduled thread creation accepts optional `schedule: {id, name}`. The scheduler sets this durable origin on each new run; thread responses, live events, reloads and session archives retain it independently of the editable title. The schedule ID, rather than its name, is the grouping identity. Forks omit it. Sanitized archives redact the schedule name while retaining its ID. Existing threads without this additive field are unchanged.
 
 - `POST /v1/threads/{id}/background[?childThreadId=...]` to promote running foreground subagents
-- `POST /v1/threads/{id}/interrupt` to stop every active turn, child task, and workflow in that root conversation
+- `POST /v1/threads/{id}/interrupt` to stop every active turn, child task, and workflow in that root conversation. Add `?resume=true` for an interactive Stop: steering the agent has not answered yet is answered by a continuation turn (see [Steer and Queue](INPUT-QUEUE.md))
 - `POST /v1/threads/{id}/goal` for tagged goal lifecycle actions
 - `GET /v1/turns/active`, `GET /v1/turns/{id}`, `POST /interrupt`, `GET /wait`
 - `GET /v1/permissions`, `/v1/questions`; `POST /v1/permissions/{id}`, `/v1/questions/{id}`
