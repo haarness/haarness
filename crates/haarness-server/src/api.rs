@@ -1968,22 +1968,34 @@ async fn promote_background_tasks(
             .await?,
     ))
 }
+/// `resume=true` is the interactive Stop: steering the agent has not read yet
+/// gets an answer instead of being dropped. Programmatic stops omit it.
+#[derive(Deserialize)]
+struct InterruptQuery {
+    #[serde(default)]
+    resume: bool,
+}
 async fn interrupt_turn(
     State(state): State<ServerState>,
     Path(id): Path<TurnId>,
+    Query(query): Query<InterruptQuery>,
 ) -> ApiResult<Json<Turn>> {
-    Ok(Json(state.runtime.interrupt(id).await?))
+    Ok(Json(state.runtime.interrupt_with(id, query.resume).await?))
 }
 async fn interrupt_thread_tree(
     State(state): State<ServerState>,
     Path(id): Path<ThreadId>,
+    Query(query): Query<InterruptQuery>,
 ) -> ApiResult<Json<Value>> {
     let thread_ids = state.runtime.thread_tree_ids(id).await?;
     let workflows = match &state.workflows {
         Some(workflows) => workflows.cancel_for_launch_threads(&thread_ids).await?,
         None => 0,
     };
-    let turns_and_tasks = state.runtime.interrupt_thread_tree(id).await?;
+    let turns_and_tasks = state
+        .runtime
+        .interrupt_thread_tree_with(id, query.resume)
+        .await?;
     Ok(Json(json!({
         "threadId": id,
         "workflows": workflows,

@@ -137,10 +137,18 @@ pub(super) fn change(
         .map_err(storage)?;
     let queue = read(&tx, thread)?;
     match action {
-        InputQueueAction::Edit { revision, id, text } => {
+        InputQueueAction::Edit {
+            revision,
+            id,
+            text,
+            attachments,
+        } => {
             check(&queue, revision)?;
             let mut item = pending(&queue, id)?.clone();
             item.text = text;
+            if let Some(attachments) = attachments {
+                item.attachments = attachments;
+            }
             validate(&item)?;
             tx.execute(
                 "UPDATE pending_inputs SET payload=?2 WHERE id=?1",
@@ -316,6 +324,7 @@ mod tests {
                     revision: q.revision,
                     id: original.id,
                     text: "edited".into(),
+                    attachments: None,
                 },
             )
             .await
@@ -386,7 +395,8 @@ mod tests {
                     InputQueueAction::Edit {
                         revision: q.revision,
                         id: a.id,
-                        text: "stale".into()
+                        text: "stale".into(),
+                        attachments: None,
                     }
                 )
                 .await,
@@ -412,6 +422,7 @@ mod tests {
             revision: q.revision,
             id: item.id,
             text: "winner".into(),
+            attachments: None,
         };
         let left = tokio::spawn({
             let store = store.clone();

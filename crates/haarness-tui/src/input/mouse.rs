@@ -202,6 +202,13 @@ async fn click(app: &mut App, row: usize, column: usize, client: &ApiClient) -> 
             app.question_answered(&id);
             app.hovered_cell = None;
         }
+        HitTarget::QueueList => app.open_input_queue(client).await?,
+        HitTarget::QueueItem(id) => app.open_queue_item_actions(id, false)?,
+        HitTarget::QueueEditCancel => {
+            if app.cancel_queue_edit() {
+                app.notice = "Edit cancelled · draft restored".into();
+            }
+        }
         HitTarget::DialogSurface | HitTarget::DialogItem(_) => {}
         HitTarget::ToastDismiss => {
             app.notification_toast = None;

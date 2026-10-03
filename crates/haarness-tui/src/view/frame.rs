@@ -2,7 +2,7 @@
 //! so mouse clicks resolve through data, not coordinates guessed after the
 //! fact. The frame records, per final screen row, what lives there.
 
-use haarness_protocol::{ItemId, ThreadId, WorkflowId};
+use haarness_protocol::{ItemId, RequestId, ThreadId, WorkflowId};
 
 /// What clicking a row does. Row-granular on purpose: this UI is built from
 /// full-width rows, so per-row targets cover every affordance without a
@@ -48,6 +48,13 @@ pub enum HitTarget {
     DiffTreeRow(usize),
     /// A row of the review viewer's patch pane, by display index.
     DiffBodyRow(usize),
+    /// The queue strip's header or `+N more` row: open every queued message.
+    QueueList,
+    /// One queued message in the strip: open its actions. Keyed by id so a
+    /// queue that changed under the pointer cannot act on its neighbour.
+    QueueItem(RequestId),
+    /// The strip's editing line: cancel the edit and restore the draft.
+    QueueEditCancel,
 }
 
 /// One clickable horizontal region in the final terminal frame. `start` is

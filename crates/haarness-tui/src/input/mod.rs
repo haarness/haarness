@@ -41,10 +41,14 @@ fn request_interrupt(app: &mut App, client: &ApiClient, target: InterruptTarget)
     };
     app.notice = message.into();
     let client = client.clone();
+    // A running turn belongs to the thread on screen. Stopping it stops that
+    // whole tree, as Desktop's Stop does, and asks the server to answer any
+    // steering the agent had not read yet rather than drop it.
+    let thread = app.thread.id;
     tokio::spawn(async move {
         let result = match target {
-            InterruptTarget::Turn(turn) => client.interrupt(turn).await.map(|_| ()),
-            InterruptTarget::Session(thread) => client.interrupt_session(thread).await,
+            InterruptTarget::Turn(_) => client.interrupt_session(thread, true).await,
+            InterruptTarget::Session(root) => client.interrupt_session(root, true).await,
             InterruptTarget::Quit => return,
         };
         if let Err(error) = result {
@@ -274,6 +278,8 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
         } else if !matches!(app.overlay, Overlay::None) {
             app.management = crate::management::Management::default();
             app.close_overlay();
+        } else if app.cancel_queue_edit() {
+            app.notice = "Edit cancelled · draft restored".into();
         } else if !app.composer.is_empty() || !app.attachments.is_empty() || app.shell_mode {
             app.composer.clear();
             app.attachments.clear();
@@ -737,6 +743,11 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                 app.shell_mode = false;
                 app.composer.clear();
                 app.notice = "Ready".into();
+            } else if app.cancel_queue_edit() {
+                // While a queued message is open, Esc belongs to the edit. It
+                // must never reach running work, not even as a second press.
+                app.escape_interrupt = None;
+                app.notice = "Edit cancelled · draft restored".into();
             } else if let Some(turn) = app.active_turn {
                 app.ctrl_c_action = None;
                 let target = InterruptTarget::Turn(turn);
@@ -833,6 +844,11 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                 app.composer.insert_char('\n');
             } else if crate::prompt_context::apply(app, client).await? {
                 refresh_mentions(app, client).await;
+            } else if app.queue_edit.is_some() {
+                // Saving replaces the queued message in place. Alt+Enter
+                // would queue anyway, so both keys save.
+                app.scroll_to_bottom();
+                app.save_queue_edit(client).await?;
             } else if key.modifiers.contains(KeyModifiers::ALT)
                 && (app.shell_mode || app.composer.text().trim_start().starts_with('/'))
             {
@@ -889,7 +905,9 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                 }
             }
         }
-        KeyCode::Char('!') if app.composer.is_empty() && !app.shell_mode => {
+        KeyCode::Char('!')
+            if app.composer.is_empty() && !app.shell_mode && app.queue_edit.is_none() =>
+        {
             app.shell_mode = true;
             app.notice = "shell — Enter runs the command, Esc leaves".into();
         }

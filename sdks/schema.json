@@ -1936,6 +1936,16 @@
                 ],
                 "type": "string"
               },
+              "attachments": {
+                "description": "Replaces the message's attachments. Omitted keeps them unchanged.",
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
               "id": {
                 "$ref": "#/components/schemas/RequestId"
               },
@@ -2321,7 +2331,7 @@
                 "type": "array"
               },
               "permission": {
-                "description": "Permission category (bash, edit, external_directory, \u2026).",
+                "description": "Permission category (bash, edit, external_directory, …).",
                 "type": "string"
               },
               "permission_id": {
@@ -3154,7 +3164,7 @@
         "type": "object"
       },
       "PendingPermissionInfo": {
-        "description": "One unanswered permission prompt, listable so clients can repopulate\npending approvals after a reconnect or thread switch \u2014 including prompts\nraised on child-agent threads.",
+        "description": "One unanswered permission prompt, listable so clients can repopulate\npending approvals after a reconnect or thread switch — including prompts\nraised on child-agent threads.",
         "properties": {
           "agent": {
             "type": [
@@ -3191,7 +3201,7 @@
             "type": "array"
           },
           "permission": {
-            "description": "Permission category (bash, edit, external_directory, \u2026).",
+            "description": "Permission category (bash, edit, external_directory, …).",
             "type": "string"
           },
           "permissionId": {
@@ -3973,7 +3983,7 @@
             "type": "object"
           }
         ],
-        "description": "One entry of a Git review: a [`FileDiff`] plus the bounds the review had\nto apply to produce it.\n\nIt flattens, so the wire shape is a strict superset of `FileDiff` and the\nendpoint keeps returning the same array of the same objects; both added\nfields are optional and defaulted, so an older client \u2014 or the generated\nTypeScript SDK before it is regenerated \u2014 decodes these responses\nunchanged and simply does not see them."
+        "description": "One entry of a Git review: a [`FileDiff`] plus the bounds the review had\nto apply to produce it.\n\nIt flattens, so the wire shape is a strict superset of `FileDiff` and the\nendpoint keeps returning the same array of the same objects; both added\nfields are optional and defaulted, so an older client — or the generated\nTypeScript SDK before it is regenerated — decodes these responses\nunchanged and simply does not see them."
       },
       "ReviewFinding": {
         "properties": {

@@ -1955,10 +1955,6 @@ impl App {
                 self.input_queue_action(&value, client).await?;
                 Ok(AppAction::Continue)
             }
-            OverlayChoice::Option(OptionsKind::InputQueueEdit, value) => {
-                self.save_input_queue_edit(value, client).await?;
-                Ok(AppAction::Continue)
-            }
             OverlayChoice::Option(OptionsKind::Tasks, value) => {
                 if let Ok(child_id) = value.parse::<uuid::Uuid>() {
                     self.enter_child(haarness_protocol::ThreadId(child_id), client)
@@ -2983,8 +2979,10 @@ impl App {
                 };
             }
             "cancel" => {
-                if let Some(turn) = self.active_turn {
-                    client.interrupt(turn).await?;
+                if self.active_turn.is_some() {
+                    // `/stop` is the typed form of Esc Esc: same tree-wide
+                    // stop, same answer for steering the agent had not read.
+                    client.interrupt_session(self.thread.id, true).await?;
                     self.notice = "Interrupted".into();
                 } else {
                     self.notice = "No active turn".into();
@@ -3004,7 +3002,6 @@ impl App {
             OptionsKind::CloudRouter
             | OptionsKind::InputQueue
             | OptionsKind::InputQueueActions
-            | OptionsKind::InputQueueEdit
             | OptionsKind::Management
             | OptionsKind::ManagementField
             | OptionsKind::ManagementValue
@@ -3798,6 +3795,9 @@ impl App {
 
     pub async fn switch_thread(&mut self, thread: Thread, client: &ApiClient) -> Result<()> {
         let previous_thread = self.thread.id;
+        // An unsaved queued-message edit belongs to the session being left;
+        // its set-aside draft is what that session keeps.
+        self.cancel_queue_edit();
         if self.composer.is_empty() && self.attachments.is_empty() {
             self.drafts.remove(&previous_thread);
         } else {

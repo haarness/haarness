@@ -229,6 +229,7 @@ def specification():
         "PreviewVersionQuery": obj({"path": S, "hash": S}, ("path", "hash")),
         "Browse": obj({"path": S, "prefix": S, "hidden": B, "limit": N, "after": S}),
         "BackgroundQuery": obj({"childThreadId": S}),
+        "InterruptQuery": obj({"resume": B}),
         "WaitQuery": obj({"timeout_ms": N}),
         "Filters": obj({"query": S, "offset": N, "limit": N}),
     }

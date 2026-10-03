@@ -71,9 +71,10 @@ fn subject(pending: &PendingPermissionInfo) -> Option<String> {
         if let (Some(agent), Some(model)) = (details["agent"].as_str(), details["model"].as_str()) {
             let previous = details["previousModel"].as_str().filter(|previous| *previous != model);
             let mut text = format!("Agent: {agent}\nModel: {model}");
-            if let Some(previous) = previous { text.push_str(&format!("\nPrevious model: {previous}")); }
+            if let Some(previous) = previous { text.push_str("\nPrevious model: "); text.push_str(previous); }
             if let Some(reason) = pending.detail["reason"].as_str().filter(|value| !value.trim().is_empty()) {
-                text.push_str(&format!("\nReason: {reason}"));
+                text.push_str("\nReason: ");
+                text.push_str(reason);
             }
             return Some(text);
         }

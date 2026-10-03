@@ -186,7 +186,16 @@ struct ActiveTurn {
     /// Why the runtime, not the user, cancelled this turn. A bare cancellation
     /// reads as the user's own stop; a server shutdown must say so.
     stop_reason: Mutex<Option<String>>,
+    /// The user stopped this turn and asked for steering it has not read yet
+    /// to be answered, rather than dropped.
+    answer_steer: AtomicBool,
 }
+
+/// Model-facing prompt for the turn that answers steering the user sent
+/// before stopping. The steering itself is already in the history above it.
+const STOP_CONTINUATION: &str = "<system-reminder>\nThe user stopped your previous work \
+before you read the message they sent while you were working. Reply to that message now. \
+Do not resume the stopped work unless the message asks you to.\n</system-reminder>";
 
 /// The transcript line for a turn the runtime had to stop.
 fn stopped_turn_message(reason: &str) -> String {
@@ -388,6 +397,51 @@ fn unconsumed_queued(items: &[Item], turn_id: TurnId) -> Vec<ItemId> {
             .then_some(item.id)
         })
         .collect()
+}
+
+/// Whether the user's latest steering in this turn still has no reply. Being
+/// sent to the model is not enough: a stop can cancel that request, so it
+/// counts as answered only once model output (text or a tool call) follows it.
+fn unanswered_steering(items: &[Item], turn_id: TurnId) -> bool {
+    let consumed: HashMap<ItemId, u64> = items
+        .iter()
+        .filter_map(|item| match item.data {
+            ItemData::QueueConsumed { item_id } => Some((item_id, item.sequence)),
+            _ => None,
+        })
+        .collect();
+    let latest = items
+        .iter()
+        .filter(|item| {
+            item.turn_id == Some(turn_id)
+                && matches!(
+                    item.data,
+                    ItemData::UserMessage {
+                        queued: true,
+                        synthetic: false,
+                        ..
+                    }
+                )
+        })
+        .map(|item| {
+            consumed
+                .get(&item.id)
+                .copied()
+                .unwrap_or(item.sequence)
+                .max(item.sequence)
+        })
+        .max();
+    let Some(reference) = latest else {
+        return false;
+    };
+    !items.iter().any(|item| {
+        item.turn_id == Some(turn_id)
+            && item.sequence > reference
+            && matches!(
+                item.data,
+                ItemData::AssistantMessage { .. } | ItemData::ToolCall { .. }
+            )
+    })
 }
 
 fn goal_tool_payload(state: Option<&GoalState>) -> serde_json::Value {
@@ -700,6 +754,7 @@ fn inject_goal_doctrine(
     });
 }
 
+#[derive(Clone)]
 pub struct AgentRuntime {
     repository: Arc<dyn ThreadRepository>,
     /// Runtime-owned configuration is replaced as one generation. A turn
@@ -748,6 +803,9 @@ pub struct AgentRuntime {
     /// threads. They reset with the provider process by design.
     tool_promotions: Arc<ToolPromotions>,
     snapshots: Option<Arc<dyn crate::SnapshotStore>>,
+    /// Threads whose queued prompts wait for the user: after Stop, or after a
+    /// queued prompt's own turn failed. A new message or Send resumes them.
+    queue_pauses: Arc<DashMap<ThreadId, ()>>,
 }
 
 #[derive(Clone)]
@@ -873,6 +931,7 @@ impl AgentRuntime {
             tool_execution_gates: Arc::new(DashMap::new()),
             tool_promotions: Arc::new(DashMap::new()),
             snapshots: None,
+            queue_pauses: Arc::new(DashMap::new()),
         }
     }
 
@@ -1305,8 +1364,16 @@ impl AgentRuntime {
                     },
                 )
                 .await?;
-            self.publish_input_queue(id).await?;
-            let turn = self.resume_input_queue(id, None).await?;
+            let queue = self.publish_input_queue(id).await?;
+            // Nothing is running, so the message just queued runs now, ahead of
+            // any prompts a stop paused; they continue after it.
+            let turn = match self
+                .resume_input_queue(id, Some((request.request_id, queue.revision)))
+                .await
+            {
+                Err(CoreError::Conflict(_)) => self.resume_input_queue(id, None).await?,
+                turn => turn?,
+            };
             return Ok(QueueInputResponse {
                 queued: turn.is_none(),
                 item: None,
@@ -2049,6 +2116,16 @@ impl AgentRuntime {
     /// interrupting only that (already completed) turn cannot implement the
     /// user's "stop this session" intent.
     pub async fn interrupt_thread_tree(&self, root: ThreadId) -> CoreResult<u64> {
+        self.interrupt_thread_tree_with(root, false).await
+    }
+
+    /// Stop a conversation and everything it delegated. `answer_steer` applies
+    /// to the root conversation only; see [`Self::interrupt_with`].
+    pub async fn interrupt_thread_tree_with(
+        &self,
+        root: ThreadId,
+        answer_steer: bool,
+    ) -> CoreResult<u64> {
         let thread_ids = self.thread_tree_ids(root).await?;
 
         let tasks = self
@@ -2067,12 +2144,18 @@ impl AgentRuntime {
         let active_turns = self
             .active
             .iter()
-            .filter_map(|entry| thread_ids.contains(entry.key()).then_some(entry.value().id))
+            .filter_map(|entry| {
+                thread_ids
+                    .contains(entry.key())
+                    .then_some((*entry.key(), entry.value().id))
+            })
             .collect::<Vec<_>>();
-        for turn_id in &active_turns {
+        for (thread_id, turn_id) in &active_turns {
             // A runner may finish between the snapshot and interruption. That
             // is already the requested terminal outcome, so tolerate it.
-            if let Err(error) = self.interrupt(*turn_id).await
+            if let Err(error) = self
+                .interrupt_with(*turn_id, answer_steer && *thread_id == root)
+                .await
                 && !matches!(error, CoreError::NotFound(_))
             {
                 return Err(error);
@@ -3685,6 +3768,7 @@ impl AgentRuntime {
             changed: Notify::new(),
             accepting: AsyncMutex::new(false),
             stop_reason: Mutex::new(None),
+            answer_steer: AtomicBool::new(false),
         });
         self.active.insert(thread_id, active.clone());
 
@@ -3867,11 +3951,70 @@ impl AgentRuntime {
             snapshot_state: AsyncMutex::new(TurnSnapshotState::new()),
             goal_accounting: Mutex::new(None),
             workflow_observations: Mutex::new(HashSet::new()),
+            queue_pauses: self.queue_pauses.clone(),
+            answer_steer: AtomicBool::new(false),
         });
+        // A real message, or Send on a queued one, resumes a paused queue.
+        if !task.request.synthetic {
+            self.queue_pauses.remove(&thread_id);
+        }
+        let runtime = self.clone();
+        let from_queue = queue_revision.is_some();
         tokio::spawn(async move {
-            task.run().await;
+            let result = Arc::clone(&task).run_with_cleanup().await;
+            runtime.follow_turn(task, result, from_queue).await;
         });
         Ok(turn)
+    }
+
+    /// Start whatever comes after a closed root turn. A stop that left unread
+    /// steering gets a continuation that answers it. Otherwise the next queued
+    /// prompt starts as its own turn, unless the user stopped the work or the
+    /// failed turn was itself a queued prompt; those leave the queue paused.
+    // Boxed with an explicit `Send` bound: this starts turns, whose runners
+    // call back here, and that recursion is otherwise opaque to `Send` checks.
+    fn follow_turn(
+        self,
+        task: Arc<RunnerTask>,
+        result: CoreResult<()>,
+        from_queue: bool,
+    ) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(async move { self.start_follow_up(&task, &result, from_queue).await })
+    }
+
+    async fn start_follow_up(&self, task: &RunnerTask, result: &CoreResult<()>, from_queue: bool) {
+        let thread_id = task.thread.id;
+        if task.answer_steer.load(Ordering::SeqCst) {
+            let request = QueueInputRequest {
+                preview: false,
+                delivery: haarness_protocol::InputDelivery::Steer,
+                request_id: RequestId::new(),
+                text: STOP_CONTINUATION.into(),
+                attachments: Vec::new(),
+                synthetic: true,
+            };
+            if let Err(error) = self
+                .queue_input_with_options(thread_id, request, false, task.request.tools.clone())
+                .await
+            {
+                tracing::warn!(%error, thread = %thread_id, "could not answer steering after stop");
+            }
+            return;
+        }
+        match result {
+            Err(CoreError::Cancelled) => return,
+            Err(_) if from_queue => {
+                self.queue_pauses.insert(thread_id, ());
+                return;
+            }
+            _ => {}
+        }
+        if self.queue_pauses.contains_key(&thread_id) {
+            return;
+        }
+        if let Err(error) = self.resume_input_queue(thread_id, None).await {
+            tracing::warn!(%error, thread = %thread_id, "could not start the next queued prompt");
+        }
     }
 
     fn schedule_title(&self, thread: &Thread, turn: &Turn, components: &RuntimeComponents) {
@@ -3957,6 +4100,13 @@ impl AgentRuntime {
     }
 
     pub async fn interrupt(&self, turn_id: TurnId) -> CoreResult<Turn> {
+        self.interrupt_with(turn_id, false).await
+    }
+
+    /// Stop a turn. With `answer_steer`, steering the turn has not read yet
+    /// is answered by a continuation instead of being dropped. Either way the
+    /// thread's queued prompts pause until the user resumes them.
+    pub async fn interrupt_with(&self, turn_id: TurnId, answer_steer: bool) -> CoreResult<Turn> {
         let turn = self.repository.get_turn(turn_id).await?;
         // A user stopping the parent session means stop its delegated work as
         // well, even when a task already returned a background acknowledgement.
@@ -3969,6 +4119,8 @@ impl AgentRuntime {
             .filter(|active| active.value().id == turn_id)
             .map(|active| Arc::clone(active.value()));
         if let Some(active) = &active {
+            self.queue_pauses.insert(turn.thread_id, ());
+            active.answer_steer.store(answer_steer, Ordering::SeqCst);
             // Signal cancellation before any persistence or goal bookkeeping.
             // Those operations may wait on locks or storage, but a stalled
             // provider stream must stop as soon as the user confirms.
@@ -4167,6 +4319,9 @@ struct RunnerTask {
     /// workflow completion is pushed back into the launching conversation, so
     /// repeated wait/inspect calls only burn context and provider tokens.
     workflow_observations: Mutex<HashSet<String>>,
+    queue_pauses: Arc<DashMap<ThreadId, ()>>,
+    /// Set when a stop leaves unread steering for a continuation to answer.
+    answer_steer: AtomicBool,
 }
 
 struct TurnToolInvoker {
@@ -4537,46 +4692,12 @@ struct PermissionResolution {
 }
 
 impl RunnerTask {
-    async fn promote_deferred_input(&self) -> CoreResult<bool> {
-        if self.cancel.is_cancelled() {
-            return Err(CoreError::Cancelled);
-        }
-        let Some(item) = self
-            .repository
-            .promote_input(self.thread.id, self.turn.id, None)
-            .await?
-        else {
-            return Ok(false);
-        };
-        self.events.publish_scoped(
-            "item.created",
-            Some(self.thread.id),
-            Some(self.root_thread_id),
-            Some(self.turn.id),
-            Some(item.id),
-            json!(item),
-        );
-        let queue = self.repository.input_queue(self.thread.id).await?;
-        self.events.publish(
-            "input.queue.updated",
-            Some(self.thread.id),
-            None,
-            None,
-            json!(queue),
-        );
-        Ok(true)
-    }
-
     fn custom_agent(&self, agent: &str) -> Option<crate::CustomAgent> {
         self.live_agents
             .read()
             .iter()
             .find(|candidate| candidate.id == agent)
             .cloned()
-    }
-
-    async fn run(self: Arc<Self>) {
-        let _ = self.run_with_cleanup().await;
     }
 
     #[instrument(
@@ -4619,7 +4740,11 @@ impl RunnerTask {
             // acknowledgement plus a retryable error clears the transient
             // QUEUED state and makes the recovery action explicit.
             if let Err(error_value) = &result {
-                self.mark_unconsumed_queue_failed(error_value).await;
+                if matches!(error_value, CoreError::Cancelled) && self.steer_answer_requested() {
+                    self.keep_unanswered_steering().await;
+                } else {
+                    self.mark_unconsumed_queue_failed(error_value).await;
+                }
             }
         }
         // Capture any tail after the last provider event (including tool or
@@ -4757,6 +4882,26 @@ impl RunnerTask {
             .list_items(self.thread.id, None)
             .await
             .is_ok_and(|items| !unconsumed_queued(&items, self.turn.id).is_empty())
+    }
+
+    fn steer_answer_requested(&self) -> bool {
+        self.depth == 0
+            && self.active.get(&self.thread.id).is_some_and(|active| {
+                active.id == self.turn.id && active.answer_steer.load(Ordering::SeqCst)
+            })
+    }
+
+    /// Stop with unanswered steering: record it in the history where the
+    /// work stopped, so the continuation that follows this turn answers it.
+    async fn keep_unanswered_steering(&self) {
+        let Ok(items) = self.repository.list_items(self.thread.id, None).await else {
+            return;
+        };
+        let unanswered = unanswered_steering(&items, self.turn.id);
+        for item_id in unconsumed_queued(&items, self.turn.id) {
+            let _ = self.publish_item(ItemData::QueueConsumed { item_id }).await;
+        }
+        self.answer_steer.store(unanswered, Ordering::SeqCst);
     }
 
     async fn mark_unconsumed_queue_failed(&self, error_value: &CoreError) {
@@ -5119,8 +5264,7 @@ impl RunnerTask {
                             CoreError::Conflict("turn lost its active queue state".into())
                         })?;
                     let mut accepting = active.accepting.lock().await;
-                    if !self.has_unconsumed_queued().await && !self.promote_deferred_input().await?
-                    {
+                    if !self.has_unconsumed_queued().await {
                         *accepting = false;
                         let turn = self
                             .repository
@@ -5857,15 +6001,10 @@ impl RunnerTask {
                             }
                         }
                     }
-                    // Explicitly deferred prompts never enter an intermediate tool/model
-                    // round. Deliver one only when this work would otherwise go idle.
-                    let deferred = if !queued && !goal_continues && !self.cancel.is_cancelled() {
-                        self.promote_deferred_input().await?
-                    } else {
-                        false
-                    };
-                    if queued || goal_continues || deferred {
-                        if queued || deferred {
+                    // Queued prompts are not delivered here: each starts as its own
+                    // turn once this one closes (see `AgentRuntime::follow_turn`).
+                    if queued || goal_continues {
+                        if queued {
                             tool_rounds = 0;
                         }
                         start_goal_logical_turn = goal_continues;
@@ -7575,6 +7714,7 @@ impl RunnerTask {
             changed: Notify::new(),
             accepting: AsyncMutex::new(false),
             stop_reason: Mutex::new(None),
+            answer_steer: AtomicBool::new(false),
         });
         self.active.insert(child.id, active.clone());
         let mut accepting = active.accepting.lock().await;
@@ -7657,6 +7797,8 @@ impl RunnerTask {
             snapshot_state: AsyncMutex::new(TurnSnapshotState::new()),
             goal_accounting: Mutex::new(None),
             workflow_observations: Mutex::new(HashSet::new()),
+            queue_pauses: self.queue_pauses.clone(),
+            answer_steer: AtomicBool::new(false),
         });
         child_task.publish_task_update("running");
         let task = Arc::new(BackgroundTask {
@@ -7889,6 +8031,7 @@ impl RunnerTask {
             tool_execution_gates: self.tool_execution_gates.clone(),
             tool_promotions: self.tool_promotions.clone(),
             snapshots: self.snapshots.clone(),
+            queue_pauses: self.queue_pauses.clone(),
         }
     }
 }

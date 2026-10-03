@@ -31,48 +31,82 @@ with tempfile.TemporaryDirectory(prefix='haarness-input-tmux-') as directory:
         def keys(*values):run('tmux','send-keys','-t',session,*values)
         def text(value):run('tmux','send-keys','-l','-t',session,value)
         def send(value):text(value if value.startswith('/') else ' '+value);keys('Enter')
+        def row(prefix):
+            return next((i for i,line in enumerate(pane().splitlines()) if line.startswith(prefix)),None)
+        def click(prefix):
+            # SGR mouse press + release on the strip row, as a terminal reports it.
+            index=until(lambda:row(prefix),f'{prefix!r} is not on screen')
+            for final in 'Mm':text(f'\x1b[<0;5;{index+1}{final}')
         run('tmux','new-session','-d','-x','160','-y','48','-s',session,command)
         until(lambda:'h a a r n e s s' in pane(),'TUI did not open')
         send('!tool bash {"command":"sleep 60"}')
         turn=until(lambda:api('/turns/active'),'initial task did not start')[0]
-        permission={'threadId':turn['threadId'],'turnId':turn['id']}
         tid=turn['threadId']
         queue=lambda:api(f'/threads/{tid}/input/queue')
+        # Steer is the default: a plain message joins the running work.
+        send('steer while sleeping')
+        until(lambda:'Steering · 1 — joins at the next step' in pane(),'steering strip missing')
         text('deferred one');keys('M-Enter')
         until(lambda:len(queue()['items'])==1,'Alt+Enter did not queue')
         text('deferred two');keys('M-Enter')
         until(lambda:len(queue()['items'])==2,'second prompt did not queue')
-        until(lambda:'2 queued' in pane(),'pending strip did not update')
+        until(lambda:'▎ Queued · 2' in pane(),'queue strip did not update')
+        assert row('▎ 1. deferred one') is not None and row('▎ 2. deferred two') is not None, pane()
         assert not any(item['data'].get('text')=='deferred one' for item in api(f'/threads/{tid}/items'))
         evidence.append('WAITING\n'+pane())
-        send('/queue');until(lambda:'Queued messages' in pane(),'queue menu missing')
-        keys('Enter');until(lambda:'Edit message' in pane(),'message actions missing')
-        keys('Enter');until(lambda:'Edit queued message' in pane(),'queue editor missing')
+        # Click a queued row to act on it; Edit loads it into the prompt and
+        # sets the draft aside until the edit is saved.
+        text(' my draft')
+        click('▎ 1. deferred one')
+        until(lambda:'Steer now' in pane(),'clicking a queued row did not open its actions')
+        keys('Down','Enter')
+        until(lambda:'Editing queued message · Enter saves · Click to cancel' in pane(),'edit did not load into the prompt')
+        assert 'Editing — Enter saves it in place' in pane(), pane()
+        evidence.append('EDITING\n'+pane())
         text(' edited');keys('Enter')
         until(lambda:queue()['items'][0]['text']=='deferred one edited','edit did not persist')
-        keys('Down','Enter');until(lambda:'Move up' in pane(),'actions missing after edit')
-        keys('Down','Down','Enter')
+        until(lambda:'my draft' in pane() and 'Editing' not in pane(),'draft was not restored after saving')
+        assert [item['text'] for item in queue()['items']]==['deferred one edited','deferred two']
+        keys('C-u')
+        # /queue still lists everything; a listed action returns to the list.
+        send('/queue');until(lambda:'Queued messages' in pane(),'queue menu missing')
+        keys('Down','Enter');until(lambda:'Move up' in pane(),'second message has no Move up')
+        keys('Down','Down','Down','Enter')
         until(lambda:queue()['items'][0]['text']=='deferred two','reorder did not persist')
-        # First item -> Remove action.
-        keys('Enter');until(lambda:'Remove message' in pane(),'remove action missing')
-        keys('Down','Down','Down','Down','Enter')
+        until(lambda:'Queued messages' in pane(),'reorder did not return to the list')
+        keys('Enter');until(lambda:'discard it' in pane(),'remove action missing')
+        keys('Down','Down','Enter')
         until(lambda:len(queue()['items'])==1,'remove did not persist')
         keys('Escape')
-        api(f'/turns/{permission["turnId"]}/interrupt',{})
+        until(lambda:'Queued messages' not in pane(),'queue list did not close')
+        # Stop from the terminal (Esc twice): the queue pauses, and the unread
+        # steering is answered instead of dropped.
+        keys('Escape');until(lambda:'esc again to interrupt' in pane(),'first Esc did not arm Stop')
+        keys('Escape')
+        def steer_answered():
+            items=api(f'/threads/{tid}/items')
+            steer=next((i for i,item in enumerate(items) if (item['data'].get('text') or '').strip()=='steer while sleeping'),None)
+            return steer is not None and any(item['data'].get('type')=='assistant_message' for item in items[steer+1:])
+        # The answer is a continuation turn that starts once the stopped one
+        # closes; give it time rather than racing the gap between them.
+        try:answered=until(steer_answered,'')
+        except AssertionError:answered=False
         until(lambda:not api('/turns/active'),'stop did not finish')
-        until(lambda:'paused' in pane(),'remaining queue was not parked')
+        until(lambda:'Queue paused — send when ready' in pane(),'remaining queue was not parked')
         assert len(queue()['items'])==1
-        # Resume the selected parked message through the terminal controls.
+        evidence.append('STOPPED\n'+pane())
+        # Resume the parked message through the terminal controls.
         send('/queue');until(lambda:'Queued messages' in pane(),'parked queue missing')
         keys('Enter');until(lambda:'Send now' in pane(),'parked message has no Send action')
         evidence.append('PARKED\n'+pane())
-        keys('Down','Enter')
+        keys('Enter')
         until(lambda:not queue()['items'],'Send did not drain parked input')
         until(lambda:not api('/turns/active'),'resumed input did not finish')
         until(lambda:'deferred one edited' in pane(),'resumed input missing in transcript')
         evidence.append('DELIVERED\n'+pane())
         Path('/tmp/haarness-input-queue-tmux.txt').write_text('\n\n'.join(evidence))
-        print('PASS: TUI queue, edit, reorder, remove, Stop/park and Send; /tmp/haarness-input-queue-tmux.txt')
+        assert answered, 'Stop (resume=true) did not answer the unread steering message'
+        print('PASS: TUI steer, queue strip, click/edit in prompt, reorder, remove, Stop/park and Send; /tmp/haarness-input-queue-tmux.txt')
     except BaseException:
         try:Path('/tmp/haarness-input-queue-tmux-failure.txt').write_text(pane())
         except Exception:pass
