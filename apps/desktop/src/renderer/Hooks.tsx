@@ -4,7 +4,7 @@ import { createStore } from "solid-js/store";
 import { useApp } from "./state";
 import { FormDialog } from "./FormDialog";
 import { Select } from "./Select";
-import { confirm } from "./ui";
+import { confirm, Empty } from "./ui";
 import "./management.css";
 
 interface Hook {
@@ -135,7 +135,12 @@ export function Hooks() {
           </Show>
           <Show
             when={catalog()!.items.length}
-            fallback={<p class="muted">{t("No hooks configured.")}</p>}
+            fallback={
+              <Empty
+                title={t("No hooks yet")}
+                detail={t("Hooks run a command when something happens, like before a tool runs or when a reply finishes.")}
+              />
+            }
           >
             <For each={catalog()!.items}>
               {(hook) => (

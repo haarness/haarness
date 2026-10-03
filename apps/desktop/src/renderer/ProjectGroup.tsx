@@ -1,4 +1,4 @@
-import { t } from "./i18n";
+import { language, t } from "./i18n";
 import { splitSchedules } from "./schedule-data";
 import { conversationRoot } from "../thread-kinds";
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
@@ -739,27 +739,62 @@ export function SessionList(props: {
         </p>
       </Show>
       <For each={failures()}>
-        {(location) => (
-          <div
-            class="project-error"
-            role="status"
-            title={app.indexes()[location.id]?.error}
-          >
-            <span>
-              {props.project &&
-              location.id === primaryLocation(props.project).id
-                ? t("Couldn’t open this project.")
-                : t("Couldn’t open {name}.", {
-                    name: t(locationName(location)),
-                  })}
-            </span>
-            <button
-              onClick={() => app.run(() => app.activateProject(location.id))}
+        {(location) => {
+          // A stopped Cloud session is not broken; it needs starting.
+          const stopped = () =>
+            !!location.cloudSession &&
+            /not running|stopped/i.test(app.indexes()[location.id]?.error ?? "");
+          const [starting, setStarting] = createSignal(false);
+          async function start() {
+            setStarting(true);
+            try {
+              await window.haarness.account({ action: "session-start", id: location.cloudSession });
+              const deadline = Date.now() + 180_000;
+              while (Date.now() < deadline) {
+                const sessions = await window.haarness.account({ action: "sessions" });
+                const state = sessions.items?.find((item: { id: string }) => item.id === location.cloudSession)
+                  ?.workspace?.observedState;
+                if (state === "running") break;
+                if (state === "failed") throw new Error(t("This Cloud session failed to start."));
+                await new Promise((resolve) => setTimeout(resolve, 1500));
+              }
+              await app.activateProject(location.id);
+            } finally {
+              setStarting(false);
+            }
+          }
+          return (
+            <div
+              class="project-error"
+              role="status"
+              title={app.indexes()[location.id]?.error}
             >
-              {t("Retry")}
-            </button>
-          </div>
-        )}
+              <span>
+                {stopped()
+                  ? starting()
+                    ? t("Starting this Cloud session…")
+                    : t("This Cloud session is stopped.")
+                  : props.project &&
+                      location.id === primaryLocation(props.project).id
+                    ? t("Couldn’t open this project.")
+                    : t("Couldn’t open {name}.", {
+                        name: t(locationName(location)),
+                      })}
+              </span>
+              <button
+                disabled={starting()}
+                onClick={() =>
+                  app.run(async () => {
+                    if (stopped()) await start();
+                    else await app.activateProject(location.id);
+                  })
+                }
+              >
+                {stopped() ? t("Start") : t("Retry")}
+              </button>
+            </div>
+          );
+        }}
       </For>
     </div>
   );
@@ -860,11 +895,11 @@ function ScheduledSessions(props: { rows: Conversation[] }) {
                             app.state.panel === "chat";
                           const label = () =>
                             new Date(row().thread.createdAt).toLocaleString(
-                              [],
+                              language(),
                               {
                                 month: "short",
                                 day: "numeric",
-                                hour: "2-digit",
+                                hour: "numeric",
                                 minute: "2-digit",
                               },
                             );

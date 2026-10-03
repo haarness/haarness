@@ -29,13 +29,18 @@ export function ProjectHome() {
             fallback={
               <>
                 <h1>
-                  {projects().length
-                    ? "Choose a project"
-                    : "Open a project to get started"}
+                  {app.currentServer().cloud
+                    ? t("Open a Cloud session")
+                    : projects().length
+                      ? t("Choose a project")
+                      : t("Open a project to get started")}
                 </h1>
                 <p>
-                  {t("Choose the folder where Haarness should work")}
-                  {app.currentServer().url ? " on this server" : ""}.
+                  {app.currentServer().cloud
+                    ? t("Start or open a session from your Haarness account.")
+                    : app.currentServer().url
+                      ? t("Choose the folder where Haarness should work on this server.")
+                      : t("Choose the folder where Haarness should work.")}
                 </p>
               </>
             }
@@ -58,12 +63,14 @@ export function ProjectHome() {
             class="primary project-home-open"
             onClick={() => app.run(() => app.openProject())}
           >
-            <Icon name="folder" size="md" />
-            {state.projectFailure
-              ? "Choose another project"
-              : projects().length
-                ? "Open another project"
-                : "Open project"}
+            <Icon name={app.currentServer().cloud ? "cloud" : "folder"} size="md" />
+            {app.currentServer().cloud
+              ? t("Cloud sessions")
+              : state.projectFailure
+                ? t("Choose another project")
+                : projects().length
+                  ? t("Open another project")
+                  : t("Open project")}
           </button>
           <Show when={projects().length}>
             <div class="project-home-recent">
@@ -74,7 +81,7 @@ export function ProjectHome() {
                     <li>
                       <button
                         class="project-home-row"
-                        title={project.root}
+                        title={primaryLocation(project).cloudSession ? undefined : project.root}
                         onClick={() =>
                           app.run(() =>
                             app.connect({
@@ -83,10 +90,17 @@ export function ProjectHome() {
                           )
                         }
                       >
-                        <Icon name="folder" size="md" />
+                        <Icon
+                          name={primaryLocation(project).cloudSession ? "cloud" : "folder"}
+                          size="md"
+                        />
                         <span>
                           <strong>{project.label}</strong>
-                          <small>{project.root}</small>
+                          <small>
+                            {primaryLocation(project).cloudSession
+                              ? t("Cloud session")
+                              : project.root}
+                          </small>
                         </span>
                         <Icon name="chevron" size="sm" />
                       </button>

@@ -24,7 +24,7 @@ test("Desktop switches Cloud routers live with correct model prices and credit s
       await page.getByRole("button",{name:status.user.displayName,exact:true}).click();
       const dialog=page.getByRole("dialog",{name:"Haarness account",exact:true});
       const select=dialog.getByRole("combobox",{name:"Cloud router",exact:true});
-      await expect(select).toBeVisible();await select.selectOption(row.id);
+      await expect(select).toBeVisible();await select.click();await dialog.locator(`[role="option"][data-value=${JSON.stringify(row.id)}]`).click();
       await expect.poll(()=>page.evaluate(()=>window.haarness.account({action:"status"}))).toMatchObject({selectedRouterId:row.id});
       await expect(dialog.getByRole("alert")).toHaveCount(0);
       await page.screenshot({path:test.info().outputPath(`router-${row.credentialMode}.png`)});

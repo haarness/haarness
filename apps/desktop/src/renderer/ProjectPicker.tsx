@@ -138,7 +138,7 @@ export function ProjectPicker(props: { heading?: boolean }) {
         type="button"
         class={props.heading ? "heading-project-picker" : "project-picker"}
         aria-label={
-          props.heading ? "Choose project" : "Choose project for new chat"
+          props.heading ? t("Choose project") : t("Choose project for new chat")
         }
         aria-haspopup="dialog"
         aria-expanded={open()}
@@ -154,7 +154,7 @@ export function ProjectPicker(props: { heading?: boolean }) {
         <Show when={!props.heading}>
           <Icon name="folder" size="sm" />
         </Show>
-        {selected()?.label ?? "Choose a project"}
+        {selected()?.label ?? t("Choose a project")}
         {/* A caret marks this as a control rather than a word in the sentence.
             It contributes no text, so the heading still reads as one line. */}
         <Icon name="down" size="xs" class="picker-caret" />

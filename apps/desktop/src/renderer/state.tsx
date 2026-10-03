@@ -40,7 +40,7 @@ import {
   type DesktopEvent,
   type NotificationTarget,
 } from "../shared";
-import { localServer, serverKey, serverProjects } from "../servers";
+import { cloudServers, localServer, serverKey, serverProjects } from "../servers";
 import { reduceEvent, type Live } from "./sync";
 import { themeColors } from "../themes";
 import {
@@ -548,7 +548,11 @@ function createApp() {
     }
     return pending;
   }
-  const servers = createMemo(() => [localServer, ...state.servers]);
+  const servers = createMemo(() => [
+    localServer,
+    ...state.servers,
+    ...cloudServers(state.recent),
+  ]);
   const currentServer = () =>
     servers().find((item) => item.id === state.activeServer) ?? localServer;
   const visibleLocations = createMemo(() =>
@@ -622,6 +626,11 @@ function createApp() {
     const server = currentServer();
     if (server.url) {
       set("remoteProjectRequest", { server, newChat });
+      return false;
+    }
+    // Cloud sessions are started and opened from the account dialog.
+    if (server.cloud) {
+      window.dispatchEvent(new CustomEvent("haarness:account"));
       return false;
     }
     return connect({}, newChat);

@@ -1428,3 +1428,24 @@
   background: color-mix(in srgb, var(--scrim) 78%, transparent);
   backdrop-filter: blur(6px);
 }
+
+/* Shortcuts read as keys, with the editable accelerator beside them. */
+.setting-row .shortcut-preview {
+  min-width: 56px;
+  text-align: center;
+  color: var(--text);
+}
+.setting-row input.shortcut-input {
+  width: 150px;
+  font-family: var(--mono);
+  font-size: var(--ui-sm);
+  color: var(--muted);
+}
+.setting-row input.shortcut-input:focus {
+  color: var(--text);
+}
+.settings-after-list {
+  display: flex;
+  gap: var(--s2);
+  margin-block-start: var(--s5);
+}

@@ -16,7 +16,10 @@ import {
   toolOutput,
   readable,
   toolResult,
+  patchFiles,
+  routineEditOutput,
 } from "../src/renderer/transcript";
+import { lines } from "../src/renderer/diff";
 
 test("shell exit status is reflected in tool presentation without interpreting other tools as processes", () => {
   const result = { output: "stderr", is_error: false, metadata: { exit: 7 } };
@@ -248,6 +251,71 @@ test("edits are recognised as changes, other calls are not", () => {
   );
   assert.deepEqual(toolChanges("bash", { command: "rm -rf /" }), []);
   assert.deepEqual(toolChanges("todowrite", { todos: [] }), []);
+});
+
+test("a Codex patch envelope reads as the files it edits, and the result's diffs win", () => {
+  const input = [
+    "*** Begin Patch",
+    "*** Update File: src/math.ts",
+    "@@ export function average(values: number[]) {",
+    "   return total / values.length;",
+    " }",
+    "+",
+    "+export const half = (value: number) => value / 2;",
+    "*** Add File: src/new.ts",
+    "+export {};",
+    "*** Delete File: src/old.ts",
+    "*** End Patch",
+  ].join("\n");
+  assert.deepEqual(
+    describeTool("apply_patch", { input }),
+    { icon: "edit", verb: "Edited", target: "src/math.ts, src/new.ts +1" },
+  );
+  assert.equal(
+    describeTool("apply_patch", { input: input.replace(/\*\*\* (Add|Delete) File: .*\n(\+export \{\};\n)?/g, "") }).target,
+    "src/math.ts",
+  );
+  const files = patchFiles(input);
+  assert.deepEqual(
+    files.map(({ path, additions, deletions }) => ({ path, additions, deletions })),
+    [
+      { path: "src/math.ts", additions: 2, deletions: 0 },
+      { path: "src/new.ts", additions: 1, deletions: 0 },
+      { path: "src/old.ts", additions: 0, deletions: 0 },
+    ],
+  );
+  // The synthesized unified diff parses, so the preview shows real rows.
+  assert.deepEqual(
+    lines({ file: "src/math.ts", patch: files[0].patch } as never)
+      .filter((row) => row.kind === "add")
+      .map((row) => row.text),
+    ["", "export const half = (value: number) => value / 2;"],
+  );
+  assert.deepEqual(toolChanges("apply_patch", { input }), files);
+  const result = {
+    output: "updated src/math.ts",
+    is_error: false,
+    metadata: {
+      diffs: [
+        { file: "src/math.ts", before: "a\n", after: "a\nb\n", additions: 1, deletions: 0 },
+      ],
+    },
+  };
+  assert.deepEqual(toolChanges("apply_patch", { input }, result), [
+    { path: "src/math.ts", patch: undefined, before: "a\n", after: "a\nb\n", additions: 1, deletions: 0 },
+  ]);
+  // A failed call changed nothing, so its arguments are all there is to show.
+  assert.deepEqual(toolChanges("apply_patch", { input }, { ...result, is_error: true }), files);
+  assert.deepEqual(patchFiles("@@ -1 +1 @@\n-a\n+b\n"), []);
+});
+
+test("routine edit confirmations are dropped under a diff, diagnostics are not", () => {
+  assert.equal(routineEditOutput("updated src/math.ts"), true);
+  assert.equal(routineEditOutput("Success. Updated the following files:\nM src/math.ts\nA src/new.ts"), true);
+  assert.equal(routineEditOutput("Wrote 12 lines to src/new.ts"), true);
+  assert.equal(routineEditOutput("updated src/math.ts\nerror TS2304: Cannot find name 'x'."), false);
+  assert.equal(routineEditOutput("LSP errors detected: 2"), false);
+  assert.equal(routineEditOutput(""), false);
 });
 
 test("a permission shows its command, and falls back to the raw payload", () => {

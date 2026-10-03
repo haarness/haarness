@@ -44,7 +44,7 @@ const namedTools: Record<string, { icon: IconName; verb: string }> = {
   write: { icon: "edit", verb: "Wrote" },
   edit: { icon: "edit", verb: "Edited" },
   multiedit: { icon: "edit", verb: "Edited" },
-  apply_patch: { icon: "edit", verb: "Patched" },
+  apply_patch: { icon: "edit", verb: "Edited" },
   list: { icon: "folder", verb: "Listed" },
   glob: { icon: "search", verb: "Matched" },
   grep: { icon: "search", verb: "Searched" },
@@ -102,6 +102,18 @@ export function describeTool(name: string, args: unknown): ToolShape {
   if (name === "list" && ["", ".", "./"].includes(toolTarget(args)))
     // The root has no name of its own; "." would only make a reader pause.
     return { ...known, target: "the project folder" };
+  if (name === "apply_patch" && typeof record?.input === "string") {
+    // The envelope is instructions for the tool; the reader wants the files.
+    const files = patchFiles(record.input).map((file) => file.path);
+    if (files.length)
+      return {
+        ...known,
+        target:
+          files.length > 2
+            ? `${files[0]}, ${files[1]} +${files.length - 2}`
+            : files.join(", "),
+      };
+  }
   if (known) return { ...known, target: toolTarget(args) };
   const kind = toolKind(name);
   return {
@@ -317,14 +329,92 @@ export interface Change {
   before?: string;
   after?: string;
   patch?: string;
+  additions?: number;
+  deletions?: number;
 }
-export function toolChanges(name: string, args: unknown): Change[] {
+/**
+ * The files in a Codex-style patch envelope (`*** Begin Patch` …
+ * `*** End Patch`), each as a unified diff the renderer already understands.
+ * Line numbers are unknown until the tool runs, so hunks start at 1; previews
+ * hide hunk headers, and the result's own diffs replace these once it lands.
+ */
+export function patchFiles(text: string): (Change & { path: string })[] {
+  if (!/^\*\*\* Begin Patch/m.test(text)) return [];
+  const files: { path: string; hunks: string[][] }[] = [];
+  let file: (typeof files)[number] | undefined;
+  let hunk: string[] | undefined;
+  for (const line of text.split("\n")) {
+    const header = /^\*\*\* (Add|Update|Delete) File: (.+)$/.exec(line);
+    if (header) {
+      file = { path: header[2].trim(), hunks: [] };
+      hunk = undefined;
+      files.push(file);
+      continue;
+    }
+    if (!file || line.startsWith("*** ")) continue;
+    if (line.startsWith("@@")) {
+      hunk = [];
+      file.hunks.push(hunk);
+      continue;
+    }
+    if (!/^[ +-]/.test(line)) continue;
+    if (!hunk) file.hunks.push((hunk = []));
+    hunk.push(line);
+  }
+  return files.map(({ path, hunks }) => {
+    const body = hunks
+      .filter((rows) => rows.length)
+      .map((rows) => {
+        const before = rows.filter((row) => row[0] !== "+").length;
+        const after = rows.filter((row) => row[0] !== "-").length;
+        return `@@ -1,${before} +1,${after} @@\n${rows.join("\n")}`;
+      });
+    return {
+      path,
+      patch: `--- a/${path}\n+++ b/${path}\n${body.join("\n")}\n`,
+      additions: hunks.flat().filter((row) => row[0] === "+").length,
+      deletions: hunks.flat().filter((row) => row[0] === "-").length,
+    };
+  });
+}
+/** What an edit tool reports it changed, which beats re-deriving it from the call. */
+function resultChanges(metadata: unknown): Change[] {
+  const diffs = object(metadata)?.diffs;
+  if (!Array.isArray(diffs)) return [];
+  return diffs.flatMap((entry) => {
+    const diff = object(entry);
+    if (typeof diff?.file !== "string") return [];
+    const count = (value: unknown) =>
+      typeof value === "number" ? value : undefined;
+    const text = (value: unknown) =>
+      typeof value === "string" ? value : undefined;
+    return [
+      {
+        path: diff.file,
+        patch: text(diff.patch),
+        before: text(diff.before) ?? (text(diff.patch) ? undefined : ""),
+        after: text(diff.after) ?? (text(diff.patch) ? undefined : ""),
+        additions: count(diff.additions),
+        deletions: count(diff.deletions),
+      },
+    ];
+  });
+}
+export function toolChanges(
+  name: string,
+  args: unknown,
+  result?: ToolResult,
+): Change[] {
   if (
     !args ||
     typeof args !== "object" ||
     !/write|edit|patch|apply/.test(name)
   )
     return [];
+  if (result && !result.is_error) {
+    const reported = resultChanges(result.metadata);
+    if (reported.length) return reported;
+  }
   const record = args as Record<string, unknown>;
   const text = (...keys: string[]) => {
     for (const key of keys) {
@@ -335,6 +425,8 @@ export function toolChanges(name: string, args: unknown): Change[] {
   };
   const path = text("path", "file_path", "filePath") ?? "";
   const patch = text("input", "patch", "diff");
+  const envelope = patch ? patchFiles(patch) : [];
+  if (envelope.length) return envelope;
   if (patch && /^(\*\*\*|---|@@|diff )/m.test(patch))
     return [{ path: path || "patch", patch }];
   const before = text("old", "old_string", "oldText");
@@ -356,6 +448,23 @@ export function toolChanges(name: string, args: unknown): Change[] {
         after: typeof edit.new === "string" ? edit.new : "",
       }));
   return [];
+}
+/**
+ * "updated src/math.ts" under a diff of src/math.ts says nothing new. An edit's
+ * output is kept only when it carries more than a routine confirmation, such as
+ * diagnostics or a partial failure.
+ */
+export function routineEditOutput(output: string) {
+  const rows = output.split("\n").map((row) => row.trim()).filter(Boolean);
+  return (
+    rows.length > 0 &&
+    rows.length <= 20 &&
+    rows.every((row) =>
+      /^(?:success\.?|done\.?|ok\.?)?\s*(?:updated the following files:?|[AMD] \S.*|(?:updated|added|created|deleted|modified|wrote|edited|moved)\b[^:]*)?$/i.test(
+        row,
+      ),
+    )
+  );
 }
 /** Transcript diffs stay a preview; the Review panel is where the whole file lives. */
 export const CHANGE_PREVIEW_LINES = 24;

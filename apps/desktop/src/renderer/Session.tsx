@@ -1426,7 +1426,9 @@ export function Session() {
                     ? t("Choose a project to start a conversation")
                     : active()
                       ? t("Send a follow-up message…")
-                      : t("Do anything, or @ to add files and agents")
+                      : state.selected
+                        ? t("Reply, or @ to add files and agents")
+                        : t("Do anything, or @ to add files and agents")
                 }
                 value={draft()}
                 onInput={(event) => change(event.currentTarget.value)}

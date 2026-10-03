@@ -10,17 +10,48 @@ export function serverKey(location: {
   id: string;
   remote: boolean;
   url?: string;
+  cloudAccount?: string;
+  cloudApiUrl?: string;
 }) {
   if (!location.remote) return localServer.id;
-  return location.url
-    ? "remote:" + new URL(location.url).origin
-    : location.id;
+  // Every Cloud session of one account is one place to switch to. Sessions are
+  // reached through the Cloud gateway's URL, but that origin is not a server
+  // the user added and must not become one.
+  if (location.cloudAccount)
+    return `cloud:${location.cloudApiUrl ?? ""}:${location.cloudAccount}`;
+  if (location.url) return "remote:" + new URL(location.url).origin;
+  return location.id;
+}
+
+/** The Haarness Cloud entries implied by opened Cloud sessions, one per account. */
+export function cloudServers(recent: Recent[]): SavedServer[] {
+  const servers = new Map<string, SavedServer>();
+  for (const location of recent)
+    if (location.remote && location.cloudAccount) {
+      const id = serverKey(location);
+      if (!servers.has(id)) servers.set(id, { id, label: "Haarness Cloud", cloud: true });
+    }
+  return [...servers.values()];
 }
 
 export function migrateServers(recent: Recent[], saved: SavedServer[] = []) {
-  const servers = new Map(saved.map((server) => [server.id, server]));
+  // Earlier versions saved a Cloud gateway as a remote server the first time a
+  // Cloud session opened. Drop those unless a real remote project uses them.
+  const gateways = new Set(
+    recent
+      .filter((location) => location.cloudAccount && location.url)
+      .map((location) => "remote:" + new URL(location.url!).origin),
+  );
+  const used = new Set(
+    recent.filter((location) => !location.cloudAccount).map(serverKey),
+  );
+  const servers = new Map(
+    saved
+      .filter((server) => !gateways.has(server.id) || used.has(server.id))
+      .map((server) => [server.id, server]),
+  );
   for (const location of recent) {
-    if (!location.remote || !location.url) continue;
+    if (!location.remote || !location.url || location.cloudAccount) continue;
     const id = serverKey(location);
     if (!servers.has(id))
       servers.set(id, {

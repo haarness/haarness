@@ -1,5 +1,5 @@
 import { createSettingsSearch } from "./settings-search";
-import { searchEntries } from "./search";
+import { searchEntries, shortcutLabel } from "./search";
 import { SettingRow as Row } from "./SettingRow";
 import { BrowserSettings } from "./BrowserSettings";
 import { Notifications } from "./Notifications";
@@ -263,10 +263,10 @@ export function Settings() {
                     ].includes(app.state.settings!)
                   }
                 >
-                  <ManagementPanel resource={app.state.settings!} />
+                  <ManagementPanel resource={app.state.settings!} rootHeading={false} />
                 </Show>
                 <Show when={app.state.settings === "marketplace" || app.state.settings === "capabilities"}>
-                  <ManagementPanel resource={`${app.state.settings}-ui`} />
+                  <ManagementPanel resource={`${app.state.settings}-ui`} rootHeading={false} />
                 </Show>
                 <Show when={app.state.settings === "models"}>
                   <Models />
@@ -547,15 +547,35 @@ function Shortcuts() {
   return (
     <>
       <p class="muted">
-        Use Mod for Command on macOS and Control on Windows/Linux. The editor
-        also supports standard search, selection, undo, and save shortcuts.
+        {t("Click a shortcut and press the keys you want. The editor also supports standard search, selection, undo, and save shortcuts.")}
       </p>
       <For each={Object.entries(app.state.preferences.shortcuts)}>
         {([name, value]) => (
           <Row title={shortcutTitles[name] ?? name} target={"shortcut:" + name}>
+            <kbd class="shortcut-preview" aria-hidden="true">
+              {shortcutLabel(value, app.state.platform)}
+            </kbd>
             <input
+              class="shortcut-input"
               aria-label={t("Shortcut {name}", { name })}
               value={value}
+              onKeyDown={(event) => {
+                // Record a chord instead of making people spell "Mod+Shift+E".
+                const mod = app.state.platform === "darwin" ? event.metaKey : event.ctrlKey;
+                if ((!mod && !event.altKey) || ["Meta", "Control", "Shift", "Alt"].includes(event.key))
+                  return;
+                event.preventDefault();
+                const key = /^(Key|Digit)/.test(event.code)
+                  ? event.code.replace(/^(Key|Digit)/, "")
+                  : event.key.length === 1 ? event.key.toUpperCase() : event.key;
+                event.currentTarget.value = [
+                  mod && "Mod",
+                  event.altKey && "Alt",
+                  event.shiftKey && "Shift",
+                  key,
+                ].filter(Boolean).join("+");
+                event.currentTarget.dispatchEvent(new Event("change"));
+              }}
               onChange={(event) =>
                 app.run(() =>
                   app.settings({
@@ -571,13 +591,13 @@ function Shortcuts() {
         )}
       </For>
       <Row title="New line">
-        <kbd>{t("Shift Enter")}</kbd>
+        <kbd>{shortcutLabel("Shift+Enter", app.state.platform)}</kbd>
       </Row>
       <Row title="Save file">
-        <kbd>{t("Mod S")}</kbd>
+        <kbd>{shortcutLabel("Mod+S", app.state.platform)}</kbd>
       </Row>
       <Row title="Find in file">
-        <kbd>{t("Mod F")}</kbd>
+        <kbd>{shortcutLabel("Mod+F", app.state.platform)}</kbd>
       </Row>
       <Row title="Close dialog">
         <kbd>{t("Escape")}</kbd>
@@ -589,9 +609,6 @@ function Servers() {
   const app = useApp();
   return (
     <>
-      <button data-setting="Add remote server" class="primary" onClick={openServerConnection}>
-        {t("Add remote server")}
-      </button>
       <p class="muted">
         {t("Select a server to see its projects and conversations.")}
       </p>
@@ -600,7 +617,12 @@ function Servers() {
           <Row
             title={item.label}
             target={"server:" + item.id}
-            description={item.url ?? "Local projects on this computer"}
+            description={
+              item.url ??
+              (item.cloud
+                ? "Cloud sessions in your Haarness account"
+                : "Local projects on this computer")
+            }
           >
             <button
               disabled={
@@ -608,7 +630,7 @@ function Servers() {
               }
               onClick={() => app.run(() => app.switchServer(item.id))}
             >
-              {app.state.activeServer === item.id ? "Selected" : "Switch"}
+              {app.state.activeServer === item.id ? t("Selected") : t("Switch")}
             </button>
             <Show when={item.url}>
               <button
@@ -655,6 +677,11 @@ function Servers() {
           </Row>
         )}
       </For>
+      <div class="settings-after-list">
+        <button data-setting="Add remote server" class="primary" onClick={openServerConnection}>
+          {t("Add remote server")}
+        </button>
+      </div>
     </>
   );
 }
@@ -919,6 +946,27 @@ function Models() {
     </>
   );
 }
+// English keys; t() runs where they render so the language can change live.
+const assetCopy = {
+  agent: {
+    about: "Agents are assistants with their own instructions, model and tools. Switch between them in the composer.",
+    create: "Create agent",
+    empty: "No agents yet",
+    emptyDetail: "Create one for a role you repeat, like a reviewer or a release helper.",
+  },
+  command: {
+    about: "Commands are saved prompts you run with / in any conversation.",
+    create: "Create command",
+    empty: "No commands yet",
+    emptyDetail: "Save a prompt you use often, then run it with /name.",
+  },
+  skill: {
+    about: "Skills are instructions and files an agent loads when a task calls for them.",
+    create: "Create skill",
+    empty: "No skills yet",
+    emptyDetail: "Teach Haarness a workflow once, and it will use it whenever it fits.",
+  },
+} as const;
 function Assets(props: { kind: string; cli: Cli }) {
   const app = useApp();
   const [rows, setRows] = createSignal<AssetRow[]>([]);
@@ -963,11 +1011,11 @@ function Assets(props: { kind: string; cli: Cli }) {
   return (
     <>
       <p class="muted">
-        Edit your agents, commands, and skills. Changes to built-in or plugin
-        definitions are saved as your own version.
+        {t(assetCopy[kind()].about)}{" "}
+        {t("Changes to built-in or plugin definitions are saved as your own version.")}
       </p>
       <button class="primary" onClick={() => app.run(() => edit())}>
-        Create {kind()}
+        {t(assetCopy[kind()].create)}
       </button>
       <Show when={editing()} keyed>
         {(current) => (
@@ -984,6 +1032,9 @@ function Assets(props: { kind: string; cli: Cli }) {
             }}
           />
         )}
+      </Show>
+      <Show when={!rows().length && !editing()}>
+        <Empty title={t(assetCopy[kind()].empty)} detail={t(assetCopy[kind()].emptyDetail)} />
       </Show>
       <For each={rows()}>
         {(item) => (
@@ -1255,8 +1306,7 @@ function Plugins() {
   return (
     <>
       <p class="muted">
-        Install compatible plugin bundles with skills, commands, agents, MCP
-        servers and extensions.
+        {t("Install compatible plugin bundles with skills, commands, agents, MCP servers and extensions.")}
       </p>
       <div class="toolbar">
         <button class="primary" onClick={() => setInstalling("plugin")}>
@@ -1276,6 +1326,12 @@ function Plugins() {
             }
           />
         )}
+      </Show>
+      <Show when={!rows().length && !installing()}>
+        <Empty
+          title={t("No plugins installed")}
+          detail={t("Plugins bundle skills, commands, agents, MCP servers and extensions. Install one from a folder, a Git repository or a marketplace.")}
+        />
       </Show>
       <For each={rows()}>
         {(plugin) => (

@@ -21,6 +21,7 @@ import Archive from "lucide-solid/icons/archive";
 import ArchiveRestore from "lucide-solid/icons/archive-restore";
 import ArrowDown from "lucide-solid/icons/arrow-down";
 import ArrowUp from "lucide-solid/icons/arrow-up";
+import ArrowUpRight from "lucide-solid/icons/arrow-up-right";
 import BookOpen from "lucide-solid/icons/book-open";
 import Bot from "lucide-solid/icons/bot";
 import Check from "lucide-solid/icons/check";
@@ -28,6 +29,11 @@ import ChevronDown from "lucide-solid/icons/chevron-down";
 import ChevronRight from "lucide-solid/icons/chevron-right";
 import ChartColumn from "lucide-solid/icons/chart-column";
 import Circle from "lucide-solid/icons/circle";
+import CreditCard from "lucide-solid/icons/credit-card";
+import Laptop from "lucide-solid/icons/laptop";
+import LogOut from "lucide-solid/icons/log-out";
+import Play from "lucide-solid/icons/play";
+import Server from "lucide-solid/icons/server";
 import CircleAlert from "lucide-solid/icons/circle-alert";
 import CircleCheck from "lucide-solid/icons/circle-check";
 import CircleHelp from "lucide-solid/icons/circle-help";
@@ -169,6 +175,12 @@ const catalog = {
   alert: TriangleAlert,
   error: CircleAlert,
   question: CircleHelp,
+  external: ArrowUpRight,
+  "sign-out": LogOut,
+  start: Play,
+  billing: CreditCard,
+  computer: Laptop,
+  server: Server,
 } satisfies Record<string, Glyph>;
 
 export type IconName = keyof typeof catalog;
