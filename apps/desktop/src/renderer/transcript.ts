@@ -411,11 +411,14 @@ export function toolChanges(
     !/write|edit|patch|apply/.test(name)
   )
     return [];
-  if (result && !result.is_error) {
-    const reported = resultChanges(result.metadata);
-    if (reported.length) return reported;
-  }
-  const record = args as Record<string, unknown>;
+  // A targeted edit's own old/new snippet is the clearest preview. A patch
+  // only says what to do, so the diff its tool reports is the better one.
+  const reported = result && !result.is_error ? resultChanges(result.metadata) : [];
+  if (reported.length && /patch/.test(name)) return reported;
+  const requested = argumentChanges(args as Record<string, unknown>);
+  return requested.length ? requested : reported;
+}
+function argumentChanges(record: Record<string, unknown>): Change[] {
   const text = (...keys: string[]) => {
     for (const key of keys) {
       const value = record[key];

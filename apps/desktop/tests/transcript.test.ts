@@ -304,6 +304,10 @@ test("a Codex patch envelope reads as the files it edits, and the result's diffs
   assert.deepEqual(toolChanges("apply_patch", { input }, result), [
     { path: "src/math.ts", patch: undefined, before: "a\n", after: "a\nb\n", additions: 1, deletions: 0 },
   ]);
+  // A targeted edit keeps its own concise snippet even when the result reports the whole file.
+  assert.deepEqual(toolChanges("edit", { path: "a.json", old: "true", new: "false" }, result), [
+    { path: "a.json", before: "true", after: "false" },
+  ]);
   // A failed call changed nothing, so its arguments are all there is to show.
   assert.deepEqual(toolChanges("apply_patch", { input }, { ...result, is_error: true }), files);
   assert.deepEqual(patchFiles("@@ -1 +1 @@\n-a\n+b\n"), []);

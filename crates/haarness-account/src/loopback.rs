@@ -11,8 +11,41 @@ use crate::{Error, Result};
 
 /// The only path the listener accepts: `redirect_uri = http://127.0.0.1:{port}/callback`.
 pub const CALLBACK_PATH: &str = "/callback";
-/// Body of the response the browser receives.
-pub const CLOSE_TAB_HTML: &str = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Haarness Cloud</title></head><body><p>Signed in. You can close this tab.</p></body></html>";
+/// The page's look: Haarness's palette in dark and light, with no external requests.
+macro_rules! page_css {
+    () => {
+        ":root{color-scheme:dark;--page:#151413;--surface:#232120;--raised:#2c2a27;--text:#eae5dd;--muted:#a9a298;--line:#ffffff16;--accent:#dba273;--danger:#ef8078}\
+@media (prefers-color-scheme:light){:root{color-scheme:light;--page:#fdfcfa;--surface:#f6f3ee;--raised:#ebe7df;--text:#232120;--muted:#635c53;--line:#00000016;--accent:#a8622c;--danger:#b3382f}}\
+*{box-sizing:border-box}html,body{margin:0}\
+body{min-height:100vh;display:grid;place-items:center;padding:24px 16px;background:var(--page);color:var(--text);font:14px/1.5 -apple-system,BlinkMacSystemFont,\"Segoe UI\",Inter,Roboto,\"Helvetica Neue\",Arial,sans-serif;-webkit-font-smoothing:antialiased}\
+main{width:min(380px,100%);padding:28px;border:1px solid var(--line);border-radius:20px;background:var(--surface);text-align:center}\
+.mark{display:grid;place-items:center;width:44px;height:44px;margin:0 auto 18px;border-radius:12px;background:var(--raised);border:1px solid var(--line)}\
+.mark svg{width:22px;height:22px}\
+h1{margin:0 0 6px;font-size:19px;font-weight:600;letter-spacing:-0.012em}\
+p{margin:0;color:var(--muted)}\
+.reason{margin-top:16px;padding:10px 12px;border-radius:12px;border:1px solid color-mix(in srgb,var(--danger) 40%,transparent);background:color-mix(in srgb,var(--danger) 10%,transparent);color:var(--text);font-size:13px;text-align:start;overflow-wrap:anywhere}"
+    };
+}
+/// The Haarness mark, drawn inline.
+macro_rules! mark {
+    () => {
+        "<div class=\"mark\"><svg viewBox=\"0 0 64 64\" fill=\"currentColor\" aria-hidden=\"true\"><rect x=\"17\" y=\"14\" width=\"8\" height=\"36\" rx=\"2\"/><rect x=\"39\" y=\"14\" width=\"8\" height=\"36\" rx=\"2\"/><rect x=\"13.5\" y=\"27\" width=\"37\" height=\"8\" rx=\"4\"/></svg></div>"
+    };
+}
+/// Body of the response the browser receives after a successful sign-in.
+pub const CLOSE_TAB_HTML: &str = concat!(
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
+    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+    "<meta name=\"color-scheme\" content=\"dark light\"><title>Signed in — Haarness</title>",
+    "<style>",
+    page_css!(),
+    "</style></head><body><main>",
+    mark!(),
+    "<h1>You’re signed in</h1>",
+    "<p>Return to Haarness to continue. You can close this tab.</p>",
+    "</main></body></html>"
+);
+
 /// Maximum bytes of request head the parser reads before giving up.
 pub const MAX_HEAD_BYTES: usize = 16 * 1024;
 /// How long [`Loopback::wait_for_callback`] waits for the browser before giving up.
@@ -205,10 +238,22 @@ async fn respond(stream: &mut TcpStream, status: &str, body: &str) -> Result<()>
 }
 
 fn error_page(reason: &str) -> String {
-    format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Haarness Cloud</title></head><body><p>Sign-in failed: {}</p></body></html>",
-        reason.replace('&', "&amp;").replace('<', "&lt;")
-    )
+    // The stylesheet has braces, so this is assembled rather than `format!`ted.
+    let mut page = String::from(concat!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+        "<meta name=\"color-scheme\" content=\"dark light\"><title>Sign-in did not finish — Haarness</title>",
+        "<style>",
+        page_css!(),
+        "</style></head><body><main>",
+        mark!(),
+        "<h1>Sign-in did not finish</h1>",
+        "<p>Close this tab and try again from Haarness.</p>",
+        "<p class=\"reason\">"
+    ));
+    page.push_str(&reason.replace('&', "&amp;").replace('<', "&lt;"));
+    page.push_str("</p></main></body></html>");
+    page
 }
 
 #[cfg(test)]
@@ -217,6 +262,16 @@ mod tests {
 
     fn head(target: &str) -> String {
         format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:1234\r\nUser-Agent: test\r\n")
+    }
+
+    #[test]
+    fn result_pages_are_branded_and_escape_the_reason() {
+        assert!(CLOSE_TAB_HTML.contains("<h1>You’re signed in</h1>"));
+        assert!(CLOSE_TAB_HTML.contains("prefers-color-scheme:light"));
+        let page = error_page("denied <script>&");
+        assert!(page.contains("<h1>Sign-in did not finish</h1>"));
+        assert!(page.contains("denied &lt;script>&amp;"));
+        assert!(!page.contains("<script>"));
     }
 
     #[test]
