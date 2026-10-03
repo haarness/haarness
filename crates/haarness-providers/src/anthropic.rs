@@ -495,7 +495,7 @@ impl ModelProvider for AnthropicProvider {
             .json(&body)
             .send()
             .await
-            .map_err(provider_error)?;
+            .map_err(crate::sse::transport_error)?;
         let mut events = json_stream(response, cancel);
         Ok(Box::pin(try_stream! {
             let mut tool: Option<(String,String,String,Value)> = None;

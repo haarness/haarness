@@ -303,7 +303,7 @@ impl ModelProvider for GeminiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(provider_error)?;
+            .map_err(crate::sse::transport_error)?;
         let mut events = json_stream(response, cancel);
         Ok(Box::pin(try_stream! {
             let mut call_index = 0_u64;

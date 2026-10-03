@@ -1219,7 +1219,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .post(&self.endpoint)
             .headers(headers)
             .json(&body);
-        let mut events = json_stream(builder.send().await.map_err(provider_error)?, cancel);
+        let mut events = json_stream(builder.send().await.map_err(crate::sse::transport_error)?, cancel);
         Ok(Box::pin(try_stream! {
             // Parallel tool calls stream interleaved deltas keyed by index.
             let mut calls: Vec<(String, String, String)> = Vec::new();

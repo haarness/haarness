@@ -205,7 +205,7 @@ impl ModelProvider for BedrockProvider {
             .body(payload)
             .send()
             .await
-            .map_err(provider_error)?;
+            .map_err(crate::sse::transport_error)?;
         if !response.status().is_success() {
             let status = response.status();
             let detail = response.text().await.unwrap_or_default();
@@ -217,7 +217,7 @@ impl ModelProvider for BedrockProvider {
         if cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
-        let response: Value = response.json().await.map_err(provider_error)?;
+        let response: Value = response.json().await.map_err(crate::sse::transport_error)?;
         let events = bedrock_events(&response);
         Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
     }
