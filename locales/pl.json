@@ -1352,5 +1352,7 @@
   "Pressing {key}": "Naciskanie {key}",
   "Scrolling": "Przewijanie",
   "Scrolling up": "Przewijanie w górę",
-  "Scrolling down": "Przewijanie w dół"
+  "Scrolling down": "Przewijanie w dół",
+  "Enable agent {name}": "Włącz agenta {name}",
+  "Enable skill {name}": "Włącz umiejętność {name}"
 }

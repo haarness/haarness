@@ -1352,5 +1352,7 @@
   "Pressing {key}": "جارٍ الضغط على {key}",
   "Scrolling": "جارٍ التمرير",
   "Scrolling up": "جارٍ التمرير لأعلى",
-  "Scrolling down": "جارٍ التمرير لأسفل"
+  "Scrolling down": "جارٍ التمرير لأسفل",
+  "Enable agent {name}": "تفعيل الوكيل {name}",
+  "Enable skill {name}": "تفعيل المهارة {name}"
 }

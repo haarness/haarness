@@ -1352,5 +1352,7 @@
   "Pressing {key}": "Pressionando {key}",
   "Scrolling": "Rolando",
   "Scrolling up": "Rolando para cima",
-  "Scrolling down": "Rolando para baixo"
+  "Scrolling down": "Rolando para baixo",
+  "Enable agent {name}": "Ativar o agente {name}",
+  "Enable skill {name}": "Ativar a habilidade {name}"
 }

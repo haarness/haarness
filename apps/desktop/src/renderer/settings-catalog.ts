@@ -3,7 +3,7 @@ export const settingsSections = [
   ["Intelligence", ["providers", "models", "agents", "commands", "skills"]],
   [
     "Capabilities",
-    ["marketplace", "capabilities", "tools", "mcp", "plugins", "extensions", "hooks", "schedules"],
+    ["marketplace", "tools", "mcp", "plugins", "extensions", "hooks", "schedules"],
   ],
   ["Support", ["about"]],
 ] as const;
@@ -22,7 +22,6 @@ export const settingsTitles: Record<string, string> = {
   mcp: "MCP servers",
   plugins: "Plugins",
   marketplace: "Marketplace",
-  capabilities: "Runtime capabilities",
   extensions: "Extensions",
   schedules: "Schedules",
   hooks: "Hooks",
@@ -39,14 +38,13 @@ export const settingsKeywords: Record<string, string> = {
   providers:
     "authentication login logout api key credentials openai anthropic google gateway",
   models: "model context reasoning capabilities llm",
-  agents: "agent profile instructions prompt permissions",
+  agents: "agent profile instructions prompt permissions enable disable",
   commands: "slash custom prompt template command",
-  skills: "skill instructions knowledge",
+  skills: "skill instructions knowledge enable disable",
   tools: "tool loading lazy schemas enable disable permission",
   mcp: "model context protocol integrations servers oauth authentication",
   plugins: "marketplace install uninstall extensions bundles",
   marketplace: "public private account catalog install update versions skills agents mcp plugins extensions",
-  capabilities: "live runtime enable disable skills agents plugins mcp",
   extensions: "javascript typescript hooks events scripts enable scope",
   schedules: "automation recurring cron timer scheduled tasks",
   hooks: "lifecycle events commands matcher global project automation",

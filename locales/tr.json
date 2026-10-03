@@ -1352,5 +1352,7 @@
   "Pressing {key}": "{key} tuşuna basılıyor",
   "Scrolling": "Kaydırılıyor",
   "Scrolling up": "Yukarı kaydırılıyor",
-  "Scrolling down": "Aşağı kaydırılıyor"
+  "Scrolling down": "Aşağı kaydırılıyor",
+  "Enable agent {name}": "{name} ajanını etkinleştir",
+  "Enable skill {name}": "{name} yeteneğini etkinleştir"
 }

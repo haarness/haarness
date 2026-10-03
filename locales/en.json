@@ -1352,5 +1352,7 @@
   "Pressing {key}": "Pressing {key}",
   "Scrolling": "Scrolling",
   "Scrolling up": "Scrolling up",
-  "Scrolling down": "Scrolling down"
+  "Scrolling down": "Scrolling down",
+  "Enable agent {name}": "Enable agent {name}",
+  "Enable skill {name}": "Enable skill {name}"
 }

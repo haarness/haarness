@@ -1352,5 +1352,7 @@
   "Pressing {key}": "正在按 {key}",
   "Scrolling": "捲動中",
   "Scrolling up": "向上捲動中",
-  "Scrolling down": "向下捲動中"
+  "Scrolling down": "向下捲動中",
+  "Enable agent {name}": "啟用代理程式 {name}",
+  "Enable skill {name}": "啟用 Skill {name}"
 }

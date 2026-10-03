@@ -7,7 +7,7 @@ import { mkdtemp, mkdir, writeFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-test("Marketplace and runtime capability settings install, disable and remove a scoped resource", async () => {
+test("Marketplace and plugin settings install, disable and remove a scoped resource", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "haarness-desktop-marketplace-")));
   const workspace = join(root, "project");
   const binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
@@ -41,9 +41,11 @@ test("Marketplace and runtime capability settings install, disable and remove a 
     await expect(settings.getByLabel("Installation scope")).toBeVisible();
     await settings.getByRole("button", { name: "Install", exact: true }).click();
     await expect.poll(() => client!.marketplace({ action: "installed" })).toMatchObject([{ id, scope: "local" }]);
-    await settings.getByRole("button", { name: "Runtime capabilities", exact: true }).click();
-    await settings.getByRole("button", { name: "Disable mcp-desktop-proof · plugin", exact: true }).click();
-    await expect(settings.getByRole("button", { name: "Enable mcp-desktop-proof · plugin", exact: true })).toBeVisible();
+    await settings.getByRole("button", { name: "Plugins", exact: true }).click();
+    const proof = settings.getByRole("switch", { name: "Enable plugin mcp-desktop-proof", exact: true });
+    await expect(proof).toBeChecked();
+    await proof.click();
+    await expect(proof).not.toBeChecked();
     await settings.getByRole("button", { name: "Marketplace", exact: true }).click();
     await settings.getByRole("button", { name: "Installed resources", exact: true }).click();
     await settings.getByRole("button", { name: "remove desktop-proof", exact: true }).click();

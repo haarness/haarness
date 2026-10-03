@@ -265,8 +265,8 @@ export function Settings() {
                 >
                   <ManagementPanel resource={app.state.settings!} rootHeading={false} />
                 </Show>
-                <Show when={app.state.settings === "marketplace" || app.state.settings === "capabilities"}>
-                  <ManagementPanel resource={`${app.state.settings}-ui`} rootHeading={false} />
+                <Show when={app.state.settings === "marketplace"}>
+                  <ManagementPanel resource="marketplace-ui" rootHeading={false} />
                 </Show>
                 <Show when={app.state.settings === "models"}>
                   <Models />
@@ -976,14 +976,42 @@ function Assets(props: { kind: string; cli: Cli }) {
       : props.kind === "skills"
         ? "skill"
         : "command";
+  // Agents and skills can be switched off without deleting them. The server
+  // keeps that state apart from the definitions, so read it alongside them.
+  const [enabled, setEnabled] = createSignal<Record<string, boolean>>({});
   async function refresh() {
-    setRows(
-      await app.native({
+    const [list, state] = await Promise.all([
+      app.native<AssetRow[]>({
         action: "asset",
         kind: kind(),
         input: { action: "list" },
       }),
+      kind() === "command"
+        ? undefined
+        : app
+            .api<Record<string, { name: string; enabled?: boolean }[]>>(
+              "manageResource",
+              "capabilities",
+              { action: "list" },
+            )
+            .catch(() => undefined),
+    ]);
+    setRows(list);
+    setEnabled(
+      Object.fromEntries(
+        (state?.[props.kind] ?? []).map((row) => [row.name, row.enabled !== false]),
+      ),
     );
+  }
+  async function toggle(item: AssetRow, on: boolean) {
+    await app.api("manageResource", "capabilities", {
+      action: on ? "enable" : "disable",
+      kind: kind(),
+      name: item.name,
+      scope: item.scope === "global" ? "global" : "local",
+    });
+    await app.catalogs();
+    await refresh();
   }
   createEffect(() => {
     props.kind;
@@ -1052,6 +1080,22 @@ function Assets(props: { kind: string; cli: Cli }) {
               .join(" · ")}
             target={props.kind + ":" + item.name}
           >
+            <Show when={item.name in enabled()}>
+              <input
+                type="checkbox"
+                role="switch"
+                aria-label={
+                  kind() === "agent"
+                    ? t("Enable agent {name}", { name: item.name })
+                    : t("Enable skill {name}", { name: item.name })
+                }
+                checked={enabled()[item.name]}
+                onChange={(event) => {
+                  const on = event.currentTarget.checked;
+                  void app.run(() => toggle(item, on));
+                }}
+              />
+            </Show>
             <button onClick={() => app.run(() => edit(item))}>{t("Edit")}</button>
             <Show when={item.managed}>
               <button

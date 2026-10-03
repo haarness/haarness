@@ -1352,5 +1352,7 @@
   "Pressing {key}": "Pritiska {key}",
   "Scrolling": "Pomiče",
   "Scrolling up": "Pomiče gore",
-  "Scrolling down": "Pomiče dolje"
+  "Scrolling down": "Pomiče dolje",
+  "Enable agent {name}": "Omogući agenta {name}",
+  "Enable skill {name}": "Omogući vještinu {name}"
 }
