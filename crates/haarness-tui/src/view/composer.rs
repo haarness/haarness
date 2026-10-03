@@ -12,6 +12,7 @@ use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
 use crate::state::{App, InterruptTarget};
 use crate::theme::Theme;
+use crate::view::frame::{HitTarget, TaggedLines};
 use crate::view::span::{compact_count, single_line};
 
 const MAX_INPUT_ROWS: usize = 6;
@@ -21,47 +22,218 @@ const INSET: usize = 2;
 
 /// Messages the waiting strip names in full before collapsing into a count.
 const MAX_QUEUED_ROWS: usize = 3;
+/// The rail every strip row hangs from: the glyph the user's own prompts
+/// carry, at column zero so the strip's text shares the prompt's column.
+const RAIL: &str = "▎ ";
 
-/// Queued follow-ups are transient delivery state, not conversation content.
-/// They wait here, directly above the composer, and join the transcript at
-/// their durable position once a `QueueConsumed` snapshot lands — the same
-/// moment the running status line drops its count.
-pub fn queued_strip(app: &App, width: usize) -> Vec<Line> {
-    let mut rows = Vec::new();
+/// Follow-ups waiting on the agent, docked directly above the prompt. Two
+/// kinds, kept apart by header and rail colour: steering the running work has
+/// been handed but has not read yet, and queued messages that wait outside
+/// the conversation for the current work to finish. Neither is conversation
+/// content yet: steering takes its durable place in the transcript when a
+/// `QueueConsumed` snapshot lands, a queued message when it runs.
+///
+/// Queued rows are the controls: the header and `+N more` open the full
+/// list, a numbered row opens that message's actions, and the editing line
+/// cancels an edit in progress.
+pub fn queued_strip(app: &App, width: usize) -> TaggedLines {
     let theme = &app.theme;
-    let textline = |text: &str| {
-        Line::new(vec![
-            Span::new("  ", theme.muted),
-            Span::new(single_line(text, width.saturating_sub(4)), theme.muted),
-        ])
-    };
-    let steers = app.pending_follow_ups();
+    let language = app.language;
+    let mut strip = TaggedLines::default();
+
+    let steers: Vec<&str> = app
+        .pending_follow_ups()
+        .into_iter()
+        .filter_map(|item| match &item.data {
+            ItemData::UserMessage { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
     if !steers.is_empty() {
-        rows.push(textline(&format!(
-            "⧗ {} steering · joins at the agent's next step",
-            steers.len()
-        )));
-        for item in steers.iter().take(MAX_QUEUED_ROWS) {
-            if let ItemData::UserMessage { text, .. } = &item.data {
-                rows.push(textline(text));
-            }
+        let rail = theme.primary;
+        strip.push(strip_row(
+            rail,
+            header(
+                language.text("Steering"),
+                format!(
+                    " · {} — {}",
+                    steers.len(),
+                    language.text("joins at the next step")
+                ),
+                theme.primary,
+                theme,
+            ),
+            theme.surface,
+            width,
+            theme,
+        ));
+        for (index, text) in steers.iter().take(MAX_QUEUED_ROWS).enumerate() {
+            strip.push(numbered_row(
+                index + 1,
+                &crate::input_queue::queued_label(text),
+                rail,
+                false,
+                width,
+                theme,
+            ));
+        }
+        if let Some(more) = more_row(steers.len(), rail, width, theme) {
+            strip.push(more);
         }
     }
-    if !app.input_queue.items.is_empty() {
-        rows.push(textline(&format!(
-            "⧗ {} queued · {} · /queue to manage",
-            app.input_queue.items.len(),
-            if app.active_turn.is_some() {
-                "after current work"
-            } else {
-                "paused"
-            }
-        )));
-        for item in app.input_queue.items.iter().take(MAX_QUEUED_ROWS) {
-            rows.push(textline(&item.text));
-        }
+
+    let queued = &app.input_queue.items;
+    let editing = app.queue_edit.as_ref();
+    if queued.is_empty() && editing.is_none() {
+        return strip;
     }
-    rows
+    // Working, the queue simply waits its turn. Idle with messages left, it
+    // stopped on purpose and needs a person: that, and editing one of its
+    // messages, are the states that take the attention colour.
+    let (label, detail, tone, rail) = if editing.is_some() {
+        (
+            language.text("Editing"),
+            format!(" — {}", language.text("Enter saves it in place")),
+            theme.accent,
+            theme.accent,
+        )
+    } else if app.active_turn.is_some() {
+        (
+            language.text("Queued"),
+            format!(" · {}", queued.len()),
+            theme.text,
+            theme.muted,
+        )
+    } else {
+        (
+            language.text("Queue paused"),
+            format!(" — {}", language.text("send when ready")),
+            theme.accent,
+            theme.accent,
+        )
+    };
+    strip.push_tagged(
+        strip_row(
+            rail,
+            header(label, detail, tone, theme),
+            theme.surface,
+            width,
+            theme,
+        ),
+        HitTarget::QueueList,
+    );
+    for (index, item) in queued.iter().take(MAX_QUEUED_ROWS).enumerate() {
+        let edited = editing.is_some_and(|edit| edit.id == item.id);
+        strip.push_tagged(
+            numbered_row(
+                index + 1,
+                &crate::input_queue::queued_label(&item.text),
+                rail,
+                edited,
+                width,
+                theme,
+            ),
+            HitTarget::QueueItem(item.id),
+        );
+    }
+    if let Some(more) = more_row(queued.len(), rail, width, theme) {
+        strip.push_tagged(more, HitTarget::QueueList);
+    }
+    if let Some(edit) = editing {
+        // A refused save replaces the hint: with a turn running, the band
+        // has no room for notices, so this line is where the reason lands.
+        let (text, color) = edit.conflict.as_deref().map_or(
+            (
+                language.text("Editing queued message · Enter saves · Click to cancel"),
+                theme.accent,
+            ),
+            |reason| (language.text(reason), theme.danger),
+        );
+        strip.push_tagged(
+            strip_row(
+                rail,
+                vec![Span::new(text.to_owned(), color)],
+                theme.surface,
+                width,
+                theme,
+            ),
+            HitTarget::QueueEditCancel,
+        );
+    }
+    strip
+}
+
+fn header(label: &str, detail: String, tone: Color, theme: &Theme) -> Vec<Span> {
+    vec![
+        Span::new(label.to_owned(), tone).with_attributes(attr::BOLD),
+        Span::new(detail, theme.muted),
+    ]
+}
+
+/// One message, numbered in delivery order and cut to a single line. The
+/// message being edited is raised on the selection background.
+fn numbered_row(
+    number: usize,
+    text: &str,
+    rail: Color,
+    edited: bool,
+    width: usize,
+    theme: &Theme,
+) -> Line {
+    let number = format!("{number}. ");
+    let room = width.saturating_sub(RAIL.width() + number.width() + 1);
+    let mut body = Span::new(single_line(text, room), theme.text);
+    if edited {
+        body = body.with_attributes(attr::BOLD);
+    }
+    strip_row(
+        if edited { theme.accent } else { rail },
+        vec![Span::new(number, theme.muted), body],
+        if edited {
+            theme.selected
+        } else {
+            theme.surface
+        },
+        width,
+        theme,
+    )
+}
+
+fn more_row(count: usize, rail: Color, width: usize, theme: &Theme) -> Option<Line> {
+    (count > MAX_QUEUED_ROWS).then(|| {
+        strip_row(
+            rail,
+            vec![Span::new(
+                format!("+{} more", count - MAX_QUEUED_ROWS),
+                theme.muted,
+            )],
+            theme.surface,
+            width,
+            theme,
+        )
+    })
+}
+
+/// Rail, content, and a raised background carried to the frame edge.
+fn strip_row(
+    rail: Color,
+    content: Vec<Span>,
+    background: Color,
+    width: usize,
+    theme: &Theme,
+) -> Line {
+    let mut spans = vec![Span::new(RAIL, rail)];
+    spans.extend(content);
+    let mut line = clamp(spans, width);
+    let used: usize = line.spans.iter().map(Span::width).sum();
+    if used < width {
+        line.spans
+            .push(Span::new(" ".repeat(width - used), theme.text));
+    }
+    for span in &mut line.spans {
+        span.bg.get_or_insert(background);
+    }
+    line
 }
 
 pub fn composer_lines(app: &App, width: usize) -> Vec<Line> {
@@ -86,13 +258,10 @@ fn attachment_row(app: &App, width: usize) -> Option<Line> {
     }
     let theme = &app.theme;
     let mut spans = vec![Span::new(" ".repeat(INSET), theme.muted)];
-    for (index, path) in app.attachments.iter().take(3).enumerate() {
-        let path = std::path::Path::new(path);
-        let badge = crate::media::mime_for_path(path).map_or("file", crate::media::badge_for_mime);
-        let name = path.file_name().map_or_else(
-            || path.display().to_string(),
-            |name| name.to_string_lossy().into(),
-        );
+    for (index, source) in app.attachments.iter().take(3).enumerate() {
+        // A queued message opened for editing can carry uploaded data URLs
+        // as well as local paths; name both the way the transcript does.
+        let (badge, name) = crate::media::attachment_display(source);
         if index > 0 {
             spans.push(Span::new("   ", theme.muted));
         }

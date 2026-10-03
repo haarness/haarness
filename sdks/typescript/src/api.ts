@@ -267,8 +267,8 @@ export class Api extends Transport {
     return this.request("GET", `/v1/threads/${this.segment(id)}/active`, { binaryBody: false, binaryResponse: false, ...options });
   }
   /** POST /v1/threads/{id}/interrupt */
-  interruptThreadTree(id: string, options: RequestOptions = {}): Promise<T.InterruptResponse> {
-    return this.request("POST", `/v1/threads/${this.segment(id)}/interrupt`, { binaryBody: false, binaryResponse: false, ...options });
+  interruptThreadTree(id: string, query: T.InterruptQuery = {}, options: RequestOptions = {}): Promise<T.InterruptResponse> {
+    return this.request("POST", `/v1/threads/${this.segment(id)}/interrupt`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /v1/threads/{id}/background */
   listBackgroundTasks(id: string, options: RequestOptions = {}): Promise<Array<T.BackgroundTaskInfo>> {
@@ -371,8 +371,8 @@ export class Api extends Transport {
     return this.request("GET", `/v1/turns/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
   }
   /** POST /v1/turns/{id}/interrupt */
-  interruptTurn(id: string, options: RequestOptions = {}): Promise<T.Turn> {
-    return this.request("POST", `/v1/turns/${this.segment(id)}/interrupt`, { binaryBody: false, binaryResponse: false, ...options });
+  interruptTurn(id: string, query: T.InterruptQuery = {}, options: RequestOptions = {}): Promise<T.Turn> {
+    return this.request("POST", `/v1/turns/${this.segment(id)}/interrupt`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /v1/turns/{id}/wait */
   waitTurn(id: string, query: T.WaitQuery = {}, options: RequestOptions = {}): Promise<T.Turn> {

@@ -270,7 +270,7 @@ export class CloudChat {
   }
   async abort(turnId?: string, options?: RequestOptions) {
     if (turnId)
-      return (await this.turn(turnId, options)).interruptTurn(turnId, options);
-    return (await this.session.connect()).interruptThreadTree(this.id, options);
+      return (await this.turn(turnId, options)).interruptTurn(turnId, {}, options);
+    return (await this.session.connect()).interruptThreadTree(this.id, {}, options);
   }
 }

@@ -1124,6 +1124,25 @@ async fn wait_done(runtime: &AgentRuntime, turn: &Turn) -> Turn {
     panic!("turn did not finish");
 }
 
+/// Idle with nothing queued. Each queued prompt starts as its own turn just
+/// after the previous one closes, so idle alone can be momentary.
+async fn wait_drained(runtime: &AgentRuntime, thread_id: haarness_protocol::ThreadId) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while runtime.active_turn(thread_id).await.unwrap().is_some()
+            || !runtime
+                .input_queue(thread_id)
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("queue drains");
+}
+
 async fn wait_idle(runtime: &AgentRuntime, thread_id: haarness_protocol::ThreadId) {
     tokio::time::timeout(Duration::from_secs(10), async {
         while runtime.active_turn(thread_id).await.unwrap().is_some() {
@@ -9146,12 +9165,25 @@ async fn deferred_queue_waits_for_idle_steers_first_and_delivers_one_at_a_time()
     assert!(requests[2].contains("deferred documentation"));
     assert!(!requests[2].contains("deferred release notes"));
     assert_eq!(runtime.input_queue(thread.id).await.unwrap().items.len(), 1);
+    // Each queued prompt starts its own turn once the previous one closes.
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let documentation = runtime.active_turn(thread.id).await.unwrap().unwrap();
+    assert_ne!(documentation.id, turn.id);
     provider.next();
     provider.wait().await;
     assert!(provider.requests.lock().unwrap()[3].contains("deferred release notes"));
+    assert_eq!(
+        wait_done(&runtime, &documentation).await.status,
+        TurnStatus::Completed
+    );
+    let notes = runtime.active_turn(thread.id).await.unwrap().unwrap();
+    assert_ne!(notes.id, documentation.id);
     provider.next();
     assert_eq!(
-        wait_done(&runtime, &turn).await.status,
+        wait_done(&runtime, &notes).await.status,
         TurnStatus::Completed
     );
     assert!(
@@ -9250,6 +9282,7 @@ async fn deferred_queue_can_be_edited_reordered_removed_and_promoted_while_busy(
                 revision: q.revision,
                 id: one.request_id,
                 text: "edited one".into(),
+                attachments: None,
             },
         )
         .await
@@ -9314,7 +9347,7 @@ async fn deferred_queue_can_be_edited_reordered_removed_and_promoted_while_busy(
 }
 
 #[tokio::test]
-async fn deferred_queue_provider_failure_preserves_pending_input_and_retry_does_not_wake_it() {
+async fn deferred_queue_runs_after_a_failed_turn_and_pauses_when_a_queued_prompt_fails() {
     let provider = DeferredGate::default();
     let runtime = deferred_runtime(
         provider.clone(),
@@ -9326,11 +9359,29 @@ async fn deferred_queue_provider_failure_preserves_pending_input_and_retry_does_
         .await
         .unwrap();
     provider.wait().await;
-    let mut input = deferred_request("untouched later");
+    let mut input = deferred_request("first later");
     runtime.queue_input(thread.id, input.clone()).await.unwrap();
+    runtime
+        .queue_input(thread.id, deferred_request("untouched later"))
+        .await
+        .unwrap();
     provider.next();
     assert_eq!(wait_done(&runtime, &turn).await.status, TurnStatus::Failed);
+    // A failed turn does not strand what was queued behind it.
+    provider.wait().await;
+    assert!(provider.requests.lock().unwrap()[1].contains("first later"));
+    let queued = runtime.active_turn(thread.id).await.unwrap().unwrap();
+    // The fixture fails every request that carries the failed message, so
+    // the queued prompt fails too. Then the rest of the queue waits.
+    provider.next();
+    assert_eq!(
+        wait_done(&runtime, &queued).await.status,
+        TurnStatus::Failed
+    );
     wait_idle(&runtime, thread.id).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(runtime.active_turn(thread.id).await.unwrap().is_none());
+    // Retrying a delivered admission never wakes the paused queue.
     input.delivery = haarness_protocol::InputDelivery::Steer;
     input.text = "retry with different mode".into();
     runtime.queue_input(thread.id, input).await.unwrap();
@@ -9338,6 +9389,98 @@ async fn deferred_queue_provider_failure_preserves_pending_input_and_retry_does_
     let queue = runtime.input_queue(thread.id).await.unwrap();
     assert_eq!(queue.items.len(), 1);
     assert_eq!(queue.items[0].text, "untouched later");
+}
+
+#[tokio::test]
+async fn stop_answers_unread_steering_and_keeps_the_queue_paused_until_a_new_message() {
+    let provider = DeferredGate::default();
+    let runtime = deferred_runtime(
+        provider.clone(),
+        Arc::new(SqliteStore::in_memory().unwrap()),
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("long refactor"))
+        .await
+        .unwrap();
+    provider.wait().await;
+    runtime
+        .queue_input(thread.id, deferred_request("later changelog"))
+        .await
+        .unwrap();
+    let mut steer = deferred_request("keep the public names");
+    steer.delivery = haarness_protocol::InputDelivery::Steer;
+    runtime.queue_input(thread.id, steer).await.unwrap();
+    runtime
+        .interrupt_thread_tree_with(thread.id, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Interrupted
+    );
+    // The steering the agent never read is answered next, not dropped.
+    provider.wait().await;
+    let request = provider.requests.lock().unwrap()[1].clone();
+    assert!(request.contains("keep the public names"));
+    assert!(request.contains("The user stopped your previous work"));
+    let continuation = runtime.active_turn(thread.id).await.unwrap().unwrap();
+    provider.next();
+    assert_eq!(
+        wait_done(&runtime, &continuation).await.status,
+        TurnStatus::Completed
+    );
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(!items.iter().any(|item| matches!(&item.data, haarness_protocol::ItemData::Error { message, .. } if message.contains("Queued input could not be delivered"))));
+    // Answering the steering does not drain the queue the stop paused.
+    wait_idle(&runtime, thread.id).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(runtime.active_turn(thread.id).await.unwrap().is_none());
+    assert_eq!(runtime.input_queue(thread.id).await.unwrap().items.len(), 1);
+    // A new message runs first, then the paused queue continues.
+    let fresh = runtime
+        .start_turn(thread.id, turn_request("something new"))
+        .await
+        .unwrap();
+    provider.wait().await;
+    provider.next();
+    assert_eq!(
+        wait_done(&runtime, &fresh).await.status,
+        TurnStatus::Completed
+    );
+    provider.wait().await;
+    assert!(provider.requests.lock().unwrap()[3].contains("later changelog"));
+    provider.next();
+    wait_drained(&runtime, thread.id).await;
+}
+
+#[tokio::test]
+async fn programmatic_stop_does_not_answer_unread_steering() {
+    let provider = DeferredGate::default();
+    let runtime = deferred_runtime(
+        provider.clone(),
+        Arc::new(SqliteStore::in_memory().unwrap()),
+    );
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(thread.id, turn_request("long refactor"))
+        .await
+        .unwrap();
+    provider.wait().await;
+    let mut steer = deferred_request("keep the public names");
+    steer.delivery = haarness_protocol::InputDelivery::Steer;
+    runtime.queue_input(thread.id, steer).await.unwrap();
+    runtime.interrupt_thread_tree(thread.id).await.unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Interrupted
+    );
+    wait_idle(&runtime, thread.id).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(runtime.active_turn(thread.id).await.unwrap().is_none());
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(items.iter().any(|item| matches!(&item.data, haarness_protocol::ItemData::Error { message, .. } if message.contains("Queued input could not be delivered"))));
 }
 
 #[tokio::test]
@@ -9405,7 +9548,7 @@ async fn concurrent_idle_queue_admissions_deliver_every_prompt_once() {
         while let Some(result) = tasks.join_next().await {
             result.unwrap();
         }
-        wait_idle(&runtime, thread.id).await;
+        wait_drained(&runtime, thread.id).await;
         assert!(
             runtime
                 .input_queue(thread.id)
@@ -9461,6 +9604,48 @@ async fn stopping_with_deferred_input_resolves_the_cancelled_permission_for_clie
         1
     );
     assert_eq!(runtime.input_queue(thread.id).await.unwrap().items.len(), 1);
+}
+
+#[tokio::test]
+async fn stop_answers_steering_sent_into_a_request_the_stop_cancelled() {
+    use haarness_protocol::ItemData;
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, false);
+    let thread = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(r#"!tool bash {"command":"printf waits-for-approval"}"#),
+        )
+        .await
+        .unwrap();
+    wait_pending_permissions(&runtime, 1).await;
+    let mut steer = deferred_request("actually explain the plan");
+    steer.delivery = haarness_protocol::InputDelivery::Steer;
+    runtime.queue_input(thread.id, steer).await.unwrap();
+    // The cancelled approval lets the runner send the steering to the model
+    // before the stop lands, so it is consumed but never answered.
+    runtime
+        .interrupt_thread_tree_with(thread.id, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Interrupted
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let items = runtime.items(thread.id, None).await.unwrap();
+            if items.iter().any(|item| matches!(&item.data, ItemData::AssistantMessage { text } if text.contains("stopped your previous work")))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a continuation answers the steering");
+    wait_idle(&runtime, thread.id).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -9620,7 +9805,8 @@ mod permission_parity;
 
 #[tokio::test]
 async fn published_remote_chat_cannot_read_or_control_other_conversations() {
-    let workspace = std::env::temp_dir().join(format!("haarness-remote-scope-{}", uuid::Uuid::now_v7()));
+    let workspace =
+        std::env::temp_dir().join(format!("haarness-remote-scope-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&workspace).unwrap();
     let runtime = Arc::new(AgentRuntime::new(
         Arc::new(SqliteStore::in_memory().unwrap()),
@@ -9808,28 +9994,44 @@ async fn published_remote_chat_cannot_read_or_control_other_conversations() {
 
 #[tokio::test]
 async fn preview_tool_and_prompt_are_opt_in_for_graphical_turns() {
-    let workspace = std::env::temp_dir().join(format!("haarness-preview-gating-{}", uuid::Uuid::now_v7()));
+    let workspace =
+        std::env::temp_dir().join(format!("haarness-preview-gating-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&workspace).unwrap();
     let provider = Capturing::default();
     let runtime = AgentRuntime::with_config(
         Arc::new(SqliteStore::in_memory().unwrap()),
-        Arc::new(StaticProviderRegistry::new(vec![Arc::new(provider.clone()) as Arc<dyn ModelProvider>])),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
+        ])),
         Arc::new(NativeToolRegistry::new(workspace.clone())),
-        EventBus::new(64), workspace.clone(), String::new(), RuntimeConfig::default(),
+        EventBus::new(64),
+        workspace.clone(),
+        String::new(),
+        RuntimeConfig::default(),
     );
     let thread = echo_thread(&runtime).await;
     for preview in [None, Some(true), Some(false)] {
         let mut request = turn_request("Return an answer");
-        request.tools = preview.map(|enabled| std::collections::HashMap::from([("preview".into(), enabled)]));
+        request.tools =
+            preview.map(|enabled| std::collections::HashMap::from([("preview".into(), enabled)]));
         let turn = runtime.start_turn(thread.id, request).await.unwrap();
         wait_done(&runtime, &turn).await;
         wait_idle(&runtime, thread.id).await;
         let requests = provider.requests.lock().unwrap();
         let request = requests.last().unwrap();
-        assert_eq!(request.tools.iter().any(|tool| tool.name == "preview"), preview == Some(true));
-        assert_eq!(request.system.contains("The user's client can preview"), preview == Some(true));
+        assert_eq!(
+            request.tools.iter().any(|tool| tool.name == "preview"),
+            preview == Some(true)
+        );
+        assert_eq!(
+            request.system.contains("The user's client can preview"),
+            preview == Some(true)
+        );
     }
-    runtime.set_tool_enabled("preview", Some(false)).await.unwrap();
+    runtime
+        .set_tool_enabled("preview", Some(false))
+        .await
+        .unwrap();
     let mut request = turn_request("Disabled preview must not be advertised");
     request.tools = Some(std::collections::HashMap::from([("preview".into(), true)]));
     let turn = runtime.start_turn(thread.id, request).await.unwrap();

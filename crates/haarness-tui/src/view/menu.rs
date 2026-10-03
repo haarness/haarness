@@ -406,7 +406,6 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
                         crate::state::OptionsKind::CloudRouter
                         | crate::state::OptionsKind::InputQueue
                         | crate::state::OptionsKind::InputQueueActions
-                        | crate::state::OptionsKind::InputQueueEdit
                         | crate::state::OptionsKind::Management
                         | crate::state::OptionsKind::ManagementField
                         | crate::state::OptionsKind::ManagementValue
@@ -697,10 +696,6 @@ fn search_row(app: &App) -> Line {
         ]);
     }
     let prompt = match app.overlay {
-        Overlay::Options {
-            kind: crate::state::OptionsKind::InputQueueEdit,
-            ..
-        } => Some(("Message", "Edit queued message")),
         Overlay::Options {
             kind: crate::state::OptionsKind::WorkspaceCreateName,
             ..

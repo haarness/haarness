@@ -1365,14 +1365,24 @@ impl ApiClient {
             .json()
             .await?)
     }
-    pub async fn interrupt_session(&self, id: haarness_protocol::ThreadId) -> Result<()> {
-        self.request(
-            reqwest::Method::POST,
-            &format!("/v1/threads/{id}/interrupt"),
-        )
-        .send()
-        .await?
-        .error_for_status()?;
+    /// Stop every turn, delegated task, and workflow in one conversation tree.
+    /// `resume` is only for a person pressing Stop: steering they sent that
+    /// the agent has not read yet is then answered by a continuation turn
+    /// instead of being dropped. Programmatic stops leave it off.
+    pub async fn interrupt_session(
+        &self,
+        id: haarness_protocol::ThreadId,
+        resume: bool,
+    ) -> Result<()> {
+        let path = if resume {
+            format!("/v1/threads/{id}/interrupt?resume=true")
+        } else {
+            format!("/v1/threads/{id}/interrupt")
+        };
+        self.request(reqwest::Method::POST, &path)
+            .send()
+            .await?
+            .error_for_status()?;
         Ok(())
     }
     pub async fn shutdown_server(&self) -> Result<()> {
@@ -1405,8 +1415,17 @@ impl ApiClient {
     pub async fn change_input_queue(
         &self,
         id: haarness_protocol::ThreadId,
-        action: haarness_protocol::InputQueueAction,
+        mut action: haarness_protocol::InputQueueAction,
     ) -> Result<haarness_protocol::InputQueue> {
+        // Attachments added while editing are local paths; a remote server
+        // needs them uploaded the same way a fresh message's are.
+        if let haarness_protocol::InputQueueAction::Edit {
+            attachments: Some(attachments),
+            ..
+        } = &mut action
+        {
+            *attachments = self.attachments(std::mem::take(attachments)).await?;
+        }
         Ok(self
             .request(
                 reqwest::Method::POST,

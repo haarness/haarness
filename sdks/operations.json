@@ -826,6 +826,9 @@
     ],
     "response": {
       "$ref": "#/components/schemas/InterruptResponse"
+    },
+    "query": {
+      "$ref": "#/components/schemas/InterruptQuery"
     }
   },
   {
@@ -1177,6 +1180,9 @@
     ],
     "response": {
       "$ref": "#/components/schemas/Turn"
+    },
+    "query": {
+      "$ref": "#/components/schemas/InterruptQuery"
     }
   },
   {

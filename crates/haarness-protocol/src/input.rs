@@ -41,6 +41,9 @@ pub enum InputQueueAction {
         revision: u64,
         id: RequestId,
         text: String,
+        /// Replaces the message's attachments. Omitted keeps them unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attachments: Option<Vec<String>>,
     },
     Remove {
         revision: u64,

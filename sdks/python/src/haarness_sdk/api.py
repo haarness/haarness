@@ -267,9 +267,9 @@ class Api(Transport):
         """GET /v1/threads/{id}/active."""
         return cast("Union[T.Turn, None]", self.request('GET', f'/v1/threads/{self.segment(id)}/active', binary_body=False, binary_response=False, options=options))
 
-    def interrupt_thread_tree(self, id: str, *, options: RequestOptions | None = None) -> T.InterruptResponse:
+    def interrupt_thread_tree(self, id: str, query: T.InterruptQuery | None = None, *, options: RequestOptions | None = None) -> T.InterruptResponse:
         """POST /v1/threads/{id}/interrupt."""
-        return cast("T.InterruptResponse", self.request('POST', f'/v1/threads/{self.segment(id)}/interrupt', binary_body=False, binary_response=False, options=options))
+        return cast("T.InterruptResponse", self.request('POST', f'/v1/threads/{self.segment(id)}/interrupt', query=query, binary_body=False, binary_response=False, options=options))
 
     def list_background_tasks(self, id: str, *, options: RequestOptions | None = None) -> list[T.BackgroundTaskInfo]:
         """GET /v1/threads/{id}/background."""
@@ -371,9 +371,9 @@ class Api(Transport):
         """GET /v1/turns/{id}."""
         return cast("T.Turn", self.request('GET', f'/v1/turns/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
 
-    def interrupt_turn(self, id: str, *, options: RequestOptions | None = None) -> T.Turn:
+    def interrupt_turn(self, id: str, query: T.InterruptQuery | None = None, *, options: RequestOptions | None = None) -> T.Turn:
         """POST /v1/turns/{id}/interrupt."""
-        return cast("T.Turn", self.request('POST', f'/v1/turns/{self.segment(id)}/interrupt', binary_body=False, binary_response=False, options=options))
+        return cast("T.Turn", self.request('POST', f'/v1/turns/{self.segment(id)}/interrupt', query=query, binary_body=False, binary_response=False, options=options))
 
     def wait_turn(self, id: str, query: T.WaitQuery | None = None, *, options: RequestOptions | None = None) -> T.Turn:
         """GET /v1/turns/{id}/wait."""
@@ -756,9 +756,9 @@ class AsyncApi(AsyncTransport):
         """GET /v1/threads/{id}/active."""
         return cast("Union[T.Turn, None]", await self.request('GET', f'/v1/threads/{self.segment(id)}/active', binary_body=False, binary_response=False, options=options))
 
-    async def interrupt_thread_tree(self, id: str, *, options: RequestOptions | None = None) -> T.InterruptResponse:
+    async def interrupt_thread_tree(self, id: str, query: T.InterruptQuery | None = None, *, options: RequestOptions | None = None) -> T.InterruptResponse:
         """POST /v1/threads/{id}/interrupt."""
-        return cast("T.InterruptResponse", await self.request('POST', f'/v1/threads/{self.segment(id)}/interrupt', binary_body=False, binary_response=False, options=options))
+        return cast("T.InterruptResponse", await self.request('POST', f'/v1/threads/{self.segment(id)}/interrupt', query=query, binary_body=False, binary_response=False, options=options))
 
     async def list_background_tasks(self, id: str, *, options: RequestOptions | None = None) -> list[T.BackgroundTaskInfo]:
         """GET /v1/threads/{id}/background."""
@@ -860,9 +860,9 @@ class AsyncApi(AsyncTransport):
         """GET /v1/turns/{id}."""
         return cast("T.Turn", await self.request('GET', f'/v1/turns/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
 
-    async def interrupt_turn(self, id: str, *, options: RequestOptions | None = None) -> T.Turn:
+    async def interrupt_turn(self, id: str, query: T.InterruptQuery | None = None, *, options: RequestOptions | None = None) -> T.Turn:
         """POST /v1/turns/{id}/interrupt."""
-        return cast("T.Turn", await self.request('POST', f'/v1/turns/{self.segment(id)}/interrupt', binary_body=False, binary_response=False, options=options))
+        return cast("T.Turn", await self.request('POST', f'/v1/turns/{self.segment(id)}/interrupt', query=query, binary_body=False, binary_response=False, options=options))
 
     async def wait_turn(self, id: str, query: T.WaitQuery | None = None, *, options: RequestOptions | None = None) -> T.Turn:
         """GET /v1/turns/{id}/wait."""

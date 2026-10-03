@@ -353,7 +353,6 @@ pub enum OptionsKind {
     CloudRouter,
     InputQueue,
     InputQueueActions,
-    InputQueueEdit,
     Management,
     ManagementField,
     ManagementValue,
@@ -473,6 +472,21 @@ pub enum ToastVariant {
     Error,
 }
 
+/// A queued follow-up loaded into the prompt for editing. Whatever the prompt
+/// held before is set aside here, whole, and comes back on save or cancel.
+pub struct QueueEdit {
+    pub id: haarness_protocol::RequestId,
+    /// The message as it was when the edit began. A save never overwrites a
+    /// version another client wrote meanwhile.
+    pub original: (String, Vec<String>),
+    pub draft: crate::input::composer::SetAside,
+    pub attachments: Vec<String>,
+    pub shell: bool,
+    /// Why the last save was refused. The editing line shows it until the
+    /// next attempt, because a running turn's band has no room for notices.
+    pub conflict: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct Toast {
     pub title: Option<String>,
@@ -484,7 +498,14 @@ pub struct Toast {
 #[allow(clippy::struct_excessive_bools)] // independent UI toggles, not a state machine
 pub struct App {
     pub input_queue: haarness_protocol::InputQueue,
+    /// The queued message whose action menu is open, with the queue revision
+    /// the menu was built from.
     pub input_queue_edit: Option<(haarness_protocol::RequestId, u64)>,
+    /// The action menu was reached through the `/queue` list, so finishing an
+    /// action returns there instead of closing.
+    pub input_queue_listed: bool,
+    /// A queued message open for editing in the prompt.
+    pub queue_edit: Option<QueueEdit>,
     pub(crate) pending_server: Option<Box<crate::servers::Connection>>,
     pub(crate) original_client: Option<crate::api::ApiClient>,
     pub(crate) keybindings: std::collections::BTreeMap<String, String>,
@@ -793,7 +814,7 @@ impl App {
             live_threads: std::collections::HashMap::new(),
             notice,
             custom_status_line: None,
-            billing: Default::default(),
+            billing: haarness_account::billing::State::default(),
             language: crate::locale::Language::default(),
             connection_lost: None,
             overlay: Overlay::None,
@@ -802,6 +823,8 @@ impl App {
             refresh_needed: false,
             input_queue: haarness_protocol::InputQueue::default(),
             input_queue_edit: None,
+            input_queue_listed: false,
+            queue_edit: None,
             root_active_turn: None,
             parent_stack: Vec::new(),
             children,
@@ -1089,7 +1112,6 @@ impl App {
             Overlay::Options {
                 kind: OptionsKind::ManagementField
                     | OptionsKind::ConnectApiKey
-                    | OptionsKind::InputQueueEdit
                     | OptionsKind::WorkspaceCreateName
                     | OptionsKind::WorkspaceCreateCustomBase,
                 ..
@@ -2365,7 +2387,6 @@ impl App {
                 kind,
                 OptionsKind::ManagementField
                     | OptionsKind::ConnectApiKey
-                    | OptionsKind::InputQueueEdit
                     | OptionsKind::WorkspaceCreateName
                     | OptionsKind::WorkspaceCreateCustomBase
             ) =>

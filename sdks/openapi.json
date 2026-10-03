@@ -2189,6 +2189,16 @@
                 ],
                 "type": "string"
               },
+              "attachments": {
+                "description": "Replaces the message's attachments. Omitted keeps them unchanged.",
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
               "id": {
                 "$ref": "#/components/schemas/RequestId"
               },
@@ -2285,6 +2295,15 @@
             "type": "object"
           }
         ]
+      },
+      "InterruptQuery": {
+        "properties": {
+          "resume": {
+            "type": "boolean"
+          }
+        },
+        "required": [],
+        "type": "object"
       },
       "InterruptResponse": {
         "properties": {
@@ -9523,6 +9542,14 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "resume",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -10139,6 +10166,14 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "resume",
+            "required": false,
+            "schema": {
+              "type": "boolean"
             }
           }
         ],

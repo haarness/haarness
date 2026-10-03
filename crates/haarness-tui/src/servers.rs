@@ -63,11 +63,23 @@ impl From<StoredDraft> for Draft {
 }
 impl Draft {
     pub(crate) fn from_app(app: &App) -> Self {
+        // A queued message open for editing already lives on the server; the
+        // draft worth keeping is the one set aside when the edit began.
+        if let Some(edit) = &app.queue_edit {
+            return Self {
+                text: edit.draft.expanded_text(),
+                attachments: edit.attachments.clone(),
+                shell: edit.shell,
+            };
+        }
         Self {
             text: app.composer.expanded_text(),
             attachments: app.attachments.clone(),
             shell: app.shell_mode,
         }
+    }
+    fn is_empty(&self) -> bool {
+        self.text.is_empty() && self.attachments.is_empty()
     }
 }
 #[derive(Default, Serialize, Deserialize)]
@@ -201,10 +213,11 @@ fn merge_drafts(
 pub(crate) fn save_current(app: &App, client: &ApiClient) -> Result<()> {
     let scope = draft_scope(client, app.server_info.as_ref());
     let mut drafts = app.drafts.clone();
-    if !app.composer.is_empty() || !app.attachments.is_empty() {
-        drafts.insert(app.thread.id, Draft::from_app(app));
-    } else {
+    let draft = Draft::from_app(app);
+    if draft.is_empty() {
         drafts.remove(&app.thread.id);
+    } else {
+        drafts.insert(app.thread.id, draft);
     }
     config::update_client_json("tui-server-drafts.json", |all: &mut SavedViews| {
         let saved = all.entry(scope).or_insert_with(|| SavedView {

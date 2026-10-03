@@ -260,7 +260,7 @@ impl App {
             bottom.append(menu::menu_lines(self, width, menu_height));
         }
         bottom.append(approval);
-        bottom.extend(queued);
+        bottom.append(queued);
         bottom.extend(composer);
         // Root conversations need the same visual boundary that child panes
         // already carry in their footer. Keep the gutter outside the
@@ -455,13 +455,13 @@ impl App {
             && hit.paint_hover
         {
             match &hit.target {
-                // This target exists solely to prevent click-through and must
-                // never make inert card chrome look interactive.
-                frame::HitTarget::DialogSurface => {}
-                // Mouse movement already changes selection. When that scrolls
-                // a picker, this cell can now belong to another item; painting
-                // it again would highlight both the selected and stale row.
-                frame::HitTarget::MenuRow(_) => {}
+                // A dialog surface exists solely to prevent click-through and
+                // must never make inert card chrome look interactive. On a
+                // menu row, mouse movement already changes selection; when
+                // that scrolls a picker, this cell can now belong to another
+                // item, and painting it again would highlight both the
+                // selected and stale row.
+                frame::HitTarget::DialogSurface | frame::HitTarget::MenuRow(_) => {}
                 frame::HitTarget::DialogItem(_) => {
                     let target = hit.target.clone();
                     for region in hits

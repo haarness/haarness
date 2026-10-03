@@ -38,6 +38,32 @@ struct EditSnapshot {
     expansions: Vec<Expansion>,
 }
 
+/// A draft taken out of the prompt by [`Composer::set_aside`], kept opaque so
+/// it can only come back through [`Composer::restore`].
+#[derive(Clone)]
+pub struct SetAside(EditSnapshot);
+
+impl SetAside {
+    /// What the draft would send, with collapsed pastes expanded.
+    pub fn expanded_text(&self) -> String {
+        expand(&self.0.text, &self.0.expansions)
+    }
+}
+
+fn expand(text: &str, expansions: &[Expansion]) -> String {
+    let mut expansions = expansions.iter().collect::<Vec<_>>();
+    expansions.sort_by_key(|e| e.start);
+    let mut value = String::new();
+    let mut offset = 0;
+    for expansion in expansions {
+        value.push_str(&text[offset..expansion.start]);
+        value.push_str(&expansion.content);
+        offset = expansion.end;
+    }
+    value.push_str(&text[offset..]);
+    value
+}
+
 #[derive(Default)]
 pub struct Composer {
     text: String,
@@ -460,17 +486,23 @@ impl Composer {
     }
 
     pub fn expanded_text(&self) -> String {
-        let mut expansions = self.expansions.iter().collect::<Vec<_>>();
-        expansions.sort_by_key(|e| e.start);
-        let mut value = String::new();
-        let mut offset = 0;
-        for expansion in expansions {
-            value.push_str(&self.text[offset..expansion.start]);
-            value.push_str(&expansion.content);
-            offset = expansion.end;
-        }
-        value.push_str(&self.text[offset..]);
-        value
+        expand(&self.text, &self.expansions)
+    }
+
+    /// Lift the draft out of the prompt whole, collapsed pastes and attached
+    /// context included, leaving the prompt empty. History stays put.
+    pub fn set_aside(&mut self) -> SetAside {
+        let draft = SetAside(self.edit_snapshot());
+        self.clear();
+        draft
+    }
+
+    /// Put a set-aside draft back exactly as it was, cursor included.
+    pub fn restore(&mut self, draft: SetAside) {
+        self.clear();
+        self.text = draft.0.text;
+        self.cursor = draft.0.cursor;
+        self.expansions = draft.0.expansions;
     }
 
     pub fn take(&mut self) -> String {

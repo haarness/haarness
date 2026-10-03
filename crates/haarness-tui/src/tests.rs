@@ -7852,8 +7852,11 @@ fn queued_followups_wait_above_the_composer_until_consumed() {
         .collect();
     assert!(!transcript.contains("also add tests"), "{transcript}");
     let text = frame_text(&app, (100, 30));
-    assert!(text.contains("⧗"), "{text}");
-    assert!(text.contains("also add tests"), "{text}");
+    assert!(
+        text.contains("Steering · 1 — joins at the next step"),
+        "{text}"
+    );
+    assert!(text.contains("1. also add tests"), "{text}");
 
     // Consumption moves it into the conversation and empties the strip.
     app.items.push(message_item(
@@ -7868,7 +7871,7 @@ fn queued_followups_wait_above_the_composer_until_consumed() {
         .collect();
     assert!(transcript.contains("also add tests"), "{transcript}");
     let text = frame_text(&app, (100, 30));
-    assert!(!text.contains("⧗"), "{text}");
+    assert!(!text.contains("Steering ·"), "{text}");
 }
 
 #[tokio::test]
@@ -11011,9 +11014,14 @@ async fn active_turn_requires_two_escapes_and_shift_escape_never_aborts_the_turn
         app.phase.as_ref().map(|phase| phase.state.as_str()),
         Some("stopping")
     );
+    // Stop is the person's: it stops the tree and asks the server to answer
+    // steering the agent had not read yet.
     let request = server.await.unwrap();
     assert!(
-        request.starts_with(&format!("POST /v1/turns/{turn}/interrupt ")),
+        request.starts_with(&format!(
+            "POST /v1/threads/{}/interrupt?resume=true ",
+            app.thread.id
+        )),
         "wrong interrupt request: {request}"
     );
 }
@@ -13751,14 +13759,431 @@ async fn deferred_queue_events_are_scoped_and_never_roll_back_newer_edits() {
     assert_eq!(app.input_queue.revision, 3);
     assert_eq!(app.input_queue.items[0].text, "latest");
     let rendered = frame_text(&app, (100, 30));
-    assert!(rendered.contains("queued"));
-    assert!(rendered.contains("paused"));
+    assert!(
+        rendered.contains("Queue paused — send when ready"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("1. latest"), "{rendered}");
     assert!(
         !crate::view::transcript::transcript_lines(&app, 100)
             .lines
             .iter()
             .any(|line| line_text(line).contains("latest"))
     );
+}
+
+fn queued_input(text: &str, attachments: &[&str]) -> haarness_protocol::PendingInput {
+    haarness_protocol::PendingInput {
+        preview: false,
+        id: haarness_protocol::RequestId::new(),
+        text: text.into(),
+        attachments: attachments.iter().map(|path| (*path).to_owned()).collect(),
+    }
+}
+
+/// A session with `texts` waiting in the deferred queue at revision 7.
+fn queue_fixture(texts: &[&str]) -> App {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.input_queue = haarness_protocol::InputQueue {
+        revision: 7,
+        items: texts.iter().map(|text| queued_input(text, &[])).collect(),
+    };
+    app
+}
+
+fn queue_json(revision: u64, items: &[haarness_protocol::PendingInput]) -> String {
+    serde_json::to_string(&haarness_protocol::InputQueue {
+        revision,
+        items: items.to_vec(),
+    })
+    .unwrap()
+}
+
+/// The rendered row whose text starts with `prefix`.
+fn strip_row(app: &App, prefix: &str) -> (usize, Line) {
+    app.lines((100, 30))
+        .into_iter()
+        .enumerate()
+        .find(|(_, line)| line_text(line).starts_with(prefix))
+        .unwrap_or_else(|| {
+            panic!(
+                "no row starts with {prefix:?}:\n{}",
+                frame_text(app, (100, 30))
+            )
+        })
+}
+
+async fn click_hit(
+    app: &mut App,
+    target: &crate::view::frame::HitTarget,
+    client: &crate::api::ApiClient,
+) {
+    app.lines((100, 30));
+    let hit = app
+        .hit_rows
+        .borrow()
+        .iter()
+        .find(|hit| &hit.target == target)
+        .cloned()
+        .unwrap_or_else(|| panic!("{target:?} is not on screen"));
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        crate::input::mouse::handle_mouse(
+            app,
+            MouseEvent {
+                kind,
+                column: u16::try_from(hit.start + 2).unwrap(),
+                row: u16::try_from(hit.row).unwrap(),
+                modifiers: KeyModifiers::NONE,
+            },
+            client,
+        )
+        .await
+        .unwrap();
+    }
+}
+
+fn option_labels(app: &App) -> Vec<String> {
+    match &app.overlay {
+        crate::state::Overlay::Options {
+            kind: crate::state::OptionsKind::InputQueueActions,
+            entries,
+            ..
+        } => entries.iter().map(|entry| entry.label.clone()).collect(),
+        _ => panic!("the queued message's actions are not open"),
+    }
+}
+
+#[test]
+fn queue_strip_header_names_the_working_paused_and_editing_states() {
+    let mut app = queue_fixture(&["first", "second"]);
+    let second = app.input_queue.items[1].id;
+
+    app.active_turn = Some(TurnId::new());
+    let working = frame_text(&app, (100, 30));
+    assert!(working.contains("▎ Queued · 2"), "{working}");
+    assert!(!working.contains("paused"), "{working}");
+    // The strip's text shares the prompt's column, under a rail at the edge.
+    strip_row(&app, "▎ 1. first");
+    strip_row(&app, "▎ 2. second");
+    assert!(working.contains("\n  Ask anything"), "{working}");
+
+    app.active_turn = None;
+    let paused = frame_text(&app, (100, 30));
+    assert!(
+        paused.contains("▎ Queue paused — send when ready"),
+        "{paused}"
+    );
+    assert!(!paused.contains("Queued ·"), "{paused}");
+
+    app.composer.set_text("half-written thought".into());
+    app.edit_queued_message(second).unwrap();
+    let editing = frame_text(&app, (100, 30));
+    assert!(
+        editing.contains("▎ Editing — Enter saves it in place"),
+        "{editing}"
+    );
+    assert!(
+        editing.contains("▎ Editing queued message · Enter saves · Click to cancel"),
+        "{editing}"
+    );
+    assert!(!editing.contains("half-written thought"), "{editing}");
+    // Only the message being edited is raised.
+    let (_, edited) = strip_row(&app, "▎ 2. second");
+    let (_, other) = strip_row(&app, "▎ 1. first");
+    assert_eq!(cell_style(&edited, 2).unwrap().1, Some(app.theme.selected));
+    assert_eq!(cell_style(&other, 2).unwrap().1, Some(app.theme.surface));
+}
+
+#[test]
+fn queue_strip_numbers_three_messages_and_counts_the_rest() {
+    let thread = fixture_thread();
+    let steering = message_item(
+        1,
+        &thread,
+        ItemData::UserMessage {
+            text: "keep the public names".into(),
+            attachments: vec![],
+            queued: true,
+            synthetic: false,
+        },
+    );
+    let mut app = queue_fixture(&["one\nstill one", "two", "three", "four", "five"]);
+    app.items = vec![steering];
+    app.active_turn = Some(TurnId::new());
+
+    let (steer_header, _) = strip_row(&app, "▎ Steering · 1 — joins at the next step");
+    let (steer_row, _) = strip_row(&app, "▎ 1. keep the public names");
+    let (queue_header, _) = strip_row(&app, "▎ Queued · 5");
+    let (first, _) = strip_row(&app, "▎ 1. one still one");
+    strip_row(&app, "▎ 2. two");
+    let (third, _) = strip_row(&app, "▎ 3. three");
+    let (more, _) = strip_row(&app, "▎ +2 more");
+    assert!(steer_header < steer_row && steer_row < queue_header);
+    assert!(queue_header < first && first < third && third < more);
+    let text = frame_text(&app, (100, 30));
+    assert!(!text.contains("4. four"), "{text}");
+
+    // Steering is already with the agent: its rows are not controls. Queued
+    // rows, the header, and the overflow line are.
+    app.lines((100, 30));
+    let targets = app
+        .hit_rows
+        .borrow()
+        .iter()
+        .map(|hit| (hit.row, hit.target.clone()))
+        .collect::<Vec<_>>();
+    let at = |row: usize| {
+        targets
+            .iter()
+            .find(|(r, _)| *r == row)
+            .map(|(_, t)| t.clone())
+    };
+    assert_eq!(at(steer_row), None);
+    assert_eq!(
+        at(queue_header),
+        Some(crate::view::frame::HitTarget::QueueList)
+    );
+    assert_eq!(
+        at(first),
+        Some(crate::view::frame::HitTarget::QueueItem(
+            app.input_queue.items[0].id
+        ))
+    );
+    assert_eq!(at(more), Some(crate::view::frame::HitTarget::QueueList));
+}
+
+#[tokio::test]
+async fn clicking_a_queued_row_opens_its_actions() {
+    use crate::view::frame::HitTarget;
+
+    let mut app = queue_fixture(&["first", "second", "third"]);
+    let client = offline_client();
+    let second = app.input_queue.items[1].id;
+    app.active_turn = Some(TurnId::new());
+
+    click_hit(&mut app, &HitTarget::QueueItem(second), &client).await;
+    assert_eq!(
+        option_labels(&app),
+        ["Steer now", "Edit", "Remove", "Move up", "Move down"]
+    );
+    assert_eq!(app.input_queue_edit, Some((second, 7)));
+    assert!(!app.input_queue_listed, "a strip click closes after acting");
+
+    // Idle, sending runs the message rather than steering; the first row
+    // cannot move up.
+    app.close_overlay();
+    app.active_turn = None;
+    let first = app.input_queue.items[0].id;
+    click_hit(&mut app, &HitTarget::QueueItem(first), &client).await;
+    assert_eq!(
+        option_labels(&app),
+        ["Send now", "Edit", "Remove", "Move down"]
+    );
+
+    // Edit loads the message into the prompt rather than a dialog.
+    app.composer.set_text("my draft".into());
+    app.input_queue_action("edit", &client).await.unwrap();
+    assert!(matches!(app.overlay, crate::state::Overlay::None));
+    assert_eq!(app.composer.text(), "first");
+    assert_eq!(app.queue_edit.as_ref().map(|edit| edit.id), Some(first));
+
+    // The editing line cancels on click and brings the draft back.
+    click_hit(&mut app, &HitTarget::QueueEditCancel, &client).await;
+    assert!(app.queue_edit.is_none());
+    assert_eq!(app.composer.text(), "my draft");
+}
+
+#[tokio::test]
+async fn saving_a_queued_edit_keeps_its_place_and_sends_its_attachments() {
+    let mut app = queue_fixture(&["first", "second", "third"]);
+    app.input_queue.items[1].attachments = vec!["/tmp/plan.png".into()];
+    let second = app.input_queue.items[1].id;
+    let mut saved = app.input_queue.items.clone();
+    saved[1].text = "second, with more".into();
+    saved[1].attachments = vec!["/tmp/plan.png".into(), "/tmp/notes.pdf".into()];
+    // The server answers exactly one request: anything else (a Steer that
+    // would start the paused queue, say) fails the key press.
+    let (client, server) =
+        workspace_http_status_client(vec![(200, queue_json(8, &saved))], false).await;
+
+    app.composer.set_text("my draft".into());
+    app.attachments = vec!["/tmp/draft.png".into()];
+    app.open_queue_item_actions(second, false).unwrap();
+    app.input_queue_action("edit", &client).await.unwrap();
+    assert_eq!(app.composer.text(), "second");
+    assert_eq!(app.attachments, ["/tmp/plan.png"]);
+
+    app.composer.move_end();
+    app.composer.insert_str(", with more");
+    app.attachments.push("/tmp/notes.pdf".into());
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].starts_with(&format!("POST /v1/threads/{}/input/queue ", app.thread.id)),
+        "{}",
+        requests[0]
+    );
+    let body: serde_json::Value =
+        serde_json::from_str(requests[0].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "action": "edit",
+            "revision": 7,
+            "id": second,
+            "text": "second, with more",
+            "attachments": ["/tmp/plan.png", "/tmp/notes.pdf"],
+        })
+    );
+    // Same position, the draft is back, and a paused queue stays paused.
+    assert_eq!(app.input_queue.items[1].id, second);
+    assert_eq!(app.input_queue.items[1].text, "second, with more");
+    assert!(app.queue_edit.is_none());
+    assert_eq!(app.composer.text(), "my draft");
+    assert_eq!(app.attachments, ["/tmp/draft.png"]);
+    assert_eq!(app.notice, "Queued message saved");
+    let text = frame_text(&app, (100, 30));
+    assert!(text.contains("Queue paused — send when ready"), "{text}");
+    assert!(text.contains("2. second, with more"), "{text}");
+}
+
+#[tokio::test]
+async fn esc_cancels_a_queued_edit_and_never_interrupts_running_work() {
+    let mut app = queue_fixture(&["first", "second"]);
+    let turn = TurnId::new();
+    app.active_turn = Some(turn);
+    app.composer.set_text("my draft".into());
+    app.attachments = vec!["/tmp/draft.png".into()];
+    let second = app.input_queue.items[1].id;
+    app.edit_queued_message(second).unwrap();
+    // An Esc pressed just before editing began must not pair with this one.
+    app.escape_interrupt = Some((
+        crate::state::InterruptTarget::Turn(turn),
+        std::time::Instant::now(),
+    ));
+
+    press_key(&mut app, KeyCode::Esc).await;
+    assert!(app.queue_edit.is_none());
+    assert_eq!(app.composer.text(), "my draft");
+    assert_eq!(app.attachments, ["/tmp/draft.png"]);
+    assert!(app.escape_interrupt.is_none());
+    assert!(app.phase.is_none(), "Esc reached the running turn");
+    assert_eq!(app.notice, "Edit cancelled · draft restored");
+    assert!(!frame_text(&app, (100, 30)).contains("Editing"));
+
+    // With the edit gone, Esc is the interrupt key again, armed by one press.
+    press_key(&mut app, KeyCode::Esc).await;
+    assert!(app.escape_interrupt.is_some());
+    assert!(app.phase.is_none());
+
+    // Ctrl+C cancels an edit the same way instead of clearing or stopping.
+    app.escape_interrupt = None;
+    app.edit_queued_message(second).unwrap();
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert!(app.queue_edit.is_none());
+    assert_eq!(app.composer.text(), "my draft");
+    assert!(app.ctrl_c_action.is_none());
+}
+
+#[tokio::test]
+async fn a_conflicting_queued_edit_keeps_the_text_in_the_prompt() {
+    let mut app = queue_fixture(&["first", "second"]);
+    app.active_turn = Some(TurnId::new());
+    let second = app.input_queue.items[1].id;
+    let remaining = vec![app.input_queue.items[0].clone()];
+    let (client, server) = workspace_http_status_client(
+        vec![
+            (
+                409,
+                r#"{"code":"conflict","message":"This message has already been sent or removed"}"#
+                    .into(),
+            ),
+            (200, queue_json(9, &remaining)),
+        ],
+        false,
+    )
+    .await;
+
+    app.composer.set_text("my draft".into());
+    app.edit_queued_message(second).unwrap();
+    app.composer.set_text("second, reworded".into());
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+
+    let requests = server.await.unwrap();
+    assert!(requests[0].starts_with("POST "), "{}", requests[0]);
+    assert!(requests[1].starts_with("GET "), "{}", requests[1]);
+    assert_eq!(app.composer.text(), "second, reworded");
+    assert!(
+        app.notice.contains("Already sent or removed"),
+        "{}",
+        app.notice
+    );
+    let edit = app.queue_edit.as_ref().expect("still editing");
+    assert_eq!(edit.id, second);
+    assert_eq!(app.input_queue.revision, 9);
+    let text = frame_text(&app, (100, 30));
+    assert!(
+        text.contains("▎ Already sent or removed · Esc or click restores your draft"),
+        "{text}"
+    );
+
+    press_key(&mut app, KeyCode::Esc).await;
+    assert_eq!(app.composer.text(), "my draft");
+    assert!(app.phase.is_none());
+}
+
+#[tokio::test]
+async fn a_queued_edit_never_overwrites_a_version_changed_elsewhere() {
+    let mut app = queue_fixture(&["first", "second"]);
+    app.active_turn = Some(TurnId::new());
+    let second = app.input_queue.items[1].id;
+    // No request is expected: the refusal happens before anything is sent.
+    let (client, server) = workspace_http_status_client(vec![], false).await;
+
+    app.composer.set_text("my draft".into());
+    app.edit_queued_message(second).unwrap();
+    app.composer.set_text("second, reworded".into());
+    // Another client rewrites the same message while this one edits it.
+    app.input_queue.items[1].text = "second, by someone else".into();
+    app.input_queue.revision += 1;
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+
+    assert!(server.await.unwrap().is_empty());
+    assert_eq!(app.composer.text(), "second, reworded");
+    assert!(app.notice.contains("Changed elsewhere"), "{}", app.notice);
+    assert_eq!(app.queue_edit.as_ref().map(|edit| edit.id), Some(second));
+    press_key(&mut app, KeyCode::Esc).await;
+    assert_eq!(app.composer.text(), "my draft");
 }
 
 #[test]
