@@ -1,6 +1,6 @@
 import { measureRow } from "./measure-row";
 import { t, splitAround, parseLanguage } from "./i18n";
-import { InputQueue } from "./InputQueue";
+import { InputQueue, createInputQueue } from "./InputQueue";
 import { ModelPicker } from "./ModelPicker";
 import {
   canRecall,
@@ -427,16 +427,64 @@ export function Session() {
     persistDraft();
   });
   const active = () => state.turns.find((t) => t.threadId === state.selected);
+  const queue = createInputQueue({
+    owner,
+    working: () => !!active(),
+    read: () => ({ text: draft(), attachments: attachments(), context: app.promptContext() }),
+    write: (value) => {
+      change(value.text);
+      setAttachments(value.attachments);
+      void app.run(() => app.setPromptContext(app.draftKey(), value.context));
+      persistDraft();
+      queueMicrotask(() => composer?.focus());
+    },
+  });
+  // While work runs, sending follows the follow-up setting; the send button
+  // says which, so the user knows before they press it.
+  const [followUp, setFollowUp] = createSignal<T.InputDelivery>("steer");
+  function refreshFollowUp() {
+    const connection = state.connection;
+    if (!connection?.info.capabilities.includes("input-settings.v1")) return setFollowUp("steer");
+    void window.haarness
+      .api<{ data: { delivery: T.InputDelivery } }>(connection.id, "manageResource", ["input-settings", { action: "get" }])
+      .then((result) => {
+        if (state.connection?.id === connection.id) setFollowUp(result.data.delivery);
+      })
+      .catch(() => {});
+  }
+  createEffect(
+    on(
+      () => [!!active(), state.connection?.id, state.settings] as const,
+      ([working, , settings]) => {
+        if (working && !settings) refreshFollowUp();
+      },
+    ),
+  );
   const showStop = () =>
     !!active() &&
+    !queue.editing() &&
     !draft().trim() &&
     !attachments().length &&
     !app.promptContext().length;
+  const sendLabel = () =>
+    queue.editing()
+      ? t("Save queued message")
+      : showStop()
+        ? t("Stop session")
+        : t("Send message");
+  // The name stays "Send"; the tooltip says what sending does mid-work.
+  const sendHint = () =>
+    !queue.editing() && !showStop() && active()
+      ? followUp() === "queue"
+        ? t("Queue message")
+        : t("Steer message")
+      : sendLabel();
   const [stopping, setStopping] = createSignal(false);
   const stop = async () => {
     setStopping(true);
     try {
-      await app.api("interruptThreadTree", state.selected);
+      // An interactive Stop still answers steering the agent has not read.
+      await app.api("interruptThreadTree", state.selected, { resume: true });
       await app.refresh();
     } finally {
       setStopping(false);
@@ -841,6 +889,10 @@ export function Session() {
     }
   }
   async function send(delivery?: T.InputDelivery) {
+    if (queue.editing()) {
+      await queue.save({ text: draft(), attachments: attachments() });
+      return;
+    }
     const localCommand = /^\/(settings|input-mode|language)(?:\s+([\s\S]*))?$/.exec(draft().trim());
     if (localCommand) {
       const connection = state.connection?.id;
@@ -861,7 +913,10 @@ export function Session() {
         await app.openSettings("general");
       } else {
         const result = await window.haarness.api<{ data: { message: string } }>(connection, "manageResource", ["input-settings", { action: "command", arguments: argumentsText }]);
-        if (connection === state.connection?.id) app.notify(result.data.message);
+        if (connection === state.connection?.id) {
+          app.notify(result.data.message);
+          refreshFollowUp();
+        }
       }
       if (owner() === commandOwner && draft() === original) change("");
       return;
@@ -1363,7 +1418,7 @@ export function Session() {
                 />
               </div>
             </Show>
-            <InputQueue working={!!active()} />
+            <InputQueue queue={queue} working={!!active()} />
             <div
               class="composer"
               data-agent={selectedAgent()}
@@ -1467,6 +1522,13 @@ export function Session() {
                       setSlashDismissed(true);
                       return;
                     }
+                  }
+                  // Leaving a queued-message edit never stops the running work.
+                  if (event.key === "Escape" && queue.editing()) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    queue.cancel();
+                    return;
                   }
                   if (
                     ["ArrowUp", "ArrowDown"].includes(event.key) &&
@@ -1656,13 +1718,8 @@ export function Session() {
                   </Show>
                   <button
                     class="send-button"
-                    aria-label={
-                      showStop()
-                        ? "Stop session"
-                        : active()
-                          ? "Send message"
-                          : "Send message"
-                    }
+                    aria-label={sendLabel()}
+                    title={sendHint()}
                     disabled={
                       !project() ||
                       submitting() ||
@@ -1677,7 +1734,7 @@ export function Session() {
                     onClick={() => app.run(showStop() ? stop : () => send())}
                   >
                     <Icon
-                      name={showStop() ? "stop" : "send"}
+                      name={queue.editing() ? "check" : showStop() ? "stop" : "send"}
                       size="sm"
                       filled={showStop()}
                     />
@@ -1844,6 +1901,14 @@ function Message(props: {
             {(() => {
               const message = () => (content() as { message: string }).message;
               const recovery = () => errorRecovery(message());
+              // The user's own Stop is not a failure; it reads as a quiet note.
+              if (message().trim() === "operation cancelled")
+                return (
+                  <div class="notice-inline turn-stopped" role="status">
+                    <Icon name="stop" size="sm" />
+                    <span>{t("Stopped")}</span>
+                  </div>
+                );
               return (
                 <div class="inline-error" role="alert">
                   <Icon name="error" size="sm" />

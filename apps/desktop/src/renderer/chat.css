@@ -806,6 +806,11 @@
   color: var(--danger);
   align-items: flex-start;
 }
+.notice-inline.turn-stopped {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--muted);
+}
 .inline-error > svg {
   flex: none;
   margin-top: 3px;

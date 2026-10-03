@@ -1,52 +1,110 @@
 /*
- * Messages waiting for the current turn.
+ * Messages queued behind the current work.
  *
- * It is a tray of the composer, so it shares the composer's surface and lets
- * the tray's own column gap do the separating.
+ * A tray tucked under the composer's top edge, like the plan dock, so the two
+ * read as one stacked surface. It exists only while something is waiting.
  */
 .input-queue {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s1);
-  margin: 0;
-  padding: var(--s2) var(--s3);
+  min-width: 0;
+  margin: 0 var(--s3) calc(-1 * var(--s2));
+  padding: var(--s1) var(--s1) var(--s3);
   border: 1px solid var(--hairline);
-  border-radius: var(--r-lg);
+  border-bottom: 0;
+  border-radius: var(--r-xl) var(--r-xl) 0 0;
   background: var(--raised);
-  max-height: 240px;
-  overflow: auto;
 }
 .input-queue header {
-  font-size: var(--ui);
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: var(--icon-button);
+  padding-inline: var(--s2) 0;
+  font-size: var(--ui-sm);
   color: var(--muted);
 }
-.input-queue p {
+.input-queue-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.input-queue-count {
+  flex: none;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+.input-queue-cancel {
+  margin-inline-start: auto;
+}
+.input-queue-error {
+  margin: 0 var(--s2) var(--s1);
+  font-size: var(--ui-sm);
+  color: var(--danger);
+}
+.input-queue ol {
+  display: flex;
+  flex-direction: column;
   margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 200px;
+  overflow-y: auto;
 }
 .input-queue-row {
   display: flex;
   align-items: center;
-  gap: var(--s1);
+  gap: var(--s2);
   min-height: var(--control);
+  padding-inline: var(--s2) 0;
+  border-radius: var(--r-md);
 }
-.input-queue-row button {
-  flex-shrink: 0;
+.input-queue-row:hover,
+.input-queue-row:focus-within,
+.input-queue-row[data-editing] {
+  background: var(--hover);
 }
-/* The queued text reads as text and truncates; the controls beside it do not. */
-.input-queue-row .input-queue-text {
+.input-queue-index {
+  flex: none;
+  min-width: 1.25em;
+  font-size: var(--ui-sm);
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+/* The message reads as one line of text; its actions never truncate. */
+.input-queue-text {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: start;
-  justify-content: flex-start;
-  border-color: transparent;
-  padding: var(--s1);
+  font-size: var(--ui);
 }
-.input-queue-row textarea {
-  flex: 1;
-  min-width: 0;
-  min-height: 64px;
-  resize: vertical;
+.input-queue-row[data-editing] .input-queue-text {
+  color: var(--muted);
+}
+.input-queue-attached {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  font-size: var(--ui-xs);
+  color: var(--faint);
+}
+.input-queue-actions {
+  display: flex;
+  align-items: center;
+  flex: none;
+}
+/* Reordering is occasional, so it appears with the row's other attention. */
+.input-queue-reorder {
+  opacity: 0;
+}
+.input-queue-row:hover .input-queue-reorder,
+.input-queue-row:focus-within .input-queue-reorder {
+  opacity: 1;
+}
+/* A move that cannot happen keeps its place but is not offered. */
+.input-queue-reorder:disabled {
+  visibility: hidden;
 }

@@ -7,7 +7,16 @@ For example, while the agent is fixing a bug:
 - Send “use the existing helper” normally to steer the next model step. It does not cancel a tool already running.
 - Queue “then update the documentation” to wait until the bug fix is finished, including its tool steps and automatic goal continuations.
 
-Queued prompts remain outside the conversation transcript until delivery. They run one at a time in the displayed order. A Queue submission while idle starts the first pending prompt immediately. Stop dismisses cancelled approval prompts in connected clients. Stop, a failed turn, or a daemon restart leaves the remaining queue paused; choose **Send** on a pending prompt to resume. Sending a new ordinary message also starts new work, after which pending prompts can continue.
+Queued prompts remain outside the conversation transcript until delivery. They run one at a time in the displayed order, and each runs as its own turn: the agent reads it as a new request, not as a mid-task interruption. A Queue submission while idle starts that prompt immediately.
+
+## Stop, failures and resuming
+
+- **Stop** cancels the current work and dismisses its approval prompts in connected clients. If you sent steering the agent has not answered yet, the agent answers it next instead of dropping it.
+- After Stop the queue **pauses**, even once that steering has been answered. It also stays idle after a daemon restart.
+- If a turn **fails**, prompts queued behind it still run. If a queued prompt's own turn fails, the rest of the queue pauses.
+- Resume a paused queue in either of two ways:
+  - Choose **Send now** on a pending prompt. That prompt runs, then the rest continue in order.
+  - Send a new message. It runs first, then the queue continues.
 
 ## Default delivery and project settings
 
@@ -38,19 +47,34 @@ The clients resolve the setting when submitting, so changes from another client 
 
 ## Desktop
 
-Normal **Send** or **Enter** uses the configured mode. **Alt+Enter** explicitly defers a normal message. **Shift+Enter** still inserts a newline.
+Normal **Send** or **Enter** uses the configured mode. While work runs, the send button's tooltip reads **Steer message** or **Queue message**, so you can see what sending does before you send. **Alt+Enter** explicitly defers a normal message. **Shift+Enter** still inserts a newline.
 
-The pending list above the composer lets you:
+Queued messages appear in a tray joined to the top of the composer. It is visible only while messages wait. Its header shows the queue's state:
 
-- Click a message to edit its text without replacing your composer draft.
-- Move it up or down, or remove it.
-- Choose **Steer** to promote that message into the current task, or **Send** when idle.
+| Header | Meaning |
+| --- | --- |
+| Queued, with a count | Work is running; the messages run in order after it. |
+| Queue paused — send when ready | Nothing runs until you resume the queue. |
+| Editing — sending saves it in place | You are editing a queued message in the composer. |
 
-Edits retain attachments. If another client changes the queue, a stale save reports a conflict and keeps your text. If the message is sent or removed while editing, the unsaved text stays available to copy. The pending list refreshes after reconnecting and follows the selected server and conversation.
+Each message has icon buttons: **Edit**, **Send now** (**Steer now** while work runs, which hands it to the current work at its next step), and **Remove**. Hovering a row also reveals **Move up** and **Move down**.
+
+**Edit** loads the message's text and attachments into the composer and sets your draft aside. The send button becomes **Save queued message**. Sending saves the message in place: it keeps its position, and a paused queue stays paused. **Esc** or the ✕ in the tray header cancels the edit and restores your draft; it never stops running work. If another client changes, sends or removes that message first, the save is refused and your edit stays in the composer. The tray refreshes after reconnecting and follows the selected server and conversation.
 
 ## TUI
 
-**Enter** uses the configured mode; **Alt+Enter** explicitly queues. Use `/queue <message>` to defer text, or `/queue` to open the pending list. Select a message to edit, move, remove, or Steer/Send it. The composer strip separately counts pending guidance and deferred prompts, and shows when deferred work is paused.
+**Enter** uses the configured mode; **Alt+Enter** explicitly queues. Use `/queue <message>` to defer text, or `/queue` to open the pending list.
+
+Above the prompt, steering the agent has not read yet appears under **Steering · N**. Queued messages appear under **Queued · N**, or **Queue paused — send when ready** when idle. The strip shows the first three messages numbered in order, then a `+N more` line.
+
+Click a queued row, or pick it from `/queue`, for its actions:
+
+- **Steer now** (**Send now** when idle)
+- **Edit**
+- **Remove**
+- **Move up** or **Move down**
+
+**Edit** loads the message into the prompt and sets your draft aside. The line `Editing queued message · Enter saves · Click to cancel` appears under the queue. Enter saves in place; Esc or a click cancels and restores the draft, and never interrupts running work. Esc Esc, Ctrl+C twice and `/stop` stop work the same way as Desktop's Stop.
 
 Slash commands and shell-mode commands are not deferred. Deferred-message actions require a server advertising `input-queue.v1`; older servers retain ordinary steering support.
 
@@ -75,11 +99,13 @@ A deferred admission while busy returns `queued: true`, with no transcript item 
 {"action":"edit","revision":3,"id":"ea73602e-4b13-4c34-86cd-71cd488fbf61","text":"Update docs and examples"}
 ```
 
-Other actions are `remove` with `id`, `steer` with `id`, and `reorder` with `ids` containing every pending ID exactly once. Mutations return the new snapshot. A stale revision or unavailable ID returns HTTP 409; invalid input returns 400. These routes use the same authentication as the conversation APIs. The `input.queue.updated` event carries a complete snapshot; clients should ignore older revisions and refresh after reconnecting.
+`edit` may also carry `attachments` to replace the message's attachments; omitting it keeps them. Other actions are `remove` with `id`, `steer` with `id`, and `reorder` with `ids` containing every pending ID exactly once. Mutations return the new snapshot. A stale revision or unavailable ID returns HTTP 409; invalid input returns 400. These routes use the same authentication as the conversation APIs. The `input.queue.updated` event carries a complete snapshot; clients should ignore older revisions and refresh after reconnecting.
 
 TypeScript SDK methods are `queueInput`, `inputQueue`, and `changeInputQueue`; Python provides `queue_input`, `input_queue`, and `change_input_queue` in synchronous and asynchronous clients.
 
-Pending prompts and admission tombstones are stored in SQLite. Promotion into the transcript and removal from the pending list happen in one transaction. Deferred follow-ups use Haarness's existing logical-turn runner; several follow-ups can share a durable turn ID.
+Pending prompts and admission tombstones are stored in SQLite. Promotion into the transcript and removal from the pending list happen in one transaction. Each deferred prompt starts its own durable turn after the previous one closes, so it never inherits that turn's step count, permissions or waiting callers.
+
+`POST /v1/threads/{threadId}/interrupt?resume=true` (and `/v1/turns/{turnId}/interrupt?resume=true`) is the interactive Stop. Steering the agent has not answered yet gets a continuation turn that answers it, instead of a "retry it" error. Without `resume=true`, as for Undo and scripts, interrupt only stops. Both forms pause the thread's queue. The SDKs take `{resume: true}` as the query argument of `interruptThreadTree` and `interruptTurn`.
 
 ## Verification
 
@@ -93,7 +119,7 @@ HAARNESS_BIN="$PWD/target/debug/haarness" python3 scripts/test-input-queue-tmux.
 HAARNESS_BIN="$PWD/target/debug/haarness" sh scripts/test-sdks.sh
 npm --prefix apps/desktop test
 npm --prefix apps/desktop run build
-HAARNESS_BIN="$PWD/target/debug/haarness" npm --prefix apps/desktop run test:e2e -- --grep 'deferred input queue|SSE chat fabric'
+HAARNESS_BIN="$PWD/target/debug/haarness" npm --prefix apps/desktop run test:e2e -- --grep 'deferred input queue|Stop answers steering|SSE chat fabric'
 ```
 
 The HTTP test kills and restarts its own daemon with persisted data. The tmux and Electron tests exercise actual client controls against isolated daemons. Tests use deterministic providers and do not require external model credentials.
