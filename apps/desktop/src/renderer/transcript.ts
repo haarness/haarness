@@ -82,11 +82,7 @@ const kindShape: Record<string, { icon: IconName; verb: string }> = {
 };
 export function describeTool(name: string, args: unknown): ToolShape {
   name = toolName(name);
-  if (name.startsWith("browser_")) {
-    const action = name.slice(8).replaceAll("_", " ");
-    const record = object(args);
-    return { icon: "web", verb: "Browser · " + action, target: typeof record?.url === "string" ? record.url : "" };
-  }
+  if (name.startsWith("browser_")) return describeBrowser(name.slice(8), object(args));
   const known = namedTools[name];
   const record = object(args);
   if (
@@ -123,6 +119,61 @@ export function describeTool(name: string, args: unknown): ToolShape {
     verb: kind === "other" ? name : kindShape[kind].verb,
     target: toolTarget(args),
   };
+}
+/**
+ * Browser steps read like what a person did in the page: "Opened example.com",
+ * "Typed “jane@example.com”", "Clicked". Element refs (@e4) mean nothing to a
+ * reader, so the target is the URL, text, value or key when there is one.
+ */
+const browserVerbs: Record<string, string> = {
+  navigate: "Opened",
+  tabs_open: "Opened a tab",
+  tabs_close: "Closed a tab",
+  tabs_focus: "Switched tabs",
+  tabs_list: "Listed tabs",
+  snapshot: "Read the page",
+  find: "Searched the page",
+  click: "Clicked",
+  hover: "Pointed at an element",
+  drag: "Dragged",
+  fill: "Typed",
+  fill_form: "Filled in a form",
+  select: "Selected",
+  press: "Pressed",
+  scroll: "Scrolled",
+  wait: "Waited",
+  screenshot: "Took a screenshot",
+  evaluate: "Ran a page script",
+  back: "Went back",
+  forward: "Went forward",
+  reload: "Reloaded the page",
+  stop: "Stopped loading",
+  dialog: "Handled a dialog",
+  console: "Read the console",
+  network_list: "Listed network requests",
+  network_get: "Read a network request",
+};
+function describeBrowser(action: string, record?: Record<string, unknown>): ToolShape {
+  const text = (value: unknown) =>
+    typeof value === "string" && value.trim() ? value.replace(/\s+/g, " ").trim() : "";
+  const quoted = (value: unknown) => (text(value) ? `“${text(value)}”` : "");
+  const target =
+    action === "fill"
+      ? quoted(record?.text)
+      : action === "select" && Array.isArray(record?.values)
+        ? record.values.map(quoted).filter(Boolean).join(", ")
+        : action === "press"
+          ? text(record?.key)
+          : action === "find" || action === "wait"
+            ? quoted(record?.text ?? record?.query)
+            : action === "scroll" && typeof record?.deltaY === "number"
+              ? record.deltaY < 0 ? "up" : "down"
+              : text(record?.url);
+  const verb =
+    action === "check"
+      ? record?.checked === false ? "Unchecked" : "Checked"
+      : (browserVerbs[action] ?? "Browser · " + action.replaceAll("_", " "));
+  return { icon: "web", verb, target };
 }
 /** Normalize only the runtime's known wrapper and built-in names. */
 export function toolName(name: string) {

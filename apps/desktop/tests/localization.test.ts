@@ -1,4 +1,5 @@
 import test from "node:test";
+import { cursorLabelKeys } from "../src/main/browser/agent-cursor";
 import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import { defaults } from "../src/shared";
@@ -98,6 +99,11 @@ test("keys translated through a variable are in the catalog", () => {
     "Cloud sessions in your Haarness account", "Local projects on this computer",
     // The palette's count picks its singular or plural key.
     "{count} result",
+    // Browser settings row, handed to SettingRow.
+    "Show the agent’s cursor",
+    "See where Haarness points, clicks and types while it controls the browser. Turning it off makes browser actions a little faster.",
+    // The agent cursor's labels, translated in the main process.
+    ...cursorLabelKeys,
     "signed in", "API key", "from the environment",
     // Custom-provider API formats, kept as English keys in the `protocols`
     // constant and translated at the render site.

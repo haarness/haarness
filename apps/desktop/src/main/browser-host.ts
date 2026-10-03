@@ -12,6 +12,7 @@ import { browserFailure } from "./browser/errors";
 import { destinationOrigin, normalizeURL } from "./browser/policy";
 import { connections } from "./runtime";
 import { data, persist } from "./store";
+import { translate } from "../localization";
 import type { DesktopEvent, BrowserLayout } from "../shared";
 
 type Entry = {
@@ -207,6 +208,8 @@ export function createBrowserHost(
         void closePage(e, id);
       },
       favicon: (urls) => void loadIcon(e, id, urls),
+      agentCursor: () => data().preferences.browserAgentCursor !== false,
+      translate: (key) => translate(data().preferences.language, key),
       popup: (options) => {
         const popup = create(e, false, options);
         focus(e, popup.state().id);

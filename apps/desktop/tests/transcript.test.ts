@@ -342,3 +342,14 @@ test("a working location is identified by the tail of its path", () => {
   assert.equal(shortPath("/srv/app"), "/srv/app");
   assert.equal(shortPath("/"), "/");
 });
+
+test("browser steps read as what happened in the page, never as element refs", () => {
+  assert.deepEqual(describeTool("browser_navigate", { url: "https://example.com/" }), { icon: "web", verb: "Opened", target: "https://example.com/" });
+  assert.deepEqual(describeTool("browser_fill", { tabID: "t", ref: "@e4", text: "Jane  Appleseed" }), { icon: "web", verb: "Typed", target: "“Jane Appleseed”" });
+  assert.deepEqual(describeTool("browser_click", { tabID: "t", ref: "@e11" }), { icon: "web", verb: "Clicked", target: "" });
+  assert.equal(describeTool("browser_check", { ref: "@e10", checked: false }).verb, "Unchecked");
+  assert.equal(describeTool("browser_select", { ref: "@e6", values: ["Express"] }).target, "“Express”");
+  assert.equal(describeTool("browser_scroll", { deltaY: -400 }).target, "up");
+  assert.equal(describeTool("browser_tabs_list", {}).verb, "Listed tabs");
+  assert.equal(describeTool("browser_lighthouse", {}).verb, "Browser · lighthouse");
+});
