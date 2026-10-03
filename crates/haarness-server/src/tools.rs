@@ -275,6 +275,8 @@ impl NativeToolRegistry {
             });
             tools.insert(tool.definition().name.clone(), tool);
         }
+        let preview: Arc<dyn Tool> = Arc::new(crate::preview::PreviewTool(workspace.clone()));
+        tools.insert("preview".into(), preview);
         let batch: Arc<dyn Tool> = Arc::new(BatchTool);
         tools.insert(batch.definition().name.clone(), batch);
         if mcp.is_some() {

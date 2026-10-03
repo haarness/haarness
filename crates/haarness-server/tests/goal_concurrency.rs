@@ -684,6 +684,7 @@ async fn queued_user_steering_does_not_consume_goal_continuation_budget() {
         .queue_input(
             thread.id,
             QueueInputRequest {
+                preview: false,
                 delivery: haarness_protocol::InputDelivery::Steer,
                 request_id: RequestId::new(),
                 text: "steer with new evidence".into(),
@@ -1283,6 +1284,7 @@ async fn queue_input_retries_the_start_admission_race_without_dropping_text() {
             .queue_input(
                 thread.id,
                 QueueInputRequest {
+                    preview: false,
                     delivery: haarness_protocol::InputDelivery::Steer,
                     request_id: RequestId::new(),
                     text: "must not be dropped".into(),
@@ -1502,6 +1504,7 @@ async fn input_at_the_closing_boundary_starts_fresh_after_terminal_removal() {
             .queue_input(
                 thread.id,
                 QueueInputRequest {
+                    preview: false,
                     delivery: haarness_protocol::InputDelivery::Steer,
                     request_id: RequestId::new(),
                     text: "fresh after close".into(),
@@ -1571,6 +1574,7 @@ async fn queued_input_is_retried_after_an_inflight_provider_error() {
         .queue_input(
             thread.id,
             QueueInputRequest {
+                preview: false,
                 delivery: haarness_protocol::InputDelivery::Steer,
                 request_id: RequestId::new(),
                 text: "accepted while the provider is blocked".into(),
@@ -1667,6 +1671,7 @@ async fn input_at_error_cleanup_waits_until_goal_and_turn_are_terminal() {
             .queue_input(
                 thread.id,
                 QueueInputRequest {
+                    preview: false,
                     delivery: haarness_protocol::InputDelivery::Steer,
                     request_id: RequestId::new(),
                     text: "start only after failure is durable".into(),
@@ -1792,6 +1797,7 @@ async fn child_failure_recovers_queued_input_before_releasing_turn_admission() {
         .queue_input(
             child.id,
             QueueInputRequest {
+                preview: false,
                 delivery: haarness_protocol::InputDelivery::Steer,
                 request_id: RequestId::new(),
                 text: "queued into failing child".into(),
@@ -1834,6 +1840,7 @@ async fn child_failure_recovers_queued_input_before_releasing_turn_admission() {
             .queue_input(
                 child.id,
                 QueueInputRequest {
+                    preview: false,
                     delivery: haarness_protocol::InputDelivery::Steer,
                     request_id: RequestId::new(),
                     text: "fresh turn after child failure".into(),

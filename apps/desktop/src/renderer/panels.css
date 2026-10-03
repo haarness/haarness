@@ -576,3 +576,23 @@
 .review-tree > .review-filter {
   flex-shrink: 0;
 }
+
+/* Generated visual files share the editor's bounded side panel. */
+.html-preview { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; background: white; color: #171717; }
+.html-preview-viewport { flex: 1; min-height: 100px; overflow: hidden; position: relative; }
+.html-preview iframe { display: block; border: 0; width: 100%; height: 100%; }
+.preview-notice { flex: none; padding: 8px 12px; font: 12px/1.4 var(--font); background: var(--surface); color: var(--muted); }
+.document-preview { overflow: auto; padding: 24px; flex: 1; }
+.preview-banner { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin: 12px 0; }
+.preview-banner-heading { display: flex; align-items: center; gap: 10px; padding: 12px; }
+.preview-title { text-align: left; flex: 1; min-width: 0; display: grid; gap: 4px; }
+.preview-title span { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.preview-status { color: var(--muted); font-size: 11px; flex: none; }
+.preview-banner-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 12px 12px; }
+.preview-banner-actions button, .preview-version-strip button { padding: 4px 9px; background: var(--surface); border: 1px solid var(--border); border-radius: 5px; }
+.preview-banner-actions button[aria-pressed="true"] { background: var(--selected); }
+.preview-code { max-height: 400px; overflow: auto; padding: 12px; font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.preview-added { background: #22c55e25; }.preview-removed { background: #ef444425; text-decoration: line-through; }
+.preview-version-strip { padding: 8px 12px; background: var(--surface); display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+.preview-inline { border-top: 1px solid var(--border); }
+.file-actions { flex-wrap: wrap; }

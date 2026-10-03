@@ -442,6 +442,18 @@ export class Api extends Transport {
   mutateFile(body: T.FileAction, options: RequestOptions = {}): Promise<T.JsonValue> {
     return this.request("POST", `/v1/files/action`, { body, binaryBody: false, binaryResponse: false, ...options });
   }
+  /** GET /v1/files/preview */
+  previewVersion(query: T.PreviewVersionQuery, options: RequestOptions = {}): Promise<T.FileContent> {
+    return this.request("GET", `/v1/files/preview`, { query, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /v1/files/preview/current */
+  currentPreview(query: T.FileQuery = {}, options: RequestOptions = {}): Promise<T.PreviewCurrent> {
+    return this.request("GET", `/v1/files/preview/current`, { query, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /v1/files/preview/restore */
+  restorePreview(body: T.PreviewRestoreRequest, options: RequestOptions = {}): Promise<T.PreviewRestoreResult> {
+    return this.request("POST", `/v1/files/preview/restore`, { body, binaryBody: false, binaryResponse: false, ...options });
+  }
   /** POST /v1/threads/{id}/browser/tunnel/{action} */
   browserTunnel(id: string, action: string, body: T.JsonValue, options: RequestOptions = {}): Promise<T.JsonValue> {
     return this.request("POST", `/v1/threads/${this.segment(id)}/browser/tunnel/${this.segment(action)}`, { body, binaryBody: false, binaryResponse: false, ...options });

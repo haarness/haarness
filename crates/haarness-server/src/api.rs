@@ -383,6 +383,7 @@ async fn openapi() -> Json<Value> {
     document.merge(AnalyticsApi::openapi());
     document.merge(crate::profiles::ProfilesApi::openapi());
     document.merge(crate::files::FilesApi::openapi());
+    document.merge(crate::preview::PreviewApi::openapi());
     document.merge(crate::browser::BrowserApi::openapi());
     document.merge(ManagementApi::openapi());
     document.merge(crate::remote::HostApi::openapi());
@@ -622,6 +623,7 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
             "network.attach".into(),
             "attachments.inline-upload".into(),
             "files.base64-write.v1".into(),
+            "files.preview.v1".into(),
             "mcp".into(),
             "skills".into(),
             "subagents".into(),

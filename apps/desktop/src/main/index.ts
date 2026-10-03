@@ -766,6 +766,9 @@ function installHandlers() {
         {
           list: ["GET", "list"],
           read: ["GET", "content"],
+          preview: ["GET", "preview"],
+          previewCurrent: ["GET", "preview/current"],
+          restore: ["POST", "preview/restore"],
           write: ["PUT", "content"],
           action: ["POST", "action"],
         } as Record<string, string[]>

@@ -261,3 +261,7 @@ Open **Browser** in the side panel to browse alongside a conversation, or ask Ha
 
 
 Composer history uses the unsent text as a prefix: Up recalls only prompts beginning with that draft, and does nothing when there are no matches. An empty draft browses all history, with the current conversation first. Down past the newest match restores the exact draft, attachments and context. Editing a recalled prompt begins a new search.
+
+### Canvas previews
+
+See [Canvas and file previews](CANVAS-PREVIEW.md) for interactive HTML, inline previews, saved versions, comparison and restore.

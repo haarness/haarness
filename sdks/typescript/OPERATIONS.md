@@ -114,6 +114,9 @@
 | `read_file` | `readFile` | `GET /v1/files/content` |
 | `write_file` | `writeFile` | `PUT /v1/files/content` |
 | `mutate_file` | `mutateFile` | `POST /v1/files/action` |
+| `preview_version` | `previewVersion` | `GET /v1/files/preview` |
+| `current_preview` | `currentPreview` | `GET /v1/files/preview/current` |
+| `restore_preview` | `restorePreview` | `POST /v1/files/preview/restore` |
 | `connect_browser_host` | `connectBrowserHost` | `GET /v1/threads/{id}/browser/host` |
 | `browser_tunnel` | `browserTunnel` | `POST /v1/threads/{id}/browser/tunnel/{action}` |
 | `call_browser_tool` | `callBrowserTool` | `POST /v1/threads/{id}/browser/tool` |

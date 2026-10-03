@@ -3139,6 +3139,10 @@
           "id": {
             "$ref": "#/components/schemas/RequestId"
           },
+          "preview": {
+            "description": "The submitting graphical client supports sandboxed file previews.",
+            "type": "boolean"
+          },
           "text": {
             "type": "string"
           }
@@ -3369,6 +3373,66 @@
           "path",
           "enabled",
           "managed"
+        ],
+        "type": "object"
+      },
+      "PreviewCurrent": {
+        "properties": {
+          "revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "PreviewRestoreRequest": {
+        "properties": {
+          "hash": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "hash",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "PreviewRestoreResult": {
+        "properties": {
+          "backup": {
+            "type": "string"
+          },
+          "file": {
+            "$ref": "#/components/schemas/FileContent"
+          }
+        },
+        "required": [
+          "file",
+          "backup"
+        ],
+        "type": "object"
+      },
+      "PreviewVersionQuery": {
+        "properties": {
+          "hash": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "hash"
         ],
         "type": "object"
       },
@@ -3639,6 +3703,10 @@
           "delivery": {
             "$ref": "#/components/schemas/InputDelivery",
             "description": "Steer by default for compatibility; queue waits for an idle boundary."
+          },
+          "preview": {
+            "description": "The submitting graphical client supports sandboxed file previews.",
+            "type": "boolean"
           },
           "requestId": {
             "$ref": "#/components/schemas/RequestId"
@@ -5459,8 +5527,8 @@
   "info": {
     "description": "",
     "license": {
-      "identifier": "MIT",
-      "name": "MIT"
+      "identifier": "Apache-2.0",
+      "name": "Apache-2.0"
     },
     "title": "Haarness API",
     "version": "1"
@@ -5698,6 +5766,106 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/FileListing"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": []
+      }
+    },
+    "/v1/files/preview": {
+      "get": {
+        "operationId": "preview_version",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "hash",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileContent"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": []
+      }
+    },
+    "/v1/files/preview/current": {
+      "get": {
+        "operationId": "current_preview",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "hidden",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewCurrent"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": []
+      }
+    },
+    "/v1/files/preview/restore": {
+      "post": {
+        "operationId": "restore_preview",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewRestoreRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewRestoreResult"
                 }
               }
             },

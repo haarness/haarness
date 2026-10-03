@@ -3924,6 +3924,7 @@ impl App {
             .queue_input(
                 self.thread.id,
                 haarness_protocol::QueueInputRequest {
+                    preview: false,
                     delivery: haarness_protocol::InputDelivery::Steer,
                     request_id: haarness_protocol::RequestId::new(),
                     text,

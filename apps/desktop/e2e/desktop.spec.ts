@@ -11211,3 +11211,131 @@ tools=false
     await new Promise<void>(resolve => provider.close(() => resolve()));
   }
 });
+
+async function newCanvasSession() {
+  // Other scenarios can leave a different provider/project selected.
+  await app.evaluate(({ dialog }, directory) => {
+    const original = dialog.showOpenDialog;
+    dialog.showOpenDialog = async () => { dialog.showOpenDialog = original; return { canceled: false, filePaths: [directory] }; };
+  }, workspace);
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
+  await expect(page.locator(".titlebar")).toContainText("workspace");
+  await showChat();
+  await newSession();
+}
+
+test("canvas preview runs isolated scripts, refreshes versions, compares and restores through real tool events", async () => {
+  await newCanvasSession();
+  const first = '<!doctype html><html><body><h1>Canvas first</h1><button onclick="document.getElementById(\'count\').textContent=\'clicked\'">Increment</button><p id="count">ready</p><script>document.body.dataset.executed="yes"</script></body></html>';
+  const second = first.replace('Canvas first', 'Canvas second');
+  await send('!tool write ' + JSON.stringify({ path: 'canvas.html', content: first }));
+  await expect.poll(() => readFile(join(workspace, 'canvas.html'), 'utf8').catch(() => '')).toBe(first);
+  await send('!tool preview {"filePath":"canvas.html","title":"Canvas demo"}');
+  const banner = page.locator('.preview-banner').last();
+  await expect(banner).toContainText('Canvas demo');
+  await expect(banner).toContainText('Current');
+  const preview = page.locator('.file-preview .html-preview');
+  await expect(preview).toBeVisible();
+  const content = () => page.frameLocator('.file-preview .html-preview iframe').frameLocator('iframe').frameLocator('iframe');
+  await expect(content().getByRole('heading', { name: 'Canvas first' })).toBeVisible();
+  await expect(content().locator('body')).toHaveAttribute('data-executed', 'yes');
+  await content().getByRole('button', { name: 'Increment' }).click();
+  await expect(content().locator('#count')).toHaveText('clicked');
+  expect(await content().locator('body').evaluate(() => ({ bridge: typeof (window as unknown as {haarness?: unknown}).haarness, parent: (() => { try { return !!parent.document; } catch { return false; } })() }))).toEqual({ bridge: 'undefined', parent: false });
+  await page.locator('.file-actions').getByRole('button', { name: 'Code', exact: true }).click();
+  await expect(page.locator('.file-preview .cm-content')).toContainText('Canvas first');
+  await page.locator('.file-actions').getByRole('button', { name: 'Preview', exact: true }).click();
+  await banner.getByRole('button', { name: 'Preview', exact: true }).click();
+  await expect(banner.locator('.preview-inline .html-preview')).toBeVisible();
+  await send('!tool edit ' + JSON.stringify({ path: 'canvas.html', old: 'Canvas first', new: 'Canvas second' }));
+  await expect.poll(() => readFile(join(workspace, 'canvas.html'), 'utf8')).toBe(second);
+  await send('!tool preview {"filePath":"canvas.html","title":"Canvas updated"}');
+  await expect(page.locator('.preview-banner')).toHaveCount(2);
+  await expect(content().getByRole('heading', { name: 'Canvas second' })).toBeVisible();
+  const earlier = page.locator('.preview-banner').first();
+  await expect(earlier).toContainText('Earlier version');
+  await earlier.getByRole('button', { name: 'Compare', exact: true }).click();
+  await expect(earlier.locator('.preview-removed')).toContainText('Canvas first');
+  await expect(earlier.locator('.preview-added')).toContainText('Canvas second');
+  await earlier.getByRole('button', { name: 'Open preview', exact: true }).click();
+  await expect(page.locator('.preview-version-strip')).toBeVisible();
+  await expect(content().getByRole('heading', { name: 'Canvas first' })).toBeVisible();
+  await page.getByRole('button', { name: 'Show current', exact: true }).click();
+  await expect(content().getByRole('heading', { name: 'Canvas second' })).toBeVisible();
+  await earlier.getByRole('button', { name: 'Restore', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: /Confirm|Restore/, exact: false }).click();
+  await expect.poll(() => readFile(join(workspace, 'canvas.html'), 'utf8')).toBe(first);
+  await expect(content().getByRole('heading', { name: 'Canvas first' })).toBeVisible();
+  await earlier.getByRole('button', { name: 'Undo restore', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: /Confirm|Restore/, exact: false }).click();
+  await expect.poll(() => readFile(join(workspace, 'canvas.html'), 'utf8')).toBe(second);
+  await writeFile(join(workspace, 'canvas.html'), first.replace('Canvas first', 'External change'));
+  await page.locator('.preview-banner').last().getByRole('button', { name: 'Open preview', exact: true }).click();
+  await expect(content().getByRole('heading', { name: 'Canvas second' })).toBeVisible();
+  await expect(page.locator('.preview-banner').last()).toContainText('Earlier version');
+  await page.getByRole('button', { name: 'Show current', exact: true }).click();
+  await expect(content().getByRole('heading', { name: 'External change' })).toBeVisible();
+  await page.screenshot({ path: test.info().outputPath('canvas-preview.png') });
+});
+
+test("canvas preview blocks network and navigation without affecting chat or normal file editing", async () => {
+  await newCanvasSession();
+  const requests: string[] = [];
+  const receiver = createServer((request, response) => { requests.push(request.url ?? ''); response.end('unexpected'); });
+  await new Promise<void>(resolve => receiver.listen(0, '127.0.0.1', resolve));
+  const address = receiver.address();
+  if (!address || typeof address === 'string') throw Error('Missing receiver');
+  const url = `http://127.0.0.1:${address.port}`;
+  try {
+    const html = `<!doctype html><h1>Contained preview</h1><a href="${url}/link">Leave</a><img src="${url}/image"><script>fetch('${url}/fetch').catch(()=>{});setTimeout(()=>{location.href='${url}/navigation'},500);</script><meta http-equiv="refresh" content="1;url=${url}/refresh">`;
+    await writeFile(join(workspace, 'contained.html'), html);
+    await send('!tool preview {"filePath":"contained.html"}');
+    await expect(page.locator('.preview-banner')).toBeVisible();
+    const content = page.frameLocator('.file-preview .html-preview iframe').frameLocator('iframe').frameLocator('iframe');
+    await expect(content.getByRole('heading')).toHaveText('Contained preview');
+    await content.getByRole('link', { name: 'Leave' }).click();
+    await expect(page.locator('.file-preview .preview-notice')).toBeVisible();
+    // Allow both the script and meta refresh timers to attempt their navigation.
+    await page.waitForTimeout(1600);
+    expect(requests).toEqual([]);
+    // Chromium may replace the blocked frame with its local error document; never reload hostile scripts automatically.
+    await expect(page.locator('.file-preview .preview-notice')).toBeVisible();
+    await send('chat still works after sandbox attempts');
+    await expect(page.getByRole('region', { name: 'Conversation', exact: true })).toContainText('chat still works after sandbox attempts');
+  } finally { await new Promise<void>(resolve => receiver.close(() => resolve())); }
+});
+
+test("canvas preview preserves unsaved code, renders markdown on request and never reopens from history", async () => {
+  await newCanvasSession();
+  await writeFile(join(workspace, 'draft-preview.html'), '<h1>Saved canvas</h1>');
+  await send('!tool preview {"filePath":"draft-preview.html"}');
+  await expect(page.locator('.preview-banner')).toBeVisible();
+  await page.locator('.file-actions').getByRole('button', { name: 'Code', exact: true }).click();
+  const editor = page.locator('.file-preview .cm-content');
+  await editor.fill('<h1>Unsaved canvas</h1>');
+  await send('!tool preview {"filePath":"draft-preview.html"}');
+  await expect(page.locator('.preview-banner')).toHaveCount(2);
+  await expect(editor).toContainText('Unsaved canvas');
+  expect(await readFile(join(workspace, 'draft-preview.html'), 'utf8')).toContain('Saved canvas');
+  await page.locator('.file-actions').getByRole('button', { name: 'Save', exact: true }).click();
+  await expect.poll(() => readFile(join(workspace, 'draft-preview.html'), 'utf8')).toContain('Unsaved canvas');
+  await expect(editor).toBeVisible();
+  await writeFile(join(workspace, 'report-preview.md'), '# Rendered report\n\nPreview markdown content.');
+  await send('!tool preview {"filePath":"report-preview.md"}');
+  await expect(page.locator('.file-preview .document-preview')).toContainText('Rendered report');
+  await expect(page.locator('.preview-banner')).toHaveCount(3);
+  await page.getByRole('button', { name: 'Hide side panel', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.haarness.storage('layout:v2'))).toMatchObject({ dock: null });
+  await page.reload();
+  await expect(page.locator('.preview-banner')).toHaveCount(3);
+  await expect(page.locator('.side-panel')).toBeHidden();
+});
+
+test("canvas preview loads a public npm library through the supported CDN", async () => {
+  test.skip(process.env.HAARNESS_LIVE_PREVIEW_CDN !== '1', 'Explicit network integration check');
+  await newCanvasSession();
+  await writeFile(join(workspace, 'cdn-preview.html'), '<!doctype html><h1 id="result">Loading library</h1><script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.13/dayjs.min.js"></script><script>document.getElementById("result").textContent=dayjs("2026-10-03").format("YYYY/MM/DD")</script>');
+  await send('!tool preview {"filePath":"cdn-preview.html"}');
+  const content = page.frameLocator('.file-preview .html-preview iframe').frameLocator('iframe').frameLocator('iframe');
+  await expect(content.getByRole('heading')).toHaveText('2026/10/03', { timeout: 30000 });
+});

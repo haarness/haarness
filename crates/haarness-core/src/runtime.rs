@@ -1233,8 +1233,8 @@ impl AgentRuntime {
         if request.delivery == haarness_protocol::InputDelivery::Queue {
             return self.defer_input(thread_id, request).await;
         }
-        self.queue_input_with_options(thread_id, request, false, None)
-            .await
+        let tools = request.preview.then(|| HashMap::from([("preview".into(), true)]));
+        self.queue_input_with_options(thread_id, request, false, tools).await
     }
 
     pub async fn input_queue(&self, id: ThreadId) -> CoreResult<haarness_protocol::InputQueue> {
@@ -1280,6 +1280,7 @@ impl AgentRuntime {
                     .enqueue_input(
                         id,
                         haarness_protocol::PendingInput {
+                            preview: request.preview,
                             id: request.request_id,
                             text: request.text,
                             attachments: request.attachments,
@@ -1297,6 +1298,7 @@ impl AgentRuntime {
                 .enqueue_input(
                     id,
                     haarness_protocol::PendingInput {
+                        preview: request.preview,
                         id: request.request_id,
                         text: request.text,
                         attachments: request.attachments,
@@ -1351,7 +1353,7 @@ impl AgentRuntime {
                         provider: None,
                         model: None,
                         reasoning_effort: None,
-                        tools: None,
+                        tools: input.preview.then(|| HashMap::from([("preview".into(), true)])),
                         command: None,
                     },
                     Vec::new(),
@@ -5414,6 +5416,9 @@ impl RunnerTask {
                             && (goal_for_request.is_some() || !is_goal_tool(&tool.name))
                     })
                     .collect::<Vec<_>>();
+                if !tool_round_limit_reached && eligible_tools.iter().any(|tool| tool.name == "preview") {
+                    system.push_str(include_str!("preview.txt"));
+                }
                 let mut lazy_settings = self.config.lazy_tools.clone();
                 if let Some(mode) = *self.lazy_tool_mode.read() {
                     lazy_settings.mode = mode;
@@ -6180,6 +6185,9 @@ impl RunnerTask {
     }
 
     fn tool_enabled(&self, name: &str) -> bool {
+        if name == "preview" && self.request.tools.as_ref().and_then(|tools| tools.get(name)) != Some(&true) {
+            return false;
+        }
         if !turn_tool_enabled(self.request.tools.as_ref(), name) {
             return false;
         }
@@ -7452,6 +7460,7 @@ impl RunnerTask {
                             &child,
                             active.id,
                             &QueueInputRequest {
+                                preview: false,
                                 delivery: haarness_protocol::InputDelivery::Steer,
                                 request_id: RequestId::new(),
                                 text: prompt,
@@ -7825,6 +7834,7 @@ impl RunnerTask {
                 .queue_input_with_options(
                     info.parent_thread_id,
                     QueueInputRequest {
+                        preview: false,
                         delivery: haarness_protocol::InputDelivery::Steer,
                         request_id: RequestId::new(),
                         text: task.envelope(&info, state, &text),

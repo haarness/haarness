@@ -350,3 +350,30 @@ test("audit: rejected Settings changes remain visible and dismissible inside the
   await expect(settings.getByRole("alert")).toHaveCount(0);
   await shortcut.fill(original); await shortcut.press("Tab");
 });
+
+test("audit: overlapping canvas previews keep the latest mode and cannot land in another chat", async ({ desktop: { app, page, a } }) => {
+  await writeFile(join(a, 'race.html'), '<h1>First page</h1>');
+  const send = async (mode: string) => {
+    await page.getByRole('textbox', { name: 'Message', exact: true }).fill(`!tool preview {"filePath":"race.html","mode":"${mode}"}`);
+    await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  };
+  await hold(app, 'GET', '/v1/files/content');
+  await send('preview');
+  await expect(page.locator('.preview-banner')).toHaveCount(1);
+  await held(app, 1);
+  await send('code');
+  await expect(page.locator('.preview-banner')).toHaveCount(2);
+  await held(app, 2);
+  await release(app);
+  await expect(editor(page)).toContainText('First page');
+  await writeFile(join(a, 'race.html'), '<h1>Late page</h1>');
+  await hold(app, 'GET', '/v1/files/content');
+  await send('preview');
+  await expect(page.locator('.preview-banner')).toHaveCount(3);
+  await held(app);
+  await button(page, 'New session').click();
+  await expect(page.locator('.preview-banner')).toHaveCount(0);
+  await release(app);
+  await expect(editor(page)).toContainText('First page');
+  await expect(page.locator('.file-preview .html-preview')).toHaveCount(0);
+});

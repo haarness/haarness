@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def routes():
     result = []
-    filenames = ("api.rs", "profiles.rs", "files.rs", "browser.rs", "remote.rs", "sharing.rs")
+    filenames = ("api.rs", "profiles.rs", "files.rs", "preview.rs", "browser.rs", "remote.rs", "sharing.rs")
     for source in (ROOT / "crates/haarness-server/src").glob("*.rs"):
         if re.search(r'\.route\(\s*"', source.read_text().split("#[cfg(test)]")[0]):
             assert source.name in filenames, f"New route module needs SDK coverage: {source.name}"

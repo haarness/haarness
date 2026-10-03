@@ -80,12 +80,13 @@ pub fn routes() -> Router<ServerState> {
         .route("/files/list", get(list_files))
         .route("/files/content", get(read_file).put(write_file))
         .route("/files/action", post(mutate_file))
+        .merge(crate::preview::routes())
         .layer(DefaultBodyLimit::max(15 * 1024 * 1024))
 }
 fn bad(error: impl std::fmt::Display) -> Failure {
     (StatusCode::BAD_REQUEST, error.to_string())
 }
-fn resolve(root: &Path, value: &str, create: bool) -> Result<PathBuf, Failure> {
+pub(crate) fn resolve(root: &Path, value: &str, create: bool) -> Result<PathBuf, Failure> {
     let relative = Path::new(value);
     if relative.is_absolute()
         || relative
@@ -118,10 +119,10 @@ fn resolve(root: &Path, value: &str, create: bool) -> Result<PathBuf, Failure> {
     }
     Ok(path)
 }
-fn hash(bytes: &[u8]) -> String {
+pub(crate) fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
-fn bytes(path: &Path) -> Result<Vec<u8>, Failure> {
+pub(crate) fn bytes(path: &Path) -> Result<Vec<u8>, Failure> {
     if !path.metadata().map_err(bad)?.is_file() {
         return Err(bad("Only regular files can be opened"));
     }
