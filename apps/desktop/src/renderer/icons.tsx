@@ -20,6 +20,8 @@ import { Dynamic } from "solid-js/web";
 import Archive from "lucide-solid/icons/archive";
 import ArchiveRestore from "lucide-solid/icons/archive-restore";
 import ArrowDown from "lucide-solid/icons/arrow-down";
+import ArrowLeft from "lucide-solid/icons/arrow-left";
+import ArrowRight from "lucide-solid/icons/arrow-right";
 import ArrowUp from "lucide-solid/icons/arrow-up";
 import ArrowUpRight from "lucide-solid/icons/arrow-up-right";
 import BookOpen from "lucide-solid/icons/book-open";
@@ -176,6 +178,8 @@ const catalog = {
   error: CircleAlert,
   question: CircleHelp,
   external: ArrowUpRight,
+  back: ArrowLeft,
+  forward: ArrowRight,
   "sign-out": LogOut,
   start: Play,
   billing: CreditCard,

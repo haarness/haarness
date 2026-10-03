@@ -27,6 +27,8 @@ type Entry = {
   partition: string;
   pages: Map<Browser.TabID, BrowserPage>;
   tabs: Map<Browser.TabID, Browser.Tab>;
+  /** Site icons for the Desktop tab strip, never sent to the server. */
+  icons: Map<Browser.TabID, { origin: string; data: string }>;
   focusedTabID: Browser.TabID | null;
   requests: Map<string, AbortController>;
   requestTabs: Map<string, string>;
@@ -57,7 +59,7 @@ export function createBrowserHost(
       kind: "browser",
       connection: e.connection,
       id: e.thread,
-      data: { state: inventory, error, focus },
+      data: { state: withIcons(e, inventory), error, focus },
     });
     clearTimeout(e.save);
     e.save = setTimeout(() => {
@@ -72,6 +74,56 @@ export function createBrowserHost(
       void persist();
     }, 200);
     layout(e, e.layout);
+  }
+  /** An icon shows only while its tab is still on the site it came from. */
+  function withIcons(e: Entry, inventory: Browser.State): Browser.State {
+    return {
+      ...inventory,
+      tabs: inventory.tabs.map((tab) => {
+        const icon = e.icons.get(tab.id);
+        return icon && icon.origin === origin(tab.url) ? { ...tab, favicon: icon.data } : tab;
+      }),
+    };
+  }
+  function origin(url: string) {
+    try {
+      return new URL(url).origin;
+    } catch {
+      return "";
+    }
+  }
+  /**
+   * Reads the page's first usable icon through the tab's own session (the
+   * page has usually just loaded it, so this is a cache hit) and keeps it as a
+   * small data URL; the renderer's CSP allows only data: images.
+   */
+  async function loadIcon(e: Entry, id: Browser.TabID, urls: string[]) {
+    const page = e.pages.get(id);
+    const candidate = urls.find((url) => /^(https?:|data:image\/)/.test(url));
+    if (!page || !candidate) return;
+    const site = origin(page.state().url);
+    try {
+      let data: string;
+      if (candidate.startsWith("data:")) {
+        if (candidate.length > 96_000) return;
+        data = candidate;
+      } else {
+        const response = await page.contents.session.fetch(candidate, {
+          signal: AbortSignal.timeout(5_000),
+        });
+        const type = (response.headers.get("content-type") ?? "").split(";")[0].trim();
+        if (!response.ok || !/^image\/(png|x-icon|vnd\.microsoft\.icon|svg\+xml|gif|jpeg|webp|avif)$/.test(type))
+          return;
+        const bytes = Buffer.from(await response.arrayBuffer());
+        if (bytes.length > 64_000) return;
+        data = `data:${type};base64,${bytes.toString("base64")}`;
+      }
+      if (e.disposed || !e.pages.has(id)) return;
+      e.icons.set(id, { origin: site, data });
+      publish(e);
+    } catch {
+      /* A missing icon leaves the globe; it is never worth an error. */
+    }
   }
   function layout(e: Entry, value?: BrowserLayout) {
     e.layout = value;
@@ -113,6 +165,7 @@ export function createBrowserHost(
     const page = e.pages.get(id);
     e.pages.delete(id);
     e.tabs.delete(id);
+    e.icons.delete(id);
     if (e.focusedTabID === id)
       e.focusedTabID = e.tabs.keys().next().value ?? null;
     await page?.dispose();
@@ -153,6 +206,7 @@ export function createBrowserHost(
       fail: () => {
         void closePage(e, id);
       },
+      favicon: (urls) => void loadIcon(e, id, urls),
       popup: (options) => {
         const popup = create(e, false, options);
         focus(e, popup.state().id);
@@ -340,6 +394,7 @@ export function createBrowserHost(
       partition: "haarness-browser-" + randomUUID(),
       pages: new Map(),
       tabs: new Map(tabs.map((tab) => [tab.id, tab])),
+      icons: new Map(),
       focusedTabID:
         tabs.find((tab) => tab.id === saved?.focusedTabID)?.id ??
         tabs[0]?.id ??

@@ -38,6 +38,8 @@ export function createBrowserPage(
     publish: (error?: string) => void;
     fail: () => void;
     downloaded?: (file: { id: string; name: string; path: string; url: string; bytes: number; state: "completed" | "failed" }) => void;
+    /** The page's icon candidates, for the Desktop tab strip only. */
+    favicon?: (urls: string[]) => void;
     popup: (options: Electron.BrowserWindowConstructorOptions) => WebContents;
     initialize?: boolean;
     restore?: Browser.Tab;
@@ -145,6 +147,9 @@ export function createBrowserPage(
   contents.on("did-stop-loading", publish);
   contents.on("did-navigate-in-page", publish);
   contents.on("page-title-updated", publish);
+  contents.on("page-favicon-updated", (_event, urls) => {
+    if (!closed) options.favicon?.(urls);
+  });
   contents.on("render-process-gone", () => {
     if (!closed) options.fail();
   });
