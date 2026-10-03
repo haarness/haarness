@@ -10383,8 +10383,7 @@ test("one remote server opens isolated projects with live events, files, termina
     await settings.getByLabel("Model IDs (comma separated)", { exact: true }).fill("fixture");
     await settings.getByRole("button", { name: "Save", exact: true }).click();
     await expect.poll(async () => (await scoped.providers()).some(provider => provider.id === "remote-manager-fixture")).toBe(true);
-    // Saving returns to the provider list, which offers no "Back to list" of its own.
-    await expect(settings.getByRole("button", { name: "Back to list", exact: true })).toHaveCount(0);
+    await settings.getByRole("button", { name: "Back to list", exact: true }).click();
     await settings.getByRole("button", { name: "Remote manager fixture", exact: true }).click();
     await settings.getByRole("button", { name: "Use an API key", exact: true }).click();
     await settings.getByLabel("API key", { exact: true }).fill("isolated-fixture-key");

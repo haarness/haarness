@@ -51,6 +51,7 @@ export function ManagementPanel(props: {
   const [confirmation, setConfirmation] = createSignal<ManagementEntry>();
   // The list a "Back to list" returns to; on that list the button goes nowhere.
   const [rootTitle, setRootTitle] = createSignal<string>();
+  const [atRoot, setAtRoot] = createSignal(false);
   let generation = 0;
   onCleanup(() => {
     generation++;
@@ -77,8 +78,16 @@ export function ManagementPanel(props: {
         [resource, { ...(input as object), ...(threadId ? { threadId } : {}) }],
       );
       if (current !== generation || id !== app.state.connection?.id) return;
-      if ((input as Record<string, unknown>)?.action === "view")
-        setRootTitle(result.title);
+      const action = (input as Record<string, unknown>)?.action;
+      if (action === "view") setRootTitle(result.title);
+      // Searching or toggling a row re-renders the same list in place. Any
+      // other action (a save, an inspect) shows a different page, even when
+      // the server gives it the list's title.
+      setAtRoot(
+        action === "view" ||
+          (["search", "enable", "disable"].includes(String(action)) &&
+            result.title === rootTitle()),
+      );
       setView(result);
       setValues(
         Object.fromEntries(
@@ -147,11 +156,11 @@ export function ManagementPanel(props: {
         {(current) => (
           <>
             <Show
-              when={current.title !== rootTitle() || props.rootHeading !== false}
+              when={!atRoot() || props.rootHeading !== false}
             >
               <header class="management-card-heading">
                 <h3>{current.title}</h3>
-                <Show when={current.title !== rootTitle()}>
+                <Show when={!atRoot()}>
                   <button
                     type="button"
                     disabled={busy()}
