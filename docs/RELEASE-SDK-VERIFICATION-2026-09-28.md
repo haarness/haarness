@@ -94,8 +94,8 @@ This is complete **local macOS ARM64 release proof**, not a production or six-pl
 - The initial release validation used an incorrect public hostname. The canonical domain
   is `haarness.ai` (Cloud API: `app.haarness.ai`); public deployment and publication were
   not verified by this local release run.
-- Native [release workflow](https://github.com/orex-haarness/haarness/actions/runs/36393744069)
-  and [Cloud CI](https://github.com/orex-haarness/haarness-cloud/actions/runs/36388959499)
+- Native [release workflow](https://github.com/haarness/haarness/actions/runs/36393744069)
+  and [Cloud CI](https://github.com/haarness/haarness-cloud/actions/runs/36388959499)
   failed before executing steps: GitHub reports failed account payments or a spending limit.
   Windows, Linux and Intel Mac artifact execution is therefore unverified.
 - The macOS preview is ad-hoc signed, not notarized. Curl installation handles quarantine;
