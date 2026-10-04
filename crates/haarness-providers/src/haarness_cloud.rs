@@ -182,6 +182,35 @@ mod tests {
         );
         let other = CoreError::Provider("HTTP 500: boom".into());
         assert!(matches!(readable(other), CoreError::Provider(m) if m == "HTTP 500: boom"));
+
+        // A Cloud session's chat is read in a browser too: no terminal hint, and limits explained.
+        let budget = CoreError::Provider(
+            "HTTP 402: [budget_exceeded] the per_request_max budget cannot fund this request \
+             (up to 2600000000 nanos)"
+                .into(),
+        );
+        let CoreError::Provider(message) = readable_router(budget) else {
+            panic!("still a provider error");
+        };
+        assert!(
+            message.starts_with("This request could cost more than a spending limit allows."),
+            "{message}"
+        );
+        assert!(
+            !message.contains("nanos") && !message.contains("/billing"),
+            "{message}"
+        );
+        let CoreError::Provider(message) = readable_router(CoreError::Provider(
+            "HTTP 402: [insufficient_credits] insufficient credits: unit Nanos requested 1, \
+             available 0, overage opt-in false"
+                .into(),
+        )) else {
+            panic!("still a provider error");
+        };
+        assert!(
+            message.ends_with("or add credits or choose a plan."),
+            "{message}"
+        );
     }
 
     fn uuid_for_test() -> String {
@@ -310,27 +339,57 @@ fn error(e: impl std::fmt::Display) -> CoreError {
 /// router's 402 reads `[insufficient_credits] insufficient credits: unit
 /// Nanos requested …`, which is accounting, not advice.
 fn readable(error: CoreError) -> CoreError {
-    match error {
-        CoreError::Provider(message) if message.contains("[insufficient_credits]") => {
-            CoreError::Provider(
-                if message.contains("overage opt-in false") {
-                    // Purchased credits only pay once overage is on, so "out of
-                    // credits" would be wrong for someone who just bought some.
-                    "Your included Haarness Cloud credits are used up. Turn on overage in \
-                     Billing to spend purchased credits, or add credits or choose a plan \
-                     (in the terminal: /billing)."
-                } else if message.contains("frozen") {
-                    "Your purchased Haarness Cloud credits are on hold. Open Billing in \
-                     Haarness Cloud for details (in the terminal: /billing)."
-                } else {
-                    "You're out of Haarness Cloud credits. Add credits or choose a plan under \
-                     Billing (in the terminal: /billing)."
-                }
-                .into(),
+    readable_with(error, " (in the terminal: /billing)")
+}
+
+/// [`readable`] for a Cloud session's own `router` provider, whose chat is
+/// read in a browser or on a phone as often as in a terminal.
+pub(crate) fn readable_router(error: CoreError) -> CoreError {
+    readable_with(error, "")
+}
+
+fn readable_with(error: CoreError, terminal: &str) -> CoreError {
+    let CoreError::Provider(message) = error else {
+        return error;
+    };
+    let advice = if message.contains("[insufficient_credits]") {
+        if message.contains("overage opt-in false") {
+            // Purchased credits only pay once overage is on, so "out of
+            // credits" would be wrong for someone who just bought some.
+            format!(
+                "Your included Haarness Cloud credits are used up. Turn on overage in Billing \
+                 to spend purchased credits, or add credits or choose a plan{terminal}."
+            )
+        } else if message.contains("frozen") {
+            format!(
+                "Your purchased Haarness Cloud credits are on hold. Open Billing in Haarness \
+                 Cloud for details{terminal}."
+            )
+        } else {
+            format!(
+                "You're out of Haarness Cloud credits. Add credits or choose a plan under \
+                 Billing{terminal}."
             )
         }
-        other => other,
-    }
+    } else if message.contains("[budget_exceeded]") {
+        // The limit is checked against the request's worst case: a long
+        // context and a large answer limit can exceed it on their own.
+        "This request could cost more than a spending limit allows. Compact or shorten the \
+         conversation, or raise the limit on the API key in Haarness Cloud."
+            .to_owned()
+    } else if message.contains("[exposure_cap]") {
+        "Too many requests are still settling on this Haarness Cloud account. Wait a moment, \
+         then try again."
+            .to_owned()
+    } else if message.contains("[account_suspended]") {
+        format!(
+            "This Haarness Cloud account is suspended. Open Billing in Haarness Cloud for \
+             details{terminal}."
+        )
+    } else {
+        return CoreError::Provider(message);
+    };
+    CoreError::Provider(advice)
 }
 #[async_trait]
 impl ModelProvider for HaarnessCloudProvider {

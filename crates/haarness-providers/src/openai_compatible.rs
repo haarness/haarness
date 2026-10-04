@@ -1220,11 +1220,17 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .headers(headers)
             .json(&body);
         let mut events = json_stream(builder.send().await.map_err(crate::sse::transport_error)?, cancel);
+        // A Cloud session's own router (the Haarness Cloud provider translates its errors itself).
+        if self.server_output_limit && self.id != "haarness" {
+            events = Box::pin(futures::StreamExt::map(events, |event| {
+                event.map_err(crate::haarness_cloud::readable_router)
+            }));
+        }
         Ok(Box::pin(try_stream! {
             // Parallel tool calls stream interleaved deltas keyed by index.
             let mut calls: Vec<(String, String, String)> = Vec::new();
             let mut finish_reason: Option<String> = None;
-            let mut usage: Option<(u64, u64, u64)> = None;
+            let mut usage: Option<(u64, u64, u64, u64)> = None;
             let mut reasoning_details: Vec<Value> = Vec::new();
             let mut reasoning_content = String::new();
             let mut mistral_content: Vec<Value> = Vec::new();
@@ -1237,6 +1243,8 @@ impl ModelProvider for OpenAiCompatibleProvider {
                         chunk_usage["prompt_tokens"].as_u64().unwrap_or(0),
                         chunk_usage["completion_tokens"].as_u64().unwrap_or(0),
                         chunk_usage.pointer("/prompt_tokens_details/cached_tokens").and_then(Value::as_u64).unwrap_or(0),
+                        // Haarness routers report Anthropic cache writes here.
+                        chunk_usage.pointer("/prompt_tokens_details/cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0),
                     ));
                 }
                 let delta=&event["choices"][0]["delta"];
@@ -1311,8 +1319,8 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     }
                 }
             }
-            if let Some((input_tokens, output_tokens, cache_read_tokens)) = usage {
-                yield ProviderEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens: 0 };
+            if let Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)) = usage {
+                yield ProviderEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens };
             }
             yield ProviderEvent::Finished{reason:finish_reason.unwrap_or_else(||"incomplete".into())};
         }))

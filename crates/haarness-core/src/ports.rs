@@ -346,6 +346,10 @@ pub enum ProviderEvent {
         provider_metadata: Value,
     },
     StructuredOutput(Value),
+    /// One request's token counts. `input_tokens` is the whole prompt, cache reads and writes included (`OpenAI`'s
+    /// convention; Anthropic and Bedrock adapters add their separate cache counters in), so it measures the context
+    /// for compaction and the context meter. `cache_read_tokens` and `cache_write_tokens` say how much of it was
+    /// read from or written to the provider's cache, for pricing.
     Usage {
         input_tokens: u64,
         output_tokens: u64,
