@@ -73,9 +73,20 @@ pub struct ConnectGuide {
 pub fn guide(provider: &str) -> ConnectGuide {
     match provider {
         "haarness" => ConnectGuide {
-            note: Some(
-                "Run `haarness login` in your terminal, then refresh models. Your Haarness account supplies Cloud access; no API key is needed.",
-            ),
+            methods: vec![
+                method(
+                    "browser",
+                    MethodKind::Oauth,
+                    "Sign in to Haarness",
+                    "Cloud models on your Haarness plan · no API key needed",
+                ),
+                method(
+                    "device",
+                    MethodKind::Oauth,
+                    "Sign in with a code",
+                    "For SSH sessions and remote servers",
+                ),
+            ],
             popular: Some(0),
             ..ConnectGuide::default()
         },

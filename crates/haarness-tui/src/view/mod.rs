@@ -673,7 +673,9 @@ fn apply_dialog(
         Overlay::Panel { .. } => 88,
         _ => 84,
     };
-    let horizontal_margin = if width >= 80 { 4 } else { 2 };
+    // Below 80 columns a one-cell margin only shows a sliver of dimmed
+    // transcript glyphs beside the card; take the full width instead.
+    let horizontal_margin = if width >= 80 { 4 } else { 0 };
     let available_width = width.saturating_sub(horizontal_margin).max(1);
     let card_width = preferred.min(available_width).max(32.min(width)).min(width);
     let vertical_margin = if height >= 9 { 2 } else { 0 };

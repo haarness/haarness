@@ -42,6 +42,27 @@ impl App {
         } else {
             serde_json::from_value(client.manage(resource, input).await?)?
         };
+        // A provider change made here (a key saved, a sign-out) changes what
+        // the band and the model picker may offer; re-read the catalog so the
+        // session does not keep claiming a connection it no longer has.
+        let action = input["action"].as_str().unwrap_or("view");
+        if resource == "providers"
+            && !matches!(
+                action,
+                "view" | "inspect" | "form" | "edit_form" | "router_form" | "connect"
+            )
+        {
+            if let Ok(providers) = client.refresh_providers().await {
+                self.providers = providers;
+            }
+            if !self
+                .providers
+                .iter()
+                .any(|provider| provider.id == self.thread.provider && provider.authenticated)
+            {
+                self.notice = crate::state::not_connected(&self.providers, &self.thread.provider);
+            }
+        }
         let mut view = view;
         if resource == "sharing" {
             for line in &mut view.lines {

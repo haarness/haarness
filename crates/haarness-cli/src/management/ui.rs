@@ -90,9 +90,11 @@ fn entry(label: impl Into<String>, description: impl Into<String>, request: Valu
     }
 }
 fn destructive(label: &str, request: Value) -> Entry {
+    // The label already says what happens and the confirmation asks again;
+    // a stock "This changes the selected resource" only added jargon.
     Entry {
         confirm: Some(format!("{label}?")),
-        ..entry(label, "This changes the selected resource", request)
+        ..entry(label, "", request)
     }
 }
 fn text<'a>(v: &'a Value, key: &str) -> &'a str {
@@ -374,6 +376,13 @@ impl ManagementService {
             return output(self.ui_view(resource, input).await?);
         }
         match resource {
+            // Signing out of Haarness Cloud signs out of the account; there
+            // is no provider key to remove.
+            "providers" if action == "logout" && text(input, "name") == "haarness" => {
+                haarness_account::Client::new(haarness_account::Config::from_env()?)?
+                    .logout()
+                    .await?;
+            }
             "providers" => self.provider_mutation(input)?,
             "mcp" => {
                 if action == "restart" {
@@ -648,6 +657,9 @@ impl ManagementService {
                 let mut view = View {
                     title: name.clone(),
                     lines: vec![match (&stored, connected) {
+                        (None, true) if id == "haarness" => {
+                            format!("Status  Connected · signed in · {models} models")
+                        }
                         (Some(credential), _) if credential.kind() == "oauth" => {
                             format!("Status  Connected · signed in · {models} models")
                         }
@@ -692,6 +704,11 @@ impl ManagementService {
                         "Disconnect",
                         json!({"action":"logout","name":id}),
                     ));
+                } else if id == "haarness" && connected {
+                    view.entries.push(Entry {
+                        description: "Cloud models stop here until you sign in again".into(),
+                        ..destructive("Sign out of Haarness", json!({"action":"logout","name":id}))
+                    });
                 }
                 for (scope, path, section) in self.provider_sources(id)? {
                     let request =
@@ -764,6 +781,8 @@ impl ManagementService {
                 let guide = haarness_providers::connect::guide(&p.id);
                 let stored = store.get(&p.id).ok().flatten();
                 let source = match (&stored, p.authenticated, guide.methods.is_empty()) {
+                    // Cloud is signed in through the Haarness account, not a stored key.
+                    (None, true, _) if p.id == "haarness" => Some("oauth"),
                     (Some(credential), _, _) => Some(credential.kind()),
                     (None, true, true) => Some("local"),
                     (None, true, false) => Some("environment"),
@@ -1554,6 +1573,17 @@ impl ManagementService {
                     Ok(())
                 }),
             )
+        } else if name == "haarness" {
+            // Haarness Cloud is the Haarness account itself: the account client
+            // keeps its own credentials, and the provider reads them on its next
+            // model refresh, so nothing goes into the provider key store.
+            let account = haarness_account::Client::new(haarness_account::Config::from_env()?)?;
+            let login = account.begin_login(method == "device").await?;
+            (
+                login.url.clone(),
+                login.code.clone().unwrap_or_default(),
+                Box::pin(async move { Ok(login.finish().await?) }),
+            )
         } else {
             let (url, code, future): (String, String, Completion<Credential>) =
                 match (name.as_str(), method) {
@@ -1702,11 +1732,24 @@ fn provider_status(provider: &haarness_protocol::ProviderInfo) -> String {
         .methods
         .iter()
         .find(|method| method.kind == haarness_providers::connect::MethodKind::Oauth);
+    let api = guide
+        .methods
+        .iter()
+        .any(|method| method.kind == haarness_providers::connect::MethodKind::Api);
+    // "Sign in with ChatGPT" continues a sentence here; only its first letter
+    // drops, so brand names keep their own spelling.
+    let continued = |label: &str| {
+        let mut letters = label.chars();
+        letters.next().map_or_else(String::new, |first| {
+            first.to_lowercase().chain(letters).collect()
+        })
+    };
     match (oauth, guide.note) {
-        (Some(method), _) => format!(
+        (Some(method), _) if api => format!(
             "Not connected · {} or use an API key",
-            method.label.to_lowercase()
+            continued(method.label)
         ),
+        (Some(method), _) => format!("Not connected · {}", continued(method.label)),
         (None, Some(note)) if guide.methods.is_empty() => format!("Not connected · {note}"),
         _ => "Not connected · API key".into(),
     }

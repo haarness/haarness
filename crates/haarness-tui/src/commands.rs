@@ -184,7 +184,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     command(
         "sessions",
         &["threads", "resume", "continue"],
-        "Aliases /resume /continue · browse sessions · → actions · --all archived",
+        "Resume a session · → actions · --all includes archived · also /resume",
     ),
     command(
         "worktree",
@@ -2025,6 +2025,15 @@ impl App {
                 self.submit_connect_key(&value, client).await?;
                 Ok(AppAction::Continue)
             }
+            OverlayChoice::Option(OptionsKind::Billing, value) => {
+                if value == "signin" {
+                    self.open_connect_picker(Some("haarness"), client).await?;
+                } else {
+                    self.close_overlay();
+                    self.open_billing_page(&value);
+                }
+                Ok(AppAction::Continue)
+            }
             OverlayChoice::Option(OptionsKind::CloudRouter, value) => {
                 let account = haarness_account::Client::new(haarness_account::Config::from_env()?)?;
                 let router = account.select_router(&value).await?;
@@ -2147,6 +2156,9 @@ impl App {
                 "" => self.set_auto_permissions(!self.auto_permissions),
                 _ => self.notice = "Usage: /permissions-mode [review|auto]".into(),
             },
+            "new" if self.is_untouched_session() => {
+                self.notice = "This session is already new · type to start".into();
+            }
             "new" => {
                 let request = CreateThreadRequest {
                     schedule: None,
@@ -2726,25 +2738,9 @@ impl App {
             }
             "billing" => {
                 if arguments.is_empty() {
-                    self.open_overlay(Overlay::Panel {
-                        title: "Cloud billing".into(),
-                        lines: self.billing.lines(),
-                    });
+                    self.open_billing();
                 } else if matches!(arguments, "open" | "topup" | "usage") {
-                    if let Some(summary) = &self.billing.summary {
-                        let url = match arguments {
-                            "usage" => summary.usage_url.clone(),
-                            "topup" => format!("{}#top-up", summary.billing_url),
-                            _ => summary.billing_url.clone(),
-                        };
-                        self.notice = if crate::terminal::open_browser(&url) {
-                            "Opened Cloud billing in your browser".into()
-                        } else {
-                            format!("Open {url}")
-                        };
-                    } else {
-                        self.notice = self.billing.lines().join(" ");
-                    }
+                    self.open_billing_page(arguments);
                 } else {
                     self.notice = "Usage: /billing [open|topup|usage]".into();
                 }
@@ -3000,6 +2996,7 @@ impl App {
         match kind {
             // Handled async in execute_choice; nothing to do here.
             OptionsKind::CloudRouter
+            | OptionsKind::Billing
             | OptionsKind::InputQueue
             | OptionsKind::InputQueueActions
             | OptionsKind::Management
@@ -3761,7 +3758,7 @@ impl App {
             .iter()
             .any(|provider| provider.id == self.thread.provider && provider.authenticated)
         {
-            self.notice = format!("{} is not connected · /connect", self.thread.provider);
+            self.notice = crate::state::not_connected(&self.providers, &self.thread.provider);
             return Ok(false);
         }
         let attachments = self.attachments.clone();
@@ -3795,6 +3792,8 @@ impl App {
 
     pub async fn switch_thread(&mut self, thread: Thread, client: &ApiClient) -> Result<()> {
         let previous_thread = self.thread.id;
+        let abandoned = (thread.id != previous_thread && self.is_untouched_session())
+            .then_some(previous_thread);
         // An unsaved queued-message edit belongs to the session being left;
         // its set-aside draft is what that session keeps.
         self.cancel_queue_edit();
@@ -3819,6 +3818,10 @@ impl App {
             .position(|agent| agent.id == thread.agent)
             .unwrap_or(0);
         self.thread = thread;
+        if let Some(id) = abandoned {
+            archive_untouched(&mut self.threads, id, client, std::time::Duration::from_secs(1))
+                .await;
+        }
         self.input_queue = client.input_queue(self.thread.id).await.unwrap_or_default();
         self.input_queue_edit = None;
         self.normalize_reasoning();
@@ -3911,7 +3914,7 @@ impl App {
         {
             "Ready".into()
         } else {
-            format!("{} is not connected · /connect", self.thread.provider)
+            crate::state::not_connected(&self.providers, &self.thread.provider)
         };
         Ok(())
     }
@@ -4349,6 +4352,94 @@ impl App {
         matches.next().is_none().then_some(first)
     }
 
+    /// `/billing`: balances on top, and the next step one Enter away instead
+    /// of a page of URLs and a line of subcommands to retype.
+    pub(crate) fn open_billing(&mut self) {
+        let idle_purchase = self.billing.summary.as_ref().is_some_and(|summary| {
+            !summary.overage_opt_in
+                && haarness_account::billing::display_credits(&summary.purchased_credits) != "0"
+        });
+        let mut entries = if self.billing.logged_in {
+            vec![
+                OptionEntry {
+                    label: "Add credits".into(),
+                    description: "Buy credits in your browser".into(),
+                    value: "topup".into(),
+                },
+                if self.billing.summary.as_ref().is_some_and(|summary| {
+                    let plan = summary.plan.trim();
+                    !plan.is_empty() && !plan.eq_ignore_ascii_case("no plan")
+                }) {
+                    OptionEntry {
+                        label: "Change plan".into(),
+                        description: "Compare plans, upgrade or cancel".into(),
+                        value: "open".into(),
+                    }
+                } else {
+                    OptionEntry {
+                        label: "Choose a plan".into(),
+                        description: "Included credits every month".into(),
+                        value: "open".into(),
+                    }
+                },
+                OptionEntry {
+                    label: "Usage".into(),
+                    description: "What each session and model spent".into(),
+                    value: "usage".into(),
+                },
+            ]
+        } else {
+            vec![OptionEntry {
+                label: "Sign in to Haarness".into(),
+                description: "Use Cloud models on your Haarness plan".into(),
+                value: "signin".into(),
+            }]
+        };
+        if idle_purchase {
+            // Turning overage on is a spending decision with its own
+            // confirmation in Cloud, so this opens Billing rather than flip it.
+            entries.insert(
+                0,
+                OptionEntry {
+                    label: "Turn on overage".into(),
+                    description: "Let purchased credits pay once included ones run out".into(),
+                    value: "open".into(),
+                },
+            );
+        }
+        self.open_overlay(Overlay::Options {
+            title: "Cloud billing".into(),
+            kind: OptionsKind::Billing,
+            entries,
+        });
+    }
+
+    /// Open one of the account's billing pages: `open`, `topup` or `usage`.
+    fn open_billing_page(&mut self, page: &str) {
+        let Some(summary) = &self.billing.summary else {
+            self.notice = if self.billing.logged_in {
+                "Cloud billing is still loading · try again in a moment".into()
+            } else {
+                "Not signed in to Haarness Cloud · /connect haarness".into()
+            };
+            return;
+        };
+        let url = match page {
+            "usage" => summary.usage_url.clone(),
+            "topup" => format!("{}#top-up", summary.billing_url),
+            _ => summary.billing_url.clone(),
+        };
+        self.notice = if crate::terminal::open_browser(&url) {
+            match page {
+                "usage" => "Opened Cloud usage in your browser".into(),
+                "topup" => "Opened Cloud credits in your browser".into(),
+                _ => "Opened Cloud billing in your browser".into(),
+            }
+        } else {
+            format!("Open {url}")
+        };
+    }
+
     async fn archive_current_session(&mut self, client: &ApiClient) -> Result<()> {
         client
             .update_thread(
@@ -4427,7 +4518,7 @@ impl App {
             .iter()
             .any(|candidate| candidate.id == provider && candidate.authenticated)
         {
-            self.notice = format!("{provider} is not connected · /connect");
+            self.notice = crate::state::not_connected(&self.providers, provider);
             return Ok(());
         }
         self.thread = client
@@ -4634,4 +4725,30 @@ fn language_entries(app: &App) -> Vec<OptionEntry> {
             value: code.into(),
         })
         .collect()
+}
+
+/// Archive an untouched session the user has moved on from, so launches and
+/// `/new` do not leave a trail of empty "New thread" rows. Best effort: on
+/// failure the empty session simply stays listed, as it always did.
+pub(crate) async fn archive_untouched(
+    threads: &mut Vec<Thread>,
+    id: haarness_protocol::ThreadId,
+    client: &ApiClient,
+    patience: std::time::Duration,
+) {
+    let request = UpdateThreadRequest {
+        title: None,
+        archived: Some(true),
+        agent: None,
+        provider: None,
+        model: None,
+        ultracode: None,
+    };
+    let archive = client.update_thread(id, request);
+    if matches!(
+        tokio::time::timeout(patience, archive).await,
+        Ok(Ok(_))
+    ) {
+        threads.retain(|thread| thread.id != id);
+    }
 }

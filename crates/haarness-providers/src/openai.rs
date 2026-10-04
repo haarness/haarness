@@ -384,8 +384,7 @@ fn chatgpt_catalog(body: &Value) -> Option<ChatGptCatalog> {
             entry["display_name"]
                 .as_str()
                 .filter(|name| !name.trim().is_empty())
-                .unwrap_or(slug)
-                .to_owned()
+                .map_or_else(|| slug.to_owned(), tidy_catalog_name)
         } else {
             shared
         };
@@ -875,6 +874,24 @@ fn provider_error(error: impl std::fmt::Display) -> CoreError {
     CoreError::Provider(error.to_string())
 }
 
+/// The subscription catalog spells new models `GPT-6.1-Sol`; the shared
+/// names read `GPT-6.1 Sol`. Match them so a model the shared table does not
+/// know yet still sits naturally beside the ones it does.
+fn tidy_catalog_name(name: &str) -> String {
+    let mut parts = name.split('-');
+    match (parts.next(), parts.next()) {
+        (Some("GPT"), Some(version)) if version.starts_with(|c: char| c.is_ascii_digit()) => {
+            let rest: Vec<&str> = parts.collect();
+            if rest.is_empty() {
+                name.to_owned()
+            } else {
+                format!("GPT-{version} {}", rest.join(" "))
+            }
+        }
+        _ => name.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -992,7 +1009,10 @@ mod tests {
             ["minimal", "low", "medium", "high"]
         );
         for id in ["gpt-5-1", "gpt-5.1-2025-11-13"] {
-            assert_eq!(openai_reasoning_efforts(id), ["none", "low", "medium", "high"]);
+            assert_eq!(
+                openai_reasoning_efforts(id),
+                ["none", "low", "medium", "high"]
+            );
         }
         assert_eq!(
             openai_reasoning_efforts("gpt-6-astra"),
@@ -1125,6 +1145,10 @@ mod tests {
         );
         let astra = &models[0];
         assert_eq!(astra.display_name, "GPT-6 Astra");
+        assert_eq!(super::tidy_catalog_name("GPT-6.1-Sol"), "GPT-6.1 Sol");
+        assert_eq!(super::tidy_catalog_name("GPT-5.5"), "GPT-5.5");
+        assert_eq!(super::tidy_catalog_name("GPT-Reserve"), "GPT-Reserve");
+        assert_eq!(super::tidy_catalog_name("Team model"), "Team model");
         assert_eq!(
             astra.reasoning_efforts,
             ["low", "medium", "high", "xhigh", "max"],

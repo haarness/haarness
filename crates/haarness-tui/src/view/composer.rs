@@ -430,22 +430,32 @@ fn left_variants(app: &App) -> Vec<Vec<Span>> {
         };
         return vec![lifecycle(false), lifecycle(true), vec![chip]];
     }
-    let model = vec![
-        chip.clone(),
-        Span::new(
-            format!(
-                "  {}/",
-                haarness_protocol::provider_display_id(&app.thread.provider)
-            ),
-            theme.muted,
-        )
-        .on(theme.surface),
-        Span::new(
-            app.model_label(&format!("{}/{}", app.thread.provider, app.thread.model)),
-            theme.text,
-        )
-        .on(theme.surface),
-    ];
+    // With nothing connected, the configured default is a model nobody can
+    // use yet; naming it would read as if the session were ready. An empty
+    // catalog only means it has not loaded, so the model stays named then.
+    let model = if app.providers.is_empty() || app.any_provider_connected() {
+        vec![
+            chip.clone(),
+            Span::new(
+                format!(
+                    "  {}/",
+                    haarness_protocol::provider_display_id(&app.thread.provider)
+                ),
+                theme.muted,
+            )
+            .on(theme.surface),
+            Span::new(
+                app.model_label(&format!("{}/{}", app.thread.provider, app.thread.model)),
+                theme.text,
+            )
+            .on(theme.surface),
+        ]
+    } else {
+        vec![
+            chip.clone(),
+            Span::new("  no model", theme.muted).on(theme.surface),
+        ]
+    };
     if let Some(custom) = app
         .custom_status_line
         .as_deref()

@@ -77,7 +77,11 @@ fn inline_workflow_name(source: &str) -> Option<String> {
 
 /// The children a `batch` call spawned, in launch order: their call ids
 /// are the batch call id followed by `:1`, `:2`, …
-fn batch_children<'a>(app: &'a App, name: &str, call_id: &str) -> Vec<(usize, String, &'a ChildTask)> {
+fn batch_children<'a>(
+    app: &'a App,
+    name: &str,
+    call_id: &str,
+) -> Vec<(usize, String, &'a ChildTask)> {
     if name != "batch" {
         return Vec::new();
     }
@@ -153,8 +157,14 @@ fn delegation_detail_line(task: &ChildTask, theme: &Theme) -> Line {
             .elapsed_seconds()
             .map_or_else(String::new, |seconds| format!(" · {seconds}s"));
         match task.state.as_str() {
-            "waiting_permission" => (format!("↳ waiting for approval · {tools}{elapsed}"), theme.accent),
-            "background" => (format!("↳ running in background · {doing} · {tools}{elapsed}"), theme.muted),
+            "waiting_permission" => (
+                format!("↳ waiting for approval · {tools}{elapsed}"),
+                theme.accent,
+            ),
+            "background" => (
+                format!("↳ running in background · {doing} · {tools}{elapsed}"),
+                theme.muted,
+            ),
             _ => (format!("↳ {doing} · {tools}{elapsed}"), theme.muted),
         }
     } else {
@@ -237,11 +247,46 @@ fn empty_result_label(output: &str) -> Option<&'static str> {
 }
 
 fn file_diff_count(metadata: &serde_json::Value) -> usize {
+    file_diff_stat(metadata).0
+}
+
+/// Files touched, and lines added and removed across them.
+fn file_diff_stat(metadata: &serde_json::Value) -> (usize, u64, u64) {
     metadata
         .get("diffs")
         .cloned()
         .and_then(|value| serde_json::from_value::<Vec<FileDiff>>(value).ok())
-        .map_or(0, |diffs| diffs.len())
+        .map_or((0, 0, 0), |diffs| {
+            diffs
+                .iter()
+                .fold((0, 0, 0), |(files, added, removed), diff| {
+                    (files + 1, added + diff.additions, removed + diff.deletions)
+                })
+        })
+}
+
+/// The files an `apply_patch` envelope names, so its row says what it
+/// changes instead of a bare tool name.
+fn patch_argument(arguments: &serde_json::Value) -> Option<String> {
+    let patch = ["input", "patch"]
+        .iter()
+        .find_map(|key| arguments.get(key).and_then(serde_json::Value::as_str))?;
+    let files: Vec<&str> = patch
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_end();
+            ["*** Update File: ", "*** Add File: ", "*** Delete File: "]
+                .iter()
+                .find_map(|prefix| line.strip_prefix(prefix))
+        })
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .collect();
+    match files.as_slice() {
+        [] => None,
+        [only] => Some((*only).to_owned()),
+        [first, rest @ ..] => Some(format!("{first} and {} more", rest.len())),
+    }
 }
 
 /// Every successful paired tool result is a compact activity row by default,
@@ -995,12 +1040,16 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     if *is_error {
                         return String::new();
                     }
-                    let files = file_diff_count(metadata);
+                    let (files, added, removed) = file_diff_stat(metadata);
                     if files > 0 && compact_result.is_some() {
-                        return format!(
-                            "  ·  {files} {}",
-                            if files == 1 { "file" } else { "files" }
-                        );
+                        // The row already names the file; the line counts
+                        // are what a reader cannot infer from it.
+                        let stat = format!("+{added} −{removed}");
+                        return if files == 1 {
+                            format!("  ·  {stat}")
+                        } else {
+                            format!("  ·  {files} files  {stat}")
+                        };
                     }
                     if let Some(label) = empty_result_label(output) {
                         return format!("  ·  {label}");
@@ -1010,11 +1059,20 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     }
                     String::new()
                 });
-                let argument_budget = width.saturating_sub(12 + progress.chars().count()).max(16);
+                // The status suffix must survive truncation: a row that ends
+                // in a lone "f" instead of "failed" reads as a rendering bug.
+                let argument_budget = width
+                    .saturating_sub(12 + progress.chars().count() + suffix.chars().count())
+                    .max(16);
                 let argument = if name == "workflow" {
                     format!(" {}", workflow_argument(arguments))
                 } else {
                     primary_argument(arguments)
+                        .or_else(|| {
+                            (name == "apply_patch")
+                                .then(|| patch_argument(arguments))
+                                .flatten()
+                        })
                         .map(|value| format!(" {}", single_line(&value, argument_budget)))
                         .unwrap_or_default()
                 };

@@ -351,6 +351,8 @@ pub enum WorkflowTarget {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum OptionsKind {
     CloudRouter,
+    /// `/billing`: the Cloud plan and balances, with what can be done next.
+    Billing,
     InputQueue,
     InputQueueActions,
     Management,
@@ -429,6 +431,7 @@ impl Overlay {
             Self::Options { kind, .. } => !matches!(
                 kind,
                 OptionsKind::ManagementConfirm
+                    | OptionsKind::Billing
                     | OptionsKind::ConnectMethod
                     | OptionsKind::WorkspaceActions
                     | OptionsKind::WorkspaceResetConfirmation
@@ -789,8 +792,14 @@ impl App {
             .any(|provider| provider.id == thread.provider && provider.authenticated)
         {
             "Connected".into()
+        } else if providers.is_empty()
+            || providers
+                .iter()
+                .any(|provider| provider.authenticated && !provider.models.is_empty())
+        {
+            not_connected(&providers, &thread.provider)
         } else {
-            format!("{} is not connected · /connect", thread.provider)
+            "Connect a provider to start · /connect".into()
         };
         let root_thread_id = compute_root(&threads, thread.id);
         let children = durable_children(&items);
@@ -1028,6 +1037,24 @@ impl App {
     /// for history lineage, but remain editable conversations.
     pub fn is_child_view(&self) -> bool {
         self.thread.is_subagent
+    }
+
+    /// A launch or `/new` session nobody has written anything in yet. Leaving
+    /// one behind would add another "New thread" to every session list, so
+    /// it is archived on the way out instead.
+    pub fn is_untouched_session(&self) -> bool {
+        self.items.is_empty()
+            && self.input_queue.items.is_empty()
+            && self.composer.is_empty()
+            && self.attachments.is_empty()
+            && self.active_turn.is_none()
+            && self.goal.is_none()
+            && self.thread.title == "New thread"
+            && !self.thread.is_subagent
+            && !self.thread.archived
+            && self.thread.parent_id.is_none()
+            && self.thread.fork_origin.is_none()
+            && self.thread.schedule.is_none()
     }
 
     fn active_tree_turn_count(&self, root: ThreadId) -> usize {
@@ -2408,6 +2435,19 @@ impl App {
 
 /// Root of a thread's parent chain, resolved against the known thread list.
 /// Unknown parents resolve to the deepest reachable ancestor.
+/// "OpenAI is not connected · /connect": the provider's own name, not its
+/// id, so Cloud reads as "Haarness Cloud" rather than an internal "haarness".
+pub(crate) fn not_connected(providers: &[ProviderInfo], id: &str) -> String {
+    let name = providers
+        .iter()
+        .find(|provider| provider.id == id)
+        .map_or_else(
+            || haarness_protocol::provider_display_id(id).to_owned(),
+            |provider| provider.name.clone(),
+        );
+    format!("{name} is not connected · /connect")
+}
+
 pub fn compute_root(threads: &[Thread], mut id: ThreadId) -> ThreadId {
     for _ in 0..16 {
         match threads

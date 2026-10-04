@@ -1239,6 +1239,24 @@ fn every_selector_family_uses_the_shared_full_width_focus_row() {
 }
 
 #[test]
+fn long_mention_paths_keep_their_file_name_visible() {
+    let mut app = selector_fixture();
+    let root = format!("/var/folders/{}/ws", "x".repeat(90));
+    let long = format!("{root}/dropped image.png");
+    app.composer.set_text(format!("@{root}/drop"));
+    app.mention_suggestions = vec![long, "agent://explore".into()];
+    app.selection = 0;
+    let text = frame_text(&app, (80, 30));
+    let row = text
+        .lines()
+        .find(|line| line.contains('›'))
+        .unwrap_or_else(|| panic!("no highlighted mention row:\n{text}"));
+    assert!(row.contains("dropped image.png"), "file name clipped away: {row}");
+    assert!(row.contains('…'), "{row}");
+    assert!(text.contains("Delegate to agent"), "{text}");
+}
+
+#[test]
 fn selectable_rows_remain_visibly_distinct_in_every_theme() {
     let mut app = selector_fixture();
     app.open_overlay(crate::state::Overlay::Commands);
@@ -2909,7 +2927,10 @@ fn edit_results_are_collapsed_then_expand_to_a_diff_block() {
         .map(Line::text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(collapsed_text.contains("1 file"), "{collapsed_text}");
+    assert!(
+        collapsed_text.contains("edit a.rs  ·  +1 −1"),
+        "{collapsed_text}"
+    );
     assert!(!collapsed_text.contains("- let x = 1;"), "{collapsed_text}");
     assert!(!collapsed_text.contains("+ let x = 2;"), "{collapsed_text}");
 
@@ -7589,18 +7610,25 @@ fn cloud_billing_balances_and_panel_fit_narrow_terminals() {
     })).unwrap();
     assert!(frame_text(&app, (160, 46)).contains("100.12 included · 500 purchased"));
     for width in [160, 100, 80] {
-        app.overlay = crate::state::Overlay::Panel {
-            title: "Cloud billing".into(),
-            lines: app.billing.lines(),
-        };
+        app.open_billing();
         let lines = app.lines((width, 46));
         assert!(lines.iter().all(|line| line.width() <= width as usize));
         let text = frame_text(&app, (width, 46));
-        assert!(text.contains("Included AI"));
+        assert!(text.contains("Power plan · renews Oct 27"), "{text}");
+        assert!(text.contains("100.12 credits · resets Oct 27"), "{text}");
         assert!(text.contains("Purchased"));
-        assert!(text.contains("Reserved"));
-        assert!(text.contains("Manage billing"));
+        assert!(text.contains("1.5 credits in use"), "{text}");
+        // The next step is a row to choose, not a URL or a subcommand.
+        assert!(text.contains("Add credits"), "{text}");
+        assert!(text.contains("Change plan"), "{text}");
+        assert!(!text.contains("https://"), "{text}");
     }
+    app.billing.logged_in = false;
+    app.open_billing();
+    let text = frame_text(&app, (100, 46));
+    assert!(text.contains("Sign in to Haarness"), "{text}");
+    app.billing.logged_in = true;
+    app.close_overlay();
     app.billing.error = Some("Offline".into());
     app.overlay = crate::state::Overlay::None;
     assert!(frame_text(&app, (160, 46)).contains("Cloud credits unavailable"));
