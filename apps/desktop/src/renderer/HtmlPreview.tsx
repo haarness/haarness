@@ -1,3 +1,4 @@
+import { t } from "./i18n";
 import {
   createEffect,
   createMemo,
@@ -52,10 +53,10 @@ export function HtmlPreview(props: {
       if (message?.type === "error") setError(message.message);
       if (message?.type === "blocked")
         setError(
-          "The preview blocked a network request. Embed data and use supported libraries.",
+          t("The preview blocked a network request. Embed data and use supported libraries."),
         );
       if (message?.type === "navigation")
-        setError("External navigation is disabled in previews.");
+        setError(t("External navigation is disabled in previews."));
     };
     window.addEventListener("message", listen);
     const observer = new ResizeObserver(() => setWidth(host.clientWidth));

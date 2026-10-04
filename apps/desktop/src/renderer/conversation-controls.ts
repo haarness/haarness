@@ -1,4 +1,5 @@
 import { createSignal } from "solid-js";
+import { t } from "./i18n";
 import type { Item, Thread } from "@haarness/sdk";
 import { useApp } from "./state";
 import { lastUserMessage } from "./conversation-history";
@@ -74,10 +75,10 @@ export function createConversationControls(props: {
       } else if (action === "redo") props.redone();
       app.notify(
         action === "compact"
-          ? "Conversation compacted"
+          ? t("Conversation compacted")
           : action === "undo"
-            ? "Last turn undone"
-            : "Turn restored",
+            ? t("Last turn undone")
+            : t("Turn restored"),
       );
     } finally {
       setPending((values) => values.filter((value) => value !== key));
@@ -90,7 +91,7 @@ export function createConversationControls(props: {
           {
             key: "conversation:find",
             group: "Conversation actions",
-            name: "Find in conversation",
+            name: t("Find in conversation"),
             icon: "search",
             hint: "Mod+F",
             action: props.openFind,
@@ -101,11 +102,11 @@ export function createConversationControls(props: {
                 group: "Conversation actions",
                 name:
                   command.name === "undo"
-                    ? "Undo last turn"
+                    ? t("Undo last turn")
                     : command.name === "redo"
-                      ? "Redo turn"
-                      : "Compact conversation",
-                detail: command.description,
+                      ? t("Redo turn")
+                      : t("Compact conversation"),
+                detail: t(command.description),
                 keywords: "/" + command.name,
                 icon: (command.name === "undo"
                   ? "undo"

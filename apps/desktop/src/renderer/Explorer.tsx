@@ -49,7 +49,7 @@ export function Explorer() {
     );
     if (app.draftKey() === key) {
       app.set("panel", "chat");
-      app.notify("File context added to your message");
+      app.notify(t("File context added to your message"));
     }
   }
   const dirty = (path: string) =>
@@ -60,8 +60,8 @@ export function Explorer() {
     async () =>
       !hasEdits() ||
       (await confirm(
-        "Discard unsaved file edits?",
-        "Save your files before changing working folders, or confirm to discard these edits.",
+        t("Discard unsaved file edits?"),
+        t("Save your files before changing working folders, or confirm to discard these edits."),
       )),
   );
   const beforeUnload = (event: BeforeUnloadEvent) => {
@@ -127,7 +127,7 @@ export function Explorer() {
     const id = app.state.connection?.id;
     if (!id) return;
     if (options?.preview && dirty(path)) {
-      app.notify("Save or discard your edits before opening another preview version.");
+      app.notify(t("Save or discard your edits before opening another preview version."));
       return;
     }
     if (!tabs().some((item) => item.path === path) || options?.preview) {
@@ -138,7 +138,7 @@ export function Explorer() {
           .then((value) => {
             if (generation !== workspaceGeneration || (options?.preview && intent !== selectionGeneration)) return;
             if (options?.preview && dirty(path)) {
-              app.notify("Save or discard your edits before refreshing this preview.");
+              app.notify(t("Save or discard your edits before refreshing this preview."));
               return;
             }
             if (options?.preview) setEdits((items) => { const next = { ...items }; delete next[path]; return next; });
@@ -183,7 +183,7 @@ export function Explorer() {
         return next;
       });
       setVersion((v) => v + 1);
-      app.notify("Saved " + value.path);
+      app.notify(t("Saved {path}", { path: value.path }));
     }).catch((error) => {
       if (generation === workspaceGeneration) throw error;
     }).finally(() => pendingSaves.delete(value.editor));
@@ -283,8 +283,8 @@ export function Explorer() {
     if (
       dirty(path) &&
       !(await confirm(
-        "Discard unsaved changes?",
-        path + " has changes that have not been saved.",
+        t("Discard unsaved changes?"),
+        t("{path} has changes that have not been saved.", { path }),
       ))
     )
       return;
@@ -301,12 +301,12 @@ export function Explorer() {
     const id = app.state.connection?.id;
     const generation = workspaceGeneration;
     if (!id) return;
-    const input = await ask(directory ? "New folder" : "New file", [
-      { name: "path", label: "Path relative to this folder", required: true },
+    const input = await ask(directory ? t("New folder") : t("New file"), [
+      { name: "path", label: t("Path relative to this folder"), required: true },
     ], {
-      submit: "Create",
+      submit: t("Create"),
       onSubmit: async (input) => {
-        if (generation !== workspaceGeneration) throw Error("The working folder changed. Close this dialog and try again.");
+        if (generation !== workspaceGeneration) throw Error(t("The working folder changed. Close this dialog and try again."));
         if (directory)
           await window.haarness.files(id, "action", { action: "mkdir", path: input.path });
         else
@@ -322,11 +322,11 @@ export function Explorer() {
     const id = app.state.connection?.id;
     const generation = workspaceGeneration;
     if (!value || !id) return;
-    await ask("Rename file", [
-      { name: "target", label: "New path", value: value.path, required: true },
+    await ask(t("Rename file"), [
+      { name: "target", label: t("New path"), value: value.path, required: true },
     ], {
       onSubmit: async (input) => {
-        if (generation !== workspaceGeneration) throw Error("The working folder changed. Close this dialog and try again.");
+        if (generation !== workspaceGeneration) throw Error(t("The working folder changed. Close this dialog and try again."));
         // A rename must not race a pending write to the old path.
         await pendingSaves.get(value.editor);
         await window.haarness.files(id, "action", {
@@ -352,7 +352,7 @@ export function Explorer() {
     const value = file(), id = app.state.connection?.id;
     const generation = workspaceGeneration;
     const intent = selectionGeneration;
-    if (!value?.pin || !id || !await confirm("Restore preview version?", "The current file is backed up before this version replaces it.")) return;
+    if (!value?.pin || !id || !await confirm(t("Restore preview version?"), t("The current file is backed up before this version replaces it."))) return;
     const current = await window.haarness.files<FileContent>(id, "read", { path: value.path }).catch(() => undefined);
     await window.haarness.files(id, "restore", { path: value.path, hash: value.pin, revision: current?.revision ?? emptyHash });
     if (generation === workspaceGeneration && intent === selectionGeneration) await open(value.path, { preview: true });
@@ -361,7 +361,7 @@ export function Explorer() {
     const value = file();
     const id = app.state.connection?.id;
     const generation = workspaceGeneration;
-    if (!value || !id || !(await confirm("Delete this file?", value.path + " will be deleted from the workspace."))) return;
+    if (!value || !id || !(await confirm(t("Delete this file?"), t("{path} will be deleted from the workspace.", { path: value.path })))) return;
     await pendingSaves.get(value.editor);
     if (generation !== workspaceGeneration) return;
     await window.haarness.files(id, "action", { action: "delete", path: value.path, confirm: true });
@@ -459,16 +459,16 @@ export function Explorer() {
               <Show when={file()}>
                 <div class="file-actions">
                   <Show when={Preview.kind(file()!.path) && Preview.kind(file()!.path) !== "image"}>
-                    <button aria-pressed={file()?.mode !== "code"} onClick={() => setTabs((items) => items.map((item) => item.path === selected() ? { ...item, mode: "preview" } : item))}>Preview</button>
-                    <button aria-pressed={file()?.mode === "code"} onClick={() => setTabs((items) => items.map((item) => item.path === selected() ? { ...item, mode: "code" } : item))}>Code</button>
+                    <button aria-pressed={file()?.mode !== "code"} onClick={() => setTabs((items) => items.map((item) => item.path === selected() ? { ...item, mode: "preview" } : item))}>{t("Preview")}</button>
+                    <button aria-pressed={file()?.mode === "code"} onClick={() => setTabs((items) => items.map((item) => item.path === selected() ? { ...item, mode: "code" } : item))}>{t("Code")}</button>
                   </Show>
 
                   <Button
                     icon="file"
                     label={
                       selection().from !== selection().to
-                        ? "Add selection to context"
-                        : "Add file to context"
+                        ? t("Add selection to context")
+                        : t("Add file to context")
                     }
                     hint="Command/Ctrl+Shift+L"
                     disabled={!canAttach()}
@@ -514,14 +514,14 @@ export function Explorer() {
             fallback={
               <Empty
                 title={t("Your code, close at hand.")}
-                detail="Open a file from the explorer to read, edit, or review it."
+                detail={t("Open a file from the explorer to read, edit, or review it.")}
               />
             }
           >
             {(value) => (
               <>
                 <Show when={value().pin}>
-                  <div class="preview-version-strip">Saved preview version <button onClick={() => app.run(restorePreview)}>Restore this version</button><button onClick={() => app.run(() => open(value().path, { preview: true }))}>Show current</button></div>
+                  <div class="preview-version-strip">{t("Saved preview version")} <button onClick={() => app.run(restorePreview)}>{t("Restore this version")}</button><button onClick={() => app.run(() => open(value().path, { preview: true }))}>{t("Show current")}</button></div>
                 </Show>
                 <Show when={Preview.kind(value().path) && value().mode !== "code"} fallback={<>
                 <Show
@@ -539,7 +539,7 @@ export function Explorer() {
                                 fallback={
                                   <Empty
                                     title={t("Binary file")}
-                                    detail={`${value().mime} · ${value().size} bytes`}
+                                    detail={`${value().mime} · ${t("{size} bytes", { size: value().size })}`}
                                   />
                                 }
                               >

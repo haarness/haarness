@@ -279,7 +279,7 @@ export function ProjectPicker(props: { heading?: boolean }) {
               </For>
               <Show when={!matches().length}>
                 <div class="project-picker-empty" role="status">
-                  {query() ? "No projects found" : "No projects yet"}
+                  {query() ? t("No projects found") : t("No projects yet")}
                 </div>
               </Show>
             </div>
@@ -290,7 +290,7 @@ export function ProjectPicker(props: { heading?: boolean }) {
                 onClick={() => choose(() => app.openProject(true))}
               >
                 <Icon name="plus" size="lg" />
-                {app.currentServer().url ? "Open project" : "New project"}
+                {app.currentServer().url ? t("Open project") : t("New project")}
               </button>
             </div>
           </div>

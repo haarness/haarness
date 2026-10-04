@@ -546,3 +546,9 @@ hr {
   white-space: nowrap;
   border: 0;
 }
+
+/* Arabic letters join; any tracking pulls them apart. Spacing tokens stay for every other script. */
+:root:lang(ar),
+:root:lang(ar) * {
+  letter-spacing: 0 !important;
+}

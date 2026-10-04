@@ -16,10 +16,19 @@ export function validReasoning(
 ) {
   return reasoningLevels(levels).includes(value) ? value : "";
 }
+/** Names for the levels providers share; an English catalog key, translated where it renders. */
+const levelNames: Record<string, string> = {
+  none: "None",
+  minimal: "Minimal",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra high",
+  max: "Max",
+};
 export function reasoningLabel(value: string) {
-  return value
-    ? value
-        .replace(/[_-]/g, " ")
-        .replace(/^./, (letter) => letter.toUpperCase())
-    : "Model default";
+  if (!value) return "Model default";
+  return Object.hasOwn(levelNames, value)
+    ? levelNames[value]
+    : value.replace(/[_-]/g, " ").replace(/^./, (letter) => letter.toUpperCase());
 }

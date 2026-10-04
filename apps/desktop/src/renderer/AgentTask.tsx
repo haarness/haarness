@@ -1,3 +1,4 @@
+import { t } from "./i18n";
 import { ProviderLabel } from "./ProviderIcon";
 import { modelName } from "../model-names";
 import { toolActivity } from "./transcript";
@@ -166,8 +167,8 @@ export function AgentTask(props: { task: Task }) {
         <button
           type="button"
           class="icon-button agent-task-stop"
-          aria-label={`${stopping() ? "Stopping agent task" : "Stop agent task"}: ${title()}`}
-          title={stopping() ? "Stopping…" : "Stop agent"}
+          aria-label={`${stopping() ? t("Stopping agent task") : t("Stop agent task")}: ${title()}`}
+          title={stopping() ? t("Stopping…") : t("Stop agent")}
           disabled={stopping()}
           onClick={() => void app.run(stop)}
         >

@@ -5,6 +5,7 @@ import type {
 import { createSignal } from "solid-js";
 import type { useApp } from "./state";
 import { ask, confirm } from "./ui";
+import { t } from "./i18n";
 import { primaryLocation, type DesktopProject } from "../projects";
 import type { Recent } from "../shared";
 
@@ -42,29 +43,29 @@ export async function createWorktree(
     )
     .catch(() => setBases([]));
   const input = await ask(
-    "New worktree",
+    t("New worktree"),
     [
       {
         name: "name",
-        label: "Name",
-        placeholder: "Feature or task name",
+        label: t("Name"),
+        placeholder: t("Feature or task name"),
         required: true,
       },
       {
         name: "fromRef",
-        label: "Start from",
+        label: t("Start from"),
         type: "select",
         options: () => bases().map((base) => base.label),
       },
       {
         name: "branch",
-        label: "Branch name (optional)",
-        placeholder: "Generated from the name",
+        label: t("Branch name (optional)"),
+        placeholder: t("Generated from the name"),
       },
     ],
     {
-      description: "Create a separate checkout for this project.",
-      submit: "Create worktree",
+      description: t("Create a separate checkout for this project."),
+      submit: t("Create worktree"),
     },
   );
   if (!input) return false;
@@ -106,12 +107,12 @@ export async function resetWorktree(
   if (!location.checkout?.managed) return;
   const connection = await rootConnection(app, project);
   const input = await ask(
-    "Reset worktree",
+    t("Reset worktree"),
     [
-      { name: "toRef", label: "Target ref (optional)" },
+      { name: "toRef", label: t("Target ref (optional)") },
       {
         name: "discard",
-        label: "Uncommitted changes",
+        label: t("Uncommitted changes"),
         type: "select",
         options: [
           "Keep (refuse reset if dirty)",
@@ -121,11 +122,10 @@ export async function resetWorktree(
       },
     ],
     {
-      description:
-        "Reset “" +
-        location.checkout.name +
-        "”. Finish its tasks and close its running tools first.",
-      submit: "Reset worktree",
+      description: t("Reset “{name}”. Finish its tasks and close its running tools first.", {
+        name: location.checkout.name,
+      }),
+      submit: t("Reset worktree"),
     },
   );
   if (!input) return;
@@ -146,7 +146,7 @@ export async function resetWorktree(
   ]);
   await app.refreshProjects();
   app.set("catalogVersion", (value) => value + 1);
-  app.notify("Worktree reset.");
+  app.notify(t("Worktree reset."));
 }
 
 export async function removeWorktree(
@@ -158,12 +158,10 @@ export async function removeWorktree(
   const connection = await rootConnection(app, project);
   if (
     !(await confirm(
-      "Remove worktree?",
+      t("Remove worktree?"),
       location.checkout.exists
-        ? "Remove “" +
-            location.checkout.name +
-            "”. Dirty worktrees and running tasks are protected."
-        : "Remove the missing checkout's registration. Conversation history is retained.",
+        ? t("Remove “{name}”. Dirty worktrees and running tasks are protected.", { name: location.checkout.name })
+        : t("Remove the missing checkout's registration. Conversation history is retained."),
     ))
   )
     return;
@@ -179,5 +177,5 @@ export async function removeWorktree(
   );
   await window.haarness.forget(location.id);
   await app.refreshProjects();
-  app.notify("Worktree removed.");
+  app.notify(t("Worktree removed."));
 }

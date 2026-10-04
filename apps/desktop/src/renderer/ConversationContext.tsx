@@ -128,12 +128,12 @@ export function ConversationContext() {
             <strong data-testid="context-estimate">
               {tokenNumber(context()?.total)}
             </strong>
-            <span>estimated tokens</span>
+            <span>{t("estimated tokens")}</span>
           </div>
           <p>
             {limit()
-              ? `${tokenNumber(limit())} model context limit`
-              : "Model context limit unavailable"}
+              ? t("{count} model context limit", { count: tokenNumber(limit()) })
+              : t("Model context limit unavailable")}
           </p>
           <Show when={percent() != null}>
             <progress
@@ -142,13 +142,11 @@ export function ConversationContext() {
               value={Math.min(100, percent()!)}
             />
             <small>
-              {percent()!.toFixed(1)}% of the model limit, before overhead
+              {t("{percent}% of the model limit, before overhead", { percent: percent()!.toFixed(1) })}
             </small>
           </Show>
           <p class="context-note">
-            Approximation from saved text (4 characters per token), not a
-            provider token count. Excludes system instructions, tool
-            definitions, media and provider overhead.
+            {t("Approximation from saved text (4 characters per token), not a provider token count. Excludes system instructions, tool definitions, media and provider overhead.")}
           </p>
           <Show when={context()?.compacted}>
             <p class="context-note">
@@ -157,22 +155,21 @@ export function ConversationContext() {
           </Show>
           <Show when={context()?.attachments}>
             <p class="context-note">
-              {context()!.attachments} media attachments are not included in
-              this estimate.
+              {t("{count} media attachments are not included in this estimate.", { count: context()!.attachments })}
             </p>
           </Show>
           <dl class="context-breakdown">
             <For each={context()?.breakdown}>
               {(row) => (
                 <div>
-                  <dt>{row.label}</dt>
+                  <dt>{t(row.label)}</dt>
                   <dd>{tokenNumber(row.tokens)}</dd>
                 </div>
               )}
             </For>
           </dl>
           <p class="context-note">
-            {context()?.messages ?? 0} retained user and assistant messages.
+            {t("{count} retained user and assistant messages.", { count: context()?.messages ?? 0 })}{" "}
             {t("Undone history is excluded.")}
           </p>
         </section>
@@ -185,10 +182,10 @@ export function ConversationContext() {
                 <dl class="context-breakdown">
                   <div><dt>{t("System instructions")}</dt><dd>{tokenNumber(prompt().system_tokens)}</dd></div>
                   <div><dt>{t("Tool definitions")}</dt><dd>{tokenNumber(prompt().tool_tokens)}</dd></div>
-                  <div><dt>Conversation history</dt><dd>{tokenNumber(prompt().history_tokens)}</dd></div>
+                  <div><dt>{t("Conversation history")}</dt><dd>{tokenNumber(prompt().history_tokens)}</dd></div>
                   <div><dt>{t("Total estimated tokens")}</dt><dd>{tokenNumber(prompt().system_tokens + prompt().tool_tokens + prompt().history_tokens)}</dd></div>
                 </dl>
-                <p class="context-note">Snapshot after request hooks, estimated at 4 characters per token. Excludes provider framing and tokens for {prompt().media_attachments} media attachments. This describes the last request, not unsent changes.</p>
+                <p class="context-note">{t("Snapshot after request hooks, estimated at 4 characters per token. Excludes provider framing and tokens for {count} media attachments. This describes the last request, not unsent changes.", { count: prompt().media_attachments })}</p>
               </section>
             )}
           </Show>
@@ -207,7 +204,7 @@ export function ConversationContext() {
                     lastTurn()!.model,
                     app.state.providers,
                   )
-                : "Request model not available"}
+                : t("Request model not available")}
             </p>
             <dl class="context-stats">
               <div>
@@ -228,30 +225,27 @@ export function ConversationContext() {
               </div>
             </dl>
             <p class="context-note">
-              As reported by the provider. Cache tokens may overlap input
-              tokens; these values are not added together. Reasoning token
-              counts are not reported separately.
+              {t("As reported by the provider. Cache tokens may overlap input tokens; these values are not added together. Reasoning token counts are not reported separately.")}
             </p>
           </Show>
         </section>
         <section aria-label={t("Conversation usage totals")} aria-busy={loading()}>
           <h3>{t("Conversation totals")}</h3>
           <p class="context-note">
-            Cumulative reported usage across requests, including undone and
-            compacted history. This is not the current context size.
+            {t("Cumulative reported usage across requests, including undone and compacted history. This is not the current context size.")}
           </p>
           <Show when={loading()}>
             <p role="status">{t("Loading usage…")}</p>
           </Show>
           <Show when={error()}>
-            <p role="alert">Could not load usage: {error()}</p>
+            <p role="alert">{t("Could not load usage: {error}", { error: error() })}</p>
           </Show>
           <Show when={totals()}>
             <dl class="context-stats">
               <For each={metrics()}>
                 {([label, value]) => (
                   <div>
-                    <dt>{label}</dt>
+                    <dt>{t(label)}</dt>
                     <dd>{tokenNumber(value)}</dd>
                   </div>
                 )}
@@ -260,7 +254,7 @@ export function ConversationContext() {
                 <dt>{t("Known cost")}</dt>
                 <dd>
                   {totals()?.costUsd == null
-                    ? "Not available"
+                    ? t("Not available")
                     : "$" + totals()!.costUsd!.toFixed(4)}
                 </dd>
               </div>

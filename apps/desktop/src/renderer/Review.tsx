@@ -132,8 +132,8 @@ export function Review(props: { compact?: boolean } = {}) {
       group: "Review actions",
       name:
         app.state.preferences.diffLayout === "split"
-          ? "Use unified diff"
-          : "Use split diff",
+          ? t("Use unified diff")
+          : t("Use split diff"),
       keywords: "review layout side by side",
       icon: "diff",
       action: () =>
@@ -147,10 +147,10 @@ export function Review(props: { compact?: boolean } = {}) {
       group: "Review actions",
       name:
         value === "last"
-          ? "Review last turn"
+          ? t("Review last turn")
           : value === "branch"
-            ? "Review current branch"
-            : "Review working changes",
+            ? t("Review current branch")
+            : t("Review working changes"),
       icon: "diff" as const,
       disabled: value === "last" && !app.state.selected,
       action: () => setMode(value),
@@ -249,7 +249,7 @@ export function Review(props: { compact?: boolean } = {}) {
     if (!disposed && (revision === draftGeneration || app.state.selected === target.thread)
       && app.state.connection?.id === target.connection && app.state.selected === target.thread) {
       app.set("panel", "chat");
-      app.notify("Review comment added to your message");
+      app.notify(t("Review comment added to your message"));
     }
   }
   function Comment(props: {
@@ -366,7 +366,8 @@ export function Review(props: { compact?: boolean } = {}) {
             >
               <header>
                 <strong>{file.file}</strong>
-                <span class="muted">{file.status}</span>
+                {/* The server's status word (added, deleted, modified, renamed), translated here. */}
+                <span class="muted">{t(file.status)}</span>
                 <div class="grow" />
                 <label>
                   <input
@@ -438,7 +439,7 @@ export function Review(props: { compact?: boolean } = {}) {
                                   }
                                 >
                                   <button
-                                    aria-label={`Comment on ${file.file} line ${row.line ?? row.old ?? 0}`}
+                                    aria-label={t("Comment on {file} line {line}", { file: file.file, line: row.line ?? row.old ?? 0 })}
                                     data-comment-anchor={anchor(
                                       file,
                                       row,
@@ -603,7 +604,7 @@ export function Review(props: { compact?: boolean } = {}) {
               −{files().reduce((n, file) => n + file.deletions, 0)}
             </span>
             <span class="muted">
-              {files().length} {files().length === 1 ? "file" : "files"}
+              {t(files().length === 1 ? "{count} file" : "{count} files", { count: files().length })}
             </span>
           </span>
           <div class="grow" />
@@ -613,11 +614,11 @@ export function Review(props: { compact?: boolean } = {}) {
             value={mode()}
             onChange={(value) => setMode(value)}
             options={[
-              { value: "working", label: "Working tree" },
-              { value: "branch", label: "Current branch" },
+              { value: "working", label: t("Working tree") },
+              { value: "branch", label: t("Current branch") },
               {
                 value: "last",
-                label: "Last turn",
+                label: t("Last turn"),
                 disabled: !app.state.selected,
               },
             ]}
@@ -642,10 +643,10 @@ export function Review(props: { compact?: boolean } = {}) {
             value={context()}
             onChange={(value) => setContext(Number(value))}
             options={[
-              { value: 4, label: "4 lines" },
-              { value: 12, label: "12 lines" },
-              { value: 50, label: "50 lines" },
-              { value: 10000, label: "Full file" },
+              { value: 4, label: t("{count} lines", { count: 4 }) },
+              { value: 12, label: t("{count} lines", { count: 12 }) },
+              { value: 50, label: t("{count} lines", { count: 50 }) },
+              { value: 10000, label: t("Full file") },
             ]}
           />
           <Button
@@ -729,7 +730,7 @@ export function Review(props: { compact?: boolean } = {}) {
                   fallback={
                     <Empty
                       title={t("A clean slate.")}
-                      detail="No changes in this view. Changes made by you or Haarness will appear here."
+                      detail={t("No changes in this view. Changes made by you or Haarness will appear here.")}
                     />
                   }
                 >
@@ -744,7 +745,7 @@ export function Review(props: { compact?: boolean } = {}) {
                   >
                     <Empty
                       title={t("This folder isn’t a Git repository.")}
-                      detail="Review compares your working tree against version control. Initialise a repository to see changes here."
+                      detail={t("Review compares your working tree against version control. Initialise a repository to see changes here.")}
                     >
                       <button onClick={() => void refresh()}>
                         {t("Check again")}
@@ -812,7 +813,7 @@ function InlineComment(props: {
     <form
       class="diff-comment"
       data-side={props.side}
-      aria-label={`Comment on ${props.label}`}
+      aria-label={t("Comment on {target}", { target: props.label })}
       onSubmit={(event) => {
         event.preventDefault();
         void submit();
@@ -848,7 +849,7 @@ function InlineComment(props: {
         />
       </label>
       <footer>
-        <span class="diff-comment-hint">Shift+Enter for a new line</span>
+        <span class="diff-comment-hint">{t("Shift+Enter for a new line")}</span>
         <button type="button" disabled={busy()} onClick={props.onCancel}>
           {t("Cancel")}
         </button>
@@ -890,12 +891,9 @@ function DiffCell(props: {
       onDblClick={() => props.row && props.comment(props.row)}
     >
       <button
-        aria-label={
-          "Comment on " +
-          (props.side === "left" ? "original" : "updated") +
-          " line " +
-          (props.side === "left" ? props.row?.old : props.row?.line)
-        }
+        aria-label={t(props.side === "left" ? "Comment on original line {line}" : "Comment on updated line {line}", {
+          line: (props.side === "left" ? props.row?.old : props.row?.line) ?? "",
+        })}
         data-comment-anchor={props.anchor}
         aria-expanded={props.active}
         disabled={!props.row}

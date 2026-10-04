@@ -31,13 +31,13 @@ export function ExecutionFields(props: {
     <div class="form-grid">
       <Show when={props.setAgent}>
         <label class="field">
-          <span>Agent</span>
+          <span>{t("Agent")}</span>
           <Select
-            aria-label="Agent"
+            aria-label={t("Agent")}
             value={props.agent ?? ""}
             disabled={props.disabled}
             options={[
-              { value: "", label: "Use session agent" },
+              { value: "", label: t("Use session agent") },
               ...agents().map((agent) => ({
                 value: agent.id,
                 label: agent.name || agent.id,
@@ -47,7 +47,7 @@ export function ExecutionFields(props: {
                 ? [
                     {
                       value: props.agent,
-                      label: `${props.agent} (unavailable)`,
+                      label: t("{name} (unavailable)", { name: props.agent }),
                       disabled: true,
                     },
                   ]
@@ -58,22 +58,22 @@ export function ExecutionFields(props: {
         </label>
       </Show>
       <label class="field">
-        <span>Model</span>
+        <span>{t("Model")}</span>
         <ModelPicker
-          aria-label="Model"
+          aria-label={t("Model")}
           value={props.model}
           effort={props.variant}
           onEffortChange={props.setVariant}
           disabled={props.disabled}
           options={[
-            { value: "", label: "Use session model" },
+            { value: "", label: t("Use session model") },
             ...models(),
             ...(props.model &&
             !models().some((model) => model.value === props.model)
               ? [
                   {
                     value: props.model,
-                    label: `${currentName()} (unavailable)`,
+                    label: t("{name} (unavailable)", { name: currentName() }),
                     triggerIcon: () => (
                       <ProviderIcon
                         provider={parseModel(props.model)?.provider}

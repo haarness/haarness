@@ -665,7 +665,7 @@ export function SessionList(props: {
               <button
                 aria-description={
                   [
-                    row().waiting,
+                    row().waiting && t(row().waiting),
                     !props.project && !props.location
                       ? t("Project {name}", { name: place()?.text ?? "" })
                       : "",
@@ -715,7 +715,7 @@ export function SessionList(props: {
                 </span>
                 <Show when={row().waiting}>
                   <span class="session-waiting" aria-hidden="true">
-                    {row().waiting}
+                    {t(row().waiting)}
                   </span>
                 </Show>
               </button>

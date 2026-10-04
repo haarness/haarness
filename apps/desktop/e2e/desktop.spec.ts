@@ -9757,7 +9757,7 @@ test("provider artwork and combined reasoning follow each model's actual capabil
     await expect(slider).toHaveAttribute("aria-valuetext", "Model default");
     await slider.focus();
     await slider.press("End");
-    await expect(slider).toHaveAttribute("aria-valuetext", "Xhigh");
+    await expect(slider).toHaveAttribute("aria-valuetext", "Extra high");
     await page.getByRole("button", { name: "Reset reasoning to model default", exact: true }).click();
     await expect(slider).toHaveAttribute("aria-valuetext", "Model default");
     await slider.focus();

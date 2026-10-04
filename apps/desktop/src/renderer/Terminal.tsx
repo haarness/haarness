@@ -179,8 +179,8 @@ export function TerminalPanel() {
                   onClick={() => setSelected(id)}
                   onDblClick={() =>
                     app.run(async () => {
-                      const value = await ask("Rename terminal", [
-                        { name: "title", label: "Title", value: tab().title },
+                      const value = await ask(t("Rename terminal"), [
+                        { name: "title", label: t("Title"), value: tab().title },
                       ]);
                       if (value) {
                         await app.api("updatePty", id, {
@@ -192,7 +192,7 @@ export function TerminalPanel() {
                   }
                 >
                   {tab().title}
-                  {tab().status === "exited" ? " · exited" : ""}
+                  {tab().status === "exited" ? ` · ${t("exited")}` : ""}
                 </button>
                 <Button
                   icon="close"
@@ -214,7 +214,7 @@ export function TerminalPanel() {
         <Button
           icon="close"
           label={t("Hide terminal")}
-          hint="processes keep running"
+          hint={t("processes keep running")}
           onClick={() => app.set("terminal", false)}
         />
       </div>
