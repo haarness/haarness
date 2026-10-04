@@ -639,7 +639,7 @@ export function App() {
               </span>
             </Show>
             <Show when={state.connection!.remote}>
-              <span class="badge">{t("Remote")}</span>
+              <span class="badge">{app.currentServer().cloud ? t("Cloud session") : t("Remote")}</span>
             </Show>
           </Show>
         </div>

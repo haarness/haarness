@@ -944,17 +944,17 @@
   margin-inline-start: 2px;
   opacity: 0.55;
 }
-/* The chevron's drawing fills only the middle of its box, so the box's empty
-   right side would read as a space before the question mark. Pull it in and
-   centre it on the x-height instead of letting it hang like a subscript. */
+/* The chevron belongs to the project name, a hair apart from it, and must not
+   touch the question mark: centre it on the x-height with a little room on
+   both sides instead of tucking it under the last letter. */
 .conversation-empty .heading-project-picker {
-  padding-inline-end: 0;
+  padding-inline-end: 2px;
 }
 .conversation-empty .picker-caret {
-  width: 16px;
-  height: 16px;
-  vertical-align: 0.08em;
-  margin-inline: 0 -3px;
+  width: 18px;
+  height: 18px;
+  vertical-align: 0.06em;
+  margin-inline: 3px -3px;
 }
 .suggestions {
   display: grid;
