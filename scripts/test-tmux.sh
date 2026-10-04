@@ -155,7 +155,7 @@ if ! echo "$pane" | grep -q "/ commands" || echo "$pane" | grep -q "ctrl+o tasks
   echo "Home screen key legend did not render" >&2
   exit 1
 fi
-if ! echo "$pane" | grep -q "h a a r n e s s" || ! echo "$pane" | grep -q "v0.1.0"; then
+if ! echo "$pane" | grep -q "h a a r n e s s" || ! echo "$pane" | grep -Eq "v[0-9]+\.[0-9]+\.[0-9]+"; then
   echo "$pane" >&2
   echo "Home screen identity line did not render" >&2
   exit 1
@@ -163,7 +163,7 @@ fi
 styled_pane="$(tmux capture-pane -p -e -t "$session":0.0 2>/dev/null || true)"
 # The pristine home intentionally has no raised header/dashboard; it should
 # still paint the configured page background through OpenTUI.
-if ! echo "$styled_pane" | grep -q "48;2;15;14;13m"; then
+if ! echo "$styled_pane" | grep -q "48;2;21;20;19m"; then
   echo "$styled_pane" >&2
   echo "OpenTUI did not render the expected warm background" >&2
   exit 1
@@ -331,7 +331,7 @@ for command in models providers sessions; do
   tmux send-keys -l -t "$session":0.0 "$mouse_move"
   sleep 0.1
   styled_row="$(tmux capture-pane -p -e -t "$session":0.0 2>/dev/null | sed -n "${command_row}p")"
-  if ! echo "$styled_row" | grep -q "48;2;62;184;166m"; then
+  if ! echo "$styled_row" | grep -q "48;2;234;229;221m"; then
     echo "$styled_row" >&2
     echo "Mouse motion did not track /$command after terminal focus recovery" >&2
     exit 1
@@ -386,7 +386,7 @@ mouse_move="$(printf '\033[<35;16;%sM' "$model_row")"
 tmux send-keys -l -t "$session":0.0 "$mouse_move"
 sleep 0.2
 styled_row="$(tmux capture-pane -p -e -t "$session":0.0 2>/dev/null | sed -n "${model_row}p")"
-if ! echo "$styled_row" | grep -q "48;2;62;184;166m"; then
+if ! echo "$styled_row" | grep -q "48;2;234;229;221m"; then
   echo "$styled_row" >&2
   echo "Mouse motion did not highlight the hovered modal row" >&2
   exit 1
@@ -2026,11 +2026,11 @@ tmux send-keys -t "$session":0.0 Enter
 attempt=0
 while [ "$attempt" -lt 60 ]; do
   pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
-  echo "$pane" | grep -Eq "[[:space:]]steering([[:space:]]|$)" && break
+  echo "$pane" | grep -Eiq "[[:space:]]steering([[:space:]]|$)" && break
   attempt=$((attempt + 1))
   sleep 0.1
 done
-if ! echo "$pane" | grep -Eq "[[:space:]]steering([[:space:]]|$)"; then
+if ! echo "$pane" | grep -Eiq "[[:space:]]steering([[:space:]]|$)"; then
   echo "$pane" >&2
   echo "Mid-turn input did not expose its steering delivery status" >&2
   exit 1
@@ -2050,7 +2050,7 @@ if ! echo "$pane" | grep -q "Ready"; then
   echo "Parallel-children turn did not complete" >&2
   exit 1
 fi
-if echo "$pane" | grep -Eq "[[:space:]]steering([[:space:]]|$)"; then
+if echo "$pane" | grep -Eiq "[[:space:]]steering([[:space:]]|$)"; then
   echo "$pane" >&2
   echo "Consumed steering input retained its queued delivery status" >&2
   exit 1
@@ -2315,11 +2315,11 @@ tmux new-session -d -x 100 -y 30 -s "$session" "env HAARNESS_DATA_DIR='$test_roo
 attempt=0
 while [ "$attempt" -lt 100 ]; do
   pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
-  echo "$pane" | grep -q "h a a r n e s s" && echo "$pane" | grep -q "v0.1.0" && break
+  echo "$pane" | grep -q "h a a r n e s s" && echo "$pane" | grep -Eq "v[0-9]+\.[0-9]+\.[0-9]+" && break
   attempt=$((attempt + 1))
   sleep 0.1
 done
-if ! echo "$pane" | grep -q "h a a r n e s s" || ! echo "$pane" | grep -q "v0.1.0"; then
+if ! echo "$pane" | grep -q "h a a r n e s s" || ! echo "$pane" | grep -Eq "v[0-9]+\.[0-9]+\.[0-9]+"; then
   echo "$pane" >&2
   echo "Plain reopening did not render a fresh home session" >&2
   exit 1
