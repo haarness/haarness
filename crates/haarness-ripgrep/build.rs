@@ -2,7 +2,10 @@ use sha2::{Digest, Sha256};
 use std::{env, fs, io::Read, path::PathBuf};
 
 fn main() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vendor/ripgrep");
+    // Read the manifest directory when the script runs, not when it was
+    // compiled: worktrees sharing a target directory reuse this binary.
+    let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo manifest directory"))
+        .join("../../vendor/ripgrep");
     let manifest_path = root.join("manifest.json");
     println!("cargo:rerun-if-changed={}", manifest_path.display());
     let manifest: serde_json::Value =

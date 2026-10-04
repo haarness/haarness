@@ -13,7 +13,9 @@ fn main() {
     let archive = if let Some(path) = env::var_os("HAARNESS_OPENTUI_ARCHIVE") {
         PathBuf::from(path)
     } else {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        // Read the manifest directory when the script runs, not when it was
+        // compiled: worktrees sharing a target directory reuse this binary.
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo provides CARGO_MANIFEST_DIR"))
             .join("../../vendor/opentui/artifacts")
             .join(&asset.file)
     };
