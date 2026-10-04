@@ -837,13 +837,28 @@ function Providers() {
                 </span>
               </div>
               <div class="toolbar">
-                <button
-                  classList={{ primary: !provider.authenticated }}
-                  onClick={() => app.openConnect({ provider: provider.id, onboarding: false })}
+                {/* Haarness Cloud is the Haarness account, not a stored key:
+                    "Disconnect" removed nothing and "Reconnect" opened a
+                    picker that leaves Cloud out, so both go to the account. */}
+                <Show
+                  when={provider.id !== "haarness"}
+                  fallback={
+                    <button
+                      classList={{ primary: !provider.authenticated }}
+                      onClick={() => window.dispatchEvent(new Event("haarness:account"))}
+                    >
+                      {provider.authenticated ? t("Haarness account") : t("Sign in to Haarness")}
+                    </button>
+                  }
                 >
-                  {provider.authenticated ? t("Reconnect") : t("Connect")}
-                </button>
-                <Show when={provider.authenticated}>
+                  <button
+                    classList={{ primary: !provider.authenticated }}
+                    onClick={() => app.openConnect({ provider: provider.id, onboarding: false })}
+                  >
+                    {provider.authenticated ? t("Reconnect") : t("Connect")}
+                  </button>
+                </Show>
+                <Show when={provider.authenticated && provider.id !== "haarness"}>
                   <button
                     onClick={() =>
                       app.run(() => disconnectProvider(app, provider))

@@ -57,7 +57,7 @@ import { promptTitle, readingMark } from "./outline-layout";
 import { MenuButton, type MenuAction } from "./MenuButton";
 import { isWorktree, locationName } from "../projects";
 import { createWorktree } from "./worktrees";
-import { ToolActivity } from "./ToolActivity";
+import { ChangePreview, ToolActivity } from "./ToolActivity";
 import { Mark } from "./brand";
 import { matchesShortcut } from "./search";
 import {
@@ -66,6 +66,7 @@ import {
   permissionCommand,
   shortPath,
   toolActivity,
+  toolChanges,
   toolName,
   toolResult,
 } from "./transcript";
@@ -2160,10 +2161,15 @@ function Permission(props: {
       }
     });
   };
-  const title = () =>
-    permissionTitles[
-      props.permission.permission || props.permission.operation.split(":")[0]
-    ] ?? "Permission needed";
+  const category = () =>
+    props.permission.permission || props.permission.operation.split(":")[0];
+  const title = () => permissionTitles[category()] ?? "Permission needed";
+  // A file change is approved for what it changes, so show the change itself
+  // rather than only the path it touches.
+  const changes = () =>
+    ["edit", "write"].includes(category())
+      ? toolChanges(category(), props.permission.detail)
+      : [];
   const alwaysChoices = (): MenuAction[] => [
     {
       label: t("Always for this folder"),
@@ -2210,6 +2216,15 @@ function Permission(props: {
         <pre class="prompt-subject approval-command">
           {permissionCommand(props.permission.detail)}
         </pre>
+      </Show>
+      <Show when={changes().length}>
+        <div class="approval-changes">
+          <For each={changes()}>
+            {(change) => (
+              <ChangePreview change={change} showPath={changes().length > 1} />
+            )}
+          </For>
+        </div>
       </Show>
       <Show when={app.permissionError(props.permission.permissionId)}>
         <p class="error" role="alert" data-testid="permission-reply-error">
