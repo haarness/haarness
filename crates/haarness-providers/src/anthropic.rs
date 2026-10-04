@@ -577,11 +577,16 @@ impl ModelProvider for AnthropicProvider {
                         }
                     }},
                     "message_delta" => if let Some(usage) = event.get("usage") {
+                        // Anthropic's input_tokens excludes cache reads and
+                        // writes; the event's input_tokens is the whole prompt.
+                        let input = usage["input_tokens"].as_u64().unwrap_or(input_tokens);
+                        let read = usage["cache_read_input_tokens"].as_u64().unwrap_or(cache_read);
+                        let write = usage["cache_creation_input_tokens"].as_u64().unwrap_or(cache_write);
                         yield ProviderEvent::Usage {
-                            input_tokens: usage["input_tokens"].as_u64().unwrap_or(input_tokens),
+                            input_tokens: input.saturating_add(read).saturating_add(write),
                             output_tokens: usage["output_tokens"].as_u64().unwrap_or(0),
-                            cache_read_tokens: cache_read,
-                            cache_write_tokens: cache_write,
+                            cache_read_tokens: read,
+                            cache_write_tokens: write,
                         };
                     },
                     "message_stop" => {
@@ -1031,8 +1036,9 @@ mod tests {
         assert!(
             events.iter().any(|event| matches!(
                 event,
+                // Anthropic's 100 uncached + 80 read + 20 written: the whole prompt.
                 ProviderEvent::Usage {
-                    input_tokens: 100,
+                    input_tokens: 200,
                     output_tokens: 7,
                     cache_read_tokens: 80,
                     cache_write_tokens: 20,

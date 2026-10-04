@@ -373,11 +373,17 @@ fn bedrock_events(response: &Value) -> Vec<ProviderEvent> {
         }
     }
     if let Some(usage) = response.get("usage") {
+        // Bedrock's inputTokens excludes cache reads and writes; the event's
+        // input_tokens is the whole prompt.
+        let read = number(usage, "cacheReadInputTokens");
+        let write = number(usage, "cacheWriteInputTokens");
         events.push(ProviderEvent::Usage {
-            input_tokens: number(usage, "inputTokens"),
+            input_tokens: number(usage, "inputTokens")
+                .saturating_add(read)
+                .saturating_add(write),
             output_tokens: number(usage, "outputTokens"),
-            cache_read_tokens: number(usage, "cacheReadInputTokens"),
-            cache_write_tokens: number(usage, "cacheWriteInputTokens"),
+            cache_read_tokens: read,
+            cache_write_tokens: write,
         });
     }
     events.push(ProviderEvent::Finished {
@@ -601,8 +607,9 @@ mod tests {
         );
         assert!(matches!(
             &events[2],
+            // inputTokens 7 excludes the 2 cache reads: the whole prompt is 9.
             ProviderEvent::Usage {
-                input_tokens: 7,
+                input_tokens: 9,
                 output_tokens: 3,
                 cache_read_tokens: 2,
                 ..

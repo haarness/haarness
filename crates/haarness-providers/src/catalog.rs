@@ -31,11 +31,23 @@ const fn entry(
 }
 
 /// Longest-prefix table per provider. Order within a provider does not matter;
-/// the longest matching prefix wins.
+/// the longest matching prefix wins, so a variant priced differently from its
+/// family (`-pro`, `-mini`, `-nano`, `-image`) needs its own entry.
+///
+/// Prices are the providers' list prices in USD per million tokens, checked
+/// against OpenRouter's live catalogue on 2026-10-05 (it passes list prices
+/// through). Gemini's context-cache storage is billed per hour, not per written
+/// token, so its cache-write price stays 0.
 const CATALOG: &[(&str, &[CatalogEntry])] = &[
     (
         "openai",
         &[
+            entry(
+                "gpt-6.1-sol",
+                1_050_000,
+                128_000,
+                Some((2.0, 10.0, 0.1, 2.5)),
+            ),
             entry("gpt-6-sol", 1_050_000, 128_000, Some((2.0, 10.0, 0.2, 2.5))),
             entry(
                 "gpt-6-luna",
@@ -53,43 +65,138 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
                 "gpt-5.6-terra",
                 1_050_000,
                 128_000,
-                Some((2.0, 12.0, 0.2, 0.0)),
+                Some((2.0, 12.0, 0.2, 2.5)),
             ),
             entry(
                 "gpt-5.6-luna",
                 1_050_000,
                 128_000,
-                Some((0.2, 1.2, 0.02, 0.0)),
+                Some((0.2, 1.2, 0.02, 0.25)),
+            ),
+            entry(
+                "gpt-5.6-sol-pro",
+                1_050_000,
+                128_000,
+                Some((4.0, 20.0, 0.4, 5.0)),
             ),
             entry(
                 "gpt-5.6-sol",
                 1_050_000,
                 128_000,
-                Some((4.0, 20.0, 0.4, 0.0)),
+                Some((2.0, 10.0, 0.2, 2.5)),
             ),
             // `gpt-5.6` is the documented alias for GPT-5.6 Sol.
-            entry("gpt-5.6", 1_050_000, 128_000, Some((4.0, 20.0, 0.4, 0.0))),
-            // Previous-generation model still served by the API and ChatGPT;
-            // its public list price is not published in the sources above.
-            entry("gpt-5.5", 400_000, 128_000, None),
+            entry("gpt-5.6", 1_050_000, 128_000, Some((2.0, 10.0, 0.2, 2.5))),
+            entry(
+                "gpt-5.5-pro",
+                1_050_000,
+                128_000,
+                Some((30.0, 180.0, 0.0, 0.0)),
+            ),
+            entry("gpt-5.5", 1_050_000, 128_000, Some((5.0, 30.0, 0.5, 0.0))),
+            entry(
+                "gpt-chat-latest",
+                400_000,
+                128_000,
+                Some((5.0, 30.0, 0.5, 0.0)),
+            ),
+            entry(
+                "gpt-5.4-pro",
+                1_050_000,
+                128_000,
+                Some((30.0, 180.0, 0.0, 0.0)),
+            ),
+            entry(
+                "gpt-5.4-image",
+                272_000,
+                128_000,
+                Some((8.0, 15.0, 2.0, 0.0)),
+            ),
             entry(
                 "gpt-5.4-mini",
                 400_000,
                 128_000,
-                Some((0.25, 2.0, 0.025, 0.0)),
+                Some((0.75, 4.5, 0.075, 0.0)),
             ),
             entry(
                 "gpt-5.4-nano",
                 400_000,
                 128_000,
+                Some((0.2, 1.25, 0.02, 0.0)),
+            ),
+            entry("gpt-5.4", 1_050_000, 128_000, Some((2.5, 15.0, 0.25, 0.0))),
+            entry(
+                "gpt-5.3-codex",
+                400_000,
+                128_000,
+                Some((1.75, 14.0, 0.175, 0.0)),
+            ),
+            entry(
+                "gpt-5.2-pro",
+                400_000,
+                128_000,
+                Some((21.0, 168.0, 0.0, 0.0)),
+            ),
+            entry("gpt-5.2", 400_000, 128_000, Some((1.75, 14.0, 0.175, 0.0))),
+            entry(
+                "gpt-5.1-codex-mini",
+                400_000,
+                128_000,
+                Some((0.25, 2.0, 0.025, 0.0)),
+            ),
+            entry("gpt-5-pro", 400_000, 128_000, Some((15.0, 120.0, 0.0, 0.0))),
+            entry(
+                "gpt-5-image-mini",
+                400_000,
+                128_000,
+                Some((2.5, 2.0, 0.25, 0.0)),
+            ),
+            entry(
+                "gpt-5-image",
+                400_000,
+                128_000,
+                Some((10.0, 10.0, 1.25, 0.0)),
+            ),
+            entry(
+                "gpt-5-mini",
+                400_000,
+                128_000,
+                Some((0.25, 2.0, 0.025, 0.0)),
+            ),
+            entry(
+                "gpt-5-nano",
+                400_000,
+                128_000,
                 Some((0.05, 0.4, 0.005, 0.0)),
             ),
-            entry("gpt-5.4", 400_000, 128_000, Some((1.25, 10.0, 0.125, 0.0))),
+            // GPT-5 and GPT-5.1 (and their Codex builds) share one price.
             entry("gpt-5", 400_000, 128_000, Some((1.25, 10.0, 0.125, 0.0))),
+            entry(
+                "gpt-4.1-mini",
+                1_047_576,
+                32_768,
+                Some((0.4, 1.6, 0.1, 0.0)),
+            ),
+            entry(
+                "gpt-4.1-nano",
+                1_047_576,
+                32_768,
+                Some((0.1, 0.4, 0.025, 0.0)),
+            ),
             entry("gpt-4.1", 1_047_576, 32_768, Some((2.0, 8.0, 0.5, 0.0))),
+            entry(
+                "gpt-4o-mini",
+                128_000,
+                16_384,
+                Some((0.15, 0.6, 0.075, 0.0)),
+            ),
             entry("gpt-4o", 128_000, 16_384, Some((2.5, 10.0, 1.25, 0.0))),
+            entry("o3-pro", 200_000, 100_000, Some((20.0, 80.0, 0.0, 0.0))),
+            entry("o3-mini", 200_000, 100_000, Some((1.1, 4.4, 0.55, 0.0))),
             entry("o3", 200_000, 100_000, Some((2.0, 8.0, 0.5, 0.0))),
             entry("o4-mini", 200_000, 100_000, Some((1.1, 4.4, 0.275, 0.0))),
+            entry("o1-pro", 200_000, 100_000, Some((150.0, 600.0, 0.0, 0.0))),
+            entry("o1", 200_000, 100_000, Some((15.0, 60.0, 7.5, 0.0))),
             entry("codex", 400_000, 128_000, Some((1.25, 10.0, 0.125, 0.0))),
         ],
     ),
@@ -97,8 +204,14 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
         "anthropic",
         &[
             // Limits verified through Anthropic's live Models API on 2026-09-23.
-            // Do not inherit Opus 5's price for a newly discovered release.
-            entry("claude-opus-5-5", 1_000_000, 128_000, None),
+            // A newly discovered release never inherits its family's price: give
+            // it an entry once its list price is published.
+            entry(
+                "claude-opus-5-5",
+                1_000_000,
+                128_000,
+                Some((4.0, 20.0, 0.2, 5.0)),
+            ),
             entry(
                 "claude-fable-5-1",
                 1_000_000,
@@ -128,6 +241,19 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
                 1_000_000,
                 64_000,
                 Some((5.0, 25.0, 0.5, 6.25)),
+            ),
+            // Opus 4 and 4.1 kept the old Opus price; 4.5 onwards cost a third.
+            entry(
+                "claude-opus-4-1",
+                200_000,
+                32_000,
+                Some((15.0, 75.0, 1.5, 18.75)),
+            ),
+            entry(
+                "claude-opus-4-2025",
+                200_000,
+                32_000,
+                Some((15.0, 75.0, 1.5, 18.75)),
             ),
             entry(
                 "claude-opus-4",
@@ -159,6 +285,7 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
                 128_000,
                 Some((5.0, 25.0, 0.5, 6.25)),
             ),
+            // Sonnet 5 and 5.5 share one price.
             entry(
                 "claude-sonnet-5",
                 1_000_000,
@@ -171,41 +298,101 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
                 128_000,
                 Some((10.0, 50.0, 1.0, 12.5)),
             ),
+            entry(
+                "claude-3-5-haiku",
+                200_000,
+                8_192,
+                Some((0.8, 4.0, 0.08, 1.0)),
+            ),
             entry("claude-3-5", 200_000, 8_192, Some((3.0, 15.0, 0.3, 3.75))),
         ],
     ),
     (
         "gemini",
         &[
-            entry("gemini-3.8-flash", 1_048_576, 65_536, None),
-            entry("gemini-3.7-flash", 1_048_576, 65_536, None),
-            entry("gemini-3.6-flash", 1_048_576, 65_536, None),
-            entry("gemini-3.5-flash-lite", 1_048_576, 65_536, None),
-            entry("gemini-3.5-flash", 1_048_576, 65_536, None),
-            entry("gemini-3.1-flash-lite", 1_048_576, 65_536, None),
+            entry(
+                "gemini-3.8-flash",
+                1_048_576,
+                65_536,
+                Some((0.75, 3.75, 0.075, 0.0)),
+            ),
+            entry(
+                "gemini-3.7-flash",
+                1_048_576,
+                65_536,
+                Some((0.75, 3.75, 0.075, 0.0)),
+            ),
+            entry(
+                "gemini-3.6-flash",
+                1_048_576,
+                65_536,
+                Some((0.75, 3.75, 0.075, 0.0)),
+            ),
+            entry(
+                "gemini-3.5-flash-lite",
+                1_048_576,
+                65_536,
+                Some((0.3, 2.5, 0.03, 0.0)),
+            ),
+            entry(
+                "gemini-3.5-flash",
+                1_048_576,
+                65_536,
+                Some((1.5, 9.0, 0.15, 0.0)),
+            ),
+            entry(
+                "gemini-3.1-flash-lite-image",
+                65_536,
+                58_982,
+                Some((0.25, 1.5, 0.0, 0.0)),
+            ),
+            entry(
+                "gemini-3.1-flash-lite",
+                1_048_576,
+                65_536,
+                Some((0.25, 1.5, 0.025, 0.0)),
+            ),
+            entry(
+                "gemini-3.1-flash-image",
+                131_072,
+                32_768,
+                Some((0.5, 3.0, 0.0, 0.0)),
+            ),
             entry(
                 "gemini-3.1-pro",
                 1_048_576,
                 65_536,
-                Some((1.25, 10.0, 0.31, 0.0)),
+                Some((2.0, 12.0, 0.2, 0.0)),
+            ),
+            entry(
+                "gemini-3-pro-image",
+                131_072,
+                32_768,
+                Some((2.0, 12.0, 0.2, 0.0)),
             ),
             entry(
                 "gemini-3-flash",
                 1_048_576,
                 65_536,
-                Some((0.1, 0.4, 0.025, 0.0)),
+                Some((0.5, 3.0, 0.05, 0.0)),
             ),
             entry(
                 "gemini-2.5-pro",
                 1_048_576,
                 65_536,
-                Some((1.25, 10.0, 0.31, 0.0)),
+                Some((1.25, 10.0, 0.125, 0.0)),
+            ),
+            entry(
+                "gemini-2.5-flash-lite",
+                1_048_576,
+                65_536,
+                Some((0.1, 0.4, 0.01, 0.0)),
             ),
             entry(
                 "gemini-2.5-flash",
                 1_048_576,
                 65_536,
-                Some((0.3, 2.5, 0.075, 0.0)),
+                Some((0.3, 2.5, 0.03, 0.0)),
             ),
             entry("gemini", 1_048_576, 65_536, None),
         ],
@@ -218,6 +405,13 @@ pub fn lookup(provider: &str, model_id: &str) -> Option<&'static CatalogEntry> {
         .iter()
         .find(|(candidate, _)| *candidate == provider)?
         .1;
+    // Routers and aggregators spell Claude versions with dots
+    // (`claude-opus-5.5`); Anthropic's own ids use dashes (`claude-opus-5-5`).
+    let model_id = if provider == "anthropic" {
+        model_id.replace('.', "-")
+    } else {
+        model_id.to_owned()
+    };
     entries
         .iter()
         .filter(|entry| model_id.starts_with(entry.prefix))
@@ -263,9 +457,9 @@ mod tests {
     #[test]
     fn longest_prefix_wins_and_dated_snapshots_match() {
         let plain = lookup("openai", "gpt-5.4").unwrap();
-        assert!((plain.pricing.unwrap().0 - 1.25).abs() < f64::EPSILON);
+        assert!((plain.pricing.unwrap().0 - 2.5).abs() < f64::EPSILON);
         let mini = lookup("openai", "gpt-5.4-mini-2026-01-01").unwrap();
-        assert!((mini.pricing.unwrap().0 - 0.25).abs() < f64::EPSILON);
+        assert!((mini.pricing.unwrap().0 - 0.75).abs() < f64::EPSILON);
         assert_eq!(
             lookup("anthropic", "claude-sonnet-4-6-20260201")
                 .unwrap()
@@ -273,7 +467,75 @@ mod tests {
             1_000_000
         );
         assert!(lookup("openai", "unknown-model").is_none());
+        // A `-pro` build costs far more than its family: it never borrows the family's price.
+        let pro = lookup("openai", "gpt-5.5-pro").unwrap().pricing.unwrap();
+        assert!((pro.0 - 30.0).abs() < f64::EPSILON && (pro.1 - 180.0).abs() < f64::EPSILON);
+        // Opus 4.1 kept the old Opus price; the bare `claude-opus-4` prefix is Opus 4.5's.
+        assert!(
+            (lookup("anthropic", "claude-opus-4-1-20250805")
+                .unwrap()
+                .pricing
+                .unwrap()
+                .0
+                - 15.0)
+                .abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (lookup("anthropic", "claude-opus-4-5")
+                .unwrap()
+                .pricing
+                .unwrap()
+                .0
+                - 5.0)
+                .abs()
+                < f64::EPSILON
+        );
         assert!(lookup("unknown-provider", "gpt-5.4").is_none());
+    }
+
+    #[test]
+    fn current_flagships_are_priced() {
+        for (provider, model, input, output) in [
+            ("anthropic", "claude-opus-5-5", 4.0, 20.0),
+            ("anthropic", "claude-sonnet-5-5", 2.0, 10.0),
+            ("anthropic", "claude-fable-5-1", 10.0, 50.0),
+            ("openai", "gpt-6.1-sol", 2.0, 10.0),
+            ("openai", "gpt-6-sol", 2.0, 10.0),
+            ("openai", "gpt-5.5", 5.0, 30.0),
+            ("gemini", "gemini-3.8-flash", 0.75, 3.75),
+            ("gemini", "gemini-3.1-pro-preview", 2.0, 12.0),
+        ] {
+            let pricing = lookup(provider, model)
+                .and_then(|entry| entry.pricing)
+                .unwrap_or_else(|| panic!("{provider}/{model} has no price"));
+            assert!(
+                (pricing.0 - input).abs() < f64::EPSILON
+                    && (pricing.1 - output).abs() < f64::EPSILON,
+                "{provider}/{model}: {pricing:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn router_spellings_of_claude_versions_find_the_native_entry() {
+        // Cloud sessions name models the OpenRouter way: dots, not dashes.
+        let dotted = lookup("anthropic", "claude-opus-5.5").unwrap();
+        assert_eq!(dotted.prefix, "claude-opus-5-5");
+        let info = haarness_protocol::ModelInfo {
+            id: "anthropic/claude-opus-5.5".into(),
+            display_name: "Claude Opus 5.5".into(),
+            reasoning: true,
+            reasoning_efforts: Vec::new(),
+            images: true,
+            video: false,
+            tools: true,
+            context_window: None,
+            max_output_tokens: None,
+            pricing: None,
+        };
+        let pricing = annotate("router", info).pricing.unwrap();
+        assert!((pricing.input - 4.0).abs() < f64::EPSILON, "{pricing:?}");
     }
 
     #[test]

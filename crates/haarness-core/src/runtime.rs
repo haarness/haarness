@@ -8823,9 +8823,12 @@ fn cost_usd(
     #[allow(clippy::cast_precision_loss)] // billing display, not accounting
     pricing.map(|pricing| {
         let per = 1_000_000.0;
-        // Anthropic reports cache reads/writes separately from input_tokens;
-        // charge each bucket at its own rate.
-        input_tokens as f64 / per * pricing.input
+        // input_tokens counts the whole prompt; the cached parts are charged
+        // at their own rates instead of the input rate, never both.
+        let uncached = input_tokens
+            .saturating_sub(cache_read_tokens)
+            .saturating_sub(cache_write_tokens);
+        uncached as f64 / per * pricing.input
             + output_tokens as f64 / per * pricing.output
             + cache_read_tokens as f64 / per * pricing.cache_read
             + cache_write_tokens as f64 / per * pricing.cache_write
@@ -10520,8 +10523,12 @@ mod tests {
             cache_read: 0.3,
             cache_write: 3.75,
         };
-        let cost = super::cost_usd(Some(pricing), 1_000_000, 100_000, 2_000_000, 0).unwrap();
+        // 3M prompt tokens of which 2M were cache reads: 1M at the input rate.
+        let cost = super::cost_usd(Some(pricing), 3_000_000, 100_000, 2_000_000, 0).unwrap();
         assert!((cost - (3.0 + 1.5 + 0.6)).abs() < 1e-9, "{cost}");
+        // Cache writes are charged at the write rate, not also as input.
+        let cost = super::cost_usd(Some(pricing), 1_000_000, 0, 0, 1_000_000).unwrap();
+        assert!((cost - 3.75).abs() < 1e-9, "{cost}");
         assert!(super::cost_usd(None, 1, 1, 0, 0).is_none());
     }
 
