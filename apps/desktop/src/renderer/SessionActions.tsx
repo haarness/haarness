@@ -48,8 +48,7 @@ export function SessionActions(props: {
         icon={props.thread.archived ? "restore" : "archive"}
         size="sm"
         label={
-          (props.thread.archived ? "Restore session " : "Archive session ") +
-          props.thread.title
+          t(props.thread.archived ? "Restore session {title}" : "Archive session {title}", { title: props.thread.title })
         }
         onClick={() =>
           void action(props.thread.archived ? "Unarchive" : "Archive")
@@ -97,7 +96,7 @@ export async function renameSession(
   app: ReturnType<typeof useApp>,
   thread: Thread,
 ) {
-  const input = await ask("Rename session", [
+  const input = await ask(t("Rename session"), [
     { name: "title", label: t("Title"), value: thread.title, required: true },
   ]);
   if (!input) return;

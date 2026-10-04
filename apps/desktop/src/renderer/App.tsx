@@ -298,7 +298,7 @@ export function App() {
         (kind): SearchEntry => ({
           key: kind + "-new",
           group: "Commands",
-          name: kind === "file" ? "New file" : "New folder",
+          name: kind === "file" ? t("New file") : t("New folder"),
           icon: kind === "file" ? "file-new" : "folder-new",
           disabled: !connected,
           action: () => {
@@ -411,7 +411,7 @@ export function App() {
           if (archive) {
             await app.api("importSessionArchive", { archive });
             await app.refresh();
-            app.notify("Session archive imported");
+            app.notify(t("Session archive imported"));
           }
         },
       },
@@ -426,7 +426,7 @@ export function App() {
         ([id, name, shortcut]): SearchEntry => ({
           key: "window:" + id,
           group: "Window",
-          name,
+          name: t(name),
           icon: "panel",
           hint: shortcutLabel(shortcut, state.platform),
           action: () => window.haarness.windowAction(id),
@@ -470,7 +470,7 @@ export function App() {
         {
           key: "archive",
           group: "Conversation actions",
-          name: current.archived ? "Restore session" : "Archive session",
+          name: current.archived ? t("Restore session") : t("Archive session"),
           icon: current.archived ? "restore" : "archive",
           detail: current.title,
           action: async () => {
@@ -503,8 +503,8 @@ export function App() {
           key: "worktree-view",
           group: "Worktree actions",
           name: state.worktreeViews[project.id]
-            ? "Disable worktree view"
-            : "Enable worktree view",
+            ? t("Disable worktree view")
+            : t("Enable worktree view"),
           icon: "branch",
           detail: project.label,
           action: () =>
@@ -883,7 +883,7 @@ export function App() {
                               app.run(() => renameSession(app, selected()!))
                             }
                           >
-                            {selected()!.title || "Untitled session"}
+                            {selected()!.title || t("Untitled session")}
                           </span>
                         </Show>
                       </div>
@@ -915,7 +915,7 @@ export function App() {
                               </Show>
                               {state.threads.find(
                                 (thread) => thread.id === id,
-                              )?.title ?? "Session"}
+                              )?.title ?? t("Session")}
                             </button>
                             <Button
                               icon="close"
@@ -947,7 +947,7 @@ export function App() {
                   <ChatLoading
                     label={
                       state.openingChat || state.loadingChat
-                        ? "Loading conversation…"
+                        ? t("Loading conversation…")
                         : state.openingProject ? t("Opening project…") : t("Loading…")
                     }
                   />
@@ -1004,7 +1004,7 @@ export function App() {
                         onClick={() => openDock(tab)}
                       >
                         <Icon name={dockIcons[tab]} size="sm" />
-                        {dockNames[tab]}
+                        {t(dockNames[tab])}
                       </button>
                       <Button
                         icon="close"
@@ -1025,8 +1025,8 @@ export function App() {
                   icon={dockExpanded() ? "shrink" : "expand"}
                   label={
                     dockExpanded()
-                      ? "Restore side panel"
-                      : "Expand side panel"
+                      ? t("Restore side panel")
+                      : t("Expand side panel")
                   }
                   onClick={() => setDockExpanded((value) => !value)}
                 />

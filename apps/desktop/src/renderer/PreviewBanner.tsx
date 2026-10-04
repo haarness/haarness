@@ -1,3 +1,4 @@
+import { t } from "./i18n";
 import {
   Show,
   createEffect,
@@ -36,7 +37,7 @@ export function PreviewBanner(props: { metadata: unknown }) {
         setCurrent(result);
     } catch {
       if (sequence === generation)
-        setError("The current file is unavailable. Try opening it again.");
+        setError(t("The current file is unavailable. Try opening it again."));
     }
   }
   async function expand(next: "preview" | "code" | "compare") {
@@ -74,7 +75,7 @@ export function PreviewBanner(props: { metadata: unknown }) {
     } catch {
       if (sequence === loading)
         setError(
-          "This preview could not be loaded. Open the current file to continue.",
+          t("This preview could not be loaded. Open the current file to continue."),
         );
     }
   }
@@ -106,12 +107,12 @@ export function PreviewBanner(props: { metadata: unknown }) {
   });
   const state = () =>
     !current()
-      ? "Checking version…"
+      ? t("Checking version…")
       : current()?.revision === null
-        ? "Deleted"
+        ? t("Deleted")
         : current()?.revision === info()?.version
-          ? "Current"
-          : "Earlier version";
+          ? t("Current")
+          : t("Earlier version");
   function open() {
     void refresh();
     const value = info(),
@@ -134,8 +135,8 @@ export function PreviewBanner(props: { metadata: unknown }) {
     if (!value || !connection || busy()) return;
     if (
       !(await confirm(
-        "Restore preview version?",
-        "The current file is backed up before this version replaces it. Unsaved editor changes are kept.",
+        t("Restore preview version?"),
+        t("The current file is backed up before this version replaces it. Unsaved editor changes are kept."),
       ))
     )
       return;
@@ -199,26 +200,26 @@ export function PreviewBanner(props: { metadata: unknown }) {
             <span class="preview-status">{state()}</span>
           </div>
           <div class="preview-banner-actions">
-            <button onClick={open}>Open preview</button>
+            <button onClick={open}>{t("Open preview")}</button>
             <button
               aria-pressed={mode() === "preview"}
               onClick={() => void expand("preview")}
             >
-              Preview
+              {t("Preview")}
             </button>
             <button
               aria-pressed={mode() === "code"}
               onClick={() => void expand("code")}
             >
-              Code
+              {t("Code")}
             </button>
             <Show when={current() && current()?.revision !== value().version}>
-              <button onClick={() => void expand("compare")}>Compare</button>
+              <button onClick={() => void expand("compare")}>{t("Compare")}</button>
               <button
                 disabled={busy()}
                 onClick={() => app.run(() => restore(value().version))}
               >
-                Restore
+                {t("Restore")}
               </button>
             </Show>
             <Show when={backup()}>
@@ -227,7 +228,7 @@ export function PreviewBanner(props: { metadata: unknown }) {
                   disabled={busy()}
                   onClick={() => app.run(() => restore(hash()))}
                 >
-                  Undo restore
+                  {t("Undo restore")}
                 </button>
               )}
             </Show>
@@ -248,7 +249,7 @@ export function PreviewBanner(props: { metadata: unknown }) {
                     });
                 }}
               >
-                Open current
+                {t("Open current")}
               </button>
             </p>
           </Show>
@@ -264,7 +265,7 @@ export function PreviewBanner(props: { metadata: unknown }) {
                         <pre class="preview-code">
                           {file().encoding === "utf8"
                             ? file().content
-                            : "Binary image"}
+                            : t("Binary image")}
                         </pre>
                       }
                     >

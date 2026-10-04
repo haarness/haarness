@@ -3,6 +3,7 @@ import { copyFile, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { data, persist } from "./store";
+import { translate } from "../localization";
 import type { BrowserData, BrowserDownload } from "../browser-settings";
 const key = (connection: string) => "browser-data:" + connection;
 export function browserData(connection: string): BrowserData {
@@ -76,7 +77,7 @@ export async function saveBrowserDownload(
   if (!file || file.state !== "completed")
     throw new Error("This download is no longer available");
   const selected = await dialog.showSaveDialog(win, {
-    title: "Save browser download",
+    title: translate(data().preferences.language, "Save browser download"),
     defaultPath: join(
       app.getPath("downloads"),
       file.name.replace(/[\\/]/g, "_"),

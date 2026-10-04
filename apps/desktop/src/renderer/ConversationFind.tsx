@@ -65,9 +65,9 @@ export function ConversationFind(props: {
         <span role="status">
           {query().trim()
             ? matches().length
-              ? `${Math.min(index() + 1, matches().length)} of ${matches().length} messages`
-              : "No matches"
-            : "Search messages and tool output"}
+              ? t("{index} of {count} messages", { index: Math.min(index() + 1, matches().length), count: matches().length })
+              : t("No matches")
+            : t("Search messages and tool output")}
         </span>
         <Button
           icon="up"

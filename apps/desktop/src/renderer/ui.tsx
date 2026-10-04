@@ -53,6 +53,11 @@ interface Form {
   resolve: (value: Record<string, string> | null) => void;
 }
 const [form, setForm] = createSignal<Form | null>(null);
+/**
+ * Open the shared form dialog. Pass English catalog keys (or text already
+ * translated with interpolated values): the dialog translates its title,
+ * description, field labels, placeholders and submit label when it renders.
+ */
 export function ask(
   title: string,
   fields: Field[],
@@ -132,7 +137,7 @@ export function Forms() {
           <dialog
             ref={dialog}
             class="dialog"
-            aria-label={current.title}
+            aria-label={t(current.title)}
             onCancel={(event) => { event.preventDefault(); finish(null); }}
             {...dismissOnBackdrop(() => finish(null))}
           >
@@ -155,7 +160,7 @@ export function Forms() {
               }}
             >
               <header>
-                <h2>{current.title}</h2>
+                <h2>{t(current.title)}</h2>
                 <Button
                   icon="close"
                   label={t("Close dialog")}
@@ -163,7 +168,7 @@ export function Forms() {
                 />
               </header>
               <Show when={current.description}>
-                <p class="muted">{current.description}</p>
+                {(description) => <p class="muted">{t(description())}</p>}
               </Show>
               <fieldset disabled={busy()}>
               <For each={current.fields}>
@@ -172,7 +177,7 @@ export function Forms() {
                     (typeof field.options === "function" ? field.options() : field.options) ?? [];
                   return (
                   <label class="field">
-                    <span>{field.label}</span>
+                    <span>{t(field.label)}</span>
                     <Show
                       when={field.type === "textarea"}
                       fallback={
@@ -183,7 +188,7 @@ export function Forms() {
                               name={field.name}
                               type={field.type ?? "text"}
                               value={field.value ?? ""}
-                              placeholder={field.placeholder}
+                              placeholder={field.placeholder && t(field.placeholder)}
                               required={field.required}
                               readOnly={field.readonly}
                             />
@@ -191,11 +196,13 @@ export function Forms() {
                         >
                           <Select
                             name={field.name}
-                            aria-label={field.label}
+                            aria-label={t(field.label)}
                             defaultValue={field.value ?? choices()[0]}
                             options={choices().map((value) => ({
+                              // Fixed choices are English keys the caller
+                              // compares against; only their label translates.
                               value,
-                              label: value,
+                              label: t(value),
                             }))}
                           />
                         </Show>
@@ -205,7 +212,7 @@ export function Forms() {
                         name={field.name}
                         rows={5}
                         value={field.value ?? ""}
-                        placeholder={field.placeholder}
+                        placeholder={field.placeholder && t(field.placeholder)}
                         required={field.required}
                         readOnly={field.readonly}
                       />
@@ -221,7 +228,7 @@ export function Forms() {
                   {t("Cancel")}
                 </button>
                 <button type="submit" class="primary" disabled={busy()}>
-                  {current.submit}
+                  {t(current.submit)}
                 </button>
               </footer>
             </form>
@@ -237,8 +244,9 @@ export const Empty = (props: {
   children?: JSX.Element;
 }) => (
   <div class="empty">
-    <h2>{props.title}</h2>
-    <p>{props.detail}</p>
+    {/* Like the form dialog, an empty state takes English keys and translates them. */}
+    <h2>{t(props.title)}</h2>
+    <p>{props.detail && t(props.detail)}</p>
     {props.children}
   </div>
 );

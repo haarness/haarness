@@ -157,8 +157,8 @@ export function ToolActivity(props: {
                         fallback={
                           <p class="tool-empty">
                             {props.settled
-                              ? "No result was recorded."
-                              : "Waiting for output…"}
+                              ? t("No result was recorded.")
+                              : t("Waiting for output…")}
                           </p>
                         }
                       >
@@ -252,7 +252,7 @@ export function ChangePreview(props: { change: Change; showPath?: boolean }) {
       </div>
       <Show when={hidden() > 0}>
         <p class="change-more">
-          {hidden()} more lines · open Review to see all
+          {t("{count} more lines · open Review to see all", { count: hidden() })}
         </p>
       </Show>
     </div>

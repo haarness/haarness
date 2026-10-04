@@ -423,7 +423,7 @@ export function ConnectProvider(props: {
                     >
                       <Icon name={method.kind === "oauth" ? "web" : "key"} size="md" />
                       <span class="connect-row-text">
-                        <strong>{method.label}</strong>
+                        <strong>{t(method.label)}</strong>
                         <small>{method.description}</small>
                       </span>
                     </button>

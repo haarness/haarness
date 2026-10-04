@@ -201,15 +201,14 @@ export function PromptContextControls(props: {
                 <details>
                   <summary title={contextLabel(item)}>
                     {contextLabel(item)}
-                    {item.kind === "file" && item.unsaved ? " · unsaved" : ""}
+                    {item.kind === "file" && item.unsaved ? ` · ${t("unsaved")}` : ""}
                   </summary>
                   <div class="prompt-context-preview">
                     <Show
                       when={item.kind === "file"}
                       fallback={
                         <p>
-                          Requests delegation to this agent, using the task
-                          tool and normal permissions.
+                          {t("Requests delegation to this agent, using the task tool and normal permissions.")}
                         </p>
                       }
                     >
@@ -264,7 +263,7 @@ export function PromptContextControls(props: {
                       <small>{option.description}</small>
                     </Show>
                   </span>
-                  <small>{option.kind === "agent" ? "Agent" : "File"}</small>
+                  <small>{option.kind === "agent" ? t("Agent") : t("File")}</small>
                 </div>
               )}
             </For>

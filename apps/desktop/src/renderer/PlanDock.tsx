@@ -94,7 +94,7 @@ export function PlanDock(props: {
         <div class="plan-header">
           <button
             class="plan-toggle"
-            aria-label={open() ? "Collapse plan" : "Expand plan"}
+            aria-label={open() ? t("Collapse plan") : t("Expand plan")}
             aria-expanded={open()}
             aria-controls={id}
             onClick={() => setExpanded(!open())}
@@ -114,7 +114,7 @@ export function PlanDock(props: {
             class="plan-dismiss"
             icon="close"
             label={t("Dismiss plan")}
-            hint="Hide this checklist until a new plan starts"
+            hint={t("Hide this checklist until a new plan starts")}
             onClick={() => {
               const value = record()!;
               mutate({ ...value, dismissed: true });
@@ -137,12 +137,12 @@ export function PlanDock(props: {
                 </span>
                 <span class="sr-only">
                   {item.status === "in_progress"
-                    ? "In progress"
+                    ? t("In progress")
                     : item.status === "completed"
-                      ? "Completed"
+                      ? t("Completed")
                       : item.status === "cancelled"
-                        ? "Cancelled"
-                        : "Pending"}
+                        ? t("Cancelled")
+                        : t("Pending")}
                   :{" "}
                 </span>
                 <span class="plan-content">{item.content}</span>

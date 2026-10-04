@@ -27,4 +27,5 @@ test("switching models retains supported effort and drops unsupported values to 
   assert.equal(reasoningLabel(""), "Model default");
   assert.equal(reasoningLabel("none"), "None");
   assert.equal(reasoningLabel("budget_large"), "Budget large");
+  assert.equal(reasoningLabel("xhigh"), "Extra high");
 });

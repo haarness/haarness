@@ -60,7 +60,7 @@ export function ModelPicker(props: {
       onChange={(value) => void choose(value)}
       triggerSuffix={
         <Show when={props.onEffortChange && levels().length && valid()}>
-          <span class="model-effort-summary">{reasoningLabel(valid())}</span>
+          <span class="model-effort-summary">{t(reasoningLabel(valid()))}</span>
         </Show>
       }
       footer={(close) => (
@@ -71,8 +71,8 @@ export function ModelPicker(props: {
               <div class="reasoning-current">
                 <strong>
                   {unavailable()
-                    ? `${reasoningLabel(effort())} (unavailable)`
-                    : reasoningLabel(valid())}
+                    ? t("{name} (unavailable)", { name: t(reasoningLabel(effort())) })
+                    : t(reasoningLabel(valid()))}
                 </strong>
                 <small>{selected()?.label ?? props.value}</small>
               </div>
@@ -92,8 +92,8 @@ export function ModelPicker(props: {
               fallback={
                 <p class="reasoning-unavailable">
                   {props.value
-                    ? "This model has no adjustable reasoning levels."
-                    : "Choose a model to adjust reasoning."}
+                    ? t("This model has no adjustable reasoning levels.")
+                    : t("Choose a model to adjust reasoning.")}
                 </p>
               }
             >
@@ -119,7 +119,7 @@ export function ModelPicker(props: {
                   value={index()}
                   disabled={busy() || props.disabled}
                   aria-label={t("Reasoning effort")}
-                  aria-valuetext={reasoningLabel(valid())}
+                  aria-valuetext={t(reasoningLabel(valid()))}
                   onInput={(event) =>
                     props.onEffortChange?.(
                       steps()[Number(event.currentTarget.value)] ?? "",
@@ -130,7 +130,7 @@ export function ModelPicker(props: {
               </div>
               <div class="reasoning-scale" aria-hidden="true">
                 <span>{t("Default")}</span>
-                <span>{reasoningLabel(levels().at(-1) ?? "")}</span>
+                <span>{t(reasoningLabel(levels().at(-1) ?? ""))}</span>
               </div>
             </Show>
           </Show>

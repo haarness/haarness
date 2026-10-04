@@ -112,6 +112,15 @@
   font-variant-numeric: tabular-nums;
   font-family: var(--mono);
 }
+/* "+4 −0" reads left to right in every language; the file count is a sentence in the interface font. */
+.diff-totals > .added,
+.diff-totals > .removed {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+.diff-totals > .muted {
+  font-family: var(--sans);
+}
 
 .file-preview {
   flex: 1;
@@ -268,6 +277,12 @@
 .diff-split {
   font: var(--ui-sm) / 1.65 var(--mono);
   overflow-x: auto;
+  /* Code keeps left-to-right order in Arabic too, like the editor and the terminal. */
+  direction: ltr;
+}
+.diff-file > header strong {
+  direction: ltr;
+  unicode-bidi: isolate;
 }
 .diff-line {
   display: flex;

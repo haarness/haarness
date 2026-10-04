@@ -254,12 +254,12 @@ export function Session() {
       ? [
           {
             name: "memory",
-            description: "Manage project memory",
+            description: t("Manage project memory"),
             template: "",
           },
           { name: "language", description: t("select_language"), template: "" },
           { name: "settings", description: t("Open settings"), template: "" },
-          { name: "input-mode", description: "Toggle project Steer/Queue · /input-mode [steer|queue|toggle|reset]", template: "" },
+          { name: "input-mode", description: `${t("Toggle project Steer/Queue")} · /input-mode [steer|queue|toggle|reset]`, template: "" },
           ...historyCommands,
           ...state.commands.filter(
             (item) =>
@@ -653,7 +653,7 @@ export function Session() {
             {
               key: "dictation",
               group: "Conversation actions",
-              name: voice.active() ? "Stop dictation" : "Start dictation",
+              name: voice.active() ? t("Stop dictation") : t("Start dictation"),
               keywords: "microphone voice speech transcribe",
               icon: "mic" as const,
               action: async () => {
@@ -680,7 +680,7 @@ export function Session() {
         key: "slash:" + command.name,
         group: "Slash commands",
         name: "/" + command.name,
-        detail: command.description || "Insert into message",
+        detail: command.description ? t(command.description) : t("Insert into message"),
         keywords: "slash command prompt",
         icon: "code" as const,
         action: () => {
@@ -887,7 +887,7 @@ export function Session() {
         onClick={() => app.run(openForkSource)}
       >
         <Icon name="branch" size="sm" />
-        <span>Continued from {forkSourceTitle()}</span>
+        <span>{t("Continued from {title}", { title: forkSourceTitle() })}</span>
       </button>
     </div>
   );
@@ -1500,8 +1500,8 @@ export function Session() {
           <span class="sr-only" role="status">
             {active()
               ? pending()
-                ? "Waiting for your response"
-                : "Haarness is working"
+                ? t("Waiting for your response")
+                : t("Haarness is working")
               : ""}
           </span>
           {/* One dock at a time: a waiting decision takes the plan's place and
@@ -1682,7 +1682,7 @@ export function Session() {
                   aria-label={t("Slash commands")}
                 >
                   <div class="slash-suggestions-header">
-                    {t("Commands")}<span>↑ ↓ to browse · Enter to select</span>
+                    {t("Commands")}<span>{t("↑ ↓ to browse · Enter to select")}</span>
                   </div>
                   <For each={slashCommands()}>
                     {(command, index) => (
@@ -1695,7 +1695,7 @@ export function Session() {
                           "/" +
                           command.name +
                           (command.description
-                            ? " — " + command.description
+                            ? " — " + t(command.description)
                             : "")
                         }
                         onPointerMove={() => setSlashIndex(index())}
@@ -1703,7 +1703,8 @@ export function Session() {
                         onClick={() => chooseCommand(index())}
                       >
                         <strong>/{command.name}</strong>
-                        <span>{command.description}</span>
+                        {/* Built-in descriptions are English keys; a project's own pass through unchanged. */}
+                        <span>{t(command.description)}</span>
                       </button>
                     )}
                   </For>
@@ -1774,8 +1775,8 @@ export function Session() {
                           onClick={() => app.openConnect({ onboarding: true })}
                         >
                           {state.ready
-                            ? "Connect a provider"
-                            : "Loading models…"}
+                            ? t("Connect a provider")
+                            : t("Loading models…")}
                         </button>
                       }
                     >
@@ -1808,12 +1809,12 @@ export function Session() {
                       class="icon-button dictation-button"
                       classList={{ recording: voice.active() }}
                       aria-label={
-                        voice.active() ? "Stop dictation" : "Start dictation"
+                        voice.active() ? t("Stop dictation") : t("Start dictation")
                       }
                       title={
                         voice.active()
-                          ? "Stop dictation"
-                          : "Start dictation (⌘⇧M)"
+                          ? t("Stop dictation")
+                          : `${t("Start dictation")} (⌘⇧M)`
                       }
                       aria-pressed={voice.active()}
                       disabled={
@@ -1905,8 +1906,8 @@ function Message(props: {
     <div class="message-tools">
       <button
         class="icon-button"
-        aria-label={copied() ? "Copied" : "Copy message"}
-        title={copied() ? "Copied" : "Copy message"}
+        aria-label={copied() ? t("Copied") : t("Copy message")}
+        title={copied() ? t("Copied") : t("Copy message")}
         onClick={() =>
           app.run(() => copy((content() as { text: string }).text))
         }
@@ -2029,7 +2030,7 @@ function Message(props: {
                       class="inline-error-action"
                       onClick={() => app.set("settings", recovery()!.pane)}
                     >
-                      {recovery()!.label}
+                      {t(recovery()!.label)}
                     </button>
                   </Show>
                 </div>

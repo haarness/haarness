@@ -230,7 +230,7 @@ export function Settings() {
                 fallback={
                   <Empty
                     title={t("Open project first.")}
-                    detail="Runtime settings belong to the selected Haarness installation."
+                    detail={t("Runtime settings belong to the selected Haarness installation.")}
                   />
                 }
               >
@@ -243,9 +243,7 @@ export function Settings() {
                   }
                 >
                   <p class="notice-inline">
-                    This is a remote project. Runtime catalogs are available
-                    below; host configuration and credentials must be managed on
-                    that server.
+                    {t("This is a remote project. Runtime catalogs are available below; host configuration and credentials must be managed on that server.")}
                   </p>
                 </Show>
                 <Show when={app.state.settings === "providers" && local()}>
@@ -313,7 +311,7 @@ export function Settings() {
                     </button>
                   </Show>
                 </summary>
-                <pre>{output() || "Working…"}</pre>
+                <pre>{output() || t("Working…")}</pre>
                 <For
                   each={[...output().matchAll(/https?:\/\/[^\s]+/g)].slice(
                     0,
@@ -393,9 +391,9 @@ function General() {
               return (
                 <button
                   class="theme-option"
-                  aria-label={theme.name + " theme"}
+                  aria-label={t("{name} theme", { name: theme.name })}
                   aria-pressed={app.state.preferences.palette === theme.id}
-                  title={theme.description}
+                  title={t(theme.description)}
                   onClick={() =>
                     app.run(() => app.settings({ palette: theme.id }))
                   }
@@ -513,11 +511,11 @@ function General() {
       </For>
       <Row title="Turn completion notifications" description="Choose when completed or failed tasks notify you.">
         <Select aria-label={t("Turn completion notifications")} value={app.state.preferences.completionNotifications}
-          options={[{ value: "background", label: "Only when unfocused" }, { value: "always", label: "Always" }, { value: "never", label: "Never" }]}
+          options={[{ value: "background", label: t("Only when unfocused") }, { value: "always", label: t("Always") }, { value: "never", label: t("Never") }]}
           onChange={(value) => app.run(() => app.settings({ completionNotifications: value as Preferences["completionNotifications"] }))} />
       </Row>
       <For each={[["permissionNotifications", "Permission notifications", "Notify when approval is needed while the app is in the background."], ["questionNotifications", "Question notifications", "Notify when input is needed while the app is in the background."]] as const}>
-        {([key, title, description]) => <Row title={title} description={description}><input type="checkbox" role="switch" aria-label={title} checked={app.state.preferences[key]} onChange={(event) => app.run(() => app.settings({ [key]: event.currentTarget.checked }))} /></Row>}
+        {([key, title, description]) => <Row title={title} description={description}><input type="checkbox" role="switch" aria-label={t(title)} checked={app.state.preferences[key]} onChange={(event) => app.run(() => app.settings({ [key]: event.currentTarget.checked }))} /></Row>}
       </For>
       <Row title="Send message with">
         <Select
@@ -530,14 +528,12 @@ function General() {
           }
           options={[
             { value: "enter", label: t("Enter") },
-            { value: "mod-enter", label: "Command / Control + Enter" },
+            { value: "mod-enter", label: t("Command / Control + Enter") },
           ]}
         />
       </Row>
       <p class="muted">
-        Drafts, appearance and saved projects are saved on this computer.
-        Conversations and tasks are saved separately for each project folder or
-        worktree.
+        {t("Drafts, appearance and saved projects are saved on this computer. Conversations and tasks are saved separately for each project folder or worktree.")}
       </p>
     </>
   );
@@ -636,7 +632,7 @@ function Servers() {
               <button
                 onClick={() =>
                   app.run(async () => {
-                    const input = await ask("Rename server", [
+                    const input = await ask(t("Rename server"), [
                       {
                         name: "label",
                         label: t("Name"),
@@ -663,8 +659,8 @@ function Servers() {
                   app.run(async () => {
                     if (
                       await confirm(
-                        "Remove this server?",
-                        "This removes the saved connection and its projects from Desktop. Conversation history and running tasks on the server are preserved.",
+                        t("Remove this server?"),
+                        t("This removes the saved connection and its projects from Desktop. Conversation history and running tasks on the server are preserved."),
                       )
                     )
                       await app.removeServer(item.id);
@@ -697,7 +693,7 @@ function Projects() {
               <span class="small muted">{t("Current working folder")}</span>
               <h3>{connection().workspace.split(/[\\/]/).filter(Boolean).at(-1) || connection().workspace}</h3>
               <p class="settings-current-project-path">{connection().workspace}</p>
-              <span class="small muted">{app.currentServer().label}</span>
+              <span class="small muted">{t(app.currentServer().label)}</span>
               <Show when={!connection().remote && !connection().trust}>
                 <p class="small muted">{t("Project configuration disabled")}</p>
               </Show>
@@ -707,10 +703,9 @@ function Projects() {
         )}
       </Show>
       <div class="setting-block">
-        <h3>{app.currentServer().label}</h3>
+        <h3>{t(app.currentServer().label)}</h3>
         <p>
-          Manage projects on this server. Switch servers to see another server’s
-          projects.
+          {t("Manage projects on this server. Switch servers to see another server’s projects.")}
         </p>
         <button onClick={() => app.openSettings("servers")}>
           {t("Switch server")}
@@ -725,7 +720,7 @@ function Projects() {
       <Show when={!app.projects().length}>
         <Empty
           title={t("No projects yet")}
-          detail="Open a project on this server to get started."
+          detail={t("Open a project on this server to get started.")}
         />
       </Show>
       <For each={app.projects()}>
@@ -878,7 +873,7 @@ function Providers() {
                       {modelName(provider.id, model.id, app.state.providers)}
                     </strong>{" "}
                     <code>{model.id}</code> ·{" "}
-                    {model.contextWindow?.toLocaleString() ?? "Unknown"} context
+                    {t("{count} context", { count: model.contextWindow?.toLocaleString() ?? t("Unknown") })}
                   </p>
                 )}
               </For>
@@ -945,10 +940,10 @@ function Models() {
                 <td>{model.contextWindow?.toLocaleString() ?? "—"}</td>
                 <td>
                   {[
-                    model.tools ? "Tools" : "",
-                    model.images ? "Images" : "",
-                    model.video ? "Video" : "",
-                    model.reasoning ? "Reasoning" : "",
+                    model.tools ? t("Tools") : "",
+                    model.images ? t("Images") : "",
+                    model.video ? t("Video") : "",
+                    model.reasoning ? t("Reasoning") : "",
                   ]
                     .filter(Boolean)
                     .join(" · ")}
@@ -968,18 +963,24 @@ const assetCopy = {
     create: "Create agent",
     empty: "No agents yet",
     emptyDetail: "Create one for a role you repeat, like a reviewer or a release helper.",
+    removeProject: "Remove this custom agent from this project?",
+    removeAll: "Remove this custom agent from all projects?",
   },
   command: {
     about: "Commands are saved prompts you run with / in any conversation.",
     create: "Create command",
     empty: "No commands yet",
     emptyDetail: "Save a prompt you use often, then run it with /name.",
+    removeProject: "Remove this custom command from this project?",
+    removeAll: "Remove this custom command from all projects?",
   },
   skill: {
     about: "Skills are instructions and files an agent loads when a task calls for them.",
     create: "Create skill",
     empty: "No skills yet",
     emptyDetail: "Teach Haarness a workflow once, and it will use it whenever it fits.",
+    removeProject: "Remove this custom skill from this project?",
+    removeAll: "Remove this custom skill from all projects?",
   },
 } as const;
 function Assets(props: { kind: string; cli: Cli }) {
@@ -1086,10 +1087,10 @@ function Assets(props: { kind: string; cli: Cli }) {
             description={[
               item.description,
               item.scope === "local"
-                ? "This project"
+                ? t("This project")
                 : item.scope === "global"
-                  ? "All projects"
-                  : "Built-in / plugin",
+                  ? t("All projects")
+                  : t("Built-in / plugin"),
             ]
               .filter(Boolean)
               .join(" · ")}
@@ -1118,14 +1119,8 @@ function Assets(props: { kind: string; cli: Cli }) {
                   app.run(async () => {
                     if (
                       await confirm(
-                        (item.customized ? "Reset " : "Remove ") + item.name,
-                        "Remove this custom " +
-                          kind() +
-                          " from " +
-                          (item.scope === "local"
-                            ? "this project"
-                            : "all projects") +
-                          "?",
+                        t(item.customized ? "Reset {name}" : "Remove {name}", { name: item.name }),
+                        t(item.scope === "local" ? assetCopy[kind()].removeProject : assetCopy[kind()].removeAll),
                       )
                     ) {
                       await app.native({
@@ -1142,7 +1137,7 @@ function Assets(props: { kind: string; cli: Cli }) {
                   })
                 }
               >
-                {item.customized ? "Reset to default" : "Remove"}
+                {item.customized ? t("Reset to default") : t("Remove")}
               </button>
             </Show>
           </Row>
@@ -1171,7 +1166,7 @@ function Tools() {
     <>
       <Row
         title={t("Tool loading")}
-        description="Control how optional tool schemas enter model context."
+        description={t("Control how optional tool schemas enter model context.")}
       >
         <Select
           aria-label={t("Tool loading")}
@@ -1182,15 +1177,17 @@ function Tools() {
             )
           }
           options={[
-            { value: "auto", label: "Automatic" },
-            { value: "always", label: "Always lazy" },
-            { value: "off", label: "All enabled tools" },
+            { value: "auto", label: t("Automatic") },
+            { value: "always", label: t("Always lazy") },
+            { value: "off", label: t("All enabled tools") },
           ]}
         />
       </Row>
       <p class="muted">
-        {catalog()?.estimatedAdvertisedTokens.toLocaleString()} advertised
-        tokens · {catalog()?.estimatedSavedTokens.toLocaleString()} saved
+        {t("{advertised} advertised tokens · {saved} saved", {
+          advertised: catalog()?.estimatedAdvertisedTokens.toLocaleString() ?? "",
+          saved: catalog()?.estimatedSavedTokens.toLocaleString() ?? "",
+        })}
       </p>
       <input
         aria-label={t("Search tools")}
@@ -1298,7 +1295,7 @@ function Mcp(props: { cli: Cli }) {
                   {t("Authorize")}
                 </button>
                 <MenuButton
-                  text="Manage"
+                  text={t("Manage")}
                   label={t("Manage {name}", { name: server.name })}
                   items={[
                     { label: "Enable", command: "enable" },
@@ -1306,20 +1303,21 @@ function Mcp(props: { cli: Cli }) {
                     { label: "Remove", command: "remove" },
                     { label: "Sign out", command: "logout" },
                   ].map((item) => ({
-                    label: item.label,
+                    label: t(item.label),
                     run: () =>
                       void app.run(async () => {
                         const input = await ask(
-                          item.label + " " + server.name,
+                          `${t(item.label)} ${server.name}`,
                           [
                             {
+                              // The options are CLI scopes; the select shows them as they are.
                               name: "scope",
-                              label: "Scope",
+                              label: t("Scope"),
                               type: "select",
                               options: ["Global", "Project"],
                             },
                           ],
-                          { submit: item.label },
+                          { submit: t(item.label) },
                         );
                         if (!input) return;
                         await props.cli([
@@ -1340,7 +1338,7 @@ function Mcp(props: { cli: Cli }) {
       <Show when={!rows().length}>
         <Empty
           title={t("Connect your tools.")}
-          detail="MCP servers bring external tools, resources and prompts into Haarness."
+          detail={t("MCP servers bring external tools, resources and prompts into Haarness.")}
         />
       </Show>
     </>
@@ -1424,7 +1422,7 @@ function Plugins() {
               <button
                 onClick={() =>
                   app.run(async () => {
-                    if (await confirm("Remove plugin?", plugin.name))
+                    if (await confirm(t("Remove plugin?"), plugin.name))
                       await action("remove", plugin.name);
                   })
                 }
@@ -1494,13 +1492,13 @@ function Extensions(props: { cli: Cli }) {
       </Show>
       <div class="toolbar" data-setting="Extension scope">
         <label>
-          Scope{" "}
+          {t("Scope")}{" "}
           <Select
             aria-label={t("Extension scope")}
             value={scope()}
             onChange={(value) => setScope(value)}
             options={[
-              { value: "Global", label: "Global" },
+              { value: "Global", label: t("Global") },
               { value: "Project", label: t("Project") },
             ]}
           />
@@ -1510,8 +1508,8 @@ function Extensions(props: { cli: Cli }) {
         title={t("Enable extensions")}
         description={
           scope() === "Project"
-            ? "Extensions configured for this project."
-            : "Extensions available across your projects."
+            ? t("Extensions configured for this project.")
+            : t("Extensions available across your projects.")
         }
       >
         <input
@@ -1566,8 +1564,8 @@ function Extensions(props: { cli: Cli }) {
                   app.run(async () => {
                     if (
                       await confirm(
-                        "Remove extension?",
-                        `Unregister ${entry.name ?? entry.source}. Source files are preserved.`,
+                        t("Remove extension?"),
+                        t("Unregister {name}. Source files are preserved.", { name: entry.name ?? entry.source }),
                       )
                     ) {
                       await props.cli([
@@ -1596,19 +1594,17 @@ function Profiles(props: { cli: Cli }) {
   return (
     <>
       <p class="muted">
-        Portable profiles contain configuration, skills, agents, commands, and
-        other supported assets. They exclude conversation databases and
-        credential stores.
+        {t("Portable profiles contain configuration, skills, agents, commands, and other supported assets. They exclude conversation databases and credential stores.")}
       </p>
       <Row title="Save a profile">
         <button
           onClick={() =>
             app.run(async () => {
-              const input = await ask("Save profile", [
+              const input = await ask(t("Save profile"), [
                 { name: "name", label: t("Name"), required: true },
                 {
                   name: "scope",
-                  label: "Scope",
+                  label: t("Scope"),
                   type: "select",
                   options: ["both", "global", "local"],
                 },
@@ -1644,7 +1640,7 @@ function Profiles(props: { cli: Cli }) {
                 "--dry-run",
                 "--json",
               ]);
-              if (await confirm("Restore profile?", stringify(preview)))
+              if (await confirm(t("Restore profile?"), stringify(preview)))
                 await props.cli(["profile", "restore", path, "--json"]);
             })
           }
@@ -1654,7 +1650,7 @@ function Profiles(props: { cli: Cli }) {
       </Row>
       <Row title="Profile catalog">
         <MenuButton
-          text="Manage catalog"
+          text={t("Manage catalog")}
           label={t("Manage catalog")}
           items={[
             { label: "List profiles", command: "cloud-list" },
@@ -1664,13 +1660,13 @@ function Profiles(props: { cli: Cli }) {
             { label: "Restore profile", command: "cloud-restore" },
             { label: "Delete profile", command: "cloud-delete" },
           ].map((item) => ({
-            label: item.label,
+            label: t(item.label),
             run: () =>
               void app.run(async () => {
                 const input = await ask(
-                  item.label,
+                  t(item.label),
                   [
-                    { name: "url", label: "HTTPS URL", required: true },
+                    { name: "url", label: t("HTTPS URL"), required: true },
                     ...(item.command === "cloud-list"
                       ? []
                       : [
@@ -1678,8 +1674,8 @@ function Profiles(props: { cli: Cli }) {
                             name: "target",
                             label:
                               item.command === "cloud-push"
-                                ? "Local archive path"
-                                : "Profile ID",
+                                ? t("Local archive path")
+                                : t("Profile ID"),
                             required: true,
                           },
                         ]),
@@ -1687,13 +1683,13 @@ function Profiles(props: { cli: Cli }) {
                       ? [
                           {
                             name: "output",
-                            label: "Download output path",
+                            label: t("Download output path"),
                             required: true,
                           },
                         ]
                       : []),
                   ],
-                  { submit: item.label },
+                  { submit: t(item.label) },
                 );
                 if (!input) return;
                 const args = [
@@ -1752,7 +1748,7 @@ function About() {
           <button
             onClick={() => app.run(() => window.haarness.update("download"))}
           >
-            Download {update().version}
+            {t("Download {version}", { version: update().version ?? "" })}
           </button>
         </Show>
         <Show when={update().status === "ready"}>
@@ -1762,8 +1758,8 @@ function About() {
               app.run(async () => {
                 if (
                   await confirm(
-                    "Install update?",
-                    "Haarness will restart. Save your file edits before continuing.",
+                    t("Install update?"),
+                    t("Haarness will restart. Save your file edits before continuing."),
                   )
                 )
                   await window.haarness.update("install");
@@ -1774,7 +1770,7 @@ function About() {
           </button>
         </Show>
         <Show when={update().status === "downloading"}>
-          <span>Downloading {Math.round(update().percent ?? 0)}%</span>
+          <span>{t("Downloading {percent}%", { percent: Math.round(update().percent ?? 0) })}</span>
         </Show>
         <Show when={update().status === "current"}>
           <span>{t("You are up to date.")}</span>
@@ -1788,7 +1784,7 @@ function About() {
           title="Reopen project"
           description="Reload the current project to bring conversations and files up to date."
         >
-          <button onClick={() => app.run(app.hydrate)}>Refresh</button>
+          <button onClick={() => app.run(app.hydrate)}>{t("Refresh")}</button>
         </Row>
       </Show>
     </>

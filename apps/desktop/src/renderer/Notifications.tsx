@@ -11,7 +11,8 @@ export function Notifications() {
         <Show when={state.notice}>
           <div class="toast" role="status">
             <Icon name="check" size="sm" />
-            {state.notice}
+            {/* Callers pass an English key or an already translated sentence. */}
+            {t(state.notice)}
           </div>
         </Show>
         <Show when={state.error}>

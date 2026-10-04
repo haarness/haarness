@@ -4,6 +4,9 @@ import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import { defaults } from "../src/shared";
 import { languages, dictionaries, displayLanguage, parseLanguage, translate } from "../src/localization";
+import { contextKinds } from "../src/renderer/context-usage";
+import { themes } from "../src/themes";
+import { settingsControls, settingsSections, settingsTitles, shortcutTitles } from "../src/renderer/settings-catalog";
 
 test("English is the explicit default and invalid preferences recover to English", () => {
   assert.equal(defaults.language, "en");
@@ -48,6 +51,20 @@ test("translations preserve every interpolation field in every language", () => 
 
 // A literal that never reaches a catalog shows English in all 17 languages, so
 // the renderer's own t() keys are checked here rather than found in the UI.
+// Native menus and dialogs are translated in the main process through `say()`
+// (and the menu's own `t()`), so their literals get the same check.
+test("every main-process dialog and menu key is in the shared catalog", async () => {
+  const missing = new Set<string>();
+  for (const name of ["index.ts", "browser-data.ts"]) {
+    const source = await readFile(new URL(`../src/main/${name}`, import.meta.url), "utf8");
+    for (const [, key] of source.matchAll(/\b(?:say|t)\(\s*"((?:[^"\\]|\\.)*)"/g))
+      if (!Object.hasOwn(dictionaries.en, key)) missing.add(`${name}: ${key}`);
+    for (const [, key] of source.matchAll(/\btranslate\([^,]+,\s*"((?:[^"\\]|\\.)*)"/g))
+      if (!Object.hasOwn(dictionaries.en, key)) missing.add(`${name}: ${key}`);
+  }
+  assert.deepEqual([...missing], []);
+});
+
 test("every renderer t() key is in the shared catalog", async () => {
   const directory = new URL("../src/renderer/", import.meta.url);
   const names = (await readdir(directory)).filter((name) => /\.tsx?$/.test(name));
@@ -56,6 +73,10 @@ test("every renderer t() key is in the shared catalog", async () => {
     const source = await readFile(new URL(name, directory), "utf8");
     for (const [, key] of source.matchAll(/\bt\(\s*"((?:[^"\\]|\\.)*)"/g))
       if (!Object.hasOwn(dictionaries.en, key)) missing.add(`${name}: ${key}`);
+    // SettingRow translates the literal title and description it is handed.
+    for (const [row] of source.matchAll(/<(?:Row|SettingRow)\b[^>]*>/g))
+      for (const [, key] of row.matchAll(/\b(?:title|description)="([^"]*)"/g))
+        if (!Object.hasOwn(dictionaries.en, key)) missing.add(`${name}: ${key}`);
   }
   assert.deepEqual([...missing], []);
 });
@@ -142,6 +163,44 @@ test("keys translated through a variable are in the catalog", () => {
     "running", "completed", "failed", "cancelled", "paused", "interrupted",
     "active", "blocked", "usage_limited", "budget_limited", "complete",
     "cleared",
+    // Context panel rows, from `contextKinds` and the usage `metrics`.
+    ...contextKinds,
+    "Input tokens", "Output tokens", "Cache read tokens", "Cache write tokens",
+    // Notification switches, from their title/description tuples.
+    "Permission notifications", "Notify when approval is needed while the app is in the background.",
+    "Question notifications", "Notify when input is needed while the app is in the background.",
+    // Custom definition removal, from `assetCopy`.
+    "Remove this custom agent from this project?", "Remove this custom agent from all projects?",
+    "Remove this custom command from this project?", "Remove this custom command from all projects?",
+    "Remove this custom skill from this project?", "Remove this custom skill from all projects?",
+    // MCP and profile catalog menus, labelled from their item lists.
+    "Enable", "Disable", "Remove", "Sign out",
+    "List profiles", "Upload profile", "View profile", "Download profile", "Restore profile", "Delete profile",
+    // Fixed select choices: the form dialog translates their labels and keeps the values.
+    "Global", "Project", "both", "global", "local",
+    "Keep (refuse reset if dirty)", "Discard tracked changes", "Discard tracked and untracked changes",
+    // Plural pairs and side-specific names chosen inside one t() call.
+    "{count} file", "{count} files", "Reset {name}", "Remove {name}",
+    "Comment on original line {line}", "Comment on updated line {line}",
+    "Archive session {title}", "Restore session {title}",
+    // Review file status words from the server's diff.
+    "added", "deleted", "modified",
+    // Reasoning level names from `reasoning.ts`, and the sidebar's waiting badges from state.tsx.
+    "Model default", "None", "Minimal", "Low", "Medium", "High", "Extra high", "Max",
+    "Needs approval", "Needs an answer",
+    // Theme descriptions from `themes.ts`, shown as the swatch tooltip.
+    ...themes.map((theme) => theme.description),
+    // Helper labels and built-in slash command descriptions.
+    "Open providers", "Use an API key",
+    // `historyCommands` (conversation-controls.ts imports the app state, so its
+    // three descriptions are listed here).
+    "Undo the last turn and restore its prompt", "Restore the next undone turn",
+    "Summarize this conversation with its model",
+    // Settings navigation and search titles.
+    ...Object.values(settingsTitles),
+    ...settingsSections.map(([section]) => section),
+    ...settingsControls.map(([, title]) => title),
+    ...Object.values(shortcutTitles),
   ];
   assert.deepEqual(
     dynamic.filter((key) => !Object.hasOwn(dictionaries.en, key)),

@@ -5,6 +5,8 @@ import { browserData, removeBrowserData, saveBrowserDownload } from "./browser-d
 import { createBrowserHost } from "./browser-host";
 import { createAttachmentDraftStorage } from "./attachment-drafts";
 import { translate } from "../localization";
+/** Native dialogs speak the language chosen in Settings, like the menus do. */
+const say = (key: string) => translate(data().preferences.language, key);
 import { authorizationHeaders, type ServerAuth } from "@haarness/sdk";
 import { browseRemote, openRemote, remoteLocationId } from "./remote-projects";
 import { withThreadKinds } from "../thread-kinds";
@@ -582,7 +584,7 @@ function installHandlers() {
     const url = input.url ?? recent?.url;
     if (!url && !workspace) {
       const result = await dialog.showOpenDialog(win, {
-        title: "Open project",
+        title: say("Open project"),
         properties: ["openDirectory", "createDirectory"],
       });
       if (result.canceled) return null;
@@ -929,11 +931,11 @@ function installHandlers() {
   });
   handle("attachments", async (win) => {
     const result = await dialog.showOpenDialog(win, {
-      title: "Attach files",
+      title: say("Attach files"),
       properties: ["openFile", "multiSelections"],
       filters: [
         {
-          name: "Media and documents",
+          name: say("Media and documents"),
           extensions: [
             "png",
             "jpg",
@@ -971,7 +973,7 @@ function installHandlers() {
   });
   handle("openArchive", async (win) => {
     const result = await dialog.showOpenDialog(win, {
-      filters: [{ name: "Session archive", extensions: ["json"] }],
+      filters: [{ name: say("Session archive"), extensions: ["json"] }],
       properties: ["openFile"],
     });
     if (result.canceled) return null;
@@ -1136,11 +1138,11 @@ function createWindow() {
   win.webContents.on("will-prevent-unload", (event) => {
     const choice = dialog.showMessageBoxSync(win, {
       type: "warning",
-      buttons: ["Keep editing", "Discard and close"],
+      buttons: [say("Keep editing"), say("Discard and close")],
       defaultId: 0,
       cancelId: 0,
-      message: "There are unsaved file edits.",
-      detail: "Save your files before closing, or discard the edits.",
+      message: say("There are unsaved file edits."),
+      detail: say("Save your files before closing, or discard the edits."),
     });
     if (choice === 1) event.preventDefault();
     else quitting = false;
@@ -1160,9 +1162,9 @@ function createWindow() {
       void dialog
         .showMessageBox(win, {
           type: "error",
-          message: "The window stopped responding.",
-          detail: "Your tasks keep running when you close this window.",
-          buttons: ["Reload window", "Close"],
+          message: say("The window stopped responding."),
+          detail: say("Your tasks keep running when you close this window."),
+          buttons: [say("Reload window"), say("Close")],
         })
         .then((result) => {
           if (quitting || win.isDestroyed()) return;

@@ -363,7 +363,7 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
         />
         <button type="button" aria-label={t("Browser settings")} onClick={() => void app.openSettings("browser")}><Icon name="settings" size="sm" /></button>
         <button type="submit" disabled={!state.connection}>
-          Go
+          {t("Go")}
         </button>
       </form>
       <Show when={error()}>
@@ -395,12 +395,12 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
             <strong>{t("Browse alongside your work")}</strong>
             <p>
               {state.selected
-                ? "Open a tab or ask Haarness to browse."
-                : "Open a tab now. It will follow you into your next chat."}
+                ? t("Open a tab or ask Haarness to browse.")
+                : t("Open a tab now. It will follow you into your next chat.")}
             </p>
             <small>
-              {state.selected ? "Each conversation has its own browser." : "Tabs follow you into your next chat."} Localhost uses this
-              project’s server.
+              {state.selected ? t("Each conversation has its own browser.") : t("Tabs follow you into your next chat.")}{" "}
+              {t("Localhost uses this project’s server.")}
             </small>
           </div>
         </Show>
