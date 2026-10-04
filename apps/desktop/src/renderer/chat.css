@@ -457,6 +457,11 @@
   align-items: center;
   gap: var(--s2);
 }
+/* `.activity-shimmer` is an inline-block and is declared later; without this
+   a running or waiting step lost its gaps ("EditedREADME.md+1 −1"). */
+.tool-label.activity-shimmer {
+  display: flex;
+}
 .tool-label.activity-shimmer > strong,
 .tool-label.activity-shimmer > .tool-target {
   color: inherit;
@@ -1569,6 +1574,16 @@
 }
 .prompt-subject.prompt-detail {
   color: var(--muted);
+}
+/* The proposed change under an edit request: short enough to keep the
+   composer in view, scrollable when the edit is long. */
+.approval-changes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.approval-changes .change-lines {
+  max-height: 180px;
 }
 .prompt-actions {
   display: flex;

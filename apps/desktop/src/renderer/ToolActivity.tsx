@@ -232,7 +232,7 @@ function changeRows(change: Change) {
     after: change.after,
   } as Parameters<typeof lines>[0]).filter((row) => row.kind !== "hunk");
 }
-function ChangePreview(props: { change: Change; showPath?: boolean }) {
+export function ChangePreview(props: { change: Change; showPath?: boolean }) {
   const rows = createMemo(() => changeRows(props.change));
   const shown = () => rows().slice(0, CHANGE_PREVIEW_LINES);
   const hidden = () => rows().length - shown().length;
