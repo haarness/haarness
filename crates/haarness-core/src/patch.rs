@@ -56,14 +56,18 @@ pub enum HunkLine {
 }
 
 pub fn parse_patch(input: &str) -> Result<Vec<FileOp>, String> {
-    let mut lines = input.lines().peekable();
+    let mut lines = input.trim_start().lines().peekable();
+    // The header carries no information, so a stuttered marker such as
+    // `*** Begin Patch Patch` (seen from real models) is not worth a retry.
     match lines.next().map(str::trim) {
-        Some("*** Begin Patch") => {}
-        other => {
+        Some(header) if header.starts_with("*** Begin Patch") => {}
+        Some(other) if !other.is_empty() => {
             return Err(format!(
-                "patch must start with *** Begin Patch, got {other:?}"
+                "patch must start with `*** Begin Patch`; the first line was `{}`",
+                other.chars().take(80).collect::<String>()
             ));
         }
+        _ => return Err("patch is empty; start it with `*** Begin Patch`".into()),
     }
     let mut operations = Vec::new();
     let mut ended = false;
@@ -285,6 +289,20 @@ after\n\
         assert!(
             parse_patch("*** Begin Patch\n*** Update File: x\n?bogus\n*** End Patch\n").is_err()
         );
+        let error = parse_patch("--- a/x\n+++ b/x\n").unwrap_err();
+        assert_eq!(
+            error,
+            "patch must start with `*** Begin Patch`; the first line was `--- a/x`"
+        );
+        assert!(parse_patch("  \n").unwrap_err().contains("patch is empty"));
+    }
+
+    #[test]
+    fn tolerates_a_stuttered_begin_marker() {
+        let operations =
+            parse_patch("\n*** Begin Patch Patch\n*** Delete File: gone.txt\n*** End Patch\n")
+                .unwrap();
+        assert!(matches!(&operations[0], FileOp::Delete { path } if path == "gone.txt"));
     }
 
     #[test]
