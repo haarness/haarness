@@ -2,7 +2,7 @@
 //! headings, surface-backed code, soft list bullets — no boxes, no rules
 //! heavier than a hairline.
 
-use haarness_opentui::{Line, Span, attr};
+use haarness_opentui::{Color, Line, Span, attr};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 use crate::highlight::highlight_block;
@@ -116,41 +116,62 @@ impl Renderer<'_> {
         (first, format!("{base}{cont_pad}"))
     }
 
-    /// Aligned table: header row on the surface, hairline separator, data
-    /// rows padded per column (clipped to keep the table inside the width).
+    /// Aligned table: header row in the primary tone, hairline separator,
+    /// data rows padded per column. A table wider than the transcript wraps
+    /// its cells inside their columns rather than clipping them: a table is
+    /// read for the words in it, and an ellipsis in every cell hides them.
     fn render_table(&mut self, rows: &[Vec<String>]) {
+        use unicode_width::UnicodeWidthStr as _;
         if rows.is_empty() {
             return;
         }
-        let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+        let columns = rows.iter().map(Vec::len).max().unwrap_or(0).max(1);
         let budget = self
             .width
-            .saturating_sub(self.indent.chars().count() + columns.saturating_sub(1) * 3)
-            .max(8);
-        let cap = (budget / columns.max(1)).clamp(4, 40);
-        let mut widths = vec![0usize; columns];
+            .saturating_sub(self.indent.width() + (columns - 1) * 3)
+            .max(columns * 4);
+        let mut natural = vec![1usize; columns];
         for row in rows {
             for (index, cell) in row.iter().enumerate() {
-                widths[index] = widths[index].max(cell.trim().chars().count().min(cap));
+                natural[index] = natural[index].max(cell.trim().width());
             }
         }
+        let widths = fit_columns(&natural, budget);
         for (row_index, row) in rows.iter().enumerate() {
-            let mut spans = vec![Span::new(self.indent, self.theme.muted)];
-            for (index, width) in widths.iter().enumerate() {
-                let cell = row.get(index).map(String::as_str).unwrap_or("").trim();
-                let clipped = crate::view::span::single_line(cell, *width);
-                let pad = width.saturating_sub(clipped.chars().count());
-                let color = if row_index == 0 {
-                    self.theme.primary
-                } else {
-                    self.text_color()
-                };
-                spans.push(Span::new(format!("{clipped}{}", " ".repeat(pad)), color));
-                if index + 1 < columns {
-                    spans.push(Span::new(" │ ", self.theme.muted));
+            let color = if row_index == 0 {
+                self.theme.primary
+            } else {
+                self.text_color()
+            };
+            let cells: Vec<Vec<String>> = widths
+                .iter()
+                .enumerate()
+                .map(|(index, width)| {
+                    let cell = row.get(index).map(String::as_str).unwrap_or("").trim();
+                    let wrapped: Vec<String> = textwrap::wrap(cell, *width)
+                        .into_iter()
+                        .map(|line| crate::view::span::single_line(&line, *width))
+                        .collect();
+                    if wrapped.is_empty() {
+                        vec![String::new()]
+                    } else {
+                        wrapped
+                    }
+                })
+                .collect();
+            let height = cells.iter().map(Vec::len).max().unwrap_or(1);
+            for line in 0..height {
+                let mut spans = vec![Span::new(self.indent, self.theme.muted)];
+                for (index, width) in widths.iter().enumerate() {
+                    let text = cells[index].get(line).map(String::as_str).unwrap_or("");
+                    let pad = width.saturating_sub(text.width());
+                    spans.push(Span::new(format!("{text}{}", " ".repeat(pad)), color));
+                    if index + 1 < columns {
+                        spans.push(Span::new(" │ ", self.theme.muted));
+                    }
                 }
+                self.lines.push(Line::new(spans));
             }
-            self.lines.push(Line::new(spans));
             if row_index == 0 {
                 let rule: String = widths
                     .iter()
@@ -208,8 +229,16 @@ impl Renderer<'_> {
                         return;
                     }
                 }
+                // The padding only reads as a chip on a painted surface; over
+                // the terminal's own background it would look like stray
+                // double spaces around every identifier.
+                let text = if self.theme.surface == Color::TRANSPARENT {
+                    code.to_string()
+                } else {
+                    format!(" {code} ")
+                };
                 self.inline
-                    .push(Span::new(format!(" {code} "), self.theme.accent).on(self.theme.surface));
+                    .push(Span::new(text, self.theme.accent).on(self.theme.surface));
             }
             // Terminal agent output relies on its line structure; treat soft
             // breaks as real breaks instead of collapsing them to spaces.
@@ -372,6 +401,41 @@ impl Renderer<'_> {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// Share `budget` columns between table columns of `natural` widths: a
+/// column that fits keeps its width, and the rest split what is left evenly,
+/// so one long column cannot squeeze its neighbours down to nothing.
+fn fit_columns(natural: &[usize], budget: usize) -> Vec<usize> {
+    if natural.iter().sum::<usize>() <= budget {
+        return natural.to_vec();
+    }
+    let mut widths = vec![0usize; natural.len()];
+    let mut open: Vec<usize> = (0..natural.len()).collect();
+    let mut remaining = budget;
+    // Settle every column narrower than an even share of what is left, then
+    // split the remainder among the wide ones.
+    loop {
+        let share = remaining / open.len().max(1);
+        let (fits, wide): (Vec<usize>, Vec<usize>) =
+            open.iter().partition(|&&index| natural[index] <= share);
+        if fits.is_empty() {
+            let mut extra = remaining.saturating_sub(share * wide.len());
+            for index in wide {
+                widths[index] = share.max(4) + usize::from(extra > 0);
+                extra = extra.saturating_sub(1);
+            }
+            return widths;
+        }
+        for index in fits {
+            widths[index] = natural[index];
+            remaining = remaining.saturating_sub(natural[index]);
+        }
+        open = wide;
+        if open.is_empty() {
+            return widths;
         }
     }
 }
@@ -573,6 +637,37 @@ mod table_tests {
             ada.find('│'),
             grace.find('│'),
             "columns align: {ada:?} vs {grace:?}"
+        );
+    }
+
+    #[test]
+    fn narrow_tables_wrap_cells_instead_of_clipping_them() {
+        let theme = Theme::editorial_dark();
+        let lines = render_markdown(
+            "| Design | How it stores inventory | Trade-off |\n|---|---|---|\n\
+             | Dictionary-backed | Maps item names to quantities | Simple and fast for in-memory use |",
+            60,
+            &theme,
+            "  ",
+        );
+        let text = lines
+            .iter()
+            .map(haarness_opentui::Line::text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text.contains('…'), "a cell was clipped: {text}");
+        assert!(text.contains("quantities"), "{text}");
+        assert!(text.contains("in-memory use"), "{text}");
+        assert!(lines.iter().all(|line| line.width() <= 60), "{text}");
+        let separators: Vec<usize> = lines
+            .iter()
+            .map(haarness_opentui::Line::text)
+            .filter(|row| row.contains('│'))
+            .map(|row| row.find('│').unwrap())
+            .collect();
+        assert!(
+            separators.windows(2).all(|pair| pair[0] == pair[1]),
+            "{text}"
         );
     }
 

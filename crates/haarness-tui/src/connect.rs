@@ -74,7 +74,11 @@ impl ConnectProvider {
                 .join(" · ");
         }
         if let Some(oauth) = self.methods.iter().find(|method| method.kind == "oauth") {
-            return format!("{} · or use an API key", oauth.label);
+            return if self.methods.iter().any(|method| method.kind == "api") {
+                format!("{} · or use an API key", oauth.label)
+            } else {
+                oauth.label.clone()
+            };
         }
         if self.methods.is_empty() {
             return self.note.clone().unwrap_or_else(|| "Not available".into());
@@ -633,16 +637,29 @@ mod tests {
         assert_eq!(provider.status(), "Connected · signed in · 12 models");
         provider.connected = false;
         provider.source = None;
-        provider.methods = vec![ConnectMethod {
-            id: "browser".into(),
-            kind: "oauth".into(),
-            label: "Sign in with ChatGPT".into(),
-            description: String::new(),
-        }];
+        provider.methods = vec![
+            ConnectMethod {
+                id: "browser".into(),
+                kind: "oauth".into(),
+                label: "Sign in with ChatGPT".into(),
+                description: String::new(),
+            },
+            ConnectMethod {
+                id: "api".into(),
+                kind: "api".into(),
+                label: "Use an API key".into(),
+                description: String::new(),
+            },
+        ];
         assert_eq!(
             provider.status(),
             "Sign in with ChatGPT · or use an API key"
         );
+        // Haarness Cloud is an account sign-in only; offering a key would
+        // send people looking for one that does not exist.
+        provider.methods.truncate(1);
+        provider.methods[0].label = "Sign in to Haarness".into();
+        assert_eq!(provider.status(), "Sign in to Haarness");
         provider.methods.clear();
         provider.note = Some("Local runtime".into());
         assert_eq!(provider.status(), "Local runtime");

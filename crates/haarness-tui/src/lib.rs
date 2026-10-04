@@ -883,8 +883,15 @@ async fn run_with_client(
             } => {
                 if let Some(watch) = &mut billing {
                     app.billing = watch.updates.borrow_and_update().clone();
-                    if let state::Overlay::Panel { title, lines } = &mut app.overlay {
-                        if title == "Cloud billing" { *lines = app.billing.lines(); }
+                    // The summary reads live state; the actions depend on it
+                    // too (sign in, turn on overage), so rebuild them in place.
+                    if matches!(
+                        app.overlay,
+                        state::Overlay::Options { kind: state::OptionsKind::Billing, .. }
+                    ) {
+                        let selection = app.selection;
+                        app.open_billing();
+                        app.selection = selection.min(app.current_selection_length().saturating_sub(1));
                     }
                 }
             },
@@ -917,6 +924,17 @@ async fn run_with_client(
                 }
             },
         }
+    }
+    if app.is_untouched_session() {
+        let id = app.thread.id;
+        // Leaving must stay instant; a slow daemon just keeps the row.
+        commands::archive_untouched(
+            &mut app.threads,
+            id,
+            &client,
+            std::time::Duration::from_millis(300),
+        )
+        .await;
     }
     let draft_save = servers::save_current(&app, &client);
     event_task.abort();

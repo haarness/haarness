@@ -466,24 +466,30 @@ impl App {
                             && call_id.starts_with("shell-")
                         {
                             self.notice = "Ready".into();
-                            self.show_toast(
-                                Some(if *is_error {
-                                    "Shell failed".into()
-                                } else {
-                                    "Shell finished".into()
-                                }),
-                                if output.trim().is_empty() {
-                                    "Command completed".into()
-                                } else {
-                                    output.clone()
-                                },
-                                if *is_error {
-                                    ToastVariant::Error
-                                } else {
-                                    ToastVariant::Success
-                                },
-                                std::time::Duration::from_secs(if *is_error { 8 } else { 4 }),
-                            );
+                            if *is_error && output.starts_with("permission denied") {
+                                // The person just answered the prompt; a red
+                                // "failed" card would contradict their choice.
+                                self.notice = "Shell command not run".into();
+                            } else {
+                                self.show_toast(
+                                    Some(if *is_error {
+                                        "Shell failed".into()
+                                    } else {
+                                        "Shell finished".into()
+                                    }),
+                                    if output.trim().is_empty() {
+                                        "Command completed".into()
+                                    } else {
+                                        output.clone()
+                                    },
+                                    if *is_error {
+                                        ToastVariant::Error
+                                    } else {
+                                        ToastVariant::Success
+                                    },
+                                    std::time::Duration::from_secs(if *is_error { 8 } else { 4 }),
+                                );
+                            }
                         }
                         let item_turn_id = item.turn_id;
                         match item.data {

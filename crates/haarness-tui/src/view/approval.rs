@@ -21,6 +21,8 @@ use crate::view::span::single_line;
 
 /// Context rows the panel gives a long command before eliding.
 const MAX_CONTEXT_ROWS: usize = 4;
+/// Rows of a proposed file change shown before eliding the rest.
+const MAX_CHANGE_ROWS: usize = 8;
 /// The same rail glyph user messages carry; here in the accent color.
 const RAIL: &str = "▎ ";
 
@@ -69,10 +71,18 @@ fn subject(pending: &PendingPermissionInfo) -> Option<String> {
     if category(pending) == "agent_switch" {
         let details = &pending.detail["__agentSwitch"];
         if let (Some(agent), Some(model)) = (details["agent"].as_str(), details["model"].as_str()) {
-            let previous = details["previousModel"].as_str().filter(|previous| *previous != model);
+            let previous = details["previousModel"]
+                .as_str()
+                .filter(|previous| *previous != model);
             let mut text = format!("Agent: {agent}\nModel: {model}");
-            if let Some(previous) = previous { text.push_str("\nPrevious model: "); text.push_str(previous); }
-            if let Some(reason) = pending.detail["reason"].as_str().filter(|value| !value.trim().is_empty()) {
+            if let Some(previous) = previous {
+                text.push_str("\nPrevious model: ");
+                text.push_str(previous);
+            }
+            if let Some(reason) = pending.detail["reason"]
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+            {
                 text.push_str("\nReason: ");
                 text.push_str(reason);
             }
@@ -109,7 +119,10 @@ fn subject(pending: &PendingPermissionInfo) -> Option<String> {
 /// that the headline has just spelled out in words, so it comes off here.
 fn always_rules(pending: &PendingPermissionInfo, subject: Option<&str>) -> Vec<String> {
     if category(pending) == "agent_switch" && pending.detail["__agentSwitch"]["agent"].is_string() {
-        return vec![format!("only agent {} in this session", pending.detail["__agentSwitch"]["agent"].as_str().unwrap())];
+        return vec![format!(
+            "only agent {} in this session",
+            pending.detail["__agentSwitch"]["agent"].as_str().unwrap()
+        )];
     }
     let prefix = format!("{}:", category(pending));
     pending
@@ -117,6 +130,21 @@ fn always_rules(pending: &PendingPermissionInfo, subject: Option<&str>) -> Vec<S
         .iter()
         .map(|rule| rule.strip_prefix(&prefix).unwrap_or(rule).to_owned())
         .filter(|rule| Some(rule.as_str()) != subject)
+        // A bare `*` is the whole category; say so rather than print a glob.
+        .map(|rule| {
+            if rule == "*" {
+                match category(pending) {
+                    "edit" => "every file edit".into(),
+                    "bash" => "every shell command".into(),
+                    "read" => "every file read".into(),
+                    "webfetch" | "fetch" => "every URL fetch".into(),
+                    other if !other.is_empty() => format!("every {other} request"),
+                    _ => rule,
+                }
+            } else {
+                rule
+            }
+        })
         .collect()
 }
 
@@ -196,11 +224,50 @@ pub fn approval_lines(app: &App, width: usize) -> TaggedLines {
         }
     }
 
+    // An edit is approved for what it changes, not for its file name: show
+    // the change itself, short and coloured like the diff it will become.
+    let change = change_preview(pending, inner.saturating_sub(2).max(10));
+    if !change.is_empty() {
+        push_row(&mut panel, Vec::new(), width, theme, focused);
+        let hidden = change.len().saturating_sub(MAX_CHANGE_ROWS);
+        for (marker, text) in change.into_iter().take(MAX_CHANGE_ROWS) {
+            let (fg, bg) = match marker {
+                '+' => (theme.diff.added, theme.diff.added_bg),
+                '-' => (theme.diff.removed, theme.diff.removed_bg),
+                _ => (theme.muted, theme.overlay),
+            };
+            let row = format!("{marker} {text}");
+            let pad = inner.saturating_sub(row.width());
+            push_row(
+                &mut panel,
+                vec![
+                    Span::new("  ", theme.text).on(theme.overlay),
+                    Span::new(row, fg).on(bg),
+                    Span::new(" ".repeat(pad), fg).on(bg),
+                ],
+                width,
+                theme,
+                focused,
+            );
+        }
+        if hidden > 0 {
+            push_row(
+                &mut panel,
+                vec![Span::new(format!("  … {hidden} more lines"), theme.muted).on(theme.overlay)],
+                width,
+                theme,
+                focused,
+            );
+        }
+    }
+
     if let Some(choice) = staged {
         // Confirm stage: name the scope the rule is about to enter. The rule
         // itself only earns a row where it reaches wider than the subject
         // already shown; otherwise saying so would print that string twice.
-        let scope = if choice == 'r' { "this repository and its worktrees" } else if choice == 'w' {
+        let scope = if choice == 'r' {
+            "this repository and its worktrees"
+        } else if choice == 'w' {
             "this folder"
         } else {
             "this session"
@@ -266,6 +333,50 @@ pub fn approval_lines(app: &App, width: usize) -> TaggedLines {
         push_row(&mut panel, footer, width, theme, focused);
     }
     panel
+}
+
+/// The lines a file-changing request would add and remove, as `(marker,
+/// text)` pairs clipped to `width`: an `edit`'s old/new text, an
+/// `apply_patch` envelope's hunks, or the opening of a `write`.
+fn change_preview(pending: &PendingPermissionInfo, width: usize) -> Vec<(char, String)> {
+    let detail = &pending.detail;
+    let text = |key: &str| detail.get(key).and_then(serde_json::Value::as_str);
+    let clip = |line: &str| single_line(line.trim_end(), width.saturating_sub(2));
+    if let (Some(old), Some(new)) = (text("old"), text("new")) {
+        let diff = similar::TextDiff::from_lines(old, new);
+        return diff
+            .iter_all_changes()
+            .map(|change| {
+                let marker = match change.tag() {
+                    similar::ChangeTag::Delete => '-',
+                    similar::ChangeTag::Insert => '+',
+                    similar::ChangeTag::Equal => ' ',
+                };
+                (marker, clip(change.value()))
+            })
+            .collect();
+    }
+    if let Some(patch) = text("input")
+        .or_else(|| text("patch"))
+        .filter(|patch| patch.trim_start().starts_with("*** Begin Patch"))
+    {
+        return patch
+            .lines()
+            .filter_map(|line| {
+                let mut chars = line.chars();
+                match chars.next() {
+                    Some(marker @ ('+' | '-')) => Some((marker, clip(chars.as_str()))),
+                    _ => None,
+                }
+            })
+            .collect();
+    }
+    if category(pending) == "edit" {
+        if let Some(content) = text("content") {
+            return content.lines().map(|line| ('+', clip(line))).collect();
+        }
+    }
+    Vec::new()
 }
 
 /// One panel row: accent rail, content, surface background to the edge.

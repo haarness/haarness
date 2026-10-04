@@ -118,8 +118,12 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
                         .map(|path| {
                             if let Some(agent) = path.strip_prefix("agent://") {
                                 (format!("@{agent}"), "Delegate to agent".into())
+                            } else if path.ends_with('/') {
+                                (path.clone(), "Folder".into())
                             } else {
-                                (path.clone(), "File snapshot".into())
+                                // A path says what it is; "File snapshot" on
+                                // every row only pushed the paths apart.
+                                (path.clone(), String::new())
                             }
                         })
                         .collect(),
@@ -157,13 +161,31 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
     }
     let visible = rows.len().min(7).min(max_height - 1);
     let start = app.selection.saturating_sub(visible - 1);
+    // One column for the labels that carry a description, so a long one
+    // does not shove its description out of line with the rows around it.
+    let label_width = rows
+        .iter()
+        .skip(start)
+        .take(visible)
+        .filter(|(_, description)| !description.is_empty())
+        .map(|(label, _)| label.width())
+        .max()
+        .unwrap_or_default()
+        .clamp(18, (width / 2).max(18))
+        .min(width.saturating_sub(8));
     for (index, (label, description)) in rows.into_iter().enumerate().skip(start).take(visible) {
         let marker = if index == app.selection { "›" } else { " " };
-        let label_width = 18.min(width.saturating_sub(8));
-        let body = format!(
-            "  {marker} {label:<label_width$} {}",
-            single_line(&description, width.saturating_sub(label_width + 7))
-        );
+        let body = if description.is_empty() {
+            // A bare path gets the whole row, and an over-long one keeps
+            // its end: the file name is what tells two rows apart.
+            format!("  {marker} {}", leading_ellipsis(&label, width.saturating_sub(5)))
+        } else {
+            let label = single_line(&label, label_width);
+            format!(
+                "  {marker} {label:<label_width$} {}",
+                single_line(&description, width.saturating_sub(label_width + 7))
+            )
+        };
         let mut row = line(
             pad(&body, width),
             if index == app.selection {
@@ -184,6 +206,11 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
     lines
 }
 
+/// What sets one model apart from the next: the id to type (whose prefix
+/// also says who serves it), how much it can read, and what it costs.
+/// Abilities nearly every model shares (reasoning, vision, tools) and the
+/// output ceiling are noise in a list of fifty; only a missing tool ability
+/// is worth a word, since agents depend on it.
 fn model_detail(app: &App, qualified: &str, status: &str) -> String {
     let Some((provider_id, model_id)) = qualified.split_once('/') else {
         return status.to_owned();
@@ -198,31 +225,19 @@ fn model_detail(app: &App, qualified: &str, status: &str) -> String {
         parts.push(status.to_owned());
     }
     if let Some(info) = info {
-        let mut capabilities = Vec::new();
-        if info.reasoning {
-            capabilities.push("reasoning");
-        }
-        if info.images {
-            capabilities.push("vision");
-        }
-        if info.video {
-            capabilities.push("video");
-        }
-        if info.tools {
-            capabilities.push("tools");
-        }
-        if !capabilities.is_empty() {
-            parts.push(capabilities.join("+"));
-        }
         if let Some(context) = info.context_window {
-            parts.push(format!("{} ctx", token_limit(context)));
+            parts.push(format!("{} context", token_limit(context)));
         }
-        if let Some(output) = info.max_output_tokens {
-            parts.push(format!("{} out", token_limit(output)));
+        if !info.tools {
+            parts.push("no tools".to_owned());
         }
-        if let Some(pricing) = info.pricing {
+        // A subscription model is priced at zero; "$0/0" says nothing useful.
+        if let Some(pricing) = info
+            .pricing
+            .filter(|pricing| pricing.input > 0.0 || pricing.output > 0.0)
+        {
             parts.push(format!(
-                "${}/{} MTok",
+                "${}/{} per MTok",
                 compact_price(pricing.input),
                 compact_price(pricing.output)
             ));
@@ -270,6 +285,24 @@ fn compact_decimal(value: f64, precision: usize, suffix: &str) -> String {
 
 fn compact_price(value: f64) -> String {
     compact_decimal(value, 3, "")
+}
+
+/// Fit `text` into `width` cells by dropping its start rather than its end.
+fn leading_ellipsis(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return text.to_owned();
+    }
+    let mut kept: Vec<char> = Vec::new();
+    let mut used = 1;
+    for character in text.chars().rev() {
+        let cell = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+        if used + cell > width {
+            break;
+        }
+        used += cell;
+        kept.push(character);
+    }
+    std::iter::once('…').chain(kept.into_iter().rev()).collect()
 }
 
 /// Center-card content for explicit dialogs. Autocomplete remains attached to
@@ -404,6 +437,7 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
                             .and_then(|catalog| catalog.current_workspace_id.as_deref())
                             .is_some_and(|current| entry.value == format!("workspace:{current}")),
                         crate::state::OptionsKind::CloudRouter
+                        | crate::state::OptionsKind::Billing
                         | crate::state::OptionsKind::InputQueue
                         | crate::state::OptionsKind::InputQueueActions
                         | crate::state::OptionsKind::Management
@@ -980,6 +1014,76 @@ fn workflow_dialog(
 /// view's first lines, or the hints above the API-key prompt. Each source
 /// line gets one row when it fits and a wrapped continuation when it does
 /// not, within a cap so the choices stay on screen.
+/// The `/billing` summary: who, which plan, and what is left to spend. Rows
+/// are `label  value` pairs so they line up like the rest of the panels.
+fn billing_preface(billing: &haarness_account::billing::State) -> Vec<String> {
+    use haarness_account::billing::display_credits;
+    if !billing.logged_in {
+        return vec!["Not signed in to Haarness Cloud.".into()];
+    }
+    let mut lines = Vec::new();
+    if let Some(error) = &billing.error {
+        lines.push(format!("\u{26a0}  Billing unavailable  {error}"));
+    }
+    let Some(summary) = &billing.summary else {
+        if billing.error.is_none() {
+            lines.push("Loading your plan and credits…".into());
+        }
+        return lines;
+    };
+    let day = |value: &str| {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .map_or_else(|_| value.to_owned(), |at| at.format("%b %-d").to_string())
+    };
+    let plan_code = summary.plan.trim();
+    let mut plan = if plan_code.is_empty() || plan_code.eq_ignore_ascii_case("no plan") {
+        // Cloud's own wording for an account that has not subscribed.
+        "No plan yet".to_owned()
+    } else {
+        let mut letters = plan_code.chars();
+        letters.next().map_or_else(String::new, |first| {
+            first.to_uppercase().chain(letters).collect::<String>() + " plan"
+        })
+    };
+    if let Some(status) = summary
+        .subscription_status
+        .as_deref()
+        .filter(|status| !matches!(*status, "active" | "trialing"))
+    {
+        plan = format!("{plan} · {}", status.replace('_', " "));
+    }
+    if let Some(at) = &summary.period_ends_at {
+        let verb = if summary.cancel_at_period_end {
+            "ends"
+        } else {
+            "renews"
+        };
+        plan = format!("{plan} · {verb} {}", day(at));
+    }
+    lines.push(format!("Account  {}", summary.account_name));
+    lines.push(format!("Plan  {plan}"));
+    let mut included = format!("{} credits", display_credits(&summary.included_credits));
+    if let Some(at) = &summary.resets_at {
+        included = format!("{included} · resets {}", day(at));
+    }
+    lines.push(format!("Included AI  {included}"));
+    lines.push(format!(
+        "Purchased  {} credits",
+        display_credits(&summary.purchased_credits)
+    ));
+    let held = display_credits(&summary.held_credits);
+    if held != "0" {
+        lines.push(format!("Reserved  {held} credits in use"));
+    }
+    lines.push(format!("Cloud compute  {} units", summary.cloud_units));
+    if summary.overage_opt_in {
+        lines.push("Overage  on · purchased credits pay past your allowance".into());
+    } else if display_credits(&summary.purchased_credits) != "0" {
+        lines.push("Overage  off · purchased credits are not spent".into());
+    }
+    lines
+}
+
 fn preface_rows(app: &App, width: usize, cap: usize) -> Vec<Line> {
     let lines: Vec<String> = match app.overlay {
         Overlay::Options {
@@ -997,6 +1101,10 @@ fn preface_rows(app: &App, width: usize, cap: usize) -> Vec<Line> {
             kind: crate::state::OptionsKind::ConnectApiKey,
             ..
         } => app.connect_key_hints(),
+        Overlay::Options {
+            kind: crate::state::OptionsKind::Billing,
+            ..
+        } => billing_preface(&app.billing),
         _ => Vec::new(),
     };
     if lines.is_empty() || cap == 0 {

@@ -156,6 +156,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn an_exhausted_balance_reads_as_advice() {
+        let raw = CoreError::Provider(
+            "HTTP 402 Payment Required: [insufficient_credits] insufficient credits: unit Nanos \
+             requested 104592000, available 0, overage opt-in false"
+                .into(),
+        );
+        let CoreError::Provider(message) = readable(raw) else {
+            panic!("still a provider error");
+        };
+        assert!(
+            message.starts_with("Your included Haarness Cloud credits are used up."),
+            "{message}"
+        );
+        assert!(message.contains("Turn on overage"), "{message}");
+        assert!(!message.contains("Nanos"), "{message}");
+        let spent = CoreError::Provider(
+            "HTTP 402: [insufficient_credits] insufficient credits: unit Nanos requested 1, \
+             available 0, overage opt-in true"
+                .into(),
+        );
+        assert!(
+            matches!(readable(spent), CoreError::Provider(m) if m.starts_with("You're out of Haarness Cloud credits."))
+        );
+        let other = CoreError::Provider("HTTP 500: boom".into());
+        assert!(matches!(readable(other), CoreError::Provider(m) if m == "HTTP 500: boom"));
+    }
+
     fn uuid_for_test() -> String {
         format!(
             "{}-{}",
@@ -277,6 +305,33 @@ impl HaarnessCloudProvider {
 fn error(e: impl std::fmt::Display) -> CoreError {
     CoreError::Provider(e.to_string())
 }
+
+/// Say what an exhausted Cloud balance means for the person reading it. The
+/// router's 402 reads `[insufficient_credits] insufficient credits: unit
+/// Nanos requested …`, which is accounting, not advice.
+fn readable(error: CoreError) -> CoreError {
+    match error {
+        CoreError::Provider(message) if message.contains("[insufficient_credits]") => {
+            CoreError::Provider(
+                if message.contains("overage opt-in false") {
+                    // Purchased credits only pay once overage is on, so "out of
+                    // credits" would be wrong for someone who just bought some.
+                    "Your included Haarness Cloud credits are used up. Turn on overage in \
+                     Billing to spend purchased credits, or add credits or choose a plan \
+                     (in the terminal: /billing)."
+                } else if message.contains("frozen") {
+                    "Your purchased Haarness Cloud credits are on hold. Open Billing in \
+                     Haarness Cloud for details (in the terminal: /billing)."
+                } else {
+                    "You're out of Haarness Cloud credits. Add credits or choose a plan under \
+                     Billing (in the terminal: /billing)."
+                }
+                .into(),
+            )
+        }
+        other => other,
+    }
+}
 #[async_trait]
 impl ModelProvider for HaarnessCloudProvider {
     fn id(&self) -> &str {
@@ -327,9 +382,13 @@ impl ModelProvider for HaarnessCloudProvider {
         let models = self
             .catalog()
             .map_or_else(Vec::new, |(_, catalog)| catalog.get(&[]));
-        transport
+        let stream = transport
             .with_model_info(models)
             .stream(request, cancel)
             .await
+            .map_err(readable)?;
+        Ok(Box::pin(futures::StreamExt::map(stream, |event| {
+            event.map_err(readable)
+        })))
     }
 }
