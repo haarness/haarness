@@ -212,6 +212,27 @@ mod tests {
             "{message}"
         );
 
+        for (raw, start) in [
+            (
+                "HTTP 404 Not Found: [upstream_404] upstream returned HTTP 404",
+                "The provider no longer serves this model.",
+            ),
+            (
+                "HTTP 429: [upstream_429] upstream returned HTTP 429",
+                "The provider is rate limiting this model right now.",
+            ),
+            (
+                "HTTP 502: [upstream_503] upstream returned HTTP 503",
+                "The provider is overloaded or unavailable right now.",
+            ),
+        ] {
+            let CoreError::Provider(message) = readable_router(CoreError::Provider(raw.into()))
+            else {
+                panic!("still a provider error");
+            };
+            assert!(message.starts_with(start), "{raw} → {message}");
+        }
+
         let byok = CoreError::Provider(
             "HTTP 402: [payment_required] routing your own provider keys needs a Haarness Cloud \
              plan or the trial"
@@ -220,8 +241,14 @@ mod tests {
         let CoreError::Provider(message) = readable(byok) else {
             panic!("still a provider error");
         };
-        assert!(message.starts_with("Routing your own provider keys"), "{message}");
-        assert!(message.ends_with("(in the terminal: /billing)."), "{message}");
+        assert!(
+            message.starts_with("Routing your own provider keys"),
+            "{message}"
+        );
+        assert!(
+            message.ends_with("(in the terminal: /billing)."),
+            "{message}"
+        );
     }
 
     fn uuid_for_test() -> String {
@@ -382,6 +409,24 @@ fn readable_with(error: CoreError, terminal: &str) -> CoreError {
                  Billing{terminal}."
             )
         }
+    } else if message.contains("[upstream_404]") {
+        // The provider stopped serving a model it still lists (a deprecation); Cloud withdraws such models at its
+        // next catalogue refresh.
+        "The provider no longer serves this model. Choose another model.".to_owned()
+    } else if message.contains("[upstream_429]") {
+        "The provider is rate limiting this model right now. Try again in a moment, or choose another model."
+            .to_owned()
+    } else if [
+        "[upstream_500]",
+        "[upstream_502]",
+        "[upstream_503]",
+        "[upstream_529]",
+    ]
+    .iter()
+    .any(|code| message.contains(code))
+    {
+        "The provider is overloaded or unavailable right now. Try again in a moment, or choose another model."
+            .to_owned()
     } else if message.contains("[payment_required]") {
         // The router refuses your own provider keys without a plan or trial; nothing is
         // charged for those requests, but the account needs one to route them.

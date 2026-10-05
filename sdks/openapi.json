@@ -911,6 +911,40 @@
         },
         "type": "object"
       },
+      "ContextUsage": {
+        "properties": {
+          "compactAt": {
+            "type": "integer"
+          },
+          "estimatedTokens": {
+            "type": "integer"
+          },
+          "reportedTokens": {
+            "type": "integer"
+          },
+          "tokens": {
+            "type": "integer"
+          },
+          "window": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "tokens",
+          "reportedTokens",
+          "estimatedTokens",
+          "window",
+          "compactAt"
+        ],
+        "type": "object"
+      },
       "CreateThreadRequest": {
         "description": "Unset fields resolve to configured defaults on the server, falling back to\nthe built-in `build` agent and the current default OpenAI model.",
         "properties": {
@@ -3890,7 +3924,7 @@
         "type": "object"
       },
       "PromptUsage": {
-        "description": "Text estimates from the final prepared request, after request hooks.\nProvider framing and binary media tokens are not included.",
+        "description": "Estimates of the final prepared request, after request hooks, with the\nweights of the model's tokenizer family. Provider framing is not included;\nthe reported input of the same request calibrates later estimates.",
         "properties": {
           "history_tokens": {
             "format": "int64",
@@ -3898,6 +3932,12 @@
             "type": "integer"
           },
           "media_attachments": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "media_tokens": {
+            "description": "Estimated tokens of those attachments; zero in records made before\nmedia was estimated.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -5186,6 +5226,9 @@
           },
           "cacheWriteTokens": {
             "type": "integer"
+          },
+          "context": {
+            "$ref": "#/components/schemas/ContextUsage"
           },
           "costIncomplete": {
             "type": "boolean"

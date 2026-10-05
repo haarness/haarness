@@ -1823,6 +1823,15 @@ async fn thread_usage(
             _ => None,
         })
         .unwrap_or(Value::Null);
+    // The one context number every client shows, measured as compaction does.
+    let context = state.runtime.context_usage(id).await?;
+    usage["context"] = json!({
+        "tokens": context.estimate.tokens,
+        "reportedTokens": context.estimate.reported,
+        "estimatedTokens": context.estimate.estimated,
+        "window": context.window,
+        "compactAt": context.compact_at,
+    });
     Ok(Json(usage))
 }
 

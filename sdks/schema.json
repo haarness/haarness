@@ -3477,7 +3477,7 @@
         "type": "object"
       },
       "PromptUsage": {
-        "description": "Text estimates from the final prepared request, after request hooks.\nProvider framing and binary media tokens are not included.",
+        "description": "Estimates of the final prepared request, after request hooks, with the\nweights of the model's tokenizer family. Provider framing is not included;\nthe reported input of the same request calibrates later estimates.",
         "properties": {
           "history_tokens": {
             "format": "int64",
@@ -3485,6 +3485,12 @@
             "type": "integer"
           },
           "media_attachments": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "media_tokens": {
+            "description": "Estimated tokens of those attachments; zero in records made before\nmedia was estimated.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"

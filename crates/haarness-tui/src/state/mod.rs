@@ -622,6 +622,9 @@ pub struct App {
     /// reflow to either more or fewer terminal rows as delimiters close.
     pub scroll_adjustment: std::cell::Cell<isize>,
     pub last_transcript_len: std::cell::Cell<usize>,
+    /// Context estimate of the shown thread, keyed by its item count, last
+    /// sequence and undo boundary; the meters read it every frame.
+    pub context_tokens: std::cell::Cell<Option<((usize, u64, Option<u64>), u64)>>,
     /// Server identity (version, workspace, git branch) for the header/home.
     pub server_info: Option<haarness_protocol::ServerInfo>,
     /// Render tick (~5/s) driving the working spinner.
@@ -861,6 +864,7 @@ impl App {
             max_viewport_offset: std::cell::Cell::new(0),
             scroll_adjustment: std::cell::Cell::new(0),
             last_transcript_len: std::cell::Cell::new(0),
+            context_tokens: std::cell::Cell::new(None),
             server_info: None,
             tick: 0,
             turn_started: None,
@@ -1803,12 +1807,34 @@ impl App {
         }
         priced.then_some(total)
     }
-    /// Context fill of the last turn against the model's window, 0..=1.
+    /// Context the next request carries against the model's window, 0..=1:
+    /// the last provider report plus an estimate of what was added since,
+    /// measured as the runtime measures it for compaction.
     pub fn context_fill(&self) -> Option<f64> {
-        let last_input = self.items.iter().rev().find_map(|item| match &item.data {
-            ItemData::Usage { input_tokens, .. } => Some(*input_tokens),
-            _ => None,
-        })?;
+        let revert = self.thread.revert.as_ref().map(|revert| revert.sequence);
+        let key = (
+            self.items.len(),
+            self.items.last().map_or(0, |item| item.sequence),
+            revert,
+        );
+        let tokens = match self.context_tokens.get() {
+            Some((cached, tokens)) if cached == key => tokens,
+            _ => {
+                let retained = self
+                    .items
+                    .iter()
+                    .filter(|item| revert.is_none_or(|sequence| item.sequence <= sequence))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let tokenizer = haarness_protocol::tokens::Tokenizer::for_model(&self.thread.model);
+                let tokens = haarness_protocol::tokens::context(&retained, tokenizer).tokens;
+                self.context_tokens.set(Some((key, tokens)));
+                tokens
+            }
+        };
+        if tokens == 0 {
+            return None;
+        }
         let window = self
             .providers
             .iter()
@@ -1818,9 +1844,10 @@ impl App {
             .find(|model| {
                 self.thread.model.starts_with(&model.id) || model.id == self.thread.model
             })?
-            .context_window?;
+            .context_window
+            .filter(|window| *window > 0)?;
         #[allow(clippy::cast_precision_loss)] // display meter only
-        Some((last_input as f64 / window as f64).clamp(0.0, 1.0))
+        Some((tokens as f64 / window as f64).clamp(0.0, 1.0))
     }
     pub fn agent(&self) -> &str {
         self.agents

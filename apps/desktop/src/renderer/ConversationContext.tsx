@@ -84,6 +84,14 @@ export function ConversationContext() {
       .find((provider) => provider.id === thread()?.provider)
       ?.models.find((model) => model.id === thread()?.model);
   const limit = () => model()?.contextWindow;
+  /** The server's context number, measured as compaction measures it; shown
+   * only when the model states its window. */
+  const inUse = () => {
+    const context = totals()?.context;
+    return context?.window
+      ? { ...context, window: context.window, percent: (context.tokens / context.window) * 100 }
+      : undefined;
+  };
   const percent = () =>
     limit() && context() ? (context()!.total / limit()!) * 100 : null;
   const latest = () => {
@@ -122,6 +130,34 @@ export function ConversationContext() {
             app.state.providers,
           )}
         </ProviderLabel>
+        <Show when={inUse()}>
+          {(usage) => (
+            <section aria-label={t("Context in use")}>
+              <h3>{t("Context in use")}</h3>
+              <div class="context-total">
+                <strong data-testid="context-tokens">
+                  {tokenNumber(usage().tokens)}
+                </strong>
+                <span>
+                  {t("of {count} tokens", { count: tokenNumber(usage().window) })}
+                </span>
+              </div>
+              <progress
+                aria-label={t("Context in use")}
+                max="100"
+                value={Math.min(100, usage().percent)}
+              />
+              <small>
+                {t("{percent}% of the context window", {
+                  percent: usage().percent.toFixed(1),
+                })}
+              </small>
+              <p class="context-note">
+                {t("Last request reported by the provider plus an estimate of what was added since. Compacts automatically above {count} tokens.", { count: tokenNumber(usage().compactAt) })}
+              </p>
+            </section>
+          )}
+        </Show>
         <section aria-label={t("Retained context estimate")}>
           <h3>{t("Retained text estimate")}</h3>
           <div class="context-total">
@@ -183,9 +219,16 @@ export function ConversationContext() {
                   <div><dt>{t("System instructions")}</dt><dd>{tokenNumber(prompt().system_tokens)}</dd></div>
                   <div><dt>{t("Tool definitions")}</dt><dd>{tokenNumber(prompt().tool_tokens)}</dd></div>
                   <div><dt>{t("Conversation history")}</dt><dd>{tokenNumber(prompt().history_tokens)}</dd></div>
-                  <div><dt>{t("Total estimated tokens")}</dt><dd>{tokenNumber(prompt().system_tokens + prompt().tool_tokens + prompt().history_tokens)}</dd></div>
+                  <Show when={prompt().media_tokens}>
+                    <div><dt>{t("Media")}</dt><dd>{tokenNumber(prompt().media_tokens)}</dd></div>
+                  </Show>
+                  <div><dt>{t("Total estimated tokens")}</dt><dd>{tokenNumber(prompt().system_tokens + prompt().tool_tokens + prompt().history_tokens + (prompt().media_tokens ?? 0))}</dd></div>
                 </dl>
-                <p class="context-note">{t("Snapshot after request hooks, estimated at 4 characters per token. Excludes provider framing and tokens for {count} media attachments. This describes the last request, not unsent changes.", { count: prompt().media_attachments })}</p>
+                <p class="context-note">
+                  {prompt().media_tokens || !prompt().media_attachments
+                    ? t("Snapshot after request hooks, estimated with this model family's token weights. Excludes provider framing. This describes the last request, not unsent changes.")
+                    : t("Snapshot after request hooks, estimated at 4 characters per token. Excludes provider framing and tokens for {count} media attachments. This describes the last request, not unsent changes.", { count: prompt().media_attachments })}
+                </p>
               </section>
             )}
           </Show>

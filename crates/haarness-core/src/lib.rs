@@ -29,6 +29,8 @@ pub use permissions::{
     PermissionDecision, PermissionEngine, PermissionRule, resolve_permission_path,
 };
 pub use ports::*;
-pub use runtime::{AgentRuntime, DirectToolResult, EmptyToolRegistry, StaticProviderRegistry};
+pub use runtime::{
+    AgentRuntime, ContextUsage, DirectToolResult, EmptyToolRegistry, StaticProviderRegistry,
+};
 pub use tool_catalog::{LOAD_TOOL_NAME, LazyToolSettings, load_tool_definition, select_tools};
 pub use workflows::{WorkflowLogDraft, WorkflowRepository};
