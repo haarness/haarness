@@ -15,6 +15,15 @@ function run(command, args, cwd = root) {
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 const name = process.platform === "win32" ? "haarness.exe" : "haarness";
 let binary = process.env.HAARNESS_BIN;
+// A development build signs in to the local Cloud stack, never production;
+// shipping one would give users an app that cannot sign in.
+if (binary && /[\\/]target[\\/]debug[\\/]/.test(resolve(binary)) && process.env.HAARNESS_PACKAGE_DEBUG !== "1") {
+  console.error(
+    `${binary} is a development build: it signs in to the local Cloud stack, not app.haarness.ai.\n` +
+      "Package a release build (unset HAARNESS_BIN), or set HAARNESS_PACKAGE_DEBUG=1 for a local-only package.",
+  );
+  process.exit(1);
+}
 if (!binary) {
   run("cargo", ["build", "--release", "-p", "haarness-cli"]);
   binary = join(root, "target/release", name);

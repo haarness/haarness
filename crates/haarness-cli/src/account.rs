@@ -409,11 +409,7 @@ pub async fn rpc(client: &Client, input: Value) -> Result<Value> {
                 _ => "app",
             };
             {
-                let base = std::env::var("HAARNESS_CLOUD_WEB_ORIGIN")
-                    .ok()
-                    .map(|url| haarness_account::safe_url(&url))
-                    .transpose()?
-                    .unwrap_or_else(|| client.config.api_url.clone());
+                let base = client.config.web_origin()?;
                 let mut url = base.join(&if input["page"] == "session-settings" { format!("app/sessions/{}/settings", id(&input)?) } else {page.to_owned()})?;
                 if matches!(input["page"].as_str(), Some("billing" | "topup" | "usage")) {
                     if let Some(account) = client.config.selected_account() {
