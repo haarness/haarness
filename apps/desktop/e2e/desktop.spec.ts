@@ -10306,6 +10306,11 @@ test("conversation context inspector shows measured usage, retained estimates an
   await expect(metric(totals,"Cache write tokens")).toHaveText("100");
   await expect(metric(totals,"Known cost")).toHaveText("$0.0250");
   await expect(metric(latest,"Input")).toHaveText("500");
+  // The last report after the compaction (500 in + 100 out), nothing appended since.
+  const inUse = panel.getByRole("region", {name:"Context in use",exact:true});
+  await expect(inUse.getByTestId("context-tokens")).toHaveText("600");
+  await expect(inUse).toContainText("of " + known.model.contextWindow!.toLocaleString("en-US") + " tokens");
+  await expect(inUse.getByRole("progressbar", {name:"Context in use"})).toBeVisible();
   await expect(panel.getByTestId("context-estimate")).toHaveText("13");
   await expect(panel.getByRole("progressbar", {name:"Estimated text share of context limit"})).toBeVisible();
   await expect(panel).toContainText(known.model.contextWindow!.toLocaleString("en-US") + " model context limit");
@@ -10320,6 +10325,7 @@ test("conversation context inspector shows measured usage, retained estimates an
   await expect(panel.getByTestId("context-estimate")).toHaveText("0");
   await expect(panel).toContainText("Model context limit unavailable");
   await expect(panel.getByRole("progressbar")).toHaveCount(0);
+  await expect(panel.getByRole("region", {name:"Context in use",exact:true})).toHaveCount(0);
   await expect(latest).toContainText("No usage report");
   const turn = await client.startTurn(empty.id,{text:"context live update",requestId:crypto.randomUUID()});
   await client.waitTurn(turn.id);

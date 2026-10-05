@@ -8,6 +8,7 @@ mod input;
 mod management;
 mod model_names;
 mod pty;
+pub mod tokens;
 mod tools;
 mod workflow;
 mod workspace;
@@ -172,14 +173,19 @@ pub struct Turn {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Text estimates from the final prepared request, after request hooks.
-/// Provider framing and binary media tokens are not included.
+/// Estimates of the final prepared request, after request hooks, with the
+/// weights of the model's tokenizer family. Provider framing is not included;
+/// the reported input of the same request calibrates later estimates.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PromptUsage {
     pub system_tokens: u64,
     pub tool_tokens: u64,
     pub history_tokens: u64,
     pub media_attachments: u64,
+    /// Estimated tokens of those attachments; zero in records made before
+    /// media was estimated.
+    #[serde(default)]
+    pub media_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

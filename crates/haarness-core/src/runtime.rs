@@ -10,6 +10,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use futures::StreamExt;
+use haarness_protocol::tokens::{self, Tokenizer};
 use haarness_protocol::{
     BackgroundTaskInfo, BtwRequest, BtwResponse, CompactRequest, CreateThreadRequest,
     ForkThreadRequest, GoalActionRequest, GoalActionResponse, GoalCompletion, GoalLogicalTurnEvent,
@@ -76,30 +77,15 @@ fn latest_todo_checkpoint(items: &[Item], through: Option<u64>) -> TodoCheckpoin
 /// compaction. The summary precedes its retained verbatim tail even though the
 /// tail's durable rows necessarily have earlier sequence numbers.
 fn provider_visible_items(items: &[Item]) -> Vec<&Item> {
-    let Some(compaction_index) = items
-        .iter()
-        .rposition(|item| matches!(item.data, ItemData::Compaction { .. }))
-    else {
-        return items.iter().collect();
-    };
-    let tail_start = match &items[compaction_index].data {
-        ItemData::Compaction {
-            tail_start_sequence,
-            ..
-        } => *tail_start_sequence,
-        _ => None,
-    };
-    let mut visible = vec![&items[compaction_index]];
-    if let Some(tail_start) = tail_start {
-        visible.extend(items[..compaction_index].iter().filter(|item| {
-            item.sequence >= tail_start && !matches!(item.data, ItemData::Compaction { .. })
-        }));
-    }
-    visible.extend(items[compaction_index + 1..].iter());
-    visible
+    tokens::visible_items(items)
 }
 
-fn retained_tail_start(items: &[Item], tail_turns: usize, token_budget: u64) -> Option<u64> {
+fn retained_tail_start(
+    items: &[Item],
+    tail_turns: usize,
+    token_budget: u64,
+    tokenizer: Tokenizer,
+) -> Option<u64> {
     let visible = provider_visible_items(items)
         .into_iter()
         .filter(|item| !matches!(item.data, ItemData::Compaction { .. }))
@@ -108,8 +94,7 @@ fn retained_tail_start(items: &[Item], tail_turns: usize, token_budget: u64) -> 
     let mut users = 0_usize;
     let mut start = None;
     for item in visible.into_iter().rev() {
-        let size = serde_json::to_string(&item.data).map_or(0, |json| json.len() as u64);
-        tokens = tokens.saturating_add(size / 4 + 4);
+        tokens = tokens.saturating_add(tokenizer.item(&item.data));
         if tokens > token_budget {
             break;
         }
@@ -135,13 +120,15 @@ fn complete_compaction_request(
     items: &[Item],
     mut request: CompactRequest,
     input_limit: Option<u64>,
+    tokenizer: Tokenizer,
 ) -> CompactRequest {
     request.todo_checkpoint = Some(latest_todo_checkpoint(items, None));
     let tail_budget = input_limit
         .map(|limit| limit / 2)
         .unwrap_or(settings.preserve_recent_tokens)
         .min(settings.preserve_recent_tokens);
-    request.tail_start_sequence = retained_tail_start(items, settings.tail_turns, tail_budget);
+    request.tail_start_sequence =
+        retained_tail_start(items, settings.tail_turns, tail_budget, tokenizer);
     request
 }
 
@@ -156,17 +143,30 @@ fn compaction_input_limit(
     let inferred_reserve = model_max_output
         .filter(|value| *value > 0)
         .unwrap_or_else(|| 32_000.min(context_window / 4));
+    // Some catalogs list an output limit as large as the window itself; input
+    // always keeps at least half, or every round would compact to nothing.
     let reserve = settings
         .reserve_output
         .map_or(inferred_reserve, |configured| {
             configured.max(inferred_reserve)
         })
-        .min(context_window);
+        .min(context_window / 2);
     let safety_limit = context_window.saturating_sub(reserve);
     #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     #[allow(clippy::cast_sign_loss)]
     let threshold_limit = (context_window as f64 * settings.threshold.clamp(0.0, 1.0)) as u64;
     safety_limit.min(threshold_limit)
+}
+
+/// The next request's context against the model's limits.
+#[derive(Debug, Clone, Copy)]
+pub struct ContextUsage {
+    pub estimate: tokens::ContextEstimate,
+    /// The model's context window, when its metadata states one; compaction
+    /// assumes 128k otherwise.
+    pub window: Option<u64>,
+    /// Automatic compaction starts above this many tokens.
+    pub compact_at: u64,
 }
 
 struct ActiveTurn {
@@ -549,16 +549,47 @@ fn is_provider_context_overflow(error: &CoreError) -> bool {
         return false;
     };
     let message = message.to_ascii_lowercase();
+    // Rate limits also speak of too many tokens; compacting cannot fix them.
+    if [
+        "rate limit",
+        "too many requests",
+        "throttl",
+        "per minute",
+        "quota",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker))
+    {
+        return false;
+    }
+    // Phrasings collected across providers and local servers (after
+    // opencode's provider-error list).
     [
         "http 413",
         "status 413",
+        "request entity too large",
+        "request too large",
+        "request_too_large",
         "context_length_exceeded",
         "context length exceeded",
+        "model_context_window_exceeded",
         "maximum context length",
         "context window exceeded",
+        "context window exceeds limit",
+        "exceeds the context window",
+        "exceeds the available context size",
+        "greater than the context length",
+        "longer than the model's context length",
+        "context length is only",
+        "configured context size",
+        "maximum prompt length is",
+        "exceeds the maximum number of tokens",
+        "exceeded model token limit",
+        "token limit exceeded",
+        "reduce the length of the messages",
         "too many tokens",
         "prompt is too long",
-        "request too large",
+        "input is too long",
     ]
     .iter()
     .any(|marker| message.contains(marker))
@@ -1759,6 +1790,24 @@ impl AgentRuntime {
     ) -> CoreResult<Vec<haarness_protocol::Item>> {
         self.repository.list_items(id, after).await
     }
+    /// Size of the context the thread's next request carries, measured the
+    /// way automatic compaction measures it, against the model's window and
+    /// the size at which compaction starts. History an undo removed is
+    /// excluded before it is deleted.
+    pub async fn context_usage(&self, id: ThreadId) -> CoreResult<ContextUsage> {
+        let thread = self.repository.get_thread(id).await?;
+        let mut items = self.repository.list_items(id, None).await?;
+        if let Some(revert) = &thread.revert {
+            items.retain(|item| item.sequence <= revert.sequence);
+        }
+        let models = self.components().providers.models(&thread.provider);
+        let window = model_metadata(&models, &thread.model).and_then(|info| info.context_window);
+        Ok(ContextUsage {
+            estimate: tokens::context(&items, Tokenizer::for_model(&thread.model)),
+            window,
+            compact_at: self.compaction_input_limit_for(&thread.provider, &thread.model),
+        })
+    }
     /// Current task-list state. During a pending revert this intentionally
     /// reads the last todo snapshot at the revert boundary, while the full
     /// transcript remains available for unrevert.
@@ -2212,12 +2261,14 @@ impl AgentRuntime {
         items: &[Item],
         request: CompactRequest,
         input_limit: Option<u64>,
+        model: &str,
     ) -> CompactRequest {
         complete_compaction_request(
             &self.components().config.compaction,
             items,
             request,
             input_limit,
+            Tokenizer::for_model(model),
         )
     }
 
@@ -2281,7 +2332,8 @@ impl AgentRuntime {
         let items = self.repository.list_items(id, None).await?;
         let expected_tail = items.last().map(|item| (item.id, item.sequence));
         let input_limit = self.compaction_input_limit_for(&thread.provider, &thread.model);
-        let request = self.complete_compaction_request(&items, request, Some(input_limit));
+        let request =
+            self.complete_compaction_request(&items, request, Some(input_limit), &thread.model);
         let item = self.repository.compact(id, request, expected_tail).await?;
         drop(admission_guard);
         if let Some(hooks) = &self.components().hooks {
@@ -2363,6 +2415,7 @@ impl AgentRuntime {
                         tail_start_sequence: None,
                     },
                     Some(input_limit),
+                    &thread.model,
                 ),
                 summarized_revision.last().copied(),
             )
@@ -5060,6 +5113,7 @@ impl RunnerTask {
                         tail_start_sequence: None,
                     },
                     Some(input_limit),
+                    Tokenizer::for_model(model),
                 ),
                 expected_tail,
             )
@@ -5354,7 +5408,7 @@ impl RunnerTask {
                         context_window,
                         model_info.and_then(|info| info.max_output_tokens),
                     );
-                    if estimate_tokens(provider_visible_items(&items)) > budget {
+                    if tokens::context(&items, Tokenizer::for_model(&model)).tokens > budget {
                         self.set_status("compacting", None);
                         let summary = summarize_context(
                             &provider,
@@ -5406,6 +5460,7 @@ impl RunnerTask {
                                             tail_start_sequence: None,
                                         },
                                         Some(budget),
+                                        Tokenizer::for_model(&model),
                                     ),
                                     expected_tail,
                                 )
@@ -8693,30 +8748,6 @@ fn compaction_provider_context(
     content
 }
 
-/// Rough token estimate for the next provider request: the last reported
-/// input size plus chars/4 for everything appended since. No tokenizer — the
-/// numbers only gate compaction, where being approximately right suffices.
-fn estimate_tokens<'a>(items: impl IntoIterator<Item = &'a Item>) -> u64 {
-    let mut reported = 0_u64;
-    let mut appended = 0_u64;
-    for item in items {
-        if let ItemData::Usage { input_tokens, .. } = &item.data {
-            reported = *input_tokens;
-            appended = 0;
-        } else {
-            // Binary encodings are not text tokens. Reserve a coarse amount
-            // per attachment until the provider reports actual usage.
-            let size = match &item.data {
-                ItemData::UserMessage { text, attachments, .. } => text.len() as u64 + 4096 * attachments.len() as u64,
-                ItemData::ToolResult { output, metadata, .. } => output.len() as u64 + 4096 * metadata.get("attachments").and_then(serde_json::Value::as_array).map_or(0, |values| values.iter().filter(|value| value.is_string()).count()) as u64,
-                data => serde_json::to_string(data).map_or(0, |json| json.len() as u64),
-            };
-            appended += size / 4 + 4;
-        }
-    }
-    reported + appended
-}
-
 fn attachment_summary(sources: &[String]) -> String {
     sources.iter().map(|source| {
         if let Some(data) = source.strip_prefix("data:") {
@@ -9365,6 +9396,7 @@ mod tests {
     };
 
     use chrono::Utc;
+    use haarness_protocol::tokens::{self, Tokenizer};
     use haarness_protocol::{
         GoalLogicalTurnEvent, GoalLogicalTurnPhase, ItemId, ModelInfo, Thread, ThreadId,
         TodoCheckpoint, TodoEntry, TurnId,
@@ -10128,6 +10160,30 @@ mod tests {
     }
 
     #[test]
+    fn context_overflow_errors_are_told_apart_from_rate_limits() {
+        let overflow = |message: &str| {
+            super::is_provider_context_overflow(&CoreError::Provider(message.into()))
+        };
+        for message in [
+            "prompt is too long: 210000 tokens > 200000 maximum",
+            "The input token count (1200000) exceeds the maximum number of tokens allowed (1048576).",
+            "Your input exceeds the context window of this model.",
+            "[upstream_400] model_context_window_exceeded",
+            "HTTP 413 Request Entity Too Large",
+            "the request exceeds the available context size, try increasing it",
+        ] {
+            assert!(overflow(message), "{message}");
+        }
+        for message in [
+            "Rate limit reached for gpt-5.5: too many tokens per minute",
+            "[upstream_429] RESOURCE_EXHAUSTED: quota exceeded",
+            "Too many requests",
+        ] {
+            assert!(!overflow(message), "{message}");
+        }
+    }
+
+    #[test]
     fn compaction_limits_use_model_output_safety_and_optional_early_threshold() {
         let settings = crate::CompactionSettings::default();
         assert_eq!(
@@ -10145,6 +10201,11 @@ mod tests {
         assert_eq!(
             super::compaction_input_limit(&settings, 32_768, None),
             24_576
+        );
+        // An output limit as large as the window still leaves half for input.
+        assert_eq!(
+            super::compaction_input_limit(&settings, 128_000, Some(128_000)),
+            64_000
         );
 
         let configured = crate::CompactionSettings {
@@ -10186,7 +10247,8 @@ mod tests {
             item(1, ItemData::UserMessage { text: "Inspect this".into(), attachments: vec![source.clone()], queued: false, synthetic: false }),
             item(2, ItemData::ToolResult { call_id: "image".into(), name: "read".into(), output: "Image loaded".into(), is_error: false, metadata: json!({"attachments":[source.clone()]}) }),
         ];
-        assert!(super::estimate_tokens(&items) < 3000);
+        // Two unreadable images at the family's cap, not 100k base64 chars of text.
+        assert!(tokens::context(&items, Tokenizer::ClaudeLegacy).tokens < 4_000);
         let messages = vec![
             ProviderMessage::Media { role: "user".into(), content: "Inspect this".into(), attachments: vec![source.clone()] },
             ProviderMessage::ToolResult { call_id: "image".into(), name: "read".into(), output: "Image loaded".into(), is_error: false, attachments: vec![source] },
@@ -10467,9 +10529,9 @@ mod tests {
                 },
             ),
         ];
-        let estimate = super::estimate_tokens(&items);
+        let estimate = tokens::context(&items, Tokenizer::Generic).tokens;
         assert!(
-            (50_000..52_000).contains(&estimate),
+            (50_010..52_000).contains(&estimate),
             "reported usage plus the small tail, got {estimate}"
         );
     }
@@ -10511,7 +10573,7 @@ mod tests {
             ),
         ];
 
-        let estimate = super::estimate_tokens(super::provider_visible_items(&items));
+        let estimate = tokens::context(&items, Tokenizer::Generic).tokens;
         assert!(estimate < 1_000, "hidden history was counted: {estimate}");
     }
 
@@ -10827,13 +10889,16 @@ mod tests {
     }
 }
 
-/// Count only prepared textual content; never serialize attachment payloads.
+/// Estimate the prepared request with the model family's weights; media is
+/// sized from its headers, never from its base64 payload.
 fn prepared_usage(request: &ProviderRequest) -> Option<haarness_protocol::PromptUsage> {
-    fn tokens(text: &str) -> u64 {
-        (text.chars().count() as u64).div_ceil(4)
-    }
+    let tokenizer = Tokenizer::for_model(&request.model);
+    let tokens = |text: &str| tokenizer.text(text);
+    let media_tokens =
+        |sources: &[String]| -> u64 { sources.iter().map(|source| tokenizer.media(source)).sum() };
     let mut history = 0;
     let mut media = 0;
+    let mut media_estimate = 0;
     for message in &request.messages {
         history += match message {
             ProviderMessage::Text { content, .. } => tokens(content),
@@ -10843,6 +10908,7 @@ fn prepared_usage(request: &ProviderRequest) -> Option<haarness_protocol::Prompt
                 ..
             } => {
                 media += attachments.len() as u64;
+                media_estimate += media_tokens(attachments);
                 tokens(content)
             }
             ProviderMessage::ToolCall {
@@ -10855,6 +10921,7 @@ fn prepared_usage(request: &ProviderRequest) -> Option<haarness_protocol::Prompt
                 ..
             } => {
                 media += attachments.len() as u64;
+                media_estimate += media_tokens(attachments);
                 tokens(name) + tokens(output)
             }
         };
@@ -10875,6 +10942,7 @@ fn prepared_usage(request: &ProviderRequest) -> Option<haarness_protocol::Prompt
         tool_tokens,
         history_tokens: history,
         media_attachments: media,
+        media_tokens: media_estimate,
     })
 }
 
@@ -10901,6 +10969,8 @@ mod prepared_usage_tests {
         assert_eq!(initial.system_tokens, 3);
         assert_eq!(initial.history_tokens, 1);
         assert_eq!(initial.media_attachments, 1);
+        // Not an image header, so the family's large-image size, not the payload.
+        assert_eq!(initial.media_tokens, Tokenizer::Generic.image(2_048, 2_048));
         assert_eq!(initial.tool_tokens, 0);
         request.system.push_str(" plus hook context");
         request.output_schema =

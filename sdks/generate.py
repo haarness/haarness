@@ -166,6 +166,16 @@ def specification():
             "LoopResponse": obj({"loop": nullable(ref("LoopConfig"))}, ("loop",)),
             "ShellRequest": obj({"command": S}, ("command",)),
             "RevertRequest": obj({"sequence": nullable(N)}),
+            "ContextUsage": obj(
+                {
+                    "tokens": N,
+                    "reportedTokens": N,
+                    "estimatedTokens": N,
+                    "window": nullable(N),
+                    "compactAt": N,
+                },
+                ("tokens", "reportedTokens", "estimatedTokens", "window", "compactAt"),
+            ),
             "UsageResponse": obj(
                 {
                     "inputTokens": N,
@@ -176,6 +186,7 @@ def specification():
                     "costIncomplete": B,
                     "latestInputTokens": N,
                     "descendants": J,
+                    "context": ref("ContextUsage"),
                 },
                 (
                     "inputTokens",
