@@ -17,9 +17,9 @@ export interface RemoteShare {
 
 const states: ShareState[] = ["signed_out", "off", "connecting", "on", "stopped"];
 
-/** `/remote-control`, and its short forms `/rc` and `/dc`. */
-export const remoteCommand = /^\/(remote-control|rc|dc)(?:\s+([\s\S]*))?$/i;
-export const remoteAliases = ["rc", "dc"];
+/** `/remote-control`, and its short form `/rc`. */
+export const remoteCommand = /^\/(remote-control|rc)(?:\s+([\s\S]*))?$/i;
+export const remoteAliases = ["rc"];
 
 /** What `/remote-control [status|stop]` asks for, or null when unknown. */
 export function remoteAction(argumentsText: string): RemoteAction | null {

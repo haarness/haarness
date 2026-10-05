@@ -74,7 +74,7 @@ async function command(page: Page, text: string) {
   await message.press("Enter");
 }
 
-test("remote control asks a signed-out user to sign in, and the short forms work", async () => {
+test("remote control asks a signed-out user to sign in, and the short form works", async () => {
   const { page, close } = await launch({ HAARNESS_CLOUD_API_URL: "http://127.0.0.1:9" });
   try {
     const message = page.getByRole("textbox", { name: "Message" });
@@ -83,7 +83,7 @@ test("remote control asks a signed-out user to sign in, and the short forms work
     await expect(page.getByText("Send a first message, then share the chat with /remote-control.")).toBeVisible();
     await chat(page, "hello");
     // The short form finds the command in the slash list.
-    await message.fill("/dc");
+    await message.fill("/rc");
     await expect(page.locator("#slash-commands")).toContainText("remote-control");
     await message.press("Enter");
     await expect(message).toHaveValue("/remote-control ");

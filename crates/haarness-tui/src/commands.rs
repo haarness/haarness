@@ -308,7 +308,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     ),
     command(
         "remote-control",
-        &["rc", "dc", "remote"],
+        &["rc", "remote"],
         "Continue this chat from your phone or any browser · /remote-control stop",
     ),
     command("mcp", &["mcps"], "Manage MCP connections"),

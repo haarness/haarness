@@ -306,7 +306,7 @@ export function Session() {
             const query = draft().slice(1).toLowerCase();
             return (
               item.name.toLowerCase().startsWith(query) ||
-              // Short forms (/rc, /dc) once both letters are typed, so "/d"
+              // The short form /rc once both letters are typed, so "/r"
               // still lists only the commands that start with it.
               ("aliases" in item && query.length >= 2 && item.aliases!.some((alias) => alias.startsWith(query)))
             );

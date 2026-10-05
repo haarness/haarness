@@ -14938,7 +14938,7 @@ async fn remote_control_shows_the_link_and_a_scannable_code_while_live() {
 async fn remote_control_aliases_open_the_dialog_and_report_a_failed_start() {
     let mut app = connect_fixture();
     let client = offline_client();
-    for alias in ["/dc", "/rc"] {
+    for alias in ["/rc", "/remote-control"] {
         app.close_overlay();
         app.execute_command(alias, &client).await.unwrap();
         assert!(
