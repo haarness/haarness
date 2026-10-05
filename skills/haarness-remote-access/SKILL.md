@@ -66,7 +66,7 @@ Check exit status, individual checks and cleanup. The echo provider is determini
 - Open the link in a browser signed in to the same account, send from there, and confirm the turn appears in the TUI; the band shows `remote`.
 - `/rc stop` must leave no connector, no `remote-*` identity files and no host/publication in Cloud; the old link returns 404. Stopping from the Cloud page must clear the TUI badge within a minute and clean up the connector the same way. Sharing again gives a new link.
 - Desktop: `npx playwright test e2e/remote-control.spec.ts` (signed-out case always; the live case with `HAARNESS_REMOTE_CONTROL_API`, `_WEB` and a signed-in `_ACCOUNT` config dir). It saves `qr.png`/`dialog.png`; decode the QR too.
-- Check the Cloud Remote hosts page and the shared chat at 375 px wide: chat-only connectors appear only under Published chats, never as computer cards.
+- Check Cloud's Remote control page (Sessions and Hosts tabs) and the shared chat at 375 px wide: chat-only connectors appear only under Sessions, never as computer cards under Hosts.
 
 ## Complete the user journey
 
