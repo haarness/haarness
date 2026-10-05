@@ -166,60 +166,11 @@ fn local_path(source: &str) -> CoreResult<PathBuf> {
 }
 
 pub fn mime_for_path(path: &Path) -> Option<&'static str> {
-    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    match extension.as_str() {
-        "png" => Some("image/png"),
-        "jpg" | "jpeg" => Some("image/jpeg"),
-        "webp" => Some("image/webp"),
-        "gif" => Some("image/gif"),
-        "heic" => Some("image/heic"),
-        "heif" => Some("image/heif"),
-        "pdf" => Some("application/pdf"),
-        "mp3" => Some("audio/mpeg"),
-        "wav" => Some("audio/wav"),
-        "flac" => Some("audio/flac"),
-        "m4a" => Some("audio/mp4"),
-        "aac" => Some("audio/aac"),
-        "ogg" | "oga" | "opus" => Some("audio/ogg"),
-        "mp4" | "m4v" => Some("video/mp4"),
-        "mpeg" => Some("video/mpeg"),
-        "mov" => Some("video/mov"),
-        "avi" => Some("video/avi"),
-        "flv" => Some("video/x-flv"),
-        "mpg" => Some("video/mpg"),
-        "webm" => Some("video/webm"),
-        "wmv" => Some("video/wmv"),
-        "3gp" | "3gpp" => Some("video/3gpp"),
-        _ => None,
-    }
+    haarness_core::attachments::media_mime_for_path(path)
 }
 
 fn is_supported_mime(mime_type: &str) -> bool {
-    matches!(
-        mime_type,
-        "image/png"
-            | "image/jpeg"
-            | "image/webp"
-            | "image/gif"
-            | "image/heic"
-            | "image/heif"
-            | "application/pdf"
-            | "audio/mpeg"
-            | "audio/wav"
-            | "audio/flac"
-            | "audio/mp4"
-            | "audio/aac"
-            | "audio/ogg"
-            | "video/mp4"
-            | "video/mpeg"
-            | "video/mov"
-            | "video/avi"
-            | "video/x-flv"
-            | "video/mpg"
-            | "video/webm"
-            | "video/wmv"
-            | "video/3gpp"
-    )
+    haarness_core::attachments::is_supported_media_mime(mime_type)
 }
 
 fn default_filename(mime_type: &str) -> &'static str {
