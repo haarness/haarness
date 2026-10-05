@@ -850,7 +850,34 @@ fn merge_discovered_models(
         // Prefer the live object as it can carry provider-authoritative limits
         // and capabilities. The embedded catalog still fills fields omitted by
         // the provider API (notably OpenAI pricing and token limits).
-        .filter_map(|model| discovered.remove(&model.id))
+        .filter_map(|model| {
+            if let Some(live) = discovered.remove(&model.id) {
+                return Some(live);
+            }
+            // Some APIs list only dated snapshots (`claude-haiku-4-5-20251001`)
+            // while configs and chats name the alias (`claude-haiku-4-5`).
+            // Keep the alias, with the live details of its newest snapshot,
+            // so a configured or stored model is still found in the catalog.
+            let mut snapshots: Vec<_> = discovered
+                .keys()
+                .filter(|id| {
+                    id.strip_prefix(model.id.as_str())
+                        .and_then(|rest| rest.strip_prefix('-'))
+                        .is_some_and(|date| {
+                            date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit())
+                        })
+                })
+                .cloned()
+                .collect();
+            snapshots.sort();
+            let newest = snapshots.pop()?;
+            for older in snapshots {
+                discovered.remove(&older);
+            }
+            let mut live = discovered.remove(&newest)?;
+            live.id = model.id;
+            Some(live)
+        })
         .collect();
     let mut remaining: Vec<_> = discovered.into_values().collect();
     remaining.sort_by(|left, right| model_order::compare(&left.id, &right.id));
@@ -911,6 +938,44 @@ mod tests {
             max_output_tokens: None,
             pricing: None,
         }
+    }
+
+    #[test]
+    fn a_dated_snapshot_keeps_its_alias_in_the_catalog() {
+        let model = |id: &str, name: &str| ModelInfo {
+            id: id.into(),
+            display_name: name.into(),
+            reasoning: false,
+            reasoning_efforts: Vec::new(),
+            images: false,
+            video: false,
+            tools: true,
+            context_window: None,
+            max_output_tokens: None,
+            pricing: None,
+        };
+        let merged = merge_discovered_models(
+            vec![
+                model("claude-haiku-4-5", "alias"),
+                model("claude-sonnet-4-6", "alias"),
+            ],
+            vec![
+                model("claude-haiku-4-5-20250101", "older"),
+                model("claude-haiku-4-5-20251001", "Claude Haiku 4.5"),
+                model("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+                model("claude-opus-4-5-20251101", "Claude Opus 4.5"),
+            ],
+        );
+        let ids: Vec<_> = merged.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "claude-haiku-4-5",
+                "claude-sonnet-4-6",
+                "claude-opus-4-5-20251101"
+            ]
+        );
+        assert_eq!(merged[0].display_name, "Claude Haiku 4.5");
     }
 
     #[test]
