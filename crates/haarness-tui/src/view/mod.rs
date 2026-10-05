@@ -578,7 +578,6 @@ fn apply_toast(
         return;
     };
     let border = match toast.variant {
-        ToastVariant::Info => app.theme.primary,
         ToastVariant::Success => app.theme.success(),
         ToastVariant::Warning => app.theme.accent,
         ToastVariant::Error => app.theme.danger,

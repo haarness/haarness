@@ -155,14 +155,6 @@ impl AzureProvider {
         }
     }
 
-    #[must_use]
-    pub fn with_api_key(mut self, api_key: Option<String>) -> Self {
-        if self.instance.api_key.is_none() {
-            self.instance.api_key = api_key;
-        }
-        self
-    }
-
     async fn credential(&self) -> CoreResult<CloudCredential> {
         if let Some(key) = &self.instance.api_key {
             return Ok(CloudCredential::ApiKey(key.clone()));
@@ -293,14 +285,6 @@ impl CopilotProvider {
             models,
             live_models: crate::live_models::LiveModels::default(),
         }
-    }
-
-    #[must_use]
-    pub fn with_token(mut self, token: Option<String>) -> Self {
-        if self.instance.api_key.is_none() {
-            self.instance.api_key = token;
-        }
-        self
     }
 
     fn token(&self) -> CoreResult<String> {
@@ -544,14 +528,6 @@ impl VertexProvider {
             models,
             token,
         }
-    }
-
-    #[must_use]
-    pub fn with_token(mut self, token: Option<String>) -> Self {
-        if self.token.is_none() {
-            self.token = token.map(SecretString::from);
-        }
-        self
     }
 
     async fn token(&self) -> CoreResult<String> {

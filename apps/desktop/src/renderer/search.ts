@@ -14,7 +14,7 @@ export interface SearchEntry {
   action: () => unknown;
 }
 
-export function normalizeSearch(text: string) {
+function normalizeSearch(text: string) {
   return text
     .normalize("NFKD")
     .replace(/\p{M}/gu, "")
@@ -28,7 +28,7 @@ export function normalizeSearch(text: string) {
 }
 
 /** Exact titles first, then prefixes, words, aliases and compact fuzzy matches. */
-export function searchScore(entry: SearchEntry, query: string) {
+function searchScore(entry: SearchEntry, query: string) {
   const title = normalizeSearch(entry.name);
   const words = normalizeSearch(query).split(" ").filter(Boolean);
   if (!words.length) return 0;

@@ -26,7 +26,6 @@ import {
   createEffect,
   onCleanup,
   onMount,
-  type JSX,
 } from "solid-js";
 import type * as T from "@haarness/sdk";
 import type { Preferences } from "../shared";
@@ -34,7 +33,7 @@ import { themes, themeColors } from "../themes";
 import { useApp } from "./state";
 import { dismissOnBackdrop } from "./ui";
 import { Wordmark } from "./brand";
-import { Button, Icon, ask, confirm, stringify, Empty, type Field } from "./ui";
+import { Button, Icon, ask, confirm, stringify, Empty } from "./ui";
 import {
   settingsSections as sections,
   settingsTitles as titles,

@@ -68,14 +68,6 @@ impl BedrockProvider {
         Self::new_with_region(instance, auth_store, region)
     }
 
-    #[must_use]
-    pub fn with_bearer(mut self, bearer: Option<String>) -> Self {
-        if self.bearer.is_none() {
-            self.bearer = bearer.map(SecretString::from);
-        }
-        self
-    }
-
     fn new_with_region(
         instance: NativeInstance,
         auth_store: Option<Arc<CredentialStore>>,

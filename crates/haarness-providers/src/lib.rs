@@ -137,112 +137,20 @@ pub struct NativeProviderRegistry {
 }
 
 impl NativeProviderRegistry {
-    #[must_use]
-    pub fn from_environment() -> Self {
-        Self::from_environment_with_credentials(&HashMap::new())
-    }
-
-    #[must_use]
-    pub fn from_environment_with_credentials(credentials: &HashMap<String, String>) -> Self {
-        let mut registry = Self::default();
-        registry.insert(Arc::new(
-            OpenAiProvider::from_environment().with_api_key(credentials.get("openai").cloned()),
-        ));
-        registry.insert(Arc::new(
-            AnthropicProvider::from_environment()
-                .with_api_key(credentials.get("anthropic").cloned()),
-        ));
-        registry.insert(Arc::new(
-            GeminiProvider::from_environment().with_api_key(credentials.get("gemini").cloned()),
-        ));
-        registry.insert(Arc::new(
-            AzureProvider::from_environment(None).with_api_key(credentials.get("azure").cloned()),
-        ));
-        registry.insert(Arc::new(
-            VertexProvider::from_environment(None)
-                .with_token(credentials.get("google-vertex").cloned()),
-        ));
-        registry.insert(Arc::new(
-            CopilotProvider::from_environment(None)
-                .with_token(credentials.get("github-copilot").cloned()),
-        ));
-        registry.insert(Arc::new(
-            BedrockProvider::from_environment(None)
-                .with_bearer(credentials.get("amazon-bedrock").cloned()),
-        ));
-        if let Some(provider) = OpenAiCompatibleProvider::from_environment() {
-            registry.insert(Arc::new(provider));
-        }
-        if std::env::var_os("HAARNESS_TEST_PROVIDER").is_some() {
-            registry.insert(Arc::new(test_echo::EchoProvider));
-        }
-        registry
-    }
-
-    pub async fn discover_from_environment_with_credentials(
-        credentials: &HashMap<String, String>,
-    ) -> Self {
-        Self::discover_with_instances(credentials, Vec::new(), &std::collections::HashSet::new())
-            .await
-    }
-
-    /// Full discovery: native providers, the legacy env-configured compatible
-    /// endpoint, config-declared instances, always-visible presets, and local
-    /// runtime auto-detection. `disabled` suppresses any instance id
-    /// (including `ollama`/`lmstudio` detection).
-    pub async fn discover_with_instances(
-        credentials: &HashMap<String, String>,
-        instances: Vec<CompatibleInstance>,
-        disabled: &std::collections::HashSet<String>,
-    ) -> Self {
-        Self::discover_with_instances_and_store(credentials, instances, disabled, None).await
-    }
-
-    /// Discovery backed by a live owner-only credential store. Native
-    /// providers can observe CLI login/logout without a server restart and
-    /// persist refreshed subscription tokens safely.
-    pub async fn discover_with_instances_and_store(
-        credentials: &HashMap<String, String>,
-        instances: Vec<CompatibleInstance>,
-        disabled: &std::collections::HashSet<String>,
-        auth_store: Option<Arc<CredentialStore>>,
-    ) -> Self {
-        Self::discover_with_providers_and_store(
-            credentials,
-            instances
-                .into_iter()
-                .map(ProviderInstance::OpenAiChatCompletions)
-                .collect(),
-            disabled,
-            auth_store,
-        )
-        .await
-    }
-
-    /// Discovery backed by a live credential store for every supported custom
-    /// wire protocol. Remote model discovery runs concurrently.
+    /// Discovery backed by the live owner-only credential store, so providers
+    /// observe sign-ins and sign-outs without a server restart and persist
+    /// refreshed subscription tokens safely. Covers every supported custom wire
+    /// protocol; remote model discovery runs concurrently.
     pub async fn discover_with_providers_and_store(
-        credentials: &HashMap<String, String>,
         instances: Vec<ProviderInstance>,
         disabled: &std::collections::HashSet<String>,
-        auth_store: Option<Arc<CredentialStore>>,
+        credential_store: Arc<CredentialStore>,
     ) -> Self {
         let mut registry = Self::default();
-        let static_credential = |id: &str| {
-            auth_store
-                .is_none()
-                .then(|| credentials.get(id).cloned())
-                .flatten()
-        };
-        let openai = OpenAiProvider::from_environment()
-            .with_api_key(static_credential("openai"))
-            .with_auth_store(auth_store.clone());
-        let anthropic = AnthropicProvider::from_environment()
-            .with_api_key(static_credential("anthropic"))
-            .with_auth_store(auth_store.clone());
-        let gemini = GeminiProvider::from_environment()
-            .with_api_key(static_credential("gemini"))
-            .with_auth_store(auth_store.clone());
+        let auth_store = Some(credential_store.clone());
+        let openai = OpenAiProvider::from_environment().with_auth_store(auth_store.clone());
+        let anthropic = AnthropicProvider::from_environment().with_auth_store(auth_store.clone());
+        let gemini = GeminiProvider::from_environment().with_auth_store(auth_store.clone());
         let copilot = CopilotProvider::from_environment(auth_store.clone());
         let discover_copilot = !disabled.contains("github-copilot");
         let (openai, anthropic, gemini, copilot, locals) = tokio::join!(
@@ -347,22 +255,16 @@ impl NativeProviderRegistry {
             if preset_id_in(disabled, preset) || preset_id_in(&declared, preset) {
                 continue;
             }
-            let api_key = if auth_store.is_some() {
-                preset_environment_key(preset)
-            } else {
-                preset_api_key(preset, credentials)
-            };
+            let api_key = preset_environment_key(preset);
             declared.insert(preset.id.to_owned());
             let authenticated = api_key.is_some()
-                || auth_store.as_ref().is_some_and(|store| {
-                    std::iter::once(preset.id)
-                        .chain(preset.aliases.iter().copied())
-                        .find_map(|id| store.get(id).ok().flatten())
-                        .is_some_and(|credential| {
-                            credential.api_key().is_some()
-                                || (preset.id == "xai" && credential.oauth_parts().is_some())
-                        })
-                });
+                || std::iter::once(preset.id)
+                    .chain(preset.aliases.iter().copied())
+                    .find_map(|id| credential_store.get(id).ok().flatten())
+                    .is_some_and(|credential| {
+                        credential.api_key().is_some()
+                            || (preset.id == "xai" && credential.oauth_parts().is_some())
+                    });
             configured.push((
                 ProviderInstance::OpenAiChatCompletions(CompatibleInstance {
                     id: preset.id.to_owned(),
@@ -849,25 +751,6 @@ fn preset_environment_key(preset: &CompatiblePreset) -> Option<String> {
         .find_map(|variable| std::env::var(variable).ok())
 }
 
-fn preset_api_key(
-    preset: &CompatiblePreset,
-    credentials: &HashMap<String, String>,
-) -> Option<String> {
-    preset_environment_key(preset).or_else(|| stored_preset_key(preset, credentials))
-}
-
-fn stored_preset_key(
-    preset: &CompatiblePreset,
-    credentials: &HashMap<String, String>,
-) -> Option<String> {
-    credentials.get(preset.id).cloned().or_else(|| {
-        preset
-            .aliases
-            .iter()
-            .find_map(|alias| credentials.get(*alias).cloned())
-    })
-}
-
 /// Detect local model runtimes on their conventional loopback ports with a
 /// short timeout so startup stays fast when nothing is listening.
 async fn detect_local_runtimes(
@@ -1005,7 +888,7 @@ impl ProviderRegistry for NativeProviderRegistry {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashMap, HashSet};
+    use std::collections::{BTreeMap, HashSet};
 
     use haarness_core::ModelProvider;
     use haarness_protocol::ModelInfo;
@@ -1167,10 +1050,5 @@ mod tests {
         let together = super::compatible_preset("togetherai").unwrap();
         let legacy_ids = HashSet::from(["together".to_owned()]);
         assert!(super::preset_id_in(&legacy_ids, together));
-        let credentials = HashMap::from([("together".to_owned(), "legacy-secret".to_owned())]);
-        assert_eq!(
-            super::stored_preset_key(together, &credentials).as_deref(),
-            Some("legacy-secret")
-        );
     }
 }

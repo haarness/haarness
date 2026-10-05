@@ -1460,17 +1460,15 @@ fn executor_with_bun(bun: PathBuf) -> WorkflowExecutor {
 }
 
 #[test]
-fn native_and_portable_capabilities_report_bun_availability() {
+fn capability_reports_bun_availability() {
     let executable = std::env::current_exe().expect("current executable");
     let executor = WorkflowExecutor::new(ExecutorConfig {
         bun_path: Some(executable.clone()),
         ..ExecutorConfig::default()
     });
-    assert_eq!(executor.capability().bun_path, Some(executable.clone()));
+    assert_eq!(executor.capability().bun_path, Some(executable));
     assert_eq!(executor.capability().blocker, None);
     assert!(executor.capability().executable);
-    assert_eq!(executor.portable_capability().bun_path, Some(executable));
-    assert!(executor.portable_capability().executable);
 }
 
 #[test]

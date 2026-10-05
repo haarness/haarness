@@ -207,14 +207,6 @@
   flex: 1;
   overflow: hidden;
 }
-.config-code {
-  height: 320px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-md);
-  display: flex;
-  margin-top: var(--s3);
-  overflow: hidden;
-}
 .media-preview {
   flex: 1;
   display: flex;

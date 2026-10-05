@@ -24,14 +24,10 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use fs2::FileExt as _;
-#[cfg(test)]
-use haarness_core::EventSubscription;
 use haarness_core::{
     AgentRuntime, EventBus, McpRegistry, ProviderRegistry, SkillRegistry, ToolRegistry,
 };
 use haarness_mcp::NativeMcpRegistry;
-#[cfg(test)]
-use haarness_protocol::GoalUpdatedEvent;
 use haarness_protocol::{
     CreateThreadRequest, GoalActionRequest, GoalState, GoalStatus, ItemData, McpConfigureRequest,
     PTY_CAPABILITY, QuestionReply, RequestId, SCHEMA_VERSION, SESSION_ARCHIVE_CAPABILITY,
@@ -1360,10 +1356,9 @@ async fn models_command(
     let credentials = resolved_credentials(&read_auth(paths).unwrap_or_default());
     let (instances, disabled) = provider_instances(&config, &credentials);
     let providers = NativeProviderRegistry::discover_with_providers_and_store(
-        &credentials,
         instances,
         &disabled,
-        Some(Arc::new(CredentialStore::new(paths.auth.clone()))),
+        Arc::new(CredentialStore::new(paths.auth.clone())),
     )
     .await;
     let mut found_provider = provider_filter.is_none();
@@ -1402,10 +1397,9 @@ async fn providers_command(
     let credentials = resolved_credentials(&read_auth(paths).unwrap_or_default());
     let (instances, disabled) = provider_instances(&config, &credentials);
     let providers = NativeProviderRegistry::discover_with_providers_and_store(
-        &credentials,
         instances,
         &disabled,
-        Some(Arc::new(CredentialStore::new(paths.auth.clone()))),
+        Arc::new(CredentialStore::new(paths.auth.clone())),
     )
     .await;
     for provider in providers.list() {
@@ -3981,60 +3975,6 @@ async fn settle_cli_workflows_client(
     Ok(())
 }
 
-#[cfg(test)]
-async fn set_goal_for_run(
-    runtime: &AgentRuntime,
-    thread_id: ThreadId,
-    objective: String,
-) -> Result<()> {
-    if runtime.active_turn(thread_id).await?.is_some() {
-        anyhow::bail!(
-            "cannot start a goal in session {thread_id} while its current turn is still running"
-        );
-    }
-    runtime
-        .goal_action(
-            thread_id,
-            GoalActionRequest::Set {
-                goal: objective,
-                token_budget: None,
-            },
-        )
-        .await?;
-    Ok(())
-}
-
-#[cfg(test)]
-async fn select_run_thread(
-    runtime: &AgentRuntime,
-    requested_thread: Option<Uuid>,
-    continue_last: bool,
-    fork: bool,
-    create: CreateThreadRequest,
-) -> Result<Thread> {
-    if fork && requested_thread.is_none() && !continue_last {
-        anyhow::bail!("--fork requires --session/--thread or --continue");
-    }
-
-    let base = if let Some(id) = requested_thread {
-        Some(runtime.get_thread(ThreadId(id)).await?)
-    } else if continue_last {
-        runtime
-            .list_threads(false)
-            .await?
-            .into_iter()
-            .find(|thread| thread.parent_id.is_none() && !thread.archived)
-    } else {
-        None
-    };
-
-    match base {
-        Some(thread) if fork => Ok(runtime.fork_thread(thread.id, None, None).await?),
-        Some(thread) => Ok(thread),
-        None => Ok(runtime.create_thread(create).await?),
-    }
-}
-
 const DEFAULT_GOAL_IDLE_TIMEOUT_MS: u64 = 45_000;
 
 fn goal_idle_timeout_from(value: Option<&str>) -> Duration {
@@ -4053,95 +3993,6 @@ fn goal_idle_timeout() -> Duration {
     .into_iter()
     .find_map(|name| std::env::var(name).ok());
     goal_idle_timeout_from(configured.as_deref())
-}
-
-#[cfg(test)]
-async fn wait_for_goal_with_timeout(
-    runtime: &AgentRuntime,
-    thread_id: ThreadId,
-    subscription: EventSubscription,
-    timeout: Duration,
-) -> Result<()> {
-    let mut receiver = subscription.receiver;
-    let mut idle_since = None;
-    loop {
-        resolve_noninteractive_questions(runtime, thread_id)?;
-        let state = runtime
-            .goal_state(thread_id)
-            .await?
-            .context("goal was cleared before completion")?;
-        if !state.status.is_active() {
-            return finish_goal_run(&state);
-        }
-
-        if runtime.active_turn(thread_id).await?.is_some() {
-            idle_since = None;
-        } else {
-            let since = idle_since.get_or_insert_with(Instant::now);
-            if since.elapsed() >= timeout {
-                anyhow::bail!(
-                    "goal watcher stopped after {}s without a goal update while idle",
-                    timeout.as_secs_f64()
-                );
-            }
-        }
-
-        let poll = idle_since
-            .map(|since| timeout.saturating_sub(since.elapsed()))
-            .unwrap_or(Duration::from_millis(250))
-            .min(Duration::from_millis(250));
-        match tokio::time::timeout(poll, receiver.recv()).await {
-            Ok(Ok(event))
-                if event.thread_id == Some(thread_id) && event.event_type == "goal.updated" =>
-            {
-                let update: GoalUpdatedEvent =
-                    serde_json::from_value(event.payload).context("decode goal.updated event")?;
-                if !update.state.status.is_active() {
-                    return finish_goal_run(&update.state);
-                }
-                if let Some(message) = update.message.filter(|message| !message.trim().is_empty()) {
-                    eprintln!("{message}");
-                }
-                idle_since = None;
-            }
-            Ok(Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) | Err(_) => {}
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
-                anyhow::bail!("goal event stream closed before completion");
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-fn resolve_noninteractive_questions(
-    runtime: &AgentRuntime,
-    root_thread_id: ThreadId,
-) -> Result<()> {
-    for question in runtime.pending_questions().into_iter().filter(|question| {
-        question.thread_id == root_thread_id || question.root_thread_id == Some(root_thread_id)
-    }) {
-        let answer = if question.multiple && question.custom {
-            // headless fallback: an empty multi-selection
-            // lets goal-criteria negotiation accept the proposed set without
-            // inventing a criterion from refusal prose.
-            "[]".into()
-        } else {
-            question
-                .choices
-                .iter()
-                .find(|choice| choice.trim().eq_ignore_ascii_case("cancel"))
-                .cloned()
-                .unwrap_or_else(|| {
-                    "Question rejected: this non-interactive run cannot answer questions.".into()
-                })
-        };
-        eprintln!(
-            "Question requested by thread {}; applying the non-interactive fallback.",
-            question.thread_id
-        );
-        runtime.reply_question(&question.question_id, QuestionReply { answer })?;
-    }
-    Ok(())
 }
 
 fn finish_goal_run(state: &GoalState) -> Result<()> {
@@ -4440,10 +4291,9 @@ impl HotReloadController {
             provider_instances(&sources.file_config, &credentials);
         let providers: Arc<dyn ProviderRegistry> = Arc::new(
             NativeProviderRegistry::discover_with_providers_and_store(
-                &credentials,
                 instances,
                 &disabled_providers,
-                Some(Arc::new(CredentialStore::new(self.paths.auth.clone()))),
+                Arc::new(CredentialStore::new(self.paths.auth.clone())),
             )
             .await,
         );
@@ -4533,7 +4383,7 @@ impl HotReloadController {
         let formatter = candidate.formatter.clone();
         let runtime = self.runtime.clone();
         let memory_context = candidate.memory_context.clone();
-        self.runtime.replace_components_when_idle_with(
+        self.runtime.replace_components_when_idle(
             candidate.providers.clone(),
             candidate.tools.clone(),
             candidate.project_context.clone(),
@@ -4905,10 +4755,9 @@ async fn application_at(
     let (instances, disabled_providers) = provider_instances(&file_config, &credentials);
     let providers = Arc::new(
         NativeProviderRegistry::discover_with_providers_and_store(
-            &credentials,
             instances,
             &disabled_providers,
-            Some(Arc::new(CredentialStore::new(paths.auth.clone()))),
+            Arc::new(CredentialStore::new(paths.auth.clone())),
         )
         .await,
     );
@@ -7875,9 +7724,9 @@ mod tests {
         local_server_compatibility_error, mcp_config_for_display,
         migrate_legacy_workspace_database, normalize_natural_language_args, parse_mcp_key_values,
         qualified_run_model, read_mcp_entry, replace_incompatible_workspace_server,
-        resolved_credentials, select_run_thread, server_compatibility_error, set_goal_for_run,
-        valid_provider_url, wait_for_goal_with_timeout, write_mcp_entry, write_provider_entry,
-        write_runtime,
+        resolved_credentials, select_run_thread_client, server_compatibility_error,
+        set_goal_for_run_client, valid_provider_url, wait_for_goal_client, write_mcp_entry,
+        write_provider_entry, write_runtime,
     };
 
     #[test]
@@ -8026,6 +7875,41 @@ mod tests {
             .await
             .unwrap();
         (runtime, thread.id, root)
+    }
+
+    /// Serve `runtime` in-process, so tests drive the same HTTP client
+    /// functions `haarness run` uses rather than a copy of them.
+    async fn run_client(
+        runtime: &Arc<AgentRuntime>,
+        workspace: &std::path::Path,
+    ) -> (haarness_tui::api::ApiClient, haarness_server::ServerHandle) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = haarness_server::serve(
+            listener,
+            "run-test-token",
+            haarness_server::ServerState {
+                browser: None,
+                management: None,
+                runtime: runtime.clone(),
+                mcp: Arc::new(haarness_mcp::NativeMcpRegistry::default()),
+                skills: Arc::new(haarness_server::FilesystemSkillRegistry::new(Vec::new())),
+                plugins: None,
+                workflows: None,
+                workspaces: None,
+                workspace_id: None,
+                workspace: workspace.to_path_buf(),
+                project_trusted: false,
+                language: None,
+            },
+        )
+        .await
+        .unwrap();
+        let client = haarness_tui::api::ApiClient::new(
+            &format!("http://{}", server.address),
+            "run-test-token",
+        )
+        .unwrap();
+        (client, server)
     }
 
     async fn question_test_runtime() -> (Arc<AgentRuntime>, ThreadId, PathBuf) {
@@ -8811,7 +8695,7 @@ mod tests {
     #[tokio::test]
     async fn goal_watcher_follows_updates_until_complete() {
         let (runtime, thread_id, root) = goal_test_runtime().await;
-        let subscription = runtime.events().subscribe(Some(runtime.events().cursor()));
+        let (client, server) = run_client(&runtime, &root).await;
         runtime
             .goal_action(
                 thread_id,
@@ -8831,15 +8715,11 @@ mod tests {
                 .unwrap();
         });
 
-        wait_for_goal_with_timeout(
-            runtime.as_ref(),
-            thread_id,
-            subscription,
-            Duration::from_millis(250),
-        )
-        .await
-        .unwrap();
+        wait_for_goal_client(&client, thread_id, Duration::from_millis(250))
+            .await
+            .unwrap();
         task.await.unwrap();
+        server.shutdown().await.unwrap();
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -8847,7 +8727,7 @@ mod tests {
     #[tokio::test]
     async fn goal_watcher_bounds_idle_active_goals() {
         let (runtime, thread_id, root) = goal_test_runtime().await;
-        let subscription = runtime.events().subscribe(Some(runtime.events().cursor()));
+        let (client, server) = run_client(&runtime, &root).await;
         runtime
             .goal_action(
                 thread_id,
@@ -8859,19 +8739,14 @@ mod tests {
             .await
             .unwrap();
 
-        let error = wait_for_goal_with_timeout(
-            runtime.as_ref(),
-            thread_id,
-            subscription,
-            Duration::from_millis(20),
-        )
-        .await
-        .unwrap_err();
+        let error = wait_for_goal_client(&client, thread_id, Duration::from_millis(20))
+            .await
+            .unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("without a goal update while idle")
+            error.to_string().contains("without a goal update"),
+            "{error}"
         );
+        server.shutdown().await.unwrap();
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -8879,7 +8754,7 @@ mod tests {
     #[tokio::test]
     async fn goal_watcher_resolves_criteria_questions_without_hanging() {
         let (runtime, thread_id, root) = question_test_runtime().await;
-        let subscription = runtime.events().subscribe(Some(runtime.events().cursor()));
+        let (client, server) = run_client(&runtime, &root).await;
         runtime
             .goal_action(
                 thread_id,
@@ -8910,14 +8785,11 @@ mod tests {
             .await
             .unwrap();
 
+        // The watcher polls every 250 ms; a few polls answer the question and
+        // see the goal complete. Hanging would mean waiting for a person.
         tokio::time::timeout(
-            Duration::from_secs(1),
-            wait_for_goal_with_timeout(
-                runtime.as_ref(),
-                thread_id,
-                subscription,
-                Duration::from_millis(100),
-            ),
+            Duration::from_secs(5),
+            wait_for_goal_client(&client, thread_id, Duration::from_millis(100)),
         )
         .await
         .expect("the goal watcher hung on an interactive question")
@@ -8968,6 +8840,7 @@ mod tests {
         })
         .await
         .expect("goal turn did not settle after completion");
+        server.shutdown().await.unwrap();
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -9020,6 +8893,7 @@ mod tests {
     #[tokio::test]
     async fn run_thread_selection_honors_session_continue_and_fork() {
         let (runtime, thread_id, root) = goal_test_runtime().await;
+        let (client, server) = run_client(&runtime, &root).await;
         let request = || CreateThreadRequest {
             schedule: None,
             title: Some("new CLI run".into()),
@@ -9031,26 +8905,27 @@ mod tests {
         };
 
         let explicit =
-            select_run_thread(runtime.as_ref(), Some(thread_id.0), false, false, request())
+            select_run_thread_client(&client, Some(thread_id.0), false, false, request())
                 .await
                 .unwrap();
         assert_eq!(explicit.id, thread_id);
 
-        let continued = select_run_thread(runtime.as_ref(), None, true, false, request())
+        let continued = select_run_thread_client(&client, None, true, false, request())
             .await
             .unwrap();
         assert_eq!(continued.id, thread_id);
 
-        let forked = select_run_thread(runtime.as_ref(), Some(thread_id.0), false, true, request())
+        let forked = select_run_thread_client(&client, Some(thread_id.0), false, true, request())
             .await
             .unwrap();
         assert_ne!(forked.id, thread_id);
         assert_eq!(forked.parent_id, Some(thread_id));
 
-        let error = select_run_thread(runtime.as_ref(), None, false, true, request())
+        let error = select_run_thread_client(&client, None, false, true, request())
             .await
             .unwrap_err();
         assert!(error.to_string().contains("--fork requires"));
+        server.shutdown().await.unwrap();
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -9058,6 +8933,7 @@ mod tests {
     #[tokio::test]
     async fn busy_reused_session_does_not_replace_its_goal() {
         let (runtime, thread_id, root) = question_test_runtime().await;
+        let (client, server) = run_client(&runtime, &root).await;
         runtime
             .goal_action(
                 thread_id,
@@ -9098,7 +8974,7 @@ mod tests {
         .await
         .expect("provider never asked the criteria question");
 
-        let error = set_goal_for_run(runtime.as_ref(), thread_id, "replacement goal".into())
+        let error = set_goal_for_run_client(&client, thread_id, "replacement goal".into())
             .await
             .unwrap_err();
         assert!(error.to_string().contains("current turn is still running"));
@@ -9132,6 +9008,7 @@ mod tests {
         })
         .await
         .expect("turn did not stop after clearing the goal");
+        server.shutdown().await.unwrap();
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
     }

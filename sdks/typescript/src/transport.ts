@@ -1,4 +1,4 @@
-import type { JsonValue, EventEnvelope } from "./types.js";
+import type { EventEnvelope } from "./types.js";
 
 export type ServerAuth =
   | { type: "none" }

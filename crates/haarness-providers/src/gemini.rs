@@ -79,6 +79,7 @@ impl GeminiProvider {
             headers: instance.headers,
         }
     }
+    #[cfg(test)]
     #[must_use]
     pub fn with_api_key(mut self, key: Option<String>) -> Self {
         if self.api_key.is_none()

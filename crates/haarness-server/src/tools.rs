@@ -119,14 +119,12 @@ impl NativeToolRegistry {
     pub fn new(workspace: PathBuf) -> Self {
         Self::build(workspace, None, None, Vec::new())
     }
+    /// MCP projection plus a skill registry whose discovered catalog is
+    /// embedded into the `skill` tool description, without workflows or
+    /// scheduling: what tests compose.
+    #[cfg(test)]
     #[must_use]
-    pub fn with_mcp(workspace: PathBuf, mcp: Arc<dyn McpRegistry>) -> Self {
-        Self::build(workspace, Some(mcp), None, Vec::new())
-    }
-    /// Full composition: MCP projection plus a skill registry whose discovered
-    /// catalog is embedded into the `skill` tool description.
-    #[must_use]
-    pub fn with_extras(
+    pub(crate) fn with_extras(
         workspace: PathBuf,
         mcp: Option<Arc<dyn McpRegistry>>,
         skills: Option<Arc<dyn SkillRegistry>>,
@@ -134,11 +132,8 @@ impl NativeToolRegistry {
     ) -> Self {
         Self::build(workspace, mcp, skills, skill_infos)
     }
-    /// Full composition plus the model-facing `workflow` tool. This separate
-    /// builder keeps existing embedders source-compatible and lets the
-    /// application resolve the host/coordinator/runtime construction cycle.
-    #[must_use]
-    pub fn with_workflows(
+    /// The composition plus the model-facing `workflow` tool.
+    fn with_workflows(
         workspace: PathBuf,
         mcp: Option<Arc<dyn McpRegistry>>,
         skills: Option<Arc<dyn SkillRegistry>>,
@@ -5271,7 +5266,7 @@ mod webfetch_tests {
 
     #[tokio::test]
     async fn code_mode_calls_only_mcp_tools_in_confined_runtime() {
-        if !WorkflowExecutor::default().portable_capability().executable {
+        if !WorkflowExecutor::default().capability().executable {
             eprintln!("Bun unavailable; skipping portable code-mode execution test");
             return;
         }

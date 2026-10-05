@@ -226,5 +226,3 @@ export function Icon(props: IconProps): JSX.Element {
     />
   );
 }
-
-export const iconNames = Object.keys(catalog) as IconName[];

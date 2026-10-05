@@ -70,7 +70,7 @@ export function persist() {
     });
   return chain;
 }
-export function credential(id: string) {
+function credential(id: string) {
   const encoded = state.credentials[id];
   return encoded
     ? safeStorage.decryptString(Buffer.from(encoded, "base64"))
@@ -100,7 +100,7 @@ export function saveServerAuth(id: string, auth: ServerAuth) {
     auth.type === "none" ? "" : "haarness-auth:v1:" + JSON.stringify(auth),
   );
 }
-export function setCredential(id: string, token: string) {
+function setCredential(id: string, token: string) {
   if (!token) {
     delete state.credentials[id];
     return;

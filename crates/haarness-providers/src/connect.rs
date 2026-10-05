@@ -288,15 +288,6 @@ fn key_url(preset: &str) -> Option<&'static str> {
     })
 }
 
-/// Whether the provider has a browser/device sign-in in addition to keys.
-#[must_use]
-pub fn supports_oauth(provider: &str) -> bool {
-    guide(provider)
-        .methods
-        .iter()
-        .any(|method| method.kind == MethodKind::Oauth)
-}
-
 /// Sort key for the connect picker: the popular shelf first in its fixed
 /// order, then everything else by display name.
 #[must_use]
@@ -318,10 +309,16 @@ mod tests {
             let guide = guide(id);
             let ids: Vec<_> = guide.methods.iter().map(|method| method.id).collect();
             assert_eq!(ids, ["browser", "device", "api"], "{id}");
-            assert!(supports_oauth(id));
         }
-        assert!(!supports_oauth("anthropic"));
-        assert!(!supports_oauth("groq"));
+        for id in ["anthropic", "groq"] {
+            assert!(
+                guide(id)
+                    .methods
+                    .iter()
+                    .all(|method| method.kind != MethodKind::Oauth),
+                "{id}"
+            );
+        }
     }
 
     #[test]

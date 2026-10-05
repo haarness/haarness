@@ -57,7 +57,7 @@ const namedTools: Record<string, { icon: IconName; verb: string }> = {
   todoread: { icon: "todo", verb: "Checked the plan" },
   batch: { icon: "layers", verb: "Ran a batch" },
 };
-export const toolKind = (name: string) =>
+const toolKind = (name: string) =>
   /bash|shell|exec|command/.test(name)
     ? "run"
     : /write|edit|patch|apply/.test(name)

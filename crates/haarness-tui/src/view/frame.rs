@@ -109,7 +109,6 @@ impl TaggedLines {
         self.lines.extend(lines);
     }
     /// Append another tagged block, re-basing its tags.
-    #[allow(dead_code)] // used as the composition seam by upcoming views
     pub fn append(&mut self, mut other: TaggedLines) {
         let base = self.lines.len();
         self.lines.append(&mut other.lines);

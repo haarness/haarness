@@ -84,7 +84,6 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 toml = "1.0"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["catch-panic", "cors", "request-id", "trace"] }
 htmd = "0.5"
 jsonc-parser = { version = "0.33", features = ["serde", "cst"] }
 jsonschema = { version = "0.51", default-features = false }
@@ -98,7 +97,6 @@ utoipa = { version = "5.5", features = ["axum_extras", "chrono", "uuid"] }
 uuid = { version = "1.20", features = ["serde", "v7"] }
 vt100 = "0.16"
 walkdir = "2.5"
-zeroize = "1.8"
 zip = { version = "7.2", default-features = false, features = ["deflate"] }
 
 # Keep hot Rust edits fast; limit debug data while retaining file/line backtraces.

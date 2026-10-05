@@ -357,6 +357,12 @@ input[type="number"] {
   width: 1em;
   height: 1em;
 }
+/* Interface direction follows the chosen language; source and terminals keep
+   their own left-to-right order in Arabic too. */
+html[dir="rtl"] :is(pre, code, .cm-editor, .xterm) {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
 .brand-wordmark {
   display: block;
   width: auto;
@@ -367,14 +373,6 @@ input[type="number"] {
      the wordmark optically flush with whatever sits under it. */
   margin-inline-start: -0.06em;
   direction: ltr;
-}
-.eyebrow {
-  display: block;
-  font-size: var(--ui-xs);
-  letter-spacing: var(--track-caps);
-  font-weight: 600;
-  color: var(--muted);
-  text-transform: uppercase;
 }
 .badge {
   display: inline-flex;

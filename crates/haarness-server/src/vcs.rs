@@ -129,22 +129,9 @@ impl Default for DiffEntry {
     }
 }
 
-/// Return a full-context diff for `workspace`.
-pub async fn diff(workspace: &Path, mode: DiffMode) -> Result<Vec<ReviewFile>> {
-    diff_with_context(workspace, mode, DEFAULT_CONTEXT_LINES).await
-}
-
-/// Return a bounded diff with the requested number of context lines.
-pub async fn diff_with_context(
-    workspace: &Path,
-    mode: DiffMode,
-    context_lines: u32,
-) -> Result<Vec<ReviewFile>> {
-    diff_selected(workspace, mode, context_lines, false, None).await
-}
-
-/// List metadata without constructing patches, or load one literal workspace path.
-/// Omitted options retain the original bounded, eager API for existing clients.
+/// The review of `workspace` with `context_lines` of context: every file's
+/// bounded patch, only metadata when `summary` is set, or one literal
+/// workspace `path`.
 pub async fn diff_selected(
     workspace: &Path,
     mode: DiffMode,
@@ -353,22 +340,6 @@ pub async fn diff_selected(
             omitted_files,
         })
         .collect())
-}
-
-/// Convenience wrapper for a working-tree review.
-pub async fn working_tree_diff(workspace: &Path) -> Result<Vec<ReviewFile>> {
-    diff(workspace, DiffMode::WorkingTree).await
-}
-
-/// Convenience wrapper for a branch review.
-pub async fn branch_diff(workspace: &Path) -> Result<Vec<ReviewFile>> {
-    diff(workspace, DiffMode::Branch).await
-}
-
-/// Detect the repository's default branch without contacting a remote.
-pub async fn detect_default_branch(workspace: &Path) -> Result<Option<DefaultBranch>> {
-    ensure_worktree(workspace).await?;
-    detect_default_branch_inner(workspace).await
 }
 
 async fn ensure_worktree(workspace: &Path) -> Result<()> {
@@ -1143,6 +1114,33 @@ mod tests {
 
     use super::*;
 
+    async fn working_tree_diff(workspace: &Path) -> Result<Vec<ReviewFile>> {
+        diff_selected(
+            workspace,
+            DiffMode::WorkingTree,
+            DEFAULT_CONTEXT_LINES,
+            false,
+            None,
+        )
+        .await
+    }
+
+    async fn branch_diff(workspace: &Path) -> Result<Vec<ReviewFile>> {
+        diff_selected(
+            workspace,
+            DiffMode::Branch,
+            DEFAULT_CONTEXT_LINES,
+            false,
+            None,
+        )
+        .await
+    }
+
+    async fn detect_default_branch(workspace: &Path) -> Result<Option<DefaultBranch>> {
+        ensure_worktree(workspace).await?;
+        detect_default_branch_inner(workspace).await
+    }
+
     struct TestRepo {
         path: PathBuf,
     }
@@ -1334,7 +1332,9 @@ mod tests {
         repo.write("new *.txt", "untracked\n");
         repo.write("binary", [0, 1, 2]);
         for mode in [DiffMode::WorkingTree, DiffMode::Branch] {
-            let eager = diff_with_context(&repo.path, mode, 4).await.unwrap();
+            let eager = diff_selected(&repo.path, mode, 4, false, None)
+                .await
+                .unwrap();
             let summary = diff_selected(&repo.path, mode, 4, true, None)
                 .await
                 .unwrap();

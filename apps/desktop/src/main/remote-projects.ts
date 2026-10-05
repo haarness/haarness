@@ -3,7 +3,7 @@ import type { DirectoryListing } from "../shared";
 import type { WorkspaceInfo, WorkspaceListResponse } from "@haarness/sdk";
 
 /** Host credentials never leave Electron main. Directory APIs stay on one origin. */
-export async function hostRequest<T>(
+async function hostRequest<T>(
   url: string,
   token: string | ServerAuth,
   path: string,

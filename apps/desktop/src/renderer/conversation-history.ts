@@ -16,7 +16,7 @@ export function lastUserMessage(items: Item[], boundary = Infinity) {
 
 /** Search readable content, not IDs, snapshots, or provider metadata. Results
  * are indexed from history so unmounted virtual rows remain searchable. */
-export function conversationText(item: Item, items: Item[]) {
+function conversationText(item: Item, items: Item[]) {
   const data = item.data;
   switch (data.type) {
     case "user_message":

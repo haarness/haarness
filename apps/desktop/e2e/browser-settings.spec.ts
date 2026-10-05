@@ -37,7 +37,6 @@ let env: Record<string, string>,
   endpoint: { url: string; token: string },
   client: Haarness,
   thread: Thread,
-  second: Thread,
   connection: string;
 let tabID: string;
 let protectedRequests = 0;
@@ -235,7 +234,7 @@ test.beforeAll(async () => {
     provider: "echo",
     model: "echo-1",
   });
-  second = await client.createThread({
+  await client.createThread({
     title: "Other conversation",
     provider: "echo",
     model: "echo-1",

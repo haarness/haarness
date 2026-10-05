@@ -63,16 +63,6 @@ impl OpenAiProvider {
     }
 
     #[must_use]
-    pub fn with_api_key(mut self, key: Option<String>) -> Self {
-        if self.api_key.is_none()
-            && let Some(key) = key
-        {
-            self.api_key = Some(SecretString::from(key));
-        }
-        self
-    }
-
-    #[must_use]
     pub fn with_auth_store(mut self, store: Option<Arc<CredentialStore>>) -> Self {
         self.auth_store = store;
         self

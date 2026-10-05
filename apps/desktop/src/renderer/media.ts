@@ -1,5 +1,5 @@
 import { attachmentMimeTypes, checkAttachments, type Attachment } from "../attachments";
-export { checkAttachments, readAttachments, type Attachment } from "../attachments";
+export { checkAttachments, type Attachment } from "../attachments";
 
 export async function fileAttachments(files: File[]) {
   const values: Attachment[] = [];

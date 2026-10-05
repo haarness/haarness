@@ -130,17 +130,9 @@ impl Loopback {
     }
 }
 
-/// Parses one raw HTTP/1.1 request head (`GET /callback?code=…&state=… HTTP/1.1\r\nHost: …\r\n\r\n`).
-/// Rejects any method but GET, any path but [`CALLBACK_PATH`], a missing `code`, a `state` that differs from
-/// `expected_state`, and turns `error=<code>` into `Err(Error::Other)`.
-pub fn parse_callback_request(head: &str, expected_state: &str) -> Result<CallbackParams> {
-    match classify(head, expected_state) {
-        Callback::Accepted(params) => Ok(params),
-        Callback::Ignored(reason) => Err(Error::Other(reason.to_owned())),
-        Callback::Rejected(reason) => Err(Error::Other(reason)),
-    }
-}
-
+/// Sorts one raw HTTP/1.1 request head (`GET /callback?code=…&state=… HTTP/1.1\r\nHost: …\r\n\r\n`).
+/// Any method but GET or any path but [`CALLBACK_PATH`] is ignored; a missing `code`, a `state` that
+/// differs from `expected_state`, or `error=<code>` rejects the sign-in.
 fn classify(head: &str, expected_state: &str) -> Callback {
     let Some(request_line) = head.split("\r\n").next().filter(|line| !line.is_empty()) else {
         return Callback::Ignored("empty request");
@@ -276,14 +268,12 @@ mod tests {
 
     #[test]
     fn accepts_the_callback() {
-        let params =
-            parse_callback_request(&head("/callback?code=hcc_abc&state=st-1"), "st-1").unwrap();
         assert_eq!(
-            params,
-            CallbackParams {
+            classify(&head("/callback?code=hcc_abc&state=st-1"), "st-1"),
+            Callback::Accepted(CallbackParams {
                 code: "hcc_abc".to_owned(),
                 state: "st-1".to_owned()
-            }
+            })
         );
     }
 
@@ -298,20 +288,26 @@ mod tests {
                 "access_denied",
             ),
         ] {
-            let error = parse_callback_request(&head(target), "st-1").unwrap_err();
-            assert!(error.to_string().contains(needle), "{target}: {error}");
+            let Callback::Rejected(error) = classify(&head(target), "st-1") else {
+                panic!("{target} was not rejected");
+            };
+            assert!(error.contains(needle), "{target}: {error}");
         }
     }
 
     #[test]
     fn ignores_other_requests() {
         for target in ["/favicon.ico", "/callback/../x", "/"] {
-            assert!(parse_callback_request(&head(target), "st-1").is_err());
+            assert!(
+                matches!(classify(&head(target), "st-1"), Callback::Ignored(_)),
+                "{target}"
+            );
         }
-        let error = parse_callback_request("POST /callback?code=a&state=st-1 HTTP/1.1\r\n", "st-1")
-            .unwrap_err();
-        assert!(error.to_string().contains("only GET"));
-        assert!(parse_callback_request("", "st-1").is_err());
+        assert!(matches!(
+            classify("POST /callback?code=a&state=st-1 HTTP/1.1\r\n", "st-1"),
+            Callback::Ignored(reason) if reason.contains("only GET")
+        ));
+        assert!(matches!(classify("", "st-1"), Callback::Ignored(_)));
     }
 
     #[test]

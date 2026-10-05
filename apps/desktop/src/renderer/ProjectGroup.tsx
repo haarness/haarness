@@ -21,7 +21,7 @@ import { Button, Icon, ask, confirm, type IconName } from "./ui";
 import { SessionActions } from "./SessionActions";
 import { createFileDrop } from "./file-drop";
 
-export function ProjectGroup(props: {
+function ProjectGroup(props: {
   project: DesktopProject;
   order: ReturnType<typeof createOrdering>;
 }) {

@@ -1019,29 +1019,10 @@ impl AgentRuntime {
     /// Atomically install a fully composed runtime generation when no model
     /// turn or direct workflow tool can still be using the previous one.
     /// Returns `false` when work is active so the caller can keep one pending
-    /// refresh and retry after the session becomes idle.
-    pub fn replace_components_when_idle(
-        &self,
-        providers: Arc<dyn ProviderRegistry>,
-        tools: Arc<dyn ToolRegistry>,
-        project_context: String,
-        config: RuntimeConfig,
-        hooks: Option<Arc<dyn crate::HookPort>>,
-    ) -> bool {
-        self.replace_components_when_idle_with(
-            providers,
-            tools,
-            project_context,
-            config,
-            hooks,
-            || {},
-        )
-    }
-
-    /// Variant used by the application composition root to update stable
-    /// registries (skills, MCP and workflows) inside the same admission
-    /// boundary as the runtime generation swap.
-    pub fn replace_components_when_idle_with<F>(
+    /// refresh and retry after the session becomes idle. `before_swap` runs
+    /// inside the same admission boundary, so the composition root can update
+    /// stable registries (skills, MCP and workflows) with the generation.
+    pub fn replace_components_when_idle<F>(
         &self,
         providers: Arc<dyn ProviderRegistry>,
         tools: Arc<dyn ToolRegistry>,
