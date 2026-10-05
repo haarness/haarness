@@ -30,6 +30,20 @@ pub struct AnthropicProvider {
     headers: crate::ProviderHeaders,
 }
 
+/// The Messages endpoint under `ANTHROPIC_BASE_URL`. Anthropic's SDKs and
+/// Claude Code take the API root (`https://api.anthropic.com`) and add
+/// `/v1/messages`; a base that already names `/v1` or the endpoint is kept.
+fn messages_endpoint(base: &str) -> String {
+    let base = base.trim_end_matches('/');
+    if base.ends_with("/messages") {
+        base.to_owned()
+    } else if base.ends_with("/v1") {
+        format!("{base}/messages")
+    } else {
+        format!("{base}/v1/messages")
+    }
+}
+
 impl AnthropicProvider {
     #[must_use]
     pub fn from_environment() -> Self {
@@ -38,8 +52,9 @@ impl AnthropicProvider {
             id: "anthropic".into(),
             name: "Anthropic".into(),
             endpoint: std::env::var("ANTHROPIC_BASE_URL")
-                .map(|base| format!("{}/messages", base.trim_end_matches('/')))
-                .unwrap_or_else(|_| "https://api.anthropic.com/v1/messages".into()),
+                .map_or_else(|_| "https://api.anthropic.com/v1/messages".into(), |base| {
+                    messages_endpoint(&base)
+                }),
             api_key: std::env::var("ANTHROPIC_API_KEY")
                 .ok()
                 .map(SecretString::from),
@@ -760,6 +775,34 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use haarness_core::{ModelProvider, ProviderEvent, ProviderMessage, ProviderRequest};
+
+    #[test]
+    fn base_url_follows_the_sdk_convention() {
+        for (base, endpoint) in [
+            (
+                "https://api.anthropic.com",
+                "https://api.anthropic.com/v1/messages",
+            ),
+            (
+                "https://api.anthropic.com/",
+                "https://api.anthropic.com/v1/messages",
+            ),
+            (
+                "https://proxy.example/v1",
+                "https://proxy.example/v1/messages",
+            ),
+            (
+                "https://proxy.example/v1/messages",
+                "https://proxy.example/v1/messages",
+            ),
+            (
+                "https://proxy.example/anthropic",
+                "https://proxy.example/anthropic/v1/messages",
+            ),
+        ] {
+            assert_eq!(super::messages_endpoint(base), endpoint, "{base}");
+        }
+    }
 
     use super::{AnthropicProvider, discovered_model, discovered_model_for};
 
