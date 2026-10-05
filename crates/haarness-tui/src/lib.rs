@@ -18,6 +18,7 @@ mod messages;
 mod preferences;
 mod prompt_context;
 mod pty_view;
+mod remote_control;
 mod servers;
 mod state;
 mod statusline;
@@ -906,6 +907,7 @@ async fn run_with_client(
                         app.notice = error.to_string();
                     }
                 }
+                app.poll_remote_control(&client);
                 if app.goal_refresh_needed && app.tick.is_multiple_of(10) {
                     hydrate_goal_snapshot(&mut app, &client).await;
                     app.reveal_goal_completion();

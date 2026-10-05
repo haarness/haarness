@@ -688,6 +688,7 @@ fn apply_dialog(
             | Overlay::Diff(_)
             | Overlay::Workflow { .. }
             | Overlay::ProviderLogin
+            | Overlay::RemoteControl
     );
     // A tall terminal should show more of the list, not the same fifteen rows
     // with empty space above and below the card.

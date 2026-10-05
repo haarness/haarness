@@ -3143,6 +3143,22 @@ mod tests {
         (format!("http://{address}"), polls)
     }
 
+    #[test]
+    fn remote_control_qr_codes_are_square_with_finder_patterns() {
+        let rows = ui::qr_rows(
+            "https://app.haarness.ai/app/remote/sessions/0199f2d4-5a1b-7c3d-8e4f-a0b1c2d3e4f5",
+        );
+        let size = rows.len();
+        assert!(size >= 21 && (size - 21) % 4 == 0, "{size}");
+        assert!(rows.iter().all(|row| row.len() == size));
+        // Each corner except the bottom right holds a 7×7 finder pattern.
+        for (top, left) in [(0, 0), (0, size - 7), (size - 7, 0)] {
+            assert_eq!(&rows[top][left..left + 7], "1111111");
+            assert_eq!(&rows[top + 1][left..left + 7], "1000001");
+            assert_eq!(&rows[top + 3][left..left + 7], "1011101");
+        }
+    }
+
     fn login_service(root: &Path, issuer: &str, callback_port: u16) -> ManagementService {
         let paths = Paths::new(Some(&root.join("home"))).unwrap();
         ManagementService::new(

@@ -133,7 +133,8 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
         Overlay::Panel { .. }
         | Overlay::Diff(_)
         | Overlay::Workflow { .. }
-        | Overlay::ProviderLogin => {
+        | Overlay::ProviderLogin
+        | Overlay::RemoteControl => {
             return TaggedLines::default();
         }
     };
@@ -328,6 +329,9 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
     if matches!(app.overlay, Overlay::ProviderLogin) {
         return Some(login_dialog(app, width, max_height));
     }
+    if matches!(app.overlay, Overlay::RemoteControl) {
+        return Some(remote_control_dialog(app, width, max_height));
+    }
 
     let (title, rows): (&str, Vec<SelectorRow>) = match app.overlay {
         Overlay::Commands => (
@@ -472,7 +476,8 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
         | Overlay::Panel { .. }
         | Overlay::Diff(_)
         | Overlay::Workflow { .. }
-        | Overlay::ProviderLogin => {
+        | Overlay::ProviderLogin
+        | Overlay::RemoteControl => {
             unreachable!()
         }
     };
@@ -1251,6 +1256,224 @@ fn login_dialog(app: &App, width: usize, max_height: usize) -> TaggedLines {
     }));
     out.push(card.bottom());
     out
+}
+
+/// `/remote-control`: the shared chat's QR code beside what it means, then
+/// its link. The QR code is drawn in true black on white whatever the theme,
+/// because phone cameras read dark-on-light codes most reliably.
+fn remote_control_dialog(app: &App, width: usize, max_height: usize) -> TaggedLines {
+    use crate::remote_control::Action;
+    let theme = &app.theme;
+    let card = ModalCard::new(app, width);
+    let content = card.content_width();
+    let remote = &app.remote;
+    let current = remote.thread == Some(app.thread.id);
+    let share = remote.share.as_ref().filter(|_| current);
+    let busy = remote.busy().filter(|_| current);
+    let state = share.map_or("", |share| share.state.as_str());
+    let spin = crate::view::span::spinner(app.tick).to_string();
+    let heading = |glyph: String, color: haarness_opentui::Color, label: &str| {
+        Line::new(vec![
+            Span::new(format!("{glyph} "), color),
+            Span::new(label.to_owned(), theme.text).with_attributes(attr::BOLD),
+        ])
+    };
+    let mut status = Vec::new();
+    let mut notes: Vec<(String, haarness_opentui::Color)> = Vec::new();
+    let mut footer = "esc close";
+    let live = matches!(state, "on" | "connecting");
+    let explain = "This chat keeps running here, with this computer's files and model keys.";
+    match (busy, state) {
+        (Some(Action::Stop), _) => status.push(heading(spin, theme.primary, "Stopping…")),
+        (Some(Action::Start), _) if !live => {
+            status.push(heading(spin, theme.primary, "Sharing this chat…"));
+            notes.push(("Connecting it to Haarness Cloud.".into(), theme.muted));
+        }
+        _ if remote.failure.is_some() && current => {
+            status.push(heading(
+                "✕".into(),
+                theme.danger,
+                "Could not update sharing",
+            ));
+            notes.push((remote.failure.clone().unwrap_or_default(), theme.danger));
+            footer = "enter try again  ·  esc close";
+        }
+        (_, "on" | "connecting") => {
+            status.push(if state == "on" {
+                heading("●".into(), theme.success(), "Live in Haarness Cloud")
+            } else {
+                heading(spin, theme.primary, "Connecting to Haarness Cloud…")
+            });
+            if let Some(chat) = share.and_then(|share| share.chat.as_deref()) {
+                status.push(line(chat, theme.text));
+            }
+            if let Some(computer) = share.and_then(|share| share.computer.as_deref()) {
+                status.push(line(format!("on {computer}"), theme.muted));
+            }
+            notes.push((
+                "Scan the code with your phone, or open the link in any browser signed in to Haarness Cloud.".into(),
+                theme.text,
+            ));
+            notes.push((explain.into(), theme.muted));
+            footer = "o open  ·  c copy link  ·  s stop sharing  ·  esc close";
+        }
+        (_, "off") => {
+            status.push(heading("○".into(), theme.muted, "Not shared"));
+            notes.push((
+                "Continue this chat from your phone or any browser.".into(),
+                theme.text,
+            ));
+            notes.push((explain.into(), theme.muted));
+            footer = "enter share this chat  ·  esc close";
+        }
+        (_, "stopped") => {
+            status.push(heading(
+                "○".into(),
+                theme.muted,
+                "Sharing stopped from Haarness Cloud",
+            ));
+            notes.push(("Share again for a new link.".into(), theme.text));
+            footer = "enter share again  ·  esc close";
+        }
+        (_, "signed_out") => {
+            status.push(heading(
+                "○".into(),
+                theme.muted,
+                "Sign in to Haarness Cloud",
+            ));
+            notes.push((
+                "Sign in to continue this chat from your phone or any browser.".into(),
+                theme.text,
+            ));
+            notes.push((explain.into(), theme.muted));
+            footer = "enter sign in  ·  esc close";
+        }
+        _ => status.push(heading(spin, theme.primary, "Checking…")),
+    }
+    if let Some(error) = share.and_then(|share| share.error.as_deref()) {
+        notes.push((error.to_owned(), theme.danger));
+    }
+    let url = share
+        .filter(|share| share.live())
+        .and_then(|share| share.url.clone());
+    let qr = share
+        .filter(|_| live && url.is_some())
+        .map(|share| qr_code_lines(&share.qr))
+        .unwrap_or_default();
+    let qr_width = qr.first().map_or(0, Line::width);
+    // Header, separators, footer and the link take about eight rows.
+    let room = max_height.saturating_sub(8);
+    let side_by_side = !qr.is_empty() && content >= qr_width + 3 + 28;
+    let show_qr = !qr.is_empty()
+        && if side_by_side {
+            qr.len() <= room
+        } else {
+            qr.len() + status.len() + 2 <= room
+        };
+    let text_width = if show_qr && side_by_side {
+        content - qr_width - 3
+    } else {
+        content
+    };
+    let mut text = status;
+    for (note, color) in notes {
+        text.push(Line::empty());
+        text.extend(wrap_panel_text(&note, text_width, "", color));
+    }
+    let mut body: Vec<Line> = Vec::new();
+    if show_qr && side_by_side {
+        // Centre the text block against the code.
+        let offset = qr.len().saturating_sub(text.len()) / 2;
+        for (index, code) in qr.into_iter().enumerate() {
+            let words = index
+                .checked_sub(offset)
+                .and_then(|row| text.get(row).cloned())
+                .unwrap_or_else(Line::empty);
+            body.push(beside(app, width, code, words, text_width));
+        }
+    } else {
+        body.extend(text.into_iter().map(|row| card.row(row, false)));
+        if show_qr {
+            body.push(card.row(Line::empty(), false));
+            for code in qr {
+                body.push(beside(app, width, code, Line::empty(), 0));
+            }
+        }
+    }
+    if let Some(url) = &url {
+        body.push(card.row(Line::empty(), false));
+        for row in wrap_panel_text(url, content, "", theme.primary) {
+            body.push(card.row(row, false));
+        }
+    }
+    body.truncate(max_height.saturating_sub(5).max(1));
+    let mut out = TaggedLines::default();
+    out.push(card.top());
+    out.push(card.header("Remote control"));
+    out.push(card.separator());
+    for row in body {
+        out.push(row);
+    }
+    out.push(card.separator());
+    out.push(card.footer(footer));
+    out.push(card.bottom());
+    out
+}
+
+/// A QR code in half blocks: each cell holds two modules, the upper one in
+/// the foreground and the lower one in the background, with the two-module
+/// quiet zone scanners need.
+fn qr_code_lines(rows: &[String]) -> Vec<Line> {
+    const DARK: haarness_opentui::Color = haarness_opentui::Color::rgb(0, 0, 0);
+    const LIGHT: haarness_opentui::Color = haarness_opentui::Color::rgb(255, 255, 255);
+    const QUIET: usize = 2;
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let total = rows.len() + QUIET * 2;
+    let dark = |row: usize, column: usize| {
+        row.checked_sub(QUIET)
+            .zip(column.checked_sub(QUIET))
+            .and_then(|(row, column)| rows.get(row)?.as_bytes().get(column))
+            == Some(&b'1')
+    };
+    (0..total)
+        .step_by(2)
+        .map(|row| {
+            let mut spans: Vec<Span> = Vec::new();
+            for column in 0..total {
+                let fg = if dark(row, column) { DARK } else { LIGHT };
+                let bg = if dark(row + 1, column) { DARK } else { LIGHT };
+                match spans.last_mut() {
+                    Some(previous) if previous.fg == fg && previous.bg == Some(bg) => {
+                        previous.text.push('▀');
+                    }
+                    _ => spans.push(Span::new("▀", fg).on(bg)),
+                }
+            }
+            Line::new(spans)
+        })
+        .collect()
+}
+
+/// One card row holding a QR code line and, beside it, a line of text. The
+/// code keeps its own colours, which `ModalCard::row` would paint over.
+fn beside(app: &App, width: usize, code: Line, words: Line, text_width: usize) -> Line {
+    let theme = &app.theme;
+    let padding = 2.min(width / 2);
+    let code_width = code.width();
+    let mut spans = vec![Span::new(" ".repeat(padding), theme.text).on(theme.overlay)];
+    spans.extend(code.spans);
+    let mut used = padding + code_width;
+    if text_width > 0 {
+        spans.push(Span::new("   ", theme.text).on(theme.overlay));
+        spans.extend(fit_line(words, text_width, theme.text, theme.overlay).spans);
+        used += 3 + text_width;
+    }
+    if used < width {
+        spans.push(Span::new(" ".repeat(width - used), theme.text).on(theme.overlay));
+    }
+    Line::new(spans)
 }
 
 fn panel_dialog(

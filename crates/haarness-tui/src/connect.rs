@@ -554,6 +554,12 @@ impl App {
             .iter()
             .find(|candidate| candidate.id == provider)
             .map_or_else(|| provider.to_owned(), |candidate| candidate.name.clone());
+        if provider == "haarness" && self.resume_remote_control(client) {
+            self.connect.login = None;
+            self.connect.provider = None;
+            self.notice = format!("{name} connected · sharing this chat");
+            return Ok(());
+        }
         let models: Vec<String> = self
             .providers
             .iter()

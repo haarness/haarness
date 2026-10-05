@@ -1342,6 +1342,19 @@ async fn handle_overlay_key(app: &mut App, key: KeyEvent, client: &ApiClient) ->
     if matches!(app.overlay, Overlay::Diff(_)) && handle_diff_key(app, key, client).await? {
         return Ok(AppAction::Continue);
     }
+    if matches!(app.overlay, Overlay::RemoteControl) {
+        match key.code {
+            KeyCode::Esc => app.close_overlay(),
+            KeyCode::Enter => app.remote_control_primary(client).await?,
+            KeyCode::Char('o') => app.open_remote_control_link(),
+            KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.copy_remote_control_link();
+            }
+            KeyCode::Char('s') => app.stop_remote_control(client),
+            _ => {}
+        }
+        return Ok(AppAction::Continue);
+    }
     if matches!(app.overlay, Overlay::ProviderLogin) {
         let failed = app
             .connect

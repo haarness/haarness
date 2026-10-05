@@ -1,4 +1,5 @@
 import { previewInfo } from "./preview-actions";
+import type { RemoteAction, RemoteShare } from "./remote-control";
 import { createAttachmentDrafts } from "./attachment-drafts";
 import { applyLanguage } from "./i18n";
 import {
@@ -96,6 +97,10 @@ interface State extends Live {
   settings: string | null;
   /** The connect-a-provider dialog, when open. */
   connect: { provider?: string; onboarding?: boolean } | null;
+  /** The `/remote-control` dialog, when open, and what it was asked to do. */
+  remoteControl: { action: RemoteAction } | null;
+  /** Whether each chat is shared through Haarness Cloud, by session key. */
+  remoteShares: Record<string, RemoteShare>;
   memoryOpen: boolean;
   settingsTarget: string | null;
   settingsRevision: number;
@@ -159,6 +164,8 @@ function createApp() {
     panel: "chat",
     settings: null,
     connect: null,
+    remoteControl: null,
+    remoteShares: {},
     memoryOpen: false,
     settingsTarget: null,
     settingsRevision: 0,
@@ -1706,6 +1713,13 @@ function createApp() {
     registerSearch,
     searchCommands: () =>
       Object.values(registrations()).flatMap((entries) => entries()),
+    /** Open the `/remote-control` dialog for the selected chat. */
+    openRemoteControl: (action: RemoteAction = "start") => {
+      if (!state.connection || !state.selected) return;
+      set("remoteControl", { action });
+    },
+    setRemoteShare: (key: string, share: RemoteShare) =>
+      set("remoteShares", key, share),
     /** Open the connect-a-provider dialog; `onboarding` when nothing works yet. */
     openConnect: (options: { provider?: string; onboarding?: boolean } = {}) => {
       if (!state.connection) return;

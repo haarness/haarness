@@ -285,11 +285,7 @@ impl Client {
                 .map(str::to_owned)
                 .ok_or_else(|| Error::Other("Cloud returned an invalid credit balance".into()))
         };
-        let base = std::env::var("HAARNESS_CLOUD_WEB_ORIGIN")
-            .ok()
-            .map(|url| crate::safe_url(&url))
-            .transpose()?
-            .unwrap_or_else(|| self.config.api_url.clone());
+        let base = self.config.web_origin()?;
         let web = |path: &str| -> Result<String> {
             let mut url = base.join(path).map_err(|e| Error::Config(e.to_string()))?;
             url.query_pairs_mut().append_pair("accountId", account);

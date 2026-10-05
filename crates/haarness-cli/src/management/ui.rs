@@ -112,6 +112,35 @@ fn revision(path: &Path) -> Result<String> {
     use sha2::{Digest, Sha256};
     Ok(format!("{:x}", Sha256::digest(fs::read(path)?)))
 }
+// What `/remote-control` says in clients that render the view as text.
+const SHARE_SCAN: &str =
+    "Scan the code or open the link on your phone or any browser signed in to Haarness Cloud.";
+const SHARE_RUNS_HERE: &str = "The chat keeps running on this computer, with its files and model keys, until you stop sharing.";
+const SHARE_OFFER: &str = "Continue this chat from your phone or any browser. It keeps running on this computer, with its files and model keys.";
+const SHARE_STOPPED: &str = "Sharing was stopped from Haarness Cloud. Share again for a new link.";
+const SHARE_SIGN_IN: &str =
+    "Sign in to Haarness Cloud to continue this chat from your phone or any browser.";
+/// A QR code as rows of `1` (dark) and `0` (light) modules, without the
+/// quiet zone, so each client can draw it in its own medium.
+pub(crate) fn qr_rows(text: &str) -> Vec<String> {
+    let Ok(code) = qrcode::QrCode::with_error_correction_level(text, qrcode::EcLevel::M) else {
+        return Vec::new();
+    };
+    code.to_colors()
+        .chunks(code.width())
+        .map(|row| {
+            row.iter()
+                .map(|module| {
+                    if *module == qrcode::Color::Dark {
+                        '1'
+                    } else {
+                        '0'
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
 fn output(view: View) -> Result<Value> {
     Ok(serde_json::to_value(view)?)
 }
@@ -211,6 +240,9 @@ impl ManagementService {
         }
         if resource == "sharing" {
             return self.sharing_view(input).await.and_then(output);
+        }
+        if resource == "remote-control" {
+            return self.remote_control_view(input).await.and_then(output);
         }
         if action == "login_callback_form" {
             let mut callback = field(
@@ -541,6 +573,78 @@ impl ManagementService {
                 json!({"action":"revoke","threadId":thread,"token":row.token}),
             ));
         }
+        Ok(view)
+    }
+
+    /// `/remote-control` in the TUI and Desktop: continue this chat from a
+    /// phone or browser through Haarness Cloud. `status` answers from local
+    /// state only; `view` also asks Cloud whether it reaches the chat.
+    async fn remote_control_view(&self, input: &Value) -> Result<View> {
+        use crate::remote_cloud::{self, ShareState};
+        let thread: ThreadId =
+            serde_json::from_value(input["threadId"].clone()).context("Open a chat first")?;
+        let current = self.runtime()?.get_thread(thread).await?;
+        let action = text(input, "action");
+        let share = match action {
+            "start" => {
+                ensure!(
+                    !current.is_subagent,
+                    "Share the conversation that started this agent; its agents come with it."
+                );
+                remote_cloud::share_chat(&self.paths, &self.workspace, thread.0).await?
+            }
+            "stop" => remote_cloud::stop_chat(&self.paths, &self.workspace, thread.0).await?,
+            "status" => {
+                remote_cloud::chat_status(&self.paths, &self.workspace, thread.0, false).await?
+            }
+            "" | "view" => {
+                remote_cloud::chat_status(&self.paths, &self.workspace, thread.0, true).await?
+            }
+            other => bail!("Unknown remote control action {other}"),
+        };
+        let request = |action: &str| json!({"action":action,"threadId":thread});
+        let mut view = View {
+            title: "Remote control".into(),
+            ..View::default()
+        };
+        match share.state {
+            ShareState::On | ShareState::Connecting => {
+                view.lines.extend(share.url.clone());
+                view.lines.push(if share.state == ShareState::On {
+                    SHARE_SCAN.into()
+                } else {
+                    "Connecting to Haarness Cloud…".into()
+                });
+                view.lines.push(SHARE_RUNS_HERE.into());
+                view.entries
+                    .push(destructive("Stop sharing", request("stop")));
+            }
+            ShareState::Off | ShareState::Stopped => {
+                let stopped = share.state == ShareState::Stopped;
+                view.lines
+                    .push(if stopped { SHARE_STOPPED } else { SHARE_OFFER }.into());
+                view.entries.push(entry(
+                    "Share this chat",
+                    "Get a link for your phone or browser",
+                    request("start"),
+                ));
+            }
+            ShareState::SignedOut => {
+                view.lines.push(SHARE_SIGN_IN.into());
+                view.entries.push(entry(
+                    "Sign in to Haarness Cloud",
+                    "",
+                    json!({"action":"login","name":"haarness","method":"browser"}),
+                ));
+            }
+        }
+        if let Some(error) = &share.error {
+            view.lines.push(error.clone());
+        }
+        let mut data = serde_json::to_value(&share)?;
+        data["chat"] = json!(current.title);
+        data["qr"] = json!(share.url.as_deref().map(qr_rows).unwrap_or_default());
+        view.data = Some(data);
         Ok(view)
     }
 

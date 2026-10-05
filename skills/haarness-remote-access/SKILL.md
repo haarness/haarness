@@ -58,6 +58,16 @@ Read [the live script](../../scripts/test-remote-live.py) before running. It is 
 
 Check exit status, individual checks and cleanup. The echo provider is deterministic transport evidence; it does not prove a real model, browser interaction or physical file picker. Secret-free results remain under `target/remote-e2e-*/checks.json`.
 
+## `/remote-control` from the TUI and Desktop
+
+`/remote-control` (aliases `/rc`, `/dc`; `status`, `stop`) shares the open chat through the server's `remote-control` management resource, which starts the same connector as `remote enable --chat` and returns the link plus QR rows. Unit coverage: `cargo test -p haarness-cli --bin haarness remote_cloud::tests remote_control_qr`, `cargo test -p haarness-tui --lib remote_control`, `npm --prefix apps/desktop test` (`tests/remote-control.test.ts`). Live, against the local Cloud sandbox:
+
+- TUI in a private tmux socket with isolated `HAARNESS_DATA_DIR`/`HAARNESS_CLOUD_CONFIG_DIR`, `HAARNESS_CLOUD_API_URL` and `HAARNESS_CLOUD_WEB_ORIGIN`, `SSH_TTY=fixture`: type `/dc` while signed out, Enter signs in with a device code (approve it on the web's `/device` page), and sharing resumes by itself. Decode the terminal QR from `tmux capture-pane -e` colours with OpenCV and compare it with the link.
+- Open the link in a browser signed in to the same account, send from there, and confirm the turn appears in the TUI; the band shows `remote`.
+- `/rc stop` must leave no connector, no `remote-*` identity files and no host/publication in Cloud; the old link returns 404. Stopping from the Cloud page must clear the TUI badge within a minute and clean up the connector the same way. Sharing again gives a new link.
+- Desktop: `npx playwright test e2e/remote-control.spec.ts` (signed-out case always; the live case with `HAARNESS_REMOTE_CONTROL_API`, `_WEB` and a signed-in `_ACCOUNT` config dir). It saves `qr.png`/`dialog.png`; decode the QR too.
+- Check the Cloud Remote hosts page and the shared chat at 375 px wide: chat-only connectors appear only under Published chats, never as computer cards.
+
 ## Complete the user journey
 
 Follow the [test plan](references/remote-session-test-plan.md) for full-host and published-chat Chrome control, real-model file reading, bidirectional tmux chat updates, permissions/questions, reconnect with unsent draft retention, cross-replica routing and independent credential revocation. A connected badge or successful click alone is not a pass: verify fresh runtime effects and authoritative history after recovery.
