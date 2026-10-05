@@ -319,6 +319,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
                 }
             });
             let _watcher = AbortTask(watcher);
+            let mut shown_title = identity["title"].as_str().unwrap_or_default().to_owned();
             let mut failures = 0u32;
             let mut rejected = None;
             loop {
@@ -369,7 +370,15 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
                     Ok(Ok((socket, _))) => {
                         failures = 0;
                         println!("Remote host connected");
-                        tokio::select! {()=stop.cancelled()=>break,result=connected(socket,target.clone(),http.clone())=>{if let Err(error)=result {eprintln!("Remote connection ended: {error}");}}}
+                        tokio::select! {
+                            () = stop.cancelled() => break,
+                            result = connected(socket, target.clone(), http.clone()) => {
+                                if let Err(error) = result {
+                                    eprintln!("Remote connection ended: {error}");
+                                }
+                            }
+                            () = follow_title(&client, &http, &target, id, &file, &mut shown_title) => {}
+                        }
                     }
                     Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response)))
                         if response.status() == reqwest::StatusCode::UNAUTHORIZED =>
@@ -401,6 +410,62 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
         }
     }
     Ok(())
+}
+/// Keeps a shared chat's name in Cloud in step with the chat. A chat shared
+/// right after its first message is still "New thread" when published; its
+/// real title arrives later, and a rename can come at any time.
+async fn follow_title(
+    client: &haarness_account::Client,
+    http: &reqwest::Client,
+    target: &Target,
+    host: Uuid,
+    identity: &Path,
+    shown: &mut String,
+) {
+    let Some(thread) = target.thread else {
+        return std::future::pending().await;
+    };
+    loop {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let current = async {
+            http.get(format!("{}/v1/threads/{thread}", target.url))
+                .bearer_auth(&target.token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<Value>()
+                .await
+        }
+        .await;
+        let Some(title) = current
+            .ok()
+            .and_then(|thread| {
+                thread["title"]
+                    .as_str()
+                    .map(|title| title.trim().chars().take(200).collect::<String>())
+            })
+            .filter(|title| !title.is_empty() && title != shown)
+        else {
+            continue;
+        };
+        let published = client
+            .request(
+                reqwest::Method::POST,
+                &format!("/api/v1/remote-hosts/{host}/sessions"),
+                Some(json!({"projectId": target.project, "threadId": thread, "title": title})),
+            )
+            .await;
+        if published.is_ok() {
+            if let Some(mut saved) = std::fs::read(identity)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            {
+                saved["title"] = json!(title);
+                let _ = super::write_private_json(identity, &saved);
+            }
+            *shown = title;
+        }
+    }
 }
 async fn verify_runtime(http: &reqwest::Client, target: &Target) -> Result<()> {
     let info = tokio::time::timeout(Duration::from_secs(5), async {
