@@ -87,8 +87,13 @@ impl ModelProvider for EchoProvider {
         // Auxiliary naming uses the same provider without executing its
         // scripted tools or waiting for a scripted main-response stream.
         if request.system == haarness_core::system_prompt_for("title") {
+            // Titles quote the first message; echo the message itself.
+            let message = prompt
+                .split_once("<message>\n")
+                .and_then(|(_, rest)| rest.rsplit_once("\n</message>"))
+                .map_or(prompt.as_str(), |(message, _)| message);
             return Ok(Box::pin(stream::iter(vec![
-                Ok(ProviderEvent::TextDelta(format!("Echo: {prompt}"))),
+                Ok(ProviderEvent::TextDelta(format!("Echo: {message}"))),
                 Ok(ProviderEvent::Finished {
                     reason: "completed".into(),
                 }),
