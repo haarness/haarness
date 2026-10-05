@@ -501,6 +501,18 @@ impl ModelProvider for HaarnessCloudProvider {
         cancel: CancellationToken,
     ) -> CoreResult<ProviderStream> {
         let transport = tokio::select! { () = cancel.cancelled() => return Err(error("Request cancelled")), result = self.transport() => result? };
+        // A turn can come before anything listed the models (the first one
+        // after start-up). Without the catalog every model would look
+        // text-only, so an image in the conversation would fail the turn.
+        if self
+            .catalog()
+            .is_some_and(|(_, catalog)| catalog.get(&[]).is_empty())
+        {
+            tokio::select! {
+                () = cancel.cancelled() => return Err(error("Request cancelled")),
+                () = self.refresh_models(false) => {}
+            }
+        }
         let models = self
             .catalog()
             .map_or_else(Vec::new, |(_, catalog)| catalog.get(&[]));
