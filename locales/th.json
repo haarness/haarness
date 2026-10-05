@@ -1400,6 +1400,7 @@
   "Always lazy": "โหลดตามต้องการเสมอ",
   "Approximation from saved text (4 characters per token), not a provider token count. Excludes system instructions, tool definitions, media and provider overhead.": "ค่าประมาณจากข้อความที่บันทึกไว้ (4 อักขระต่อโทเค็น) ไม่ใช่จำนวนโทเค็นจากผู้ให้บริการ ไม่รวมคำสั่งระบบ นิยามเครื่องมือ สื่อ และส่วนเกินของผู้ให้บริการ",
   "As reported by the provider. Cache tokens may overlap input tokens; these values are not added together. Reasoning token counts are not reported separately.": "ตามที่ผู้ให้บริการรายงาน โทเค็นแคชอาจซ้อนกับโทเค็นอินพุต ค่าเหล่านี้จึงไม่ถูกนำมารวมกัน และไม่มีการรายงานจำนวนโทเค็นการให้เหตุผลแยกต่างหาก",
+  "Estimated locally: the provider reported no usage for this request.": "ค่าประมาณในเครื่อง: ผู้ให้บริการไม่ได้รายงานการใช้งานสำหรับคำขอนี้",
   "Assistant messages": "ข้อความของผู้ช่วย",
   "Automatic": "อัตโนมัติ",
   "Binary image": "รูปภาพไบนารี",

@@ -1400,6 +1400,7 @@
   "Always lazy": "Her zaman gecikmeli",
   "Approximation from saved text (4 characters per token), not a provider token count. Excludes system instructions, tool definitions, media and provider overhead.": "Kayıtlı metinden yapılan bir yaklaşıklıktır (token başına 4 karakter); sağlayıcının token sayısı değildir. Sistem talimatlarını, araç tanımlarını, medyayı ve sağlayıcı ek yükünü içermez.",
   "As reported by the provider. Cache tokens may overlap input tokens; these values are not added together. Reasoning token counts are not reported separately.": "Sağlayıcının bildirdiği şekliyle. Önbellek token’ları giriş token’larıyla çakışabilir; bu değerler toplanmaz. Akıl yürütme token sayıları ayrıca bildirilmez.",
+  "Estimated locally: the provider reported no usage for this request.": "Yerel tahmin: sağlayıcı bu istek için kullanım bildirmedi.",
   "Assistant messages": "Asistan mesajları",
   "Automatic": "Otomatik",
   "Binary image": "İkili görsel",

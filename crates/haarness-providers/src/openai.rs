@@ -721,15 +721,14 @@ impl ModelProvider for OpenAiProvider {
                         }
                     }
                     "response.completed" | "response.incomplete" => {
-                        let usage = &event["response"]["usage"];
-                        let cache_read = usage
-                            .pointer("/input_tokens_details/cached_tokens")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0);
-                        yield ProviderEvent::Usage { input_tokens: number(usage, "input_tokens"), output_tokens: number(usage, "output_tokens"), cache_read_tokens: cache_read, cache_write_tokens: 0 };
+                        if let Some(usage) = response_usage(&event) { yield usage; }
                         yield ProviderEvent::Finished { reason: event["response"]["incomplete_details"]["reason"].as_str().unwrap_or(if event["type"] == "response.completed" { "completed" } else { "incomplete" }).into() };
                     }
-                    "response.failed" | "error" => Err(CoreError::Provider(event.to_string()))?,
+                    // A failed response can still have been billed.
+                    "response.failed" | "error" => {
+                        if let Some(usage) = response_usage(&event) { yield usage; }
+                        Err(CoreError::Provider(event.to_string()))?;
+                    }
                     _ => {}
                 }
             }
@@ -867,6 +866,20 @@ fn string(value: &Value, key: &str) -> String {
         .unwrap_or_default()
         .into()
 }
+/// The response's reported usage; `None` when it carries none (a proxy that
+/// strips it), never an all-zero report.
+fn response_usage(event: &Value) -> Option<ProviderEvent> {
+    let usage = event["response"]["usage"].as_object()?;
+    let usage = Value::Object(usage.clone());
+    let details = |path: &str| usage.pointer(path).and_then(Value::as_u64).unwrap_or(0);
+    Some(ProviderEvent::Usage {
+        input_tokens: number(&usage, "input_tokens"),
+        output_tokens: number(&usage, "output_tokens"),
+        cache_read_tokens: details("/input_tokens_details/cached_tokens"),
+        cache_write_tokens: details("/input_tokens_details/cache_write_tokens"),
+    })
+}
+
 fn number(value: &Value, key: &str) -> u64 {
     value.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
@@ -1064,6 +1077,66 @@ mod tests {
             openai_reasoning_efforts("o4-mini"),
             ["low", "medium", "high"]
         );
+    }
+
+    #[tokio::test]
+    async fn usage_is_reported_only_when_the_response_carries_it() {
+        async fn run(body: &'static str) -> Vec<Result<ProviderEvent, haarness_core::CoreError>> {
+            let router = Router::new().route(
+                "/responses",
+                post(move || async move { ([("content-type", "text/event-stream")], body) }),
+            );
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let provider = OpenAiProvider::for_test(format!("http://{address}/responses"), "test");
+            let request = ProviderRequest {
+                model: "gpt-5.5".into(),
+                system: "sys".into(),
+                messages: vec![ProviderMessage::Text {
+                    role: "user".into(),
+                    content: "go".into(),
+                }],
+                tools: Vec::new(),
+                reasoning_effort: None,
+                parameters: haarness_core::RequestParameters::default(),
+                output_schema: None,
+            };
+            provider
+                .stream(request, CancellationToken::new())
+                .await
+                .unwrap()
+                .collect()
+                .await
+        }
+        let usages = |events: &[Result<ProviderEvent, haarness_core::CoreError>]| {
+            events
+                .iter()
+                .filter(|event| matches!(event, Ok(ProviderEvent::Usage { .. })))
+                .count()
+        };
+        // A proxy that strips usage: no report at all, not an all-zero one.
+        let events = run(
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+        )
+        .await;
+        assert_eq!(usages(&events), 0, "{events:?}");
+        // A failed response that was billed keeps its usage, then fails;
+        // cache writes are read when reported.
+        let events = run(
+            "data: {\"type\":\"response.failed\",\"response\":{\"usage\":{\"input_tokens\":70,\"output_tokens\":4,\"input_tokens_details\":{\"cached_tokens\":20,\"cache_write_tokens\":30}}}}\n\n",
+        )
+        .await;
+        assert!(matches!(
+            events.first(),
+            Some(Ok(ProviderEvent::Usage {
+                input_tokens: 70,
+                output_tokens: 4,
+                cache_read_tokens: 20,
+                cache_write_tokens: 30
+            }))
+        ));
+        assert!(events.last().is_some_and(Result::is_err));
     }
 
     #[tokio::test]

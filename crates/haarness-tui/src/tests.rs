@@ -2455,6 +2455,7 @@ fn usage_totals_reach_the_composer_label() {
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
                 cost_usd: None,
+                estimated: false,
             },
         ),
         message_item(
@@ -2467,6 +2468,7 @@ fn usage_totals_reach_the_composer_label() {
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
                 cost_usd: None,
+                estimated: false,
             },
         ),
     ];

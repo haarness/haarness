@@ -1954,6 +1954,10 @@ impl AgentRuntime {
             let mut answer = String::new();
             let mut calls = Vec::new();
             let mut finished = false;
+            // Providers repeat cumulative usage within a stream (Gemini on
+            // every chunk, Anthropic at start and end): the last report is the
+            // request's; only separate attempts add up.
+            let mut attempt_usage = (0_u64, 0_u64);
             while let Some(event) = stream.next().await {
                 match event? {
                     ProviderEvent::TextDelta(delta) => answer.push_str(&delta),
@@ -1966,10 +1970,7 @@ impl AgentRuntime {
                         input_tokens: input,
                         output_tokens: output,
                         ..
-                    } => {
-                        input_tokens = input_tokens.saturating_add(input);
-                        output_tokens = output_tokens.saturating_add(output);
-                    }
+                    } => attempt_usage = (input, output),
                     ProviderEvent::ToolCall {
                         call_id,
                         name,
@@ -1990,6 +1991,8 @@ impl AgentRuntime {
                     }
                 }
             }
+            input_tokens = input_tokens.saturating_add(attempt_usage.0);
+            output_tokens = output_tokens.saturating_add(attempt_usage.1);
             if !finished {
                 return Err(CoreError::ProviderIncomplete(
                     "side question ended without a completion event".into(),
@@ -5729,6 +5732,9 @@ impl RunnerTask {
                 let mut text = String::new();
                 let mut reasoning = String::new();
                 let mut usage = None;
+                // Everything the model streamed, for the local output estimate
+                // when the provider reports no usage.
+                let mut streamed = String::new();
                 let mut calls = Vec::new();
                 let mut structured_output = None;
                 let mut blocked = None;
@@ -5737,7 +5743,10 @@ impl RunnerTask {
                 loop {
                     let event = tokio::select! {
                         biased;
-                        () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
+                        () = self.cancel.cancelled() => {
+                            self.publish_round_usage(usage, prompt_usage.clone(), &streamed, provider_id, &model).await?;
+                            return Err(CoreError::Cancelled);
+                        }
                         event = stream.next().instrument(provider_span.clone()) => event,
                     };
                     let Some(event) = event else {
@@ -5769,6 +5778,7 @@ impl RunnerTask {
                             // are appended immediately while all prose is held
                             // until the end, reversing the visible transcript.
                             self.flush_reasoning_segment(&mut reasoning).await?;
+                            streamed.push_str(&delta);
                             text.push_str(&delta);
                             self.set_status("responding", None);
                             self.events.publish_scoped(
@@ -5791,6 +5801,7 @@ impl RunnerTask {
                                 )
                                 .await?;
                             }
+                            streamed.push_str(&delta);
                             reasoning.push_str(&delta);
                             self.events.publish_scoped(
                                 "turn.reasoning_delta",
@@ -5808,11 +5819,14 @@ impl RunnerTask {
                             provider_metadata,
                         } => {
                             let name = self.resolve_tool_name(&name);
+                            streamed.push_str(&name);
+                            streamed.push_str(&arguments.to_string());
                             if call_id.trim().is_empty() || name.trim().is_empty() {
-                                return Err(CoreError::Provider(
+                                blocked = Some(CoreError::Provider(
                                     "provider returned a tool call without a call ID or name"
                                         .into(),
                                 ));
+                                break;
                             }
                             self.flush_reasoning_segment(&mut reasoning).await?;
                             if self.output_schema.is_none() {
@@ -5832,18 +5846,22 @@ impl RunnerTask {
                             calls.push((call_id, name, arguments));
                         }
                         ProviderEvent::StructuredOutput(value) => {
+                            streamed.push_str(&value.to_string());
                             if structured_output.replace(value).is_some() {
-                                return Err(CoreError::Provider(
+                                blocked = Some(CoreError::Provider(
                                     "provider returned structured output more than once".into(),
                                 ));
+                                break;
                             }
                         }
+                        // The last report is the request's; an all-zero one
+                        // (a gateway without usage) is no report at all.
                         ProviderEvent::Usage {
                             input_tokens,
                             output_tokens,
                             cache_read_tokens,
                             cache_write_tokens,
-                        } => {
+                        } if input_tokens > 0 || output_tokens > 0 => {
                             usage = Some((
                                 input_tokens,
                                 output_tokens,
@@ -5851,6 +5869,7 @@ impl RunnerTask {
                                 cache_write_tokens,
                             ));
                         }
+                        ProviderEvent::Usage { .. } => {}
                         ProviderEvent::Finished { reason } => {
                             finished = true;
                             if let Some(error) = ProviderEvent::finish_error(&reason) { blocked = Some(error); }
@@ -5869,16 +5888,25 @@ impl RunnerTask {
                 if blocked.is_some() {
                     self.flush_assistant_segment(&mut text, &mut goal_turn_assistant_text).await?;
                 } else if self.output_schema.is_some() {
-                    if !text.trim().is_empty() {
-                        return Err(CoreError::Provider(
-                            "provider returned plain text for a structured-output turn".into(),
-                        ));
-                    }
-                    if structured_output.is_some() && !calls.is_empty() {
-                        return Err(CoreError::Provider(
-                            "provider mixed final structured output with ordinary tool calls"
-                                .into(),
-                        ));
+                    let invalid = if !text.trim().is_empty() {
+                        Some("provider returned plain text for a structured-output turn")
+                    } else if structured_output.is_some() && !calls.is_empty() {
+                        Some("provider mixed final structured output with ordinary tool calls")
+                    } else if structured_output.is_none() && calls.is_empty() {
+                        Some("model did not produce structured output")
+                    } else {
+                        None
+                    };
+                    if let Some(message) = invalid {
+                        self.publish_round_usage(
+                            usage,
+                            prompt_usage.clone(),
+                            &streamed,
+                            provider_id,
+                            &model,
+                        )
+                        .await?;
+                        return Err(CoreError::Provider(message.into()));
                     }
                     if let Some(value) = structured_output {
                         let text = serde_json::to_string(&value).map_err(|error| {
@@ -5888,34 +5916,14 @@ impl RunnerTask {
                         })?;
                         self.publish_item(ItemData::AssistantMessage { text })
                             .await?;
-                    } else if calls.is_empty() {
-                        return Err(CoreError::Provider(
-                            "model did not produce structured output".into(),
-                        ));
                     }
                 } else {
                     self.flush_assistant_segment(&mut text, &mut goal_turn_assistant_text)
                         .await?;
                 }
-                if let Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)) =
-                    usage
-                {
-                    self.publish_item(ItemData::Usage {
-                        prompt: prompt_usage,
-                        input_tokens,
-                        output_tokens,
-                        cache_read_tokens,
-                        cache_write_tokens,
-                        cost_usd: cost_usd(
-                            model_pricing(&self.providers, provider_id, &model),
-                            input_tokens,
-                            output_tokens,
-                            cache_read_tokens,
-                            cache_write_tokens,
-                        ),
-                    })
+                let usage = self
+                    .publish_round_usage(usage, prompt_usage, &streamed, provider_id, &model)
                     .await?;
-                }
                 self.checkpoint_goal_accounting(usage.map(
                     |(input_tokens, output_tokens, cache_read_tokens, _)| {
                         (input_tokens, output_tokens, cache_read_tokens)
@@ -6249,6 +6257,53 @@ impl RunnerTask {
                 }
             }
         })
+    }
+
+    /// Records one provider request: its reported usage, or when the provider
+    /// reported none for a request that sent and streamed something, the
+    /// local estimate (prepared prompt plus streamed output), marked
+    /// `estimated`. Returns what was recorded.
+    async fn publish_round_usage(
+        &self,
+        reported: Option<(u64, u64, u64, u64)>,
+        prompt: Option<haarness_protocol::PromptUsage>,
+        streamed: &str,
+        provider_id: &str,
+        model: &str,
+    ) -> CoreResult<Option<(u64, u64, u64, u64)>> {
+        let estimated = reported.is_none();
+        let usage = reported.or_else(|| {
+            let prompt = prompt.as_ref()?;
+            let output = Tokenizer::for_model(model).text(streamed);
+            (output > 0).then(|| {
+                let input = prompt.system_tokens
+                    + prompt.tool_tokens
+                    + prompt.history_tokens
+                    + prompt.media_tokens;
+                (input, output, 0, 0)
+            })
+        });
+        let Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)) = usage
+        else {
+            return Ok(None);
+        };
+        self.publish_item(ItemData::Usage {
+            prompt,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            cost_usd: cost_usd(
+                model_pricing(&self.providers, provider_id, model),
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            ),
+            estimated,
+        })
+        .await?;
+        Ok(usage)
     }
 
     async fn publish_item(&self, data: ItemData) -> CoreResult<Item> {
@@ -10517,6 +10572,7 @@ mod tests {
                     cache_read_tokens: 0,
                     cache_write_tokens: 0,
                     cost_usd: None,
+                    estimated: false,
                 },
             ),
             item(

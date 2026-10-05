@@ -1400,6 +1400,7 @@
   "Always lazy": "Always lazy",
   "Approximation from saved text (4 characters per token), not a provider token count. Excludes system instructions, tool definitions, media and provider overhead.": "Approximation from saved text (4 characters per token), not a provider token count. Excludes system instructions, tool definitions, media and provider overhead.",
   "As reported by the provider. Cache tokens may overlap input tokens; these values are not added together. Reasoning token counts are not reported separately.": "As reported by the provider. Cache tokens may overlap input tokens; these values are not added together. Reasoning token counts are not reported separately.",
+  "Estimated locally: the provider reported no usage for this request.": "Estimated locally: the provider reported no usage for this request.",
   "Assistant messages": "Assistant messages",
   "Automatic": "Automatic",
   "Binary image": "Binary image",

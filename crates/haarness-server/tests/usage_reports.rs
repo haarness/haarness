@@ -1,0 +1,400 @@
+//! Usage is the provider's report when it sends one, and the local estimate,
+//! marked `estimated`, only when it sends none: on every exit of a round.
+use async_trait::async_trait;
+use futures::stream;
+use haarness_core::{
+    AgentRuntime, CoreError, CoreResult, McpRegistry, ModelProvider, ProviderEvent,
+    ProviderRequest, ProviderStream, SkillRegistry, StaticProviderRegistry, ToolDefinition,
+    ToolOutput,
+};
+use haarness_protocol::{
+    BtwResponse, CreateThreadRequest, McpConfigureRequest, McpServerInfo, ModelInfo, ProviderInfo,
+    SkillInfo, Thread,
+};
+use haarness_server::{NativeToolRegistry, ServerState, serve};
+use haarness_store::SqliteStore;
+use serde_json::{Value, json};
+use std::{collections::VecDeque, path::PathBuf, sync::Arc};
+use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
+
+/// Answers each request with the next scripted event list.
+#[derive(Clone, Default)]
+struct ScriptedProvider {
+    scripts: Arc<std::sync::Mutex<VecDeque<Vec<ProviderEvent>>>>,
+}
+
+impl ScriptedProvider {
+    fn push(&self, events: Vec<ProviderEvent>) {
+        self.scripts.lock().unwrap().push_back(events);
+    }
+}
+
+#[async_trait]
+impl ModelProvider for ScriptedProvider {
+    fn id(&self) -> &str {
+        "echo"
+    }
+    fn info(&self) -> ProviderInfo {
+        ProviderInfo {
+            id: "echo".into(),
+            name: "Scripted usage".into(),
+            authenticated: true,
+            models: vec![ModelInfo {
+                id: "echo-1".into(),
+                display_name: "Echo".into(),
+                reasoning: false,
+                reasoning_efforts: Vec::new(),
+                images: false,
+                video: false,
+                tools: true,
+                context_window: Some(200_000),
+                max_output_tokens: None,
+                pricing: None,
+            }],
+        }
+    }
+    async fn stream(&self, _: ProviderRequest, _: CancellationToken) -> CoreResult<ProviderStream> {
+        let events = self.scripts.lock().unwrap().pop_front().unwrap_or_else(|| {
+            vec![
+                ProviderEvent::TextDelta("Done.".into()),
+                ProviderEvent::Finished {
+                    reason: "stop".into(),
+                },
+            ]
+        });
+        Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+    }
+}
+
+fn usage(input_tokens: u64, output_tokens: u64) -> ProviderEvent {
+    ProviderEvent::Usage {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+    }
+}
+
+fn finished() -> ProviderEvent {
+    ProviderEvent::Finished {
+        reason: "stop".into(),
+    }
+}
+
+struct NoMcp;
+
+#[async_trait]
+impl McpRegistry for NoMcp {
+    fn tool_snapshot(&self) -> Vec<ToolDefinition> {
+        Vec::new()
+    }
+    async fn list(&self) -> CoreResult<Vec<McpServerInfo>> {
+        Ok(Vec::new())
+    }
+    async fn configure(&self, _: &str, _: McpConfigureRequest) -> CoreResult<McpServerInfo> {
+        Err(CoreError::NotFound("fixture".into()))
+    }
+    async fn reconnect(&self, _: &str) -> CoreResult<McpServerInfo> {
+        Err(CoreError::NotFound("fixture".into()))
+    }
+    async fn disconnect(&self, _: &str) -> CoreResult<McpServerInfo> {
+        Err(CoreError::NotFound("fixture".into()))
+    }
+    async fn tools(&self, _: &str) -> CoreResult<Vec<ToolDefinition>> {
+        Ok(Vec::new())
+    }
+    async fn call(&self, _: &str, _: &str, _: Value) -> CoreResult<ToolOutput> {
+        Err(CoreError::NotFound("fixture".into()))
+    }
+    async fn resources(&self, _: &str) -> CoreResult<Vec<Value>> {
+        Ok(Vec::new())
+    }
+    async fn resource_templates(&self, _: &str) -> CoreResult<Vec<Value>> {
+        Ok(Vec::new())
+    }
+    async fn read_resource(&self, _: &str, _: &str) -> CoreResult<Value> {
+        Err(CoreError::NotFound("fixture".into()))
+    }
+    async fn prompts(&self, _: &str) -> CoreResult<Vec<Value>> {
+        Ok(Vec::new())
+    }
+    async fn get_prompt(&self, _: &str, _: &str, _: Value) -> CoreResult<Value> {
+        Err(CoreError::NotFound("fixture".into()))
+    }
+}
+
+struct NoSkills;
+
+#[async_trait]
+impl SkillRegistry for NoSkills {
+    async fn discover(&self) -> CoreResult<Vec<SkillInfo>> {
+        Ok(Vec::new())
+    }
+    async fn load(&self, name: &str) -> CoreResult<String> {
+        Err(CoreError::NotFound(name.into()))
+    }
+}
+
+struct TestServer {
+    base: String,
+    client: reqwest::Client,
+    handle: haarness_server::ServerHandle,
+    runtime: Arc<AgentRuntime>,
+}
+
+async fn start_server(
+    workspace: PathBuf,
+    database: PathBuf,
+    provider: ScriptedProvider,
+) -> TestServer {
+    let store = Arc::new(SqliteStore::open(database).unwrap());
+    let providers = Arc::new(StaticProviderRegistry::new(vec![
+        Arc::new(provider) as Arc<dyn ModelProvider>
+    ]));
+    let tools = Arc::new(NativeToolRegistry::new(workspace.clone()));
+    let runtime = Arc::new(AgentRuntime::with_workspace(
+        store,
+        providers,
+        tools,
+        haarness_core::EventBus::new(256),
+        workspace.clone(),
+    ));
+    runtime.recover().await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let handle = serve(
+        listener,
+        "usage-token",
+        ServerState {
+            browser: None,
+            management: None,
+            runtime: runtime.clone(),
+            mcp: Arc::new(NoMcp),
+            skills: Arc::new(NoSkills),
+            plugins: None,
+            workflows: None,
+            workspaces: None,
+            workspace_id: None,
+            workspace,
+            project_trusted: false,
+            language: None,
+        },
+    )
+    .await
+    .unwrap();
+    let client = reqwest::Client::builder()
+        .default_headers({
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::AUTHORIZATION,
+                "Bearer usage-token".parse().unwrap(),
+            );
+            headers
+        })
+        .build()
+        .unwrap();
+    TestServer {
+        base: format!("http://{}", handle.address),
+        client,
+        handle,
+        runtime,
+    }
+}
+
+impl TestServer {
+    async fn thread(&self) -> Thread {
+        self.client
+            .post(format!("{}/v1/threads", self.base))
+            .json(&CreateThreadRequest {
+                provider: Some("echo".into()),
+                model: Some("echo-1".into()),
+                ..Default::default()
+            })
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
+
+    /// Runs one turn to its end and returns the thread's usage items.
+    async fn turn(&self, thread: &Thread, text: &str) -> Vec<Value> {
+        let turn: Value = self
+            .client
+            .post(format!("{}/v1/threads/{}/turns", self.base, thread.id))
+            .json(&json!({"requestId": uuid::Uuid::now_v7(), "text": text}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let id = turn["id"].as_str().unwrap();
+        self.client
+            .get(format!("{}/v1/turns/{id}/wait?timeout_ms=20000", self.base))
+            .send()
+            .await
+            .unwrap();
+        let items: Value = self
+            .client
+            .get(format!("{}/v1/threads/{}/items", self.base, thread.id))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        items
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["data"]["type"] == "usage")
+            .map(|item| item["data"].clone())
+            .collect()
+    }
+
+    async fn context(&self, thread: &Thread) -> Value {
+        let usage: Value = self
+            .client
+            .get(format!("{}/v1/threads/{}/usage", self.base, thread.id))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        usage["context"].clone()
+    }
+}
+
+async fn server(name: &str) -> (TestServer, ScriptedProvider, PathBuf) {
+    let root = std::env::temp_dir().join(format!("haarness-usage-{name}-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let provider = ScriptedProvider::default();
+    let server = start_server(root.clone(), root.join("state.db"), provider.clone()).await;
+    (server, provider, root)
+}
+
+#[tokio::test]
+async fn reported_usage_is_recorded_and_anchors_the_context() {
+    let (server, provider, root) = server("reported").await;
+    let thread = server.thread().await;
+    provider.push(vec![
+        ProviderEvent::TextDelta("Hello.".into()),
+        usage(1_000, 20),
+        finished(),
+    ]);
+    let usages = server.turn(&thread, "hi").await;
+    assert_eq!(usages.len(), 1);
+    assert_eq!(
+        (
+            usages[0]["input_tokens"].as_u64(),
+            usages[0]["output_tokens"].as_u64()
+        ),
+        (Some(1_000), Some(20))
+    );
+    assert!(usages[0].get("estimated").is_none(), "{:?}", usages[0]);
+    assert_eq!(server.context(&thread).await["reportedTokens"], 1_020);
+    server.handle.shutdown().await.unwrap();
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
+async fn without_a_report_the_local_estimate_is_recorded_and_marked() {
+    let (server, provider, root) = server("estimated").await;
+    let thread = server.thread().await;
+    // No usage at all, then an all-zero report (a gateway that strips usage).
+    provider.push(vec![
+        ProviderEvent::TextDelta("An answer without any usage report.".into()),
+        finished(),
+    ]);
+    provider.push(vec![
+        ProviderEvent::TextDelta("Another answer.".into()),
+        usage(0, 0),
+        finished(),
+    ]);
+    server.turn(&thread, "first").await;
+    let usages = server.turn(&thread, "second").await;
+    assert_eq!(usages.len(), 2, "{usages:?}");
+    for usage in &usages {
+        assert_eq!(usage["estimated"], true, "{usage:?}");
+        let prompt = &usage["prompt"];
+        let estimated_input = [
+            "system_tokens",
+            "tool_tokens",
+            "history_tokens",
+            "media_tokens",
+        ]
+        .iter()
+        .map(|key| prompt[key].as_u64().unwrap_or(0))
+        .sum::<u64>();
+        assert_eq!(usage["input_tokens"].as_u64(), Some(estimated_input));
+        assert!(usage["output_tokens"].as_u64().unwrap() > 0);
+    }
+    // Estimates never anchor: the context is estimated from the history.
+    let context = server.context(&thread).await;
+    assert_eq!(context["reportedTokens"], 0, "{context:?}");
+    assert!(
+        context["estimatedTokens"].as_u64().unwrap() > 0,
+        "{context:?}"
+    );
+    server.handle.shutdown().await.unwrap();
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
+async fn usage_received_before_a_failure_is_kept() {
+    let (server, provider, root) = server("failed").await;
+    let thread = server.thread().await;
+    provider.push(vec![
+        usage(4_200, 9),
+        ProviderEvent::ToolCall {
+            call_id: String::new(),
+            name: "read".into(),
+            arguments: json!({}),
+            provider_metadata: Value::Null,
+        },
+        finished(),
+    ]);
+    let usages = server.turn(&thread, "go").await;
+    assert_eq!(usages.len(), 1, "{usages:?}");
+    assert_eq!(usages[0]["input_tokens"], 4_200);
+    assert!(usages[0].get("estimated").is_none());
+    server.handle.shutdown().await.unwrap();
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
+async fn side_questions_count_the_last_report_of_a_stream_once() {
+    let (server, provider, root) = server("btw").await;
+    let thread = server.thread().await;
+    // Gemini repeats cumulative usage on every chunk.
+    provider.push(vec![
+        usage(50, 1),
+        ProviderEvent::TextDelta("Short ".into()),
+        usage(50, 3),
+        ProviderEvent::TextDelta("answer.".into()),
+        usage(50, 4),
+        finished(),
+    ]);
+    let answer: BtwResponse = server
+        .client
+        .post(format!("{}/v1/threads/{}/btw", server.base, thread.id))
+        .json(&json!({"question": "Quick?"}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!((answer.input_tokens, answer.output_tokens), (50, 4));
+    server.handle.shutdown().await.unwrap();
+    std::fs::remove_dir_all(root).ok();
+}

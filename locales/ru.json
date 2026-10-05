@@ -1400,6 +1400,7 @@
   "Always lazy": "Всегда по требованию",
   "Approximation from saved text (4 characters per token), not a provider token count. Excludes system instructions, tool definitions, media and provider overhead.": "Оценка по сохранённому тексту (4 символа на токен), а не подсчёт токенов провайдера. Не включает системные инструкции, описания инструментов, медиафайлы и служебные расходы провайдера.",
   "As reported by the provider. Cache tokens may overlap input tokens; these values are not added together. Reasoning token counts are not reported separately.": "По данным провайдера. Токены кэша могут пересекаться с входными токенами; эти значения не суммируются. Токены рассуждения не указываются отдельно.",
+  "Estimated locally: the provider reported no usage for this request.": "Локальная оценка: провайдер не сообщил расход для этого запроса.",
   "Assistant messages": "Сообщения ассистента",
   "Automatic": "Автоматически",
   "Binary image": "Двоичное изображение",

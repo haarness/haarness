@@ -1400,6 +1400,7 @@
   "Always lazy": "始终延迟加载",
   "Approximation from saved text (4 characters per token), not a provider token count. Excludes system instructions, tool definitions, media and provider overhead.": "根据已保存文本估算（每 token 约 4 个字符），并非提供商给出的 token 数。不包含系统指令、工具定义、媒体和提供商的额外开销。",
   "As reported by the provider. Cache tokens may overlap input tokens; these values are not added together. Reasoning token counts are not reported separately.": "以提供商报告的数据为准。缓存 token 可能与输入 token 重叠，这些数值不会相加。推理 token 数不单独报告。",
+  "Estimated locally: the provider reported no usage for this request.": "本地估算：提供商未报告此请求的用量。",
   "Assistant messages": "助手消息",
   "Automatic": "自动",
   "Binary image": "二进制图片",

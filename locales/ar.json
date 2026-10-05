@@ -1400,6 +1400,7 @@
   "Always lazy": "دائمًا عند الطلب",
   "Approximation from saved text (4 characters per token), not a provider token count. Excludes system instructions, tool definitions, media and provider overhead.": "تقدير مبني على النص المحفوظ (4 أحرف لكل رمز)، وليس عدّ رموز من المزوّد. لا يشمل تعليمات النظام وتعريفات الأدوات والوسائط والحمل الإضافي للمزوّد.",
   "As reported by the provider. Cache tokens may overlap input tokens; these values are not added together. Reasoning token counts are not reported separately.": "كما أبلغ عنها المزوّد. قد تتداخل رموز الذاكرة المؤقتة مع رموز المدخلات؛ ولا تُجمع هذه القيم معًا. لا يُبلَّغ عن رموز الاستدلال بشكل منفصل.",
+  "Estimated locally: the provider reported no usage for this request.": "تقدير محلي: لم يُبلغ المزوّد عن أي استخدام لهذا الطلب.",
   "Assistant messages": "رسائل المساعد",
   "Automatic": "تلقائي",
   "Binary image": "صورة ثنائية",

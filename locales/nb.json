@@ -1400,6 +1400,7 @@
   "Always lazy": "Alltid ved behov",
   "Approximation from saved text (4 characters per token), not a provider token count. Excludes system instructions, tool definitions, media and provider overhead.": "Tilnærming ut fra lagret tekst (4 tegn per token), ikke en tokentelling fra leverandøren. Utelater systeminstruksjoner, verktøydefinisjoner, medier og leverandørens overhead.",
   "As reported by the provider. Cache tokens may overlap input tokens; these values are not added together. Reasoning token counts are not reported separately.": "Slik leverandøren rapporterer det. Hurtigbuffer-tokens kan overlappe med inndata-tokens, og verdiene legges ikke sammen. Tokens for resonnering rapporteres ikke separat.",
+  "Estimated locally: the provider reported no usage for this request.": "Anslått lokalt: leverandøren rapporterte ingen bruk for denne forespørselen.",
   "Assistant messages": "Assistentmeldinger",
   "Automatic": "Automatisk",
   "Binary image": "Binært bilde",

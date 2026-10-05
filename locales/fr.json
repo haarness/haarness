@@ -1400,6 +1400,7 @@
   "Always lazy": "Toujours à la demande",
   "Approximation from saved text (4 characters per token), not a provider token count. Excludes system instructions, tool definitions, media and provider overhead.": "Estimation à partir du texte enregistré (4 caractères par jeton), et non un décompte de jetons du fournisseur. Exclut les instructions système, les définitions d’outils, les médias et la surcharge du fournisseur.",
   "As reported by the provider. Cache tokens may overlap input tokens; these values are not added together. Reasoning token counts are not reported separately.": "Valeurs signalées par le fournisseur. Les jetons de cache peuvent recouper les jetons d’entrée ; ces valeurs ne sont pas additionnées. Les jetons de raisonnement ne sont pas signalés séparément.",
+  "Estimated locally: the provider reported no usage for this request.": "Estimation locale : le fournisseur n’a signalé aucune utilisation pour cette requête.",
   "Assistant messages": "Messages de l’assistant",
   "Automatic": "Automatique",
   "Binary image": "Image binaire",

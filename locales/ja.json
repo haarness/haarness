@@ -1400,6 +1400,7 @@
   "Always lazy": "常に遅延読み込み",
   "Approximation from saved text (4 characters per token), not a provider token count. Excludes system instructions, tool definitions, media and provider overhead.": "保存されたテキストからの概算値（1 トークンあたり 4 文字）であり、プロバイダーのトークン数ではありません。システム指示、ツール定義、メディア、プロバイダーのオーバーヘッドは含まれません。",
   "As reported by the provider. Cache tokens may overlap input tokens; these values are not added together. Reasoning token counts are not reported separately.": "プロバイダーが報告した値です。キャッシュトークンは入力トークンと重複する場合があるため、これらの値は合算されません。推論トークン数は個別には報告されません。",
+  "Estimated locally: the provider reported no usage for this request.": "ローカルでの推定値です。プロバイダーはこのリクエストの使用量を報告しませんでした。",
   "Assistant messages": "アシスタントのメッセージ",
   "Automatic": "自動",
   "Binary image": "バイナリ画像",

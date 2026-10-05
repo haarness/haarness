@@ -1269,15 +1269,39 @@ impl ModelProvider for OpenAiCompatibleProvider {
             // The last detail whose text reached the transcript, so a new
             // block can be separated from the one before it.
             let mut emitted_reasoning: Option<Value> = None;
-            while let Some(event)=events.next().await{let event=event?;
-                if let Some(chunk_usage) = event.get("usage").filter(|value| !value.is_null()) {
+            while let Some(event)=events.next().await{
+                let event = match event {
+                    Ok(event) => event,
+                    Err(error) => {
+                        // Usage that already arrived was billed; keep it.
+                        if let Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)) = usage.take() {
+                            yield ProviderEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens };
+                        }
+                        Err::<(), _>(error)?;
+                        continue;
+                    }
+                };
+                // Moonshot reports usage on the choice rather than the chunk.
+                if let Some(chunk_usage) = event.get("usage").filter(|value| value.is_object()).or_else(|| event["choices"][0].get("usage").filter(|value| value.is_object())) {
+                    let count = |paths: &[&str]| paths.iter().find_map(|path| chunk_usage.pointer(path).and_then(Value::as_u64)).unwrap_or(0);
                     usage = Some((
-                        chunk_usage["prompt_tokens"].as_u64().unwrap_or(0),
-                        chunk_usage["completion_tokens"].as_u64().unwrap_or(0),
-                        chunk_usage.pointer("/prompt_tokens_details/cached_tokens").and_then(Value::as_u64).unwrap_or(0),
-                        // Haarness routers report Anthropic cache writes here.
-                        chunk_usage.pointer("/prompt_tokens_details/cache_creation_input_tokens").and_then(Value::as_u64).unwrap_or(0),
+                        count(&["/prompt_tokens"]),
+                        count(&["/completion_tokens"]),
+                        // DeepSeek and Z.ai name cache hits their own way.
+                        count(&["/prompt_tokens_details/cached_tokens", "/prompt_cache_hit_tokens", "/cached_tokens"]),
+                        // Haarness routers report Anthropic cache writes as
+                        // `cache_creation_input_tokens`; OpenRouter as `cache_write_tokens`.
+                        count(&["/prompt_tokens_details/cache_creation_input_tokens", "/prompt_tokens_details/cache_write_tokens"]),
                     ));
+                }
+                // An error reported inside the stream (OpenRouter, Haarness
+                // routers) ends the request; it is not an incomplete reply.
+                if let Some(error) = event.get("error").filter(|error| !error.is_null()) {
+                    if let Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)) = usage.take() {
+                        yield ProviderEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens };
+                    }
+                    let message = error.get("message").and_then(Value::as_str).map_or_else(|| error.to_string(), str::to_owned);
+                    Err(CoreError::Provider(message))?;
                 }
                 let delta=&event["choices"][0]["delta"];
                 if let Some(text)=delta["content"].as_str().filter(|text| !text.is_empty()){yield ProviderEvent::TextDelta(text.into());}
@@ -1341,6 +1365,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
             if replay_reasoning_content { provider_metadata["reasoning_content"] = json!(reasoning_content); }
             if !mistral_content.is_empty() { provider_metadata["mistral_content"] = json!(mistral_content); }
             if provider_metadata.as_object().is_some_and(|metadata| metadata.is_empty()) { provider_metadata = Value::Null; }
+            // Report usage before the tool calls, whose arguments may not parse.
+            if let Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)) = usage.take() {
+                yield ProviderEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens };
+            }
             for (call_id, name, arguments) in calls.drain(..) {
                 if !name.is_empty() {
                     let arguments = serde_json::from_str(&arguments).map_err(|error| CoreError::Provider(format!("OpenAI-compatible provider returned invalid tool arguments: {error}")))?;
@@ -1350,9 +1378,6 @@ impl ModelProvider for OpenAiCompatibleProvider {
                         yield ProviderEvent::ToolCall{call_id,name,arguments,provider_metadata:provider_metadata.clone()};
                     }
                 }
-            }
-            if let Some((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)) = usage {
-                yield ProviderEvent::Usage { input_tokens, output_tokens, cache_read_tokens, cache_write_tokens };
             }
             yield ProviderEvent::Finished{reason:finish_reason.unwrap_or_else(||"incomplete".into())};
         }))
@@ -2024,6 +2049,108 @@ mod tests {
         );
         assert_eq!(requests[0]["_headers"]["x-fixture"], "yes");
         assert!(requests[0]["_headers"].get("bad header").is_none());
+    }
+
+    /// Streams `body` as the provider's whole SSE response and collects every
+    /// event, errors included.
+    async fn stream_events(
+        body: &'static str,
+    ) -> Vec<Result<ProviderEvent, haarness_core::CoreError>> {
+        let router = Router::new().route(
+            "/chat/completions",
+            post(move || async move { ([("content-type", "text/event-stream")], body) }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider =
+            OpenAiCompatibleProvider::for_test(format!("http://{address}/chat/completions"));
+        let request = ProviderRequest {
+            model: "compat-test".into(),
+            system: "sys".into(),
+            messages: vec![ProviderMessage::Text {
+                role: "user".into(),
+                content: "go".into(),
+            }],
+            tools: Vec::new(),
+            reasoning_effort: None,
+            parameters: haarness_core::RequestParameters::default(),
+            output_schema: None,
+        };
+        provider
+            .stream(request, CancellationToken::new())
+            .await
+            .unwrap()
+            .collect()
+            .await
+    }
+
+    fn reported(
+        events: &[Result<ProviderEvent, haarness_core::CoreError>],
+    ) -> Vec<(u64, u64, u64, u64)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Ok(ProviderEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                }) => Some((
+                    input_tokens.to_owned(),
+                    output_tokens.to_owned(),
+                    cache_read_tokens.to_owned(),
+                    cache_write_tokens.to_owned(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn usage_is_read_wherever_providers_put_it() {
+        // Moonshot: usage on the choice; DeepSeek: cache hits named its own way.
+        let events = stream_events(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5,\"prompt_cache_hit_tokens\":60}}]}\n\n",
+            "data: [DONE]\n\n"
+        ))
+        .await;
+        assert_eq!(reported(&events), [(100, 5, 60, 0)]);
+        // OpenRouter: cache writes as `cache_write_tokens`.
+        let events = stream_events(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":300,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":250}}}\n\n",
+            "data: [DONE]\n\n"
+        ))
+        .await;
+        assert_eq!(reported(&events), [(300, 2, 0, 250)]);
+    }
+
+    #[tokio::test]
+    async fn usage_already_received_survives_errors() {
+        // An error frame inside the stream fails the request after the usage
+        // it already reported, rather than ending as an incomplete reply.
+        let events = stream_events(concat!(
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":80,\"completion_tokens\":3}}\n\n",
+            "data: {\"error\":{\"message\":\"Upstream overloaded\",\"code\":\"upstream_529\"}}\n\n",
+            "data: [DONE]\n\n"
+        ))
+        .await;
+        assert_eq!(reported(&events), [(80, 3, 0, 0)]);
+        assert!(matches!(
+            events.last(),
+            Some(Err(haarness_core::CoreError::Provider(message))) if message == "Upstream overloaded"
+        ));
+        // Tool arguments that do not parse fail the request after its usage.
+        let events = stream_events(concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"read\",\"arguments\":\"{broken\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":90,\"completion_tokens\":7}}\n\n",
+            "data: [DONE]\n\n"
+        ))
+        .await;
+        assert_eq!(reported(&events), [(90, 7, 0, 0)]);
+        assert!(events.last().is_some_and(Result::is_err));
     }
 
     #[tokio::test]

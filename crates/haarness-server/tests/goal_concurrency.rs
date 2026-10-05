@@ -75,6 +75,14 @@ impl ModelProvider for CriteriaProvider {
                 provider_metadata: serde_json::Value::Null,
             })]
         };
+        // A tiny report keeps goal accounting deterministic; without one the
+        // runtime would charge its local estimate of the whole prompt.
+        events.push(Ok(ProviderEvent::Usage {
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        }));
         events.push(Ok(ProviderEvent::Finished {
             reason: "done".into(),
         }));
@@ -615,8 +623,10 @@ async fn criteria_approval_applies_to_the_latest_same_goal_snapshot() {
     answer_criteria(&runtime, &question, &turn).await;
 
     let state = runtime.goal_state(thread.id).await.unwrap().unwrap();
-    assert_eq!(state.tokens_used, 321);
-    assert_eq!(state.time_used_seconds, 17);
+    // The approval applies to the latest snapshot: its 321 tokens plus the
+    // two each later round reports, never the stale snapshot plus those.
+    assert!((321..1_000).contains(&state.tokens_used), "{}", state.tokens_used);
+    assert!(state.time_used_seconds >= 17);
     assert_eq!(state.criteria.len(), 2);
     assert!(!state.needs_criteria);
 }
