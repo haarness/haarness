@@ -37,6 +37,54 @@ pub struct Summary {
     pub overage_opt_in: bool,
     pub billing_url: String,
     pub usage_url: String,
+    /// Seats on a per-seat (Team) plan; absent for a one-person plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seats: Option<i32>,
+    /// `month` or `year` for a subscription.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_interval: Option<String>,
+    /// The current allowance comes from the one-time trial.
+    #[serde(default)]
+    pub trial: bool,
+    /// The account can still start the one-time trial.
+    #[serde(default)]
+    pub trial_available: bool,
+    #[serde(default)]
+    pub auto_topup: bool,
+    /// Why the last automatic top-up failed (they are then off).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_topup_failure: Option<String>,
+    /// Whole days the credits that can pay last at the last seven days' pace; absent without recent spend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub days_left: Option<u64>,
+    /// A plan is current but no AI credit can pay: nothing included is left and purchased credits cannot pay.
+    #[serde(default)]
+    pub out_of_credits: bool,
+}
+
+/// The plan code the trial's allowance carries.
+pub const TRIAL_PLAN: &str = "trial";
+
+/// Exact nanos from a wallet amount (`{"nanos":"…"}`); 0 when absent.
+fn nanos(value: &Value, key: &str) -> u128 {
+    value[key]["nanos"]
+        .as_str()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Days the credits that can pay last at the pace of `spent_7_days` nanos a week.
+pub fn days_left(
+    included: u128,
+    purchased: u128,
+    overage: bool,
+    spent_7_days: u128,
+) -> Option<u64> {
+    if spent_7_days == 0 {
+        return None;
+    }
+    let left = included + if overage { purchased } else { 0 };
+    u64::try_from(left * 7 / spent_7_days).ok()
 }
 
 /// Human-readable credits without floating-point rounding or loss of precision.
@@ -82,15 +130,24 @@ impl State {
             }
         }
         if let Some(s) = &self.summary {
+            let mut plan = format!(
+                "Plan             {} · {}",
+                s.plan,
+                s.subscription_status.as_deref().unwrap_or(if s.trial {
+                    "free trial"
+                } else {
+                    "no subscription"
+                })
+            );
+            if s.billing_interval.as_deref() == Some("year") {
+                plan.push_str(" · yearly");
+            }
+            if let Some(seats) = s.seats {
+                plan.push_str(&format!(" · {seats} seats"));
+            }
             lines.extend([
                 format!("Account          {}", s.account_name),
-                format!(
-                    "Plan             {} · {}",
-                    s.plan,
-                    s.subscription_status
-                        .as_deref()
-                        .unwrap_or("no subscription")
-                ),
+                plan,
                 format!("Billing status   {}", s.account_status),
                 String::new(),
                 format!(
@@ -118,6 +175,22 @@ impl State {
                     }
                 ),
             ]);
+            lines.push(format!(
+                "Auto top-up      {}",
+                match (&s.auto_topup_failure, s.auto_topup) {
+                    (Some(reason), _) => format!("off · the last charge failed: {reason}"),
+                    (None, true) => "on".into(),
+                    (None, false) => "off".into(),
+                }
+            ));
+            if s.out_of_credits {
+                lines
+                    .push("Out of credits   add credits or turn overage on to keep working".into());
+            } else if let Some(days) = s.days_left {
+                lines.push(format!(
+                    "Forecast         about {days} days left at this pace"
+                ));
+            }
             if let Some(at) = &s.resets_at {
                 lines.push(format!("Allowance reset  {at}"));
             }
@@ -129,6 +202,12 @@ impl State {
                     } else {
                         "Plan renews    "
                     }
+                ));
+            }
+            if s.trial_available {
+                lines.push(format!(
+                    "Free trial       available · start it at {}",
+                    s.billing_url
                 ));
             }
             lines.extend([
@@ -173,8 +252,33 @@ impl Client {
                 result => result,
             }
         };
-        let (wallet, subscription) = tokio::try_join!(wallet, subscription)?;
+        // An account without a subscription can still hold an allowance: the trial or a granted plan.
+        let entitlements = async {
+            match self
+                .request(
+                    Method::GET,
+                    &format!("api/v1/billing/entitlements{query}"),
+                    None,
+                )
+                .await
+            {
+                Err(Error::Api { status: 404, .. }) => Ok(Value::Null),
+                result => result,
+            }
+        };
+        let (wallet, subscription, entitlements) =
+            tokio::try_join!(wallet, subscription, entitlements)?;
+
         let text = |v: &Value, key: &str| v[key].as_str().map(str::to_owned);
+        let plan_code = text(&subscription, "planCode").or_else(|| text(&entitlements, "planCode"));
+        let overage = wallet["overageOptIn"].as_bool().unwrap_or(false);
+        let included = nanos(&wallet, "includedAi");
+        let purchased = nanos(&wallet, "purchased");
+        let seats = subscription["seats"]
+            .as_i64()
+            .or_else(|| entitlements["seats"].as_i64())
+            .and_then(|seats| i32::try_from(seats).ok())
+            .filter(|seats| *seats > 1);
         let credits = |key: &str| -> Result<String> {
             wallet[key]["credits"]
                 .as_str()
@@ -202,7 +306,10 @@ impl Client {
                     .and_then(|a| a["name"].as_str())
                     .unwrap_or(account)
                     .into(),
-                plan: text(&subscription, "planCode").unwrap_or_else(|| "No plan".into()),
+                trial: plan_code.as_deref() == Some(TRIAL_PLAN) && subscription.is_null(),
+                out_of_credits: plan_code.is_some()
+                    && included + if overage { purchased } else { 0 } == 0,
+                plan: plan_code.unwrap_or_else(|| "No plan".into()),
                 subscription_status: text(&subscription, "status"),
                 account_status: text(&wallet, "status")
                     .ok_or_else(|| Error::Other("Missing billing status".into()))?,
@@ -214,9 +321,20 @@ impl Client {
                 resets_at: text(&wallet, "resetsAt"),
                 period_ends_at: text(&subscription, "currentPeriodEnd"),
                 cancel_at_period_end: subscription["cancelAtPeriodEnd"].as_bool().unwrap_or(false),
-                overage_opt_in: wallet["overageOptIn"].as_bool().unwrap_or(false),
+                overage_opt_in: overage,
                 billing_url: web("app/billing")?,
                 usage_url: web("app/billing/usage")?,
+                seats,
+                billing_interval: text(&subscription, "billingInterval"),
+                trial_available: wallet["trialAvailable"].as_bool().unwrap_or(false),
+                auto_topup: wallet["autoTopup"]["enabled"].as_bool().unwrap_or(false),
+                auto_topup_failure: text(&wallet["autoTopup"], "failure"),
+                days_left: days_left(
+                    included,
+                    purchased,
+                    overage,
+                    nanos(&wallet, "aiSpendLast7Days"),
+                ),
             }),
         })
     }

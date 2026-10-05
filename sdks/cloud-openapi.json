@@ -77,6 +77,46 @@
             }
           }
         }
+      },
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Create a team account owned by the caller, with its own billing account.",
+        "description": "Auth: `cookie+csrf|bearer`.",
+        "operationId": "create_account",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAccountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The team account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountDto"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`invalid_state`: the caller owns too many teams",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/accounts/{id}": {
@@ -185,6 +225,149 @@
         }
       }
     },
+    "/api/v1/accounts/{id}/invitations": {
+      "get": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Pending invitations to a team account.",
+        "description": "Auth: `cookie|bearer`, role ≥ admin.",
+        "operationId": "list_invitations",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pending invitations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Items_InvitationDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Role < admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Invite someone by email to a team account; the link is emailed and returned once.",
+        "description": "Auth: `cookie+csrf|bearer`, role ≥ admin. `409 invalid_state` (`details.reason = seats_full`) when every seat of\nthe team's per-seat plan is taken.",
+        "operationId": "create_invitation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateInvitationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The invitation and its link",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedInvitationDto"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not a team account, or no free seat",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/accounts/{id}/invitations/{invitationId}": {
+      "delete": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Revoke a pending invitation.",
+        "description": "Auth: `cookie+csrf|bearer`, role ≥ admin.",
+        "operationId": "revoke_invitation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "invitationId",
+            "in": "path",
+            "description": "Invitation id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revoked"
+          },
+          "404": {
+            "description": "Unknown or no longer pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/accounts/{id}/members": {
       "get": {
         "tags": [
@@ -218,6 +401,108 @@
           },
           "404": {
             "description": "Unknown or not a member",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/accounts/{id}/members/{userId}": {
+      "delete": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Remove a member, or leave the team (any member may remove themselves).",
+        "description": "Auth: `cookie+csrf|bearer`, role ≥ admin to remove someone else.",
+        "operationId": "remove_member",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "path",
+            "description": "Member user id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed"
+          },
+          "409": {
+            "description": "`invalid_state`: the team would have no owner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Change a member's role. Only owners grant or take ownership.",
+        "description": "Auth: `cookie+csrf|bearer`, role ≥ admin.",
+        "operationId": "update_member",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "path",
+            "description": "Member user id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMemberRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Updated"
+          },
+          "409": {
+            "description": "`invalid_state`: the team would have no owner",
             "content": {
               "application/json": {
                 "schema": {
@@ -328,6 +613,40 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/accounts/{id}/seats": {
+      "get": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "A team's seats: what its per-seat plan pays for, members and pending invitations.",
+        "description": "Auth: `cookie|bearer`.",
+        "operationId": "account_seats",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Seats",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeatsDto"
                 }
               }
             }
@@ -2521,6 +2840,68 @@
         }
       }
     },
+    "/api/v1/invitations/accept": {
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Accept an invitation as the signed-in person (their verified email must be the invited one).",
+        "description": "Auth: `cookie+csrf|bearer`.",
+        "operationId": "accept_invitation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptInvitationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The team joined",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountDto"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in with another email",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Used, revoked or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`invalid_state`: no free seat",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/key": {
       "get": {
         "tags": [
@@ -3283,6 +3664,244 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/mfa": {
+      "get": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "The caller's two-factor authentication.",
+        "description": "Auth: `cookie|bearer`.",
+        "operationId": "mfa_status",
+        "responses": {
+          "200": {
+            "description": "Status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MfaStatusDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session or token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mfa/disable": {
+      "post": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Turn two-factor authentication off: removes the authenticator, recovery codes and trusted browsers.",
+        "description": "Auth: `cookie+csrf` (browser sessions only) plus a current code.",
+        "operationId": "mfa_disable",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MfaCodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Disabled"
+          },
+          "422": {
+            "description": "Wrong code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mfa/recovery-codes": {
+      "post": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Replace every recovery code.",
+        "description": "Auth: `cookie+csrf` (browser sessions only) plus a current code.",
+        "operationId": "mfa_recovery_codes",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MfaCodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The new codes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MfaRecoveryCodesResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Wrong code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mfa/totp/confirm": {
+      "post": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Prove the new secret with its first code. Turning two-factor authentication on returns ten recovery codes.",
+        "description": "Auth: `cookie+csrf` (browser sessions only).",
+        "operationId": "mfa_totp_confirm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MfaCodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MfaConfirmResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No setup in progress, or it expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Wrong code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mfa/totp/setup": {
+      "post": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Generate a new authenticator secret. It replaces nothing until it is confirmed; replacing an enabled\nauthenticator requires a current code.",
+        "description": "Auth: `cookie+csrf` (browser sessions only).",
+        "operationId": "mfa_totp_setup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MfaSetupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The secret for the QR code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MfaSetupResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a browser session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Two-factor authentication is unavailable on this deployment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A current code is required to replace the authenticator",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mfa/trusted-browsers": {
+      "delete": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Make every trusted browser ask for a code again.",
+        "description": "Auth: `cookie+csrf` (browser sessions only).",
+        "operationId": "mfa_forget_browsers",
+        "responses": {
+          "204": {
+            "description": "Forgotten"
           }
         }
       }
@@ -5190,6 +5809,7 @@
         "tags": [
           "routers"
         ],
+        "summary": "Router providers and the settings each one accepts.",
         "operationId": "router_providers",
         "responses": {
           "200": {
@@ -5679,6 +6299,84 @@
           },
           "409": {
             "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/schedules/preview": {
+      "get": {
+        "tags": [
+          "cloud-schedules"
+        ],
+        "summary": "Upcoming runs for a cadence, computed by the worker's own rules (time zones and daylight saving included).",
+        "operationId": "preview_cloud_schedule",
+        "parameters": [
+          {
+            "name": "at",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "everySeconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "cron",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "timezone",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "count",
+            "in": "query",
+            "description": "How many runs to list (1..20, default 5).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudSchedulePreviewDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid cadence",
             "content": {
               "application/json": {
                 "schema": {
@@ -8035,7 +8733,14 @@
         },
         "responses": {
           "200": {
-            "description": "redirectTo continuation"
+            "description": "`redirectTo` continuation, or `mfaRequired` with an `HttpOnly` `hc_mfa` cookie when the account uses two-factor authentication",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignInResponse"
+                }
+              }
+            }
           },
           "401": {
             "description": "Incorrect email or password"
@@ -8239,6 +8944,115 @@
           },
           "401": {
             "description": "No session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/mfa": {
+      "get": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "The sign-in waiting for its code in this browser (the `hc_mfa` cookie).",
+        "description": "Auth: public (the `HttpOnly` challenge cookie is the credential).",
+        "operationId": "mfa_challenge",
+        "responses": {
+          "200": {
+            "description": "The waiting sign-in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MfaChallengeDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No sign-in is waiting, or it expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/mfa/cancel": {
+      "post": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Abandon the waiting sign-in and clear `hc_mfa`.",
+        "description": "Auth: public. Requires the configured web Origin.",
+        "operationId": "mfa_cancel",
+        "responses": {
+          "204": {
+            "description": "Cancelled"
+          }
+        }
+      }
+    },
+    "/auth/mfa/verify": {
+      "post": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Finish a sign-in with an authenticator or recovery code; sets `hc_session` + `hc_csrf`, and `hc_mfa_trust`\nwhen `trustBrowser` is set.",
+        "description": "Auth: public with the `hc_mfa` cookie. Requires the configured web Origin and JSON. Five wrong codes end the\nsign-in; ten per account per 15 minutes are allowed.",
+        "operationId": "mfa_verify",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MfaVerifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`redirectTo` continuation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignInResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No sign-in is waiting, it expired, or too many wrong codes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Wrong, reused or malformed code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
             "content": {
               "application/json": {
                 "schema": {
@@ -8560,6 +9374,63 @@
           },
           "404": {
             "description": "Unknown version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/ops/users/{id}/mfa/reset": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Turn two-factor authentication off for a user who lost both their authenticator and recovery codes, after\nsupport confirmed who they are. Sessions are untouched; the user is notified by email.",
+        "description": "Auth: `internal`.",
+        "operationId": "internal_mfa_reset",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "User id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Two-factor authentication is off"
+          },
+          "401": {
+            "description": "Missing or wrong internal token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Two-factor authentication was not on",
             "content": {
               "application/json": {
                 "schema": {
@@ -9407,6 +10278,17 @@
   },
   "components": {
     "schemas": {
+      "AcceptInvitationRequest": {
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string"
+          }
+        }
+      },
       "AccountApiKeyDto": {
         "type": "object",
         "required": [
@@ -9853,8 +10735,82 @@
           "bearer"
         ]
       },
+      "AutoTopupDto": {
+        "type": "object",
+        "description": "The account's automatic top-up: when purchased credits fall below `threshold`, the saved card is charged\nthe `topupCode` pack (face value plus the service fee).",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "failedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "failure": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last automatic charge failed (automatic top-ups then turn off)."
+          },
+          "threshold": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Amount"
+              }
+            ]
+          },
+          "topupCode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "AutoTopupPolicyDto": {
+        "type": "object",
+        "description": "What an automatic top-up may be set to.",
+        "required": [
+          "maxPerDay",
+          "minThresholdCredits",
+          "defaultThresholdCredits"
+        ],
+        "properties": {
+          "defaultThresholdCredits": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "maxPerDay": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "minThresholdCredits": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "BillingAccountId": {
         "type": "string"
+      },
+      "BillingInterval": {
+        "type": "string",
+        "description": "How often a subscription is billed. Allowances are granted monthly either way.",
+        "enum": [
+          "month",
+          "year"
+        ]
       },
       "BucketDto": {
         "type": "object",
@@ -10038,6 +10994,17 @@
                   }
                 ]
               },
+              "interval": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/BillingInterval",
+                    "description": "`month` (default) | `year`."
+                  }
+                ]
+              },
               "kind": {
                 "type": "string",
                 "enum": [
@@ -10046,6 +11013,14 @@
               },
               "planCode": {
                 "$ref": "#/components/schemas/PlanCode"
+              },
+              "seats": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Seats of a per-seat plan (default: its minimum); ignored by single-person plans."
               }
             }
           },
@@ -10076,9 +11051,57 @@
                 "type": "string"
               }
             }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "accountId": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AccountId"
+                  }
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "trial"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "accountId": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AccountId"
+                  }
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "payment_method"
+                ]
+              }
+            }
           }
         ],
-        "description": "`{\"kind\":\"subscription\",\"planCode\":\"pro\"}` | `{\"kind\":\"topup\",\"topupCode\":\"topup_20\"}`."
+        "description": "`{\"kind\":\"subscription\",\"planCode\":\"pro\",\"interval\":\"year\"}` | `{\"kind\":\"subscription\",\"planCode\":\"team\",\"seats\":5}` |\n`{\"kind\":\"topup\",\"topupCode\":\"topup_20\"}` | `{\"kind\":\"trial\"}` (save a card, claim the trial) |\n`{\"kind\":\"payment_method\"}` (save a card for automatic top-ups)."
       },
       "CheckoutResponse": {
         "type": "object",
@@ -10312,6 +11335,7 @@
           "chatId",
           "name",
           "prompt",
+          "timezone",
           "nextRunAt",
           "enabled",
           "version",
@@ -10331,6 +11355,13 @@
             "type": "string",
             "format": "date-time"
           },
+          "cron": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Calendar cadence in `timezone`, when the schedule has one."
+          },
           "enabled": {
             "type": "boolean"
           },
@@ -10344,6 +11375,17 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "lastRun": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CloudScheduleRunDto",
+                "description": "The most recent run, in lists and single reads."
+              }
+            ]
           },
           "name": {
             "type": "string"
@@ -10359,6 +11401,9 @@
             "type": "string",
             "format": "uuid"
           },
+          "timezone": {
+            "type": "string"
+          },
           "updatedAt": {
             "type": "string",
             "format": "date-time"
@@ -10366,6 +11411,41 @@
           "version": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "CloudScheduleOccurrenceDto": {
+        "type": "object",
+        "required": [
+          "at",
+          "shifted"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "shifted": {
+            "type": "boolean",
+            "description": "The rule's wall time did not exist that day (clocks went forward), so this run is at the end of the gap."
+          }
+        }
+      },
+      "CloudSchedulePreviewDto": {
+        "type": "object",
+        "required": [
+          "timezone",
+          "occurrences"
+        ],
+        "properties": {
+          "occurrences": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CloudScheduleOccurrenceDto"
+            }
+          },
+          "timezone": {
+            "type": "string"
           }
         }
       },
@@ -10432,6 +11512,39 @@
             "format": "date-time"
           }
         }
+      },
+      "CloudScheduleTiming": {
+        "type": "object",
+        "description": "A replacement cadence for an existing schedule, validated like a create.",
+        "properties": {
+          "at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "cron": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "everySeconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "timezone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
       },
       "CollectionDto": {
         "type": "object",
@@ -10594,6 +11707,18 @@
         },
         "additionalProperties": false
       },
+      "CreateAccountRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/accounts`: a team account owned by the caller.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "CreateAgentSessionRequest": {
         "type": "object",
         "properties": {
@@ -10738,11 +11863,18 @@
               "null"
             ],
             "format": "date-time",
-            "description": "First run as RFC3339 with explicit offset. Required for a one-shot schedule."
+            "description": "First run as RFC3339 with explicit offset. Required for a one-shot schedule; with `everySeconds` it is the\nfirst slot, with `cron` runs start at or after it."
           },
           "chatId": {
             "type": "string",
             "format": "uuid"
+          },
+          "cron": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Calendar cadence: five-field cron (`minute hour day-of-month month day-of-week`, e.g. `0 9 * * 1-5`) read\nin `timezone`. Daylight saving keeps the wall time: a time skipped when clocks go forward runs at the end of\nthe gap, a time repeated when they go back runs once. Mutually exclusive with `everySeconds`."
           },
           "everySeconds": {
             "type": [
@@ -10750,7 +11882,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Repeating cadence in seconds (60..31536000). Missed ticks are coalesced; runs never overlap."
+            "description": "Repeating cadence in seconds (60..31536000), elapsed time on a fixed grid. Missed ticks are coalesced; runs\nnever overlap."
           },
           "name": {
             "type": "string"
@@ -10761,9 +11893,32 @@
           "sessionId": {
             "type": "string",
             "format": "uuid"
+          },
+          "timezone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "IANA time zone (`Europe/Paris`) for `cron` and for display. Defaults to UTC."
           }
         },
         "additionalProperties": false
+      },
+      "CreateInvitationRequest": {
+        "type": "object",
+        "required": [
+          "email",
+          "role"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/MembershipRole",
+            "description": "admin | builder | viewer | billing (owners are never invited)."
+          }
+        }
       },
       "CreateProjectRequest": {
         "type": "object",
@@ -11000,6 +12155,22 @@
               "null"
             ],
             "description": "Null on idempotency replay. Rotate if the one-time response was lost."
+          }
+        }
+      },
+      "CreatedInvitationDto": {
+        "type": "object",
+        "description": "The invitation and the link it was emailed with (shown once, for sharing by hand).",
+        "required": [
+          "invitation",
+          "acceptUrl"
+        ],
+        "properties": {
+          "acceptUrl": {
+            "type": "string"
+          },
+          "invitation": {
+            "$ref": "#/components/schemas/InvitationDto"
           }
         }
       },
@@ -11455,6 +12626,11 @@
                 "$ref": "#/components/schemas/PlanVersionId"
               }
             ]
+          },
+          "seats": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Seats the allowances above are pooled across (1 for single-person plans and the trial)."
           }
         }
       },
@@ -12035,6 +13211,39 @@
           }
         }
       },
+      "InvitationDto": {
+        "type": "object",
+        "description": "A pending invitation to a team account.",
+        "required": [
+          "id",
+          "email",
+          "role",
+          "createdAt",
+          "expiresAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "email": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "$ref": "#/components/schemas/InvitationId"
+          },
+          "role": {
+            "$ref": "#/components/schemas/MembershipRole"
+          }
+        }
+      },
+      "InvitationId": {
+        "type": "string"
+      },
       "Items_AccountApiKeyDto": {
         "type": "object",
         "description": "`{\"items\": [...]}`, the shape of the §5.3 list routes that are not cursor-paginated.",
@@ -12293,6 +13502,48 @@
                 "updatedAt": {
                   "type": "string",
                   "format": "date-time"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Items_InvitationDto": {
+        "type": "object",
+        "description": "`{\"items\": [...]}`, the shape of the §5.3 list routes that are not cursor-paginated.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "A pending invitation to a team account.",
+              "required": [
+                "id",
+                "email",
+                "role",
+                "createdAt",
+                "expiresAt"
+              ],
+              "properties": {
+                "createdAt": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "email": {
+                  "type": "string"
+                },
+                "expiresAt": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "id": {
+                  "$ref": "#/components/schemas/InvitationId"
+                },
+                "role": {
+                  "$ref": "#/components/schemas/MembershipRole"
                 }
               }
             }
@@ -12684,6 +13935,17 @@
                   "billing_account_id": {
                     "$ref": "#/components/schemas/BillingAccountId"
                   },
+                  "billing_interval": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/BillingInterval",
+                        "description": "`year` grants only the first month of the invoice period; later months come from\n`annual_allowance_sweep`. Absent: `month`."
+                      }
+                    ]
+                  },
                   "invoice_id": {
                     "type": "string"
                   },
@@ -12701,10 +13963,78 @@
                   "plan_version": {
                     "$ref": "#/components/schemas/PlanVersionId"
                   },
+                  "seats": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int32",
+                    "description": "The invoiced quantity: seats of a per-seat plan (absent on jobs queued before seats existed: 1)."
+                  },
                   "subscription_id": {
                     "$ref": "#/components/schemas/SubscriptionId"
                   }
                 }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Grants the next monthly allowance of every annual subscription whose current month has ended.",
+            "required": [
+              "payload",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "annual_allowance_sweep"
+                ]
+              },
+              "payload": {
+                "type": "object",
+                "description": "Grants the next monthly allowance of every annual subscription whose current month has ended."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Emails an account when an included allowance passes 80% or runs out (once per period and allowance).",
+            "required": [
+              "payload",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "allowance_alert_sweep"
+                ]
+              },
+              "payload": {
+                "type": "object",
+                "description": "Emails an account when an included allowance passes 80% or runs out (once per period and allowance)."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Charges the saved card of every account with automatic top-ups on whose purchased credits are below\nits threshold.",
+            "required": [
+              "payload",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "auto_topup_sweep"
+                ]
+              },
+              "payload": {
+                "type": "object",
+                "description": "Charges the saved card of every account with automatic top-ups on whose purchased credits are below\nits threshold."
               }
             }
           },
@@ -13474,6 +14804,174 @@
           "billing"
         ]
       },
+      "MfaChallengeDto": {
+        "type": "object",
+        "description": "`GET /auth/mfa`: the sign-in waiting for its code in this browser.",
+        "required": [
+          "method",
+          "expiresAt"
+        ],
+        "properties": {
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "method": {
+            "$ref": "#/components/schemas/MfaMethod"
+          }
+        }
+      },
+      "MfaCodeRequest": {
+        "type": "object",
+        "description": "A code from the authenticator app (`123456`) or an unused recovery code (`xxxxx-xxxxx`).",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          }
+        }
+      },
+      "MfaConfirmResponse": {
+        "type": "object",
+        "description": "`POST /api/v1/mfa/totp/confirm`. Recovery codes are issued when two-factor authentication turns on and are\nkept when an authenticator is replaced.",
+        "properties": {
+          "recoveryCodes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "MfaMethod": {
+        "type": "string",
+        "description": "How the first factor of a waiting sign-in was proven.",
+        "enum": [
+          "google",
+          "password"
+        ]
+      },
+      "MfaRecoveryCodesResponse": {
+        "type": "object",
+        "description": "One-use recovery codes. Shown once; only their hashes are stored.",
+        "required": [
+          "recoveryCodes"
+        ],
+        "properties": {
+          "recoveryCodes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "MfaSetupRequest": {
+        "type": "object",
+        "description": "Start authenticator setup. Replacing an enabled authenticator requires a current code.",
+        "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "MfaSetupResponse": {
+        "type": "object",
+        "description": "The new secret, for the QR code and for manual entry. Shown once; confirm it before `expiresAt`.",
+        "required": [
+          "secret",
+          "otpauthUri",
+          "expiresAt"
+        ],
+        "properties": {
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "otpauthUri": {
+            "type": "string"
+          },
+          "secret": {
+            "type": "string",
+            "description": "Base32, the form authenticator apps accept when typed."
+          }
+        }
+      },
+      "MfaStatusDto": {
+        "type": "object",
+        "description": "`GET /api/v1/mfa`: the caller's two-factor authentication (ADR-0013).",
+        "required": [
+          "available",
+          "enabled",
+          "recoveryCodesRemaining",
+          "trustedBrowsers",
+          "thisBrowserTrusted"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "description": "`false` when this deployment cannot store authenticator secrets."
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "enabledAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "lastUsedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "recoveryCodesRemaining": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "thisBrowserTrusted": {
+            "type": "boolean"
+          },
+          "trustedBrowsers": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Browsers that skip the code until their trust expires.",
+            "minimum": 0
+          }
+        }
+      },
+      "MfaVerifyRequest": {
+        "type": "object",
+        "description": "The second step of a browser sign-in.",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "trustBrowser": {
+            "type": "boolean",
+            "description": "Skip the code in this browser for 30 days."
+          }
+        }
+      },
       "ModelPriceDto": {
         "type": "object",
         "required": [
@@ -13539,6 +15037,13 @@
           "models"
         ],
         "properties": {
+          "defaultModel": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model Cloud sessions start on, when it is configured and active in this pricebook (`provider/model`)."
+          },
           "models": {
             "type": "array",
             "items": {
@@ -13988,6 +15493,7 @@
                 "chatId",
                 "name",
                 "prompt",
+                "timezone",
                 "nextRunAt",
                 "enabled",
                 "version",
@@ -14007,6 +15513,13 @@
                   "type": "string",
                   "format": "date-time"
                 },
+                "cron": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Calendar cadence in `timezone`, when the schedule has one."
+                },
                 "enabled": {
                   "type": "boolean"
                 },
@@ -14021,6 +15534,17 @@
                   "type": "string",
                   "format": "uuid"
                 },
+                "lastRun": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/CloudScheduleRunDto",
+                      "description": "The most recent run, in lists and single reads."
+                    }
+                  ]
+                },
                 "name": {
                   "type": "string"
                 },
@@ -14034,6 +15558,9 @@
                 "sessionId": {
                   "type": "string",
                   "format": "uuid"
+                },
+                "timezone": {
+                  "type": "string"
                 },
                 "updatedAt": {
                   "type": "string",
@@ -14351,7 +15878,7 @@
                 },
                 "kind": {
                   "type": "string",
-                  "description": "subscription | topup"
+                  "description": "subscription | topup | `auto_topup`"
                 },
                 "paidAt": {
                   "type": "string",
@@ -14786,6 +16313,10 @@
                 "resourceClass": {
                   "$ref": "#/components/schemas/ResourceClass"
                 },
+                "runtimeUpdateAvailable": {
+                  "type": "boolean",
+                  "description": "The runtime image is older than the one new sessions get; the next start boots the current one."
+                },
                 "startedAt": {
                   "type": [
                     "string",
@@ -14841,7 +16372,7 @@
           },
           "kind": {
             "type": "string",
-            "description": "subscription | topup"
+            "description": "subscription | topup | `auto_topup`"
           },
           "paidAt": {
             "type": "string",
@@ -14884,6 +16415,13 @@
           "maxRunning"
         ],
         "properties": {
+          "annualPriceUsd": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Billed once a year: two months free. Absent when the plan is monthly only."
+          },
           "code": {
             "$ref": "#/components/schemas/PlanCode"
           },
@@ -14912,12 +16450,23 @@
           },
           "name": {
             "type": "string"
+          },
+          "seats": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SeatRangeDto",
+                "description": "A per-seat plan (Team): prices and allowances above are per seat; checkout buys `min..=max` seats."
+              }
+            ]
           }
         }
       },
       "PlanVersionId": {
         "type": "string",
-        "description": "Plan catalogue version, e.g. `\"2026-09-22-proposal\"`."
+        "description": "Plan catalogue version, e.g. `\"2026-11\"`."
       },
       "PlansResponse": {
         "type": "object",
@@ -14927,9 +16476,20 @@
           "topups",
           "cloudClasses",
           "overage",
-          "fundingFeePercent"
+          "fundingFeePercent",
+          "serviceFeePercent"
         ],
         "properties": {
+          "autoTopup": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AutoTopupPolicyDto"
+              }
+            ]
+          },
           "cloudClasses": {
             "type": "array",
             "items": {
@@ -14937,7 +16497,8 @@
             }
           },
           "fundingFeePercent": {
-            "type": "string"
+            "type": "string",
+            "description": "Kept for older clients: the same value as `serviceFeePercent`."
           },
           "overage": {
             "$ref": "#/components/schemas/OverageDto"
@@ -14948,11 +16509,25 @@
               "$ref": "#/components/schemas/PlanDto"
             }
           },
+          "serviceFeePercent": {
+            "type": "string",
+            "description": "The service fee added to every top-up, in percent of its face value."
+          },
           "topups": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/TopupDto"
             }
+          },
+          "trial": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TrialDto"
+              }
+            ]
           },
           "version": {
             "$ref": "#/components/schemas/PlanVersionId"
@@ -15874,6 +17449,49 @@
         },
         "additionalProperties": false
       },
+      "SeatRangeDto": {
+        "type": "object",
+        "required": [
+          "min",
+          "max"
+        ],
+        "properties": {
+          "max": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "min": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "SeatsDto": {
+        "type": "object",
+        "description": "A team's seats: what its Team plan pays for, who holds them and who is invited.",
+        "required": [
+          "members",
+          "pendingInvitations"
+        ],
+        "properties": {
+          "members": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "pendingInvitations": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "seats": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Seats on the current per-seat plan; absent without one (members are then not limited)."
+          }
+        }
+      },
       "SessionAgent": {
         "type": "object",
         "required": [
@@ -16009,6 +17627,23 @@
           }
         },
         "additionalProperties": false
+      },
+      "SignInResponse": {
+        "type": "object",
+        "description": "The continuation after a completed sign-in step.",
+        "properties": {
+          "mfaRequired": {
+            "type": "boolean",
+            "description": "The password was right; the sign-in now waits for a code (`POST /auth/mfa/verify`)."
+          },
+          "redirectTo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the browser goes next; absent while `mfaRequired`."
+          }
+        }
       },
       "SignedArtifactDto": {
         "type": "object",
@@ -16267,6 +17902,10 @@
           "cancelAtPeriodEnd"
         ],
         "properties": {
+          "billingInterval": {
+            "type": "string",
+            "description": "`month | year`"
+          },
           "cancelAtPeriodEnd": {
             "type": "boolean"
           },
@@ -16292,6 +17931,11 @@
           },
           "planVersion": {
             "$ref": "#/components/schemas/PlanVersionId"
+          },
+          "seats": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Seats of a per-seat plan; 1 otherwise."
           },
           "status": {
             "type": "string",
@@ -16374,6 +18018,39 @@
       },
       "TransactionId": {
         "type": "string"
+      },
+      "TrialDto": {
+        "type": "object",
+        "description": "The one-time Cloud trial: claimed by saving a card; nothing is charged.",
+        "required": [
+          "days",
+          "aiCredits",
+          "cloudUnits",
+          "diskGb",
+          "maxRunning"
+        ],
+        "properties": {
+          "aiCredits": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cloudUnits": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "days": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "diskGb": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "maxRunning": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
       },
       "Unit": {
         "type": "string",
@@ -16473,6 +18150,30 @@
         },
         "additionalProperties": false
       },
+      "UpdateAutoTopup": {
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "thresholdCredits": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "topupCode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "UpdateCloudAgentRequest": {
         "type": "object",
         "required": [
@@ -16522,7 +18223,8 @@
               "string",
               "null"
             ],
-            "format": "date-time"
+            "format": "date-time",
+            "description": "Moves the next run (must be in the future)."
           },
           "enabled": {
             "type": [
@@ -16542,12 +18244,34 @@
               "null"
             ]
           },
+          "timing": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CloudScheduleTiming",
+                "description": "Replaces the whole cadence: one-off, interval or calendar, with its time zone."
+              }
+            ]
+          },
           "version": {
             "type": "integer",
             "format": "int64"
           }
         },
         "additionalProperties": false
+      },
+      "UpdateMemberRequest": {
+        "type": "object",
+        "required": [
+          "role"
+        ],
+        "properties": {
+          "role": {
+            "$ref": "#/components/schemas/MembershipRole"
+          }
+        }
       },
       "UpdateRemoteHostRequest": {
         "type": "object",
@@ -16597,6 +18321,17 @@
       "UpdateWalletRequest": {
         "type": "object",
         "properties": {
+          "autoTopup": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UpdateAutoTopup",
+                "description": "Turning automatic top-ups on also turns overage on: purchased credits only pay with it."
+              }
+            ]
+          },
           "overageOptIn": {
             "type": [
               "boolean",
@@ -16871,6 +18606,20 @@
           "egressBytesReserved"
         ],
         "properties": {
+          "aiSpendLast7Days": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Amount",
+                "description": "Model spend over the last 7 days: divided by 7, the recent daily pace behind \"about N days left\"."
+              }
+            ]
+          },
+          "autoTopup": {
+            "$ref": "#/components/schemas/AutoTopupDto"
+          },
           "billingAccountId": {
             "$ref": "#/components/schemas/BillingAccountId"
           },
@@ -16896,6 +18645,10 @@
             "type": "integer",
             "format": "int64"
           },
+          "hasPaymentMethod": {
+            "type": "boolean",
+            "description": "A card is saved for automatic top-ups."
+          },
           "heldReserve": {
             "$ref": "#/components/schemas/Amount",
             "description": "Σ holds whose unit is nanos ONLY (`included_ai` + purchased); never converts unit-second/byte holds"
@@ -16919,6 +18672,14 @@
           "status": {
             "type": "string",
             "description": "active | suspended | frozen"
+          },
+          "trialAvailable": {
+            "type": "boolean",
+            "description": "The account can still claim the one-time trial."
+          },
+          "trialRefused": {
+            "type": "boolean",
+            "description": "A trial checkout saved a card that had already been used for a trial, so no trial started."
           }
         }
       },
@@ -17028,6 +18789,10 @@
           "resourceClass": {
             "$ref": "#/components/schemas/ResourceClass"
           },
+          "runtimeUpdateAvailable": {
+            "type": "boolean",
+            "description": "The runtime image is older than the one new sessions get; the next start boots the current one."
+          },
           "startedAt": {
             "type": [
               "string",
@@ -17076,7 +18841,8 @@
           "defaultResourceClass",
           "defaultDiskGb",
           "maxDiskGb",
-          "defaultIdleTimeoutSecs"
+          "defaultIdleTimeoutSecs",
+          "exportsAvailable"
         ],
         "properties": {
           "defaultDiskGb": {
@@ -17093,6 +18859,10 @@
           },
           "defaultResourceClass": {
             "$ref": "#/components/schemas/ResourceClass"
+          },
+          "exportsAvailable": {
+            "type": "boolean",
+            "description": "Whether `POST /api/v1/workspaces/{id}/export` can produce a downloadable archive on this deployment."
           },
           "maxDiskGb": {
             "type": "integer",

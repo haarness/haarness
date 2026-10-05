@@ -255,7 +255,7 @@ URLs, HTTP redirects are not followed, and PTY authentication uses headers.
 ## Cloud accounts, sessions and chats
 
 `HaarnessCloud` (TypeScript/Python) and `AsyncHaarnessCloud` (Python) expose all
-156 documented Cloud operations, including account events, host relay sockets, and scoped runtime adapters.
+176 documented Cloud operations, including account events, host relay sockets, and scoped runtime adapters.
 This includes identity/OAuth, plans and wallets, billing, API keys and model usage,
 marketplace, devices, reusable agents, session lifecycle and schedules.
 See [Cloud methods](CLOUD-OPERATIONS.md) and [Cloud schema](cloud-openapi.json).

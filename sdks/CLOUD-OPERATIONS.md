@@ -4,11 +4,18 @@
 | --- | --- | --- |
 | `native_router_session` | `nativeRouterSession` | `POST /api/v1/account/router-session` |
 | `list_accounts` | `listAccounts` | `GET /api/v1/accounts` |
+| `create_account` | `createAccount` | `POST /api/v1/accounts` |
 | `get_account` | `getAccount` | `GET /api/v1/accounts/{id}` |
 | `patch_account` | `patchAccount` | `PATCH /api/v1/accounts/{id}` |
+| `list_invitations` | `listInvitations` | `GET /api/v1/accounts/{id}/invitations` |
+| `create_invitation` | `createInvitation` | `POST /api/v1/accounts/{id}/invitations` |
+| `revoke_invitation` | `revokeInvitation` | `DELETE /api/v1/accounts/{id}/invitations/{invitationId}` |
 | `list_members` | `listMembers` | `GET /api/v1/accounts/{id}/members` |
+| `remove_member` | `removeMember` | `DELETE /api/v1/accounts/{id}/members/{userId}` |
+| `update_member` | `updateMember` | `PATCH /api/v1/accounts/{id}/members/{userId}` |
 | `list_projects` | `listProjects` | `GET /api/v1/accounts/{id}/projects` |
 | `create_project` | `createProject` | `POST /api/v1/accounts/{id}/projects` |
+| `account_seats` | `accountSeats` | `GET /api/v1/accounts/{id}/seats` |
 | `list_account_api_keys` | `listAccountApiKeys` | `GET /api/v1/api-keys` |
 | `create_account_api_key` | `createAccountApiKey` | `POST /api/v1/api-keys` |
 | `revoke_account_api_key` | `revokeAccountApiKey` | `DELETE /api/v1/api-keys/{id}` |
@@ -42,6 +49,7 @@
 | `list_devices` | `listDevices` | `GET /api/v1/devices` |
 | `revoke_device` | `revokeDevice` | `DELETE /api/v1/devices/{id}` |
 | `entity_events` | `entityEvents` | `GET /api/v1/events` |
+| `accept_invitation` | `acceptInvitation` | `POST /api/v1/invitations/accept` |
 | `api_key_context` | `apiKeyContext` | `GET /api/v1/key` |
 | `upload_artifact` | `uploadArtifact` | `POST /api/v1/marketplace/artifacts` |
 | `list_collections` | `listCollections` | `GET /api/v1/marketplace/collections` |
@@ -55,6 +63,12 @@
 | `create_submission` | `createSubmission` | `POST /api/v1/marketplace/submissions` |
 | `get_submission` | `getSubmission` | `GET /api/v1/marketplace/submissions/{id}` |
 | `me` | `me` | `GET /api/v1/me` |
+| `mfa_status` | `mfaStatus` | `GET /api/v1/mfa` |
+| `mfa_disable` | `mfaDisable` | `POST /api/v1/mfa/disable` |
+| `mfa_recovery_codes` | `mfaRecoveryCodes` | `POST /api/v1/mfa/recovery-codes` |
+| `mfa_totp_confirm` | `mfaTotpConfirm` | `POST /api/v1/mfa/totp/confirm` |
+| `mfa_totp_setup` | `mfaTotpSetup` | `POST /api/v1/mfa/totp/setup` |
+| `mfa_forget_browsers` | `mfaForgetBrowsers` | `DELETE /api/v1/mfa/trusted-browsers` |
 | `get_operation` | `getOperation` | `GET /api/v1/operations/{id}` |
 | `operation_events` | `operationEvents` | `GET /api/v1/operations/{id}/events` |
 | `list_profiles` | `listProfiles` | `GET /api/v1/profiles` |
@@ -96,6 +110,7 @@
 | `set_router_credential` | `setRouterCredential` | `PUT /api/v1/routers/{id}/credentials/{provider}` |
 | `list_cloud_schedules` | `listCloudSchedules` | `GET /api/v1/schedules` |
 | `create_cloud_schedule` | `createCloudSchedule` | `POST /api/v1/schedules` |
+| `preview_cloud_schedule` | `previewCloudSchedule` | `GET /api/v1/schedules/preview` |
 | `get_cloud_schedule` | `getCloudSchedule` | `GET /api/v1/schedules/{id}` |
 | `delete_cloud_schedule` | `deleteCloudSchedule` | `DELETE /api/v1/schedules/{id}` |
 | `update_cloud_schedule` | `updateCloudSchedule` | `PATCH /api/v1/schedules/{id}` |
@@ -135,6 +150,9 @@
 | `google_start` | `googleStart` | `GET /auth/google/start` |
 | `logout` | `logout` | `POST /auth/logout` |
 | `logout_all` | `logoutAll` | `POST /auth/logout-all` |
+| `mfa_challenge` | `mfaChallenge` | `GET /auth/mfa` |
+| `mfa_cancel` | `mfaCancel` | `POST /auth/mfa/cancel` |
+| `mfa_verify` | `mfaVerify` | `POST /auth/mfa/verify` |
 | `auth_options` | `authOptions` | `GET /auth/options` |
 | `device_page` | `devicePage` | `GET /device` |
 | `healthz` | `healthz` | `GET /healthz` |
@@ -144,6 +162,7 @@
 | `internal_retry_job` | `internalRetryJob` | `POST /internal/ops/jobs/{id}/retry` |
 | `internal_ledger_check` | `internalLedgerCheck` | `GET /internal/ops/ledger-check` |
 | `internal_review_version` | `internalReviewVersion` | `POST /internal/ops/marketplace/versions/{id}/review` |
+| `internal_mfa_reset` | `internalMfaReset` | `POST /internal/ops/users/{id}/mfa/reset` |
 | `publish_release` | `publishRelease` | `POST /internal/releases` |
 | `upload_release_artifact` | `uploadReleaseArtifact` | `POST /internal/releases/artifacts` |
 | `withdraw_release` | `withdrawRelease` | `DELETE /internal/releases/{id}` |

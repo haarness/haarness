@@ -19,6 +19,19 @@ export type BillingState = {
     overageOptIn: boolean;
     billingUrl: string;
     usageUrl: string;
+    /** Seats on a per-seat (Team) plan. */
+    seats?: number | null;
+    /** `month` or `year` for a subscription. */
+    billingInterval?: string | null;
+    /** The current allowance is the one-time trial. */
+    trial?: boolean;
+    trialAvailable?: boolean;
+    autoTopup?: boolean;
+    autoTopupFailure?: string | null;
+    /** Days the credits that can pay last at the last week's pace. */
+    daysLeft?: number | null;
+    /** A plan is current but no AI credit can pay. */
+    outOfCredits?: boolean;
   } | null;
 };
 

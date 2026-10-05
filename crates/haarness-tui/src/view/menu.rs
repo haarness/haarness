@@ -1039,6 +1039,8 @@ fn billing_preface(billing: &haarness_account::billing::State) -> Vec<String> {
     let mut plan = if plan_code.is_empty() || plan_code.eq_ignore_ascii_case("no plan") {
         // Cloud's own wording for an account that has not subscribed.
         "No plan yet".to_owned()
+    } else if summary.trial {
+        "Free trial".to_owned()
     } else {
         let mut letters = plan_code.chars();
         letters.next().map_or_else(String::new, |first| {
@@ -1051,6 +1053,12 @@ fn billing_preface(billing: &haarness_account::billing::State) -> Vec<String> {
         .filter(|status| !matches!(*status, "active" | "trialing"))
     {
         plan = format!("{plan} · {}", status.replace('_', " "));
+    }
+    if let Some(seats) = summary.seats {
+        plan = format!("{plan} · {seats} seats");
+    }
+    if summary.billing_interval.as_deref() == Some("year") {
+        plan = format!("{plan} · yearly");
     }
     if let Some(at) = &summary.period_ends_at {
         let verb = if summary.cancel_at_period_end {
@@ -1076,10 +1084,25 @@ fn billing_preface(billing: &haarness_account::billing::State) -> Vec<String> {
         lines.push(format!("Reserved  {held} credits in use"));
     }
     lines.push(format!("Cloud compute  {} units", summary.cloud_units));
+    if summary.out_of_credits {
+        lines.push("\u{26a0}  Out of credits  add credits with /billing topup".into());
+    } else if let Some(days) = summary.days_left.filter(|days| *days < 30) {
+        lines.push(format!("Forecast  about {days} days left at this pace"));
+    }
     if summary.overage_opt_in {
         lines.push("Overage  on · purchased credits pay past your allowance".into());
     } else if display_credits(&summary.purchased_credits) != "0" {
         lines.push("Overage  off · purchased credits are not spent".into());
+    }
+    if let Some(reason) = &summary.auto_topup_failure {
+        lines.push(format!(
+            "Auto top-up  off · the last charge failed: {reason}"
+        ));
+    } else if summary.auto_topup {
+        lines.push("Auto top-up  on · your saved card buys credits when you run low".into());
+    }
+    if summary.trial_available {
+        lines.push("Free trial  available · start it with /billing open".into());
     }
     lines
 }
@@ -1637,5 +1660,76 @@ mod tests {
         assert_eq!(token_limit(1_048_576), "1.05M");
         assert_eq!(token_limit(128_000), "128K");
         assert_eq!(token_limit(8192), "8.2K");
+    }
+
+    fn billing(summary: serde_json::Value) -> haarness_account::billing::State {
+        let mut base = serde_json::json!({
+            "accountId": "a", "accountName": "Acme", "plan": "team", "subscriptionStatus": "active",
+            "accountStatus": "active", "includedCredits": "30000", "purchasedCredits": "0", "heldCredits": "0",
+            "cloudUnits": "120.00", "cloudUnitsHeld": "0.00", "cancelAtPeriodEnd": false, "overageOptIn": false,
+            "billingUrl": "https://haarness.ai/app/billing", "usageUrl": "https://haarness.ai/app/billing/usage",
+        });
+        for (key, value) in summary.as_object().unwrap() {
+            base[key] = value.clone();
+        }
+        haarness_account::billing::State {
+            logged_in: true,
+            summary: Some(serde_json::from_value(base).unwrap()),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn billing_names_trial_seats_yearly_forecast_and_auto_topups() {
+        let lines = billing_preface(&billing(serde_json::json!({
+            "seats": 3, "billingInterval": "year", "daysLeft": 6, "autoTopup": true,
+        })));
+        assert!(
+            lines.contains(&"Plan  Team plan · 3 seats · yearly".to_owned()),
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(&"Forecast  about 6 days left at this pace".to_owned()),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.starts_with("Auto top-up  on")),
+            "{lines:?}"
+        );
+
+        let lines = billing_preface(&billing(serde_json::json!({
+            "plan": "trial", "subscriptionStatus": null, "trial": true, "outOfCredits": true,
+            "autoTopupFailure": "Your card was declined.",
+        })));
+        assert!(lines.contains(&"Plan  Free trial".to_owned()), "{lines:?}");
+        assert!(
+            lines.iter().any(|line| line.contains("Out of credits")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.starts_with("Forecast")),
+            "out of credits wins: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("the last charge failed: Your card was declined.")),
+            "{lines:?}"
+        );
+
+        let lines = billing_preface(&billing(serde_json::json!({
+            "plan": "No plan", "subscriptionStatus": null, "trialAvailable": true, "daysLeft": 90,
+        })));
+        assert!(lines.contains(&"Plan  No plan yet".to_owned()), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("Free trial  available")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.starts_with("Forecast")),
+            "a month or more is not worth a line: {lines:?}"
+        );
     }
 }

@@ -22,6 +22,19 @@
     }
   },
   {
+    "name": "create_account",
+    "method": "POST",
+    "path": "/api/v1/accounts",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/AccountDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/CreateAccountRequest"
+    }
+  },
+  {
     "name": "get_account",
     "method": "GET",
     "path": "/api/v1/accounts/{id}",
@@ -48,6 +61,44 @@
     }
   },
   {
+    "name": "list_invitations",
+    "method": "GET",
+    "path": "/api/v1/accounts/{id}/invitations",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/Items_InvitationDto"
+    }
+  },
+  {
+    "name": "create_invitation",
+    "method": "POST",
+    "path": "/api/v1/accounts/{id}/invitations",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/CreatedInvitationDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/CreateInvitationRequest"
+    }
+  },
+  {
+    "name": "revoke_invitation",
+    "method": "DELETE",
+    "path": "/api/v1/accounts/{id}/invitations/{invitationId}",
+    "pathParams": [
+      "id",
+      "invitationId"
+    ],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
     "name": "list_members",
     "method": "GET",
     "path": "/api/v1/accounts/{id}/members",
@@ -56,6 +107,34 @@
     ],
     "response": {
       "$ref": "#/components/schemas/Items_MemberDto"
+    }
+  },
+  {
+    "name": "remove_member",
+    "method": "DELETE",
+    "path": "/api/v1/accounts/{id}/members/{userId}",
+    "pathParams": [
+      "id",
+      "userId"
+    ],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "update_member",
+    "method": "PATCH",
+    "path": "/api/v1/accounts/{id}/members/{userId}",
+    "pathParams": [
+      "id",
+      "userId"
+    ],
+    "response": {
+      "type": "null"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/UpdateMemberRequest"
     }
   },
   {
@@ -82,6 +161,17 @@
     "contentType": "application/json",
     "body": {
       "$ref": "#/components/schemas/CreateProjectRequest"
+    }
+  },
+  {
+    "name": "account_seats",
+    "method": "GET",
+    "path": "/api/v1/accounts/{id}/seats",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/SeatsDto"
     }
   },
   {
@@ -484,6 +574,19 @@
     "stream": "websocket"
   },
   {
+    "name": "accept_invitation",
+    "method": "POST",
+    "path": "/api/v1/invitations/accept",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/AccountDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/AcceptInvitationRequest"
+    }
+  },
+  {
     "name": "api_key_context",
     "method": "GET",
     "path": "/api/v1/key",
@@ -648,6 +751,76 @@
     "pathParams": [],
     "response": {
       "$ref": "#/components/schemas/MeResponse"
+    }
+  },
+  {
+    "name": "mfa_status",
+    "method": "GET",
+    "path": "/api/v1/mfa",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/MfaStatusDto"
+    }
+  },
+  {
+    "name": "mfa_disable",
+    "method": "POST",
+    "path": "/api/v1/mfa/disable",
+    "pathParams": [],
+    "response": {
+      "type": "null"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/MfaCodeRequest"
+    }
+  },
+  {
+    "name": "mfa_recovery_codes",
+    "method": "POST",
+    "path": "/api/v1/mfa/recovery-codes",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/MfaRecoveryCodesResponse"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/MfaCodeRequest"
+    }
+  },
+  {
+    "name": "mfa_totp_confirm",
+    "method": "POST",
+    "path": "/api/v1/mfa/totp/confirm",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/MfaConfirmResponse"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/MfaCodeRequest"
+    }
+  },
+  {
+    "name": "mfa_totp_setup",
+    "method": "POST",
+    "path": "/api/v1/mfa/totp/setup",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/MfaSetupResponse"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/MfaSetupRequest"
+    }
+  },
+  {
+    "name": "mfa_forget_browsers",
+    "method": "DELETE",
+    "path": "/api/v1/mfa/trusted-browsers",
+    "pathParams": [],
+    "response": {
+      "type": "null"
     }
   },
   {
@@ -1172,6 +1345,18 @@
     }
   },
   {
+    "name": "preview_cloud_schedule",
+    "method": "GET",
+    "path": "/api/v1/schedules/preview",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/CloudSchedulePreviewDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/PreviewCloudScheduleQuery"
+    }
+  },
+  {
     "name": "get_cloud_schedule",
     "method": "GET",
     "path": "/api/v1/schedules/{id}",
@@ -1551,7 +1736,9 @@
     "method": "POST",
     "path": "/auth/email/login",
     "pathParams": [],
-    "response": {},
+    "response": {
+      "$ref": "#/components/schemas/SignInResponse"
+    },
     "contentType": "application/json",
     "body": {
       "$ref": "#/components/schemas/EmailLoginRequest"
@@ -1632,6 +1819,37 @@
     "pathParams": [],
     "response": {
       "type": "null"
+    }
+  },
+  {
+    "name": "mfa_challenge",
+    "method": "GET",
+    "path": "/auth/mfa",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/MfaChallengeDto"
+    }
+  },
+  {
+    "name": "mfa_cancel",
+    "method": "POST",
+    "path": "/auth/mfa/cancel",
+    "pathParams": [],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "mfa_verify",
+    "method": "POST",
+    "path": "/auth/mfa/verify",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/SignInResponse"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/MfaVerifyRequest"
     }
   },
   {
@@ -1728,6 +1946,17 @@
     "contentType": "application/json",
     "body": {
       "$ref": "#/components/schemas/ReviewVersionRequest"
+    }
+  },
+  {
+    "name": "internal_mfa_reset",
+    "method": "POST",
+    "path": "/internal/ops/users/{id}/mfa/reset",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
     }
   },
   {
