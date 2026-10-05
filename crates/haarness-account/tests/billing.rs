@@ -49,12 +49,12 @@ async fn fixture() -> Fixture {
         .route("/api/v1/me", get(|| async { Json(json!({"defaultAccountId":A,"accounts":[{"id":A,"name":"Personal"},{"id":B,"name":"Team"}]})) }))
         .route("/api/v1/billing/wallet", get(|State(d): State<Data>, Query(q): Query<HashMap<String,String>>| async move {
             d.requests.fetch_add(1, Ordering::SeqCst);
-            Json(json!({"status":"active","includedAi":{"credits":if q.get("accountId").map(String::as_str)==Some(B) {"100".into()} else {format!("{}.123456", d.balance.load(Ordering::SeqCst))}},"purchased":{"credits":"9007199254740993.000001"},"heldReserve":{"credits":"4.5"},"cloudUnitSecondsAvailable":7200,"cloudUnitSecondsReserved":360,"overageOptIn":false,"resetsAt":"2026-10-01T00:00:00Z"}))
+            Json(json!({"status":"active","includedAi":{"credits":if q.get("accountId").map(String::as_str)==Some(B) {"100".into()} else {format!("{}.123456", d.balance.load(Ordering::SeqCst))},"nanos":if q.get("accountId").map(String::as_str)==Some(B) {"100000000".into()} else {format!("{}123456", d.balance.load(Ordering::SeqCst))}},"purchased":{"credits":"9007199254740993.000001","nanos":"9007199254740993000001"},"heldReserve":{"credits":"4.5"},"cloudUnitSecondsAvailable":7200,"cloudUnitSecondsReserved":360,"overageOptIn":false,"resetsAt":"2026-10-01T00:00:00Z","trialAvailable":q.get("accountId").map(String::as_str)==Some(B),"autoTopup":{"enabled":true},"aiSpendLast7Days":{"nanos":"23123456"}}))
         }))
         .route("/api/v1/billing/subscription", get(|State(d): State<Data>, Query(q): Query<HashMap<String,String>>| async move {
             if d.fail.load(Ordering::SeqCst) { return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"message":"temporarily unavailable"}))); }
             if q.get("accountId").map(String::as_str)==Some(B) { return (StatusCode::NOT_FOUND,Json(json!({}))); }
-            (StatusCode::OK,Json(json!({"planCode":"power","status":"active","cancelAtPeriodEnd":true,"currentPeriodEnd":"2026-10-01T00:00:00Z"})))
+            (StatusCode::OK,Json(json!({"planCode":"power","status":"active","cancelAtPeriodEnd":true,"currentPeriodEnd":"2026-10-01T00:00:00Z","seats":3,"billingInterval":"year"})))
         }))
         .route("/api/v1/events", get(|State(d): State<Data>, ws: WebSocketUpgrade| async move {
             ws.on_upgrade(move |mut socket| async move {
@@ -111,6 +111,10 @@ async fn until(
     .expect("billing update timed out")
 }
 
+async fn state_lines(f: &Fixture) -> Vec<String> {
+    f.client.billing_summary().await.unwrap().lines()
+}
+
 #[tokio::test]
 async fn snapshot_preserves_precision_holds_and_no_plan_without_hiding_errors() {
     let f = fixture().await;
@@ -123,16 +127,26 @@ async fn snapshot_preserves_precision_holds_and_no_plan_without_hiding_errors() 
     assert_eq!(s.cloud_units_held, "0.10");
     assert!(s.cancel_at_period_end);
     assert!(s.billing_url.ends_with(&format!("?accountId={A}")));
+    // A yearly three-seat plan with automatic top-ups: 23.123456 credits at 23.123456 a week last 7 days.
+    assert_eq!(s.seats, Some(3));
+    assert_eq!(s.billing_interval.as_deref(), Some("year"));
+    assert!(s.auto_topup && !s.trial && !s.trial_available && !s.out_of_credits);
+    assert_eq!(s.days_left, Some(7));
+    let lines = state_lines(&f).await;
+    assert!(
+        lines.iter().any(|line| line.contains("yearly · 3 seats")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line == "Auto top-up      on"),
+        "{lines:?}"
+    );
     f.client.select_account(B).await.unwrap();
-    assert_eq!(
-        f.client
-            .billing_summary()
-            .await
-            .unwrap()
-            .summary
-            .unwrap()
-            .plan,
-        "No plan"
+    let b = f.client.billing_summary().await.unwrap().summary.unwrap();
+    assert_eq!(b.plan, "No plan");
+    assert!(
+        b.trial_available && !b.out_of_credits,
+        "no plan is not 'out of credits'"
     );
     f.data.fail.store(true, Ordering::SeqCst);
     assert!(
@@ -222,4 +236,11 @@ fn readable_credit_balances_never_round_up_or_lose_large_integer_precision() {
     ] {
         assert_eq!(billing::display_credits(raw), display);
     }
+}
+
+#[test]
+fn days_left_counts_purchased_credits_only_when_they_can_pay() {
+    assert_eq!(billing::days_left(7_000, 7_000, false, 7_000), Some(7));
+    assert_eq!(billing::days_left(7_000, 7_000, true, 7_000), Some(14));
+    assert_eq!(billing::days_left(7_000, 0, false, 0), None);
 }

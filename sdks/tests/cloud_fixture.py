@@ -89,7 +89,7 @@ def fund(cloud):
             entitlement = cloud.billing_entitlements()
             subscription = cloud.get_subscription()
             assert entitlement["planCode"] == subscription["planCode"] == "pro"
-            assert entitlement["aiCredits"] == 10_000 and entitlement["cloudUnits"] == 50
+            assert entitlement["aiCredits"] == 8_000 and entitlement["cloudUnits"] == 40
             return
         time.sleep(0.25)
     raise AssertionError("Fixture credit grant timed out")

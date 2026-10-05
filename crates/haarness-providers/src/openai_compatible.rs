@@ -648,7 +648,7 @@ fn discovered_model_info(
 
     // OpenRouter and Haarness Cloud publish per-token prices as strings. Convert only this
     // documented shape; other compatible APIs use different units.
-    if matches!(provider, "openrouter" | "haarness")
+    if matches!(provider, "openrouter" | "haarness" | "router")
         && let (Some(input), Some(output)) = (
             entry.pointer("/pricing/prompt").and_then(json_number),
             entry.pointer("/pricing/completion").and_then(json_number),
@@ -985,6 +985,35 @@ fn apply_model_defaults(mut info: ModelInfo, defaults: CompatibleModelDefaults) 
 
 // One model response can request several tools. Chat Completions requires those
 // calls in one assistant message, followed by all corresponding tool results.
+/// Anthropic models behind a Haarness router: mark the stable prefix and the newest turns for prompt caching,
+/// as the native Anthropic provider does. The system breakpoint also covers the tools (Anthropic caches tools,
+/// then system, then messages), and the last two user or tool messages let a multi-round agent loop reuse the
+/// cache. The router forwards message-level `cache_control` to Anthropic; other upstreams would reject it.
+fn mark_prompt_cache(messages: &mut [Value]) {
+    let marker = || json!({"type": "ephemeral"});
+    let has_text = |message: &Value| match &message["content"] {
+        Value::String(text) => !text.is_empty(),
+        Value::Array(parts) => !parts.is_empty(),
+        _ => false,
+    };
+    if let Some(system) = messages
+        .first_mut()
+        .filter(|message| message["role"] == "system" && has_text(message))
+    {
+        system["cache_control"] = marker();
+    }
+    let mut recent_turns = 0;
+    for message in messages.iter_mut().skip(1).rev() {
+        if recent_turns == 2 {
+            break;
+        }
+        if matches!(message["role"].as_str(), Some("user" | "tool")) && has_text(message) {
+            message["cache_control"] = marker();
+            recent_turns += 1;
+        }
+    }
+}
+
 fn push_tool_call_message(messages: &mut Vec<Value>, message: Value) {
     if let Some(previous) = messages.last_mut()
         && previous["role"] == "assistant"
@@ -1155,6 +1184,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
             }
         }
         messages.append(&mut tool_media);
+        if self.server_output_limit && model.starts_with("anthropic/") {
+            mark_prompt_cache(&mut messages);
+        }
         let mut requested_tools = request.tools;
         if let Some(schema) = structured_output.as_ref() {
             requested_tools.retain(|tool| tool.name != STRUCTURED_OUTPUT_TOOL_NAME);
@@ -1571,14 +1603,17 @@ mod tests {
 
     #[test]
     fn cloud_catalog_prices_override_builtin_estimates() {
-        let model = discovered_model_info("haarness", &serde_json::json!({
-            "id":"openai/gpt-4.1-nano",
-            "pricing":{"prompt":"0.0000001","completion":"0.0000004","input_cache_read":"0.000000025"}
-        }), CompatibleModelDefaults::default()).unwrap();
-        let price = model.pricing.unwrap();
-        assert!((price.input - 0.1).abs() < 1e-12);
-        assert!((price.output - 0.4).abs() < 1e-12);
-        assert!((price.cache_read - 0.025).abs() < 1e-12);
+        // The Haarness Cloud provider and a Cloud session's own router read the same price list.
+        for provider in ["haarness", "router"] {
+            let model = discovered_model_info(provider, &serde_json::json!({
+                "id":"openai/gpt-4.1-nano",
+                "pricing":{"prompt":"0.0000001","completion":"0.0000004","input_cache_read":"0.000000025"}
+            }), CompatibleModelDefaults::default()).unwrap();
+            let price = model.pricing.unwrap();
+            assert!((price.input - 0.1).abs() < 1e-12, "{provider}");
+            assert!((price.output - 0.4).abs() < 1e-12, "{provider}");
+            assert!((price.cache_read - 0.025).abs() < 1e-12, "{provider}");
+        }
     }
 
     #[test]
@@ -1865,6 +1900,74 @@ mod tests {
         assert!(requests[0].get("max_tokens").is_none());
         assert_eq!(requests[0]["reasoning_effort"], "high");
         assert_eq!(requests[1]["max_tokens"], 512);
+    }
+
+    #[tokio::test]
+    async fn routed_claude_requests_mark_the_prompt_cache_and_others_do_not() {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route("/chat/completions", post(completions_recording_headers))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = OpenAiCompatibleProvider::new(CompatibleInstance {
+            id: "router".into(),
+            name: "Managed router".into(),
+            base_url: format!("http://{address}"),
+            api_key: None,
+            models: vec![
+                "anthropic/claude-sonnet-5.5".into(),
+                "openai/gpt-6.1-sol".into(),
+            ],
+            discover_models: false,
+            server_output_limit: true,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: true,
+            headers: crate::ProviderHeaders::default(),
+        });
+        for model in ["anthropic/claude-sonnet-5.5", "openai/gpt-6.1-sol"] {
+            let text = |role: &str, content: &str| ProviderMessage::Text {
+                role: role.into(),
+                content: content.into(),
+            };
+            let request = ProviderRequest {
+                model: model.into(),
+                system: "sys".into(),
+                messages: vec![
+                    text("user", "first"),
+                    text("assistant", "answer"),
+                    text("user", "second"),
+                    text("user", "third"),
+                ],
+                tools: vec![],
+                reasoning_effort: None,
+                output_schema: None,
+                parameters: haarness_core::RequestParameters::default(),
+            };
+            let events = provider
+                .stream(request, CancellationToken::new())
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            assert!(events.iter().all(Result::is_ok));
+        }
+        let requests = state.0.lock();
+        let marked = |request: &Value| -> Vec<bool> {
+            request["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|message| message["cache_control"]["type"] == "ephemeral")
+                .collect()
+        };
+        // system, first, answer, second, third: the system prompt and the two newest user turns.
+        assert_eq!(marked(&requests[0]), vec![true, false, false, true, true]);
+        assert!(
+            marked(&requests[1]).iter().all(|marked| !marked),
+            "only Anthropic accepts cache_control"
+        );
     }
 
     #[tokio::test]

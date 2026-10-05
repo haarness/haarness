@@ -211,6 +211,17 @@ mod tests {
             message.ends_with("or add credits or choose a plan."),
             "{message}"
         );
+
+        let byok = CoreError::Provider(
+            "HTTP 402: [payment_required] routing your own provider keys needs a Haarness Cloud \
+             plan or the trial"
+                .into(),
+        );
+        let CoreError::Provider(message) = readable(byok) else {
+            panic!("still a provider error");
+        };
+        assert!(message.starts_with("Routing your own provider keys"), "{message}");
+        assert!(message.ends_with("(in the terminal: /billing)."), "{message}");
     }
 
     fn uuid_for_test() -> String {
@@ -371,6 +382,13 @@ fn readable_with(error: CoreError, terminal: &str) -> CoreError {
                  Billing{terminal}."
             )
         }
+    } else if message.contains("[payment_required]") {
+        // The router refuses your own provider keys without a plan or trial; nothing is
+        // charged for those requests, but the account needs one to route them.
+        format!(
+            "Routing your own provider keys through Haarness Cloud needs a plan or the free \
+             trial. Start the trial or choose a plan under Billing{terminal}."
+        )
     } else if message.contains("[budget_exceeded]") {
         // The limit is checked against the request's worst case: a long
         // context and a large answer limit can exceed it on their own.

@@ -10,6 +10,10 @@ export class CloudApi extends Transport {
   listAccounts(options: RequestOptions = {}): Promise<T.Items_AccountDto> {
     return this.request("GET", `/api/v1/accounts`, { binaryBody: false, binaryResponse: false, ...options });
   }
+  /** POST /api/v1/accounts */
+  createAccount(body: T.CreateAccountRequest, options: RequestOptions = {}): Promise<T.AccountDto> {
+    return this.request("POST", `/api/v1/accounts`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
   /** GET /api/v1/accounts/{id} */
   getAccount(id: string, options: RequestOptions = {}): Promise<T.AccountDto> {
     return this.request("GET", `/api/v1/accounts/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
@@ -18,9 +22,29 @@ export class CloudApi extends Transport {
   patchAccount(id: string, body: T.UpdateAccountRequest, options: RequestOptions = {}): Promise<T.AccountDto> {
     return this.request("PATCH", `/api/v1/accounts/${this.segment(id)}`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
   }
+  /** GET /api/v1/accounts/{id}/invitations */
+  listInvitations(id: string, options: RequestOptions = {}): Promise<T.Items_InvitationDto> {
+    return this.request("GET", `/api/v1/accounts/${this.segment(id)}/invitations`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /api/v1/accounts/{id}/invitations */
+  createInvitation(id: string, body: T.CreateInvitationRequest, options: RequestOptions = {}): Promise<T.CreatedInvitationDto> {
+    return this.request("POST", `/api/v1/accounts/${this.segment(id)}/invitations`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** DELETE /api/v1/accounts/{id}/invitations/{invitationId} */
+  revokeInvitation(id: string, invitationId: string, options: RequestOptions = {}): Promise<void> {
+    return this.request("DELETE", `/api/v1/accounts/${this.segment(id)}/invitations/${this.segment(invitationId)}`, { binaryBody: false, binaryResponse: false, ...options });
+  }
   /** GET /api/v1/accounts/{id}/members */
   listMembers(id: string, options: RequestOptions = {}): Promise<T.Items_MemberDto> {
     return this.request("GET", `/api/v1/accounts/${this.segment(id)}/members`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** DELETE /api/v1/accounts/{id}/members/{userId} */
+  removeMember(id: string, userId: string, options: RequestOptions = {}): Promise<void> {
+    return this.request("DELETE", `/api/v1/accounts/${this.segment(id)}/members/${this.segment(userId)}`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** PATCH /api/v1/accounts/{id}/members/{userId} */
+  updateMember(id: string, userId: string, body: T.UpdateMemberRequest, options: RequestOptions = {}): Promise<void> {
+    return this.request("PATCH", `/api/v1/accounts/${this.segment(id)}/members/${this.segment(userId)}`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /api/v1/accounts/{id}/projects */
   listProjects(id: string, options: RequestOptions = {}): Promise<T.Items_ProjectDto> {
@@ -29,6 +53,10 @@ export class CloudApi extends Transport {
   /** POST /api/v1/accounts/{id}/projects */
   createProject(id: string, body: T.CreateProjectRequest, options: RequestOptions = {}): Promise<T.ProjectDto> {
     return this.request("POST", `/api/v1/accounts/${this.segment(id)}/projects`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /api/v1/accounts/{id}/seats */
+  accountSeats(id: string, options: RequestOptions = {}): Promise<T.SeatsDto> {
+    return this.request("GET", `/api/v1/accounts/${this.segment(id)}/seats`, { binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /api/v1/api-keys */
   listAccountApiKeys(query: T.ListAccountApiKeysQuery = {}, options: RequestOptions = {}): Promise<T.Items_AccountApiKeyDto> {
@@ -162,6 +190,10 @@ export class CloudApi extends Transport {
   revokeDevice(id: string, options: RequestOptions = {}): Promise<void> {
     return this.request("DELETE", `/api/v1/devices/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
   }
+  /** POST /api/v1/invitations/accept */
+  acceptInvitation(body: T.AcceptInvitationRequest, options: RequestOptions = {}): Promise<T.AccountDto> {
+    return this.request("POST", `/api/v1/invitations/accept`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
   /** GET /api/v1/key */
   apiKeyContext(options: RequestOptions = {}): Promise<T.ApiKeyContextDto> {
     return this.request("GET", `/api/v1/key`, { binaryBody: false, binaryResponse: false, ...options });
@@ -213,6 +245,30 @@ export class CloudApi extends Transport {
   /** GET /api/v1/me */
   me(options: RequestOptions = {}): Promise<T.MeResponse> {
     return this.request("GET", `/api/v1/me`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /api/v1/mfa */
+  mfaStatus(options: RequestOptions = {}): Promise<T.MfaStatusDto> {
+    return this.request("GET", `/api/v1/mfa`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /api/v1/mfa/disable */
+  mfaDisable(body: T.MfaCodeRequest, options: RequestOptions = {}): Promise<void> {
+    return this.request("POST", `/api/v1/mfa/disable`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /api/v1/mfa/recovery-codes */
+  mfaRecoveryCodes(body: T.MfaCodeRequest, options: RequestOptions = {}): Promise<T.MfaRecoveryCodesResponse> {
+    return this.request("POST", `/api/v1/mfa/recovery-codes`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /api/v1/mfa/totp/confirm */
+  mfaTotpConfirm(body: T.MfaCodeRequest, options: RequestOptions = {}): Promise<T.MfaConfirmResponse> {
+    return this.request("POST", `/api/v1/mfa/totp/confirm`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /api/v1/mfa/totp/setup */
+  mfaTotpSetup(body: T.MfaSetupRequest, options: RequestOptions = {}): Promise<T.MfaSetupResponse> {
+    return this.request("POST", `/api/v1/mfa/totp/setup`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** DELETE /api/v1/mfa/trusted-browsers */
+  mfaForgetBrowsers(options: RequestOptions = {}): Promise<void> {
+    return this.request("DELETE", `/api/v1/mfa/trusted-browsers`, { binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /api/v1/operations/{id} */
   getOperation(id: string, options: RequestOptions = {}): Promise<T.OperationDto> {
@@ -366,6 +422,10 @@ export class CloudApi extends Transport {
   createCloudSchedule(body: T.CreateCloudScheduleRequest, options: RequestOptions = {}): Promise<T.CloudScheduleDto> {
     return this.request("POST", `/api/v1/schedules`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
   }
+  /** GET /api/v1/schedules/preview */
+  previewCloudSchedule(query: T.PreviewCloudScheduleQuery = {}, options: RequestOptions = {}): Promise<T.CloudSchedulePreviewDto> {
+    return this.request("GET", `/api/v1/schedules/preview`, { query, binaryBody: false, binaryResponse: false, ...options });
+  }
   /** GET /api/v1/schedules/{id} */
   getCloudSchedule(id: string, options: RequestOptions = {}): Promise<T.CloudScheduleDto> {
     return this.request("GET", `/api/v1/schedules/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
@@ -491,7 +551,7 @@ export class CloudApi extends Transport {
     return this.request("POST", `/auth/email/forgot-password`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
   }
   /** POST /auth/email/login */
-  emailLogin(body: T.EmailLoginRequest, options: RequestOptions = {}): Promise<T.JsonValue> {
+  emailLogin(body: T.EmailLoginRequest, options: RequestOptions = {}): Promise<T.SignInResponse> {
     return this.request("POST", `/auth/email/login`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
   }
   /** POST /auth/email/reset-password */
@@ -521,6 +581,18 @@ export class CloudApi extends Transport {
   /** POST /auth/logout-all */
   logoutAll(options: RequestOptions = {}): Promise<void> {
     return this.request("POST", `/auth/logout-all`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /auth/mfa */
+  mfaChallenge(options: RequestOptions = {}): Promise<T.MfaChallengeDto> {
+    return this.request("GET", `/auth/mfa`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /auth/mfa/cancel */
+  mfaCancel(options: RequestOptions = {}): Promise<void> {
+    return this.request("POST", `/auth/mfa/cancel`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /auth/mfa/verify */
+  mfaVerify(body: T.MfaVerifyRequest, options: RequestOptions = {}): Promise<T.SignInResponse> {
+    return this.request("POST", `/auth/mfa/verify`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /auth/options */
   authOptions(options: RequestOptions = {}): Promise<T.JsonValue> {
@@ -557,6 +629,10 @@ export class CloudApi extends Transport {
   /** POST /internal/ops/marketplace/versions/{id}/review */
   internalReviewVersion(id: string, body: T.ReviewVersionRequest, options: RequestOptions = {}): Promise<T.ReviewVersionResponse> {
     return this.request("POST", `/internal/ops/marketplace/versions/${this.segment(id)}/review`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /internal/ops/users/{id}/mfa/reset */
+  internalMfaReset(id: string, options: RequestOptions = {}): Promise<void> {
+    return this.request("POST", `/internal/ops/users/${this.segment(id)}/mfa/reset`, { binaryBody: false, binaryResponse: false, ...options });
   }
   /** POST /internal/releases */
   publishRelease(body: T.PublishReleaseRequest, options: RequestOptions = {}): Promise<T.ReleasePublication> {

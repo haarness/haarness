@@ -11,6 +11,10 @@ class CloudApi(Transport):
         """GET /api/v1/accounts."""
         return cast("T.Items_AccountDto", self.request('GET', f'/api/v1/accounts', binary_body=False, binary_response=False, options=options))
 
+    def create_account(self, body: T.CreateAccountRequest, *, options: RequestOptions | None = None) -> T.AccountDto:
+        """POST /api/v1/accounts."""
+        return cast("T.AccountDto", self.request('POST', f'/api/v1/accounts', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
     def get_account(self, id: str, *, options: RequestOptions | None = None) -> T.AccountDto:
         """GET /api/v1/accounts/{id}."""
         return cast("T.AccountDto", self.request('GET', f'/api/v1/accounts/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
@@ -19,9 +23,29 @@ class CloudApi(Transport):
         """PATCH /api/v1/accounts/{id}."""
         return cast("T.AccountDto", self.request('PATCH', f'/api/v1/accounts/{self.segment(id)}', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
+    def list_invitations(self, id: str, *, options: RequestOptions | None = None) -> T.Items_InvitationDto:
+        """GET /api/v1/accounts/{id}/invitations."""
+        return cast("T.Items_InvitationDto", self.request('GET', f'/api/v1/accounts/{self.segment(id)}/invitations', binary_body=False, binary_response=False, options=options))
+
+    def create_invitation(self, id: str, body: T.CreateInvitationRequest, *, options: RequestOptions | None = None) -> T.CreatedInvitationDto:
+        """POST /api/v1/accounts/{id}/invitations."""
+        return cast("T.CreatedInvitationDto", self.request('POST', f'/api/v1/accounts/{self.segment(id)}/invitations', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def revoke_invitation(self, id: str, invitationId: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /api/v1/accounts/{id}/invitations/{invitationId}."""
+        return cast("None", self.request('DELETE', f'/api/v1/accounts/{self.segment(id)}/invitations/{self.segment(invitationId)}', binary_body=False, binary_response=False, options=options))
+
     def list_members(self, id: str, *, options: RequestOptions | None = None) -> T.Items_MemberDto:
         """GET /api/v1/accounts/{id}/members."""
         return cast("T.Items_MemberDto", self.request('GET', f'/api/v1/accounts/{self.segment(id)}/members', binary_body=False, binary_response=False, options=options))
+
+    def remove_member(self, id: str, userId: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /api/v1/accounts/{id}/members/{userId}."""
+        return cast("None", self.request('DELETE', f'/api/v1/accounts/{self.segment(id)}/members/{self.segment(userId)}', binary_body=False, binary_response=False, options=options))
+
+    def update_member(self, id: str, userId: str, body: T.UpdateMemberRequest, *, options: RequestOptions | None = None) -> None:
+        """PATCH /api/v1/accounts/{id}/members/{userId}."""
+        return cast("None", self.request('PATCH', f'/api/v1/accounts/{self.segment(id)}/members/{self.segment(userId)}', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     def list_projects(self, id: str, *, options: RequestOptions | None = None) -> T.Items_ProjectDto:
         """GET /api/v1/accounts/{id}/projects."""
@@ -30,6 +54,10 @@ class CloudApi(Transport):
     def create_project(self, id: str, body: T.CreateProjectRequest, *, options: RequestOptions | None = None) -> T.ProjectDto:
         """POST /api/v1/accounts/{id}/projects."""
         return cast("T.ProjectDto", self.request('POST', f'/api/v1/accounts/{self.segment(id)}/projects', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def account_seats(self, id: str, *, options: RequestOptions | None = None) -> T.SeatsDto:
+        """GET /api/v1/accounts/{id}/seats."""
+        return cast("T.SeatsDto", self.request('GET', f'/api/v1/accounts/{self.segment(id)}/seats', binary_body=False, binary_response=False, options=options))
 
     def list_account_api_keys(self, query: T.ListAccountApiKeysQuery | None = None, *, options: RequestOptions | None = None) -> T.Items_AccountApiKeyDto:
         """GET /api/v1/api-keys."""
@@ -159,6 +187,10 @@ class CloudApi(Transport):
         """DELETE /api/v1/devices/{id}."""
         return cast("None", self.request('DELETE', f'/api/v1/devices/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
 
+    def accept_invitation(self, body: T.AcceptInvitationRequest, *, options: RequestOptions | None = None) -> T.AccountDto:
+        """POST /api/v1/invitations/accept."""
+        return cast("T.AccountDto", self.request('POST', f'/api/v1/invitations/accept', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
     def api_key_context(self, *, options: RequestOptions | None = None) -> T.ApiKeyContextDto:
         """GET /api/v1/key."""
         return cast("T.ApiKeyContextDto", self.request('GET', f'/api/v1/key', binary_body=False, binary_response=False, options=options))
@@ -210,6 +242,30 @@ class CloudApi(Transport):
     def me(self, *, options: RequestOptions | None = None) -> T.MeResponse:
         """GET /api/v1/me."""
         return cast("T.MeResponse", self.request('GET', f'/api/v1/me', binary_body=False, binary_response=False, options=options))
+
+    def mfa_status(self, *, options: RequestOptions | None = None) -> T.MfaStatusDto:
+        """GET /api/v1/mfa."""
+        return cast("T.MfaStatusDto", self.request('GET', f'/api/v1/mfa', binary_body=False, binary_response=False, options=options))
+
+    def mfa_disable(self, body: T.MfaCodeRequest, *, options: RequestOptions | None = None) -> None:
+        """POST /api/v1/mfa/disable."""
+        return cast("None", self.request('POST', f'/api/v1/mfa/disable', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def mfa_recovery_codes(self, body: T.MfaCodeRequest, *, options: RequestOptions | None = None) -> T.MfaRecoveryCodesResponse:
+        """POST /api/v1/mfa/recovery-codes."""
+        return cast("T.MfaRecoveryCodesResponse", self.request('POST', f'/api/v1/mfa/recovery-codes', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def mfa_totp_confirm(self, body: T.MfaCodeRequest, *, options: RequestOptions | None = None) -> T.MfaConfirmResponse:
+        """POST /api/v1/mfa/totp/confirm."""
+        return cast("T.MfaConfirmResponse", self.request('POST', f'/api/v1/mfa/totp/confirm', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def mfa_totp_setup(self, body: T.MfaSetupRequest, *, options: RequestOptions | None = None) -> T.MfaSetupResponse:
+        """POST /api/v1/mfa/totp/setup."""
+        return cast("T.MfaSetupResponse", self.request('POST', f'/api/v1/mfa/totp/setup', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def mfa_forget_browsers(self, *, options: RequestOptions | None = None) -> None:
+        """DELETE /api/v1/mfa/trusted-browsers."""
+        return cast("None", self.request('DELETE', f'/api/v1/mfa/trusted-browsers', binary_body=False, binary_response=False, options=options))
 
     def get_operation(self, id: str, *, options: RequestOptions | None = None) -> T.OperationDto:
         """GET /api/v1/operations/{id}."""
@@ -363,6 +419,10 @@ class CloudApi(Transport):
         """POST /api/v1/schedules."""
         return cast("T.CloudScheduleDto", self.request('POST', f'/api/v1/schedules', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
+    def preview_cloud_schedule(self, query: T.PreviewCloudScheduleQuery | None = None, *, options: RequestOptions | None = None) -> T.CloudSchedulePreviewDto:
+        """GET /api/v1/schedules/preview."""
+        return cast("T.CloudSchedulePreviewDto", self.request('GET', f'/api/v1/schedules/preview', query=query, binary_body=False, binary_response=False, options=options))
+
     def get_cloud_schedule(self, id: str, *, options: RequestOptions | None = None) -> T.CloudScheduleDto:
         """GET /api/v1/schedules/{id}."""
         return cast("T.CloudScheduleDto", self.request('GET', f'/api/v1/schedules/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
@@ -487,9 +547,9 @@ class CloudApi(Transport):
         """POST /auth/email/forgot-password."""
         return cast("T.JsonValue", self.request('POST', f'/auth/email/forgot-password', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
-    def email_login(self, body: T.EmailLoginRequest, *, options: RequestOptions | None = None) -> T.JsonValue:
+    def email_login(self, body: T.EmailLoginRequest, *, options: RequestOptions | None = None) -> T.SignInResponse:
         """POST /auth/email/login."""
-        return cast("T.JsonValue", self.request('POST', f'/auth/email/login', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+        return cast("T.SignInResponse", self.request('POST', f'/auth/email/login', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     def email_reset(self, body: T.EmailPasswordRequest, *, options: RequestOptions | None = None) -> T.JsonValue:
         """POST /auth/email/reset-password."""
@@ -518,6 +578,18 @@ class CloudApi(Transport):
     def logout_all(self, *, options: RequestOptions | None = None) -> None:
         """POST /auth/logout-all."""
         return cast("None", self.request('POST', f'/auth/logout-all', binary_body=False, binary_response=False, options=options))
+
+    def mfa_challenge(self, *, options: RequestOptions | None = None) -> T.MfaChallengeDto:
+        """GET /auth/mfa."""
+        return cast("T.MfaChallengeDto", self.request('GET', f'/auth/mfa', binary_body=False, binary_response=False, options=options))
+
+    def mfa_cancel(self, *, options: RequestOptions | None = None) -> None:
+        """POST /auth/mfa/cancel."""
+        return cast("None", self.request('POST', f'/auth/mfa/cancel', binary_body=False, binary_response=False, options=options))
+
+    def mfa_verify(self, body: T.MfaVerifyRequest, *, options: RequestOptions | None = None) -> T.SignInResponse:
+        """POST /auth/mfa/verify."""
+        return cast("T.SignInResponse", self.request('POST', f'/auth/mfa/verify', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     def auth_options(self, *, options: RequestOptions | None = None) -> T.JsonValue:
         """GET /auth/options."""
@@ -554,6 +626,10 @@ class CloudApi(Transport):
     def internal_review_version(self, id: str, body: T.ReviewVersionRequest, *, options: RequestOptions | None = None) -> T.ReviewVersionResponse:
         """POST /internal/ops/marketplace/versions/{id}/review."""
         return cast("T.ReviewVersionResponse", self.request('POST', f'/internal/ops/marketplace/versions/{self.segment(id)}/review', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def internal_mfa_reset(self, id: str, *, options: RequestOptions | None = None) -> None:
+        """POST /internal/ops/users/{id}/mfa/reset."""
+        return cast("None", self.request('POST', f'/internal/ops/users/{self.segment(id)}/mfa/reset', binary_body=False, binary_response=False, options=options))
 
     def publish_release(self, body: T.PublishReleaseRequest, *, options: RequestOptions | None = None) -> T.ReleasePublication:
         """POST /internal/releases."""
@@ -624,6 +700,10 @@ class AsyncCloudApi(AsyncTransport):
         """GET /api/v1/accounts."""
         return cast("T.Items_AccountDto", await self.request('GET', f'/api/v1/accounts', binary_body=False, binary_response=False, options=options))
 
+    async def create_account(self, body: T.CreateAccountRequest, *, options: RequestOptions | None = None) -> T.AccountDto:
+        """POST /api/v1/accounts."""
+        return cast("T.AccountDto", await self.request('POST', f'/api/v1/accounts', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
     async def get_account(self, id: str, *, options: RequestOptions | None = None) -> T.AccountDto:
         """GET /api/v1/accounts/{id}."""
         return cast("T.AccountDto", await self.request('GET', f'/api/v1/accounts/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
@@ -632,9 +712,29 @@ class AsyncCloudApi(AsyncTransport):
         """PATCH /api/v1/accounts/{id}."""
         return cast("T.AccountDto", await self.request('PATCH', f'/api/v1/accounts/{self.segment(id)}', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
+    async def list_invitations(self, id: str, *, options: RequestOptions | None = None) -> T.Items_InvitationDto:
+        """GET /api/v1/accounts/{id}/invitations."""
+        return cast("T.Items_InvitationDto", await self.request('GET', f'/api/v1/accounts/{self.segment(id)}/invitations', binary_body=False, binary_response=False, options=options))
+
+    async def create_invitation(self, id: str, body: T.CreateInvitationRequest, *, options: RequestOptions | None = None) -> T.CreatedInvitationDto:
+        """POST /api/v1/accounts/{id}/invitations."""
+        return cast("T.CreatedInvitationDto", await self.request('POST', f'/api/v1/accounts/{self.segment(id)}/invitations', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def revoke_invitation(self, id: str, invitationId: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /api/v1/accounts/{id}/invitations/{invitationId}."""
+        return cast("None", await self.request('DELETE', f'/api/v1/accounts/{self.segment(id)}/invitations/{self.segment(invitationId)}', binary_body=False, binary_response=False, options=options))
+
     async def list_members(self, id: str, *, options: RequestOptions | None = None) -> T.Items_MemberDto:
         """GET /api/v1/accounts/{id}/members."""
         return cast("T.Items_MemberDto", await self.request('GET', f'/api/v1/accounts/{self.segment(id)}/members', binary_body=False, binary_response=False, options=options))
+
+    async def remove_member(self, id: str, userId: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /api/v1/accounts/{id}/members/{userId}."""
+        return cast("None", await self.request('DELETE', f'/api/v1/accounts/{self.segment(id)}/members/{self.segment(userId)}', binary_body=False, binary_response=False, options=options))
+
+    async def update_member(self, id: str, userId: str, body: T.UpdateMemberRequest, *, options: RequestOptions | None = None) -> None:
+        """PATCH /api/v1/accounts/{id}/members/{userId}."""
+        return cast("None", await self.request('PATCH', f'/api/v1/accounts/{self.segment(id)}/members/{self.segment(userId)}', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     async def list_projects(self, id: str, *, options: RequestOptions | None = None) -> T.Items_ProjectDto:
         """GET /api/v1/accounts/{id}/projects."""
@@ -643,6 +743,10 @@ class AsyncCloudApi(AsyncTransport):
     async def create_project(self, id: str, body: T.CreateProjectRequest, *, options: RequestOptions | None = None) -> T.ProjectDto:
         """POST /api/v1/accounts/{id}/projects."""
         return cast("T.ProjectDto", await self.request('POST', f'/api/v1/accounts/{self.segment(id)}/projects', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def account_seats(self, id: str, *, options: RequestOptions | None = None) -> T.SeatsDto:
+        """GET /api/v1/accounts/{id}/seats."""
+        return cast("T.SeatsDto", await self.request('GET', f'/api/v1/accounts/{self.segment(id)}/seats', binary_body=False, binary_response=False, options=options))
 
     async def list_account_api_keys(self, query: T.ListAccountApiKeysQuery | None = None, *, options: RequestOptions | None = None) -> T.Items_AccountApiKeyDto:
         """GET /api/v1/api-keys."""
@@ -772,6 +876,10 @@ class AsyncCloudApi(AsyncTransport):
         """DELETE /api/v1/devices/{id}."""
         return cast("None", await self.request('DELETE', f'/api/v1/devices/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
 
+    async def accept_invitation(self, body: T.AcceptInvitationRequest, *, options: RequestOptions | None = None) -> T.AccountDto:
+        """POST /api/v1/invitations/accept."""
+        return cast("T.AccountDto", await self.request('POST', f'/api/v1/invitations/accept', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
     async def api_key_context(self, *, options: RequestOptions | None = None) -> T.ApiKeyContextDto:
         """GET /api/v1/key."""
         return cast("T.ApiKeyContextDto", await self.request('GET', f'/api/v1/key', binary_body=False, binary_response=False, options=options))
@@ -823,6 +931,30 @@ class AsyncCloudApi(AsyncTransport):
     async def me(self, *, options: RequestOptions | None = None) -> T.MeResponse:
         """GET /api/v1/me."""
         return cast("T.MeResponse", await self.request('GET', f'/api/v1/me', binary_body=False, binary_response=False, options=options))
+
+    async def mfa_status(self, *, options: RequestOptions | None = None) -> T.MfaStatusDto:
+        """GET /api/v1/mfa."""
+        return cast("T.MfaStatusDto", await self.request('GET', f'/api/v1/mfa', binary_body=False, binary_response=False, options=options))
+
+    async def mfa_disable(self, body: T.MfaCodeRequest, *, options: RequestOptions | None = None) -> None:
+        """POST /api/v1/mfa/disable."""
+        return cast("None", await self.request('POST', f'/api/v1/mfa/disable', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def mfa_recovery_codes(self, body: T.MfaCodeRequest, *, options: RequestOptions | None = None) -> T.MfaRecoveryCodesResponse:
+        """POST /api/v1/mfa/recovery-codes."""
+        return cast("T.MfaRecoveryCodesResponse", await self.request('POST', f'/api/v1/mfa/recovery-codes', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def mfa_totp_confirm(self, body: T.MfaCodeRequest, *, options: RequestOptions | None = None) -> T.MfaConfirmResponse:
+        """POST /api/v1/mfa/totp/confirm."""
+        return cast("T.MfaConfirmResponse", await self.request('POST', f'/api/v1/mfa/totp/confirm', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def mfa_totp_setup(self, body: T.MfaSetupRequest, *, options: RequestOptions | None = None) -> T.MfaSetupResponse:
+        """POST /api/v1/mfa/totp/setup."""
+        return cast("T.MfaSetupResponse", await self.request('POST', f'/api/v1/mfa/totp/setup', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def mfa_forget_browsers(self, *, options: RequestOptions | None = None) -> None:
+        """DELETE /api/v1/mfa/trusted-browsers."""
+        return cast("None", await self.request('DELETE', f'/api/v1/mfa/trusted-browsers', binary_body=False, binary_response=False, options=options))
 
     async def get_operation(self, id: str, *, options: RequestOptions | None = None) -> T.OperationDto:
         """GET /api/v1/operations/{id}."""
@@ -976,6 +1108,10 @@ class AsyncCloudApi(AsyncTransport):
         """POST /api/v1/schedules."""
         return cast("T.CloudScheduleDto", await self.request('POST', f'/api/v1/schedules', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
+    async def preview_cloud_schedule(self, query: T.PreviewCloudScheduleQuery | None = None, *, options: RequestOptions | None = None) -> T.CloudSchedulePreviewDto:
+        """GET /api/v1/schedules/preview."""
+        return cast("T.CloudSchedulePreviewDto", await self.request('GET', f'/api/v1/schedules/preview', query=query, binary_body=False, binary_response=False, options=options))
+
     async def get_cloud_schedule(self, id: str, *, options: RequestOptions | None = None) -> T.CloudScheduleDto:
         """GET /api/v1/schedules/{id}."""
         return cast("T.CloudScheduleDto", await self.request('GET', f'/api/v1/schedules/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
@@ -1100,9 +1236,9 @@ class AsyncCloudApi(AsyncTransport):
         """POST /auth/email/forgot-password."""
         return cast("T.JsonValue", await self.request('POST', f'/auth/email/forgot-password', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
-    async def email_login(self, body: T.EmailLoginRequest, *, options: RequestOptions | None = None) -> T.JsonValue:
+    async def email_login(self, body: T.EmailLoginRequest, *, options: RequestOptions | None = None) -> T.SignInResponse:
         """POST /auth/email/login."""
-        return cast("T.JsonValue", await self.request('POST', f'/auth/email/login', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+        return cast("T.SignInResponse", await self.request('POST', f'/auth/email/login', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     async def email_reset(self, body: T.EmailPasswordRequest, *, options: RequestOptions | None = None) -> T.JsonValue:
         """POST /auth/email/reset-password."""
@@ -1131,6 +1267,18 @@ class AsyncCloudApi(AsyncTransport):
     async def logout_all(self, *, options: RequestOptions | None = None) -> None:
         """POST /auth/logout-all."""
         return cast("None", await self.request('POST', f'/auth/logout-all', binary_body=False, binary_response=False, options=options))
+
+    async def mfa_challenge(self, *, options: RequestOptions | None = None) -> T.MfaChallengeDto:
+        """GET /auth/mfa."""
+        return cast("T.MfaChallengeDto", await self.request('GET', f'/auth/mfa', binary_body=False, binary_response=False, options=options))
+
+    async def mfa_cancel(self, *, options: RequestOptions | None = None) -> None:
+        """POST /auth/mfa/cancel."""
+        return cast("None", await self.request('POST', f'/auth/mfa/cancel', binary_body=False, binary_response=False, options=options))
+
+    async def mfa_verify(self, body: T.MfaVerifyRequest, *, options: RequestOptions | None = None) -> T.SignInResponse:
+        """POST /auth/mfa/verify."""
+        return cast("T.SignInResponse", await self.request('POST', f'/auth/mfa/verify', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     async def auth_options(self, *, options: RequestOptions | None = None) -> T.JsonValue:
         """GET /auth/options."""
@@ -1167,6 +1315,10 @@ class AsyncCloudApi(AsyncTransport):
     async def internal_review_version(self, id: str, body: T.ReviewVersionRequest, *, options: RequestOptions | None = None) -> T.ReviewVersionResponse:
         """POST /internal/ops/marketplace/versions/{id}/review."""
         return cast("T.ReviewVersionResponse", await self.request('POST', f'/internal/ops/marketplace/versions/{self.segment(id)}/review', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def internal_mfa_reset(self, id: str, *, options: RequestOptions | None = None) -> None:
+        """POST /internal/ops/users/{id}/mfa/reset."""
+        return cast("None", await self.request('POST', f'/internal/ops/users/{self.segment(id)}/mfa/reset', binary_body=False, binary_response=False, options=options))
 
     async def publish_release(self, body: T.PublishReleaseRequest, *, options: RequestOptions | None = None) -> T.ReleasePublication:
         """POST /internal/releases."""

@@ -208,12 +208,14 @@ export function AccountMenu(props: {
     alive = false;
     off();
   });
+  // The trial is not a plan name; it reads as "Free trial" in the reader's language.
+  const planLabel = (s: NonNullable<BillingState["summary"]>) => (s.trial ? t("Free trial") : planName(s.plan));
   const navSummary = () => {
     const s = summary();
     if (!s) return undefined;
     if (billing().error) return t("Billing unavailable");
     const total = creditsShort(addCredits(s.includedCredits, s.purchasedCredits));
-    return t("{plan} · {credits} credits", { plan: planName(s.plan) ?? t("No plan"), credits: total });
+    return t("{plan} · {credits} credits", { plan: planLabel(s) ?? t("No plan"), credits: total });
   };
   return (
     <>
@@ -377,7 +379,8 @@ export function AccountMenu(props: {
                   <Show when={summary()}>
                     {s => (
                       <span class="account-plan" data-plan={planName(s().plan) ? "paid" : "none"}>
-                        {planName(s().plan) ?? t("No plan")}
+                        {planLabel(s()) ?? t("No plan")}
+                        <Show when={s().billingInterval === "year"}>{" · " + t("Yearly")}</Show>
                         <Show when={planName(s().plan) && s().subscriptionStatus && s().subscriptionStatus !== "active"}>
                           {" · " + t(subscriptionStates[s().subscriptionStatus!] ?? s().subscriptionStatus!)}
                         </Show>
@@ -390,11 +393,20 @@ export function AccountMenu(props: {
                   <Show when={!planName(s().plan)}>
                     <div class="account-upsell">
                       <p>{t("Choose a plan for monthly AI credits and Cloud compute, or add credits that never expire.")}</p>
-                      <button class="primary" onClick={() => void web("billing")}>
+                      <Show when={s().trialAvailable}>
+                        <button class="primary" data-testid="start-trial" onClick={() => void web("billing")}>
+                          {t("Start free trial")}
+                          <Icon name="external" size="sm" />
+                        </button>
+                      </Show>
+                      <button classList={{ primary: !s().trialAvailable }} onClick={() => void web("billing")}>
                         {t("See plans")}
                         <Icon name="external" size="sm" />
                       </button>
                     </div>
+                  </Show>
+                  <Show when={s().outOfCredits}>
+                    <p class="form-error" role="status" data-testid="out-of-credits">{t("You're out of AI credits.")}</p>
                   </Show>
                   <Show when={s().accountStatus !== "active"}>
                     <p class="form-error" role="status">{t("This account is {status}. Cloud requests are paused until billing is resolved.", { status: s().accountStatus })}</p>
@@ -420,6 +432,12 @@ export function AccountMenu(props: {
                   </dl>
                   <Show when={/[1-9]/.test(s().heldCredits)}>
                     <p class="account-note">{t("{credits} credits are held by requests in progress.", { credits: credits(s().heldCredits) })}</p>
+                  </Show>
+                  <Show when={!s().outOfCredits && s().daysLeft != null && s().daysLeft! < 30}>
+                    <p class="account-note" data-testid="days-left">{t("About {days} days left at this pace", { days: s().daysLeft! })}</p>
+                  </Show>
+                  <Show when={s().autoTopupFailure}>
+                    {reason => <p class="form-error" role="status">{t("The last automatic top-up failed, so they are off: {reason}", { reason: reason() })}</p>}
                   </Show>
                   <Show when={s().periodEndsAt}>
                     {at => (
@@ -546,7 +564,7 @@ export function AccountMenu(props: {
                       <textarea aria-label={t("Session configuration JSON")} rows={6} value={configuration()} onInput={e => setConfiguration(e.currentTarget.value)} placeholder={'{"mcp":{},"agents":{},"skills":{}}'} />
                     </details>
                     <p class="account-hint">
-                      {t("Starts an independent Cloud machine with its own files. Compute and storage use your credits.")}
+                      {t("Starts an independent Cloud machine with its own files. It runs on your plan's compute hours and disk.")}
                     </p>
                     <div class="account-create-footer">
                       <button type="button" class="account-link" onClick={() => void web("agents")}>
