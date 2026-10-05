@@ -1735,7 +1735,6 @@ dependencies = [
  "tokio-tungstenite 0.30.0",
  "tokio-util",
  "tower",
- "tower-http",
  "tracing",
  "tracing-opentelemetry",
  "url",
@@ -4507,14 +4506,11 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
- "http-body-util",
  "pin-project-lite",
  "tower",
  "tower-layer",
  "tower-service",
- "tracing",
  "url",
- "uuid",
 ]
 
 [[package]]
@@ -5312,7 +5308,6 @@ dependencies = [
  "anyhow",
  "cargo_metadata",
  "clap",
- "sha2",
  "walkdir",
 ]
 

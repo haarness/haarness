@@ -723,17 +723,6 @@ impl ApiClient {
             .unwrap_or_default();
         self.get(&format!("/v1/workflows/runs/{id}{suffix}")).await
     }
-    pub async fn wait_workflow(
-        &self,
-        id: haarness_protocol::WorkflowId,
-        timeout_ms: Option<u64>,
-    ) -> Result<haarness_protocol::WorkflowRun> {
-        let suffix = timeout_ms
-            .map(|timeout| format!("?timeoutMs={timeout}"))
-            .unwrap_or_default();
-        self.get(&format!("/v1/workflows/runs/{id}/wait{suffix}"))
-            .await
-    }
     async fn workflow_run_action(
         &self,
         id: haarness_protocol::WorkflowId,

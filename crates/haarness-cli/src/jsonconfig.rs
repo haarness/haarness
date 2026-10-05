@@ -1558,14 +1558,6 @@ fn scoped_agent_name(plugin: &str, relative: &str, explicit: Option<&str>) -> St
     format!("{plugin}:{}", parts.join(":"))
 }
 
-/// Minimal flat frontmatter: `--- key: value … ---`. Values keep everything
-/// after the first colon (quotes stripped). Good enough for command/agent
-/// metadata without a YAML dependency.
-#[cfg(test)]
-fn split_frontmatter(content: &str) -> (BTreeMap<String, String>, &str) {
-    haarness_core::definitions::markdown(content).unwrap_or_else(|_| (BTreeMap::new(), content))
-}
-
 fn markdown_agent_tools(front: &BTreeMap<String, String>) -> HashMap<String, bool> {
     let mut tools = HashMap::new();
     if let Some(raw) = front.get("tools") {
@@ -2570,13 +2562,14 @@ mod tests {
 
     #[test]
     fn frontmatter_splits_and_body_survives() {
-        let (front, body) = split_frontmatter(
+        let (front, body) = haarness_core::definitions::markdown(
             "---\ndescription: Review code\nagent: review\n---\nDo a review of $ARGUMENTS",
-        );
+        )
+        .unwrap();
         assert_eq!(front.get("description").unwrap(), "Review code");
         assert_eq!(front.get("agent").unwrap(), "review");
         assert!(body.contains("Do a review of $ARGUMENTS"));
-        let (empty, body) = split_frontmatter("no frontmatter here");
+        let (empty, body) = haarness_core::definitions::markdown("no frontmatter here").unwrap();
         assert!(empty.is_empty());
         assert_eq!(body, "no frontmatter here");
     }

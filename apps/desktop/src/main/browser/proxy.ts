@@ -13,7 +13,7 @@ import { Duplex } from "node:stream";
 import { Schema } from "effect";
 import { Browser } from "./rpc.js";
 
-export type Transport = {
+type Transport = {
   open(target: Browser.TunnelTarget, signal: AbortSignal): Promise<string>;
   read(id: string, signal: AbortSignal): Promise<Browser.TunnelRead>;
   write(
@@ -24,7 +24,6 @@ export type Transport = {
   ): Promise<void>;
   close(id: string): Promise<void>;
 };
-export type Proxy = Awaited<ReturnType<typeof make>>;
 
 // Desktop-only leaf. This listener is never loaded by the server plugin.
 export async function make(transport: Transport) {

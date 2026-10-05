@@ -48,20 +48,10 @@ impl FilesystemSkillRegistry {
             disabled: Arc::default(),
         }
     }
-    pub fn replace_scoped_roots(&self, roots: Vec<(PathBuf, bool, Option<PathBuf>)>) {
-        *self.catalog.write() = catalog_for_roots(&roots);
-    }
-
     /// Replace the ordered discovery roots without replacing the registry
     /// object held by REST routes and already-composed native tools.
-    pub fn replace_roots(&self, roots: Vec<(PathBuf, bool)>) {
-        let catalog = catalog_for_roots(
-            &roots
-                .into_iter()
-                .map(|(path, trusted)| (path, trusted, None))
-                .collect::<Vec<_>>(),
-        );
-        *self.catalog.write() = catalog;
+    pub fn replace_scoped_roots(&self, roots: Vec<(PathBuf, bool, Option<PathBuf>)>) {
+        *self.catalog.write() = catalog_for_roots(&roots);
     }
 
     pub fn set_disabled(&self, names: Vec<String>) {
@@ -205,37 +195,11 @@ fn skill_files(root: &Path, depth: usize) -> Vec<PathBuf> {
     }
     files
 }
-#[cfg(test)]
-fn frontmatter(body: &str, key: &str) -> Option<String> {
-    if !body.starts_with("---") {
-        return None;
-    }
-    body.lines()
-        .skip(1)
-        .take_while(|line| *line != "---")
-        .find_map(|line| {
-            line.split_once(':')
-                .filter(|(name, _)| name.trim() == key)
-                .map(|(_, value)| value.trim().trim_matches('"').to_owned())
-        })
-}
-#[allow(dead_code)]
-fn _is_within(path: &Path, root: &Path) -> bool {
-    path.starts_with(root)
-}
 
 #[cfg(test)]
 mod tests {
-    use super::{FilesystemSkillRegistry, frontmatter};
+    use super::FilesystemSkillRegistry;
     use haarness_core::SkillRegistry;
-    #[test]
-    fn reads_progressive_metadata_without_body() {
-        let body = "---\nname: demo\ndescription: concise skill\n---\nsecret body";
-        assert_eq!(
-            frontmatter(body, "description").as_deref(),
-            Some("concise skill")
-        );
-    }
 
     #[tokio::test]
     async fn recursively_discovers_and_prefers_the_nearest_root() {
@@ -285,7 +249,7 @@ mod tests {
 
         std::fs::write(&path, "---\nname: demo\n---\nnew body").unwrap();
         assert!(registry.load("demo").await.unwrap().contains("old body"));
-        registry.replace_roots(vec![(root.clone(), true)]);
+        registry.replace_scoped_roots(vec![(root.clone(), true, None)]);
         assert!(registry.load("demo").await.unwrap().contains("new body"));
         std::fs::remove_dir_all(root).unwrap();
     }

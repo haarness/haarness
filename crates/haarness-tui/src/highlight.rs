@@ -214,12 +214,7 @@ pub fn highlight_line(line: &str, language_name: &str, theme: &Theme) -> Vec<Spa
     finish(spans, plain, syntax, theme)
 }
 
-fn finish(
-    mut spans: Vec<Span>,
-    plain: String,
-    syntax: &crate::theme::SyntaxTheme,
-    theme: &Theme,
-) -> Vec<Span> {
+fn finish(mut spans: Vec<Span>, plain: String, syntax: &SyntaxTheme, theme: &Theme) -> Vec<Span> {
     if !plain.is_empty() {
         spans.push(Span::new(plain, syntax.function).on(theme.surface));
     }
@@ -227,11 +222,6 @@ fn finish(
         spans.push(Span::new("", syntax.function).on(theme.surface));
     }
     spans
-}
-
-#[allow(dead_code)]
-pub fn roles(theme: &Theme) -> &SyntaxTheme {
-    &theme.syntax
 }
 
 // ---------------------------------------------------------------------------

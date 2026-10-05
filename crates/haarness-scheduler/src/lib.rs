@@ -599,19 +599,6 @@ impl Scheduler {
         Ok(pid)
     }
 
-    pub fn uninstall_all(&self) -> Result<()> {
-        let mut failures = Vec::new();
-        for schedule in self.list()? {
-            if let Err(error) = self.uninstall(&schedule) {
-                failures.push(format!("{}: {error}", schedule.name));
-            }
-        }
-        if failures.is_empty() {
-            return Ok(());
-        }
-        anyhow::bail!("failed to unregister schedules: {}", failures.join("; "))
-    }
-
     #[must_use]
     pub fn summary(schedule: &Schedule) -> String {
         format!(
@@ -950,11 +937,6 @@ struct ParsedRequest {
     name: Option<String>,
     prompt: String,
     trigger: Trigger,
-}
-
-pub fn parse_natural_request(request: &str) -> Result<(Option<String>, String, Trigger)> {
-    let value = parse_request(request)?;
-    Ok((value.name, value.prompt, value.trigger))
 }
 
 fn parse_request(request: &str) -> Result<ParsedRequest> {
@@ -1678,21 +1660,19 @@ mod tests {
 
     #[test]
     fn natural_language_matches_common_haarness_forms() {
-        let (_, _, trigger) =
-            parse_natural_request("every Monday at 8am to summarize notifications").unwrap();
+        let parsed = parse_request("every Monday at 8am to summarize notifications").unwrap();
         assert_eq!(
-            trigger,
+            parsed.trigger,
             Trigger::Cron {
                 expression: "0 8 * * 1".into()
             }
         );
-        let (name, prompt, trigger) = parse_natural_request(
-            "schedule named \"repo-summary\" every 2 minutes to summarize the repo",
-        )
-        .unwrap();
-        assert_eq!(name.as_deref(), Some("repo-summary"));
-        assert_eq!(prompt, "summarize the repo");
-        assert_eq!(trigger, Trigger::Interval { seconds: 120 });
+        let parsed =
+            parse_request("schedule named \"repo-summary\" every 2 minutes to summarize the repo")
+                .unwrap();
+        assert_eq!(parsed.name.as_deref(), Some("repo-summary"));
+        assert_eq!(parsed.prompt, "summarize the repo");
+        assert_eq!(parsed.trigger, Trigger::Interval { seconds: 120 });
     }
 
     #[test]

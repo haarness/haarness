@@ -10,7 +10,7 @@ use haarness_protocol::{
 };
 use unicode_width::UnicodeWidthChar as _;
 
-use crate::commands::{COMMANDS, CommandSpec};
+use crate::commands::COMMANDS;
 use crate::input::{WorkspaceMutation, WorkspaceRefOperation, composer::Composer};
 use crate::theme::Theme;
 
@@ -470,9 +470,6 @@ pub enum OverlayChoice {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ToastVariant {
-    /// Reserved for informational cards; ambient facts use the status line.
-    #[allow(dead_code)]
-    Info,
     Success,
     Warning,
     Error,
@@ -2196,20 +2193,6 @@ impl App {
             });
         }
         entries
-    }
-
-    #[allow(dead_code)] // superseded by filtered_slash_entries; kept for tests
-    pub fn filtered_commands(query: &str) -> Vec<&'static CommandSpec> {
-        let query = query.trim().to_ascii_lowercase();
-        COMMANDS
-            .iter()
-            .filter(|entry| {
-                query.is_empty()
-                    || entry.name.starts_with(&query)
-                    || entry.aliases.iter().any(|alias| alias.starts_with(&query))
-                    || entry.description.to_ascii_lowercase().contains(&query)
-            })
-            .collect()
     }
 
     pub fn filtered_threads(&self) -> Vec<&Thread> {

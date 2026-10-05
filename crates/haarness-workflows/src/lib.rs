@@ -92,15 +92,6 @@ pub enum CapabilityBlocker {
     BunUnavailable,
 }
 
-/// Availability of the restricted Claude-portable runtime. Portable sources
-/// execute in a denied-globals VM with static validation and a parent
-/// watchdog.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PortableCapability {
-    pub bun_path: Option<PathBuf>,
-    pub executable: bool,
-}
-
 /// One native workflow invocation.
 #[derive(Debug, Clone)]
 pub struct WorkflowInvocation {
@@ -298,15 +289,6 @@ impl WorkflowExecutor {
             bun_path,
             executable: blocker.is_none(),
             blocker,
-        }
-    }
-
-    #[must_use]
-    pub fn portable_capability(&self) -> PortableCapability {
-        let bun_path = self.resolve_bun();
-        PortableCapability {
-            executable: bun_path.is_some(),
-            bun_path,
         }
     }
 

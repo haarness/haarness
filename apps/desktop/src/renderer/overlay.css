@@ -20,10 +20,6 @@
   padding: var(--s7);
   animation: fade-in var(--fast) var(--ease);
 }
-.palette-backdrop {
-  align-items: flex-start;
-  padding-top: 12vh;
-}
 
 /* ------------------------------------------------------------------ dialog */
 .dialog {
@@ -337,38 +333,6 @@
   overflow-wrap: anywhere;
   margin: 0;
 }
-.workflow-argument-row {
-  display: grid;
-  align-items: center;
-  grid-template-columns: minmax(0, 1fr) 110px minmax(0, 1fr) var(
-      --icon-button
-    );
-  gap: var(--s2);
-  margin-bottom: var(--s2);
-}
-/* Keep an input's own description closer to it than the next input is. */
-.workflow-input {
-  margin-bottom: var(--s3);
-}
-.workflow-input > .workflow-argument-row {
-  margin-bottom: 0;
-}
-.workflow-input > small:not(:empty) {
-  margin-block-start: var(--s0);
-}
-.form-arguments {
-  margin-bottom: var(--s4);
-}
-.form-arguments > h3 {
-  margin: 0 0 var(--s2);
-  font-size: var(--ui);
-  font-weight: 550;
-}
-.workflow-argument-row input[type="checkbox"] {
-  width: 18px;
-  height: 18px;
-  accent-color: var(--primary);
-}
 @media (max-width: 600px) {
   .editor-dialog {
     padding: var(--s4);
@@ -378,9 +342,6 @@
   }
   .form-hint-row {
     flex-wrap: wrap;
-  }
-  .workflow-argument-row {
-    grid-template-columns: minmax(0, 1fr) 110px;
   }
   .form-tool-row {
     grid-template-columns: minmax(0, 1fr) 100px var(--icon-button);

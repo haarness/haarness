@@ -2023,7 +2023,7 @@ return { ok: true, input: args.input }
     let host = WorkflowRuntimeAdapter::new();
     host.attach(&runtime);
     let executor = WorkflowExecutor::new(ExecutorConfig::default());
-    if !executor.portable_capability().executable {
+    if !executor.capability().executable {
         eprintln!("skipping workflow lifecycle API fixture: Bun is unavailable");
         let _ = std::fs::remove_dir_all(workspace);
         return;
@@ -2145,7 +2145,7 @@ return {{ workflow: "{name}", input: args.input }}
         .unwrap();
     }
     let executor = WorkflowExecutor::new(ExecutorConfig::default());
-    if !executor.portable_capability().executable {
+    if !executor.capability().executable {
         eprintln!("skipping command-fabric workflow fixture: Bun is unavailable");
         let _ = std::fs::remove_dir_all(workspace);
         return;

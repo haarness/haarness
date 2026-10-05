@@ -360,10 +360,6 @@ impl Renderer {
         self.background = color;
     }
     #[must_use]
-    pub fn background(&self) -> Color {
-        self.background
-    }
-    #[must_use]
     pub fn color_support(&self) -> ColorSupport {
         let mut capabilities = std::mem::MaybeUninit::<NativeCapabilities>::uninit();
         unsafe {
@@ -381,16 +377,6 @@ impl Renderer {
         }
         self.width = width;
         self.height = height;
-    }
-    pub fn draw(&mut self, lines: &[StyledLine], force: bool) {
-        self.fill(lines);
-        unsafe {
-            (self.render)(self.handle, force);
-        }
-    }
-    pub fn snapshot(&mut self, lines: &[StyledLine]) -> String {
-        let buffer = self.fill(lines);
-        self.resolved_chars(buffer)
     }
     /// Draw span-styled lines; each span renders in its own colors and
     /// attributes at its cell offset.
@@ -422,28 +408,6 @@ impl Renderer {
         let count = unsafe { (self.write)(buffer, output.as_mut_ptr(), capacity, true) } as usize;
         output.truncate(count);
         String::from_utf8_lossy(&output).into_owned()
-    }
-    fn fill(&mut self, lines: &[StyledLine]) -> NativeHandle {
-        let buffer = unsafe { (self.next_buffer)(self.handle) };
-        unsafe {
-            (self.clear)(buffer, self.background.as_ptr());
-        }
-        for (y, line) in lines.iter().take(self.height as usize).enumerate() {
-            let length = u32::try_from(line.text.len()).unwrap_or(u32::MAX);
-            unsafe {
-                (self.draw_text)(
-                    buffer,
-                    line.text.as_ptr(),
-                    length,
-                    line.x,
-                    u32::try_from(y).unwrap_or(0),
-                    line.foreground.as_ptr(),
-                    line.background.as_ptr(),
-                    line.attributes,
-                );
-            }
-        }
-        buffer
     }
     fn fill_lines(&mut self, lines: &[Line]) -> NativeHandle {
         use unicode_width::UnicodeWidthStr;
@@ -491,32 +455,6 @@ impl Drop for Renderer {
         }
     }
 }
-pub struct StyledLine {
-    pub text: String,
-    pub x: u32,
-    pub foreground: Color,
-    pub background: Color,
-    pub attributes: u32,
-}
-impl StyledLine {
-    #[must_use]
-    pub fn new(text: impl Into<String>, foreground: Color) -> Self {
-        Self {
-            text: text.into(),
-            x: 0,
-            foreground,
-            background: DEFAULT_BACKGROUND,
-            attributes: 0,
-        }
-    }
-
-    #[must_use]
-    pub const fn with_background(mut self, background: Color) -> Self {
-        self.background = background;
-        self
-    }
-}
-
 /// One styled run of text within a [`Line`]. A `bg` of `None` inherits the
 /// renderer's background (the theme page color).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -672,8 +610,7 @@ mod tests {
     fn headless_renderer_draws_text() {
         let mut renderer = Renderer::new(32, 4, true).unwrap();
         let foreground = Color::rgb(231, 225, 213);
-        let styled = StyledLine::new("rust-opentui-smoke", foreground);
-        let output = renderer.snapshot(&[styled]);
+        let output = renderer.snapshot_lines(&[Line::plain("rust-opentui-smoke", foreground)]);
         assert!(output.contains("rust-opentui-smoke"), "{output:?}");
 
         let colors = renderer
@@ -688,7 +625,7 @@ mod tests {
         let mut renderer = Renderer::new(20, 4, true).unwrap();
         renderer.resize(40, 8);
         assert_eq!(renderer.size(), (40, 8));
-        let output = renderer.snapshot(&[StyledLine::new("resized", Color::rgb(51, 184, 166))]);
+        let output = renderer.snapshot_lines(&[Line::plain("resized", Color::rgb(51, 184, 166))]);
         assert!(output.contains("resized"), "{output:?}");
     }
 
@@ -772,7 +709,7 @@ mod tests {
         let first = Renderer::new(20, 4, true).unwrap();
         drop(first);
         let mut second = Renderer::new(24, 6, true).unwrap();
-        let output = second.snapshot(&[StyledLine::new("reborn", Color::rgb(51, 184, 166))]);
+        let output = second.snapshot_lines(&[Line::plain("reborn", Color::rgb(51, 184, 166))]);
         assert!(output.contains("reborn"), "{output:?}");
     }
 }

@@ -500,7 +500,7 @@ impl Client {
             ("scope", SCOPE),
             ("state", &state),
             ("code_challenge", &pkce.challenge),
-            ("code_challenge_method", "S256"),
+            ("code_challenge_method", pkce::CHALLENGE_METHOD),
         ]);
         Ok(Login {
             url: url.to_string(),

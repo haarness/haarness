@@ -1,7 +1,6 @@
 import type * as Types from "@haarness/sdk";
 import type { ThemeId } from "./themes";
 import type { Attachment } from "./attachments";
-export type { Types };
 export interface ProjectLocation {
   cloudWorkspace?: string;
   cloudSession?: string;
@@ -99,12 +98,6 @@ export interface Recent extends ProjectLocation {
   remote: boolean;
   url?: string;
   trust: boolean;
-}
-export interface Configuration {
-  id: string;
-  path: string;
-  text: string;
-  revision: string;
 }
 export interface FileEntry {
   name: string;

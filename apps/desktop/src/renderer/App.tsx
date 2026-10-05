@@ -24,7 +24,7 @@ import {
   primaryLocation,
   sidebarGroups,
 } from "../projects";
-import { Button, Icon, Forms, ask, type IconName } from "./ui";
+import { Button, Icon, Forms, type IconName } from "./ui";
 import { Session } from "./Session";
 import { ProjectHome } from "./ProjectHome";
 import { ChatLoading } from "./ChatLoading";

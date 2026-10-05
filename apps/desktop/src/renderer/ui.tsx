@@ -2,7 +2,7 @@ import { language, t } from "./i18n";
 import { Select } from "./Select";
 import { For, Show, createSignal, onMount, type JSX } from "solid-js";
 import { Icon, type IconName, type IconSize } from "./icons";
-export { Icon, type IconName, type IconSize } from "./icons";
+export { Icon, type IconName } from "./icons";
 /**
  * The one icon-only control. It owns the hit area (`--icon-button`), the
  * accessible name and the tooltip, so no screen ever ships a bare `<svg>` in a
@@ -263,24 +263,4 @@ export function time(value: string) {
     hour: "numeric",
     minute: "2-digit",
   });
-}
-
-export function trapFocus(
-  event: KeyboardEvent & { currentTarget: HTMLElement },
-) {
-  if (event.key !== "Tab") return;
-  const nodes = Array.from(
-    event.currentTarget.querySelectorAll<HTMLElement>(
-      'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]',
-    ),
-  ).filter((node) => node.getClientRects().length);
-  const first = nodes[0],
-    last = nodes[nodes.length - 1];
-  if (event.shiftKey && document.activeElement === first) {
-    event.preventDefault();
-    last?.focus();
-  } else if (!event.shiftKey && document.activeElement === last) {
-    event.preventDefault();
-    first?.focus();
-  }
 }

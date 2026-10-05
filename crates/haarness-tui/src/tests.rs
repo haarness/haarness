@@ -9797,7 +9797,7 @@ fn compact_terminal_keeps_the_toast_visible() {
     app.show_toast(
         Some("Notice".into()),
         "Compact feedback".into(),
-        crate::state::ToastVariant::Info,
+        crate::state::ToastVariant::Warning,
         std::time::Duration::from_secs(30),
     );
 

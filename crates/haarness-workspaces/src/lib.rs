@@ -617,11 +617,6 @@ impl WorkspaceManager {
         self.activity_root.join(workspace_id).join("server.lock")
     }
 
-    #[must_use]
-    pub fn workspace_data_dir(&self, workspace_id: &str) -> PathBuf {
-        self.activity_root.join(workspace_id)
-    }
-
     fn acquire_inactive_guard(&self, workspace_id: &str) -> Result<File> {
         let path = self.activity_lock_path(workspace_id);
         if let Some(parent) = path.parent() {

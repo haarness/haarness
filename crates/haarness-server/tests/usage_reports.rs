@@ -140,7 +140,6 @@ struct TestServer {
     base: String,
     client: reqwest::Client,
     handle: haarness_server::ServerHandle,
-    runtime: Arc<AgentRuntime>,
 }
 
 async fn start_server(
@@ -168,7 +167,7 @@ async fn start_server(
         ServerState {
             browser: None,
             management: None,
-            runtime: runtime.clone(),
+            runtime,
             mcp: Arc::new(NoMcp),
             skills: Arc::new(NoSkills),
             plugins: None,
@@ -197,7 +196,6 @@ async fn start_server(
         base: format!("http://{}", handle.address),
         client,
         handle,
-        runtime,
     }
 }
 

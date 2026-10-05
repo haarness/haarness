@@ -10,7 +10,7 @@ export type PromptContext =
       unsaved?: boolean;
     }
   | { kind: "agent"; name: string };
-export const MAX_CONTEXT_BYTES = 128 * 1024;
+const MAX_CONTEXT_BYTES = 128 * 1024;
 export const contextKey = (item: PromptContext) =>
   item.kind === "agent"
     ? JSON.stringify([item.kind, item.name])
@@ -24,7 +24,7 @@ export const contextLabel = (item: PromptContext) =>
         : "");
 export const mentionAgents = (agents: AgentProfile[]) =>
   agents.filter((agent) => !agent.hidden && agent.mode !== "primary");
-export function checkContext(items: PromptContext[]) {
+function checkContext(items: PromptContext[]) {
   if (
     items.length > 20 ||
     new TextEncoder().encode(JSON.stringify(items)).length > MAX_CONTEXT_BYTES

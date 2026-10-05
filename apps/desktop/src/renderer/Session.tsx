@@ -55,7 +55,7 @@ import {
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import type * as T from "@haarness/sdk";
 import { useApp } from "./state";
-import { Button, Icon, ask, stringify, time, type IconName } from "./ui";
+import { Button, Icon, stringify, time, type IconName } from "./ui";
 import { attachmentName, type Attachment } from "./media";
 import { createFileDrop } from "./file-drop";
 import { Markdown } from "./Markdown";

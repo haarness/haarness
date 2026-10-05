@@ -8,7 +8,6 @@ import {
   splitSchedules,
   triggerArgs,
   triggerForm,
-  type Trigger,
 } from "../src/renderer/schedule-data";
 
 test("schedule pickers round-trip interval, calendar and custom triggers", () => {

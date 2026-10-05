@@ -79,10 +79,6 @@ pub(crate) fn initial_theme_variant(
     .to_owned()
 }
 
-pub async fn run(server: &str, token: &str) -> Result<()> {
-    run_with_thread(server, token, None, false).await
-}
-
 /// Restore durable goal state before the first frame is rendered. Goal SSE
 /// updates only cover changes after the captured event cursor, so relying on
 /// the live stream alone leaves an existing pursuit invisible on launch.
@@ -145,45 +141,9 @@ fn suspend_terminal(renderer: &mut Renderer, last_title: &mut String) -> Result<
     Ok(())
 }
 
-/// Start the TUI. A plain launch creates a fresh root thread and home screen;
-/// `continue_last` restores the saved/most-recent root, and an explicit
-/// `--thread`/`--session` id wins over both.
-pub async fn run_with_thread(
-    server: &str,
-    token: &str,
-    initial_thread: Option<uuid::Uuid>,
-    continue_last: bool,
-) -> Result<()> {
-    Box::pin(run_with_client(
-        ApiClient::new(server, token)?,
-        initial_thread,
-        continue_last,
-        false,
-    ))
-    .await
-    .map(|_| ())
-}
-
 /// Attach to an explicitly selected endpoint. Local media is uploaded into
 /// requests, and `fork` clones the selected or continued session before the
 /// first frame so the original remains untouched.
-pub async fn run_attached(
-    server: &str,
-    token: &str,
-    initial_thread: Option<uuid::Uuid>,
-    continue_last: bool,
-    fork: bool,
-) -> Result<()> {
-    run_attached_with_auth(
-        server,
-        api::ServerAuth::bearer(token),
-        initial_thread,
-        continue_last,
-        fork,
-    )
-    .await
-}
-
 pub async fn run_attached_with_auth(
     server: &str,
     auth: api::ServerAuth,
@@ -238,50 +198,13 @@ pub async fn resume_attached_with_resolver(
 }
 
 /// Start a local, auto-discovered TUI that can follow a replacement daemon's
-/// new loopback port and bearer token. Explicit remote `--connect` clients use
-/// `run_with_thread` and remain pinned to the endpoint the user selected.
-pub async fn run_with_thread_and_resolver(
-    server: &str,
-    token: &str,
-    initial_thread: Option<uuid::Uuid>,
-    continue_last: bool,
-    resolver: EndpointResolver,
-) -> Result<()> {
-    run_with_thread_and_resolver_fork(
-        server,
-        token,
-        initial_thread,
-        continue_last,
-        false,
-        resolver,
-    )
-    .await
-}
-
-pub async fn run_with_thread_and_resolver_fork(
-    server: &str,
-    token: &str,
-    initial_thread: Option<uuid::Uuid>,
-    continue_last: bool,
-    fork: bool,
-    resolver: EndpointResolver,
-) -> Result<()> {
-    run_with_thread_and_resolver_fork_switching(
-        server,
-        token,
-        initial_thread,
-        continue_last,
-        fork,
-        resolver,
-    )
-    .await
-    .map(|_| ())
-}
-
-/// Local launcher variant that returns a selected workspace path after the
-/// terminal has been restored. The CLI can then discover/start that
-/// workspace's independent server without nesting TUIs or sharing runtime
-/// state between directories.
+/// new loopback port and bearer token (explicit remote `--connect` clients use
+/// `run_attached_with_auth` and stay pinned to the endpoint the user chose).
+/// A plain launch creates a fresh root thread and home screen;
+/// `continue_last` restores the saved/most-recent root, and an explicit
+/// `--thread`/`--session` id wins over both. Returns a workspace path the user
+/// switched to, once the terminal has been restored, so the CLI can start
+/// that workspace's own server without nesting TUIs.
 pub async fn run_with_thread_and_resolver_switching(
     server: &str,
     token: &str,
@@ -300,6 +223,8 @@ pub async fn run_with_thread_and_resolver_switching(
     .await
 }
 
+/// As [`run_with_thread_and_resolver_switching`], forking the selected or
+/// continued session first so the original remains untouched.
 pub async fn run_with_thread_and_resolver_fork_switching(
     server: &str,
     token: &str,

@@ -40,8 +40,6 @@ tokio-util.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tokio-tungstenite.workspace = true
-tower.workspace = true
-tower-http.workspace = true
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
 utoipa.workspace = true
@@ -56,6 +54,7 @@ workspace = true
 nix = { workspace = true, features = ["process", "signal"] }
 
 [dev-dependencies]
+tower.workspace = true
 fs2.workspace = true
 haarness-store = { path = "../haarness-store" }
 reqwest.workspace = true
