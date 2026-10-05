@@ -84,7 +84,12 @@ impl Config {
                 std::env::var_os("HAARNESS_DATA_DIR")
                     .map(|p| PathBuf::from(p).join("config/account"))
             })
-            .unwrap_or_else(|| default_config_dir(&api_url));
+            .unwrap_or_else(|| {
+                let home = std::env::var_os("HAARNESS_HOME")
+                    .map(PathBuf::from)
+                    .filter(|home| home.is_absolute());
+                default_config_dir(&api_url, home.as_deref())
+            });
         let mut config = Self::new(
             api_url.as_str(),
             dir,
@@ -152,16 +157,21 @@ impl Config {
     }
 }
 
-/// `~/.config/haarness-cloud` for production. Any other Cloud service keeps
-/// its sign-in in a folder of its own, so signing in to a local stack never
-/// signs a production install out, and switching back needs no new sign-in.
-fn default_config_dir(api_url: &Url) -> PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
-        })
-        .join("haarness-cloud");
+/// `~/.config/haarness-cloud` for production, or `config/account` inside a
+/// `HAARNESS_HOME` install, which shares nothing with the user's own. Any
+/// other Cloud service keeps its sign-in in a folder of its own, so signing
+/// in to a local stack never signs a production install out, and switching
+/// back needs no new sign-in.
+fn default_config_dir(api_url: &Url, haarness_home: Option<&Path>) -> PathBuf {
+    let base = match haarness_home {
+        Some(home) => home.join("config").join("account"),
+        None => std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
+            })
+            .join("haarness-cloud"),
+    };
     if safe_url(PRODUCTION_API_URL).is_ok_and(|production| production == *api_url) {
         return base;
     }
@@ -662,14 +672,24 @@ mod tests {
 
     #[test]
     fn each_cloud_service_keeps_its_own_sign_in() {
-        let production = default_config_dir(&safe_url(PRODUCTION_API_URL).unwrap());
+        let production = default_config_dir(&safe_url(PRODUCTION_API_URL).unwrap(), None);
         assert!(production.ends_with("haarness-cloud"), "{production:?}");
-        let local = default_config_dir(&safe_url("http://127.0.0.1:18080").unwrap());
+        let local = default_config_dir(&safe_url("http://127.0.0.1:18080").unwrap(), None);
         assert!(
             local.ends_with("haarness-cloud/services/127.0.0.1-18080"),
             "{local:?}"
         );
         assert_eq!(local.parent().unwrap().parent().unwrap(), production);
+        // An isolated HAARNESS_HOME install never reads the user's own sign-in.
+        let home = Path::new("/tmp/isolated");
+        assert_eq!(
+            default_config_dir(&safe_url(PRODUCTION_API_URL).unwrap(), Some(home)),
+            home.join("config/account")
+        );
+        assert_eq!(
+            default_config_dir(&safe_url("http://127.0.0.1:29080").unwrap(), Some(home)),
+            home.join("config/account/services/127.0.0.1-29080")
+        );
         assert_eq!(
             service_folder(&safe_url("https://staging.haarness.ai").unwrap()),
             "staging.haarness.ai"
