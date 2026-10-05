@@ -1400,6 +1400,7 @@
   "Always lazy": "항상 지연 로드",
   "Approximation from saved text (4 characters per token), not a provider token count. Excludes system instructions, tool definitions, media and provider overhead.": "저장된 텍스트를 기준으로 한 근삿값(토큰당 4자)이며, 공급자가 집계한 토큰 수가 아닙니다. 시스템 지침, 도구 정의, 미디어, 공급자 오버헤드는 제외됩니다.",
   "As reported by the provider. Cache tokens may overlap input tokens; these values are not added together. Reasoning token counts are not reported separately.": "공급자가 보고한 값입니다. 캐시 토큰은 입력 토큰과 겹칠 수 있으므로 이 값들은 합산하지 않습니다. 추론 토큰 수는 별도로 보고되지 않습니다.",
+  "Estimated locally: the provider reported no usage for this request.": "로컬 추정값: 공급자가 이 요청의 사용량을 보고하지 않았습니다.",
   "Assistant messages": "어시스턴트 메시지",
   "Automatic": "자동",
   "Binary image": "바이너리 이미지",

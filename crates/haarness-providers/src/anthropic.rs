@@ -510,10 +510,11 @@ impl ModelProvider for AnthropicProvider {
             let mut thinking_seen = false;
             let mut thinking_break = false;
             // input/cache counters arrive on message_start; output arrives on
-            // message_delta. Merge them and report once.
+            // message_delta. Each event reports the merged total so far.
             let mut input_tokens = 0_u64;
             let mut cache_read = 0_u64;
             let mut cache_write = 0_u64;
+            let mut output_tokens = 0_u64;
             while let Some(event) = events.next().await {
                 let event = event?;
                 match event["type"].as_str().unwrap_or_default() {
@@ -525,6 +526,15 @@ impl ModelProvider for AnthropicProvider {
                         input_tokens = usage["input_tokens"].as_u64().unwrap_or(0);
                         cache_read = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
                         cache_write = usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                        output_tokens = usage["output_tokens"].as_u64().unwrap_or(0);
+                        // The prompt is billed from here on: report it now so a
+                        // stream cut before message_delta still counts it.
+                        yield ProviderEvent::Usage {
+                            input_tokens: input_tokens.saturating_add(cache_read).saturating_add(cache_write),
+                            output_tokens,
+                            cache_read_tokens: cache_read,
+                            cache_write_tokens: cache_write,
+                        };
                     }},
                     "content_block_start" if matches!(event["content_block"]["type"].as_str(), Some("thinking" | "redacted_thinking")) => {
                         thinking_break = thinking_seen;
@@ -584,7 +594,7 @@ impl ModelProvider for AnthropicProvider {
                         let write = usage["cache_creation_input_tokens"].as_u64().unwrap_or(cache_write);
                         yield ProviderEvent::Usage {
                             input_tokens: input.saturating_add(read).saturating_add(write),
-                            output_tokens: usage["output_tokens"].as_u64().unwrap_or(0),
+                            output_tokens: usage["output_tokens"].as_u64().unwrap_or(output_tokens),
                             cache_read_tokens: read,
                             cache_write_tokens: write,
                         };
@@ -1046,6 +1056,27 @@ mod tests {
             )),
             "message_start usage must merge with message_delta output: {events:?}"
         );
+        // The prompt is reported as soon as message_start bills it, so a stream
+        // cut before message_delta still counts it; the last report wins.
+        let usages: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(event, ProviderEvent::Usage { .. }))
+            .collect();
+        assert!(matches!(
+            usages.as_slice(),
+            [
+                ProviderEvent::Usage {
+                    input_tokens: 200,
+                    output_tokens: 0,
+                    ..
+                },
+                ProviderEvent::Usage {
+                    input_tokens: 200,
+                    output_tokens: 7,
+                    ..
+                },
+            ]
+        ));
         let requests = state.0.lock();
         assert_eq!(requests[0]["messages"][0]["content"][0]["id"], "previous");
         assert_eq!(

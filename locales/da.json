@@ -1400,6 +1400,7 @@
   "Always lazy": "Altid efter behov",
   "Approximation from saved text (4 characters per token), not a provider token count. Excludes system instructions, tool definitions, media and provider overhead.": "Tilnærmelse ud fra gemt tekst (4 tegn pr. token), ikke en tokentælling fra udbyderen. Medregner ikke systeminstruktioner, værktøjsdefinitioner, medier og udbyderens overhead.",
   "As reported by the provider. Cache tokens may overlap input tokens; these values are not added together. Reasoning token counts are not reported separately.": "Som rapporteret af udbyderen. Cache-tokens kan overlappe med input-tokens; disse værdier lægges ikke sammen. Antal ræsonnement-tokens rapporteres ikke separat.",
+  "Estimated locally: the provider reported no usage for this request.": "Anslået lokalt: udbyderen rapporterede intet forbrug for denne anmodning.",
   "Assistant messages": "Assistentbeskeder",
   "Automatic": "Automatisk",
   "Binary image": "Binært billede",

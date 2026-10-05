@@ -1400,6 +1400,7 @@
   "Always lazy": "Uvijek odgođeno",
   "Approximation from saved text (4 characters per token), not a provider token count. Excludes system instructions, tool definitions, media and provider overhead.": "Procjena na osnovu spremljenog teksta (4 znaka po tokenu), a ne broj tokena provajdera. Ne uključuje sistemske upute, definicije alata, medije i dodatne troškove provajdera.",
   "As reported by the provider. Cache tokens may overlap input tokens; these values are not added together. Reasoning token counts are not reported separately.": "Prema podacima provajdera. Tokeni predmemorije mogu se preklapati s ulaznim tokenima; ove vrijednosti se ne zbrajaju. Tokeni zaključivanja ne prijavljuju se zasebno.",
+  "Estimated locally: the provider reported no usage for this request.": "Lokalna procjena: provajder nije prijavio potrošnju za ovaj zahtjev.",
   "Assistant messages": "Poruke asistenta",
   "Automatic": "Automatski",
   "Binary image": "Binarna slika",

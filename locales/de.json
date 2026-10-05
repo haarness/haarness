@@ -1400,6 +1400,7 @@
   "Always lazy": "Immer bei Bedarf",
   "Approximation from saved text (4 characters per token), not a provider token count. Excludes system instructions, tool definitions, media and provider overhead.": "Näherung aus gespeichertem Text (4 Zeichen pro Token), keine Token-Zählung des Anbieters. Ohne Systemanweisungen, Tool-Definitionen, Medien und Anbieter-Overhead.",
   "As reported by the provider. Cache tokens may overlap input tokens; these values are not added together. Reasoning token counts are not reported separately.": "So vom Anbieter gemeldet. Cache-Token können sich mit Eingabe-Token überschneiden; diese Werte werden nicht addiert. Reasoning-Token werden nicht separat gemeldet.",
+  "Estimated locally: the provider reported no usage for this request.": "Lokal geschätzt: Der Anbieter hat für diese Anfrage keine Nutzung gemeldet.",
   "Assistant messages": "Nachrichten des Assistenten",
   "Automatic": "Automatisch",
   "Binary image": "Binärbild",

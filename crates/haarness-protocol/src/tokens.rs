@@ -358,8 +358,7 @@ pub fn context(items: &[Item], tokenizer: Tokenizer) -> ContextEstimate {
     // A report kept in the retained tail measured the history before it was
     // summarized; only one made after the compaction anchors the estimate.
     let anchor = visible.iter().rposition(|item| {
-        matches!(item.data, ItemData::Usage { .. })
-            && compacted_at.is_none_or(|sequence| item.sequence > sequence)
+        reported_usage(&item.data) && compacted_at.is_none_or(|sequence| item.sequence > sequence)
     });
     let (reported, appended, overhead) = match anchor {
         Some(index) => {
@@ -435,7 +434,9 @@ pub fn calibration(items: &[Item]) -> f64 {
                 prompt: Some(prompt),
                 input_tokens,
                 ..
-            } if prompt.media_attachments == 0 || prompt.media_tokens > 0 => {
+            } if reported_usage(&item.data)
+                && (prompt.media_attachments == 0 || prompt.media_tokens > 0) =>
+            {
                 (prompt, *input_tokens)
             }
             _ => continue,
@@ -458,6 +459,19 @@ pub fn calibration(items: &[Item]) -> f64 {
         return ratio.clamp(CALIBRATION_RANGE.0, CALIBRATION_RANGE.1);
     }
     1.0
+}
+
+/// A usage record the provider reported: not a local estimate, not empty.
+fn reported_usage(data: &ItemData) -> bool {
+    matches!(
+        data,
+        ItemData::Usage {
+            input_tokens,
+            output_tokens,
+            estimated: false,
+            ..
+        } if *input_tokens > 0 || *output_tokens > 0
+    )
 }
 
 fn prompt_total(prompt: &PromptUsage) -> Option<u64> {
@@ -689,6 +703,7 @@ mod tests {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             cost_usd: None,
+            estimated: false,
         }
     }
 
@@ -883,6 +898,29 @@ mod tests {
         let mut items = items;
         items.push(item(5, usage(3_000, 100, None)));
         assert_eq!(super::context(&items, Tokenizer::Claude).reported, 3_100);
+    }
+
+    #[test]
+    fn estimates_and_empty_reports_never_anchor_the_context() {
+        let estimated = |input_tokens| ItemData::Usage {
+            prompt: None,
+            input_tokens,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: None,
+            estimated: true,
+        };
+        let items = vec![
+            item(1, user("hello")),
+            item(2, usage(9_000, 100, None)),
+            item(3, user("again")),
+            item(4, estimated(50_000)),
+            item(5, usage(0, 0, None)),
+        ];
+        let context = context(&items, Tokenizer::Claude);
+        assert_eq!(context.reported, 9_100, "{context:?}");
+        assert!(context.estimated < 50, "{context:?}");
     }
 
     #[test]

@@ -268,7 +268,9 @@ export function ConversationContext() {
               </div>
             </dl>
             <p class="context-note">
-              {t("As reported by the provider. Cache tokens may overlap input tokens; these values are not added together. Reasoning token counts are not reported separately.")}
+              {latest()?.estimated
+                ? t("Estimated locally: the provider reported no usage for this request.")
+                : t("As reported by the provider. Cache tokens may overlap input tokens; these values are not added together. Reasoning token counts are not reported separately.")}
             </p>
           </Show>
         </section>

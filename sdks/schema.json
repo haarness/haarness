@@ -2521,6 +2521,10 @@
                   "null"
                 ]
               },
+              "estimated": {
+                "description": "The provider reported no usage for this request; the counts are\nthe local estimate of what was sent and streamed. Such a record\nnever anchors the context size.",
+                "type": "boolean"
+              },
               "input_tokens": {
                 "format": "int64",
                 "minimum": 0,

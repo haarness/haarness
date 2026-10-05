@@ -322,6 +322,11 @@ pub enum ItemData {
         #[serde(default)]
         cache_write_tokens: u64,
         cost_usd: Option<f64>,
+        /// The provider reported no usage for this request; the counts are
+        /// the local estimate of what was sent and streamed. Such a record
+        /// never anchors the context size.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        estimated: bool,
     },
     Todo {
         items: Vec<TodoEntry>,
