@@ -44,6 +44,8 @@ npm --prefix sdks/typescript run build
 HAARNESS_BIN="$PWD/target/debug/haarness" npm --prefix apps/desktop run dev
 ```
 
+Development builds (`target/debug/haarness`, and Desktop dev through it) sign in to the local Cloud stack at `http://127.0.0.1:18080`; release builds use production. Build with `HAARNESS_CLOUD_DEV_API_URL`/`HAARNESS_CLOUD_DEV_WEB_ORIGIN` to bake in another local stack, or set `HAARNESS_CLOUD_API_URL` per run (see [account docs](../../docs/HAARNESS-ACCOUNT.md#session-storage-and-development)). Package only release binaries; `apps/desktop/scripts/prepare.mjs` refuses a `target/debug` one.
+
 Keep the dev process running for renderer hot reload. `HAARNESS_BIN` must point to the intended current binary; it does not replace an already-running daemon. When backend code changes, identify the daemon for the development workspace, stop that daemon gracefully, then reconnect/relaunch. Do not stop unrelated user work or every process named Haarness.
 
 For TUI/server work, set `project_dir` to the requested project or an isolated fixture:

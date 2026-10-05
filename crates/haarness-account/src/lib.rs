@@ -21,6 +21,24 @@ use url::Url;
 
 pub const SCOPE: &str = "account workspaces billing keys offline_access";
 pub const CLIENT_ID: &str = "haarness-cli";
+/// Production Haarness Cloud.
+pub const PRODUCTION_API_URL: &str = "https://app.haarness.ai";
+/// The local Cloud stack that `haarness-cloud/scripts/dev-up.sh` starts. Building with
+/// `HAARNESS_CLOUD_DEV_API_URL` (and `HAARNESS_CLOUD_DEV_WEB_ORIGIN` for a separate web dev
+/// server) bakes in another local stack.
+pub const LOCAL_API_URL: &str = match option_env!("HAARNESS_CLOUD_DEV_API_URL") {
+    Some(url) => url,
+    None => "http://127.0.0.1:18080",
+};
+const LOCAL_WEB_ORIGIN: Option<&str> = option_env!("HAARNESS_CLOUD_DEV_WEB_ORIGIN");
+/// Where a build signs in unless `HAARNESS_CLOUD_API_URL` says otherwise. Development builds
+/// use the local stack, so trying a change never touches production accounts or billing;
+/// release builds use production.
+pub const DEFAULT_API_URL: &str = if cfg!(debug_assertions) {
+    LOCAL_API_URL
+} else {
+    PRODUCTION_API_URL
+};
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
@@ -57,23 +75,18 @@ impl std::fmt::Debug for ConfiguredApiKey {
 }
 impl Config {
     pub fn from_env() -> Result<Self> {
+        let api_url = safe_url(
+            &std::env::var("HAARNESS_CLOUD_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.into()),
+        )?;
         let dir = std::env::var_os("HAARNESS_CLOUD_CONFIG_DIR")
             .map(PathBuf::from)
             .or_else(|| {
                 std::env::var_os("HAARNESS_DATA_DIR")
                     .map(|p| PathBuf::from(p).join("config/account"))
             })
-            .unwrap_or_else(|| {
-                std::env::var_os("XDG_CONFIG_HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| {
-                        PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
-                    })
-                    .join("haarness-cloud")
-            });
+            .unwrap_or_else(|| default_config_dir(&api_url));
         let mut config = Self::new(
-            &std::env::var("HAARNESS_CLOUD_API_URL")
-                .unwrap_or_else(|_| "https://app.haarness.ai".into()),
+            api_url.as_str(),
             dir,
             &std::env::var("HAARNESS_CLOUD_CLIENT_ID").unwrap_or_else(|_| CLIENT_ID.into()),
         )?;
@@ -125,15 +138,55 @@ impl Config {
     pub async fn lock(&self) -> Result<fs::File> {
         credential_lock(&self.path()).await
     }
-    /// Where the Cloud web app lives. Production serves it from the API
-    /// origin; local stacks run it elsewhere and say so in the environment.
+    /// Where the Cloud web app lives. Production and the local stack serve it
+    /// from the API origin; a separate web dev server is named in the
+    /// environment, or baked into a development build next to its API.
     pub fn web_origin(&self) -> Result<Url> {
-        std::env::var("HAARNESS_CLOUD_WEB_ORIGIN")
-            .ok()
-            .map(|url| safe_url(&url))
-            .transpose()
-            .map(|origin| origin.unwrap_or_else(|| self.api_url.clone()))
+        if let Ok(url) = std::env::var("HAARNESS_CLOUD_WEB_ORIGIN") {
+            return safe_url(&url);
+        }
+        match LOCAL_WEB_ORIGIN {
+            Some(origin) if self.api_url == safe_url(LOCAL_API_URL)? => safe_url(origin),
+            _ => Ok(self.api_url.clone()),
+        }
     }
+}
+
+/// `~/.config/haarness-cloud` for production. Any other Cloud service keeps
+/// its sign-in in a folder of its own, so signing in to a local stack never
+/// signs a production install out, and switching back needs no new sign-in.
+fn default_config_dir(api_url: &Url) -> PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
+        })
+        .join("haarness-cloud");
+    if safe_url(PRODUCTION_API_URL).is_ok_and(|production| production == *api_url) {
+        return base;
+    }
+    base.join("services").join(service_folder(api_url))
+}
+/// `127.0.0.1-18080`, `staging.haarness.ai`: the host and any explicit port,
+/// reduced to characters every file system accepts.
+fn service_folder(api_url: &Url) -> String {
+    let host = api_url
+        .host_str()
+        .unwrap_or("cloud")
+        .trim_matches(['[', ']']);
+    let name = match api_url.port() {
+        Some(port) => format!("{host}-{port}"),
+        None => host.to_owned(),
+    };
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Only explicit local development uses HTTP. Never follow token-bearing redirects.
@@ -592,5 +645,38 @@ impl Login {
         credentials::save(&client.config.path(), &c)?;
         let _ = fs::remove_file(client.config.config_dir.join("account.json"));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn development_builds_sign_in_to_the_local_stack() {
+        // Tests build with debug assertions, like `cargo build`.
+        assert_eq!(DEFAULT_API_URL, LOCAL_API_URL);
+        assert!(safe_url(LOCAL_API_URL).is_ok());
+        assert!(safe_url(PRODUCTION_API_URL).is_ok());
+    }
+
+    #[test]
+    fn each_cloud_service_keeps_its_own_sign_in() {
+        let production = default_config_dir(&safe_url(PRODUCTION_API_URL).unwrap());
+        assert!(production.ends_with("haarness-cloud"), "{production:?}");
+        let local = default_config_dir(&safe_url("http://127.0.0.1:18080").unwrap());
+        assert!(
+            local.ends_with("haarness-cloud/services/127.0.0.1-18080"),
+            "{local:?}"
+        );
+        assert_eq!(local.parent().unwrap().parent().unwrap(), production);
+        assert_eq!(
+            service_folder(&safe_url("https://staging.haarness.ai").unwrap()),
+            "staging.haarness.ai"
+        );
+        assert_eq!(
+            service_folder(&safe_url("http://[::1]:29080").unwrap()),
+            "__1-29080"
+        );
     }
 }
