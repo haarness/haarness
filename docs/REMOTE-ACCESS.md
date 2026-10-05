@@ -13,10 +13,11 @@ Open **Remote hosts** in Cloud. Browse/open a folder, select a project, and work
 
 `remote run` runs in the foreground and can be supervised by an OS service. `enable` starts a background process for the current login, not a boot/login startup service. Keep the machine awake. `remote disable HOST_ID` stops its connector without stopping accepted local work. `remote revoke HOST_ID` removes Cloud access. `remote forget HOST_ID` revokes and forgets a stopped local identity, allowing an explicit fresh registration. Host removal and project closing retain files and histories.
 
-To expose one conversation tree instead of project/terminal controls:
+To expose one conversation tree instead of project/terminal controls, type `/remote-control` (aliases `/rc`, `/dc`) in that chat in the TUI or Desktop. The server's `remote-control` management resource (`start`, `stop`, `view`, `status`, each with `threadId`) starts the same background connector as `remote enable --chat`, waits until Cloud has published the chat, and returns its link (`/app/remote/sessions/<publication>` on `HAARNESS_CLOUD_WEB_ORIGIN`, else the API origin) with a QR code as rows of modules. `/remote-control stop` stops the connector, unpublishes the chat, revokes its chat-only host and forgets the identity, so sharing again gets a fresh registration and link; sharing stopped from Cloud is detected the same way. From a shell:
 
 ```sh
-haarness remote run --chat CHAT_ID --name "Shared investigation"
+haarness remote enable --chat CHAT_ID --name "Shared investigation"   # background
+haarness remote run --chat CHAT_ID --name "Shared investigation"      # foreground
 ```
 
 Find the native chat ID in its URL or `haarness sessions list --json`. Published chats include descendants and the project filesystem shared by all its chats; this is not a filesystem sandbox. The remote caller cannot enumerate/read/control other chat histories or host terminals. The machine checks this scope independently of the Cloud relay, and refuses publishing through an older runtime without scope enforcement.

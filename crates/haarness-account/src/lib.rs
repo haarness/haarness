@@ -125,6 +125,15 @@ impl Config {
     pub async fn lock(&self) -> Result<fs::File> {
         credential_lock(&self.path()).await
     }
+    /// Where the Cloud web app lives. Production serves it from the API
+    /// origin; local stacks run it elsewhere and say so in the environment.
+    pub fn web_origin(&self) -> Result<Url> {
+        std::env::var("HAARNESS_CLOUD_WEB_ORIGIN")
+            .ok()
+            .map(|url| safe_url(&url))
+            .transpose()
+            .map(|origin| origin.unwrap_or_else(|| self.api_url.clone()))
+    }
 }
 
 /// Only explicit local development uses HTTP. Never follow token-bearing redirects.

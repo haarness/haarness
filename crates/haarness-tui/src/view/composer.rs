@@ -553,6 +553,9 @@ fn badges(app: &App) -> Vec<(String, Color)> {
     if !app.reasoning {
         badges.push((app.language.text("thinking_hidden").to_owned(), theme.muted));
     }
+    if app.remote.shared(app.thread.id) {
+        badges.push(("remote".to_owned(), theme.success()));
+    }
     badges
 }
 

@@ -1,0 +1,113 @@
+/* `/remote-control`: the shared chat's QR code beside what it means. The
+   code is always black on white: phone cameras read that most reliably. */
+.remote-dialog {
+  width: 600px;
+}
+.remote-live {
+  display: flex;
+  gap: var(--s5);
+  align-items: center;
+}
+.remote-qr {
+  flex: none;
+  width: 184px;
+  height: 184px;
+  border-radius: var(--r-md);
+  box-shadow: 0 0 0 1px var(--hairline);
+}
+.remote-details {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  font-size: var(--ui);
+  line-height: 1.5;
+}
+.remote-details p {
+  margin: 0;
+}
+.remote-status {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-weight: 600;
+}
+.remote-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.remote-status.live .remote-dot {
+  background: var(--green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 22%, transparent);
+}
+.remote-chat {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--s1);
+  overflow-wrap: anywhere;
+}
+.remote-link {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  padding: var(--s0) var(--s0) var(--s0) var(--s2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+.remote-link code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--ui-sm);
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+.remote-lead {
+  margin: 0;
+  font-size: var(--ui);
+  line-height: 1.6;
+}
+.remote-waiting {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: var(--s2) 0;
+}
+.remote-dialog footer {
+  align-items: center;
+}
+.remote-dialog footer button {
+  gap: var(--s1);
+}
+.remote-spacer {
+  flex: 1;
+}
+.remote-stop {
+  color: var(--danger);
+}
+@media (max-width: 640px) {
+  .remote-live {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .remote-qr {
+    align-self: center;
+  }
+}
+/* The composer chip for a chat that is reachable from Cloud. */
+.composer .remote-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  max-width: none;
+  color: var(--text);
+}
+.composer .remote-pill .remote-dot {
+  background: var(--green);
+}

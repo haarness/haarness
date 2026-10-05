@@ -14855,3 +14855,118 @@ async fn escape_cancels_a_review_that_is_still_loading() {
 
 #[path = "messages_tests.rs"]
 mod messages_tests;
+
+fn remote_control_text(app: &App, size: (u32, u32)) -> String {
+    app.lines(size)
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[tokio::test]
+async fn remote_control_shows_the_link_and_a_scannable_code_while_live() {
+    let mut app = connect_fixture();
+    let client = offline_client();
+    let url = "https://app.haarness.ai/app/remote/sessions/0199f2d4-5a1b-7c3d-8e4f-a0b1c2d3e4f5";
+    app.remote.thread = Some(app.thread.id);
+    app.remote.share = Some(crate::remote_control::Share {
+        state: "on".into(),
+        url: Some(url.into()),
+        computer: Some("Desk".into()),
+        chat: Some("Release investigation".into()),
+        error: None,
+        qr: (0..25)
+            .map(|row| {
+                (0..25)
+                    .map(|column| if (row + column) % 2 == 0 { '1' } else { '0' })
+                    .collect()
+            })
+            .collect(),
+    });
+    // The band says the chat is reachable from elsewhere.
+    assert!(remote_control_text(&app, (100, 40)).contains("remote"));
+
+    app.open_overlay(crate::state::Overlay::RemoteControl);
+    let rendered = remote_control_text(&app, (100, 44));
+    for expected in [
+        "Remote control",
+        "Live in Haarness Cloud",
+        "Release investigation",
+        "on Desk",
+        url,
+        "Scan the code with your phone",
+        "s stop sharing",
+    ] {
+        assert!(rendered.contains(expected), "{expected}\n{rendered}");
+    }
+    // 25 modules plus the quiet zone, two modules per row.
+    assert_eq!(
+        rendered
+            .lines()
+            .filter(|line| line.contains("▀▀▀▀"))
+            .count(),
+        15
+    );
+
+    // A short terminal keeps the link and drops the code.
+    let rendered = remote_control_text(&app, (100, 22));
+    assert!(rendered.contains(url), "{rendered}");
+    assert!(!rendered.contains('▀'), "{rendered}");
+
+    // Signed out, Enter offers to sign in instead of sharing.
+    app.remote.share = Some(crate::remote_control::Share {
+        state: "signed_out".into(),
+        ..crate::remote_control::Share::default()
+    });
+    let rendered = remote_control_text(&app, (100, 40));
+    assert!(rendered.contains("Sign in to Haarness Cloud"), "{rendered}");
+    assert!(rendered.contains("enter sign in"), "{rendered}");
+    assert!(!rendered.contains("remote  "), "{rendered}");
+
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(app.overlay, crate::state::Overlay::None));
+}
+
+#[tokio::test]
+async fn remote_control_aliases_open_the_dialog_and_report_a_failed_start() {
+    let mut app = connect_fixture();
+    let client = offline_client();
+    for alias in ["/dc", "/rc"] {
+        app.close_overlay();
+        app.execute_command(alias, &client).await.unwrap();
+        assert!(
+            matches!(app.overlay, crate::state::Overlay::RemoteControl),
+            "{alias}"
+        );
+        assert_eq!(
+            app.remote.busy(),
+            Some(crate::remote_control::Action::Start),
+            "{alias}"
+        );
+        assert!(remote_control_text(&app, (100, 40)).contains("Sharing this chat"));
+        // The server is unreachable: the dialog says so instead of spinning.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.remote.failure.is_none() {
+            assert!(std::time::Instant::now() < deadline, "no failure reported");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            app.poll_remote_control(&client);
+        }
+        let rendered = remote_control_text(&app, (100, 40));
+        assert!(rendered.contains("Could not update sharing"), "{rendered}");
+        assert!(rendered.contains("enter try again"), "{rendered}");
+    }
+    let Err(error) = app.execute_command("/remote-control later", &client).await else {
+        panic!("an unknown option must be refused");
+    };
+    assert!(
+        error.to_string().contains("/remote-control stop"),
+        "{error}"
+    );
+}

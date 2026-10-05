@@ -64,6 +64,7 @@ import List from "lucide-solid/icons/list";
 import ListTodo from "lucide-solid/icons/list-todo";
 import Maximize from "lucide-solid/icons/maximize-2";
 import MessageSquare from "lucide-solid/icons/message-square";
+import MonitorSmartphone from "lucide-solid/icons/monitor-smartphone";
 import Mic from "lucide-solid/icons/mic";
 import Minimize from "lucide-solid/icons/minimize-2";
 import PanelLeft from "lucide-solid/icons/panel-left";
@@ -189,6 +190,7 @@ const catalog = {
   billing: CreditCard,
   computer: Laptop,
   server: Server,
+  remote: MonitorSmartphone,
 } satisfies Record<string, Glyph>;
 
 export type IconName = keyof typeof catalog;

@@ -306,6 +306,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         &[],
         "Review, share and revoke a conversation snapshot",
     ),
+    command(
+        "remote-control",
+        &["rc", "dc", "remote"],
+        "Continue this chat from your phone or any browser · /remote-control stop",
+    ),
     command("mcp", &["mcps"], "Manage MCP connections"),
     command("schedules", &["schedule"], "Manage scheduled runs"),
     command("hooks", &[], "Manage runtime hooks"),
@@ -2294,6 +2299,7 @@ impl App {
                 self.open_management("sharing", &serde_json::json!({"action":"view"}), client)
                     .await?;
             }
+            "remote-control" => self.remote_control_command(arguments, client)?,
             "usage" => {
                 let usage = client.thread_usage(self.thread.id).await?;
                 let number = |key: &str| usage[key].as_u64().unwrap_or(0);

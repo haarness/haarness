@@ -5,6 +5,7 @@ import { t } from "./i18n";
 import { ServerConnect, openServerConnection } from "./ServerConnect";
 import { RemoteProjectPicker } from "./RemoteProjectPicker";
 import { ConnectProvider } from "./ConnectProvider";
+import { RemoteControlDialog } from "./RemoteControlDialog";
 import {
   For,
   Show,
@@ -1128,6 +1129,14 @@ export function App() {
             provider={options().provider}
             onboarding={options().onboarding}
             close={() => set("connect", null)}
+          />
+        )}
+      </Show>
+      <Show when={state.connection && state.selected ? state.remoteControl : null}>
+        {(request) => (
+          <RemoteControlDialog
+            action={request().action}
+            close={() => set("remoteControl", null)}
           />
         )}
       </Show>

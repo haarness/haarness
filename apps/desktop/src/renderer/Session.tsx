@@ -20,6 +20,13 @@ import { retainedItems } from "./conversation-history";
 import { PromptContextControls } from "./PromptContext";
 import { mentionAgents } from "./prompt-context";
 import { sessionKey } from "../projects";
+import {
+  isLive,
+  parseShare,
+  remoteAction,
+  remoteAliases,
+  remoteCommand,
+} from "./remote-control";
 import { agentColor } from "./agent-colors";
 import { conversationAgents, selectConversationAgent } from "./agent-selection";
 import { providerModelOptions } from "./provider-model-options";
@@ -117,6 +124,27 @@ export function Session() {
   const app = useApp();
   const { state, set } = app;
   const thread = () => state.threads.find((t) => t.id === state.selected);
+  const remoteShared = () =>
+    !!state.connection &&
+    !!state.selected &&
+    isLive(state.remoteShares[sessionKey(state.connection.id, state.selected)]);
+  // Learn whether the chat that just opened is shared, for the composer chip.
+  // The server answers from local state: no Cloud call, nothing to wait for.
+  createEffect(
+    on(
+      () => [state.connection?.id, state.selected, state.ready] as const,
+      ([connection, selected, ready]) => {
+        if (!connection || !selected || !ready) return;
+        void window.haarness
+          .api(connection, "manageResource", [
+            "remote-control",
+            { action: "status", threadId: selected },
+          ])
+          .then((view) => app.setRemoteShare(sessionKey(connection, selected), parseShare(view)))
+          .catch(() => {});
+      },
+    ),
+  );
   const hasForkOrigin = () =>
     !!thread() &&
     !thread()!.isSubagent &&
@@ -260,16 +288,29 @@ export function Session() {
           { name: "language", description: t("select_language"), template: "" },
           { name: "settings", description: t("Open settings"), template: "" },
           { name: "input-mode", description: `${t("Toggle project Steer/Queue")} · /input-mode [steer|queue|toggle|reset]`, template: "" },
+          {
+            name: "remote-control",
+            description: `${t("Continue this chat from your phone or any browser")} · /rc`,
+            template: "",
+            aliases: remoteAliases,
+          },
           ...historyCommands,
           ...state.commands.filter(
             (item) =>
               item.name !== "language" && item.name !== "memory" && item.name !== "settings" && item.name !== "input-mode" &&
+              item.name !== "remote-control" &&
               !historyCommands.some((command) => command.name === item.name),
           ),
         ]
-          .filter((item) =>
-            item.name.toLowerCase().startsWith(draft().slice(1).toLowerCase()),
-          )
+          .filter((item) => {
+            const query = draft().slice(1).toLowerCase();
+            return (
+              item.name.toLowerCase().startsWith(query) ||
+              // Short forms (/rc, /dc) once both letters are typed, so "/d"
+              // still lists only the commands that start with it.
+              ("aliases" in item && query.length >= 2 && item.aliases!.some((alias) => alias.startsWith(query)))
+            );
+          })
           .slice(0, 12)
       : [],
   );
@@ -663,6 +704,19 @@ export function Session() {
             },
           ]
         : []),
+      ...(state.selected && !thread()?.isSubagent
+        ? [
+            {
+              key: "remote-control",
+              group: "Conversation actions",
+              name: t("Remote control"),
+              detail: `${t("Continue this chat from your phone or any browser")} · /remote-control`,
+              keywords: "remote control share phone mobile cloud qr rc dc",
+              icon: "remote" as const,
+              action: () => app.openRemoteControl(remoteShared() ? "view" : "start"),
+            },
+          ]
+        : []),
       ...(active()
         ? [
             {
@@ -984,6 +1038,19 @@ export function Session() {
   async function send(delivery?: T.InputDelivery) {
     if (queue.editing()) {
       await queue.save({ text: draft(), attachments: attachments() });
+      return;
+    }
+    const remote = remoteCommand.exec(draft().trim());
+    if (remote) {
+      const action = remoteAction(remote[2] ?? "");
+      if (!action)
+        throw new Error(t("Use /remote-control, /remote-control status or /remote-control stop."));
+      if (!state.connection || !state.selected)
+        throw new Error(t("Send a first message, then share the chat with /remote-control."));
+      if (thread()?.isSubagent)
+        throw new Error(t("Share the conversation that started this agent; its agents come with it."));
+      change("");
+      app.openRemoteControl(action);
       return;
     }
     const localCommand = /^\/(settings|input-mode|language)(?:\s+([\s\S]*))?$/.exec(draft().trim());
@@ -1748,6 +1815,17 @@ export function Session() {
                     >
                       <Icon name="shield" size="sm" />
                       {app.isAutoApproval() ? t("Auto-approve") : t("Ask first")}
+                    </button>
+                  </Show>
+                  <Show when={remoteShared()}>
+                    <button
+                      class="pill-select remote-pill"
+                      aria-label={t("Remote control")}
+                      title={t("Live in Haarness Cloud")}
+                      onClick={() => app.openRemoteControl("view")}
+                    >
+                      <span class="remote-dot" aria-hidden="true" />
+                      {t("Remote")}
                     </button>
                   </Show>
                 </div>

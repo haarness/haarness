@@ -160,51 +160,15 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
                 println!("Connector is already running");
                 return Ok(());
             }
-            std::fs::create_dir_all(paths.config_dir())?;
             let log = file.with_extension("log");
-            let mut options = std::fs::OpenOptions::new();
-            options.create(true).append(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let output = options.open(&log)?;
-            let mut command = std::process::Command::new(std::env::current_exe()?);
-            if let Some(root) = &paths.root {
-                command.arg("--data-dir").arg(root);
-            }
-            command
-                .arg("--workspace")
-                .arg(workspace)
-                .args(["remote", "run", "--name", &name]);
-            if let Some(chat) = session {
-                command.arg("--chat").arg(chat.to_string());
-            }
-            command
-                .stdin(std::process::Stdio::null())
-                .stdout(output.try_clone()?)
-                .stderr(output);
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::CommandExt;
-                command.process_group(0);
-            }
-            let mut child = command.spawn()?;
-            for _ in 0..100 {
-                if let Some(status) = child.try_wait()? {
-                    anyhow::bail!("Connector exited ({status}); inspect {}", log.display())
-                }
-                if running(&file)? {
-                    println!(
-                        "Connector started. Use `haarness remote status` for its host ID. Log: {}",
-                        log.display()
-                    );
-                    return Ok(());
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            anyhow::bail!("Connector is starting; inspect {}", log.display())
+            spawn_connector(paths, workspace, &file, &name, session)
+                .await
+                .map_err(|error| anyhow::anyhow!("{error}; inspect {}", log.display()))?;
+            println!(
+                "Connector started. Use `haarness remote status` for its host ID. Log: {}",
+                log.display()
+            );
+            return Ok(());
         }
         RemoteCommand::Hosts => {
             println!(
@@ -300,10 +264,25 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Uuid::now_v7(),
                 Err(error) => return Err(error.into()),
             };
-            super::write_private_json(
-                &file,
-                &json!({"id":id,"workspace":workspace,"chatId":session,"apiUrl":client.config.api_url,"pid":std::process::id()}),
-            )?;
+            // Keep what an earlier run learned (the publication) so status
+            // can show the chat's link while this run reconnects.
+            let mut identity = std::fs::read(&file)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .filter(Value::is_object)
+                .unwrap_or_else(|| json!({}));
+            for (key, value) in [
+                ("id", json!(id)),
+                ("workspace", json!(workspace)),
+                ("chatId", json!(session)),
+                ("accountId", json!(account)),
+                ("name", json!(name)),
+                ("apiUrl", json!(client.config.api_url)),
+                ("pid", json!(std::process::id())),
+            ] {
+                identity[key] = value;
+            }
+            super::write_private_json(&file, &identity)?;
             let stop_file = file.with_extension("stop");
             if stop_file.exists() {
                 std::fs::remove_file(&stop_file)?;
@@ -317,10 +296,14 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
                         Some(json!({"projectId":target.project,"threadId":thread,"title":title})),
                     )
                     .await?;
-                println!(
-                    "Published chat {}",
-                    published["id"].as_str().unwrap_or_default()
-                );
+                let publication = published["id"].as_str().unwrap_or_default();
+                identity["publicationId"] = json!(publication);
+                identity["title"] = published["title"].clone();
+                super::write_private_json(&file, &identity)?;
+                println!("Published chat {publication}");
+                if let Ok(url) = chat_url(&client, publication) {
+                    println!("Open it from any browser: {url}");
+                }
             }
             println!("Remote host {id}. Connecting to {}", client.config.api_url);
             let stop = tokio_util::sync::CancellationToken::new();
@@ -760,7 +743,8 @@ fn running(file: &Path) -> Result<bool> {
         Err(error) => Err(error.into()),
     }
 }
-fn local_status(paths: &Paths) -> Result<Vec<Value>> {
+/// Every connector identity this data directory knows, with its file.
+fn identities(paths: &Paths) -> Result<Vec<(std::path::PathBuf, Value)>> {
     let mut result = Vec::new();
     if !paths.config_dir().exists() {
         return Ok(result);
@@ -771,39 +755,428 @@ fn local_status(paths: &Paths) -> Result<Vec<Value>> {
         if !name.starts_with("remote-") || !name.ends_with(".json") {
             continue;
         }
-        let Ok(mut value) = serde_json::from_slice::<Value>(&std::fs::read(&path)?) else {
-            continue;
-        };
-        if value["id"].as_str().is_none() {
-            continue;
-        }
-        value["running"] = json!(running(&path)?);
-        result.push(value);
-    }
-    Ok(result)
-}
-fn local_file(paths: &Paths, id: Uuid) -> Result<Option<std::path::PathBuf>> {
-    for entry in std::fs::read_dir(paths.config_dir())? {
-        let path = entry?.path();
-        if path.extension().is_none_or(|v| v != "json")
-            || !path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .starts_with("remote-")
-        {
-            continue;
-        }
         let Ok(value) = serde_json::from_slice::<Value>(&std::fs::read(&path)?) else {
             continue;
         };
-        if value["id"].as_str() == Some(&id.to_string()) {
-            return Ok(Some(path));
+        if value["id"].as_str().is_some() {
+            result.push((path, value));
         }
     }
-    Ok(None)
+    Ok(result)
+}
+fn local_status(paths: &Paths) -> Result<Vec<Value>> {
+    identities(paths)?
+        .into_iter()
+        .map(|(path, mut value)| {
+            value["running"] = json!(running(&path)?);
+            Ok(value)
+        })
+        .collect()
+}
+fn local_file(paths: &Paths, id: Uuid) -> Result<Option<std::path::PathBuf>> {
+    Ok(identities(paths)?
+        .into_iter()
+        .find(|(_, value)| value["id"].as_str() == Some(&id.to_string()))
+        .map(|(path, _)| path))
 }
 
+/// Start a background connector and return once it holds its lock, with the
+/// log offset its output starts at. The connector outlives the caller: the
+/// stop file, `remote disable` or `/remote-control stop` ends it.
+async fn spawn_connector(
+    paths: &Paths,
+    workspace: &Path,
+    file: &Path,
+    name: &str,
+    session: Option<Uuid>,
+) -> Result<u64> {
+    std::fs::create_dir_all(paths.config_dir())?;
+    let log = file.with_extension("log");
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let output = options.open(&log)?;
+    let start = output.metadata()?.len();
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    if let Some(root) = &paths.root {
+        command.arg("--data-dir").arg(root);
+    }
+    command
+        .arg("--workspace")
+        .arg(workspace)
+        .args(["remote", "run", "--name", name]);
+    if let Some(chat) = session {
+        command.arg("--chat").arg(chat.to_string());
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(output.try_clone()?)
+        .stderr(output);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn()?;
+    for _ in 0..100 {
+        if let Some(status) = child.try_wait()? {
+            anyhow::bail!(
+                exit_reason(&log, start).unwrap_or_else(|| format!("Connector exited ({status})"))
+            )
+        }
+        if running(file)? {
+            // Reap it whenever it ends, so a long-lived daemon that started
+            // it never collects zombies.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            return Ok(start);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    anyhow::bail!("Connector is still starting")
+}
+/// What a connector said last before it gave up: its `Error:` line, or the
+/// last thing it printed.
+fn exit_reason(log: &Path, start: u64) -> Option<String> {
+    let bytes = std::fs::read(log).ok()?;
+    let text = String::from_utf8_lossy(bytes.get(usize::try_from(start).ok()?..)?);
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    lines
+        .iter()
+        .rev()
+        .find_map(|line| line.strip_prefix("Error: "))
+        .or_else(|| lines.last().copied())
+        .map(str::to_owned)
+}
+
+/// Where a published chat opens in the Cloud web app.
+pub(crate) fn chat_url(client: &haarness_account::Client, publication: &str) -> Result<String> {
+    Ok(client
+        .config
+        .web_origin()?
+        .join(&format!("app/remote/sessions/{publication}"))?
+        .to_string())
+}
+
+/// The name Cloud shows for this computer next to its shared chats.
+pub(crate) fn computer_name() -> String {
+    #[cfg(target_os = "macos")]
+    if let Ok(output) = std::process::Command::new("scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+    {
+        let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if output.status.success() && !name.is_empty() {
+            return name.chars().take(100).collect();
+        }
+    }
+    ["COMPUTERNAME", "HOSTNAME"]
+        .into_iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .chain(std::fs::read_to_string("/etc/hostname").ok())
+        .map(|name| name.trim().to_owned())
+        .find(|name| !name.is_empty())
+        .map_or_else(
+            || "My computer".into(),
+            |name| name.chars().take(100).collect(),
+        )
+}
+
+/// Whether one chat can be continued from Cloud, as `/remote-control`
+/// reports it in the TUI and Desktop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ShareState {
+    /// No Haarness Cloud sign-in on this computer.
+    SignedOut,
+    /// Not shared.
+    Off,
+    /// The connector runs but Cloud does not see it yet.
+    Connecting,
+    /// Reachable from Cloud.
+    On,
+    /// Someone stopped sharing or removed access from Cloud.
+    Stopped,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChatShare {
+    pub state: ShareState,
+    pub url: Option<String>,
+    pub host_id: Option<String>,
+    pub publication_id: Option<String>,
+    pub computer: Option<String>,
+    pub error: Option<String>,
+}
+impl ChatShare {
+    fn new(state: ShareState) -> Self {
+        Self {
+            state,
+            url: None,
+            host_id: None,
+            publication_id: None,
+            computer: None,
+            error: None,
+        }
+    }
+}
+/// The connector identity that publishes this chat of this project, under
+/// any account of the configured Cloud.
+fn chat_identity(
+    paths: &Paths,
+    client: &haarness_account::Client,
+    workspace: &Path,
+    thread: Uuid,
+) -> Result<Option<(std::path::PathBuf, Value)>> {
+    let thread = thread.to_string();
+    Ok(identities(paths)?.into_iter().find(|(_, value)| {
+        value["chatId"].as_str() == Some(thread.as_str())
+            && value["apiUrl"].as_str() == Some(client.config.api_url.as_str())
+            && value["workspace"].as_str() == workspace.to_str()
+    }))
+}
+fn not_found(error: &haarness_account::Error) -> bool {
+    matches!(
+        error,
+        haarness_account::Error::Api {
+            status: 403 | 404,
+            ..
+        }
+    )
+}
+/// Report one chat's sharing. `check_cloud` asks Cloud whether it reaches
+/// the connector; without it the answer is local and instant.
+pub(crate) async fn chat_status(
+    paths: &Paths,
+    workspace: &Path,
+    thread: Uuid,
+    check_cloud: bool,
+) -> Result<ChatShare> {
+    status_with(
+        &super::account::client()?,
+        paths,
+        workspace,
+        thread,
+        check_cloud,
+    )
+    .await
+}
+async fn status_with(
+    client: &haarness_account::Client,
+    paths: &Paths,
+    workspace: &Path,
+    thread: Uuid,
+    check_cloud: bool,
+) -> Result<ChatShare> {
+    let idle = if client.config.signed_in() {
+        ShareState::Off
+    } else {
+        ShareState::SignedOut
+    };
+    let Some((file, identity)) = chat_identity(paths, client, workspace, thread)? else {
+        return Ok(ChatShare::new(idle));
+    };
+    if !running(&file)? {
+        return Ok(ChatShare::new(idle));
+    }
+    let publication = identity["publicationId"].as_str().map(str::to_owned);
+    let mut share = ChatShare {
+        url: publication
+            .as_deref()
+            .and_then(|id| chat_url(client, id).ok()),
+        host_id: identity["id"].as_str().map(str::to_owned),
+        publication_id: publication.clone(),
+        computer: identity["name"].as_str().map(str::to_owned),
+        ..ChatShare::new(ShareState::Connecting)
+    };
+    if let (true, Some(publication)) = (check_cloud, publication) {
+        match client
+            .request(
+                reqwest::Method::GET,
+                &format!("/api/v1/remote-sessions/{publication}"),
+                None,
+            )
+            .await
+        {
+            Ok(value) if value["connected"] == true => share.state = ShareState::On,
+            Ok(_) => {}
+            Err(error) if not_found(&error) => {
+                share.state = ShareState::Stopped;
+                share.url = None;
+                // Cloud ended it (Stop sharing, Remove access): the connector
+                // has nothing left to serve. Clean up now so the next share
+                // registers afresh; a failure here is retried by that share.
+                if stop_connector(&file).await.is_ok() {
+                    let _ = forget_chat(client, &file, &identity).await;
+                }
+            }
+            Err(haarness_account::Error::NotLoggedIn) => share.state = ShareState::SignedOut,
+            Err(error) => share.error = Some(error.to_string()),
+        }
+    }
+    Ok(share)
+}
+/// Share one chat: start (or restart) its connector and wait until Cloud
+/// has published it. Sharing that was stopped from Cloud starts over with a
+/// fresh registration, because Cloud never revives a revoked publication.
+pub(crate) async fn share_chat(paths: &Paths, workspace: &Path, thread: Uuid) -> Result<ChatShare> {
+    let client = super::account::client()?;
+    if !client.config.signed_in() {
+        return Ok(ChatShare::new(ShareState::SignedOut));
+    }
+    let status = client.status().await?;
+    if status["loggedIn"] != true {
+        return Ok(ChatShare::new(ShareState::SignedOut));
+    }
+    let account = status["selectedAccountId"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .context("Choose a Haarness Cloud account first")?;
+    if let Some((file, identity)) = chat_identity(paths, &client, workspace, thread)? {
+        if running(&file)? {
+            let share = chat_status(paths, workspace, thread, true).await?;
+            if share.state != ShareState::Stopped {
+                return Ok(share);
+            }
+            stop_connector(&file).await?;
+            forget_chat(&client, &file, &identity).await?;
+        }
+    }
+    let file = identity_file(paths, &client, account, workspace, Some(thread));
+    if let Some(identity) = std::fs::read(&file)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+    {
+        if let Some(publication) = identity["publicationId"].as_str() {
+            match client
+                .request(
+                    reqwest::Method::GET,
+                    &format!("/api/v1/remote-sessions/{publication}"),
+                    None,
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(error) if not_found(&error) => forget_chat(&client, &file, &identity).await?,
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    let start = spawn_connector(paths, workspace, &file, &computer_name(), Some(thread)).await?;
+    // The connector registers and publishes as soon as it holds its lock.
+    for _ in 0..150 {
+        let published = std::fs::read(&file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|identity| identity["publicationId"].is_string());
+        if published {
+            break;
+        }
+        if !running(&file)? {
+            anyhow::bail!(
+                exit_reason(&file.with_extension("log"), start).unwrap_or_else(|| {
+                    "The connector stopped before Cloud published the chat".into()
+                })
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // Cloud sees the connector a moment after it publishes; a short wait
+    // lets the first answer say "on" instead of "connecting".
+    let mut share = chat_status(paths, workspace, thread, true).await?;
+    for _ in 0..10 {
+        if share.state != ShareState::Connecting {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        share = chat_status(paths, workspace, thread, true).await?;
+    }
+    Ok(share)
+}
+/// Stop sharing one chat: end its connector, then end Cloud access and
+/// forget the registration. Local files and history are untouched.
+pub(crate) async fn stop_chat(paths: &Paths, workspace: &Path, thread: Uuid) -> Result<ChatShare> {
+    stop_with(&super::account::client()?, paths, workspace, thread).await
+}
+async fn stop_with(
+    client: &haarness_account::Client,
+    paths: &Paths,
+    workspace: &Path,
+    thread: Uuid,
+) -> Result<ChatShare> {
+    let idle = if client.config.signed_in() {
+        ShareState::Off
+    } else {
+        ShareState::SignedOut
+    };
+    let Some((file, identity)) = chat_identity(paths, client, workspace, thread)? else {
+        return Ok(ChatShare::new(idle));
+    };
+    stop_connector(&file).await?;
+    let mut share = ChatShare::new(idle);
+    if let Err(error) = forget_chat(client, &file, &identity).await {
+        // The connector is down, so nothing reaches the chat; keep the
+        // identity so a later stop (or share) can finish the cleanup.
+        share.error = Some(format!(
+            "Stopped on this computer, but Haarness Cloud could not be updated: {error}"
+        ));
+    }
+    Ok(share)
+}
+async fn stop_connector(file: &Path) -> Result<()> {
+    if !running(file)? {
+        return Ok(());
+    }
+    std::fs::write(file.with_extension("stop"), "stop")?;
+    for _ in 0..150 {
+        if !running(file)? {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    anyhow::bail!("The connector did not stop within 15 seconds")
+}
+/// End Cloud access for a stopped chat connector and delete its identity.
+async fn forget_chat(
+    client: &haarness_account::Client,
+    file: &Path,
+    identity: &Value,
+) -> Result<()> {
+    let removals = [
+        identity["publicationId"]
+            .as_str()
+            .map(|id| format!("/api/v1/remote-sessions/{id}")),
+        identity["id"]
+            .as_str()
+            .map(|id| format!("/api/v1/remote-hosts/{id}")),
+    ];
+    for path in removals.into_iter().flatten() {
+        match client.request(reqwest::Method::DELETE, &path, None).await {
+            Ok(_) => {}
+            Err(error) if not_found(&error) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    for extension in ["json", "lock", "stop", "log"] {
+        match std::fs::remove_file(file.with_extension(extension)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+            _ => {}
+        }
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -823,6 +1196,145 @@ mod tests {
             args.extend(command);
             assert!(super::super::Cli::try_parse_from(args).is_ok());
         }
+    }
+    #[test]
+    fn exit_reason_prefers_the_final_error_after_the_offset() {
+        let root = std::env::temp_dir().join(format!("haarness-remote-log-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let log = root.join("remote.log");
+        std::fs::write(&log, "Error: an earlier run\n").unwrap();
+        let start = std::fs::metadata(&log).unwrap().len();
+        std::fs::write(
+            &log,
+            "Error: an earlier run\nRemote host 1. Connecting\nError: Remote host access was revoked or is no longer allowed\n\nCaused by:\n    403\n",
+        )
+        .unwrap();
+        assert_eq!(
+            exit_reason(&log, start).as_deref(),
+            Some("Remote host access was revoked or is no longer allowed")
+        );
+        std::fs::write(
+            &log,
+            "Error: an earlier run\nWaiting for the local runtime\n",
+        )
+        .unwrap();
+        assert_eq!(
+            exit_reason(&log, start).as_deref(),
+            Some("Waiting for the local runtime")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn shared_chat_reports_its_link_and_stopping_ends_cloud_access() {
+        use axum::{
+            Json, Router,
+            extract::Path as Route,
+            http::StatusCode,
+            routing::{delete, get},
+        };
+        let root = std::env::temp_dir().join(format!("haarness-remote-chat-{}", Uuid::now_v7()));
+        let paths = Paths::new(Some(&root)).unwrap();
+        let workspace = root.join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (thread, host, publication) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let removed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (sessions, hosts) = (removed.clone(), removed.clone());
+        let router = Router::new()
+            .route(
+                "/api/v1/remote-sessions/{id}",
+                get(move |Route(id): Route<Uuid>| async move {
+                    if id == publication {
+                        Ok(Json(json!({"id":id,"connected":true})))
+                    } else {
+                        Err(StatusCode::NOT_FOUND)
+                    }
+                })
+                .delete(move |Route(id): Route<String>| async move {
+                    sessions.lock().unwrap().push(format!("session {id}"));
+                    StatusCode::NO_CONTENT
+                }),
+            )
+            .route(
+                "/api/v1/remote-hosts/{id}",
+                delete(move |Route(id): Route<String>| async move {
+                    hosts.lock().unwrap().push(format!("host {id}"));
+                    StatusCode::NO_CONTENT
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = haarness_account::Client::new(
+            haarness_account::Config::new(&api, root.join("cloud"), "test")
+                .unwrap()
+                .with_api_key("hck_fixture".into())
+                .unwrap(),
+        )
+        .unwrap();
+        let status = |check| status_with(&client, &paths, &workspace, thread, check);
+        assert_eq!(status(true).await.unwrap().state, ShareState::Off);
+
+        // A connector that published this chat and still holds its lock.
+        let file = paths.config_dir().join("remote-fixture.json");
+        let identity = json!({"id":host,"workspace":workspace,"chatId":thread,
+            "apiUrl":client.config.api_url,"publicationId":publication,"name":"Desk"});
+        std::fs::write(&file, identity.to_string()).unwrap();
+        let lock = std::fs::File::create(file.with_extension("lock")).unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let local = status(false).await.unwrap();
+        assert_eq!(local.state, ShareState::Connecting);
+        let shared = status(true).await.unwrap();
+        assert_eq!(shared.state, ShareState::On);
+        assert_eq!(
+            shared.url.as_deref(),
+            Some(format!("{api}/app/remote/sessions/{publication}").as_str())
+        );
+        assert_eq!(shared.computer.as_deref(), Some("Desk"));
+        // Another chat of the same project is not shared.
+        assert_eq!(
+            status_with(&client, &paths, &workspace, Uuid::now_v7(), true)
+                .await
+                .unwrap()
+                .state,
+            ShareState::Off
+        );
+
+        // The connector exits when it sees the stop file, as `remote run` does.
+        let stop = file.with_extension("stop");
+        let connector = std::thread::spawn(move || {
+            while !stop.exists() {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            drop(lock);
+        });
+        let stopped = stop_with(&client, &paths, &workspace, thread)
+            .await
+            .unwrap();
+        connector.join().unwrap();
+        assert_eq!(stopped.state, ShareState::Off);
+        assert_eq!(stopped.error, None);
+        assert_eq!(
+            *removed.lock().unwrap(),
+            [format!("session {publication}"), format!("host {host}")]
+        );
+        assert!(!file.exists() && !file.with_extension("lock").exists());
+        assert_eq!(status(true).await.unwrap().state, ShareState::Off);
+
+        // Sharing stopped from Cloud while the connector still runs.
+        std::fs::write(
+            &file,
+            json!({"id":host,"workspace":workspace,"chatId":thread,
+                "apiUrl":client.config.api_url,"publicationId":Uuid::now_v7()})
+            .to_string(),
+        )
+        .unwrap();
+        let lock = std::fs::File::create(file.with_extension("lock")).unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let revoked = status(true).await.unwrap();
+        assert_eq!(revoked.state, ShareState::Stopped);
+        assert_eq!(revoked.url, None);
+        drop(lock);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn relay_paths_cannot_escape_an_advertised_project_or_chat() {
