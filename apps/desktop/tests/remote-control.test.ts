@@ -8,15 +8,15 @@ import {
   remoteCommand,
 } from "../src/renderer/remote-control";
 
-test("/remote-control and its short forms choose start, status or stop", () => {
-  for (const text of ["/remote-control", "/rc", "/dc", "/RC on", "/dc   share"])
+test("/remote-control and its short form choose start, status or stop", () => {
+  for (const text of ["/remote-control", "/rc", "/RC on", "/rc   share"])
     assert.equal(remoteAction(remoteCommand.exec(text)?.[2] ?? ""), "start", text);
   assert.equal(remoteAction(remoteCommand.exec("/rc stop")![2]), "stop");
   assert.equal(remoteAction(remoteCommand.exec("/remote-control off")![2]), "stop");
   assert.equal(remoteAction(remoteCommand.exec("/remote-control status")![2]), "view");
   assert.equal(remoteAction("later"), null);
   // Other commands that merely start alike are not remote control.
-  for (const text of ["/rcx", "/dcc", "/remote", "/remote-controls", "rc"])
+  for (const text of ["/rcx", "/dc", "/remote", "/remote-controls", "rc"])
     assert.equal(remoteCommand.exec(text), null, text);
 });
 
