@@ -71,6 +71,7 @@ async fn turn(
                 cache_read_tokens: 30,
                 cache_write_tokens: 5,
                 cost_usd: cost,
+                estimated: false,
             },
         )
         .await
