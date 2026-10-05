@@ -528,7 +528,7 @@ impl Tool for BrowserTool {
                 if bytes_total > MAX_BYTES {
                     return Err(error("Browser uploads exceed 5 MiB total"));
                 }
-                files.push(json!({"id":format!("file_{}",uuid::Uuid::new_v4()),"name":path.file_name().unwrap_or_default().to_string_lossy(),"mime":"application/octet-stream","data":STANDARD.encode(bytes)}));
+                files.push(json!({"id":format!("file_{}",uuid::Uuid::now_v7()),"name":path.file_name().unwrap_or_default().to_string_lossy(),"mime":"application/octet-stream","data":STANDARD.encode(bytes)}));
             }
             args["paths"] = json!(
                 files
@@ -682,7 +682,7 @@ mod tests {
         let seed = ThreadId::new();
         let (host, _messages) = connected(&broker, seed);
         broker.hosts.lock().remove(&seed);
-        let draft = uuid::Uuid::new_v4();
+        let draft = uuid::Uuid::now_v7();
         broker.drafts.lock().insert(draft, host.clone());
         let target = ThreadId::new();
         assert!(broker.host(target, None).is_err());

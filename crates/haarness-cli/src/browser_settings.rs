@@ -126,7 +126,7 @@ mod tests {
     fn browser_settings_inheritance_stale_writes_and_reset_preserve_other_settings() {
         let dir = std::env::temp_dir().join(format!(
             "haarness-browser-settings-{}",
-            uuid::Uuid::new_v4()
+            uuid::Uuid::now_v7()
         ));
         let global = dir.join("global");
         let workspace = dir.join("project");
