@@ -1515,7 +1515,7 @@ impl AgentRuntime {
     async fn queue_input_with_options(
         &self,
         thread_id: ThreadId,
-        request: QueueInputRequest,
+        mut request: QueueInputRequest,
         auto_approve: bool,
         tools: Option<HashMap<String, bool>>,
     ) -> CoreResult<QueueInputResponse> {
@@ -1524,6 +1524,8 @@ impl AgentRuntime {
                 "text or an attachment is required".into(),
             ));
         }
+        request.attachments =
+            crate::attachments::admit(std::mem::take(&mut request.attachments), &self.workspace)?;
         loop {
             let thread = self.repository.get_thread(thread_id).await?;
             let active_turn = self
@@ -3678,6 +3680,8 @@ impl AgentRuntime {
         queue_revision: Option<u64>,
     ) -> CoreResult<Turn> {
         let _reload = self.reload_gate.read().await;
+        request.attachments =
+            crate::attachments::admit(std::mem::take(&mut request.attachments), &self.workspace)?;
         let components = self.components();
         // A standalone `ultracode` in the user's current request is a one-turn
         // orchestration signal, without mutating the durable
@@ -8654,6 +8658,11 @@ fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
                 };
                 let replayed_after_compaction =
                     compaction_sequence.is_some_and(|sequence| item.sequence < sequence);
+                let (content, attachments) = if replayed_after_compaction {
+                    (content, attachments)
+                } else {
+                    crate::attachments::for_model(content, attachments)
+                };
                 let message = if attachments.is_empty() || replayed_after_compaction {
                     ProviderMessage::Text {
                         role: "user".into(),
@@ -10257,15 +10266,26 @@ mod tests {
 
     #[test]
     fn provider_messages_preserve_multimodal_user_attachments() {
+        // History names media by path; files that still exist are replayed.
+        let dir = std::env::temp_dir().join(format!("haarness-media-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("example.png");
+        let video = dir.join("example.mp4");
+        std::fs::write(&image, b"png").unwrap();
+        std::fs::write(&video, b"mp4").unwrap();
         let messages = provider_messages(vec![item(
             1,
             ItemData::UserMessage {
                 text: "Describe this".into(),
-                attachments: vec!["/tmp/example.png".into(), "/tmp/example.mp4".into()],
+                attachments: vec![
+                    image.to_string_lossy().into_owned(),
+                    video.to_string_lossy().into_owned(),
+                ],
                 queued: false,
                 synthetic: false,
             },
         )]);
+        std::fs::remove_dir_all(&dir).unwrap();
 
         assert!(matches!(
             &messages[0],

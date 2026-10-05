@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+base64.workspace = true
 chrono.workspace = true
 dashmap.workspace = true
 futures.workspace = true
@@ -24,6 +25,7 @@ tree-sitter = "0.25"
 tree-sitter-bash = "0.25"
 tokio-util.workspace = true
 tracing.workspace = true
+url.workspace = true
 uuid.workspace = true
 
 [lints]

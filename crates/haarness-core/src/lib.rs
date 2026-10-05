@@ -1,6 +1,7 @@
 //! Provider, storage, and transport independent agent runtime.
 
 mod agents;
+pub mod attachments;
 mod config;
 pub mod definitions;
 mod events;
