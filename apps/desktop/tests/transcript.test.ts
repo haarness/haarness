@@ -33,10 +33,26 @@ test("shell exit status is reflected in tool presentation without interpreting o
   assert.equal(toolFailed("read", { ...result, is_error: true }), true);
 });
 
+test("a step's verb never claims it is done before it is", () => {
+  // A write waiting for approval reads "Writing", a refused one "Tried to write".
+  const write = describeTool("write", { path: "/tmp/out.txt" });
+  assert.deepEqual(
+    [write.verb, write.doing, write.attempt],
+    ["Wrote", "Writing", "Tried to write"],
+  );
+  const click = describeTool("browser_click", { ref: "@e4" });
+  assert.deepEqual([click.verb, click.doing, click.attempt], ["Clicked", "Clicking", "Tried to click"]);
+  // An unknown tool keeps its own name in every state.
+  const custom = describeTool("acme_zap", {});
+  assert.deepEqual([custom.verb, custom.doing, custom.attempt], ["acme_zap", "acme_zap", "acme_zap"]);
+});
+
 test("named tools get the verb a reader expects", () => {
   assert.deepEqual(describeTool("bash", { command: "npm test" }), {
     icon: "terminal",
     verb: "Ran",
+    doing: "Running",
+    attempt: "Tried to run",
     target: "npm test",
   });
   assert.equal(describeTool("edit", { path: "src/app.ts" }).verb, "Edited");
@@ -269,7 +285,13 @@ test("a Codex patch envelope reads as the files it edits, and the result's diffs
   ].join("\n");
   assert.deepEqual(
     describeTool("apply_patch", { input }),
-    { icon: "edit", verb: "Edited", target: "src/math.ts, src/new.ts +1" },
+    {
+      icon: "edit",
+      verb: "Edited",
+      doing: "Editing",
+      attempt: "Tried to edit",
+      target: "src/math.ts, src/new.ts +1",
+    },
   );
   assert.equal(
     describeTool("apply_patch", { input: input.replace(/\*\*\* (Add|Delete) File: .*\n(\+export \{\};\n)?/g, "") }).target,
@@ -344,9 +366,9 @@ test("a working location is identified by the tail of its path", () => {
 });
 
 test("browser steps read as what happened in the page, never as element refs", () => {
-  assert.deepEqual(describeTool("browser_navigate", { url: "https://example.com/" }), { icon: "web", verb: "Opened", target: "https://example.com/" });
-  assert.deepEqual(describeTool("browser_fill", { tabID: "t", ref: "@e4", text: "Jane  Appleseed" }), { icon: "web", verb: "Typed", target: "“Jane Appleseed”" });
-  assert.deepEqual(describeTool("browser_click", { tabID: "t", ref: "@e11" }), { icon: "web", verb: "Clicked", target: "" });
+  assert.deepEqual(describeTool("browser_navigate", { url: "https://example.com/" }), { icon: "web", verb: "Opened", doing: "Opening", attempt: "Tried to open", target: "https://example.com/" });
+  assert.deepEqual(describeTool("browser_fill", { tabID: "t", ref: "@e4", text: "Jane  Appleseed" }), { icon: "web", verb: "Typed", doing: "Typing", attempt: "Tried to type", target: "“Jane Appleseed”" });
+  assert.deepEqual(describeTool("browser_click", { tabID: "t", ref: "@e11" }), { icon: "web", verb: "Clicked", doing: "Clicking", attempt: "Tried to click", target: "" });
   assert.equal(describeTool("browser_check", { ref: "@e10", checked: false }).verb, "Unchecked");
   assert.equal(describeTool("browser_select", { ref: "@e6", values: ["Express"] }).target, "“Express”");
   assert.equal(describeTool("browser_scroll", { deltaY: -400 }).target, "up");
