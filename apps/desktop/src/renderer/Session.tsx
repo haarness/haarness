@@ -2082,6 +2082,12 @@ function Message(props: {
                   args={tool().arguments}
                   result={result()}
                   expanded={!app.state.preferences.compactTools}
+                  waiting={app.state.permissions.some(
+                    (permission) =>
+                      permission.threadId === props.item.threadId &&
+                      !!props.item.turnId &&
+                      permission.turnId === props.item.turnId,
+                  )}
                 />
               );
             })()}

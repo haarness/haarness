@@ -499,6 +499,11 @@
 .tool-call[open] > summary .tool-status {
   opacity: 1;
 }
+/* A step held for approval says so at rest, in the copper of "waits on you". */
+.tool-status.waiting {
+  color: var(--accent);
+  opacity: 1;
+}
 .tool-chevron {
   flex: none;
   color: var(--faint);

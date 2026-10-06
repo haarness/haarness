@@ -35,6 +35,8 @@ export function ToolActivity(props: {
   expanded?: boolean;
   nested?: boolean;
   settled?: boolean;
+  /** Its turn is waiting for the person to approve a request. */
+  waiting?: boolean;
 }) {
   const [open, setOpen] = createSignal(!!props.expanded);
   createEffect(() => setOpen(!!props.expanded));
@@ -50,6 +52,8 @@ export function ToolActivity(props: {
       ? {
           icon: "layers" as const,
           verb: batchLabel(batch()),
+          doing: batchLabel(batch()),
+          attempt: batchLabel(batch()),
           target: "",
         }
       : describeTool(props.name, props.args),
@@ -63,8 +67,19 @@ export function ToolActivity(props: {
       : props.nested
         ? "pending"
         : "running";
+  // Waiting on the person is not work in motion: the row rests and says so.
+  const waiting = () => !!props.waiting && !props.result && !props.settled;
   const live = () =>
-    status() === "running" || (status() === "pending" && !props.settled);
+    !waiting() &&
+    (status() === "running" || (status() === "pending" && !props.settled));
+  // The verb tells the row's state: "Writing" while it runs or waits for
+  // approval, "Wrote" once done, "Tried to write" when it failed or was refused.
+  const verb = () =>
+    status() === "done"
+      ? shape().verb
+      : status() === "failed" || props.settled
+        ? shape().attempt
+        : shape().doing;
   const changes = createMemo(() =>
     toolChanges(toolName(props.name), props.args, props.result),
   );
@@ -106,7 +121,7 @@ export function ToolActivity(props: {
         {/* A step in motion sweeps like the activity line and the agent card;
             a finished one simply rests. The word stays for screen readers. */}
         <Shimmer class="tool-label" active={live()}>
-          <strong>{shape().verb}</strong>
+          <strong>{verb()}</strong>
           <span class="tool-target" title={shape().target}>
             {shape().target}
           </span>
@@ -127,6 +142,9 @@ export function ToolActivity(props: {
           <span class="sr-only">
             {status() === "running" ? t("Running") : t("Waiting for result")}
           </span>
+        </Show>
+        <Show when={waiting()}>
+          <span class="tool-status waiting">{t("Needs approval")}</span>
         </Show>
         <Show when={status() === "pending" && props.settled}>
           <span class="tool-status">{t("No result")}</span>

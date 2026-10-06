@@ -30,32 +30,43 @@ export function toolResult(items: Item[], call?: Item, boundary = Infinity) {
  */
 export interface ToolShape {
   icon: IconName;
+  /** What it did: "Wrote". */
   verb: string;
+  /** While it runs or waits for approval: "Writing". */
+  doing: string;
+  /** When it failed or was refused: "Tried to write". */
+  attempt: string;
   target: string;
 }
+type Verbs = { verb: string; doing: string; attempt: string };
+const verbs = (verb: string, doing: string, base: string): Verbs => ({
+  verb,
+  doing,
+  attempt: "Tried to " + base,
+});
 /**
  * Haarness's own tools are named, so they get the exact verb a reader expects.
  * Anything else — an MCP server, an extension — falls back to a family guess,
  * and if even that fails the tool's own name is the honest label.
  */
-const namedTools: Record<string, { icon: IconName; verb: string }> = {
-  bash: { icon: "terminal", verb: "Ran" },
-  read: { icon: "file-text", verb: "Read" },
-  write: { icon: "edit", verb: "Wrote" },
-  edit: { icon: "edit", verb: "Edited" },
-  multiedit: { icon: "edit", verb: "Edited" },
-  apply_patch: { icon: "edit", verb: "Edited" },
-  list: { icon: "folder", verb: "Listed" },
-  glob: { icon: "search", verb: "Matched" },
-  grep: { icon: "search", verb: "Searched" },
-  webfetch: { icon: "web", verb: "Fetched" },
-  task: { icon: "agents", verb: "Delegated" },
-  skill: { icon: "book", verb: "Used" },
-  question: { icon: "question", verb: "Asked" },
-  todo: { icon: "todo", verb: "Updated the plan" },
-  todowrite: { icon: "todo", verb: "Updated the plan" },
-  todoread: { icon: "todo", verb: "Checked the plan" },
-  batch: { icon: "layers", verb: "Ran a batch" },
+const namedTools: Record<string, { icon: IconName } & Verbs> = {
+  bash: { icon: "terminal", ...verbs("Ran", "Running", "run") },
+  read: { icon: "file-text", ...verbs("Read", "Reading", "read") },
+  write: { icon: "edit", ...verbs("Wrote", "Writing", "write") },
+  edit: { icon: "edit", ...verbs("Edited", "Editing", "edit") },
+  multiedit: { icon: "edit", ...verbs("Edited", "Editing", "edit") },
+  apply_patch: { icon: "edit", ...verbs("Edited", "Editing", "edit") },
+  list: { icon: "folder", ...verbs("Listed", "Listing", "list") },
+  glob: { icon: "search", ...verbs("Matched", "Matching", "match") },
+  grep: { icon: "search", ...verbs("Searched", "Searching", "search") },
+  webfetch: { icon: "web", ...verbs("Fetched", "Fetching", "fetch") },
+  task: { icon: "agents", ...verbs("Delegated", "Delegating", "delegate") },
+  skill: { icon: "book", ...verbs("Used", "Using", "use") },
+  question: { icon: "question", ...verbs("Asked", "Asking", "ask") },
+  todo: { icon: "todo", ...verbs("Updated the plan", "Updating the plan", "update the plan") },
+  todowrite: { icon: "todo", ...verbs("Updated the plan", "Updating the plan", "update the plan") },
+  todoread: { icon: "todo", ...verbs("Checked the plan", "Checking the plan", "check the plan") },
+  batch: { icon: "layers", ...verbs("Ran a batch", "Running a batch", "run a batch") },
 };
 const toolKind = (name: string) =>
   /bash|shell|exec|command/.test(name)
@@ -71,14 +82,14 @@ const toolKind = (name: string) =>
             : /task|agent|spawn/.test(name)
               ? "agent"
               : "other";
-const kindShape: Record<string, { icon: IconName; verb: string }> = {
-  run: { icon: "terminal", verb: "Ran" },
-  edit: { icon: "edit", verb: "Edited" },
-  read: { icon: "file-text", verb: "Read" },
-  search: { icon: "search", verb: "Searched" },
-  web: { icon: "web", verb: "Fetched" },
-  agent: { icon: "agents", verb: "Delegated" },
-  other: { icon: "tools", verb: "Used" },
+const kindShape: Record<string, { icon: IconName } & Verbs> = {
+  run: { icon: "terminal", ...verbs("Ran", "Running", "run") },
+  edit: { icon: "edit", ...verbs("Edited", "Editing", "edit") },
+  read: { icon: "file-text", ...verbs("Read", "Reading", "read") },
+  search: { icon: "search", ...verbs("Searched", "Searching", "search") },
+  web: { icon: "web", ...verbs("Fetched", "Fetching", "fetch") },
+  agent: { icon: "agents", ...verbs("Delegated", "Delegating", "delegate") },
+  other: { icon: "tools", ...verbs("Used", "Using", "use") },
 };
 export function describeTool(name: string, args: unknown): ToolShape {
   name = toolName(name);
@@ -112,46 +123,43 @@ export function describeTool(name: string, args: unknown): ToolShape {
   }
   if (known) return { ...known, target: toolTarget(args) };
   const kind = toolKind(name);
-  return {
-    icon: kindShape[kind].icon,
-    // An unrecognised tool is named rather than described; guessing a verb for
-    // it would claim knowledge the interface does not have.
-    verb: kind === "other" ? name : kindShape[kind].verb,
-    target: toolTarget(args),
-  };
+  // An unrecognised tool is named rather than described; guessing a verb for
+  // it would claim knowledge the interface does not have.
+  const named = kind === "other" ? { verb: name, doing: name, attempt: name } : undefined;
+  return { ...kindShape[kind], ...named, target: toolTarget(args) };
 }
 /**
  * Browser steps read like what a person did in the page: "Opened example.com",
  * "Typed “jane@example.com”", "Clicked". Element refs (@e4) mean nothing to a
  * reader, so the target is the URL, text, value or key when there is one.
  */
-const browserVerbs: Record<string, string> = {
-  navigate: "Opened",
-  tabs_open: "Opened a tab",
-  tabs_close: "Closed a tab",
-  tabs_focus: "Switched tabs",
-  tabs_list: "Listed tabs",
-  snapshot: "Read the page",
-  find: "Searched the page",
-  click: "Clicked",
-  hover: "Pointed at an element",
-  drag: "Dragged",
-  fill: "Typed",
-  fill_form: "Filled in a form",
-  select: "Selected",
-  press: "Pressed",
-  scroll: "Scrolled",
-  wait: "Waited",
-  screenshot: "Took a screenshot",
-  evaluate: "Ran a page script",
-  back: "Went back",
-  forward: "Went forward",
-  reload: "Reloaded the page",
-  stop: "Stopped loading",
-  dialog: "Handled a dialog",
-  console: "Read the console",
-  network_list: "Listed network requests",
-  network_get: "Read a network request",
+const browserVerbs: Record<string, Verbs> = {
+  navigate: verbs("Opened", "Opening", "open"),
+  tabs_open: verbs("Opened a tab", "Opening a tab", "open a tab"),
+  tabs_close: verbs("Closed a tab", "Closing a tab", "close a tab"),
+  tabs_focus: verbs("Switched tabs", "Switching tabs", "switch tabs"),
+  tabs_list: verbs("Listed tabs", "Listing tabs", "list tabs"),
+  snapshot: verbs("Read the page", "Reading the page", "read the page"),
+  find: verbs("Searched the page", "Searching the page", "search the page"),
+  click: verbs("Clicked", "Clicking", "click"),
+  hover: verbs("Pointed at an element", "Pointing at an element", "point at an element"),
+  drag: verbs("Dragged", "Dragging", "drag"),
+  fill: verbs("Typed", "Typing", "type"),
+  fill_form: verbs("Filled in a form", "Filling in a form", "fill in a form"),
+  select: verbs("Selected", "Selecting", "select"),
+  press: verbs("Pressed", "Pressing", "press"),
+  scroll: verbs("Scrolled", "Scrolling", "scroll"),
+  wait: verbs("Waited", "Waiting", "wait"),
+  screenshot: verbs("Took a screenshot", "Taking a screenshot", "take a screenshot"),
+  evaluate: verbs("Ran a page script", "Running a page script", "run a page script"),
+  back: verbs("Went back", "Going back", "go back"),
+  forward: verbs("Went forward", "Going forward", "go forward"),
+  reload: verbs("Reloaded the page", "Reloading the page", "reload the page"),
+  stop: verbs("Stopped loading", "Stopping loading", "stop loading"),
+  dialog: verbs("Handled a dialog", "Handling a dialog", "handle a dialog"),
+  console: verbs("Read the console", "Reading the console", "read the console"),
+  network_list: verbs("Listed network requests", "Listing network requests", "list network requests"),
+  network_get: verbs("Read a network request", "Reading a network request", "read a network request"),
 };
 function describeBrowser(action: string, record?: Record<string, unknown>): ToolShape {
   const text = (value: unknown) =>
@@ -169,11 +177,14 @@ function describeBrowser(action: string, record?: Record<string, unknown>): Tool
             : action === "scroll" && typeof record?.deltaY === "number"
               ? record.deltaY < 0 ? "up" : "down"
               : text(record?.url);
-  const verb =
+  const fallback = "Browser · " + action.replaceAll("_", " ");
+  const forms =
     action === "check"
-      ? record?.checked === false ? "Unchecked" : "Checked"
-      : (browserVerbs[action] ?? "Browser · " + action.replaceAll("_", " "));
-  return { icon: "web", verb, target };
+      ? record?.checked === false
+        ? verbs("Unchecked", "Unchecking", "uncheck")
+        : verbs("Checked", "Checking", "check")
+      : (browserVerbs[action] ?? { verb: fallback, doing: fallback, attempt: fallback });
+  return { icon: "web", ...forms, target };
 }
 /** Normalize only the runtime's known wrapper and built-in names. */
 export function toolName(name: string) {
