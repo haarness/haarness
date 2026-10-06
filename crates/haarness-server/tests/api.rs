@@ -3850,6 +3850,110 @@ async fn llm_compaction_shrinks_context_but_retains_recent_turns_and_exact_todos
     assert!(texts.iter().any(|text| text == "next question"));
 }
 
+/// Answers "high demand" (HTTP 503) the first time, then normally.
+#[derive(Default)]
+struct BusyOnce {
+    rounds: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl ModelProvider for BusyOnce {
+    fn id(&self) -> &str {
+        "busy"
+    }
+
+    fn info(&self) -> ProviderInfo {
+        ProviderInfo {
+            id: "busy".into(),
+            name: "Busy fixture".into(),
+            authenticated: true,
+            models: vec![ModelInfo {
+                id: "busy-1".into(),
+                display_name: "Busy fixture".into(),
+                reasoning: false,
+                reasoning_efforts: Vec::new(),
+                images: false,
+                video: false,
+                tools: false,
+                context_window: Some(100_000),
+                max_output_tokens: Some(4_096),
+                pricing: None,
+            }],
+        }
+    }
+
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        _cancel: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        if let Some(title) = title_fixture(&request) {
+            return title;
+        }
+        if self
+            .rounds
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 0
+        {
+            return Ok(Box::pin(stream::iter(vec![Err(CoreError::Provider(
+                "HTTP 503 Service Unavailable: This model is currently experiencing high demand."
+                    .into(),
+            ))])));
+        }
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderEvent::TextDelta(
+                "answered after a busy moment".into(),
+            )),
+            Ok(ProviderEvent::Finished {
+                reason: "done".into(),
+            }),
+        ])))
+    }
+}
+
+#[tokio::test]
+async fn a_busy_provider_is_retried_instead_of_failing_the_turn() {
+    let provider = BusyOnce::default();
+    let rounds = provider.rounds.clone();
+    let events = EventBus::new(256);
+    let runtime = AgentRuntime::new(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        events.clone(),
+    );
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Busy provider".into()),
+            provider: Some("busy".into()),
+            model: Some("busy-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let turn = runtime
+        .start_turn(thread.id, turn_request("hello"))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert_eq!(rounds.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(items.iter().any(|item| matches!(
+        &item.data,
+        haarness_protocol::ItemData::AssistantMessage { text } if text == "answered after a busy moment"
+    )));
+    // The person saw that it was retrying rather than a silent pause.
+    let retrying = events.subscribe(None).replay.iter().any(|event| {
+        event.event_type == "turn.status" && event.payload.to_string().contains("retrying")
+    });
+    assert!(retrying, "a turn.status retrying event is published");
+}
+
 #[tokio::test]
 async fn context_overflow_compacts_once_and_replays_without_binary_media() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
