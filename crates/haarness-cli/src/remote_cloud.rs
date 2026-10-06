@@ -160,6 +160,31 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
                 println!("Connector is already running");
                 return Ok(());
             }
+            // Enabling is the person asking to connect this computer again: if
+            // Cloud removed its earlier registration (Remove access), register
+            // a new one instead of failing on the old identity.
+            let earlier = std::fs::read(&file)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .and_then(|identity| identity["id"].as_str().map(str::to_owned));
+            if let Some(id) = earlier {
+                let removed = matches!(
+                    client
+                        .request(
+                            reqwest::Method::GET,
+                            &format!("/api/v1/remote-hosts/{id}"),
+                            None
+                        )
+                        .await,
+                    Err(haarness_account::Error::Api { status: 404, .. })
+                );
+                if removed {
+                    std::fs::remove_file(&file)?;
+                    println!(
+                        "This computer was removed from Haarness Cloud; registering it again."
+                    );
+                }
+            }
             let log = file.with_extension("log");
             spawn_connector(paths, workspace, &file, &name, session)
                 .await
