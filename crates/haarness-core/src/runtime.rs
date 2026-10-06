@@ -24,7 +24,7 @@ use parking_lot::{Mutex, RwLock};
 use serde_json::json;
 use tokio::sync::{Mutex as AsyncMutex, Notify, RwLock as AsyncRwLock, Semaphore, oneshot};
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument as _, error, instrument};
+use tracing::{Instrument as _, error, instrument, warn};
 
 use crate::agents::custom_system_prompt_with_context;
 use crate::tool_catalog::{
@@ -542,6 +542,93 @@ fn is_provider_usage_limit(error: &CoreError) -> bool {
     ]
     .iter()
     .any(|marker| message.contains(marker))
+}
+
+/// An overloaded or briefly unreachable provider: worth another try before
+/// the turn fails ("This model is currently experiencing high demand").
+/// Rate limits and quotas are usage limits, handled on their own.
+fn is_provider_transient(error: &CoreError) -> bool {
+    let CoreError::Provider(message) = error else {
+        return false;
+    };
+    if is_provider_usage_limit(error) {
+        return false;
+    }
+    let message = message.to_ascii_lowercase();
+    [
+        "http 500",
+        "http 502",
+        "http 503",
+        "http 504",
+        "http 529",
+        "overloaded",
+        "high demand",
+        "temporarily unavailable",
+        "error sending request",
+        "connection reset",
+        "connection closed before message completed",
+        "operation timed out",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker))
+}
+
+/// Retries for a transient provider failure before any output, waiting 2,
+/// 4, 8 then 16 seconds.
+const TRANSIENT_RETRIES: u8 = 4;
+
+/// The longest wait a provider may ask for ("Please retry in 17.2s") that a
+/// turn sits out instead of failing: a per-minute limit, not a daily quota.
+const LONGEST_ADVISED_WAIT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// How long to wait before trying the round again, or `None` to fail it now:
+/// a busy or unreachable provider backs off, and a rate limit that names a
+/// short wait (Gemini's free tier allows a few requests a minute) is waited out.
+fn retry_delay(error: &CoreError, attempt: u8) -> Option<std::time::Duration> {
+    if is_provider_transient(error) {
+        return Some(std::time::Duration::from_secs(1 << attempt.min(4)));
+    }
+    if !is_provider_usage_limit(error) {
+        return None;
+    }
+    let CoreError::Provider(message) = error else {
+        return None;
+    };
+    let lower = message.to_ascii_lowercase();
+    let (_, rest) = lower.split_once("retry in ")?;
+    let advised = advised_wait(rest)? + std::time::Duration::from_secs(1);
+    (advised <= LONGEST_ADVISED_WAIT).then_some(advised)
+}
+
+/// A wait written the way providers write it: "17.19s", "59s", "1m30s",
+/// "21h16m10.2s" or "500ms".
+fn advised_wait(text: &str) -> Option<std::time::Duration> {
+    let mut seconds = 0.0_f64;
+    let mut rest = text;
+    let mut parsed = false;
+    // Each part starts with a digit; the sentence's full stop ends the wait.
+    while rest.starts_with(|c: char| c.is_ascii_digit()) {
+        let digits = rest
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .unwrap_or(rest.len());
+        let value: f64 = rest[..digits].parse().ok()?;
+        rest = &rest[digits..];
+        let (scale, unit) = if rest.starts_with("ms") {
+            (0.001, 2)
+        } else if rest.starts_with('h') {
+            (3600.0, 1)
+        } else if rest.starts_with('m') {
+            (60.0, 1)
+        } else if rest.starts_with('s') {
+            (1.0, 1)
+        } else {
+            return None;
+        };
+        seconds += value * scale;
+        rest = &rest[unit..];
+        parsed = true;
+    }
+    parsed.then(|| std::time::Duration::from_secs_f64(seconds))
 }
 
 fn is_provider_context_overflow(error: &CoreError) -> bool {
@@ -4996,6 +5083,30 @@ impl RunnerTask {
     /// Publish a `turn.status` transition once per state change. The status
     /// line is only honest if the server narrates what the turn is doing:
     /// thinking, streaming text, running a named tool, waiting on a human.
+    /// Shows "retrying" and waits before another provider round, unless the
+    /// turn is stopped meanwhile.
+    async fn wait_before_retry(
+        &self,
+        attempt: u8,
+        delay: std::time::Duration,
+        error: &CoreError,
+    ) -> CoreResult<()> {
+        warn!(
+            thread = %self.thread.id,
+            turn = %self.turn.id,
+            attempt,
+            delay_secs = delay.as_secs(),
+            %error,
+            "provider unavailable; retrying"
+        );
+        self.set_status("retrying", None);
+        tokio::select! {
+            biased;
+            () = self.cancel.cancelled() => Err(CoreError::Cancelled),
+            () = tokio::time::sleep(delay) => Ok(()),
+        }
+    }
+
     fn set_status(&self, state: &str, tool: Option<(&str, &str)>) {
         let key = match tool {
             Some((_, call_id)) => format!("{state}:{call_id}"),
@@ -5204,6 +5315,7 @@ impl RunnerTask {
                 .unwrap_or(crate::goal::MAX_GOAL_TURNS);
             let mut compactions_this_turn = 0_u8;
             let mut recoveries = 0_u8;
+            let mut transient_retries = 0_u8;
             let mut recovering = false;
             // UserPromptSubmit hooks may block the turn or inject context.
             let mut prompt_context: Option<String> = None;
@@ -5711,6 +5823,14 @@ impl RunnerTask {
                             compactions_this_turn = compactions_this_turn.saturating_add(1);
                             continue 'provider_round;
                         }
+                        if transient_retries < TRANSIENT_RETRIES
+                            && let Some(delay) = retry_delay(&error_value, transient_retries + 1)
+                        {
+                            transient_retries += 1;
+                            self.wait_before_retry(transient_retries, delay, &error_value)
+                                .await?;
+                            continue 'provider_round;
+                        }
                         return Err(error_value);
                     }
                 };
@@ -5746,6 +5866,18 @@ impl RunnerTask {
                                 && self.recover_context_overflow(&provider, &model).await?
                             {
                                 compactions_this_turn = compactions_this_turn.saturating_add(1);
+                                continue 'provider_round;
+                            }
+                            // Providers report an HTTP failure as the stream's
+                            // first item; nothing has reached the person yet.
+                            if !saw_provider_event
+                                && transient_retries < TRANSIENT_RETRIES
+                                && let Some(delay) =
+                                    retry_delay(&error_value, transient_retries + 1)
+                            {
+                                transient_retries += 1;
+                                self.wait_before_retry(transient_retries, delay, &error_value)
+                                    .await?;
                                 continue 'provider_round;
                             }
                             blocked = Some(error_value);
@@ -10868,6 +11000,68 @@ mod tests {
         assert_eq!(resolved.turn_id, Some(first_turn));
         assert_eq!(resolved.payload["questionId"], "question-1");
         assert_eq!(resolved.payload["resolution"], "answered");
+    }
+
+    #[test]
+    fn busy_or_unreachable_providers_are_retried_but_limits_and_bad_requests_are_not() {
+        let provider = |message: &str| CoreError::Provider(message.into());
+        for retried in [
+            "HTTP 503 Service Unavailable: This model is currently experiencing high demand.",
+            "HTTP 529: overloaded_error",
+            "HTTP 502 Bad Gateway",
+            "error sending request for url (https://api.example/v1/messages)",
+        ] {
+            assert!(
+                super::is_provider_transient(&provider(retried)),
+                "{retried}"
+            );
+        }
+        for failed in [
+            "HTTP 429: rate limit exceeded",
+            "HTTP 400 Bad Request: API key not valid",
+            "HTTP 413 Payload Too Large: maximum context length exceeded",
+        ] {
+            assert!(!super::is_provider_transient(&provider(failed)), "{failed}");
+        }
+        assert!(!super::is_provider_transient(&CoreError::Cancelled));
+        // A per-minute limit that names a short wait is sat out; a daily
+        // quota or an unnamed wait fails the turn with its message.
+        let per_minute = provider(
+            "HTTP 429 Too Many Requests: You exceeded your current quota. \
+             * Quota exceeded for metric: generate_content_free_tier_requests, limit: 5\n\
+             Please retry in 17.197029539s.",
+        );
+        let wait = super::retry_delay(&per_minute, 1).unwrap();
+        assert!((18..=19).contains(&wait.as_secs()), "{wait:?}");
+        assert!(super::retry_delay(&provider("HTTP 429: rate limit exceeded"), 1).is_none());
+        assert!(
+            super::retry_delay(
+                &provider("HTTP 429: quota exceeded. Please retry in 7200s."),
+                1
+            )
+            .is_none()
+        );
+        // A daily quota names hours: never mistaken for seconds.
+        assert!(
+            super::retry_delay(
+                &provider("HTTP 429: limit: 20. Please retry in 21h16m10.222s."),
+                1
+            )
+            .is_none()
+        );
+        assert_eq!(
+            super::advised_wait("1m30s."),
+            Some(std::time::Duration::from_secs(90))
+        );
+        assert_eq!(
+            super::advised_wait("500ms"),
+            Some(std::time::Duration::from_millis(500))
+        );
+        assert_eq!(super::advised_wait("soon"), None);
+        assert_eq!(
+            super::retry_delay(&provider("HTTP 503 Service Unavailable"), 3),
+            Some(std::time::Duration::from_secs(8))
+        );
     }
 
     #[test]
