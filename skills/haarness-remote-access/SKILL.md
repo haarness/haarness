@@ -51,7 +51,7 @@ HAARNESS_REMOTE_E2E=1 HAARNESS_CLOUD_API_URL=http://127.0.0.1:19080 \
 Read [the live script](../../scripts/test-remote-live.py) before running. It is loopback-only; do not relax that guard to stress production. It owns its runtime/registrations and cleanup, and invokes [the TypeScript integration](../../sdks/tests/remote_e2e.mjs). Coverage includes:
 
 - Discovery/hidden files, published root/children and denied siblings/host/terminal operations.
-- 10 MiB binary equality, 200 reads at concurrency 20, 32 held streams then capacity recovery.
+- 10 MiB binary equality, 200 reads at concurrency 20, 48 held streams beside a request (no per-host cap), then reader cleanup.
 - Approved work completing through a disconnect without duplicate effects; project close/reopen and native daemon replacement with fresh endpoint/token discovery.
 - PTY idle keepalive beyond 40 seconds, Python sync/async and TypeScript HTTP/events/PTYs.
 - Session-only publication forgery denial and CLI enable/status/disable/forget/fresh registration.

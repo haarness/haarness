@@ -242,11 +242,11 @@ try:
         == "accepted-once\n"
     )
     proof("approval, disconnect during work, stable reconnect and no mutation replay")
-    # Saturation fails quickly, and abandoned readers release capacity.
+    # Many held streams never crowd out a request, and abandoned readers are released.
     from contextlib import ExitStack
 
     with httpx.Client(timeout=10) as raw, ExitStack() as stack:
-        for n in range(32):
+        for n in range(48):
             response = stack.enter_context(
                 raw.stream(
                     "GET",
@@ -260,10 +260,10 @@ try:
                 runtime.base_url + "/v1/info",
                 headers={"Authorization": "Bearer " + env["HAARNESS_API_KEY"]},
             ).status_code
-            == 429
+            == 200
         )
-    until(lambda: runtime.info(), "capacity was not released")
-    proof("32-stream saturation and abandoned-reader cleanup")
+    until(lambda: runtime.info(), "abandoned readers were not released")
+    proof("48 held streams beside a request, and abandoned-reader cleanup")
     # Close advertisement without deleting history; re-opening retains the same identity.
     host.host_close(pid)
     assert not host.host_projects()["workspaces"]

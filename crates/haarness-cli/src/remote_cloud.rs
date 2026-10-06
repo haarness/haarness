@@ -556,7 +556,6 @@ async fn connected(
                         match serde_json::from_str::<Frame>(&value)? {
                             frame@Frame::Open{id,..}=>{
                                 ensure!(!active.contains_key(&id),"Duplicate relay request");
-                                if active.len()>=32 {send.send(Frame::Error{id,message:"Host request capacity reached".into()}).await?;continue}
                                 let (input,receiver)=mpsc::channel(WINDOW+2);
                                 let credit=Arc::new(Semaphore::new(WINDOW));
                                 let cancel=tokio_util::sync::CancellationToken::new();
