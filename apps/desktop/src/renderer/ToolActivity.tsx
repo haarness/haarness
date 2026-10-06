@@ -73,11 +73,14 @@ export function ToolActivity(props: {
     !waiting() &&
     (status() === "running" || (status() === "pending" && !props.settled));
   // The verb tells the row's state: "Writing" while it runs or waits for
-  // approval, "Wrote" once done, "Tried to write" when it failed or was refused.
+  // approval, "Wrote" once done, "Tried to write" when the tool errored or
+  // was refused. A command that ran and exited non-zero still "Ran".
   const verb = () =>
-    status() === "done"
-      ? shape().verb
-      : status() === "failed" || props.settled
+    props.result
+      ? props.result.is_error
+        ? shape().attempt
+        : shape().verb
+      : props.settled
         ? shape().attempt
         : shape().doing;
   const changes = createMemo(() =>
