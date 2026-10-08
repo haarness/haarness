@@ -57,6 +57,7 @@ Scheduled thread creation accepts optional `schedule: {id, name}`. The scheduler
 - `POST /v1/threads/{id}/goal` for tagged goal lifecycle actions
 - `GET /v1/turns/active`, `GET /v1/turns/{id}`, `POST /interrupt`, `GET /wait`
 - `GET /v1/permissions`, `/v1/questions`; `POST /v1/permissions/{id}`, `/v1/questions/{id}`
+- `GET`/`PUT /v1/threads/{id}/approval-mode` for the chat's Auto/Review setting, which the server applies for every client (see [automatic approvals](AUTO-APPROVALS.md))
 - `POST /v1/mcp/{name}`, `/reconnect`, `/disconnect`, and MCP tool list/call routes
 - `POST /v1/plugins` for install/enable/disable/remove/marketplace actions
 - `GET /v1/workflows`, `/v1/workflows/{invocation}/source`, `/v1/workflows/runs`, and `/v1/workflows/runs/{id}`
@@ -152,6 +153,15 @@ generation is live, and `configuration.reload_failed` when validation rejects
 the candidate. `assets.updated` follows a successful reload and tells clients
 to refresh provider, command, agent, workflow, skill, MCP, and language-service
 catalogs. The `serverInstanceId` does not change during a hot reload.
+A reload follows source content, not file events: rewriting a file unchanged,
+editor scratch files (`*.swp`, `*.swo`, `*.swx`, `*~`, `.#*`, `#*#`, `4913`,
+JetBrains `___jb_tmp___`/`___jb_old___`, `.DS_Store`), folder timestamps, and
+an OAuth token refresh that only rewrites `access`, `refresh`, and `expires` in
+`auth.json` reload nothing. Sources that settle back on the live generation's
+content reload nothing either. A reload keeps each connected MCP server whose
+effective configuration (with `${VAR}` references resolved) is unchanged,
+instead of starting it again. Servers connect concurrently at startup and on
+reload.
 Servers advertise this contract as `configuration-hot-reload.v1` in
 `/v1/info.capabilities`.
 
@@ -226,6 +236,17 @@ server reports `needs_auth` with a non-secret detail until the CLI completes
 the public OAuth authorization-code + PKCE flow. `disconnect` drops the live
 worker and advertised tools without deleting configuration; `reconnect`
 performs initialization and capability discovery again.
+`timeoutMs` (default 30 s) bounds the socket connect, initialization, and tool
+discovery as one deadline, plus a `headersHelper` run. It does not bound tool
+calls or the Streamable HTTP response streams that carry their results; a
+timed-out connection names its limit ("MCP connection timed out after 30 s").
+Tool descriptions are capped at 2048 characters, ending in `… [truncated]`;
+set `HAARNESS_MAX_MCP_DESCRIPTION_LENGTH` to a positive character count to
+change the budget. A tool schema without a root `type` gets `"object"`, as MCP
+requires. Requests to Claude (Anthropic Messages, Bedrock, and Haarness Cloud
+routers) omit any tool whose root input schema has `oneOf`, `anyOf`, or `allOf`,
+or a root `type` other than `object`, which Claude rejects for the whole
+request. A WARN line names each such tool once per process.
 Connected servers expose tool list/call, resource and resource-template lists,
 resource reads, prompt lists, and prompt resolution through the corresponding
 `/v1/mcp/{name}/...` routes. Unsupported prompt/resource capabilities return

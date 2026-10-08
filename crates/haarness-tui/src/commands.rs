@@ -2156,9 +2156,9 @@ impl App {
             }
 
             "permissions-mode" => match arguments.trim() {
-                "auto" => self.set_auto_permissions(true),
-                "review" | "normal" => self.set_auto_permissions(false),
-                "" => self.set_auto_permissions(!self.auto_permissions),
+                "auto" => self.change_approval_mode(true, client).await,
+                "review" | "normal" => self.change_approval_mode(false, client).await,
+                "" => self.change_approval_mode(!self.auto_permissions, client).await,
                 _ => self.notice = "Usage: /permissions-mode [review|auto]".into(),
             },
             "new" if self.is_untouched_session() => {
@@ -2175,6 +2175,17 @@ impl App {
                     ultracode: None,
                 };
                 let thread = client.create_thread(request).await?;
+                // A new chat starts in the open chat's mode, as it would
+                // have when Auto belonged to the TUI rather than the chat.
+                if self.approval_server && self.auto_permissions {
+                    let auto = haarness_protocol::SetApprovalModeRequest {
+                        mode: haarness_protocol::ApprovalModeSetting::Auto,
+                        revision: None,
+                    };
+                    if let Err(error) = client.set_approval_mode(thread.id, &auto).await {
+                        tracing::warn!(%error, "could not start the new chat in Auto");
+                    }
+                }
                 self.refresh_threads(client).await?;
                 self.switch_thread(thread, client).await?;
             }
@@ -3781,7 +3792,9 @@ impl App {
                     provider: None,
                     model: None,
                     reasoning_effort: self.reasoning_effort.clone(),
-                    tools: None,
+                    // A terminal shows no file previews; saying so keeps a
+                    // Desktop chat's preview tool out of terminal turns.
+                    tools: Some(std::collections::HashMap::from([("preview".into(), false)])),
                     command: None,
                 },
             )
@@ -3933,7 +3946,8 @@ impl App {
             .queue_input(
                 self.thread.id,
                 haarness_protocol::QueueInputRequest {
-                    preview: false,
+                    preview: Some(false),
+                    reasoning_effort: self.reasoning_effort.clone(),
                     delivery: haarness_protocol::InputDelivery::Steer,
                     request_id: haarness_protocol::RequestId::new(),
                     text,

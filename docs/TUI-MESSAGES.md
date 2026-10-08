@@ -68,3 +68,15 @@ was unfocused). Ambient facts — input cleared, text copied, a provider
 connected, a reconnect, a task being stopped — are written to the status line
 under the composer instead. Desktop notifications follow the same rule: they
 are sent only while the terminal is unfocused.
+
+"Finished" means the turn completed. A **finished** card and banner wait half a
+second (`state::completion`, the same grace as Desktop) because the daemon
+starts the next queued prompt as a new turn moments after the last one ends; if
+the conversation starts another turn inside that grace, nothing is announced,
+and the last turn of a queue is judged by how long the whole queue took (work
+of 20 seconds or more in the open conversation earns one). A failed turn says
+**Haarness failed: …** at once (a card only while unfocused, or for another
+session), and a stopped turn says nothing.
+
+A custom status-line command that keeps failing logs one WARN per distinct
+error, DEBUG while the same error repeats, and INFO when it recovers.

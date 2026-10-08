@@ -41,6 +41,21 @@
   gap: var(--s3);
   align-items: center;
 }
+/* An archived chat says so where it starts, beside the one action that
+   undoes it; the control stays as quiet as the sentence. */
+.archived-notice {
+  gap: var(--s2);
+}
+.archived-notice > .icon {
+  flex: none;
+}
+.archived-notice > button {
+  flex: none;
+  min-height: var(--control-sm);
+  padding: 0 var(--s3);
+  margin-inline-start: var(--s1);
+  font-size: var(--ui-xs);
+}
 @media (max-width: 600px) {
   .conversation-find-controls {
     flex-wrap: wrap;

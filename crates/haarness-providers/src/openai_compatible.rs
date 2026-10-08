@@ -1188,6 +1188,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
             mark_prompt_cache(&mut messages);
         }
         let mut requested_tools = request.tools;
+        // Haarness routers pass a Claude request's parameters to Anthropic as its input schema.
+        if self.server_output_limit {
+            crate::tool_schema::retain_claude_compatible(&model, &mut requested_tools);
+        }
         if let Some(schema) = structured_output.as_ref() {
             requested_tools.retain(|tool| tool.name != STRUCTURED_OUTPUT_TOOL_NAME);
             requested_tools.push(structured_output_tool(schema));
@@ -1993,6 +1997,79 @@ mod tests {
             marked(&requests[1]).iter().all(|marked| !marked),
             "only Anthropic accepts cache_control"
         );
+    }
+
+    /// A Haarness router hands a Claude request's tool parameters to Anthropic
+    /// as `input_schema`, so it fails on the same root schemas.
+    #[tokio::test]
+    async fn routed_claude_requests_omit_tools_whose_root_schema_claude_rejects() {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route("/chat/completions", post(completions_recording_headers))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let models = vec![
+            "anthropic/claude-sonnet-5.5".into(),
+            "openai/gpt-6.1-sol".into(),
+        ];
+        let instance = |id: &str, server_output_limit: bool| CompatibleInstance {
+            id: id.into(),
+            name: id.into(),
+            base_url: format!("http://{address}"),
+            api_key: None,
+            models: models.clone(),
+            discover_models: false,
+            server_output_limit,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: true,
+            headers: crate::ProviderHeaders::default(),
+        };
+        let tools = vec![
+            ToolDefinition {
+                name: "plain".into(),
+                description: "plain".into(),
+                input_schema: json!({"type": "object"}),
+            },
+            ToolDefinition {
+                name: "mcp__fixture__either".into(),
+                description: "either".into(),
+                input_schema: json!({"type": "object", "anyOf": [{"required": ["a"]}, {"required": ["b"]}]}),
+            },
+        ];
+        for (provider, model) in [
+            ("router", "anthropic/claude-sonnet-5.5"),
+            ("router", "openai/gpt-6.1-sol"),
+            ("openrouter", "anthropic/claude-sonnet-5.5"),
+        ] {
+            let provider = OpenAiCompatibleProvider::new(instance(provider, provider == "router"));
+            let request = ProviderRequest {
+                model: model.into(),
+                system: "sys".into(),
+                messages: vec![ProviderMessage::Text {
+                    role: "user".into(),
+                    content: "list".into(),
+                }],
+                tools: tools.clone(),
+                reasoning_effort: None,
+                output_schema: None,
+                parameters: haarness_core::RequestParameters::default(),
+            };
+            let events = provider
+                .stream(request, CancellationToken::new())
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            assert!(events.iter().all(Result::is_ok));
+        }
+        let requests = state.0.lock();
+        let count = |request: &Value| request["tools"].as_array().map_or(0, Vec::len);
+        assert_eq!(count(&requests[0]), 1);
+        assert_eq!(requests[0]["tools"][0]["function"]["name"], "plain");
+        assert_eq!(count(&requests[1]), 2);
+        assert_eq!(count(&requests[2]), 2, "only Haarness routers are filtered");
     }
 
     #[tokio::test]

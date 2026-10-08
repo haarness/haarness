@@ -4266,7 +4266,8 @@ async fn queued_input_during_summarization_cancels_compaction_until_exact_delive
         .queue_input(
             thread.id,
             haarness_protocol::QueueInputRequest {
-                preview: false,
+                preview: None,
+                reasoning_effort: None,
                 delivery: haarness_protocol::InputDelivery::Steer,
                 request_id: RequestId::new(),
                 text: exact_steering.into(),
@@ -4600,7 +4601,8 @@ async fn rest_compaction_rejects_active_turn_and_preserves_queued_steering() {
         .queue_input(
             thread.id,
             haarness_protocol::QueueInputRequest {
-                preview: false,
+                preview: None,
+                reasoning_effort: None,
                 delivery: haarness_protocol::InputDelivery::Steer,
                 request_id: RequestId::new(),
                 text: exact_steering.into(),
@@ -6745,7 +6747,8 @@ async fn queued_message_during_text_stream_runs_in_a_follow_up_round() {
         .queue_input(
             thread.id,
             haarness_protocol::QueueInputRequest {
-                preview: false,
+                preview: None,
+                reasoning_effort: None,
                 delivery: haarness_protocol::InputDelivery::Steer,
                 request_id: RequestId::new(),
                 text: "arrived during streaming".into(),
@@ -6812,7 +6815,8 @@ async fn queued_message_steers_into_running_turn() {
         .queue_input(
             thread.id,
             haarness_protocol::QueueInputRequest {
-                preview: false,
+                preview: None,
+                reasoning_effort: None,
                 delivery: haarness_protocol::InputDelivery::Steer,
                 request_id: RequestId::new(),
                 text: "hi".into(),
@@ -6902,7 +6906,8 @@ async fn queue_input_on_idle_thread_starts_a_turn() {
         .queue_input(
             thread.id,
             haarness_protocol::QueueInputRequest {
-                preview: false,
+                preview: None,
+                reasoning_effort: None,
                 delivery: haarness_protocol::InputDelivery::Steer,
                 request_id: RequestId::new(),
                 text: "hello there".into(),
@@ -7814,7 +7819,8 @@ async fn queued_goal_steering_tool_followup_keeps_current_doctrine() {
         .queue_input(
             thread.id,
             haarness_protocol::QueueInputRequest {
-                preview: false,
+                preview: None,
+                reasoning_effort: None,
                 delivery: haarness_protocol::InputDelivery::Steer,
                 request_id: RequestId::new(),
                 text: "steer through the status tool".into(),
@@ -8488,7 +8494,8 @@ async fn replacing_a_goal_mid_turn_resets_the_goal_boundary() {
         .queue_input(
             thread.id,
             haarness_protocol::QueueInputRequest {
-                preview: false,
+                preview: None,
+                reasoning_effort: None,
                 delivery: haarness_protocol::InputDelivery::Steer,
                 request_id: RequestId::new(),
                 text: "begin the new objective".into(),
@@ -9213,7 +9220,8 @@ impl DeferredGate {
 }
 fn deferred_request(text: &str) -> haarness_protocol::QueueInputRequest {
     haarness_protocol::QueueInputRequest {
-        preview: false,
+        preview: None,
+        reasoning_effort: None,
         delivery: haarness_protocol::InputDelivery::Queue,
         request_id: RequestId::new(),
         text: text.into(),
@@ -10148,4 +10156,315 @@ async fn preview_tool_and_prompt_are_opt_in_for_graphical_turns() {
     assert!(!request.tools.iter().any(|tool| tool.name == "preview"));
     assert!(!request.system.contains("The user's client can preview"));
     std::fs::remove_dir_all(workspace).unwrap();
+}
+
+#[tokio::test]
+async fn a_chat_keeps_its_preview_setting_when_a_client_does_not_say() {
+    let workspace =
+        std::env::temp_dir().join(format!("haarness-preview-sticky-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let provider = Capturing::default();
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(NativeToolRegistry::new(workspace.clone())),
+        EventBus::new(64),
+        workspace.clone(),
+        String::new(),
+        RuntimeConfig::default(),
+    );
+    let thread = echo_thread(&runtime).await;
+    // Desktop says yes, a phone says nothing, the terminal says no, then the
+    // phone again: each silent turn matches the turn before it.
+    for (preview, expected) in [
+        (Some(true), true),
+        (None, true),
+        (Some(false), false),
+        (None, false),
+    ] {
+        let mut request = turn_request("Return an answer");
+        request.tools =
+            preview.map(|enabled| std::collections::HashMap::from([("preview".into(), enabled)]));
+        let turn = runtime.start_turn(thread.id, request).await.unwrap();
+        wait_done(&runtime, &turn).await;
+        wait_idle(&runtime, thread.id).await;
+        let requests = provider.requests.lock().unwrap();
+        let request = requests.last().unwrap();
+        assert_eq!(
+            request.tools.iter().any(|tool| tool.name == "preview"),
+            expected,
+            "{preview:?}"
+        );
+    }
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+fn effort_runtime(workspace: &std::path::Path) -> (AgentRuntime, Capturing) {
+    let provider = Capturing::with_reasoning_efforts(&["low", "high"]);
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(NativeToolRegistry::new(workspace.to_path_buf())),
+        EventBus::new(256),
+        workspace.to_path_buf(),
+        String::new(),
+        RuntimeConfig::default(),
+    );
+    (runtime, provider)
+}
+
+fn queued(text: &str, effort: Option<&str>) -> haarness_protocol::QueueInputRequest {
+    haarness_protocol::QueueInputRequest {
+        preview: None,
+        reasoning_effort: effort.map(str::to_owned),
+        delivery: haarness_protocol::InputDelivery::Steer,
+        request_id: RequestId::new(),
+        text: text.into(),
+        attachments: Vec::new(),
+        synthetic: false,
+    }
+}
+
+#[tokio::test]
+async fn queued_and_deferred_turns_keep_the_chats_reasoning_effort() {
+    let workspace =
+        std::env::temp_dir().join(format!("haarness-effort-carry-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let (runtime, provider) = effort_runtime(&workspace);
+    let thread = echo_thread(&runtime).await;
+    let last_effort = || {
+        provider
+            .requests
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .reasoning_effort
+            .clone()
+    };
+    let mut request = turn_request("First prompt");
+    request.reasoning_effort = Some("high".into());
+    let turn = runtime.start_turn(thread.id, request).await.unwrap();
+    wait_done(&runtime, &turn).await;
+    wait_idle(&runtime, thread.id).await;
+    assert_eq!(last_effort().as_deref(), Some("high"));
+
+    // A message sent without an effort (a phone, an older client) keeps it.
+    let response = runtime
+        .queue_input(thread.id, queued("No effort given", None))
+        .await
+        .unwrap();
+    wait_done(&runtime, response.turn.as_ref().unwrap()).await;
+    wait_idle(&runtime, thread.id).await;
+    assert_eq!(last_effort().as_deref(), Some("high"));
+
+    // One that says which effort it wants gets it.
+    let response = runtime
+        .queue_input(thread.id, queued("Low please", Some("low")))
+        .await
+        .unwrap();
+    wait_done(&runtime, response.turn.as_ref().unwrap()).await;
+    wait_idle(&runtime, thread.id).await;
+    assert_eq!(last_effort().as_deref(), Some("low"));
+
+    // A deferred message carries its own effort through the queue.
+    let mut deferred = queued("Deferred", Some("high"));
+    deferred.delivery = haarness_protocol::InputDelivery::Queue;
+    runtime.queue_input(thread.id, deferred).await.unwrap();
+    wait_drained(&runtime, thread.id).await;
+    assert_eq!(last_effort().as_deref(), Some("high"));
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+#[tokio::test]
+async fn auto_approves_once_without_a_prompt_and_review_asks() {
+    let workspace =
+        std::env::temp_dir().join(format!("haarness-approval-auto-{}", uuid::Uuid::now_v7()));
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    let (_store, runtime) = workspace_runtime(&workspace);
+    let thread = echo_thread(&runtime).await;
+    let initial = runtime.approval_mode(thread.id).await.unwrap();
+    assert_eq!(initial.mode, haarness_protocol::ApprovalMode::Review);
+    assert!(!initial.explicit);
+    let auto = runtime
+        .set_approval_mode(
+            thread.id,
+            haarness_protocol::SetApprovalModeRequest {
+                mode: haarness_protocol::ApprovalModeSetting::Auto,
+                revision: Some(initial.revision.clone()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(auto.mode, haarness_protocol::ApprovalMode::Auto);
+    assert!(auto.explicit);
+    assert_ne!(auto.revision, initial.revision);
+
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(r#"!tool write {"path":"auto.txt","content":"hi"}"#),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wait_done(&runtime, &turn).await.status, TurnStatus::Completed);
+    assert_eq!(std::fs::read_to_string(workspace.join("auto.txt")).unwrap(), "hi");
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item.data, haarness_protocol::ItemData::PermissionRequest { .. })),
+        "Auto must not show a prompt"
+    );
+    // Auto answers once; it never remembers a rule.
+    runtime
+        .set_approval_mode(
+            thread.id,
+            haarness_protocol::SetApprovalModeRequest {
+                mode: haarness_protocol::ApprovalModeSetting::Review,
+                revision: None,
+            },
+        )
+        .await
+        .unwrap();
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(r#"!tool write {"path":"auto.txt","content":"again"}"#),
+        )
+        .await
+        .unwrap();
+    let permission = wait_permission(&runtime, thread.id).await;
+    runtime
+        .reply_permission(
+            &permission,
+            haarness_protocol::PermissionReply {
+                decision: haarness_protocol::PermissionReplyDecision::Reject,
+                feedback: None,
+            },
+        )
+        .await
+        .unwrap();
+    wait_done(&runtime, &turn).await;
+    assert_eq!(std::fs::read_to_string(workspace.join("auto.txt")).unwrap(), "hi");
+
+    // A change made from a stale view is refused.
+    let stale = runtime
+        .set_approval_mode(
+            thread.id,
+            haarness_protocol::SetApprovalModeRequest {
+                mode: haarness_protocol::ApprovalModeSetting::Auto,
+                revision: Some(auto.revision),
+            },
+        )
+        .await;
+    assert!(matches!(stale, Err(CoreError::Conflict(_))), "{stale:?}");
+    tokio::fs::remove_dir_all(workspace).await.unwrap();
+}
+
+#[tokio::test]
+async fn turning_auto_on_answers_requests_already_waiting() {
+    let workspace =
+        std::env::temp_dir().join(format!("haarness-approval-release-{}", uuid::Uuid::now_v7()));
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    let (_store, runtime) = workspace_runtime(&workspace);
+    let thread = echo_thread(&runtime).await;
+    let other = echo_thread(&runtime).await;
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(r#"!tool write {"path":"waiting.txt","content":"hi"}"#),
+        )
+        .await
+        .unwrap();
+    let other_turn = runtime
+        .start_turn(
+            other.id,
+            turn_request(r#"!tool write {"path":"other.txt","content":"hi"}"#),
+        )
+        .await
+        .unwrap();
+    wait_pending_permissions(&runtime, 2).await;
+    runtime
+        .set_approval_mode(
+            thread.id,
+            haarness_protocol::SetApprovalModeRequest {
+                mode: haarness_protocol::ApprovalModeSetting::Auto,
+                revision: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(wait_done(&runtime, &turn).await.status, TurnStatus::Completed);
+    assert!(workspace.join("waiting.txt").exists());
+    // Another chat in Review keeps its prompt.
+    let pending = runtime.pending_permissions();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].thread_id, other.id);
+    assert!(
+        runtime.events().subscribe(None).replay.iter().any(|event| {
+            event.event_type == "approval_mode.changed"
+                && event.thread_id == Some(thread.id)
+                && event.payload["mode"] == "auto"
+        }),
+        "clients hear about the change"
+    );
+    runtime.interrupt(other_turn.id).await.unwrap();
+    tokio::fs::remove_dir_all(workspace).await.unwrap();
+}
+
+#[tokio::test]
+async fn delegated_agents_follow_the_chats_mode_and_forks_keep_their_own() {
+    let workspace =
+        std::env::temp_dir().join(format!("haarness-approval-child-{}", uuid::Uuid::now_v7()));
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    let (runtime, _) = p0_runtime(&workspace, false);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Fixture".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    runtime
+        .set_approval_mode(
+            thread.id,
+            haarness_protocol::SetApprovalModeRequest {
+                mode: haarness_protocol::ApprovalModeSetting::Auto,
+                revision: None,
+            },
+        )
+        .await
+        .unwrap();
+    let turn = runtime
+        .start_turn(thread.id, turn_request(&tasks_prompt(1, "true")))
+        .await
+        .unwrap();
+    assert_eq!(wait_done(&runtime, &turn).await.status, TurnStatus::Completed);
+    assert!(runtime.pending_permissions().is_empty());
+    let child = runtime
+        .list_threads(true)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.is_subagent && item.parent_id == Some(thread.id))
+        .expect("the task ran in a child chat");
+    let inherited = runtime.approval_mode(child.id).await.unwrap();
+    assert_eq!(inherited.mode, haarness_protocol::ApprovalMode::Auto);
+    assert_eq!(inherited.source_thread_id, thread.id);
+    let fork = runtime
+        .fork_thread(thread.id, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime.approval_mode(fork.id).await.unwrap().mode,
+        haarness_protocol::ApprovalMode::Review
+    );
+    tokio::fs::remove_dir_all(workspace).await.unwrap();
 }

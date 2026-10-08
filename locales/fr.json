@@ -1681,5 +1681,10 @@
   "Stopped sharing. This chat stays on this computer.": "Partage arrêté. Cette discussion reste sur cet ordinateur.",
   "This chat keeps running on this computer, with its files and model keys, until you stop sharing.": "Cette discussion continue de s’exécuter sur cet ordinateur, avec ses fichiers et ses clés de fournisseur, jusqu’à ce que vous arrêtiez le partage.",
   "Use /remote-control, /remote-control status or /remote-control stop.": "Utilisez /remote-control, /remote-control status ou /remote-control stop.",
-  "on {computer}": "sur {computer}"
+  "on {computer}": "sur {computer}",
+  "This chat is archived. Sending a message restores it.": "Cette discussion est archivée. Envoyer un message la restaure.",
+  "Approvals changed in another window. Try again.": "Les approbations ont changé dans une autre fenêtre. Réessayez.",
+  "Auto on for this chat · requests are allowed once · ctrl+y to review": "Automatique activé pour cette conversation · demandes autorisées une fois · ctrl+y pour la revue",
+  "Review · this chat asks before acting · ctrl+y for Auto": "Revue · cette conversation demande avant d’agir · ctrl+y pour l’automatique",
+  "Approvals changed in another window · ctrl+y to switch": "Approbations modifiées dans une autre fenêtre · ctrl+y pour basculer"
 }

@@ -393,7 +393,8 @@ async fn reliability_input_arriving_during_failure_hook_starts_a_fresh_turn() {
                 .queue_input(
                     thread.id,
                     haarness_protocol::QueueInputRequest {
-                        preview: false,
+                        preview: None,
+                        reasoning_effort: None,
                         delivery: haarness_protocol::InputDelivery::Steer,
                         request_id: haarness_protocol::RequestId::new(),
                         text: "follow up during cleanup".into(),

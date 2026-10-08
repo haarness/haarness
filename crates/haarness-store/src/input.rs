@@ -276,7 +276,8 @@ mod tests {
     use super::*;
     fn message(text: &str) -> PendingInput {
         PendingInput {
-            preview: false,
+            preview: None,
+            reasoning_effort: None,
             id: RequestId::new(),
             text: text.into(),
             attachments: vec!["data:text/plain;base64,dGVzdA==".into()],
@@ -295,7 +296,7 @@ mod tests {
             .await
             .unwrap();
         let mut original = message("first admission");
-        original.preview = true;
+        original.preview = Some(true);
         let q = store
             .enqueue_input(thread.id, original.clone())
             .await
@@ -316,7 +317,7 @@ mod tests {
         let store = SqliteStore::open(&path).unwrap();
         let q = store.input_queue(thread.id).await.unwrap();
         assert_eq!(q.items[0].attachments, original.attachments);
-        assert!(q.items[0].preview);
+        assert_eq!(q.items[0].preview, Some(true));
         let q = store
             .change_input_queue(
                 thread.id,
@@ -330,7 +331,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(q.items[0].attachments, original.attachments);
-        assert!(q.items[0].preview);
+        assert_eq!(q.items[0].preview, Some(true));
         store
             .change_input_queue(
                 thread.id,

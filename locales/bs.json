@@ -1681,5 +1681,10 @@
   "Stopped sharing. This chat stays on this computer.": "Dijeljenje zaustavljeno. Ovaj razgovor ostaje na ovom računaru.",
   "This chat keeps running on this computer, with its files and model keys, until you stop sharing.": "Ovaj razgovor nastavlja raditi na ovom računaru, sa svojim datotekama i ključevima za modele, dok ne prestanete dijeliti.",
   "Use /remote-control, /remote-control status or /remote-control stop.": "Koristite /remote-control, /remote-control status ili /remote-control stop.",
-  "on {computer}": "na {computer}"
+  "on {computer}": "na {computer}",
+  "This chat is archived. Sending a message restores it.": "Ovaj razgovor je arhiviran. Slanjem poruke vraćate ga.",
+  "Approvals changed in another window. Try again.": "Odobrenja su promijenjena u drugom prozoru. Pokušajte ponovo.",
+  "Auto on for this chat · requests are allowed once · ctrl+y to review": "Automatski način uključen za ovaj chat · zahtjevi su dozvoljeni jednom · ctrl+y za pregled",
+  "Review · this chat asks before acting · ctrl+y for Auto": "Pregled · ovaj chat pita prije djelovanja · ctrl+y za automatski način",
+  "Approvals changed in another window · ctrl+y to switch": "Odobrenja su promijenjena u drugom prozoru · ctrl+y za prebacivanje"
 }

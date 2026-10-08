@@ -618,6 +618,47 @@ test("sidebar flat and project session orders stay independent through archive, 
   await expect(project("alpha").locator(".session-title")).toHaveText(["One", "Two"]);
 });
 
+test("sidebar an archived chat says so in the chat; Restore or a new message returns it to the sidebar", async () => {
+  const alpha = await open("alpha");
+  const thread = await alpha.createThread({ title: "Shelved idea", provider: "echo", model: "echo-1" });
+  await alpha.waitTurn((await alpha.startTurn(thread.id, { text: "first thought", requestId: crypto.randomUUID() })).id);
+  const row = () => project("alpha").getByRole("button", { name: "Shelved idea", exact: true });
+  const notice = page.locator(".conversation .archived-notice");
+  await row().click();
+  await expect(page.locator(".transcript")).toContainText("first thought");
+  await expect(notice).toHaveCount(0);
+  await project("alpha").getByRole("button", { name: "Archive session Shelved idea", exact: true }).click();
+  await expect(row()).toHaveCount(0);
+  await expect.poll(() => alpha.getThread(thread.id).then(value => value.archived)).toBe(true);
+
+  // Search is the way back in; opening the chat does not restore it by itself.
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("Shelved");
+  await page.getByRole("option", { name: "Shelved idea", exact: true }).click();
+  await expect(page.locator(".transcript")).toContainText("first thought");
+  await expect(notice).toHaveText("This chat is archived. Sending a message restores it.Restore");
+  await expect(notice).toHaveAttribute("role", "status");
+  await expect(row()).toHaveCount(0);
+  expect((await alpha.getThread(thread.id)).archived).toBe(true);
+  await page.screenshot({ path: test.info().outputPath("archived-chat.png") });
+  await notice.getByRole("button", { name: "Restore", exact: true }).click();
+  await expect(notice).toHaveCount(0);
+  await expect(row()).toBeVisible();
+  await expect(row()).toHaveAttribute("aria-current", "true");
+  expect((await alpha.getThread(thread.id)).archived).toBe(false);
+
+  // Archived elsewhere while open: the notice follows, and continuing the chat restores it.
+  await alpha.updateThread(thread.id, { archived: true });
+  await expect(notice).toBeVisible();
+  await expect(row()).toHaveCount(0);
+  await page.getByRole("textbox", { name: "Message", exact: true }).fill("second thought");
+  await page.getByRole("button", { name: /Send message|Send guidance/ }).click();
+  await expect(page.locator(".transcript")).toContainText("Echo: second thought");
+  await expect(notice).toHaveCount(0);
+  await expect(row()).toBeVisible();
+  expect((await alpha.getThread(thread.id)).archived).toBe(false);
+});
+
 test("sidebar removing a section's last project hides its heading and reopening restores its presentation", async () => {
   const alpha = await open("alpha");
   const thread = await alpha.createThread({ title: "Retained chat", provider: "echo", model: "echo-1" });

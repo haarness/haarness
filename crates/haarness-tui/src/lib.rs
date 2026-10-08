@@ -466,6 +466,7 @@ async fn run_with_client(
     let (statusline_context, mut statusline_rx, statusline_task) =
         statusline::spawn(statusline_config);
     let _ = statusline_context.send(statusline::Context::from_app(&app));
+    let mut statusline_failures = statusline::FailureLog::default();
     let mut billing = haarness_account::Config::from_env()
         .and_then(haarness_account::Client::new)
         .map(haarness_account::billing::watch)
@@ -795,10 +796,18 @@ async fn run_with_client(
             },
             Some(update) = statusline_rx.recv() => {
                 match update {
-                    statusline::Update::Output(value) => app.custom_status_line = Some(value),
-                    statusline::Update::Error(error) => {
-                        tracing::warn!(%error, "custom status line command failed");
+                    statusline::Update::Output(value) => {
+                        if let Some(error) = statusline_failures.recovered() {
+                            tracing::info!(%error, "custom status line command recovered");
+                        }
+                        app.custom_status_line = Some(value);
                     }
+                    statusline::Update::Error(error) => match statusline_failures.failed(&error) {
+                        statusline::LogLevel::Warn => {
+                            tracing::warn!(%error, "custom status line command failed");
+                        }
+                        _ => tracing::debug!(%error, "custom status line command still failing"),
+                    },
                 }
             },
             () = async {
@@ -826,6 +835,7 @@ async fn run_with_client(
                 app.tick = app.tick.wrapping_add(1);
                 let _ = statusline_context.send(statusline::Context::from_app(&app));
                 app.expire_notification();
+                app.release_completions(std::time::Instant::now());
                 app.reveal_goal_completion();
                 if matches!(app.overlay, state::Overlay::ProviderLogin) {
                     if let Err(error) = app.poll_login(&client).await {

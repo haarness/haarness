@@ -82,6 +82,8 @@
 | `compact` | `compact` | `POST /v1/threads/{id}/compact` |
 | `get_goal` | `getGoal` | `GET /v1/threads/{id}/goal` |
 | `set_goal` | `setGoal` | `POST /v1/threads/{id}/goal` |
+| `get_approval_mode` | `getApprovalMode` | `GET /v1/threads/{id}/approval-mode` |
+| `set_approval_mode` | `setApprovalMode` | `PUT /v1/threads/{id}/approval-mode` |
 | `get_loop` | `getLoop` | `GET /v1/threads/{id}/loop` |
 | `set_loop` | `setLoop` | `POST /v1/threads/{id}/loop` |
 | `thread_usage` | `threadUsage` | `GET /v1/threads/{id}/usage` |

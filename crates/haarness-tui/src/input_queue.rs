@@ -28,7 +28,8 @@ impl App {
             .queue_input(
                 self.thread.id,
                 QueueInputRequest {
-                    preview: false,
+                    preview: Some(false),
+                    reasoning_effort: self.reasoning_effort.clone(),
                     delivery: InputDelivery::Queue,
                     request_id: RequestId::new(),
                     text,

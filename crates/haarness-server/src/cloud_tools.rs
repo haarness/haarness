@@ -1,9 +1,46 @@
 //! Cloud tool schemas stay at the server boundary; account credentials belong to the host adapter.
 use crate::ManagementRegistry;
 use async_trait::async_trait;
-use haarness_core::{CoreResult, Tool, ToolContext, ToolDefinition, ToolOutput};
+use haarness_core::{
+    CoreResult, PermissionDecision, Tool, ToolContext, ToolDefinition, ToolOutput,
+};
 use serde_json::{Value, json};
 use std::sync::Arc;
+
+/// Read-only actions of each Cloud tool, mirroring the plan agent's Cloud
+/// ceiling. Every other action can start billable compute, submit remote work,
+/// or change or delete Cloud resources.
+// Actions that follow ordinary permission rules: reads, and changes that
+// spend nothing or reduce spending (stopping, interrupting, pausing, titles,
+// archiving, an empty chat). The plan agent's read-only ceiling still denies
+// every one that is not a read.
+const MANAGE_QUIET: &[&str] = &["list", "get", "models", "ssh_public_key"];
+const SESSION_QUIET: &[&str] = &[
+    "list",
+    "get",
+    "ssh_public_key",
+    "messages",
+    "wait",
+    "stop",
+    "abort",
+    "rename",
+    "archive",
+];
+const CHAT_QUIET: &[&str] = &[
+    "list", "get", "messages", "wait", "create", "rename", "archive", "abort",
+];
+const SCHEDULE_QUIET: &[&str] = &["list", "get", "history", "pause"];
+
+/// Cloud actions that spend money or remove or replace something always ask:
+/// the permissive default profile, yolo, Auto, session rules and hook
+/// pre-approvals cannot skip the prompt, and no "Always" is offered. An
+/// explicit deny rule still wins. A missing or unknown action asks.
+fn cloud_constraint(quiet: &[&str], arguments: &Value) -> Option<PermissionDecision> {
+    let ordinary = arguments["action"]
+        .as_str()
+        .is_some_and(|action| quiet.contains(&action));
+    (!ordinary).then_some(PermissionDecision::Ask)
+}
 
 pub(crate) struct CloudTool {
     session: bool,
@@ -77,6 +114,16 @@ impl Tool for CloudTool {
             Some("list" | "get" | "models" | "ssh_public_key" | "messages" | "wait")
         )
     }
+    fn permission_constraint(&self, args: &Value, _operation: &str) -> Option<PermissionDecision> {
+        cloud_constraint(
+            if self.session {
+                SESSION_QUIET
+            } else {
+                MANAGE_QUIET
+            },
+            args,
+        )
+    }
     async fn execute(&self, args: Value, context: ToolContext) -> CoreResult<ToolOutput> {
         self.registry.execute(self.name(), args, context).await
     }
@@ -132,6 +179,9 @@ impl Tool for CloudChatTool {
             Some("list" | "get" | "messages" | "wait")
         )
     }
+    fn permission_constraint(&self, args: &Value, _operation: &str) -> Option<PermissionDecision> {
+        cloud_constraint(CHAT_QUIET, args)
+    }
     async fn execute(&self, args: Value, context: ToolContext) -> CoreResult<ToolOutput> {
         self.0.execute("cloud_chat", args, context).await
     }
@@ -159,7 +209,378 @@ impl Tool for CloudScheduleTool {
     fn parallel_safe(&self, args: &Value) -> bool {
         matches!(args["action"].as_str(), Some("list" | "get" | "history"))
     }
+    fn permission_constraint(&self, args: &Value, _operation: &str) -> Option<PermissionDecision> {
+        cloud_constraint(SCHEDULE_QUIET, args)
+    }
     async fn execute(&self, args: Value, context: ToolContext) -> CoreResult<ToolOutput> {
         self.0.execute("cloud_schedule", args, context).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::NativeToolRegistry;
+    use futures::stream;
+    use haarness_core::{
+        AgentRuntime, EventBus, HookDecision, HookPort, ModelProvider, PermissionEngine,
+        PermissionRule, ProviderEvent, ProviderMessage, ProviderRequest, ProviderStream,
+        RuntimeConfig, StaticProviderRegistry, ToolRegistry,
+    };
+    use haarness_protocol::{
+        CreateThreadRequest, PermissionReply, PermissionReplyDecision, ProviderInfo, RequestId,
+        StartTurnRequest, ThreadId, TurnStatus,
+    };
+    use haarness_store::SqliteStore;
+    use std::sync::Mutex;
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+
+    const CLOUD_TOOLS: [&str; 4] = [
+        "cloud_agent_manage",
+        "cloud_agent_session",
+        "cloud_chat",
+        "cloud_schedule",
+    ];
+
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<String>>);
+
+    impl Recorder {
+        fn calls(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl ManagementRegistry for Recorder {
+        async fn execute(
+            &self,
+            resource: &str,
+            arguments: Value,
+            _context: ToolContext,
+        ) -> CoreResult<ToolOutput> {
+            self.0.lock().unwrap().push(format!(
+                "{resource}:{}",
+                arguments["action"].as_str().unwrap_or_default()
+            ));
+            Ok(ToolOutput {
+                text: "ok".into(),
+                metadata: json!({}),
+            })
+        }
+    }
+
+    #[test]
+    fn spending_or_destructive_cloud_actions_always_ask() {
+        let registry = NativeToolRegistry::new(std::path::PathBuf::from("/workspace"))
+            .with_management(Arc::new(Recorder::default()));
+        let plan = PermissionEngine::plan_defaults();
+        for name in CLOUD_TOOLS {
+            let tool = registry.get(name).expect("Cloud tool registered");
+            let definition = tool.definition();
+            let actions = definition.input_schema["properties"]["action"]["enum"]
+                .as_array()
+                .unwrap();
+            for action in actions.iter().filter_map(Value::as_str) {
+                let operation = format!("{name}:{action}:target");
+                let constraint =
+                    tool.permission_constraint(&json!({"action": action}), &operation);
+                // Every plan-readable action is quiet; nothing else is a read.
+                if plan.evaluate(&operation) == PermissionDecision::Allow {
+                    assert_eq!(constraint, None, "{operation}");
+                }
+                let spends = matches!(
+                    action,
+                    "create" | "start" | "ask" | "delete" | "update" | "save_agent" | "run"
+                        | "resume"
+                ) && !(name == "cloud_chat" && action == "create");
+                assert_eq!(
+                    constraint,
+                    spends.then_some(PermissionDecision::Ask),
+                    "{operation}"
+                );
+            }
+            for unknown in [
+                json!({}),
+                json!({"action": "invented"}),
+                json!({"action": 1}),
+            ] {
+                assert_eq!(
+                    tool.permission_constraint(&unknown, name),
+                    Some(PermissionDecision::Ask)
+                );
+            }
+        }
+    }
+
+    /// Calls the tool named in the prompt (`!cloud <tool> <json>`), then answers.
+    struct Scripted;
+
+    #[async_trait]
+    impl ModelProvider for Scripted {
+        fn id(&self) -> &str {
+            "fixture"
+        }
+        fn info(&self) -> ProviderInfo {
+            ProviderInfo {
+                id: "fixture".into(),
+                name: "Cloud approval fixture".into(),
+                authenticated: true,
+                models: vec![],
+            }
+        }
+        async fn stream(
+            &self,
+            request: ProviderRequest,
+            _cancel: CancellationToken,
+        ) -> CoreResult<ProviderStream> {
+            let mut prompt = None;
+            let mut answered = false;
+            for message in &request.messages {
+                match message {
+                    ProviderMessage::Text { role, content } if role == "user" => {
+                        prompt = Some(content.clone());
+                        answered = false;
+                    }
+                    ProviderMessage::ToolResult { .. } => answered = true,
+                    _ => {}
+                }
+            }
+            let script = prompt.unwrap_or_default();
+            let call = script
+                .trim_start()
+                .strip_prefix("!cloud ")
+                .filter(|_| !answered);
+            let event = match call.and_then(|call| call.split_once(' ')) {
+                Some((name, arguments)) => ProviderEvent::ToolCall {
+                    call_id: format!("call-{}", uuid::Uuid::now_v7()),
+                    name: name.into(),
+                    arguments: serde_json::from_str(arguments).unwrap(),
+                    provider_metadata: Value::Null,
+                },
+                None => ProviderEvent::TextDelta("done".into()),
+            };
+            Ok(Box::pin(stream::iter([
+                Ok(event),
+                Ok(ProviderEvent::Finished {
+                    reason: "stop".into(),
+                }),
+            ])))
+        }
+    }
+
+    /// Pre-approves every tool and every permission prompt.
+    struct ApproveAll;
+
+    #[async_trait]
+    impl HookPort for ApproveAll {
+        async fn pre_tool_use(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+            HookDecision {
+                permission: Some(PermissionDecision::Allow),
+                ..HookDecision::default()
+            }
+        }
+        async fn post_tool_use(
+            &self,
+            _: ThreadId,
+            _: &str,
+            _: &Value,
+            _: &str,
+            _: bool,
+        ) -> Option<String> {
+            None
+        }
+        async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+            HookDecision::default()
+        }
+        async fn permission_request(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+            HookDecision {
+                permission: Some(PermissionDecision::Allow),
+                ..HookDecision::default()
+            }
+        }
+        async fn stop(&self, _: ThreadId) {}
+    }
+
+    async fn settle(runtime: &AgentRuntime, turn: haarness_protocol::TurnId) -> TurnStatus {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let status = runtime.turn(turn).await.unwrap().status;
+                if !matches!(status, TurnStatus::Queued | TurnStatus::Running) {
+                    return status;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("turn settles")
+    }
+
+    async fn prompted(runtime: &AgentRuntime) -> haarness_protocol::PendingPermissionInfo {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(pending) = runtime.pending_permissions().pop() {
+                    return pending;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("permission requested")
+    }
+
+    #[tokio::test]
+    async fn cloud_mutations_always_prompt_even_under_yolo_hooks_and_always() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-cloud-approvals-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let recorder = Arc::new(Recorder::default());
+        let mut config = RuntimeConfig {
+            auto_approve: true,
+            ..RuntimeConfig::default()
+        };
+        config.base_rules.push(PermissionRule {
+            pattern: "cloud_agent_manage:delete:*".into(),
+            decision: PermissionDecision::Deny,
+        });
+        let runtime = AgentRuntime::with_config(
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            Arc::new(StaticProviderRegistry::new([
+                Arc::new(Scripted) as Arc<dyn ModelProvider>
+            ])),
+            Arc::new(NativeToolRegistry::new(workspace.clone()).with_management(recorder.clone())),
+            EventBus::new(256),
+            workspace.clone(),
+            String::new(),
+            config,
+        )
+        .with_hooks(Arc::new(ApproveAll));
+        let thread = runtime
+            .create_thread(CreateThreadRequest {
+                title: Some("Cloud approvals".into()),
+                provider: Some("fixture".into()),
+                model: Some("fixture".into()),
+                ..CreateThreadRequest::default()
+            })
+            .await
+            .unwrap();
+        let start = |tool: &str, arguments: Value| StartTurnRequest {
+            request_id: RequestId::new(),
+            text: format!("!cloud {tool} {arguments}"),
+            attachments: vec![],
+            synthetic: false,
+            auto_approve: true,
+            agent: None,
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            tools: None,
+            command: None,
+        };
+        let session = "00000000-0000-4000-8000-000000000001";
+        let arguments = |tool: &str, action: &str| match tool {
+            "cloud_agent_manage" => json!({"action": action, "id": session}),
+            "cloud_chat" => json!({"action": action, "sessionId": session, "chatId": session}),
+            _ => json!({"action": action, "sessionId": session}),
+        };
+
+        // Reads run without a prompt.
+        for (tool, action) in [
+            ("cloud_agent_session", "list"),
+            ("cloud_chat", "messages"),
+            ("cloud_schedule", "history"),
+            ("cloud_agent_manage", "models"),
+        ] {
+            let turn = runtime
+                .start_turn(thread.id, start(tool, arguments(tool, action)))
+                .await
+                .unwrap();
+            assert_eq!(settle(&runtime, turn.id).await, TurnStatus::Completed);
+            assert!(runtime.pending_permissions().is_empty(), "{tool}:{action}");
+        }
+        assert_eq!(
+            recorder.calls(),
+            [
+                "cloud_agent_session:list",
+                "cloud_chat:messages",
+                "cloud_schedule:history",
+                "cloud_agent_manage:models"
+            ]
+        );
+
+        // Mutations prompt without an Always option. Answering Always counts
+        // once, so the same action prompts again; a rejection never runs it.
+        for (tool, action, reply) in [
+            (
+                "cloud_agent_session",
+                "create",
+                PermissionReplyDecision::Always,
+            ),
+            (
+                "cloud_agent_session",
+                "create",
+                PermissionReplyDecision::Reject,
+            ),
+            (
+                "cloud_agent_session",
+                "delete",
+                PermissionReplyDecision::Once,
+            ),
+            ("cloud_chat", "ask", PermissionReplyDecision::Once),
+            ("cloud_schedule", "run", PermissionReplyDecision::Once),
+            (
+                "cloud_agent_manage",
+                "update",
+                PermissionReplyDecision::Once,
+            ),
+        ] {
+            let before = recorder.calls().len();
+            let turn = runtime
+                .start_turn(thread.id, start(tool, arguments(tool, action)))
+                .await
+                .unwrap();
+            let pending = prompted(&runtime).await;
+            assert_eq!(pending.permission, tool);
+            assert_eq!(pending.allow_always, Some(false), "{tool}:{action}");
+            assert_eq!(
+                recorder.calls().len(),
+                before,
+                "{tool}:{action} ran before approval"
+            );
+            let rejected = matches!(reply, PermissionReplyDecision::Reject);
+            runtime
+                .reply_permission(
+                    &pending.permission_id,
+                    PermissionReply {
+                        decision: reply,
+                        feedback: None,
+                    },
+                )
+                .await
+                .unwrap();
+            settle(&runtime, turn.id).await;
+            assert_eq!(recorder.calls().len(), before + usize::from(!rejected));
+        }
+
+        // An explicit deny still wins over the forced prompt.
+        let turn = runtime
+            .start_turn(
+                thread.id,
+                start(
+                    "cloud_agent_manage",
+                    arguments("cloud_agent_manage", "delete"),
+                ),
+            )
+            .await
+            .unwrap();
+        settle(&runtime, turn.id).await;
+        assert!(runtime.pending_permissions().is_empty());
+        assert!(
+            !recorder
+                .calls()
+                .contains(&"cloud_agent_manage:delete".to_owned())
+        );
+        let _ = std::fs::remove_dir_all(workspace);
     }
 }

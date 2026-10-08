@@ -1096,6 +1096,8 @@ async fn main() -> Result<()> {
     let outcome = async {
         tracing::info!(
             version = env!("CARGO_PKG_VERSION"),
+            // `build.rs`: `<sha>[-dirty]`, or `unknown` without this repository's git checkout.
+            commit = option_env!("HAARNESS_BUILD_COMMIT").unwrap_or("unknown"),
             workspace = %workspace.display(),
             "haarness starting"
         );
@@ -2963,7 +2965,8 @@ async fn arm_loop(
             agent: None,
             provider: None,
             model: None,
-            reasoning_effort: None,
+            // A loop prompt is not anyone's new choice of effort.
+            reasoning_effort: runtime.chat_reasoning_effort(thread_id).await,
             tools: None,
             command: None,
         };
@@ -3491,7 +3494,8 @@ async fn run_command(
                 provider: Some(provider),
                 model: Some(model),
                 reasoning_effort: args.ultracode.then(|| "ultracode".into()).or(args.variant),
-                tools: None,
+                // Plain text output shows no file previews.
+                tools: Some(HashMap::from([("preview".into(), false)])),
                 command: args
                     .command
                     .map(|command| command.trim_start_matches('/').to_owned()),
@@ -4254,6 +4258,7 @@ impl ReloadWatch {
 struct HotReloadController {
     browser: Arc<haarness_server::browser::BrowserBroker>,
     initial_fingerprint: String,
+    digests: parking_lot::Mutex<SourceDigests>,
     watch: parking_lot::RwLock<ReloadWatch>,
     paths: Paths,
     workspace: PathBuf,
@@ -4297,7 +4302,7 @@ impl HotReloadController {
             )
             .await,
         );
-        let candidate_mcp = mcp_from_config(&self.paths, &sources.file_config).await;
+        let candidate_mcp = compose_mcp(&self.paths, &sources.file_config, Some(&self.mcp)).await;
         let candidate_skills = FilesystemSkillRegistry::new_scoped(sources.skill_roots.clone());
         let disabled_skills = capability_state::disabled(&self.paths, &self.workspace, self.trust, "skill")?;
         candidate_skills.set_disabled(disabled_skills.clone());
@@ -4402,9 +4407,12 @@ impl HotReloadController {
 
     async fn run(self, shutdown: tokio_util::sync::CancellationToken) {
         let mut observed = self.initial_fingerprint.clone();
+        // The sources the live generation was composed from.
+        let mut applied = self.initial_fingerprint.clone();
         let mut settle_since = None;
         let mut pending: Option<HotReloadCandidate> = None;
         let mut queued = false;
+        let mut scan_error: Option<String> = None;
         let mut interval = tokio::time::interval(Duration::from_millis(250));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -4413,9 +4421,22 @@ impl HotReloadController {
                 _ = interval.tick() => {}
             }
             let fingerprint = match runtime_source_fingerprint(&self) {
-                Ok(fingerprint) => fingerprint,
+                Ok(fingerprint) => {
+                    if scan_error.take().is_some() {
+                        tracing::info!("hot reload source scan recovered");
+                    }
+                    fingerprint
+                }
                 Err(error) => {
-                    tracing::warn!(%error, "hot reload source scan failed");
+                    // An unreadable source fails every poll until it is
+                    // fixed. Warn when the failure changes, not 4 times a second.
+                    let message = format!("{error:#}");
+                    if scan_error.as_deref() == Some(message.as_str()) {
+                        tracing::debug!(%error, "hot reload source scan failed");
+                    } else {
+                        tracing::warn!(%error, "hot reload source scan failed; repeats are logged at debug level");
+                        scan_error = Some(message);
+                    }
                     continue;
                 }
             };
@@ -4429,6 +4450,12 @@ impl HotReloadController {
             if pending.is_none()
                 && settle_since.is_some_and(|since| since.elapsed() >= Duration::from_millis(200))
             {
+                if observed == applied {
+                    // The sources settled back on the live generation (an
+                    // edit undone, a scratch file come and gone): no reload.
+                    settle_since = None;
+                    continue;
+                }
                 match self.candidate().await {
                     Ok(candidate) => pending = Some(candidate),
                     Err(error) => {
@@ -4453,6 +4480,7 @@ impl HotReloadController {
                 continue;
             }
             if self.apply(candidate) {
+                applied = observed.clone();
                 for notice in &candidate.notices {
                     tracing::info!("config: {notice}");
                 }
@@ -4506,15 +4534,20 @@ fn runtime_source_fingerprint(controller: &HotReloadController) -> Result<String
         controller.trust,
         &controller.management.memory_root(),
         &watch,
+        &mut controller.digests.lock(),
     )
 }
 
+/// A digest of the content of every runtime source. It changes only when a
+/// source's content does: timestamps, folder metadata, editor scratch files
+/// and OAuth token refreshes leave it alone.
 fn runtime_source_fingerprint_for(
     paths: &Paths,
     workspace: &Path,
     trust: bool,
     memory_root: &Path,
     watch: &ReloadWatch,
+    digests: &mut SourceDigests,
 ) -> Result<String> {
     let config_dir = paths
         .config
@@ -4627,67 +4660,181 @@ fn runtime_source_fingerprint_for(
     }
     roots.sort();
     roots.dedup();
-    let mut hasher = Sha256::new();
+    let mut scan = SourceScan {
+        auth: &paths.auth,
+        previous: &digests.files,
+        next: HashMap::new(),
+        hasher: Sha256::new(),
+    };
     for root in roots {
-        fingerprint_path(&root, 0, &mut hasher)?;
+        fingerprint_path(&root, 0, &mut scan)?;
     }
+    let SourceScan { next, hasher, .. } = scan;
+    digests.files = next;
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn fingerprint_path(path: &Path, depth: usize, hasher: &mut Sha256) -> Result<()> {
-    hasher.update(path.as_os_str().to_string_lossy().as_bytes());
+/// Files larger than this stand in by size and timestamp instead of being
+/// reread on each change.
+const SOURCE_DIGEST_LIMIT: u64 = 1024 * 1024;
+
+/// Content digests from the previous source scan, so the 250 ms poll rereads
+/// only files whose metadata changed.
+#[derive(Default)]
+struct SourceDigests {
+    files: HashMap<PathBuf, (FileStamp, [u8; 32])>,
+}
+
+/// Metadata that changes whenever a file's content may have.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    /// Device, inode and status-change time: an atomic replace or a rewrite
+    /// within the timestamp's resolution still differs.
+    #[cfg(unix)]
+    node: (u64, u64, i64, i64),
+}
+
+impl FileStamp {
+    fn of(metadata: &fs::Metadata) -> Self {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt as _;
+        Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            node: (
+                metadata.dev(),
+                metadata.ino(),
+                metadata.ctime(),
+                metadata.ctime_nsec(),
+            ),
+        }
+    }
+}
+
+struct SourceScan<'a> {
+    auth: &'a Path,
+    previous: &'a HashMap<PathBuf, (FileStamp, [u8; 32])>,
+    next: HashMap<PathBuf, (FileStamp, [u8; 32])>,
+    hasher: Sha256,
+}
+
+impl SourceScan<'_> {
+    fn digest(&mut self, path: &Path, metadata: &fs::Metadata) -> Result<[u8; 32]> {
+        let stamp = FileStamp::of(metadata);
+        let digest = match self.previous.get(path) {
+            Some((previous, digest)) if *previous == stamp => *digest,
+            _ if metadata.len() > SOURCE_DIGEST_LIMIT => {
+                let mut hasher = Sha256::new();
+                hasher.update(metadata.len().to_le_bytes());
+                if let Some(modified) = stamp
+                    .modified
+                    .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                {
+                    hasher.update(modified.as_nanos().to_le_bytes());
+                }
+                hasher.finalize().into()
+            }
+            _ => match fs::read(path) {
+                Ok(bytes) if path == self.auth => Sha256::digest(auth_reload_inputs(&bytes)).into(),
+                Ok(bytes) => Sha256::digest(&bytes).into(),
+                // Removed after it was listed; the next scan sees it gone.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => [0; 32],
+                Err(error) => {
+                    return Err(error).with_context(|| format!("reading {}", path.display()));
+                }
+            },
+        };
+        self.next.insert(path.to_path_buf(), (stamp, digest));
+        Ok(digest)
+    }
+}
+
+fn fingerprint_path(path: &Path, depth: usize, scan: &mut SourceScan<'_>) -> Result<()> {
+    scan.hasher
+        .update(path.as_os_str().to_string_lossy().as_bytes());
     if depth > 24 {
         return Ok(());
     }
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            hasher.update([0]);
+            scan.hasher.update([0]);
             return Ok(());
         }
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(error).with_context(|| format!("inspecting {}", path.display())),
     };
-    hasher.update(metadata.len().to_le_bytes());
-    if let Ok(modified) = metadata.modified()
-        && let Ok(duration) = modified.duration_since(UNIX_EPOCH)
-    {
-        hasher.update(duration.as_secs().to_le_bytes());
-        hasher.update(duration.subsec_nanos().to_le_bytes());
-    }
     if metadata.file_type().is_symlink() {
+        scan.hasher.update([1]);
         if let Ok(target) = fs::read_link(path) {
-            hasher.update(target.as_os_str().to_string_lossy().as_bytes());
+            scan.hasher
+                .update(target.as_os_str().to_string_lossy().as_bytes());
         }
         return Ok(());
     }
     if metadata.is_file() {
-        let content_sensitive = matches!(
-            path.extension().and_then(|extension| extension.to_str()),
-            Some("json" | "jsonc" | "toml" | "md" | "ts" | "js" | "mjs" | "mts")
-        );
-        if content_sensitive && metadata.len() <= 1024 * 1024 {
-            hasher.update(fs::read(path)?);
-        }
+        scan.hasher.update([2]);
+        let digest = scan.digest(path, &metadata)?;
+        scan.hasher.update(digest);
         return Ok(());
     }
     if !metadata.is_dir() {
         return Ok(());
     }
-    let mut children = fs::read_dir(path)?
+    // A folder contributes its entries, not its own metadata, which changes
+    // whenever any entry comes or goes.
+    scan.hasher.update([3]);
+    let mut children = fs::read_dir(path)
+        .with_context(|| format!("listing {}", path.display()))?
         .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| {
-            !matches!(
-                path.file_name().and_then(|name| name.to_str()),
-                Some(".git" | "node_modules" | "target" | "__pycache__" | ".DS_Store")
-            )
-        })
+        .filter(|path| !ignored_source(path))
         .collect::<Vec<_>>();
     children.sort();
     for child in children {
-        fingerprint_path(&child, depth + 1, hasher)?;
+        fingerprint_path(&child, depth + 1, scan)?;
     }
     Ok(())
+}
+
+/// Entries the source scan skips: tool caches, and the scratch and backup
+/// files editors write around a save (Vim swap files and its `4913` write
+/// probe, Emacs lock and autosave files, `~` backups, JetBrains safe-write
+/// temporaries, Finder metadata). None of them configures anything.
+fn ignored_source(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    matches!(
+        name,
+        ".git" | "node_modules" | "target" | "__pycache__" | ".DS_Store" | "4913"
+    ) || [".swp", ".swo", ".swx", "~", "___jb_tmp___", "___jb_old___"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+        || name.starts_with(".#")
+        || (name.len() > 1 && name.starts_with('#') && name.ends_with('#'))
+}
+
+/// What a reload reads from auth.json: which providers have credentials, of
+/// what kind and for which account, and their API keys, which are built into
+/// provider instances. Providers read OAuth tokens from the credential store
+/// per request, so a refresh rewriting only `access`, `refresh` and
+/// `expires` has nothing to reload.
+fn auth_reload_inputs(bytes: &[u8]) -> Vec<u8> {
+    let Ok(mut entries) = serde_json::from_slice::<BTreeMap<String, serde_json::Value>>(bytes)
+    else {
+        return bytes.to_vec();
+    };
+    for entry in entries.values_mut() {
+        if let Some(fields) = entry.as_object_mut()
+            && fields.get("type").and_then(serde_json::Value::as_str) == Some("oauth")
+        {
+            fields.retain(|key, _| !matches!(key.as_str(), "access" | "refresh" | "expires"));
+        }
+    }
+    serde_json::to_vec(&entries).unwrap_or_else(|_| bytes.to_vec())
 }
 
 async fn application_at(
@@ -4725,12 +4872,14 @@ async fn application_at(
     // during provider/MCP discovery must differ from this baseline and queue a
     // follow-up reload instead of being mistaken for the initial state.
     let initial_watch = ReloadWatch::from_layers(&asset_layers(paths, workspace, trust));
+    let mut digests = SourceDigests::default();
     let initial_fingerprint = runtime_source_fingerprint_for(
         paths,
         workspace,
         trust,
         &management::memory_root_for(paths, workspace),
         &initial_watch,
+        &mut digests,
     )
     .unwrap_or_default();
     let sources = compose_runtime_sources(paths, workspace, trust, yolo, persisted_rules, false)?;
@@ -4895,6 +5044,7 @@ async fn application_at(
     let hot_reload = HotReloadController {
         browser: browser.clone(),
         initial_fingerprint,
+        digests: parking_lot::Mutex::new(digests),
         watch: parking_lot::RwLock::new(initial_watch),
         paths: paths.clone(),
         workspace: workspace.to_path_buf(),
@@ -4945,12 +5095,49 @@ async fn configured_mcp(
     Ok(mcp_from_config(paths, &load_config(paths, workspace, trust)?).await)
 }
 
+/// Servers connecting at once while an MCP generation is composed. Each may
+/// take its whole connection timeout, so hung servers must not queue the
+/// rest behind them one timeout at a time.
+const MCP_CONNECT_CONCURRENCY: usize = 16;
+
 async fn mcp_from_config(paths: &Paths, config: &FileConfig) -> Arc<NativeMcpRegistry> {
+    compose_mcp(paths, config, None).await
+}
+
+/// Compose an MCP generation from configuration. A hot reload passes the
+/// `live` registry so servers whose configuration is unchanged keep their
+/// connection instead of respawning.
+async fn compose_mcp(
+    paths: &Paths,
+    config: &FileConfig,
+    live: Option<&NativeMcpRegistry>,
+) -> Arc<NativeMcpRegistry> {
+    use futures::StreamExt as _;
     let registry = Arc::new(NativeMcpRegistry::with_auth_dir(
         paths.data.join("mcp-oauth"),
     ));
-    for (name, server) in &config.mcp {
-        if let Err(error) = registry.configure(name, server.clone()).await {
+    let servers = config
+        .mcp
+        .iter()
+        .map(|(name, server)| (name.clone(), server.clone()))
+        .collect::<Vec<_>>();
+    let results = futures::stream::iter(servers)
+        .map(|(name, server)| {
+            let registry = registry.clone();
+            let live = live.cloned();
+            async move {
+                let result = match live {
+                    Some(live) => registry.configure_reusing(&live, &name, server).await,
+                    None => registry.configure(&name, server).await,
+                };
+                (name, result)
+            }
+        })
+        .buffered(MCP_CONNECT_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+    for (name, result) in results {
+        if let Err(error) = result {
             eprintln!("MCP {name}: {error}");
         }
     }
@@ -9069,6 +9256,122 @@ mod tests {
         assert_eq!(args.workflow_args, ["base=main", "dryRun=true"]);
         assert_eq!(args.variant.as_deref(), Some("high"));
         assert_eq!(args.prompt.join(" "), "summarize changes");
+    }
+
+    #[test]
+    fn editor_scratch_files_are_not_runtime_sources() {
+        let folder = std::path::Path::new(".haarness");
+        for name in [
+            ".haarness.json.swp",
+            ".haarness.json.swo",
+            ".haarness.json.swx",
+            "haarness.json~",
+            "4913",
+            ".#haarness.json",
+            "#haarness.json#",
+            "haarness.json___jb_tmp___",
+            "haarness.json___jb_old___",
+            ".DS_Store",
+            "node_modules",
+        ] {
+            assert!(super::ignored_source(&folder.join(name)), "{name}");
+        }
+        for name in [
+            "haarness.json",
+            "AGENTS.md",
+            "notes~draft.md",
+            "#1 ideas.md",
+            "swp.md",
+        ] {
+            assert!(!super::ignored_source(&folder.join(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn auth_reload_inputs_ignore_only_oauth_token_refreshes() {
+        let inputs =
+            |value: serde_json::Value| super::auth_reload_inputs(value.to_string().as_bytes());
+        let oauth = |access: &str, account: &str| serde_json::json!({"type":"oauth","access":access,"refresh":format!("{access}-r"),"expires":7,"accountId":account});
+        let api = |key: &str| serde_json::json!({"type":"api","key":key});
+        let base = serde_json::json!({"openai": api("sk-1"), "anthropic": oauth("a1", "one")});
+        let refreshed = serde_json::json!({"openai": api("sk-1"), "anthropic": oauth("a2", "one")});
+        assert_eq!(inputs(base.clone()), inputs(refreshed));
+        for changed in [
+            serde_json::json!({"openai": api("sk-2"), "anthropic": oauth("a1", "one")}),
+            serde_json::json!({"openai": api("sk-1"), "anthropic": oauth("a1", "two")}),
+            serde_json::json!({"openai": api("sk-1")}),
+            serde_json::json!({"openai": api("sk-1"), "anthropic": oauth("a1", "one"), "xai": "legacy"}),
+        ] {
+            assert_ne!(inputs(base.clone()), inputs(changed));
+        }
+        assert_eq!(super::auth_reload_inputs(b"{not json"), b"{not json");
+    }
+
+    #[test]
+    fn source_fingerprint_follows_content_not_metadata_or_scratch_files() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-fingerprint-{}", uuid::Uuid::now_v7()));
+        let config_dir = root.join("config");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(workspace.join(".haarness")).unwrap();
+        fs::create_dir_all(&config_dir).unwrap();
+        let paths = Paths {
+            root: Some(root.clone()),
+            data: root.join("data"),
+            cache: root.join("cache"),
+            database: root.join("data/haarness.db"),
+            auth: config_dir.join("auth.json"),
+            runtime: root.join("cache/runtime.json"),
+            server_lock: root.join("cache/server.lock"),
+            skills: root.join("data/skills"),
+            config: config_dir.join("config.toml"),
+            workspace_id: None,
+        };
+        let agents = workspace.join("AGENTS.md");
+        fs::write(&agents, "Use tabs.\n").unwrap();
+        fs::write(
+            workspace.join(".haarness/haarness.json"),
+            r#"{"model":"echo/echo-1"}"#,
+        )
+        .unwrap();
+        let auth = |access: &str, account: &str| {
+            serde_json::json!({"anthropic":{"type":"oauth","access":access,"refresh":access,"expires":1,"accountId":account}})
+                .to_string()
+        };
+        fs::write(&paths.auth, auth("first", "one")).unwrap();
+        let mut digests = super::SourceDigests::default();
+        let mut fingerprint = || {
+            super::runtime_source_fingerprint_for(
+                &paths,
+                &workspace,
+                true,
+                &root.join("memory"),
+                &super::ReloadWatch::default(),
+                &mut digests,
+            )
+            .unwrap()
+        };
+        let baseline = fingerprint();
+        // Same content with new timestamps, an editor's scratch files next to
+        // the config, and an OAuth token refresh: nothing a reload reads.
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(&agents, "Use tabs.\n").unwrap();
+        for scratch in [
+            ".haarness.json.swp",
+            "haarness.json~",
+            "4913",
+            "#haarness.json#",
+        ] {
+            fs::write(workspace.join(".haarness").join(scratch), "scratch").unwrap();
+        }
+        fs::write(&paths.auth, auth("second", "one")).unwrap();
+        assert_eq!(fingerprint(), baseline);
+        fs::write(&agents, "Use spaces.\n").unwrap();
+        let edited = fingerprint();
+        assert_ne!(edited, baseline);
+        fs::write(&paths.auth, auth("second", "two")).unwrap();
+        assert_ne!(fingerprint(), edited);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

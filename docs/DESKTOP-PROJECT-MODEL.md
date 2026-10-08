@@ -39,7 +39,7 @@ Automatic snapshots now default to Git projects. A plain folder such as Download
 
 The explorer no longer truncates directories at 2,000 entries. Extension catalogs have no 64-tool cap; terminals have no 20-session cap; profile archives have no 4,096-file cap; memory search no longer ignores entries after the first 1,000. Profile export deduplicates identical migrated resources while preserving distinct legacy content.
 
-Byte budgets still bound previews, diff output, IPC payloads, and archive expansion. For example, large snapshot file content is represented as omitted metadata, rather than rejecting the whole project. These budgets are distinct from arbitrary project-size or item-count limits.
+Byte budgets still bound previews, diff output, IPC payloads, and archive expansion. For example, large snapshot file content is represented as omitted metadata, rather than rejecting the whole project. A path snapshots cannot read (a root-owned directory, a file still changing when read twice) is likewise recorded as omitted, with one warning per path, instead of failing every edit; undo never writes or deletes it and refuses when such a path changed between its snapshots. These budgets are distinct from arbitrary project-size or item-count limits.
 
 ## Reference implementations and compatibility
 

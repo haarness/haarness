@@ -19,13 +19,20 @@
 //! defined by this module. Matchers compare against the tool name
 //! for tool events and `FileChanged`, the `source`/`reason` for session
 //! events and the `notification_type` for notifications.
+//!
+//! Diagnostics never log the configured command line: assignments and
+//! arguments can carry credentials. Log lines name the program word only, and
+//! any free text taken from a hook (stderr, block reasons) is redacted,
+//! stripped of control characters and clipped first.
 
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use haarness_core::{HookDecision, HookPort, PermissionDecision};
 use haarness_protocol::ThreadId;
+use regex::Regex;
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone)]
@@ -189,10 +196,17 @@ impl ConfiguredHooks {
                 .env("HAARNESS_PLUGIN_DATA", root.join(".data"))
                 .env("CLAUDE_PLUGIN_DATA", root.join(".data"));
         }
+        let label = HookLabel::new(entry, payload);
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
-                tracing::warn!(command = entry.command, %error, "hook failed to spawn");
+                tracing::warn!(
+                    event = %label.event,
+                    tool = label.tool.as_deref(),
+                    program = %label.program,
+                    %error,
+                    "hook failed to spawn"
+                );
                 return HookOutcome::default();
             }
         };
@@ -201,20 +215,29 @@ impl ConfiguredHooks {
             drop(stdin);
         }
         if entry.asynchronous {
+            // Nothing waits for an async hook's answer, so its failure is
+            // only ever visible in this log line.
             let timeout = entry.timeout;
             tokio::spawn(async move {
-                let _ = tokio::time::timeout(timeout, child.wait_with_output()).await;
+                match tokio::time::timeout(timeout, child.wait_with_output()).await {
+                    Ok(Ok(output)) if !output.status.success() => {
+                        label.failed(output.status, &output.stderr, true);
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => label.wait_failed(&error, true),
+                    Err(_) => label.timed_out(timeout, true),
+                }
             });
             return HookOutcome::default();
         }
         let output = match tokio::time::timeout(entry.timeout, child.wait_with_output()).await {
             Ok(Ok(output)) => output,
             Ok(Err(error)) => {
-                tracing::warn!(command = entry.command, %error, "hook failed");
+                label.wait_failed(&error, false);
                 return HookOutcome::default();
             }
             Err(_) => {
-                tracing::warn!(command = entry.command, "hook timed out");
+                label.timed_out(entry.timeout, false);
                 return HookOutcome::default();
             }
         };
@@ -223,13 +246,21 @@ impl ConfiguredHooks {
         // Exit code 2 is the Claude "block" convention; stderr is the reason.
         if output.status.code() == Some(2) {
             let reason = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            outcome.block = Some(if reason.is_empty() {
+            let reason = if reason.is_empty() {
                 "blocked by hook".into()
             } else {
                 reason
-            });
+            };
+            label.blocked(output.status.code(), &reason);
+            outcome.block = Some(reason);
             return outcome;
         }
+        // Any other non-zero exit is a non-blocking error under the Claude
+        // contract: the action proceeds, and this line says why the hook failed.
+        if !output.status.success() {
+            label.failed(output.status, &output.stderr, false);
+        }
+        let mut deny_reason = None;
         if let Ok(parsed) = serde_json::from_str::<Value>(stdout.trim()) {
             if parsed.get("decision").and_then(Value::as_str) == Some("block")
                 || parsed.get("continue").and_then(Value::as_bool) == Some(false)
@@ -256,6 +287,10 @@ impl ConfiguredHooks {
                     Some("ask") => outcome.permission = Some(PermissionDecision::Ask),
                     _ => {}
                 }
+                deny_reason = specific
+                    .get("permissionDecisionReason")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
                 if let Some(context) = specific.get("additionalContext").and_then(Value::as_str) {
                     outcome.context = Some(context.to_owned());
                 }
@@ -279,6 +314,17 @@ impl ConfiguredHooks {
                     _ => {}
                 }
             }
+        }
+        // A permission deny stops the action only where the runtime reads it.
+        let denied = outcome.permission == Some(PermissionDecision::Deny)
+            && matches!(entry.event.as_str(), "PreToolUse" | "PermissionRequest");
+        if outcome.block.is_some() || denied {
+            let reason = outcome
+                .block
+                .as_deref()
+                .or(deny_reason.as_deref())
+                .unwrap_or("denied by hook");
+            label.blocked(output.status.code(), reason);
         }
         outcome
     }
@@ -352,6 +398,401 @@ impl From<HookOutcome> for HookDecision {
             updated_input: outcome.updated_input,
         }
     }
+}
+
+/// Longest program name, failure stderr and block reason a log line carries.
+const PROGRAM_CHARS: usize = 120;
+const STDERR_CHARS: usize = 300;
+const REASON_CHARS: usize = 200;
+/// Hook text considered before redaction; the rest is never read.
+const SCAN_CHARS: usize = 2000;
+
+/// What a hook's log lines may name: its event, the tool it ran for and the
+/// program its command starts, never the configured command line.
+struct HookLabel {
+    event: String,
+    tool: Option<String>,
+    program: String,
+}
+
+impl HookLabel {
+    fn new(entry: &HookEntry, payload: &Value) -> Self {
+        Self {
+            event: entry.event.clone(),
+            tool: payload
+                .get("tool_name")
+                .and_then(Value::as_str)
+                .map(|tool| log_text(tool, PROGRAM_CHARS)),
+            program: program_word(entry),
+        }
+    }
+
+    /// One WARN per failed run: a non-zero exit other than a clean block, or
+    /// a signal, with the start of stderr redacted and clipped.
+    fn failed(&self, status: std::process::ExitStatus, stderr: &[u8], asynchronous: bool) {
+        let stderr = log_text(
+            head(&String::from_utf8_lossy(stderr), SCAN_CHARS),
+            STDERR_CHARS,
+        );
+        tracing::warn!(
+            event = %self.event,
+            tool = self.tool.as_deref(),
+            program = %self.program,
+            code = status.code(),
+            signal = exit_signal(status),
+            asynchronous = asynchronous.then_some(true),
+            stderr = (!stderr.is_empty()).then_some(stderr.as_str()),
+            "hook command failed"
+        );
+    }
+
+    fn wait_failed(&self, error: &std::io::Error, asynchronous: bool) {
+        tracing::warn!(
+            event = %self.event,
+            tool = self.tool.as_deref(),
+            program = %self.program,
+            asynchronous = asynchronous.then_some(true),
+            %error,
+            "hook failed"
+        );
+    }
+
+    fn timed_out(&self, timeout: Duration, asynchronous: bool) {
+        tracing::warn!(
+            event = %self.event,
+            tool = self.tool.as_deref(),
+            program = %self.program,
+            timeout_secs = timeout.as_secs(),
+            asynchronous = asynchronous.then_some(true),
+            "hook timed out"
+        );
+    }
+
+    /// One INFO per block, with the first line of its reason. Events whose
+    /// block the runtime ignores log at DEBUG so the INFO line stays true.
+    fn blocked(&self, code: Option<i32>, reason: &str) {
+        let redacted = redact(head(reason, SCAN_CHARS));
+        let line = redacted
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or_default();
+        let reason = log_text(line, REASON_CHARS);
+        if matches!(
+            self.event.as_str(),
+            "PreToolUse" | "PermissionRequest" | "UserPromptSubmit"
+        ) {
+            tracing::info!(
+                event = %self.event,
+                tool = self.tool.as_deref(),
+                program = %self.program,
+                code,
+                reason = %reason,
+                "hook blocked"
+            );
+        } else {
+            tracing::debug!(
+                event = %self.event,
+                program = %self.program,
+                code,
+                reason = %reason,
+                "hook block ignored: this event cannot be blocked"
+            );
+        }
+    }
+}
+
+fn exit_signal(status: std::process::ExitStatus) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt as _;
+        status.signal()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        None
+    }
+}
+
+/// A word of the leading simple command, unquoted as the shell would.
+struct ShellWord {
+    text: String,
+    /// Starts with an unquoted `NAME=`.
+    assignment: bool,
+}
+
+/// Characters that mean a program word still needs the shell to resolve it.
+const SHELL_SPECIAL: &[char] = &[
+    '$', '`', '{', '}', '(', ')', '*', '?', '[', ']', '=', ';', '&', '|', '<', '>', '\'', '"', '#',
+    '!', '~', '%',
+];
+
+/// The program a hook command starts, for diagnostics only: the file name of
+/// its first literal command word after leading `NAME=value` assignments and
+/// `env`/`exec`/`command`/`nohup` wrappers. Arguments and assignment values
+/// never appear. A line only the shell itself could split (command
+/// substitution, unbalanced quotes, an expansion in the program word) names
+/// the shell instead.
+fn program_word(entry: &HookEntry) -> String {
+    let shell = entry.shell.as_deref().unwrap_or("sh");
+    let fallback = || log_text(file_name(shell).unwrap_or("sh"), PROGRAM_CHARS);
+    let literal = |text: &str| ShellWord {
+        text: text.to_owned(),
+        assignment: false,
+    };
+    let words: Vec<ShellWord> = if !entry.args.is_empty() {
+        std::iter::once(&entry.command)
+            .chain(&entry.args)
+            .map(|word| literal(word))
+            .collect()
+    } else if shell.eq_ignore_ascii_case("powershell") {
+        // PowerShell quotes differently; only a bare leading path is named.
+        entry
+            .command
+            .split_whitespace()
+            .next()
+            .map(literal)
+            .into_iter()
+            .collect()
+    } else {
+        match shell_words(&entry.command) {
+            Some(words) => words,
+            None => return fallback(),
+        }
+    };
+    unwrap_program(&words)
+        .and_then(file_name)
+        .filter(|name| !name.contains(SHELL_SPECIAL))
+        .map_or_else(fallback, |name| log_text(name, PROGRAM_CHARS))
+}
+
+fn file_name(path: &str) -> Option<&str> {
+    path.rsplit(['/', '\\']).find(|part| !part.is_empty())
+}
+
+/// Skips leading assignments and transparent wrappers with their options.
+/// A wrapper with nothing after it is itself the program.
+fn unwrap_program(words: &[ShellWord]) -> Option<&str> {
+    let mut words = words.iter().skip_while(|word| word.assignment).peekable();
+    loop {
+        let wrapper = words.next()?;
+        let name = file_name(&wrapper.text)?;
+        let takes_value: &[&str] = match name {
+            "env" => &["-u", "-C", "-P", "--unset", "--chdir"],
+            "exec" => &["-a"],
+            "command" | "nohup" => &[],
+            _ => return Some(&wrapper.text),
+        };
+        let mut options = true;
+        while let Some(word) = words.peek() {
+            let text = word.text.as_str();
+            if name == "env" && (text.starts_with("-S") || text.starts_with("--split-string")) {
+                // `env -S` splits its own string; only a shell parser could follow it.
+                return Some(&wrapper.text);
+            }
+            if options && text == "--" {
+                options = false;
+            } else if options && text.starts_with('-') {
+                if takes_value.contains(&text) {
+                    words.next();
+                }
+            } else if !(name == "env" && text.contains('=')) {
+                break;
+            }
+            words.next();
+        }
+        if words.peek().is_none() {
+            return Some(&wrapper.text);
+        }
+    }
+}
+
+/// Words of the leading simple command of a POSIX shell line, up to its first
+/// operator, with quotes and escapes removed. `None` when the line needs real
+/// shell evaluation first: command substitution or unbalanced quoting.
+fn shell_words(line: &str) -> Option<Vec<ShellWord>> {
+    let is_name = |text: &str| {
+        text.chars()
+            .next()
+            .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+            && text
+                .chars()
+                .all(|character| character == '_' || character.is_ascii_alphanumeric())
+    };
+    let mut words = Vec::new();
+    let mut chars = line.chars().peekable();
+    while words.len() < 32 {
+        while chars
+            .next_if(|character| matches!(character, ' ' | '\t'))
+            .is_some()
+        {}
+        if chars
+            .peek()
+            .is_none_or(|character| "\n;&|<>()#".contains(*character))
+        {
+            break;
+        }
+        let mut text = String::new();
+        // Decided by the first character that is not part of a leading `NAME`.
+        let mut assignment = None;
+        while let Some(&character) = chars.peek() {
+            if character.is_whitespace() || "\n;&|<>()".contains(character) {
+                break;
+            }
+            chars.next();
+            match character {
+                '\'' => {
+                    assignment.get_or_insert(false);
+                    loop {
+                        match chars.next()? {
+                            '\'' => break,
+                            quoted => text.push(quoted),
+                        }
+                    }
+                }
+                '"' => {
+                    assignment.get_or_insert(false);
+                    loop {
+                        match chars.next()? {
+                            '"' => break,
+                            '`' => return None,
+                            '$' if chars.peek() == Some(&'(') => return None,
+                            '\\' => {
+                                let escaped = chars.next()?;
+                                if !"$`\"\\\n".contains(escaped) {
+                                    text.push('\\');
+                                }
+                                if escaped != '\n' {
+                                    text.push(escaped);
+                                }
+                            }
+                            quoted => text.push(quoted),
+                        }
+                    }
+                }
+                '\\' => {
+                    assignment.get_or_insert(false);
+                    let escaped = chars.next()?;
+                    if escaped != '\n' {
+                        text.push(escaped);
+                    }
+                }
+                '`' => return None,
+                '$' if chars.peek() == Some(&'(') => return None,
+                '=' if assignment.is_none() && is_name(&text) => {
+                    assignment = Some(true);
+                    text.push(character);
+                }
+                other => {
+                    if assignment.is_none() && !(other == '_' || other.is_ascii_alphanumeric()) {
+                        assignment = Some(false);
+                    }
+                    text.push(other);
+                }
+            }
+        }
+        words.push(ShellWord {
+            text,
+            assignment: assignment == Some(true),
+        });
+    }
+    Some(words)
+}
+
+/// At most `max` characters from the start of `text`, cut back to whitespace
+/// so a longer secret never survives as a fragment that redaction misses.
+fn head(text: &str, max: usize) -> &str {
+    match text.char_indices().nth(max) {
+        None => text,
+        Some((end, next)) if next.is_whitespace() => &text[..end],
+        Some((end, _)) => text[..end]
+            .rfind(char::is_whitespace)
+            .map_or("", |at| &text[..at]),
+    }
+}
+
+/// At most `max` characters, ending with `…` when cut. Never splits a char.
+pub(crate) fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let mut clipped: String = text.chars().take(max.saturating_sub(1)).collect();
+    clipped.push('…');
+    clipped
+}
+
+/// Free text made safe for one log field: redacted, with C0/C1 control
+/// characters and line breaks collapsed to single spaces, then clipped.
+pub(crate) fn log_text(text: &str, max: usize) -> String {
+    let redacted = redact(text);
+    let words: Vec<&str> = redacted
+        .split(|character: char| character.is_whitespace() || character.is_control())
+        .filter(|word| !word.is_empty())
+        .collect();
+    clip(&words.join(" "), max)
+}
+
+/// Replaces obvious credential shapes with `[redacted]`: credential headers,
+/// `Bearer`/`Basic` values, curl user flags, `key=value`, `key: value` and
+/// `--key value` pairs whose key names a credential, URL user info, JWTs,
+/// well-known token prefixes and long opaque runs. Over-redaction is fine;
+/// this is for log lines, not data.
+pub(crate) fn redact(text: &str) -> String {
+    const KEYS: &str = r"token|secret|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key|auth|cookie|credential|session";
+    const VALUE: &str = r#""[^"\r\n]*"?|'[^'\r\n]*'?"#;
+    static RULES: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
+        [
+            // A cookie header can hold several credentials; drop the rest of its line.
+            (r#"(?i)\b((?:set-)?cookie)(["']?[ \t]*:[ \t]*)[^\r\n]*"#.to_owned(), "${1}${2}[redacted]"),
+            // Verbose curl repeats the identity outside its headers.
+            (r"(?i)\b((?:server|proxy) auth using )[^\r\n]*".to_owned(), "${1}[redacted]"),
+            // Any scheme, including `Token …` and `Digest …`.
+            (
+                format!(r#"(?i)\b((?:proxy-)?authorization)(["']?[ \t]*[:=][ \t]*)({VALUE}|[^\r\n"']*)"#),
+                "${1}${2}[redacted]",
+            ),
+            (r#"(?i)\b(bearer|basic)[ \t]+[^\s"',;]+"#.to_owned(), "${1} [redacted]"),
+            (
+                format!(r#"(?i)(^|[^\w-])(--(?:proxy-)?user(?:=|[ \t]+))({VALUE}|[^\s"',;&]+)"#),
+                "${1}${2}[redacted]",
+            ),
+            // `-u user:password`, but not `sort -u file`.
+            (
+                r#"(^|[^\w-])(-[uU][ \t]*)("[^"\r\n]*:[^"\r\n]*"?|'[^'\r\n]*:[^'\r\n]*'?|[^\s"',;&:]*:[^\s"',;&]*)"#.to_owned(),
+                "${1}${2}[redacted]",
+            ),
+            (
+                format!(r#"(?i)\b([\w.-]*(?:{KEYS})[\w.-]*)(["']?[ \t]*[=:][ \t]*)({VALUE}|[^\s"',;&]+)"#),
+                "${1}${2}[redacted]",
+            ),
+            // `--token VALUE`, `-password VALUE`, as `set -x` traces print them.
+            (
+                format!(r#"(?i)(^|[^\w-])(--?[\w.-]*(?:{KEYS})[\w.-]*)[ \t]+({VALUE}|[^\s"',;&-][^\s"',;&]*)"#),
+                "${1}${2} [redacted]",
+            ),
+            (r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@]+@".to_owned(), "${1}[redacted]@"),
+            (r"\beyJ[\w-]{5,}\.[\w-]{5,}\.[\w-]*".to_owned(), "[redacted]"),
+            (
+                r"\b(?:gh[pousr]_|github_pat_|glpat-|xox[abeprs]-|sk-(?:ant-|proj-)?|AKIA|ASIA)[A-Za-z0-9_-]{12,}".to_owned(),
+                "[redacted]",
+            ),
+            // Long opaque runs, without `/` or `.` so paths and hosts survive.
+            (r"[A-Za-z0-9+_=-]{40,}".to_owned(), "[redacted]"),
+        ]
+        .into_iter()
+        .map(|(pattern, replacement)| {
+            (Regex::new(&pattern).expect("static redaction pattern"), replacement)
+        })
+        .collect()
+    });
+    let mut text = text.to_owned();
+    for (pattern, replacement) in RULES.iter() {
+        if pattern.is_match(&text) {
+            text = pattern.replace_all(&text, *replacement).into_owned();
+        }
+    }
+    text
 }
 
 /// Native tools whose successful completion changes workspace files, with
@@ -644,9 +1085,100 @@ impl HookPort for ConfiguredHooks {
     }
 }
 
+/// Records log events for tests that assert what a line does and does not say.
+#[cfg(test)]
+pub(crate) mod log_capture {
+    use std::fmt::Write as _;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
+
+    /// One rendered line per event: `LEVEL message key=value …`.
+    #[derive(Clone, Default)]
+    pub(crate) struct Capture(Arc<Mutex<Vec<String>>>);
+
+    /// With a single registered dispatcher, tracing caches a callsite's
+    /// interest and the max level from whichever thread hits it first, so a
+    /// parallel test thread without a subscriber would silence this capture.
+    /// A second, permanently registered dispatcher keeps the registry
+    /// consulting every live capture.
+    static KEEPALIVE: std::sync::LazyLock<tracing::Dispatch> =
+        std::sync::LazyLock::new(|| tracing::Dispatch::new(Capture::default()));
+
+    impl Capture {
+        /// Records this thread's events until the guard drops. The tokio test
+        /// runtime is single-threaded, so spawned tasks are recorded too.
+        pub(crate) fn install() -> (Self, tracing::subscriber::DefaultGuard) {
+            std::sync::LazyLock::force(&KEEPALIVE);
+            let capture = Self::default();
+            let guard = tracing::subscriber::set_default(capture.clone());
+            (capture, guard)
+        }
+
+        pub(crate) fn lines(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+
+        /// Lines whose message is exactly `message`.
+        pub(crate) fn matching(&self, message: &str) -> Vec<String> {
+            self.lines()
+                .into_iter()
+                .filter(|line| {
+                    line.split_once(' ')
+                        .is_some_and(|(_, rest)| rest.split(" |").next() == Some(message))
+                })
+                .collect()
+        }
+    }
+
+    #[derive(Default)]
+    struct Line {
+        message: String,
+        fields: String,
+    }
+
+    impl Visit for Line {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            if field.name() == "message" {
+                self.message = value.to_owned();
+            } else {
+                let _ = write!(self.fields, " {}={value}", field.name());
+            }
+        }
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.record_str(field, &format!("{value:?}"));
+        }
+    }
+
+    impl Subscriber for Capture {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, event: &Event<'_>) {
+            let mut line = Line::default();
+            event.record(&mut line);
+            self.0.lock().unwrap().push(format!(
+                "{} {} |{}",
+                event.metadata().level(),
+                line.message,
+                line.fields
+            ));
+        }
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use log_capture::Capture;
 
     #[test]
     fn config_blocks_parse_into_entries() {
@@ -951,5 +1483,413 @@ mod tests {
         assert_eq!(events[0]["tool_name"], "write");
         assert_eq!(events[0]["file_path"], "src/lib.rs");
         assert_eq!(events[0]["tool_input"]["content"], "x");
+    }
+
+    fn entry(command: &str, args: &[&str], shell: Option<&str>) -> HookEntry {
+        HookEntry {
+            event: "PreToolUse".into(),
+            matcher: None,
+            command: command.into(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            shell: shell.map(str::to_owned),
+            timeout: Duration::from_secs(5),
+            asynchronous: false,
+            plugin_root: None,
+        }
+    }
+
+    #[test]
+    fn program_word_never_shows_arguments_or_assignment_values() {
+        for (command, args, shell, expected) in [
+            ("./check.sh", &[][..], None, "check.sh"),
+            ("/usr/local/bin/gate --password hunter2", &[], None, "gate"),
+            ("GITHUB_TOKEN=ghp_x gh api /user", &[], None, "gh"),
+            (
+                "curl -H 'Authorization: Bearer abc' https://x.test",
+                &[],
+                None,
+                "curl",
+            ),
+            (
+                r#"PASSWORD="first PRIVATE_SUFFIX" sh "/tmp/gate.sh""#,
+                &[],
+                None,
+                "sh",
+            ),
+            (
+                "PASSWORD='first PRIVATE_SUFFIX' node gate.js",
+                &[],
+                None,
+                "node",
+            ),
+            (
+                r"PASSWORD=first\ PRIVATE_SUFFIX python3 gate.py",
+                &[],
+                None,
+                "python3",
+            ),
+            (
+                r#"UNRELATED=safe PASSWORD="first PRIVATE_SUFFIX" ruby x.rb"#,
+                &[],
+                None,
+                "ruby",
+            ),
+            (
+                "env -i FOO=bar -u BAZ /usr/bin/python3 hook.py",
+                &[],
+                None,
+                "python3",
+            ),
+            ("exec -a renamed ./run --token x", &[], None, "run"),
+            ("command nohup env -- A=1 deno run x.ts", &[], None, "deno"),
+            ("env -S 'node --token=x'", &[], None, "env"),
+            ("env", &[], None, "env"),
+            (
+                r#""$CLAUDE_PLUGIN_ROOT/hooks/fixture gate.sh" arg"#,
+                &[],
+                None,
+                "fixture gate.sh",
+            ),
+            (
+                "${CLAUDE_PLUGIN_ROOT}/hooks/check.sh",
+                &[],
+                None,
+                "check.sh",
+            ),
+            ("echo ok; rm -rf /", &[], None, "echo"),
+            // Only the shell could resolve these; name the shell instead.
+            ("$(cat cmd) --token x", &[], None, "sh"),
+            ("`which gate` --token x", &[], None, "sh"),
+            ("TOKEN=$(cat secret) ./run", &[], None, "sh"),
+            (
+                r#"PASSWORD="unterminated PRIVATE_SUFFIX ./run"#,
+                &[],
+                Some("bash"),
+                "bash",
+            ),
+            (
+                "TOKEN=${SECRET:-a PRIVATE_SUFFIX} ./run",
+                &[],
+                Some("/bin/zsh"),
+                "zsh",
+            ),
+            ("$HOOK_BIN --check", &[], None, "sh"),
+            ("", &[], None, "sh"),
+            // Explicit argument lists run without a shell.
+            (
+                "${CLAUDE_PLUGIN_ROOT}/bin/check",
+                &["--token", "PRIVATE_SUFFIX"],
+                None,
+                "check",
+            ),
+            (
+                "/usr/bin/env",
+                &["API_KEY=PRIVATE_SUFFIX", "node", "x.js"],
+                None,
+                "node",
+            ),
+            (
+                r"C:\tools\gate.exe -Token PRIVATE_SUFFIX",
+                &[],
+                Some("powershell"),
+                "gate.exe",
+            ),
+            (
+                r#"& "C:\tools\gate.exe""#,
+                &[],
+                Some("powershell"),
+                "powershell",
+            ),
+        ] {
+            let word = program_word(&entry(command, args, shell));
+            assert_eq!(word, expected, "{command:?} {args:?}");
+            assert!(!word.contains("PRIVATE_SUFFIX"));
+        }
+        let long = format!("./ga\u{1b}te\u{9b}{}", "é".repeat(300));
+        let word = program_word(&entry(&long, &[], None));
+        assert!(
+            word.chars().all(|character| !character.is_control()),
+            "{word:?}"
+        );
+        assert_eq!(word.chars().count(), PROGRAM_CHARS);
+        assert!(word.ends_with('…'));
+    }
+
+    #[test]
+    fn redaction_covers_credential_shapes_and_keeps_ordinary_text() {
+        for (input, secret) in [
+            ("--token=PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
+            ("gh --password PRIVATE_SUFFIX api", "PRIVATE_SUFFIX"),
+            ("tool -password 'PRIVATE SUFFIX'", "PRIVATE SUFFIX"),
+            ("--api-key PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
+            (
+                "curl -H 'Authorization: Bearer PRIVATE.SUFFIX' https://x.test",
+                "PRIVATE.SUFFIX",
+            ),
+            ("Authorization: Token PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
+            (
+                "proxy-authorization=Digest PRIVATE_SUFFIX",
+                "PRIVATE_SUFFIX",
+            ),
+            ("bearer PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
+            ("Basic UFJJVkFURV9TVUZGSVg=", "UFJJVkFURV9TVUZGSVg="),
+            (
+                r#"{"api_key": "PRIVATE SUFFIX", "ok": 1}"#,
+                "PRIVATE SUFFIX",
+            ),
+            (r#"{"password":"PRIVATE_SUFFIX"}"#, "PRIVATE_SUFFIX"),
+            ("API_KEY=PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
+            ("client_secret: PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
+            ("private-key=PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
+            ("passwd=PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
+            ("session=PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
+            ("credentials: PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
+            ("Cookie: a=1; sid=PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
+            (
+                "* Server auth using Basic with user 'PRIVATE_SUFFIX'",
+                "PRIVATE_SUFFIX",
+            ),
+            (
+                "https://alice:PRIVATE_SUFFIX@git.example.test/repo",
+                "PRIVATE_SUFFIX",
+            ),
+            (
+                "https://PRIVATE_SUFFIX@github.com/org/repo",
+                "PRIVATE_SUFFIX",
+            ),
+            (
+                "GET /cb?code=1&access_token=PRIVATE_SUFFIX&x=1",
+                "PRIVATE_SUFFIX",
+            ),
+            (
+                "curl -u alice:PRIVATE_SUFFIX https://x.test",
+                "PRIVATE_SUFFIX",
+            ),
+            ("curl --user 'alice:PRIVATE SUFFIX'", "PRIVATE SUFFIX"),
+            ("password: \"PRIVATE_SUFFIX\nnext line", "PRIVATE_SUFFIX"),
+            ("token=秘密の値 rest", "秘密の値"),
+            ("ghp_PRIVATESUFFIX0123456789", "PRIVATESUFFIX"),
+            ("key sk-ant-PRIVATESUFFIX01234", "PRIVATESUFFIX"),
+            (
+                "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJQUklWQVRFIn0.c2ln",
+                "eyJzdWIiOiJQUklWQVRFIn0",
+            ),
+            (
+                "x PRIVATESUFFIX0123456789abcdefghijklmnopqrstuv x",
+                "PRIVATESUFFIX",
+            ),
+        ] {
+            let redacted = redact(input);
+            assert!(!redacted.contains(secret), "{input:?} -> {redacted:?}");
+            assert!(redacted.contains("[redacted]"), "{input:?} -> {redacted:?}");
+        }
+        for ordinary in [
+            "build failed: missing file src/lib.rs",
+            "mkdir -p out && sort -u names.txt",
+            "listening on 127.0.0.1:4096",
+            "authentication failed for user",
+            "日本語のエラー: ファイルがありません",
+        ] {
+            assert_eq!(redact(ordinary), ordinary);
+        }
+        assert_eq!(
+            redact("--token=a\n--token b"),
+            "--token=[redacted]\n--token [redacted]"
+        );
+    }
+
+    #[test]
+    fn log_text_strips_controls_and_clips_on_char_boundaries() {
+        assert_eq!(
+            log_text("a\u{1b}[31mb\u{7}\r\nc\u{85}d\u{9b}e\u{7f}f\t g", 100),
+            "a [31mb c d e f g"
+        );
+        assert_eq!(clip("日本語テキスト", 4), "日本語…");
+        assert_eq!(clip("日本語", 3), "日本語");
+        assert_eq!(clip("🙂🙂🙂🙂", 2), "🙂…");
+        for max in 0..12 {
+            let clipped = log_text("é🙂 token=秘密 ü", max);
+            assert!(clipped.chars().count() <= max.max(1), "{max}: {clipped:?}");
+            assert!(!clipped.contains("秘密"));
+        }
+        // The pre-redaction cut drops a partial word rather than keeping it.
+        assert_eq!(head("one two three", 6), "one");
+        assert_eq!(head("one two three", 7), "one two");
+        assert_eq!(head("PRIVATESUFFIXPRIVATESUFFIX", 10), "");
+        assert_eq!(head("ünï cödé", 100), "ünï cödé");
+    }
+
+    fn hooks_for(event: &str, hooks: Value) -> ConfiguredHooks {
+        ConfiguredHooks::new(
+            ConfiguredHooks::parse_block(&json!({ event: [{"hooks": hooks}] })),
+            std::env::temp_dir(),
+        )
+    }
+
+    fn assert_private(capture: &Capture) {
+        for line in capture.lines() {
+            assert!(!line.contains("PRIVATE_SUFFIX"), "{line}");
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_hooks_log_one_warning_naming_program_code_and_stderr() {
+        let (capture, _guard) = Capture::install();
+        let hooks = hooks_for(
+            "PreToolUse",
+            json!([{"command": "SECRET_TOKEN=PRIVATE_SUFFIX sh -c 'echo \"auth failed: password=PRIVATE_SUFFIX\" >&2; echo second line >&2; exit 1'"}]),
+        );
+        let decision = hooks
+            .pre_tool_use(ThreadId::new(), "bash", &json!({"command": "true"}))
+            .await;
+        assert!(decision.block.is_none(), "a non-2 failure never blocks");
+        let failed = capture.matching("hook command failed");
+        assert_eq!(failed.len(), 1, "{:?}", capture.lines());
+        assert!(failed[0].starts_with("WARN "), "{}", failed[0]);
+        for expected in [
+            " event=PreToolUse",
+            " tool=bash",
+            " program=sh",
+            " code=1",
+            "stderr=auth failed: password=[redacted] second line",
+        ] {
+            assert!(failed[0].contains(expected), "{expected}: {}", failed[0]);
+        }
+        assert!(capture.matching("hook blocked").is_empty());
+
+        hooks_for(
+            "UserPromptSubmit",
+            json!([{"command": "definitely-missing-hook-binary --token PRIVATE_SUFFIX"}]),
+        )
+        .user_prompt_submit(ThreadId::new(), "hello")
+        .await;
+        let missing = capture.matching("hook command failed");
+        assert_eq!(missing.len(), 2, "{:?}", capture.lines());
+        assert!(missing[1].contains(" program=definitely-missing-hook-binary"));
+        assert!(missing[1].contains(" code=127"), "{}", missing[1]);
+        assert!(missing[1].contains("not found"), "{}", missing[1]);
+        assert!(!missing[1].contains(" tool="));
+
+        #[cfg(unix)]
+        {
+            hooks_for("Stop", json!([{"command": "kill -9 $$"}]))
+                .stop(ThreadId::new())
+                .await;
+            let killed = capture.matching("hook command failed");
+            assert_eq!(killed.len(), 3, "{:?}", capture.lines());
+            assert!(killed[2].contains(" signal=9"), "{}", killed[2]);
+            assert!(!killed[2].contains(" code="), "{}", killed[2]);
+        }
+
+        hooks_for(
+            "PreToolUse",
+            json!([{"command": "API_KEY=PRIVATE_SUFFIX sleep 5", "timeout": 1}]),
+        )
+        .pre_tool_use(ThreadId::new(), "bash", &json!({}))
+        .await;
+        let timed_out = capture.matching("hook timed out");
+        assert_eq!(timed_out.len(), 1, "{:?}", capture.lines());
+        assert!(timed_out[0].contains(" program=sleep"), "{}", timed_out[0]);
+        assert_private(&capture);
+    }
+
+    #[tokio::test]
+    async fn every_block_logs_once_at_info_with_tool_program_and_reason() {
+        let (capture, _guard) = Capture::install();
+        let thread = ThreadId::new();
+        let exit_two = hooks_for(
+            "PreToolUse",
+            json!([{"command": "TOKEN=PRIVATE_SUFFIX sh -c 'printf \"policy: no pushes\\nsee token=PRIVATE_SUFFIX\" >&2; exit 2'"}]),
+        );
+        let decision = exit_two.pre_tool_use(thread, "bash", &json!({})).await;
+        assert!(decision.block.is_some());
+        let json_deny = hooks_for(
+            "PreToolUse",
+            json!([{"command": r#"echo '{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"protected path"}}'"#}]),
+        );
+        let decision = json_deny.pre_tool_use(thread, "edit", &json!({})).await;
+        assert_eq!(decision.permission, Some(PermissionDecision::Deny));
+        let failed_block = hooks_for(
+            "UserPromptSubmit",
+            json!([{"command": r#"echo '{"decision":"block","reason":"secret=PRIVATE_SUFFIX in prompt"}'; exit 1"#}]),
+        );
+        let decision = failed_block.user_prompt_submit(thread, "hi").await;
+        assert!(decision.block.is_some());
+
+        let blocked = capture.matching("hook blocked");
+        assert_eq!(blocked.len(), 3, "{:?}", capture.lines());
+        assert!(blocked.iter().all(|line| line.starts_with("INFO ")));
+        for (line, expected) in blocked.iter().zip([
+            [
+                " tool=bash",
+                " program=sh",
+                " code=2",
+                "reason=policy: no pushes",
+            ],
+            [
+                " tool=edit",
+                " program=echo",
+                " code=0",
+                "reason=protected path",
+            ],
+            [
+                " event=UserPromptSubmit",
+                " program=echo",
+                " code=1",
+                "reason=secret=[redacted] in prompt",
+            ],
+        ]) {
+            for expected in expected {
+                assert!(line.contains(expected), "{expected}: {line}");
+            }
+        }
+        // Only the block that also exited 1 is a failure; clean blocks are not.
+        assert_eq!(capture.matching("hook command failed").len(), 1);
+
+        // Observational events cannot be blocked, so they never claim one at INFO.
+        hooks_for("Stop", json!([{"command": "echo stop >&2; exit 2"}]))
+            .stop(thread)
+            .await;
+        assert_eq!(capture.matching("hook blocked").len(), 3);
+        assert_eq!(
+            capture
+                .matching("hook block ignored: this event cannot be blocked")
+                .len(),
+            1
+        );
+        assert_private(&capture);
+    }
+
+    #[tokio::test]
+    async fn async_hook_failures_are_logged_instead_of_dropped() {
+        let (capture, _guard) = Capture::install();
+        let decision = hooks_for(
+            "PreToolUse",
+            json!([{"command": "PASSWORD=PRIVATE_SUFFIX sh -c 'echo late failure >&2; exit 3'", "async": true}]),
+        )
+        .pre_tool_use(ThreadId::new(), "bash", &json!({}))
+        .await;
+        assert!(decision.block.is_none());
+        let failed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let failed = capture.matching("hook command failed");
+                if !failed.is_empty() {
+                    return failed;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("async failure logged");
+        assert_eq!(failed.len(), 1);
+        for expected in [
+            " asynchronous=true",
+            " code=3",
+            " program=sh",
+            "stderr=late failure",
+        ] {
+            assert!(failed[0].contains(expected), "{expected}: {}", failed[0]);
+        }
+        assert_private(&capture);
     }
 }

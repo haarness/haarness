@@ -208,7 +208,7 @@ impl Service {
                     provider: None,
                     model: None,
                     reasoning_effort: None,
-                    tools: Some(HashMap::from([("question".into(), false)])),
+                    tools: Some(HashMap::from([("question".into(), false), ("preview".into(), false)])),
                     command: None,
                 },
             )

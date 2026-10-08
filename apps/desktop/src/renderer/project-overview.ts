@@ -15,6 +15,8 @@ interface Overview {
   turns: Turn[];
   permissions: PendingPermissionInfo[];
   questions: PendingQuestionInfo[];
+  /** The server answers for chats in Auto itself. */
+  shared: boolean;
   loaded: boolean;
   loading: boolean;
   error: string;
@@ -37,6 +39,7 @@ export function createProjectOverview(input: {
     turns: [],
     permissions: [],
     questions: [],
+    shared: false,
     loaded: false,
     loading: false,
     error: "",
@@ -219,6 +222,7 @@ export function createProjectOverview(input: {
             set("turns", turns);
             set("permissions", permissions);
             set("questions", questions);
+            set("shared", info.capabilities.includes("approval-mode.v1"));
             instance = info.serverInstanceId;
             cursor = info.eventCursor ?? 0;
             // Replay starts before the REST snapshot, closing the snapshot/SSE gap.

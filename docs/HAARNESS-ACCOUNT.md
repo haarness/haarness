@@ -98,9 +98,21 @@ With `--provider haarness`, upstream names such as `openai/...` remain Cloud mod
 Signing into a model provider alone does not sign into Haarness Cloud. These tools require
 your existing Haarness login and selected account. They never start a login flow or accept
 tokens, issuer URLs, or credential paths from the model. Use the Cloud editor/API to configure
-write-only environment secrets. Ordinary tool permission rules also apply; for example,
-`cloud_agent_session:ask:*` controls remote chat. The plan agent can inspect templates,
-sessions and history but cannot launch or mutate them, even with an allow override.
+write-only environment secrets.
+
+Actions that start billable compute, submit remote work, or replace or delete Cloud resources ask
+for approval each time: `cloud_agent_session` create/start/ask/update/save_agent/delete,
+`cloud_chat` ask, `cloud_agent_manage` create/update/delete and `cloud_schedule`
+create/update/resume/run/delete. The permissive default profile, an allow rule, `--yolo`, Auto
+approvals and a `PermissionRequest`/`PreToolUse` hook cannot skip that prompt, and it offers no
+**Always** choice. A deny rule such as `cloud_agent_session:delete:*` still refuses the action
+without prompting.
+
+Reads (`list`, `get`, `messages`, `wait`, `history`, `models`, `ssh_public_key`) and actions that
+spend nothing or reduce spending (stopping a session, interrupting a turn, pausing a schedule,
+renaming, archiving, creating an empty chat) follow ordinary permission rules. The plan agent can
+inspect templates, sessions and history but cannot launch or mutate them, even with an allow
+override.
 
 The tools are discoverable under **Cloud agents** in the tool catalog and can be loaded with
 `load_tool` when lazy loading is enabled. Reads never start a stopped runtime. `ask` without

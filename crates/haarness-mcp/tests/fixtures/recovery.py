@@ -3,6 +3,10 @@ import os
 import sys
 import time
 
+if 'LAUNCH_LOG' in os.environ:
+    with open(os.environ['LAUNCH_LOG'], 'a') as file:
+        file.write('launched\n')
+
 for line in sys.stdin:
     request = json.loads(line)
     if 'id' not in request:

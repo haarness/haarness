@@ -1681,5 +1681,10 @@
   "Stopped sharing. This chat stays on this computer.": "Deling stoppet. Denne chatten blir på denne datamaskinen.",
   "This chat keeps running on this computer, with its files and model keys, until you stop sharing.": "Denne chatten fortsetter å kjøre på denne datamaskinen, med filene og modellnøklene sine, helt til du slutter å dele.",
   "Use /remote-control, /remote-control status or /remote-control stop.": "Bruk /remote-control, /remote-control status eller /remote-control stop.",
-  "on {computer}": "på {computer}"
+  "on {computer}": "på {computer}",
+  "This chat is archived. Sending a message restores it.": "Denne chatten er arkivert. En ny melding gjenoppretter den.",
+  "Approvals changed in another window. Try again.": "Godkjenningene ble endret i et annet vindu. Prøv igjen.",
+  "Auto on for this chat · requests are allowed once · ctrl+y to review": "Automatisk på for denne chatten · forespørsler tillates én gang · ctrl+y for gjennomgang",
+  "Review · this chat asks before acting · ctrl+y for Auto": "Gjennomgang · denne chatten spør før den handler · ctrl+y for automatisk",
+  "Approvals changed in another window · ctrl+y to switch": "Godkjenningene ble endret i et annet vindu · ctrl+y for å bytte"
 }

@@ -319,6 +319,14 @@ class Api(Transport):
         """POST /v1/threads/{id}/goal."""
         return cast("T.GoalActionResponse", self.request('POST', f'/v1/threads/{self.segment(id)}/goal', body=body, binary_body=False, binary_response=False, options=options))
 
+    def get_approval_mode(self, id: str, *, options: RequestOptions | None = None) -> T.ApprovalModeInfo:
+        """GET /v1/threads/{id}/approval-mode."""
+        return cast("T.ApprovalModeInfo", self.request('GET', f'/v1/threads/{self.segment(id)}/approval-mode', binary_body=False, binary_response=False, options=options))
+
+    def set_approval_mode(self, id: str, body: T.SetApprovalModeRequest, *, options: RequestOptions | None = None) -> T.ApprovalModeInfo:
+        """PUT /v1/threads/{id}/approval-mode."""
+        return cast("T.ApprovalModeInfo", self.request('PUT', f'/v1/threads/{self.segment(id)}/approval-mode', body=body, binary_body=False, binary_response=False, options=options))
+
     def get_loop(self, id: str, *, options: RequestOptions | None = None) -> T.LoopResponse:
         """GET /v1/threads/{id}/loop."""
         return cast("T.LoopResponse", self.request('GET', f'/v1/threads/{self.segment(id)}/loop', binary_body=False, binary_response=False, options=options))
@@ -807,6 +815,14 @@ class AsyncApi(AsyncTransport):
     async def set_goal(self, id: str, body: T.GoalRequest, *, options: RequestOptions | None = None) -> T.GoalActionResponse:
         """POST /v1/threads/{id}/goal."""
         return cast("T.GoalActionResponse", await self.request('POST', f'/v1/threads/{self.segment(id)}/goal', body=body, binary_body=False, binary_response=False, options=options))
+
+    async def get_approval_mode(self, id: str, *, options: RequestOptions | None = None) -> T.ApprovalModeInfo:
+        """GET /v1/threads/{id}/approval-mode."""
+        return cast("T.ApprovalModeInfo", await self.request('GET', f'/v1/threads/{self.segment(id)}/approval-mode', binary_body=False, binary_response=False, options=options))
+
+    async def set_approval_mode(self, id: str, body: T.SetApprovalModeRequest, *, options: RequestOptions | None = None) -> T.ApprovalModeInfo:
+        """PUT /v1/threads/{id}/approval-mode."""
+        return cast("T.ApprovalModeInfo", await self.request('PUT', f'/v1/threads/{self.segment(id)}/approval-mode', body=body, binary_body=False, binary_response=False, options=options))
 
     async def get_loop(self, id: str, *, options: RequestOptions | None = None) -> T.LoopResponse:
         """GET /v1/threads/{id}/loop."""

@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+# Records the git commit for the startup log line.
+build = "build.rs"
 
 [[bin]]
 name = "haarness"

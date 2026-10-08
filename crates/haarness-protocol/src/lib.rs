@@ -1,5 +1,6 @@
 //! Stable wire contracts shared by every Haarness client.
 
+mod approval;
 mod archive;
 mod btw;
 mod cloud;
@@ -12,6 +13,7 @@ pub mod tokens;
 mod tools;
 mod workflow;
 mod workspace;
+pub use approval::*;
 pub use archive::*;
 pub use btw::*;
 pub use cloud::*;
@@ -991,9 +993,15 @@ pub struct BackgroundTaskInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueInputRequest {
-    /// The submitting graphical client supports sandboxed file previews.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub preview: bool,
+    /// Whether the submitting client can show sandboxed file previews. Text
+    /// clients say `false`; `None` keeps the chat's recorded value so a
+    /// phone or a background result does not change the tools or prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<bool>,
+    /// Reasoning effort for a turn this input starts. `None` keeps the
+    /// effort of the chat's latest prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     /// Steer by default for compatibility; queue waits for an idle boundary.
     #[serde(default)]
     pub delivery: InputDelivery,
@@ -1056,6 +1064,10 @@ pub struct ApiError {
         PermissionReply,
         QuestionReply,
         PermissionReplyDecision,
+        ApprovalMode,
+        ApprovalModeSetting,
+        ApprovalModeInfo,
+        SetApprovalModeRequest,
         EventEnvelope,
         ServerInfo,
         ProviderInfo,

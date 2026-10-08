@@ -285,6 +285,8 @@ fn bedrock_request(request: ProviderRequest) -> CoreResult<Value> {
     }
     let structured = request.output_schema;
     let mut requested_tools = request.tools;
+    // Converse hands Claude the same tool schema as the Messages API.
+    crate::tool_schema::retain_claude_compatible(&request.model, &mut requested_tools);
     if let Some(schema) = structured.as_ref() {
         requested_tools.retain(|tool| tool.name != STRUCTURED_OUTPUT_TOOL_NAME);
         requested_tools.push(structured_output_tool(schema));
@@ -655,6 +657,51 @@ mod tests {
         assert_eq!(
             body["messages"][2]["content"][0]["toolResult"]["content"][1]["document"]["format"],
             "pdf"
+        );
+    }
+
+    #[test]
+    fn claude_converse_requests_omit_tools_whose_root_schema_claude_rejects() {
+        let tools = vec![
+            haarness_core::ToolDefinition {
+                name: "plain".into(),
+                description: "plain".into(),
+                input_schema: json!({"type":"object"}),
+            },
+            haarness_core::ToolDefinition {
+                name: "mcp__fixture__either".into(),
+                description: "either".into(),
+                input_schema: json!({
+                    "type":"object",
+                    "oneOf":[{"required":["current"]},{"required":["all"]}]
+                }),
+            },
+        ];
+        let names = |model: &str| {
+            let body = bedrock_request(ProviderRequest {
+                model: model.into(),
+                system: "system".into(),
+                messages: vec![ProviderMessage::Text {
+                    role: "user".into(),
+                    content: "list".into(),
+                }],
+                tools: tools.clone(),
+                reasoning_effort: None,
+                parameters: haarness_core::RequestParameters::default(),
+                output_schema: None,
+            })
+            .unwrap();
+            body["toolConfig"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["toolSpec"]["name"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names("us.anthropic.claude-sonnet-4-6-v1:0"), ["plain"]);
+        assert_eq!(
+            names("amazon.nova-pro-v1:0"),
+            ["plain", "mcp__fixture__either"]
         );
     }
 

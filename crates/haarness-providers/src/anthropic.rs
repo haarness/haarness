@@ -279,6 +279,7 @@ impl ModelProvider for AnthropicProvider {
         let structured_output = request.output_schema;
         let native_json = adaptive && structured_output.is_some();
         let mut requested_tools = request.tools;
+        crate::tool_schema::retain_claude_compatible(&request.model, &mut requested_tools);
         if let Some(schema) = structured_output.as_ref() {
             requested_tools.retain(|tool| tool.name != STRUCTURED_OUTPUT_TOOL_NAME);
             if !native_json {
@@ -1194,6 +1195,75 @@ mod tests {
             .find(|tool| tool["name"] == "StructuredOutput")
             .unwrap();
         assert_eq!(tool["input_schema"]["required"][0], "count");
+    }
+
+    /// Claude answers HTTP 400 for the whole request when one tool's root
+    /// schema combines alternatives, so a single such MCP tool broke every turn.
+    #[tokio::test]
+    async fn claude_requests_omit_tools_whose_root_schema_claude_rejects() {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route("/messages", post(messages))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = AnthropicProvider::for_test(format!("http://{address}/messages"));
+        let tool = |name: &str, input_schema: Value| haarness_core::ToolDefinition {
+            name: name.into(),
+            description: name.into(),
+            input_schema,
+        };
+        let either = json!([{"required":["current"]},{"required":["all"]}]);
+        let tools = vec![
+            // Nested combiners and a property named like one are accepted.
+            tool(
+                "plain",
+                json!({"type":"object","properties":{
+                    "value":{"anyOf":[{"type":"string"},{"type":"integer"}]},
+                    "oneOf":{"type":"string"}
+                }}),
+            ),
+            tool("mcp__fixture__any", json!({"type":"object","anyOf":either})),
+            tool("mcp__fixture__one", json!({"type":"object","oneOf":either})),
+            tool("mcp__fixture__all", json!({"type":"object","allOf":either})),
+            tool("mcp__fixture__list", json!({"type":"array","items":{}})),
+        ];
+        for model in ["claude-test", "MiniMax-M3"] {
+            let request = ProviderRequest {
+                model: model.into(),
+                system: "test".into(),
+                messages: vec![ProviderMessage::Text {
+                    role: "user".into(),
+                    content: "list".into(),
+                }],
+                tools: tools.clone(),
+                reasoning_effort: None,
+                parameters: haarness_core::RequestParameters::default(),
+                output_schema: None,
+            };
+            let mut stream = provider
+                .stream(request, CancellationToken::new())
+                .await
+                .unwrap();
+            let _events: Vec<_> = stream.by_ref().collect().await;
+        }
+        let requests = state.0.lock();
+        let names = |request: &Value| {
+            request["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&requests[0]), ["plain"]);
+        assert_eq!(
+            requests[0]["tools"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        // Other models behind the Messages protocol keep every tool.
+        assert_eq!(names(&requests[1]).len(), 5);
     }
 
     #[tokio::test]

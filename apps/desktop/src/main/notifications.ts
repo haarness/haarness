@@ -7,6 +7,16 @@ export interface NativeNotification {
   close(): void;
 }
 
+/**
+ * How long a "Task finished" banner waits before it goes out. The daemon
+ * starts the next queued prompt (or the reply to steering a stop left unread)
+ * as a new root turn moments after the previous one finishes, so a banner sent
+ * at once would announce the end of work that is still going. Upstream measured
+ * those resumptions at 31–192 ms and holds its completion banner for 500 ms;
+ * a real completion costs half a second nobody can see.
+ */
+export const COMPLETION_GRACE_MS = 500;
+
 // One process-wide owner: sidebar streams, reloads and multiple windows cannot
 // duplicate a system notification. Keep native objects alive until dismissed.
 export function createNotifications(input: {
@@ -19,6 +29,24 @@ export function createNotifications(input: {
   const claimed = new Set<string>();
   const visible = new Map<NativeNotification, string>();
   const revisions = new Map<string, number>();
+  // Completions waiting out COMPLETION_GRACE_MS, one per root conversation
+  // (keyed by connection and root). Ending a wait with `false` drops its
+  // banner: the conversation picked up again, stopped or failed, a newer
+  // completion took its place, or the project went away.
+  const holds = new Map<string, { connection: string; end: (kept: boolean) => void }>();
+  const hold = (key: string, connection: string) => {
+    holds.get(key)?.end(false);
+    return new Promise<boolean>((resolve) => {
+      const end = (kept: boolean) => {
+        clearTimeout(timer);
+        if (holds.get(key)?.end === end) holds.delete(key);
+        resolve(kept);
+      };
+      const timer = setTimeout(() => end(true), COMPLETION_GRACE_MS);
+      holds.set(key, { connection, end });
+    });
+  };
+  const drop = (key: string) => holds.get(key)?.end(false);
   let disposed = false;
   async function receive(
     connection: string,
@@ -34,12 +62,14 @@ export function createNotifications(input: {
       (typeof payload.rootThreadId === "string"
         ? payload.rootThreadId
         : event.threadId);
-    let title: string;
-    if (event.type === "turn.finished") {
+    let title: string | undefined;
+    if (event.type === "turn.started" || event.type === "turn.finished") {
+      // A delegated agent's turn neither ends nor resumes the conversation.
       if (root !== event.threadId) return;
-      if (payload.status === "completed") title = "Task finished";
-      else if (payload.status === "failed") title = "Task failed";
-      else return; // User cancellation is not a successful completion.
+      if (event.type === "turn.finished" && payload.status === "completed")
+        title = "Task finished";
+      else if (event.type === "turn.finished" && payload.status === "failed")
+        title = "Task failed";
     } else if (event.type === "permission.requested") title = "Approval needed";
     else if (event.type === "question.requested") title = "Answer needed";
     else return;
@@ -51,6 +81,12 @@ export function createNotifications(input: {
     if (disposed || claimed.has(key)) return;
     claimed.add(key);
     if (claimed.size > 500) claimed.delete(claimed.values().next().value!);
+    const completed = title === "Task finished";
+    const conversationKey = JSON.stringify([connection, root]);
+    // The conversation picked up again (the next queued prompt, a stop's
+    // follow-up), stopped or failed: a completion it is holding is not true.
+    if (event.type.startsWith("turn.") && !completed) drop(conversationKey);
+    if (!title) return; // A start, or a stop, which is not a completion.
     const permitted = () => {
       if (!input.enabled()) return false;
       const policy = input.policy?.();
@@ -61,6 +97,9 @@ export function createNotifications(input: {
     };
     if (!permitted()) return;
     const revision = revisions.get(connection);
+    // Failures and requests for attention are never taken back, so only a
+    // completion waits; the checks below run again after the wait.
+    if (completed && !(await hold(conversationKey, connection))) return;
     const conversation = await thread(root).catch(() => undefined);
     if (
       disposed ||
@@ -94,6 +133,8 @@ export function createNotifications(input: {
     receive,
     forget(connection: string) {
       revisions.set(connection, (revisions.get(connection) ?? 0) + 1);
+      for (const held of [...holds.values()])
+        if (held.connection === connection) held.end(false);
       for (const [notification, id] of visible) {
         if (id !== connection) continue;
         visible.delete(notification);
@@ -102,6 +143,7 @@ export function createNotifications(input: {
     },
     dispose() {
       disposed = true;
+      for (const held of [...holds.values()]) held.end(false);
       for (const notification of visible.keys()) notification.close();
       visible.clear();
     },
