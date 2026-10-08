@@ -41,11 +41,24 @@ use tokio::{
     task::JoinHandle,
 };
 
+/// Connection, discovery and header-helper deadline for a server that sets
+/// no `timeout_ms`.
+const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+/// Character budget for an MCP tool description. Descriptions reach the
+/// model with every request and some servers ship whole manuals in them.
+const DEFAULT_DESCRIPTION_LIMIT: usize = 2048;
+const DESCRIPTION_LIMIT_ENV: &str = "HAARNESS_MAX_MCP_DESCRIPTION_LENGTH";
+const DESCRIPTION_SUFFIX: &str = "… [truncated]";
+
 #[derive(Clone, Default)]
 pub struct NativeMcpRegistry {
     servers: Arc<RwLock<BTreeMap<String, Entry>>>,
     auth_dir: Option<PathBuf>,
 }
+/// The registry a connection reports catalog changes to. A hot reload
+/// connects servers in a candidate registry and then moves their entries into
+/// the live one, so the target is shared with the entry and retargeted there.
+type Home = Arc<RwLock<std::sync::Weak<RwLock<BTreeMap<String, Entry>>>>>;
 #[derive(Clone)]
 struct Entry {
     generation: uuid::Uuid,
@@ -57,10 +70,13 @@ struct Entry {
     credential: Option<FileCredentialStore>,
     worker: Option<mpsc::Sender<WorkerCommand>>,
     auth_challenge: Option<String>,
+    home: Option<Home>,
+    /// A candidate entry sharing the live registry's connection.
+    adopted: bool,
 }
 #[derive(Clone)]
 struct CatalogClient {
-    servers: std::sync::Weak<RwLock<BTreeMap<String, Entry>>>,
+    home: Home,
     name: String,
     generation: uuid::Uuid,
     credential: Option<FileCredentialStore>,
@@ -68,7 +84,7 @@ struct CatalogClient {
 impl rmcp::ClientHandler for CatalogClient {
     async fn on_tool_list_changed(&self, context: rmcp::service::NotificationContext<RoleClient>) {
         {
-            let Some(servers) = self.servers.upgrade() else {
+            let Some(servers) = self.home.read().upgrade() else {
                 return;
             };
             let mut servers = servers.write();
@@ -84,7 +100,7 @@ impl rmcp::ClientHandler for CatalogClient {
         let Ok(tools) = context.peer.list_all_tools().await else {
             return;
         };
-        let Some(servers) = self.servers.upgrade() else {
+        let Some(servers) = self.home.read().upgrade() else {
             return;
         };
         let mut servers = servers.write();
@@ -231,6 +247,8 @@ impl McpRegistry for NativeMcpRegistry {
                 credential: None,
                 worker: None,
                 auth_challenge: None,
+                home: None,
+                adopted: false,
             },
         );
         if config.enabled {
@@ -357,8 +375,9 @@ impl NativeMcpRegistry {
             let identity = schema_identity(name, &config, self.auth_dir.as_deref());
             let credential = (config.transport == "streamable_http" && oauth_enabled(&config, &config.headers))
                 .then(|| manager_store(name, self.auth_dir.as_deref()));
+            let home: Home = Arc::new(RwLock::new(Arc::downgrade(&self.servers)));
             let handler = CatalogClient {
-                servers: Arc::downgrade(&self.servers),
+                home: home.clone(),
                 name: name.into(),
                 generation,
                 credential: credential.clone(),
@@ -411,16 +430,17 @@ impl NativeMcpRegistry {
                     _ => unreachable!(),
                 }
             };
-            let activated = tokio::time::timeout(
-                Duration::from_millis(config.timeout_ms.unwrap_or(10_000).clamp(1, 600_000)),
-                activation,
-            )
-            .await
-            .unwrap_or_else(|_| {
-                Err(ActivationError::Core(CoreError::Tool(
-                    "MCP connection timed out".into(),
-                )))
-            });
+            // The configured timeout bounds initialization and discovery as
+            // one deadline. Tool calls on the connection are not bounded by it.
+            let timeout = connection_timeout(&config);
+            let activated = tokio::time::timeout(timeout, activation)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(ActivationError::Core(CoreError::Tool(format!(
+                        "MCP connection timed out after {}",
+                        describe_timeout(timeout)
+                    ))))
+                });
             // A disconnect, reconfiguration or newer reconnect owns the slot now.
             let mut servers = self.servers.write();
             let entry = servers
@@ -467,6 +487,7 @@ impl NativeMcpRegistry {
             entry.tools = definitions;
             entry.worker = Some(worker);
             entry.auth_challenge = None;
+            entry.home = Some(home);
             entry.info.status = "connected".into();
             entry.info.detail = Some(format!("{count} tools discovered"));
             let info = entry.info.clone();
@@ -488,13 +509,67 @@ impl NativeMcpRegistry {
     /// candidate registry is composed and connected before this call, so API
     /// readers never observe a partly-added/partly-removed MCP set.
     pub fn replace_from(&self, candidate: &Self) {
-        let entries = candidate.servers.read().clone();
-        *self.servers.write() = entries.clone();
-        for (name, entry) in entries {
+        let mut entries = candidate.servers.read().clone();
+        let mut servers = self.servers.write();
+        let mut watch = Vec::new();
+        for (name, entry) in &mut entries {
+            if std::mem::take(&mut entry.adopted)
+                && let Some(live) = servers
+                    .get(name)
+                    .filter(|live| same_effective_config(&live.config, &entry.config))
+            {
+                // The connection the candidate reused may have moved on since
+                // (a recovery, a catalog change, a disconnect). This registry's
+                // entry and its watcher stay authoritative for it.
+                *entry = live.clone();
+                continue;
+            }
             if entry.info.status == "connected" {
-                self.watch(&name, entry.generation);
+                watch.push((name.clone(), entry.generation));
             }
         }
+        for home in entries.values().filter_map(|entry| entry.home.as_ref()) {
+            *home.write() = Arc::downgrade(&self.servers);
+        }
+        *servers = entries;
+        drop(servers);
+        for (name, generation) in watch {
+            self.watch(&name, generation);
+        }
+    }
+
+    /// Configure `name` in this candidate generation, sharing `live`'s
+    /// connection when it already serves the same effective configuration.
+    /// A hot reload composes a candidate for every source change; respawning
+    /// unchanged servers would restart their processes, drop their session
+    /// state and rerun their OAuth and header helpers for nothing.
+    pub async fn configure_reusing(
+        &self,
+        live: &Self,
+        name: &str,
+        config: McpConfigureRequest,
+    ) -> CoreResult<McpServerInfo> {
+        let reusable = (self.auth_dir == live.auth_dir)
+            .then(|| live.servers.read().get(name).cloned())
+            .flatten()
+            .filter(|entry| {
+                config.enabled
+                    && entry.info.status == "connected"
+                    && entry
+                        .worker
+                        .as_ref()
+                        .is_some_and(|worker| !worker.is_closed())
+                    && credential_valid(entry.credential.as_ref())
+                    && same_effective_config(&entry.config, &config)
+            });
+        let Some(mut entry) = reusable else {
+            return self.configure(name, config).await;
+        };
+        entry.config = config;
+        entry.adopted = true;
+        let info = entry.info.clone();
+        self.servers.write().insert(name.into(), entry);
+        Ok(info)
     }
 
     pub async fn begin_oauth(&self, name: &str, redirect_uri: &str) -> CoreResult<McpOAuthSession> {
@@ -689,11 +764,9 @@ fn revoke_entry(entry: &mut Entry) {
     entry.info.status = if entry.config.enabled { "needs_auth" } else { "disabled" }.into();
     entry.info.detail = Some("OAuth credentials cleared in another workspace".into());
 }
-fn schema_identity(
-    name: &str,
-    config: &McpConfigureRequest,
-    auth_dir: Option<&Path>,
-) -> Option<[u8; 32]> {
+/// The configuration a connection actually uses: the same `${VAR}` text can
+/// name a different token once the environment changes.
+fn effective_config(config: &McpConfigureRequest) -> McpConfigureRequest {
     let mut effective = config.clone();
     for value in effective
         .env
@@ -702,6 +775,18 @@ fn schema_identity(
     {
         *value = expand_env_reference(value);
     }
+    effective
+}
+fn same_effective_config(left: &McpConfigureRequest, right: &McpConfigureRequest) -> bool {
+    let left = serde_json::to_value(effective_config(left)).ok();
+    left.is_some() && left == serde_json::to_value(effective_config(right)).ok()
+}
+fn schema_identity(
+    name: &str,
+    config: &McpConfigureRequest,
+    auth_dir: Option<&Path>,
+) -> Option<[u8; 32]> {
+    let effective = effective_config(config);
     let mut hash = Sha256::new();
     hash.update(serde_json::to_vec(&effective).ok()?);
     if effective.transport == "streamable_http" && oauth_enabled(&effective, &effective.headers) {
@@ -715,14 +800,80 @@ fn schema_identity(
 }
 
 fn definitions(tools: &[rmcp::model::Tool]) -> Vec<ToolDefinition> {
+    let limit = description_limit(std::env::var(DESCRIPTION_LIMIT_ENV).ok().as_deref());
     tools
         .iter()
-        .map(|tool| ToolDefinition {
-            name: tool.name.to_string(),
-            description: tool.description.as_deref().unwrap_or("MCP tool").to_owned(),
-            input_schema: Value::Object((*tool.input_schema).clone()),
+        .map(|tool| {
+            let original = tool.description.as_deref().unwrap_or("MCP tool");
+            let description = capped_description(original, limit);
+            if description.len() != original.len() {
+                tracing::debug!(
+                    tool = %tool.name,
+                    original_chars = original.chars().count(),
+                    limit,
+                    "truncated MCP tool description"
+                );
+            }
+            let mut input_schema = (*tool.input_schema).clone();
+            // MCP requires an object root. Providers that insist on the type
+            // reject a schema that only implies it.
+            input_schema
+                .entry("type")
+                .or_insert_with(|| Value::String("object".into()));
+            ToolDefinition {
+                name: tool.name.to_string(),
+                description,
+                input_schema: Value::Object(input_schema),
+            }
         })
         .collect()
+}
+
+/// The description budget from `HAARNESS_MAX_MCP_DESCRIPTION_LENGTH`: a
+/// positive decimal character count, otherwise the default.
+fn description_limit(value: Option<&str>) -> usize {
+    value
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|limit| *limit > 0)
+        .unwrap_or(DEFAULT_DESCRIPTION_LIMIT)
+}
+
+/// `text` within `limit` characters, marked when cut. Counting characters
+/// keeps every cut on a character boundary.
+fn capped_description(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_owned();
+    }
+    let suffix = if limit > DESCRIPTION_SUFFIX.chars().count() {
+        DESCRIPTION_SUFFIX
+    } else {
+        "…"
+    };
+    let mut capped = text
+        .chars()
+        .take(limit - suffix.chars().count())
+        .collect::<String>();
+    capped.push_str(suffix);
+    capped
+}
+
+fn connection_timeout(config: &McpConfigureRequest) -> Duration {
+    Duration::from_millis(
+        config
+            .timeout_ms
+            .unwrap_or(DEFAULT_TIMEOUT_MS)
+            .clamp(1, 600_000),
+    )
+}
+
+fn describe_timeout(timeout: Duration) -> String {
+    let millis = timeout.as_millis();
+    if millis.is_multiple_of(1_000) {
+        format!("{} s", millis / 1_000)
+    } else {
+        format!("{millis} ms")
+    }
 }
 
 async fn activate_remote(
@@ -739,10 +890,12 @@ async fn activate_remote(
         let headers = resolve_headers(name, config).await?;
         let transport_config = StreamableHttpClientTransportConfig::with_uri(url)
             .custom_headers(mcp_headers(&headers)?);
+        // Only the socket connect shares the connection timeout here; the
+        // activation deadline covers initialization and discovery. A
+        // whole-request timeout would also cut off a tool call, and the SSE
+        // stream carrying its answer, that runs longer.
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_millis(
-                config.timeout_ms.unwrap_or(10_000).clamp(1, 600_000),
-            ))
+            .connect_timeout(connection_timeout(config))
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(mcp_error)?;
@@ -977,7 +1130,7 @@ async fn activate_legacy_sse(
             let transport = LegacySseTransport::connect(
                 url,
                 mcp_headers(&headers)?,
-                Duration::from_millis(config.timeout_ms.unwrap_or(10_000).clamp(1, 600_000)),
+                connection_timeout(config),
             )
             .await?;
             let client = handler.clone().serve(transport).await.map_err(mcp_error)?;
@@ -1299,7 +1452,7 @@ async fn resolve_headers(
             "headersHelper for MCP server \"{name}\" could not be executed"
         ))
     })?;
-    let timeout = Duration::from_millis(config.timeout_ms.unwrap_or(10_000).clamp(1, 600_000));
+    let timeout = connection_timeout(config);
     let output = tokio::time::timeout(timeout, child.wait_with_output())
         .await
         .map_err(|_| CoreError::Tool(format!("headersHelper for MCP server \"{name}\" timed out")))?
@@ -1753,6 +1906,166 @@ mod tests {
         let _ = std::fs::remove_dir_all(auth_dir);
     }
 
+    /// Streamable HTTP MCP fixture: `initialize` never answers when `hang` is
+    /// set, and `tools/call` answers over SSE a second after its headers.
+    async fn run_streamable_fixture(listener: TcpListener, hang: bool) {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let (request, _, body) = read_http_exchange(&mut stream).await;
+                if !request.starts_with("POST ") {
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .await;
+                    return;
+                }
+                let message: Value = serde_json::from_slice(&body).unwrap();
+                let Some(id) = message.get("id").cloned() else {
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .await;
+                    return;
+                };
+                let result = match message.get("method").and_then(Value::as_str) {
+                    Some("initialize") if hang => {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        return;
+                    }
+                    Some("initialize") => json!({
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "slow-fixture", "version": "1.0.0" }
+                    }),
+                    Some("tools/list") => json!({
+                        "tools": [{ "name": "slow", "inputSchema": { "type": "object" } }]
+                    }),
+                    Some("tools/call") => {
+                        stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n")
+                            .await
+                            .unwrap();
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        let response = json!({ "jsonrpc": "2.0", "id": id, "result": {
+                            "content": [{ "type": "text", "text": "slow call finished" }],
+                            "isError": false
+                        }});
+                        let _ = stream
+                            .write_all(format!("event: message\ndata: {response}\n\n").as_bytes())
+                            .await;
+                        return;
+                    }
+                    method => panic!("unexpected streamable fixture method {method:?}"),
+                };
+                write_json_response(
+                    &mut stream,
+                    "200 OK",
+                    &json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+                )
+                .await;
+            });
+        }
+    }
+
+    fn streamable_config(address: std::net::SocketAddr, timeout_ms: u64) -> McpConfigureRequest {
+        serde_json::from_value(json!({
+            "transport": "streamable_http",
+            "url": format!("http://{address}/mcp"),
+            "timeoutMs": timeout_ms,
+            "oauth": false,
+            "enabled": true
+        }))
+        .unwrap()
+    }
+
+    /// The connection timeout bounds connecting and discovery. A tool call,
+    /// and the SSE stream that carries its answer, may take longer.
+    #[tokio::test]
+    async fn streamable_http_calls_may_outlast_the_connection_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(run_streamable_fixture(listener, false));
+        let registry = NativeMcpRegistry::default();
+        let info = registry
+            .configure("slow", streamable_config(address, 300))
+            .await
+            .unwrap();
+        assert_eq!(info.status, "connected");
+        let started = std::time::Instant::now();
+        let output = registry
+            .call("slow", "mcp__slow__slow", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(output.text, "slow call finished");
+        assert!(started.elapsed() >= Duration::from_millis(900));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn streamable_http_connection_timeout_names_its_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(run_streamable_fixture(listener, true));
+        let registry = NativeMcpRegistry::default();
+        let error = registry
+            .configure("hung", streamable_config(address, 300))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("MCP connection timed out after 300 ms"),
+            "{error}"
+        );
+        assert!(
+            registry.list().await.unwrap()[0]
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("after 300 ms"))
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn long_mcp_descriptions_are_capped_for_the_model_context() {
+        let tools = [
+            rmcp::model::Tool::new("short", "Read a record.", Arc::new(serde_json::Map::new())),
+            rmcp::model::Tool::new("long", "é".repeat(3000), Arc::new(serde_json::Map::new())),
+        ];
+        let definitions = definitions(&tools);
+        assert_eq!(definitions[0].description, "Read a record.");
+        let long = &definitions[1].description;
+        assert_eq!(long.chars().count(), 2048);
+        assert!(long.ends_with("… [truncated]"));
+        assert!(long.starts_with("éé"));
+        // MCP requires an object root; a schema that leaves it implied gets it.
+        assert_eq!(definitions[0].input_schema, json!({"type": "object"}));
+    }
+
+    #[test]
+    fn description_limits_accept_only_positive_decimal_counts() {
+        assert_eq!(description_limit(None), 2048);
+        for value in [
+            "", "0", "-1", "1.5", "1e4", "0x1000", " 4096", "4096 ", "NaN",
+        ] {
+            assert_eq!(description_limit(Some(value)), 2048, "{value:?}");
+        }
+        for (value, limit) in [("1", 1), ("4096", 4096), ("0008192", 8192)] {
+            assert_eq!(description_limit(Some(value)), limit);
+        }
+        for text in ["", "Read a record.\nKeep its fields.", &"x".repeat(2048)] {
+            assert_eq!(capped_description(text, 2048), text);
+        }
+        assert_eq!(
+            capped_description(&"x".repeat(2049), 2048),
+            "x".repeat(2035) + "… [truncated]"
+        );
+        for limit in [1, 2, 13, 14, 2048] {
+            let capped = capped_description(&"😀".repeat(3000), limit);
+            assert_eq!(capped.chars().count(), limit);
+            assert!(capped.ends_with(if limit > 13 { "… [truncated]" } else { "…" }));
+        }
+    }
+
     #[test]
     fn legacy_sse_parser_accepts_crlf_and_multiline_data() {
         let mut buffer =
@@ -2010,6 +2323,109 @@ mod recovery_tests {
         .await
         .unwrap();
         registry.disconnect("catalog").await.unwrap();
+    }
+
+    /// A hot reload connects servers in a candidate registry and then moves
+    /// them into the live one; catalog notifications must follow the move.
+    #[tokio::test]
+    async fn catalog_changes_reach_the_live_registry_after_a_generation_swap() {
+        let config: McpConfigureRequest = serde_json::from_value(serde_json::json!({
+            "transport":"stdio", "command":"python3",
+            "args":[concat!(env!("CARGO_MANIFEST_DIR"),"/tests/fixtures/catalog.py")],"enabled":true
+        }))
+        .unwrap();
+        let live = NativeMcpRegistry::default();
+        let candidate = NativeMcpRegistry::default();
+        candidate.configure("catalog", config).await.unwrap();
+        live.replace_from(&candidate);
+        drop(candidate);
+        live.call("catalog", "refresh", serde_json::json!({}))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !live
+                .tool_snapshot()
+                .iter()
+                .any(|tool| tool.name == "mcp__catalog__new_tool")
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the live registry never saw the changed catalog");
+        live.disconnect("catalog").await.unwrap();
+    }
+
+    fn launches(log: &Path) -> usize {
+        std::fs::read_to_string(log).map_or(0, |text| text.lines().count())
+    }
+
+    /// Swap in a candidate generation composed against `live`, as a hot
+    /// reload does.
+    async fn reload(live: &NativeMcpRegistry, config: McpConfigureRequest) -> McpServerInfo {
+        let candidate = NativeMcpRegistry::default();
+        let info = candidate
+            .configure_reusing(live, "fixture", config)
+            .await
+            .unwrap();
+        live.replace_from(&candidate);
+        info
+    }
+
+    #[tokio::test]
+    async fn reloads_reuse_a_connected_server_whose_configuration_is_unchanged() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-mcp-reuse-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let launch_log = root.join("launches");
+        let configured = |scope: &str| {
+            let mut config = config(&root.join("calls"), "0");
+            config
+                .env
+                .insert("LAUNCH_LOG".into(), launch_log.display().to_string());
+            config.env.insert("SCOPE".into(), scope.into());
+            config
+        };
+        let live = NativeMcpRegistry::default();
+        live.configure("fixture", configured("first"))
+            .await
+            .unwrap();
+        assert_eq!(launches(&launch_log), 1);
+
+        assert_eq!(reload(&live, configured("first")).await.status, "connected");
+        assert_eq!(
+            launches(&launch_log),
+            1,
+            "an unchanged server was respawned"
+        );
+        let ping = live.call("fixture", "ping", serde_json::json!({})).await;
+        assert_eq!(ping.unwrap().text, "pong");
+
+        reload(&live, configured("second")).await;
+        assert_eq!(launches(&launch_log), 2, "a changed server must reconnect");
+        let ping = live.call("fixture", "ping", serde_json::json!({})).await;
+        assert_eq!(ping.unwrap().text, "pong");
+
+        // The live entry stays authoritative when it moved on after the
+        // candidate shared it: here an explicit disconnect.
+        let candidate = NativeMcpRegistry::default();
+        candidate
+            .configure_reusing(&live, "fixture", configured("second"))
+            .await
+            .unwrap();
+        live.disconnect("fixture").await.unwrap();
+        live.replace_from(&candidate);
+        drop(candidate);
+        assert_eq!(live.list().await.unwrap()[0].status, "disconnected");
+
+        // A server that is not connected is connected afresh.
+        assert_eq!(
+            reload(&live, configured("second")).await.status,
+            "connected"
+        );
+        assert_eq!(launches(&launch_log), 3);
+        live.disconnect("fixture").await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

@@ -1,7 +1,12 @@
 //! Client-side application state. Everything here mirrors server state or
 //! holds pure UI concerns; nothing talks to the runtime directly.
 
+mod completion;
 mod reduce;
+
+#[cfg(test)]
+pub use completion::COMPLETION_GRACE;
+pub use completion::TurnEnd;
 
 use haarness_protocol::{
     AgentProfile, Item, ItemData, ItemId, PendingPermissionInfo, PendingQuestionInfo, ProviderInfo,
@@ -568,9 +573,14 @@ pub struct App {
     /// Every unanswered permission prompt in this root conversation, oldest
     /// first — including prompts raised on child-agent threads.
     pub pending_permissions: Vec<PendingPermissionInfo>,
-    /// Auto is local to this TUI launch. Never persisted as permission rules.
+    /// Whether the open chat is in Auto. On a server with shared approval
+    /// modes this mirrors the server's setting for the chat; on an older
+    /// server it is this TUI launch's own switch. Never a permission rule.
     pub auto_permissions: bool,
     pub auto_permissions_seen: std::collections::HashMap<String, bool>,
+    /// The server applies Auto itself, for every client.
+    pub approval_server: bool,
+    pub approval_mode: Option<haarness_protocol::ApprovalModeInfo>,
     /// True while y/a/w/n answer the first pending permission; toggled off
     /// with Esc so typing never answers a prompt by accident.
     pub permission_focus: bool,
@@ -712,6 +722,8 @@ pub struct App {
     pub(crate) diff_load: Option<crate::commands::DiffLoad>,
     /// OSC notification queued by the reducer, drained by the event loop.
     pub pending_notification: Option<String>,
+    /// "Finished" banners waiting out their grace; see `state::completion`.
+    pub completions: completion::HeldCompletions,
     /// Visible in-TUI companion for desktop notifications. This makes
     /// completion/approval feedback work even when a terminal ignores OSC 9.
     pub notification_toast: Option<Toast>,
@@ -845,6 +857,8 @@ impl App {
             pending_permissions: Vec::new(),
             auto_permissions: false,
             auto_permissions_seen: std::collections::HashMap::new(),
+            approval_server: false,
+            approval_mode: None,
             permission_focus: false,
             confirm_always: None,
             permission_selection: 0,
@@ -914,6 +928,7 @@ impl App {
             workspace_mutation: None,
             diff_load: None,
             pending_notification: None,
+            completions: completion::HeldCompletions::default(),
             notification_toast: None,
             terminal_focused: true,
             theme_preview_restore: None,

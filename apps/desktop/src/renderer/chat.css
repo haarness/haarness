@@ -1313,9 +1313,11 @@
   gap: var(--s0);
   min-width: 0;
 }
+/* One row: the model pill gives way (its name ellipsizes) before the send
+   button could drop onto a line of its own. */
 .composer-trailing {
   margin-inline-start: auto;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   justify-content: flex-end;
 }
 .composer .icon-button {
@@ -1329,14 +1331,32 @@
   gap: var(--s1);
   max-width: none;
 }
+/* Room for a full name like "Claude Sonnet 4.6" beside its provider icon,
+   effort label and chevron. In a narrow composer the name is the part that
+   gives way (min-width: 0 lets the pill shrink; the agent pill keeps its size). */
 .composer .composer-model {
   color: var(--text);
-  max-width: 210px;
+  max-width: 320px;
+  min-width: 0;
+}
+/* In a very narrow chat the name matters more than the effort, which the
+   picker still shows. */
+@container (max-width: 420px) {
+  .composer .composer-model .model-effort-summary {
+    display: none;
+  }
+}
+/* A model name is a Latin run: in Arabic it still truncates at its end
+   ("Claude Son…"), not its start. */
+.composer .composer-model .select-label {
+  direction: ltr;
+  unicode-bidi: isolate;
 }
 .composer .agent-select {
   color: var(--composer-agent, var(--muted));
   /* Room for names like "cloud-agent"; the model pill still gets most of it. */
   max-width: 140px;
+  flex: none;
 }
 .composer .send-button {
   width: 34px;

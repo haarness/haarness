@@ -318,6 +318,14 @@ export class Api extends Transport {
   setGoal(id: string, body: T.GoalRequest, options: RequestOptions = {}): Promise<T.GoalActionResponse> {
     return this.request("POST", `/v1/threads/${this.segment(id)}/goal`, { body, binaryBody: false, binaryResponse: false, ...options });
   }
+  /** GET /v1/threads/{id}/approval-mode */
+  getApprovalMode(id: string, options: RequestOptions = {}): Promise<T.ApprovalModeInfo> {
+    return this.request("GET", `/v1/threads/${this.segment(id)}/approval-mode`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** PUT /v1/threads/{id}/approval-mode */
+  setApprovalMode(id: string, body: T.SetApprovalModeRequest, options: RequestOptions = {}): Promise<T.ApprovalModeInfo> {
+    return this.request("PUT", `/v1/threads/${this.segment(id)}/approval-mode`, { body, binaryBody: false, binaryResponse: false, ...options });
+  }
   /** GET /v1/threads/{id}/loop */
   getLoop(id: string, options: RequestOptions = {}): Promise<T.LoopResponse> {
     return this.request("GET", `/v1/threads/${this.segment(id)}/loop`, { binaryBody: false, binaryResponse: false, ...options });

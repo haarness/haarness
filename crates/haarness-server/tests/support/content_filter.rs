@@ -71,7 +71,8 @@ async fn filtered_turn_preserves_partial_output_and_usage_without_tools_or_queue
         .queue_input(
             thread.id,
             QueueInputRequest {
-                preview: false,
+                preview: None,
+                reasoning_effort: None,
                 delivery: InputDelivery::Steer,
                 request_id: RequestId::new(),
                 text: "queued input".into(),

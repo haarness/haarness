@@ -39,6 +39,21 @@ The exported resource includes `service.name`, `service.version`, the OpenTeleme
 
 Existing structured `tracing` events emitted inside those spans are available as span events. The batch processor is flushed during ordinary process shutdown, including graceful `serve` shutdown.
 
+## Diagnostic log lines
+
+These lines are designed to be safe to keep in daemon logs and span events:
+
+- `hook command failed` (WARN): a hook exited non-zero (other than a clean exit-2 block) or was killed, including `async` hooks. Fields: `event`, `tool` when the event has one, `program`, `code` or `signal`, `asynchronous`, and the start of `stderr` (up to 300 characters). Such a failure never blocks the action.
+- `hook blocked` (INFO): exactly once per block from `PreToolUse`, `PermissionRequest` or `UserPromptSubmit`, whether by exit code 2, a JSON `block`/`continue: false`, or a permission `deny`. Fields: `event`, `tool`, `program`, `code` and the first line of the `reason` (up to 200 characters). A block from a command that also failed logs both lines. Observational events cannot block, so their block answers log only at DEBUG.
+- `hook timed out`, `hook failed to spawn` and `hook failed` (WARN) carry the same `event`, `tool` and `program` fields.
+- `request rejected` (WARN): the API refused a request with 401 or 403. Fields: `method`, `path` without the query string, `reason` (`missing`, `wrong_scheme`, `bad_credential` or `forbidden` for a host/origin check), the Authorization `scheme` name only (`Bearer`, `Basic`, … or `unrecognized`), `remote` address and a clipped `user_agent`. At most one line per path prefix (for example `/v1/threads`) and reason is written each minute; the next line reports how many were `suppressed`.
+- `haarness starting` (INFO): every command's first line. Fields: `version`, `commit` (the git commit the binary was built from, `<sha>` or `<sha>-dirty`, or `unknown` for a build outside this repository's own git checkout), and `workspace`. `-dirty` reflects the tree when the build script last ran, which happens when HEAD moves.
+- `hot reload source scan failed` (WARN): a watched configuration source could not be read, with the path in `error`. The watcher keeps polling; repeats of the same error log at DEBUG, a different error warns again, and `hot reload source scan recovered` (INFO) follows once the sources read again.
+- `skipping provider-incompatible tool schema for Claude` (WARN): a tool was left out of Claude requests because Claude rejects its root input schema. Fields: `tool`, `issues`. Once per tool per process.
+- `truncated MCP tool description` (DEBUG): fields `tool`, `original_chars` and `limit`.
+
+`program` is the file name of the command's first literal word after any `NAME=value` assignments and `env`/`exec`/`command`/`nohup` wrappers, never its arguments. When only the shell could resolve that word (command substitution, an expansion or unbalanced quotes), the shell's name is logged instead. Hook text is redacted before it is logged: Authorization, cookie and credential-named `key=value`, `key: value` and `--key value` pairs (token, secret, password, API key, private key, auth, credential, session), `Bearer`/`Basic` values, curl user flags, URL user info, JWTs, well-known token prefixes and long opaque strings become `[redacted]`. Control characters are removed, and text is clipped on a character boundary. Authorization, Cookie, Host and Origin header values are never logged.
+
 ## Data handling
 
 The instrumentation does not add prompts, model responses, tool arguments, tool output, HTTP headers, bearer tokens, or OTLP authorization headers as span attributes. Existing structured log events can become span events and may contain the same operational paths and error messages already admitted to Haarness logs. Protect collector access and retention accordingly.

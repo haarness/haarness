@@ -78,6 +78,52 @@
         ],
         "type": "object"
       },
+      "ApprovalMode": {
+        "enum": [
+          "auto",
+          "review"
+        ],
+        "type": "string"
+      },
+      "ApprovalModeInfo": {
+        "properties": {
+          "explicit": {
+            "description": "True while this chat or a delegating agent has its own setting.",
+            "type": "boolean"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/ApprovalMode"
+          },
+          "revision": {
+            "description": "Opaque version of every setting that decided `mode`. Send it back\nwith a change to refuse one made from a stale view.",
+            "type": "string"
+          },
+          "sourceThreadId": {
+            "$ref": "#/components/schemas/ThreadId",
+            "description": "The chat whose own setting decided `mode`: this one, or an agent\nthat delegated to it."
+          },
+          "threadId": {
+            "$ref": "#/components/schemas/ThreadId"
+          }
+        },
+        "required": [
+          "threadId",
+          "mode",
+          "sourceThreadId",
+          "explicit",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "ApprovalModeSetting": {
+        "description": "What a client may ask for. `Inherit` clears this chat's own setting so it\nfollows the agent that delegated to it (Review at the top level).",
+        "enum": [
+          "auto",
+          "review",
+          "inherit"
+        ],
+        "type": "string"
+      },
       "BackgroundTaskInfo": {
         "description": "Process-local child-agent work associated with one parent conversation.\nChild threads and their transcript are durable; the live/background flag\nintentionally is not and disappears when the server process stops.",
         "properties": {
@@ -2331,7 +2377,7 @@
                 "type": "array"
               },
               "permission": {
-                "description": "Permission category (bash, edit, external_directory, …).",
+                "description": "Permission category (bash, edit, external_directory, \u2026).",
                 "type": "string"
               },
               "permission_id": {
@@ -3154,8 +3200,18 @@
             "$ref": "#/components/schemas/RequestId"
           },
           "preview": {
-            "description": "The submitting graphical client supports sandboxed file previews.",
-            "type": "boolean"
+            "description": "The submitting client's preview support. `None` keeps the chat's\nrecorded value, so the turn sees the same tools as earlier turns.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "reasoningEffort": {
+            "description": "Reasoning effort chosen with the message. `None` keeps the effort of\nthe chat's latest prompt.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "text": {
             "type": "string"
@@ -3168,7 +3224,7 @@
         "type": "object"
       },
       "PendingPermissionInfo": {
-        "description": "One unanswered permission prompt, listable so clients can repopulate\npending approvals after a reconnect or thread switch — including prompts\nraised on child-agent threads.",
+        "description": "One unanswered permission prompt, listable so clients can repopulate\npending approvals after a reconnect or thread switch \u2014 including prompts\nraised on child-agent threads.",
         "properties": {
           "agent": {
             "type": [
@@ -3205,7 +3261,7 @@
             "type": "array"
           },
           "permission": {
-            "description": "Permission category (bash, edit, external_directory, …).",
+            "description": "Permission category (bash, edit, external_directory, \u2026).",
             "type": "string"
           },
           "permissionId": {
@@ -3725,8 +3781,18 @@
             "description": "Steer by default for compatibility; queue waits for an idle boundary."
           },
           "preview": {
-            "description": "The submitting graphical client supports sandboxed file previews.",
-            "type": "boolean"
+            "description": "Whether the submitting client can show sandboxed file previews. Text\nclients say `false`; `None` keeps the chat's recorded value so a\nphone or a background result does not change the tools or prompt.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "reasoningEffort": {
+            "description": "Reasoning effort for a turn this input starts. `None` keeps the\neffort of the chat's latest prompt.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "requestId": {
             "$ref": "#/components/schemas/RequestId"
@@ -3993,7 +4059,7 @@
             "type": "object"
           }
         ],
-        "description": "One entry of a Git review: a [`FileDiff`] plus the bounds the review had\nto apply to produce it.\n\nIt flattens, so the wire shape is a strict superset of `FileDiff` and the\nendpoint keeps returning the same array of the same objects; both added\nfields are optional and defaulted, so an older client — or the generated\nTypeScript SDK before it is regenerated — decodes these responses\nunchanged and simply does not see them."
+        "description": "One entry of a Git review: a [`FileDiff`] plus the bounds the review had\nto apply to produce it.\n\nIt flattens, so the wire shape is a strict superset of `FileDiff` and the\nendpoint keeps returning the same array of the same objects; both added\nfields are optional and defaulted, so an older client \u2014 or the generated\nTypeScript SDK before it is regenerated \u2014 decodes these responses\nunchanged and simply does not see them."
       },
       "ReviewFinding": {
         "properties": {
@@ -4120,6 +4186,24 @@
           "schemaVersion",
           "serverInstanceId",
           "capabilities"
+        ],
+        "type": "object"
+      },
+      "SetApprovalModeRequest": {
+        "properties": {
+          "mode": {
+            "$ref": "#/components/schemas/ApprovalModeSetting"
+          },
+          "revision": {
+            "description": "The `revision` the client last saw. A mismatch answers 409; omit it\nto apply the change regardless.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "mode"
         ],
         "type": "object"
       },

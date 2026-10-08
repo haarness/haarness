@@ -553,3 +553,125 @@ async fn reloads_runtime_assets_atomically_and_defers_while_a_turn_is_active() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+fn line_count(path: &Path) -> usize {
+    std::fs::read_to_string(path).map_or(0, |text| text.lines().count())
+}
+
+async fn wait_for_mcp_status(client: &Client, address: SocketAddr, name: &str, status: &str) {
+    let mut latest = Value::Null;
+    for _ in 0..200 {
+        latest = get_json(client, address, "/mcp").await;
+        if latest.as_array().is_some_and(|servers| {
+            servers
+                .iter()
+                .any(|server| server["name"] == name && server["status"] == status)
+        }) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("MCP server {name} did not reach {status}; latest={latest}");
+}
+
+/// A reload follows content, not file events: rewriting an instruction file
+/// unchanged, an editor's scratch files and an OAuth token refresh reload
+/// nothing, and a real reload keeps unchanged MCP servers connected rather
+/// than respawning their processes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unchanged_sources_neither_reload_nor_respawn_mcp_servers() {
+    let directory = TestDirectory::new();
+    let workspace = directory.0.join("workspace");
+    let data = directory.0.join("data");
+    let home = directory.0.join("home");
+    std::fs::create_dir_all(workspace.join(".haarness")).expect("create project config root");
+    std::fs::create_dir_all(data.join("data")).expect("create isolated data root");
+    std::fs::create_dir_all(&home).expect("create isolated home");
+    let launches = directory.0.join("launches");
+    let reloads = directory.0.join("reloads");
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../haarness-mcp/tests/fixtures/recovery.py"
+    );
+    std::fs::write(
+        workspace.join(".haarness/haarness.json"),
+        serde_json::to_string_pretty(&json!({
+            "mcp": {"counter": {
+                "command": "python3",
+                "args": [fixture],
+                "env": {"LAUNCH_LOG": launches, "CALL_LOG": directory.0.join("calls")}
+            }},
+            "hooks": {"ConfigChange": [{"hooks": [{
+                "type": "command",
+                "command": format!("printf 'reload\\n' >> '{}'", reloads.display())
+            }]}]}
+        }))
+        .expect("serialize project config"),
+    )
+    .expect("write project config");
+    let agents = workspace.join("AGENTS.md");
+    std::fs::write(&agents, "Use tabs.\n").expect("write instructions");
+    // A provider this build does not know, so no credential reaches a network.
+    let auth = data.join("data/auth.json");
+    let credential = |access: &str| {
+        json!({"fixture-oauth": {"type": "oauth", "access": access, "refresh": access, "expires": 1}})
+            .to_string()
+    };
+    std::fs::write(&auth, credential("first")).expect("write credentials");
+    let address = unused_address().await;
+    let mut process = server_command(&workspace, &data, &home, address)
+        .spawn()
+        .expect("launch Haarness server");
+    wait_until_listening(address).await;
+    let client = Client::new();
+    wait_for_mcp_status(&client, address, "counter", "connected").await;
+    assert_eq!(line_count(&launches), 1);
+
+    std::fs::write(&agents, "Use tabs.\n").expect("rewrite instructions unchanged");
+    for scratch in [".haarness.json.swp", "haarness.json~", "4913"] {
+        std::fs::write(workspace.join(".haarness").join(scratch), "scratch")
+            .expect("write editor scratch file");
+    }
+    std::fs::write(&auth, credential("refreshed")).expect("refresh the OAuth token");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        line_count(&reloads),
+        0,
+        "an unchanged source reloaded the configuration"
+    );
+    assert_eq!(
+        line_count(&launches),
+        1,
+        "an unchanged source respawned the MCP server"
+    );
+
+    std::fs::write(&agents, "Use spaces.\n").expect("edit instructions");
+    for _ in 0..200 {
+        if line_count(&reloads) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(line_count(&reloads), 1, "an edited source did not reload");
+    wait_for_mcp_status(&client, address, "counter", "connected").await;
+    assert_eq!(
+        line_count(&launches),
+        1,
+        "the reload respawned an unchanged MCP server"
+    );
+    let ping = client
+        .post(format!("http://{address}/v1/mcp/counter/tools/ping"))
+        .bearer_auth(TOKEN)
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("call the reused MCP server");
+    let status = ping.status();
+    let body = ping.text().await.unwrap_or_default();
+    assert!(
+        status.is_success() && body.contains("pong"),
+        "{status}: {body}"
+    );
+    process.kill().await.expect("stop server");
+    process.wait().await.expect("reap server");
+}

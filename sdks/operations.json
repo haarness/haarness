@@ -1001,6 +1001,31 @@
     }
   },
   {
+    "name": "get_approval_mode",
+    "method": "GET",
+    "path": "/v1/threads/{id}/approval-mode",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/ApprovalModeInfo"
+    }
+  },
+  {
+    "name": "set_approval_mode",
+    "method": "PUT",
+    "path": "/v1/threads/{id}/approval-mode",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/ApprovalModeInfo"
+    },
+    "body": {
+      "$ref": "#/components/schemas/SetApprovalModeRequest"
+    }
+  },
+  {
     "name": "get_loop",
     "method": "GET",
     "path": "/v1/threads/{id}/loop",

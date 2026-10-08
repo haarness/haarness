@@ -1,7 +1,7 @@
 import { previewInfo } from "./preview-actions";
 import type { RemoteAction, RemoteShare } from "./remote-control";
 import { createAttachmentDrafts } from "./attachment-drafts";
-import { applyLanguage } from "./i18n";
+import { applyLanguage, t } from "./i18n";
 import {
   autoApproval,
   approveAndEnable,
@@ -69,7 +69,11 @@ export type Pane = "chat" | "files" | "diff";
 
 interface State extends Live {
   modelRecents: ModelKey[];
+  /** This device's Auto choice for new chats per project, and per-chat
+   * choices for servers that predate shared approval modes. */
   approvalModes: ApprovalModes;
+  /** Each chat's Auto/Review setting as its server reports it. */
+  approvalShared: Record<string, Record<string, T.ApprovalModeInfo>>;
   ordering: Ordering;
   expandedProjects: Record<string, boolean>;
   worktreeViews: Record<string, boolean>;
@@ -135,6 +139,7 @@ function createApp() {
   const [state, set] = createStore<State>({
     modelRecents: [],
     approvalModes: {},
+    approvalShared: {},
     ordering: {},
     expandedProjects: {},
     worktreeViews: {},
@@ -283,10 +288,47 @@ function createApp() {
     await modelSave;
   }
   let approvalSave = Promise.resolve<unknown>(undefined);
+  /** The server answers for chats in Auto, so every window and the phone
+   * agree; this client only shows and changes the setting. */
+  function sharedApprovals(connection = state.connection?.id ?? "") {
+    return (
+      !!connection &&
+      connection === state.connection?.id &&
+      !!state.connection?.info.capabilities.includes("approval-mode.v1")
+    );
+  }
+  function rememberApprovalMode(connection: string, info: T.ApprovalModeInfo) {
+    set("approvalShared", connection, (current) => ({
+      ...current,
+      [info.threadId]: info,
+    }));
+  }
+  async function loadApprovalMode(connection: string, thread: string) {
+    try {
+      const info = await window.haarness.api<T.ApprovalModeInfo>(
+        connection,
+        "getApprovalMode",
+        [thread],
+      );
+      rememberApprovalMode(connection, info);
+      return info;
+    } catch {
+      return undefined;
+    }
+  }
+  async function saveApprovalModes() {
+    const value = JSON.parse(JSON.stringify(state.approvalModes));
+    approvalSave = approvalSave
+      .catch(() => {})
+      .then(() => window.haarness.storage("approval-modes:v1", value));
+    await approvalSave;
+  }
   function isAutoApproval(
     connection = state.connection?.id ?? "",
     thread = state.selected,
   ) {
+    if (thread && sharedApprovals(connection))
+      return state.approvalShared[connection]?.[thread]?.mode === "auto";
     return autoApproval(
       state.approvalModes,
       connection,
@@ -303,15 +345,30 @@ function createApp() {
   ) {
     if (!connection) return;
     approvalRevision++;
+    if (thread && sharedApprovals(connection)) {
+      const revision = state.approvalShared[connection]?.[thread]?.revision;
+      try {
+        rememberApprovalMode(
+          connection,
+          await window.haarness.api<T.ApprovalModeInfo>(
+            connection,
+            "setApprovalMode",
+            [thread, { mode: enabled ? "auto" : "review", ...(revision ? { revision } : {}) }],
+          ),
+        );
+      } catch (error) {
+        await loadApprovalMode(connection, thread);
+        if (/409|another window/i.test(String(error)))
+          notify(t("Approvals changed in another window. Try again."));
+        else throw error;
+      }
+      return;
+    }
     set("approvalModes", connection, {
       ...state.approvalModes[connection],
       [thread || "*"]: enabled,
     });
-    const value = JSON.parse(JSON.stringify(state.approvalModes));
-    approvalSave = approvalSave
-      .catch(() => {})
-      .then(() => window.haarness.storage("approval-modes:v1", value));
-    await approvalSave;
+    await saveApprovalModes();
   }
   async function allowOnceAndAuto(request: T.PendingPermissionInfo) {
     const connection = state.connection?.id;
@@ -541,8 +598,69 @@ function createApp() {
   }
   createEffect(() => applyLanguage(state.preferences.language));
   createEffect(() => {
-    if (state.connection && state.connectionStatus === "Connected")
+    if (
+      state.connection &&
+      state.connectionStatus === "Connected" &&
+      !sharedApprovals(state.connection.id)
+    )
       autoRespond(state.connection.id, state.permissions, state.threads);
+  });
+  createEffect(() => {
+    const connection = state.connection?.id;
+    const thread = state.selected;
+    if (
+      connection &&
+      thread &&
+      state.connectionStatus === "Connected" &&
+      sharedApprovals(connection)
+    )
+      void loadApprovalMode(connection, thread);
+  });
+  // Per-chat Auto chosen before the server kept the mode moves to the
+  // server once; this device keeps only its choice for new chats.
+  const movedApprovals = new Set<string>();
+  createEffect(() => {
+    const connection = state.connection?.id;
+    if (
+      !connection ||
+      state.connectionStatus !== "Connected" ||
+      !sharedApprovals(connection) ||
+      movedApprovals.has(connection)
+    )
+      return;
+    movedApprovals.add(connection);
+    void (async () => {
+      const rules = { ...(state.approvalModes[connection] ?? {}) };
+      const chats = Object.keys(rules).filter((id) => id !== "*");
+      if (!chats.length) return;
+      for (const thread of chats) {
+        if (!rules[thread]) continue;
+        try {
+          const current = await window.haarness.api<T.ApprovalModeInfo>(
+            connection,
+            "getApprovalMode",
+            [thread],
+          );
+          if (!current.explicit)
+            rememberApprovalMode(
+              connection,
+              await window.haarness.api<T.ApprovalModeInfo>(
+                connection,
+                "setApprovalMode",
+                [thread, { mode: "auto", revision: current.revision }],
+              ),
+            );
+        } catch {
+          /* A deleted chat has nothing to move. */
+        }
+      }
+      set(
+        "approvalModes",
+        connection,
+        rules["*"] === undefined ? {} : { "*": rules["*"] },
+      );
+      await saveApprovalModes();
+    })();
   });
   const projectConnections = new Map<string, Promise<Connection | null>>();
   function projectConnection(id: string) {
@@ -822,7 +940,8 @@ function createApp() {
         id !== state.connection?.id &&
         overview.loaded &&
         !overview.loading &&
-        !overview.error
+        !overview.error &&
+        !overview.shared
       )
         autoRespond(id, overview.permissions, overview.threads);
     }
@@ -1281,6 +1400,25 @@ function createApp() {
       "createThread",
       [options],
     );
+    // A new chat starts in the mode chosen for new chats here. The server
+    // keeps it, so other windows and the phone see the same mode.
+    if (
+      sharedApprovals(connection) &&
+      autoApproval(state.approvalModes, connection, "")
+    ) {
+      try {
+        rememberApprovalMode(
+          connection,
+          await window.haarness.api<T.ApprovalModeInfo>(
+            connection,
+            "setApprovalMode",
+            [thread.id, { mode: "auto" }],
+          ),
+        );
+      } catch (error) {
+        set("error", String(error));
+      }
+    }
     // The sender may clear the starter draft once it has a conversation owner.
     const initialDraft =
       state.drafts["new:" + (currentProject()?.id ?? connection)] ?? "";
@@ -1576,6 +1714,11 @@ function createApp() {
     lastCursor = envelope.eventId;
     for (const journal of journals) journal.push(item as T.EventEnvelope);
     reduceEvent(state, set, item as T.EventEnvelope);
+    if (envelope.type === "approval_mode.changed")
+      rememberApprovalMode(
+        state.connection!.id,
+        envelope.payload as T.ApprovalModeInfo,
+      );
     if (envelope.type === "item.created" && envelope.threadId === state.selected && !state.loadingChat) {
       const entry = envelope.payload as T.Item;
       const data = entry.data;

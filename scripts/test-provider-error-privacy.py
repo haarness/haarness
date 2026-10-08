@@ -67,7 +67,8 @@ try:
 
         def run(thread):
             turn = api(f"/threads/{thread}/turns", {"requestId": str(uuid4()), "text": "Reply briefly."})
-            deadline = time.monotonic() + 20
+            # A transport failure is retried with backoff before the turn fails.
+            deadline = time.monotonic() + 90
             while time.monotonic() < deadline:
                 result = api("/turns/" + turn["id"])
                 if result["status"] not in ("running", "pending"):

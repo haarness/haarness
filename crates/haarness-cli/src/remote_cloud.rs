@@ -307,6 +307,10 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
             ] {
                 identity[key] = value;
             }
+            // Why an earlier run gave up no longer applies once this one starts.
+            if let Some(fields) = identity.as_object_mut() {
+                fields.remove("error");
+            }
             super::write_private_json(&file, &identity)?;
             let stop_file = file.with_extension("stop");
             if stop_file.exists() {
@@ -345,91 +349,63 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
             });
             let _watcher = AbortTask(watcher);
             let mut shown_title = identity["title"].as_str().unwrap_or_default().to_owned();
-            let mut failures = 0u32;
+            let mut backoff = Backoff::new(Pacing::default());
             let mut rejected = None;
-            loop {
-                // Daemons can be replaced by a local client upgrade or restarted after a crash.
-                // Resolve the current address/token before each transport generation.
-                let discovery = tokio::select! {
-                    () = stop.cancelled() => break,
-                    result = ensure_workspace_server(paths, workspace, trust, false) => result,
-                };
-                match discovery {
-                    Ok(discovery) => {
-                        target.url = discovery.url;
-                        target.token = discovery.token;
-                    }
-                    Err(error) => {
-                        eprintln!("Waiting for the local runtime: {error}");
-                        tokio::select! { () = stop.cancelled() => break, () = tokio::time::sleep(Duration::from_secs(5)) => {} }
-                        continue;
-                    }
-                }
-                verify_runtime(&http, &target).await?;
-                let bearer = client.bearer(rejected.as_deref()).await?;
-                rejected = None;
-                let mut url = client
-                    .config
-                    .api_url
-                    .join(&format!("api/v1/remote-hosts/{id}/connect"))?;
-                url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
-                    .map_err(|()| anyhow::anyhow!("Invalid Cloud URL"))?;
-                let mut handshake = url.as_str().into_client_request()?;
-                handshake
-                    .headers_mut()
-                    .insert("authorization", format!("Bearer {bearer}").parse()?);
-                let attempt = tokio::time::timeout(
-                    Duration::from_secs(10),
-                    tokio_tungstenite::connect_async_with_config(
-                        handshake,
-                        Some(
-                            tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-                                .max_message_size(Some(24 * 1024 * 1024))
-                                .max_frame_size(Some(24 * 1024 * 1024)),
-                        ),
-                        false,
-                    ),
-                );
-                let result = tokio::select! {()=stop.cancelled()=>break,result=attempt=>result};
-                match result {
-                    Ok(Ok((socket, _))) => {
-                        failures = 0;
-                        println!("Remote host connected");
-                        tokio::select! {
-                            () = stop.cancelled() => break,
-                            result = connected(socket, target.clone(), http.clone()) => {
-                                if let Err(error) = result {
-                                    eprintln!("Remote connection ended: {error}");
-                                }
-                            }
-                            () = follow_title(&client, &http, &target, id, &file, &mut shown_title) => {}
+            let ended: Result<()> = async {
+                loop {
+                    // Daemons can be replaced by a local client upgrade or restarted after a crash.
+                    // Resolve the current address/token before each transport generation.
+                    let discovery = tokio::select! {
+                        () = stop.cancelled() => break,
+                        result = ensure_workspace_server(paths, workspace, trust, false) => result,
+                    };
+                    match discovery {
+                        Ok(discovery) => {
+                            target.url = discovery.url;
+                            target.token = discovery.token;
+                        }
+                        Err(error) => {
+                            eprintln!("Waiting for the local runtime: {error}");
+                            tokio::select! { () = stop.cancelled() => break, () = tokio::time::sleep(Duration::from_secs(5)) => {} }
+                            continue;
                         }
                     }
-                    Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response)))
-                        if response.status() == reqwest::StatusCode::UNAUTHORIZED =>
-                    {
+                    verify_runtime(&http, &target).await?;
+                    let bearer = client.bearer(rejected.as_deref()).await?;
+                    let reauthorized = rejected.take().is_some();
+                    let mut url = client
+                        .config
+                        .api_url
+                        .join(&format!("api/v1/remote-hosts/{id}/connect"))?;
+                    url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
+                        .map_err(|()| anyhow::anyhow!("Invalid Cloud URL"))?;
+                    let mut handshake = url.as_str().into_client_request()?;
+                    handshake
+                        .headers_mut()
+                        .insert("authorization", format!("Bearer {bearer}").parse()?);
+                    let link = tokio::select! {
+                        () = stop.cancelled() => break,
+                        link = relay_link(handshake, &target, &http, backoff.pacing.stable) => link?,
+                        () = follow_title(&client, &http, &target, id, &file, &mut shown_title) => continue,
+                    };
+                    if link == Link::Unauthorized {
+                        // One retry with a fresh token; a second refusal will not pass either.
+                        ensure!(
+                            !reauthorized,
+                            "Remote authentication rejected; sign in again or replace the expired/revoked API key"
+                        );
                         rejected = Some(bearer);
-                        failures += 1;
-                        if failures > 1 {
-                            anyhow::bail!(
-                                "Remote authentication rejected; sign in again or replace the expired/revoked API key"
-                            )
-                        }
                     }
-                    Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response)))
-                        if matches!(response.status().as_u16(), 403 | 404) =>
-                    {
-                        anyhow::bail!("Remote host access was revoked or is no longer allowed")
-                    }
-                    _ => {
-                        failures += 1;
-                        eprintln!("Remote host disconnected; reconnecting");
-                    }
+                    let delay = backoff.wait(link);
+                    tokio::select! {()=stop.cancelled()=>break,()=tokio::time::sleep(delay)=>{}}
                 }
-                let delay = Duration::from_millis(
-                    (500u64 << failures.min(5)) + u64::from(rand::random::<u16>() % 500),
-                );
-                tokio::select! {()=stop.cancelled()=>break,()=tokio::time::sleep(delay)=>{}}
+                Ok(())
+            }
+            .await;
+            if let Err(error) = ended {
+                // The process ends here; status reads why from the identity.
+                record_exit(&file, &error);
+                return Err(error);
             }
             println!("Remote connector stopped. Local work continues.");
         }
@@ -511,20 +487,221 @@ async fn verify_runtime(http: &reqwest::Client, target: &Target) -> Result<()> {
     );
     Ok(())
 }
+/// How the connector paces reconnects to the Cloud relay. Each attempt costs
+/// a runtime check, a token lookup and a Cloud database write, so a relay
+/// that keeps taking the socket and dropping it must not get one a second.
+#[derive(Clone, Copy, Debug)]
+struct Pacing {
+    /// The wait after a failed attempt, doubling per failure in a row up to `retry_max`.
+    retry: Duration,
+    retry_max: Duration,
+    /// A connection that stays up this long, or carries a request, proves the
+    /// relay took this host. Only that resets the waits.
+    stable: Duration,
+    /// Connections in a row the relay took and dropped before they proved
+    /// themselves, before the waits grow to minutes.
+    drops: u32,
+    /// The first of those long waits, doubling up to `cooldown_max`.
+    cooldown: Duration,
+    cooldown_max: Duration,
+}
+impl Default for Pacing {
+    fn default() -> Self {
+        Self {
+            retry: Duration::from_secs(1),
+            retry_max: Duration::from_secs(30),
+            stable: Duration::from_secs(60),
+            drops: 4,
+            cooldown: Duration::from_secs(60),
+            cooldown_max: Duration::from_secs(10 * 60),
+        }
+    }
+}
+/// How one attempt to reach the relay ended, when reconnecting can still help.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Link {
+    /// The handshake failed: the network or Cloud is unreachable.
+    Failed,
+    /// Cloud refused the token.
+    Unauthorized,
+    /// The relay took the socket and the connection has ended. `proven` when
+    /// it stayed up for the stable period or carried a request.
+    Ended { proven: bool },
+}
+struct Backoff {
+    pacing: Pacing,
+    /// Attempts in a row that did not prove a connection.
+    failures: u32,
+    /// Of those, connections the relay took and then dropped.
+    drops: u32,
+    /// The longest wait logged so far, so each escalation is logged once.
+    logged: Duration,
+}
+impl Backoff {
+    fn new(pacing: Pacing) -> Self {
+        Self {
+            pacing,
+            failures: 0,
+            drops: 0,
+            logged: Duration::ZERO,
+        }
+    }
+    /// The wait before the next attempt, after `link`.
+    fn wait(&mut self, link: Link) -> Duration {
+        let pacing = self.pacing;
+        match link {
+            Link::Ended { proven: true } => {
+                self.failures = 0;
+                self.drops = 0;
+                self.logged = Duration::ZERO;
+            }
+            Link::Ended { proven: false } => self.drops = self.drops.saturating_add(1),
+            // A failed connect says nothing about the relay; it keeps the count.
+            Link::Failed | Link::Unauthorized => {}
+        }
+        self.failures = self.failures.saturating_add(1);
+        if self.drops >= pacing.drops && matches!(link, Link::Ended { .. }) {
+            let wait = pacing
+                .cooldown
+                .saturating_mul(1 << (self.drops - pacing.drops).min(16))
+                .min(pacing.cooldown_max);
+            if wait > self.logged {
+                self.logged = wait;
+                tracing::warn!(
+                    drops = self.drops,
+                    wait_secs = wait.as_secs(),
+                    "remote relay keeps dropping the connection; backing off"
+                );
+                eprintln!(
+                    "Haarness Cloud dropped {} connections in a row soon after accepting them; waiting {} min between attempts",
+                    self.drops,
+                    wait.as_secs().div_ceil(60).max(1)
+                );
+            }
+            return jitter(wait);
+        }
+        jitter(
+            pacing
+                .retry
+                .saturating_mul(1 << (self.failures - 1).min(16))
+                .min(pacing.retry_max),
+        )
+    }
+}
+/// Up to a fifth shorter, so connectors that lost Cloud together do not return together.
+fn jitter(wait: Duration) -> Duration {
+    wait.mul_f64(1.0 - rand::random::<f64>() / 5.0)
+}
+/// The relay announced a protocol this build does not speak; reconnecting
+/// cannot fix that, only an update can.
+#[derive(Debug)]
+struct Unsupported(u64);
+impl std::fmt::Display for Unsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Haarness Cloud now uses remote protocol version {}, which this version of Haarness does not support. Update Haarness to use remote control again.",
+            self.0
+        )
+    }
+}
+impl std::error::Error for Unsupported {}
+const RELAY_VERSION: u64 = 1;
+/// The version a relay's first frame announces, when it is a `ready` frame.
+fn relay_version(frame: &str) -> Option<u64> {
+    let frame = serde_json::from_str::<Value>(frame).ok()?;
+    if frame["type"] == "ready" {
+        frame["version"].as_u64()
+    } else {
+        None
+    }
+}
+/// One connection to the relay, from the handshake until it ends. Only an
+/// answer that reconnecting cannot change is an error.
+async fn relay_link(
+    handshake: tokio_tungstenite::tungstenite::handshake::client::Request,
+    target: &Target,
+    http: &reqwest::Client,
+    stable: Duration,
+) -> Result<Link> {
+    let attempt = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio_tungstenite::connect_async_with_config(
+            handshake,
+            Some(
+                tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+                    .max_message_size(Some(24 * 1024 * 1024))
+                    .max_frame_size(Some(24 * 1024 * 1024)),
+            ),
+            false,
+        ),
+    );
+    let socket = match attempt.await {
+        Ok(Ok((socket, _))) => socket,
+        Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response)))
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED =>
+        {
+            return Ok(Link::Unauthorized);
+        }
+        Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response)))
+            if matches!(response.status().as_u16(), 403 | 404) =>
+        {
+            anyhow::bail!("Remote host access was revoked or is no longer allowed")
+        }
+        Ok(Err(error)) => {
+            eprintln!("Could not reach Haarness Cloud: {error}; reconnecting");
+            return Ok(Link::Failed);
+        }
+        Err(_) => {
+            eprintln!("Haarness Cloud did not answer in time; reconnecting");
+            return Ok(Link::Failed);
+        }
+    };
+    println!("Remote host connected");
+    let since = tokio::time::Instant::now();
+    let mut served = false;
+    if let Err(error) = connected(socket, target.clone(), http.clone(), &mut served).await {
+        if error.is::<Unsupported>() {
+            return Err(error);
+        }
+        eprintln!("Remote connection ended: {error}");
+    }
+    Ok(Link::Ended {
+        proven: served || since.elapsed() >= stable,
+    })
+}
+/// Keep why the connector gave up in its identity, so status can say so
+/// after the process is gone.
+fn record_exit(file: &Path, error: &anyhow::Error) {
+    if let Some(mut identity) = std::fs::read(file)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .filter(Value::is_object)
+    {
+        identity["error"] = json!(error.to_string());
+        let _ = super::write_private_json(file, &identity);
+    }
+}
 async fn connected(
     mut socket: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
     target: Target,
     http: reqwest::Client,
+    served: &mut bool,
 ) -> Result<()> {
     let ready = tokio::time::timeout(Duration::from_secs(10), socket.next())
         .await?
         .context("Relay closed")??;
-    ensure!(
-        matches!(ready,Message::Text(ref value) if matches!(serde_json::from_str::<Frame>(value),Ok(Frame::Ready{version:1}))),
-        "Unsupported remote relay protocol"
-    );
+    let version = match &ready {
+        Message::Text(value) => relay_version(value),
+        _ => None,
+    };
+    match version {
+        Some(RELAY_VERSION) => {}
+        Some(version) => return Err(Unsupported(version).into()),
+        None => anyhow::bail!("Relay did not announce its protocol"),
+    }
     let (send, mut outgoing) = mpsc::channel::<Frame>(128);
     let runtime_lost = tokio_util::sync::CancellationToken::new();
     let health = runtime_lost.clone();
@@ -581,6 +758,8 @@ async fn connected(
                         match serde_json::from_str::<Frame>(&value)? {
                             frame@Frame::Open{id,..}=>{
                                 ensure!(!active.contains_key(&id),"Duplicate relay request");
+                                // A request routed here proves the relay took this host.
+                                *served=true;
                                 let (input,receiver)=mpsc::channel(WINDOW+2);
                                 let credit=Arc::new(Semaphore::new(WINDOW));
                                 let cancel=tokio_util::sync::CancellationToken::new();
@@ -1078,7 +1257,11 @@ async fn status_with(
         return Ok(ChatShare::new(idle));
     };
     if !running(&file)? {
-        return Ok(ChatShare::new(idle));
+        // A connector that gave up (an outdated protocol, revoked access)
+        // said why; keep showing it until the chat is shared again.
+        let mut share = ChatShare::new(idle);
+        share.error = identity["error"].as_str().map(str::to_owned);
+        return Ok(share);
     }
     let publication = identity["publicationId"].as_str().map(str::to_owned);
     let mut share = ChatShare {
@@ -1423,6 +1606,212 @@ mod tests {
         assert_eq!(revoked.state, ShareState::Stopped);
         assert_eq!(revoked.url, None);
         drop(lock);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    /// `wait` is `nominal` milliseconds, jittered at most a fifth shorter.
+    fn about(wait: Duration, nominal: u64) -> bool {
+        let nominal = Duration::from_millis(nominal);
+        wait <= nominal && wait >= nominal.mul_f64(0.8)
+    }
+    #[test]
+    fn dropped_connections_back_off_to_minutes_and_only_a_proven_one_resets() {
+        let mut backoff = Backoff::new(Pacing::default());
+        let dropped = Link::Ended { proven: false };
+        for seconds in [1, 2, 4, 60, 120, 240, 480, 600, 600] {
+            let wait = backoff.wait(dropped);
+            assert!(about(wait, seconds * 1000), "{wait:?} for {seconds}s");
+        }
+        // Cloud unreachable meanwhile: the short backoff, capped, and the
+        // drop count stays.
+        assert!(about(backoff.wait(Link::Failed), 30_000));
+        assert!(about(backoff.wait(dropped), 600_000));
+        // A connection that lasted, then its next drop, start over.
+        assert!(about(backoff.wait(Link::Ended { proven: true }), 1000));
+        assert!(about(backoff.wait(dropped), 2000));
+
+        let mut backoff = Backoff::new(Pacing::default());
+        for seconds in [1, 2, 4, 8, 16, 30, 30] {
+            assert!(about(backoff.wait(Link::Failed), seconds * 1000));
+        }
+    }
+    #[derive(Clone, Copy)]
+    enum Relay {
+        /// Say ready, then close at once.
+        Drop,
+        /// Say ready and keep the socket this long.
+        Hold(Duration),
+        /// Route one request here and wait for its answer.
+        Serve,
+        /// Announce another protocol version.
+        Version(u64),
+    }
+    /// A relay that plays one step per connection.
+    async fn fake_relay(script: Vec<Relay>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/connect", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            for step in script {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let version = if let Relay::Version(version) = step {
+                    version
+                } else {
+                    1
+                };
+                let ready = json!({"type":"ready","version":version}).to_string();
+                socket.send(Message::Text(ready.into())).await.unwrap();
+                match step {
+                    Relay::Hold(time) => tokio::time::sleep(time).await,
+                    Relay::Serve => {
+                        let open = json!({"type":"open","id":Uuid::now_v7(),"method":"GET",
+                            "path":"/v1/info","headers":[],"body":"","websocket":false,"thread":null});
+                        socket
+                            .send(Message::Text(open.to_string().into()))
+                            .await
+                            .unwrap();
+                        while let Some(Ok(message)) = socket.next().await {
+                            if let Message::Text(text) = message
+                                && serde_json::from_str::<Value>(&text).unwrap()["type"] == "end"
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    Relay::Drop | Relay::Version(_) => {}
+                }
+                let _ = socket.close(None).await;
+            }
+        });
+        url
+    }
+    #[tokio::test]
+    async fn a_relay_that_keeps_dropping_the_connection_is_retried_less_and_less_often() {
+        use axum::{Json, Router, routing::get};
+        let runtime = Router::new().route(
+            "/v1/info",
+            get(|| async { Json(json!({"capabilities":["remote-chat-scope.v1"]})) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = Target {
+            url: format!("http://{}", listener.local_addr().unwrap()),
+            token: "fixture".into(),
+            project: "project".into(),
+            thread: None,
+        };
+        tokio::spawn(async move { axum::serve(listener, runtime).await.unwrap() });
+        let http = reqwest::Client::new();
+        let pacing = Pacing {
+            retry: Duration::from_millis(10),
+            retry_max: Duration::from_millis(40),
+            stable: Duration::from_millis(300),
+            drops: 4,
+            cooldown: Duration::from_millis(100),
+            cooldown_max: Duration::from_millis(500),
+        };
+        let mut script = vec![Relay::Drop; 6];
+        script.extend([
+            Relay::Hold(Duration::from_millis(450)),
+            Relay::Drop,
+            Relay::Serve,
+            Relay::Drop,
+            Relay::Version(2),
+        ]);
+        let relay = fake_relay(script).await;
+        let connect = || {
+            relay_link(
+                relay.as_str().into_client_request().unwrap(),
+                &target,
+                &http,
+                pacing.stable,
+            )
+        };
+
+        let mut backoff = Backoff::new(pacing);
+        let dropped = Link::Ended { proven: false };
+        let proven = Link::Ended { proven: true };
+        for (expected, nominal) in [
+            // Accepted and dropped: the waits grow, then jump to the long ones.
+            (dropped, 10),
+            (dropped, 20),
+            (dropped, 40),
+            (dropped, 100),
+            (dropped, 200),
+            (dropped, 400),
+            // Up for the stable period: back to the shortest wait.
+            (proven, 10),
+            (dropped, 20),
+            // Carried a request: proven at once.
+            (proven, 10),
+            (dropped, 20),
+        ] {
+            let link = connect().await.unwrap();
+            assert_eq!(link, expected);
+            let wait = backoff.wait(link);
+            assert!(
+                about(wait, nominal),
+                "{wait:?} after {link:?}, expected {nominal}ms"
+            );
+        }
+        // A relay on another protocol stops the connector: only an update helps.
+        let error = connect().await.unwrap_err();
+        assert!(error.is::<Unsupported>(), "{error}");
+        assert!(error.to_string().contains("Update Haarness"), "{error}");
+        // Nothing listening is a plain failed connect.
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let nowhere = format!("ws://{}/connect", closed.local_addr().unwrap());
+        drop(closed);
+        let link = relay_link(
+            nowhere.into_client_request().unwrap(),
+            &target,
+            &http,
+            pacing.stable,
+        )
+        .await
+        .unwrap();
+        assert_eq!(link, Link::Failed);
+    }
+    #[tokio::test]
+    async fn a_connector_that_gave_up_says_why_in_the_chat_status() {
+        let root = std::env::temp_dir().join(format!("haarness-remote-exit-{}", Uuid::now_v7()));
+        let paths = Paths::new(Some(&root)).unwrap();
+        let workspace = root.join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(paths.config_dir()).unwrap();
+        let client = haarness_account::Client::new(
+            haarness_account::Config::new("http://127.0.0.1:9", root.join("cloud"), "test")
+                .unwrap()
+                .with_api_key("hck_fixture".into())
+                .unwrap(),
+        )
+        .unwrap();
+        let thread = Uuid::now_v7();
+        let file = paths.config_dir().join("remote-fixture.json");
+        std::fs::write(
+            &file,
+            json!({"id":Uuid::now_v7(),"workspace":workspace,"chatId":thread,
+                "apiUrl":client.config.api_url,"publicationId":Uuid::now_v7()})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            status_with(&client, &paths, &workspace, thread, true)
+                .await
+                .unwrap()
+                .error,
+            None
+        );
+        record_exit(&file, &anyhow::Error::new(Unsupported(2)));
+        let share = status_with(&client, &paths, &workspace, thread, true)
+            .await
+            .unwrap();
+        assert_eq!(share.state, ShareState::Off);
+        assert!(
+            share
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("Update Haarness")),
+            "{share:?}"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

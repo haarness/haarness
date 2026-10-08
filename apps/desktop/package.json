@@ -33,7 +33,7 @@
     "@xterm/xterm": "6.0.0",
     "devtools-protocol": "0.0.1687809",
     "diff": "^8.0.2",
-    "dompurify": "^3.2.7",
+    "dompurify": "^3.4.16",
     "effect": "4.0.0-rc.112",
     "electron-updater": "^6.6.2",
     "lighthouse": "13.4.1",

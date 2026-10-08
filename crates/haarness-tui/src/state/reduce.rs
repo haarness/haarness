@@ -12,7 +12,7 @@ use haarness_protocol::{
 };
 
 use crate::api::ApiClient;
-use crate::state::{App, ChildTask, PhaseInfo, ToastVariant, task_runs_in_background};
+use crate::state::{App, ChildTask, PhaseInfo, ToastVariant, TurnEnd, task_runs_in_background};
 
 fn string_list(value: &serde_json::Value) -> Vec<String> {
     value
@@ -27,9 +27,79 @@ fn string_list(value: &serde_json::Value) -> Vec<String> {
 }
 
 impl App {
+    /// Read the server's Auto/Review setting for the open chat. A server
+    /// that predates shared modes leaves this TUI's own switch in charge.
+    pub async fn refresh_approval_mode(&mut self, client: &ApiClient) {
+        self.approval_server = client.info().await.is_ok_and(|info| {
+            info.capabilities
+                .iter()
+                .any(|capability| capability == haarness_protocol::APPROVAL_MODE_CAPABILITY)
+        });
+        if !self.approval_server {
+            self.approval_mode = None;
+            return;
+        }
+        match client.approval_mode(self.thread.id).await {
+            Ok(info) => self.show_approval_mode(info),
+            Err(error) => tracing::debug!(%error, "could not read the approval mode"),
+        }
+    }
+
+    fn show_approval_mode(&mut self, info: haarness_protocol::ApprovalModeInfo) {
+        if info.thread_id != self.thread.id {
+            return;
+        }
+        self.auto_permissions = info.mode == haarness_protocol::ApprovalMode::Auto;
+        self.approval_mode = Some(info);
+    }
+
+    /// Switch the open chat between Auto and Review. The server keeps it, so
+    /// every window and the phone see the same mode.
+    pub async fn change_approval_mode(&mut self, enabled: bool, client: &ApiClient) {
+        if !self.approval_server {
+            self.set_auto_permissions(enabled);
+            return;
+        }
+        let request = haarness_protocol::SetApprovalModeRequest {
+            mode: if enabled {
+                haarness_protocol::ApprovalModeSetting::Auto
+            } else {
+                haarness_protocol::ApprovalModeSetting::Review
+            },
+            revision: self.approval_mode.as_ref().map(|info| info.revision.clone()),
+        };
+        match client.set_approval_mode(self.thread.id, &request).await {
+            Ok(info) => {
+                self.show_approval_mode(info);
+                self.notice = if enabled {
+                    "Auto on for this chat · requests are allowed once · ctrl+y to review"
+                } else {
+                    "Review · this chat asks before acting · ctrl+y for Auto"
+                }
+                .into();
+            }
+            Err(error) => {
+                let conflict = error
+                    .downcast_ref::<reqwest::Error>()
+                    .and_then(reqwest::Error::status)
+                    == Some(reqwest::StatusCode::CONFLICT);
+                self.refresh_approval_mode(client).await;
+                self.notice = if conflict {
+                    "Approvals changed in another window · ctrl+y to switch".into()
+                } else {
+                    format!("Could not change approvals: {error}")
+                };
+            }
+        }
+    }
+
     /// Reply once for unseen requests only. A known manual/failed request cannot
-    /// become automatic through replay, navigation or a mode toggle.
+    /// become automatic through replay, navigation or a mode toggle. A server
+    /// with shared modes answers for Auto chats itself, so this stays quiet.
     async fn auto_permission(&mut self, id: &str, eligible: bool, client: &ApiClient) -> bool {
+        if self.approval_server {
+            return false;
+        }
         if let Some(approved) = self.auto_permissions_seen.get(id) {
             return *approved;
         }
@@ -65,6 +135,7 @@ impl App {
         requests: Vec<PendingPermissionInfo>,
         client: &ApiClient,
     ) {
+        self.refresh_approval_mode(client).await;
         let mut pending = Vec::new();
         for request in requests {
             let eligible = request.allow_always != Some(false)
@@ -85,6 +156,12 @@ impl App {
     }
 
     pub async fn reduce(&mut self, event: EventEnvelope, client: &ApiClient) -> Result<()> {
+        if event.event_type == "approval_mode.changed" {
+            if let Ok(info) = serde_json::from_value(event.payload.clone()) {
+                self.show_approval_mode(info);
+            }
+            return Ok(());
+        }
         if event.event_type == "permission.requested"
             && let Some(id) = event.payload["permissionId"].as_str()
         {
@@ -758,6 +835,9 @@ impl App {
             "turn.started" => {
                 if let Some(thread_id) = event.thread_id {
                     self.live_threads.entry(thread_id).or_default();
+                    // The next queued prompt began: a "finished" banner the
+                    // conversation was holding is not true.
+                    self.completions.resume(thread_id);
                 }
                 if event.thread_id == Some(self.root_thread_id) {
                     self.root_active_turn = event.turn_id;
@@ -787,29 +867,18 @@ impl App {
                     self.pending_permissions.clear();
                     self.permission_focus = false;
                 }
+                let end = TurnEnd::from_status(&event.payload["status"]);
                 if on_current {
                     let goal_continues = self
                         .goal
                         .as_ref()
                         .is_some_and(|goal| goal.status == GoalStatus::Active);
-                    // Long turns earn a notification; quick ones stay quiet.
-                    if !goal_continues
-                        && self
-                            .turn_started
-                            .is_some_and(|started| started.elapsed().as_secs() >= 20)
-                    {
-                        let message = format!("Haarness finished: {}", self.thread.title);
-                        self.pending_notification = Some(message.clone());
-                        // The reply just landed in the transcript in front of
-                        // the reader; only an unfocused terminal needs a card.
-                        if !self.terminal_focused {
-                            self.show_toast(
-                                None,
-                                message,
-                                ToastVariant::Success,
-                                std::time::Duration::from_secs(5),
-                            );
-                        }
+                    // Long work earns a "finished" banner after a short grace
+                    // (see `state::completion`); a goal's next turn follows on
+                    // its own, so it is not finished yet.
+                    if !(goal_continues && end == TurnEnd::Completed) {
+                        let title = self.thread.title.clone();
+                        self.turn_ended(self.thread.id, end, &title, false, self.turn_started);
                     }
                     self.active_turn = None;
                     self.turn_started = None;
@@ -843,14 +912,9 @@ impl App {
                                 .map(|thread| thread.title.clone())
                         })
                         .unwrap_or_else(|| "Background task".into());
-                    let message = format!("Haarness finished: {title}");
-                    self.pending_notification = Some(message.clone());
-                    self.show_toast(
-                        None,
-                        message,
-                        ToastVariant::Success,
-                        std::time::Duration::from_secs(5),
-                    );
+                    if let Some(thread_id) = event.thread_id {
+                        self.turn_ended(thread_id, end, &title, true, None);
+                    }
                 }
             }
             "thread.updated" => {

@@ -2097,10 +2097,14 @@ impl Tool for McpProjectedTool {
         // attribute that to a local workspace checkpoint.
         false
     }
-    async fn execute(&self, arguments: Value, _context: ToolContext) -> CoreResult<ToolOutput> {
-        self.registry
-            .call(&self.server, &self.definition.name, arguments)
-            .await
+    async fn execute(&self, arguments: Value, context: ToolContext) -> CoreResult<ToolOutput> {
+        // MCP calls have no time limit of their own, so Stop must be able to
+        // abandon one that hangs.
+        tokio::select! {
+            biased;
+            () = context.cancel.cancelled() => Err(CoreError::Cancelled),
+            result = self.registry.call(&self.server, &self.definition.name, arguments) => result,
+        }
     }
 }
 
@@ -5312,4 +5316,76 @@ mod webfetch_tests {
         std::fs::remove_dir_all(workspace).unwrap();
     }
 
+    /// An MCP server that accepts a call and never answers.
+    struct HungMcp;
+
+    #[async_trait]
+    impl McpRegistry for HungMcp {
+        fn tool_snapshot(&self) -> Vec<ToolDefinition> {
+            Vec::new()
+        }
+        async fn list(&self) -> CoreResult<Vec<haarness_protocol::McpServerInfo>> {
+            Ok(Vec::new())
+        }
+        async fn configure(
+            &self,
+            _name: &str,
+            _config: haarness_protocol::McpConfigureRequest,
+        ) -> CoreResult<haarness_protocol::McpServerInfo> {
+            unreachable!()
+        }
+        async fn reconnect(&self, _name: &str) -> CoreResult<haarness_protocol::McpServerInfo> {
+            unreachable!()
+        }
+        async fn disconnect(&self, _name: &str) -> CoreResult<haarness_protocol::McpServerInfo> {
+            unreachable!()
+        }
+        async fn tools(&self, _name: &str) -> CoreResult<Vec<ToolDefinition>> {
+            Ok(Vec::new())
+        }
+        async fn call(&self, _name: &str, _tool: &str, _arguments: Value) -> CoreResult<ToolOutput> {
+            std::future::pending().await
+        }
+        async fn resources(&self, _name: &str) -> CoreResult<Vec<Value>> {
+            Ok(Vec::new())
+        }
+        async fn resource_templates(&self, _name: &str) -> CoreResult<Vec<Value>> {
+            Ok(Vec::new())
+        }
+        async fn read_resource(&self, _name: &str, _uri: &str) -> CoreResult<Value> {
+            unreachable!()
+        }
+        async fn prompts(&self, _name: &str) -> CoreResult<Vec<Value>> {
+            Ok(Vec::new())
+        }
+        async fn get_prompt(&self, _name: &str, _prompt: &str, _arguments: Value) -> CoreResult<Value> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_abandons_an_mcp_call_that_never_answers() {
+        let tool = McpProjectedTool {
+            definition: ToolDefinition {
+                name: "slow__wait".into(),
+                description: "waits".into(),
+                input_schema: json!({"type":"object"}),
+            },
+            server: "slow".into(),
+            registry: Arc::new(HungMcp),
+        };
+        let context = composite_context(&std::env::temp_dir());
+        let cancel = context.cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            cancel.cancel();
+        });
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tool.execute(json!({}), context),
+        )
+        .await
+        .expect("Stop must end the call");
+        assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
+    }
 }

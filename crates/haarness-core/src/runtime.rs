@@ -24,7 +24,7 @@ use parking_lot::{Mutex, RwLock};
 use serde_json::json;
 use tokio::sync::{Mutex as AsyncMutex, Notify, RwLock as AsyncRwLock, Semaphore, oneshot};
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument as _, error, instrument, warn};
+use tracing::{Instrument as _, error, info, instrument, warn};
 
 use crate::agents::custom_system_prompt_with_context;
 use crate::tool_catalog::{
@@ -924,6 +924,7 @@ pub struct AgentRuntime {
     /// Threads whose queued prompts wait for the user: after Stop, or after a
     /// queued prompt's own turn failed. A new message or Send resumes them.
     queue_pauses: Arc<DashMap<ThreadId, ()>>,
+    approval_modes: Arc<crate::approval_mode::ApprovalModes>,
 }
 
 #[derive(Clone)]
@@ -1013,6 +1014,10 @@ impl AgentRuntime {
     ) -> Self {
         let commands = config.commands.clone();
         let agents = config.custom_agents.clone();
+        let approval_modes = Arc::new(crate::approval_mode::ApprovalModes::new(
+            repository.clone(),
+            workspace.display().to_string(),
+        ));
         Self {
             repository,
             components: Arc::new(RwLock::new(Arc::new(RuntimeComponents {
@@ -1050,6 +1055,7 @@ impl AgentRuntime {
             tool_promotions: Arc::new(DashMap::new()),
             snapshots: None,
             queue_pauses: Arc::new(DashMap::new()),
+            approval_modes,
         }
     }
 
@@ -1391,7 +1397,9 @@ impl AgentRuntime {
         if request.delivery == haarness_protocol::InputDelivery::Queue {
             return self.defer_input(thread_id, request).await;
         }
-        let tools = request.preview.then(|| HashMap::from([("preview".into(), true)]));
+        let tools = request
+            .preview
+            .map(|preview| HashMap::from([("preview".into(), preview)]));
         self.queue_input_with_options(thread_id, request, false, tools).await
     }
 
@@ -1439,6 +1447,7 @@ impl AgentRuntime {
                         id,
                         haarness_protocol::PendingInput {
                             preview: request.preview,
+                            reasoning_effort: request.reasoning_effort,
                             id: request.request_id,
                             text: request.text,
                             attachments: request.attachments,
@@ -1457,6 +1466,7 @@ impl AgentRuntime {
                     id,
                     haarness_protocol::PendingInput {
                         preview: request.preview,
+                        reasoning_effort: request.reasoning_effort,
                         id: request.request_id,
                         text: request.text,
                         attachments: request.attachments,
@@ -1518,8 +1528,13 @@ impl AgentRuntime {
                         agent: None,
                         provider: None,
                         model: None,
-                        reasoning_effort: None,
-                        tools: input.preview.then(|| HashMap::from([("preview".into(), true)])),
+                        reasoning_effort: match &input.reasoning_effort {
+                            Some(effort) => Some(effort.clone()),
+                            None => self.chat_turn_settings(id).await.reasoning_effort,
+                        },
+                        tools: input
+                            .preview
+                            .map(|preview| HashMap::from([("preview".into(), preview)])),
                         command: None,
                     },
                     Vec::new(),
@@ -1652,7 +1667,12 @@ impl AgentRuntime {
                         agent: None,
                         provider: None,
                         model: None,
-                        reasoning_effort: None,
+                        // Queued, steered and background-result turns keep
+                        // the effort of the chat's latest prompt.
+                        reasoning_effort: match &request.reasoning_effort {
+                            Some(effort) => Some(effort.clone()),
+                            None => self.chat_turn_settings(thread_id).await.reasoning_effort,
+                        },
                         tools: tools.clone(),
                         command: None,
                     },
@@ -3175,6 +3195,13 @@ impl AgentRuntime {
                 format!("{}: {}", plan.permission, asked.join("  "))
             };
             let always_rules = plan.always_rules();
+            // Same rule as model calls: a chat in Auto approves eligible
+            // requests once, ordered with mode changes by the gate.
+            let approval_gate = self.approval_modes.gate.lock().await;
+            if !forced && self.approval_modes.is_auto(thread_id).await {
+                tracing::info!(thread = %thread_id, operation, "approved once (Auto)");
+                continue;
+            }
             let id = uuid::Uuid::now_v7().to_string();
             let (sender, receiver) = oneshot::channel();
             self.permissions.insert(
@@ -3195,6 +3222,7 @@ impl AgentRuntime {
                     sender,
                 },
             );
+            drop(approval_gate);
             // The host may drop this future immediately after cancelling its
             // child token. Keep cleanup synchronous-on-drop so an abandoned
             // direct call cannot leave an approval prompt live forever.
@@ -3526,6 +3554,71 @@ impl AgentRuntime {
         Ok(())
     }
 
+    /// The approval mode that applies to a chat, with what decided it.
+    pub async fn approval_mode(&self, id: ThreadId) -> CoreResult<haarness_protocol::ApprovalModeInfo> {
+        self.approval_modes.effective(id).await
+    }
+
+    /// Change a chat's approval mode for every client. Turning Auto on also
+    /// approves, once, the eligible requests already waiting in that chat and
+    /// in the agents that follow its setting.
+    pub async fn set_approval_mode(
+        &self,
+        id: ThreadId,
+        request: haarness_protocol::SetApprovalModeRequest,
+    ) -> CoreResult<haarness_protocol::ApprovalModeInfo> {
+        let gate = self.approval_modes.gate.lock().await;
+        let info = self
+            .approval_modes
+            .set(id, request.mode, request.revision.as_deref())
+            .await?;
+        let followers = self.approval_modes.followers(id).await?;
+        let mut released = Vec::new();
+        if info.mode == haarness_protocol::ApprovalMode::Auto {
+            let waiting: Vec<String> = self
+                .permissions
+                .iter()
+                .filter(|entry| !entry.value().forced && followers.contains(&entry.value().thread_id))
+                .map(|entry| entry.key().clone())
+                .collect();
+            for permission_id in waiting {
+                if let Some((_, pending)) = self.permissions.remove(&permission_id) {
+                    self.publish_permission_resolved(&permission_id, &pending, true);
+                    let _ = pending.sender.send(PermissionResolution {
+                        allowed: true,
+                        feedback: None,
+                    });
+                    released.push(permission_id);
+                }
+            }
+        }
+        drop(gate);
+        tracing::info!(
+            thread = %id,
+            mode = ?info.mode,
+            explicit = info.explicit,
+            released = released.len(),
+            "approval mode changed"
+        );
+        let root = self.approval_modes.root(id).await;
+        for follower in followers {
+            let current = if follower == id {
+                info.clone()
+            } else {
+                self.approval_modes.effective(follower).await?
+            };
+            self.events.publish_scoped(
+                "approval_mode.changed",
+                Some(follower),
+                Some(root),
+                None,
+                None,
+                json!(current),
+            );
+        }
+        Ok(info)
+    }
+
     /// Tell every client a prompt is gone — cascaded resolutions (Always
     /// covering identical siblings, Reject clearing a root) would otherwise
     /// leave stale prompts in client state.
@@ -3719,6 +3812,74 @@ impl AgentRuntime {
         *self.memory_context.write() = context;
     }
 
+    /// What the chat's latest prompt chose, kept so turns no client started
+    /// directly (queued, steered, background results) run the same way.
+    async fn chat_turn_settings(&self, thread_id: ThreadId) -> ChatTurnSettings {
+        let key = format!("chat.{thread_id}.turn");
+        match self
+            .repository
+            .runtime_setting(&self.workspace.display().to_string(), &key)
+            .await
+        {
+            Ok(value) => value
+                .and_then(|value| serde_json::from_value(value).ok())
+                .unwrap_or_default(),
+            Err(error) => {
+                tracing::warn!(%error, thread = %thread_id, "could not read the chat's turn settings");
+                ChatTurnSettings::default()
+            }
+        }
+    }
+
+    /// The reasoning effort of the chat's latest prompt, for automatic
+    /// prompts such as a loop's that should run the same way.
+    pub async fn chat_reasoning_effort(&self, thread_id: ThreadId) -> Option<String> {
+        self.chat_turn_settings(thread_id).await.reasoning_effort
+    }
+
+    /// Preview support belongs to the chat: a client that does not say
+    /// (a phone, a background result) keeps the last value a client sent, so
+    /// the tools and system prompt, and the provider's prompt cache, stay the
+    /// same. A client's own prompt also records its reasoning effort.
+    async fn apply_chat_turn_settings(&self, thread_id: ThreadId, request: &mut StartTurnRequest) {
+        let mut settings = self.chat_turn_settings(thread_id).await;
+        let mut changed = false;
+        match request.tools.as_ref().and_then(|tools| tools.get("preview")).copied() {
+            Some(preview) if settings.preview != Some(preview) => {
+                settings.preview = Some(preview);
+                changed = true;
+            }
+            Some(_) => {}
+            None => {
+                if let Some(preview) = settings.preview {
+                    request
+                        .tools
+                        .get_or_insert_with(HashMap::new)
+                        .insert("preview".into(), preview);
+                }
+            }
+        }
+        if !request.synthetic
+            && (!settings.recorded || settings.reasoning_effort != request.reasoning_effort)
+        {
+            settings.reasoning_effort.clone_from(&request.reasoning_effort);
+            settings.recorded = true;
+            changed = true;
+        }
+        if !changed {
+            return;
+        }
+        let key = format!("chat.{thread_id}.turn");
+        let value = serde_json::to_value(&settings).ok();
+        if let Err(error) = self
+            .repository
+            .save_runtime_setting(&self.workspace.display().to_string(), &key, value)
+            .await
+        {
+            tracing::warn!(%error, thread = %thread_id, "could not record the chat's turn settings");
+        }
+    }
+
     #[instrument(skip_all, fields(thread_id = %thread_id))]
     pub async fn start_turn(
         &self,
@@ -3769,6 +3930,7 @@ impl AgentRuntime {
         let _reload = self.reload_gate.read().await;
         request.attachments =
             crate::attachments::admit(std::mem::take(&mut request.attachments), &self.workspace)?;
+        self.apply_chat_turn_settings(thread_id, &mut request).await;
         let components = self.components();
         // A standalone `ultracode` in the user's current request is a one-turn
         // orchestration signal, without mutating the durable
@@ -4080,6 +4242,7 @@ impl AgentRuntime {
             goal_accounting: Mutex::new(None),
             workflow_observations: Mutex::new(HashSet::new()),
             queue_pauses: self.queue_pauses.clone(),
+            approval_modes: self.approval_modes.clone(),
             answer_steer: AtomicBool::new(false),
         });
         // A real message, or Send on a queued one, resumes a paused queue.
@@ -4114,7 +4277,8 @@ impl AgentRuntime {
         let thread_id = task.thread.id;
         if task.answer_steer.load(Ordering::SeqCst) {
             let request = QueueInputRequest {
-                preview: false,
+                preview: None,
+                reasoning_effort: None,
                 delivery: haarness_protocol::InputDelivery::Steer,
                 request_id: RequestId::new(),
                 text: STOP_CONTINUATION.into(),
@@ -4448,6 +4612,7 @@ struct RunnerTask {
     /// repeated wait/inspect calls only burn context and provider tokens.
     workflow_observations: Mutex<HashSet<String>>,
     queue_pauses: Arc<DashMap<ThreadId, ()>>,
+    approval_modes: Arc<crate::approval_mode::ApprovalModes>,
     /// Set when a stop leaves unread steering for a continuation to answer.
     answer_steer: AtomicBool,
 }
@@ -4819,6 +4984,18 @@ struct PermissionResolution {
     feedback: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatTurnSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preview: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
+    /// A client's prompt has recorded an effort, even "none chosen".
+    #[serde(default)]
+    recorded: bool,
+}
+
 impl RunnerTask {
     fn custom_agent(&self, agent: &str) -> Option<crate::CustomAgent> {
         self.live_agents
@@ -4891,13 +5068,6 @@ impl RunnerTask {
             }
         }
         if let Err(error_value) = &result {
-            error!(
-                thread = %self.thread.id,
-                turn = %self.turn.id,
-                depth = self.depth,
-                error = %error_value,
-                "turn failed"
-            );
             // A turn the runtime stopped (server shutdown, upgrade) must not
             // read like the user's own stop.
             let stop_reason = matches!(error_value, CoreError::Cancelled)
@@ -4908,6 +5078,25 @@ impl RunnerTask {
                         .and_then(|active| active.stop_reason.lock().clone())
                 })
                 .flatten();
+            // A stop is an outcome someone asked for, not a failure; keep
+            // ERROR for turns that actually broke.
+            if matches!(error_value, CoreError::Cancelled) {
+                info!(
+                    thread = %self.thread.id,
+                    turn = %self.turn.id,
+                    depth = self.depth,
+                    reason = stop_reason.as_deref().unwrap_or("user"),
+                    "turn stopped"
+                );
+            } else {
+                error!(
+                    thread = %self.thread.id,
+                    turn = %self.turn.id,
+                    depth = self.depth,
+                    error = %error_value,
+                    "turn failed"
+                );
+            }
             let visible_error = stop_reason
                 .as_deref()
                 .map_or_else(|| user_facing_error(error_value), stopped_turn_message);
@@ -7351,6 +7540,11 @@ impl RunnerTask {
         }
         let id = uuid::Uuid::now_v7().to_string();
         let (sender, receiver) = oneshot::channel();
+        // A chat in Auto approves eligible requests once, without a prompt.
+        // The gate orders this with a mode change: either Auto is visible
+        // here, or the change sees the registered prompt and releases it.
+        let approval_gate = self.approval_modes.gate.lock().await;
+        let auto = !forced && self.approval_modes.is_auto(self.thread.id).await;
         // Re-evaluate while holding the same lock used to install an Always
         // rule, and register the prompt before releasing it. This closes the
         // late-sibling race: either the new rule is already visible and no
@@ -7364,6 +7558,13 @@ impl RunnerTask {
                 refreshed.evaluate(&plan.operation(pattern))
                     == PermissionDecision::Allow
             }) {
+                return Ok(PermissionResolution {
+                    allowed: true,
+                    feedback: None,
+                });
+            }
+            if auto {
+                tracing::info!(thread = %self.thread.id, operation, "approved once (Auto)");
                 return Ok(PermissionResolution {
                     allowed: true,
                     feedback: None,
@@ -7388,6 +7589,7 @@ impl RunnerTask {
                 },
             );
         }
+        drop(approval_gate);
         self.publish_item(ItemData::PermissionRequest {
             permission_id: id.clone(),
             operation: operation.clone(),
@@ -7826,7 +8028,8 @@ impl RunnerTask {
                             &child,
                             active.id,
                             &QueueInputRequest {
-                                preview: false,
+                                preview: None,
+                                reasoning_effort: None,
                                 delivery: haarness_protocol::InputDelivery::Steer,
                                 request_id: RequestId::new(),
                                 text: prompt,
@@ -8025,6 +8228,7 @@ impl RunnerTask {
             goal_accounting: Mutex::new(None),
             workflow_observations: Mutex::new(HashSet::new()),
             queue_pauses: self.queue_pauses.clone(),
+            approval_modes: self.approval_modes.clone(),
             answer_steer: AtomicBool::new(false),
         });
         child_task.publish_task_update("running");
@@ -8203,7 +8407,8 @@ impl RunnerTask {
                 .queue_input_with_options(
                     info.parent_thread_id,
                     QueueInputRequest {
-                        preview: false,
+                        preview: None,
+                        reasoning_effort: None,
                         delivery: haarness_protocol::InputDelivery::Steer,
                         request_id: RequestId::new(),
                         text: task.envelope(&info, state, &text),
@@ -8259,6 +8464,7 @@ impl RunnerTask {
             tool_promotions: self.tool_promotions.clone(),
             snapshots: self.snapshots.clone(),
             queue_pauses: self.queue_pauses.clone(),
+            approval_modes: self.approval_modes.clone(),
         }
     }
 }

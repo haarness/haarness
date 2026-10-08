@@ -17,6 +17,7 @@ mod openai;
 mod openai_compatible;
 mod sse;
 mod test_echo;
+mod tool_schema;
 
 pub use anthropic::AnthropicProvider;
 pub use auth::{

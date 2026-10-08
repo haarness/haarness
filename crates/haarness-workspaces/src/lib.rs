@@ -1134,56 +1134,52 @@ fn canonical_directory(path: &Path) -> Result<PathBuf> {
 }
 
 fn resolve_workspace<'a>(registry: &'a Registry, reference: &str) -> Result<&'a WorkspaceInfo> {
-    if let Some(workspace) = registry
-        .workspaces
-        .iter()
-        .find(|workspace| workspace.id == reference || workspace.path == reference)
-    {
-        return Ok(workspace);
-    }
-    let matches = registry
-        .workspaces
-        .iter()
-        .filter(|workspace| workspace.name == reference)
-        .collect::<Vec<_>>();
-    match matches.as_slice() {
-        [workspace] => Ok(workspace),
-        [] => Err(WorkspaceError::NotFound(format!("workspace {reference}"))),
-        _ => Err(WorkspaceError::Conflict(format!(
-            "workspace name is ambiguous: {reference}; use its ID"
-        ))),
-    }
+    Ok(&registry.workspaces[workspace_index(registry, reference)?])
 }
 
 fn resolve_workspace_mut<'a>(
     registry: &'a mut Registry,
     reference: &str,
 ) -> Result<&'a mut WorkspaceInfo> {
-    let index = if let Some(index) = registry
+    let index = workspace_index(registry, reference)?;
+    Ok(&mut registry.workspaces[index])
+}
+
+/// A workspace by ID, registered path or unique name. A reference that
+/// matches none of those but is an existing path (through a symlink, or with
+/// `..`) names the workspace registered at its canonical location, as
+/// registration stores it.
+fn workspace_index(registry: &Registry, reference: &str) -> Result<usize> {
+    if let Some(index) = registry
         .workspaces
         .iter()
         .position(|workspace| workspace.id == reference || workspace.path == reference)
     {
-        index
-    } else {
-        let matches = registry
-            .workspaces
-            .iter()
-            .enumerate()
-            .filter(|(_, workspace)| workspace.name == reference)
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>();
-        match matches.as_slice() {
-            [index] => *index,
-            [] => return Err(WorkspaceError::NotFound(format!("workspace {reference}"))),
-            _ => {
-                return Err(WorkspaceError::Conflict(format!(
-                    "workspace name is ambiguous: {reference}; use its ID"
-                )));
-            }
-        }
-    };
-    Ok(&mut registry.workspaces[index])
+        return Ok(index);
+    }
+    let matches = registry
+        .workspaces
+        .iter()
+        .enumerate()
+        .filter(|(_, workspace)| workspace.name == reference)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [index] => Ok(*index),
+        [] => Path::new(reference)
+            .canonicalize()
+            .ok()
+            .and_then(|canonical| {
+                registry
+                    .workspaces
+                    .iter()
+                    .position(|workspace| same_path(Path::new(&workspace.path), &canonical))
+            })
+            .ok_or_else(|| WorkspaceError::NotFound(format!("workspace {reference}"))),
+        _ => Err(WorkspaceError::Conflict(format!(
+            "workspace name is ambiguous: {reference}; use its ID"
+        ))),
+    }
 }
 
 fn refresh_existence(registry: &mut Registry) {
@@ -2198,6 +2194,31 @@ mod tests {
             },
         );
         assert!(matches!(result, Err(WorkspaceError::Invalid(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_or_dotted_path_opens_the_registered_workspace() {
+        let fixture = Fixture::new();
+        let link = fixture.root.join("linked-repository");
+        std::os::unix::fs::symlink(&fixture.repository, &link).unwrap();
+        let dotted = fixture.root.join("managed/../repository");
+        for reference in [&link, &dotted] {
+            let reference = reference.to_str().unwrap();
+            let opened = fixture.manager.open_workspace(reference).unwrap();
+            assert_eq!(opened.id, fixture.local.id, "{reference}");
+            assert_eq!(fixture.manager.get(reference).unwrap().id, fixture.local.id);
+            assert_eq!(
+                fixture.manager.project_for_workspace(reference).unwrap().id,
+                fixture.local.project_id
+            );
+        }
+        // A path to nothing registered is still not found.
+        let elsewhere = fixture.root.join("managed");
+        assert!(matches!(
+            fixture.manager.get(elsewhere.to_str().unwrap()),
+            Err(WorkspaceError::NotFound(_))
+        ));
     }
 
     #[test]

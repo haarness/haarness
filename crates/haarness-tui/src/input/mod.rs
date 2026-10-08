@@ -121,7 +121,7 @@ pub(crate) async fn answer_permission(
     app.auto_permissions_seen.insert(id.clone(), true);
     app.permission_answered(&id);
     if choice == 'u' {
-        app.set_auto_permissions(true);
+        app.change_approval_mode(true, client).await;
     }
     Ok(())
 }
@@ -316,7 +316,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
         return handle_overlay_key(app, key, client).await;
     }
     if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('y') {
-        app.set_auto_permissions(!app.auto_permissions);
+        app.change_approval_mode(!app.auto_permissions, client).await;
         return Ok(AppAction::Continue);
     }
     // Permission keys only fire while the prompt owns focus: typing a word

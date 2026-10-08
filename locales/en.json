@@ -1681,5 +1681,10 @@
   "Stopped sharing. This chat stays on this computer.": "Stopped sharing. This chat stays on this computer.",
   "This chat keeps running on this computer, with its files and model keys, until you stop sharing.": "This chat keeps running on this computer, with its files and model keys, until you stop sharing.",
   "Use /remote-control, /remote-control status or /remote-control stop.": "Use /remote-control, /remote-control status or /remote-control stop.",
-  "on {computer}": "on {computer}"
+  "on {computer}": "on {computer}",
+  "This chat is archived. Sending a message restores it.": "This chat is archived. Sending a message restores it.",
+  "Approvals changed in another window. Try again.": "Approvals changed in another window. Try again.",
+  "Auto on for this chat · requests are allowed once · ctrl+y to review": "Auto on for this chat · requests are allowed once · ctrl+y to review",
+  "Review · this chat asks before acting · ctrl+y for Auto": "Review · this chat asks before acting · ctrl+y for Auto",
+  "Approvals changed in another window · ctrl+y to switch": "Approvals changed in another window · ctrl+y to switch"
 }

@@ -16,9 +16,14 @@ pub enum InputDelivery {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingInput {
-    /// The submitting graphical client supports sandboxed file previews.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub preview: bool,
+    /// The submitting client's preview support. `None` keeps the chat's
+    /// recorded value, so the turn sees the same tools as earlier turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<bool>,
+    /// Reasoning effort chosen with the message. `None` keeps the effort of
+    /// the chat's latest prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     pub id: RequestId,
     pub text: String,
     #[serde(default)]

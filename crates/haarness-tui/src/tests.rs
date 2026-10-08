@@ -8029,10 +8029,11 @@ async fn global_active_turn_snapshot_clears_only_background_completion() {
         "turn.finished",
         background.id,
         background.id,
-        serde_json::json!({}),
+        serde_json::json!({"status": "completed"}),
     );
     finished.turn_id = Some(background_turn.id);
     app.reduce(finished, &offline_client()).await.unwrap();
+    app.release_completions(std::time::Instant::now() + crate::state::COMPLETION_GRACE);
 
     assert_eq!(
         app.thread.id, current.id,
@@ -8076,10 +8077,11 @@ async fn background_root_completion_notifies_after_activity_snapshot_race() {
         "turn.finished",
         background.id,
         background.id,
-        serde_json::json!({}),
+        serde_json::json!({"status": "completed"}),
     );
     finished.turn_id = Some(background_turn.id);
     app.reduce(finished, &offline_client()).await.unwrap();
+    app.release_completions(std::time::Instant::now() + crate::state::COMPLETION_GRACE);
 
     assert_eq!(app.thread.id, current.id);
     assert_eq!(
@@ -13804,7 +13806,8 @@ async fn deferred_queue_events_are_scoped_and_never_roll_back_newer_edits() {
 
 fn queued_input(text: &str, attachments: &[&str]) -> haarness_protocol::PendingInput {
     haarness_protocol::PendingInput {
-        preview: false,
+        preview: None,
+        reasoning_effort: None,
         id: haarness_protocol::RequestId::new(),
         text: text.into(),
         attachments: attachments.iter().map(|path| (*path).to_owned()).collect(),
@@ -14695,6 +14698,7 @@ async fn completion_toasts_only_reach_an_unfocused_terminal() {
     )
     .await
     .unwrap();
+    app.release_completions(std::time::Instant::now() + crate::state::COMPLETION_GRACE);
     assert!(
         app.notification_toast.is_none(),
         "focused terminals get no completion toast"
@@ -14708,6 +14712,7 @@ async fn completion_toasts_only_reach_an_unfocused_terminal() {
     )
     .await
     .unwrap();
+    app.release_completions(std::time::Instant::now() + crate::state::COMPLETION_GRACE);
     assert!(
         app.notification_toast
             .as_ref()
@@ -14855,6 +14860,9 @@ async fn escape_cancels_a_review_that_is_still_loading() {
 
 #[path = "messages_tests.rs"]
 mod messages_tests;
+
+#[path = "completion_tests.rs"]
+mod completion_tests;
 
 fn remote_control_text(app: &App, size: (u32, u32)) -> String {
     app.lines(size)

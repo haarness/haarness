@@ -111,6 +111,52 @@
         ],
         "type": "object"
       },
+      "ApprovalMode": {
+        "enum": [
+          "auto",
+          "review"
+        ],
+        "type": "string"
+      },
+      "ApprovalModeInfo": {
+        "properties": {
+          "explicit": {
+            "description": "True while this chat or a delegating agent has its own setting.",
+            "type": "boolean"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/ApprovalMode"
+          },
+          "revision": {
+            "description": "Opaque version of every setting that decided `mode`. Send it back\nwith a change to refuse one made from a stale view.",
+            "type": "string"
+          },
+          "sourceThreadId": {
+            "$ref": "#/components/schemas/ThreadId",
+            "description": "The chat whose own setting decided `mode`: this one, or an agent\nthat delegated to it."
+          },
+          "threadId": {
+            "$ref": "#/components/schemas/ThreadId"
+          }
+        },
+        "required": [
+          "threadId",
+          "mode",
+          "sourceThreadId",
+          "explicit",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "ApprovalModeSetting": {
+        "description": "What a client may ask for. `Inherit` clears this chat's own setting so it\nfollows the agent that delegated to it (Review at the top level).",
+        "enum": [
+          "auto",
+          "review",
+          "inherit"
+        ],
+        "type": "string"
+      },
       "BackgroundQuery": {
         "properties": {
           "childThreadId": {
@@ -3558,8 +3604,18 @@
             "$ref": "#/components/schemas/RequestId"
           },
           "preview": {
-            "description": "The submitting graphical client supports sandboxed file previews.",
-            "type": "boolean"
+            "description": "The submitting client's preview support. `None` keeps the chat's\nrecorded value, so the turn sees the same tools as earlier turns.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "reasoningEffort": {
+            "description": "Reasoning effort chosen with the message. `None` keeps the effort of\nthe chat's latest prompt.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "text": {
             "type": "string"
@@ -4181,8 +4237,18 @@
             "description": "Steer by default for compatibility; queue waits for an idle boundary."
           },
           "preview": {
-            "description": "The submitting graphical client supports sandboxed file previews.",
-            "type": "boolean"
+            "description": "Whether the submitting client can show sandboxed file previews. Text\nclients say `false`; `None` keeps the chat's recorded value so a\nphone or a background result does not change the tools or prompt.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "reasoningEffort": {
+            "description": "Reasoning effort for a turn this input starts. `None` keeps the\neffort of the chat's latest prompt.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "requestId": {
             "$ref": "#/components/schemas/RequestId"
@@ -4679,6 +4745,24 @@
           "thread",
           "turns",
           "items"
+        ],
+        "type": "object"
+      },
+      "SetApprovalModeRequest": {
+        "properties": {
+          "mode": {
+            "$ref": "#/components/schemas/ApprovalModeSetting"
+          },
+          "revision": {
+            "description": "The `revision` the client last saw. A mismatch answers 409; omit it\nto apply the change regardless.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "mode"
         ],
         "type": "object"
       },
@@ -8820,6 +8904,84 @@
                       "type": "null"
                     }
                   ]
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "401": {
+            "description": "Bearer authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/threads/{id}/approval-mode": {
+      "get": {
+        "operationId": "get_approval_mode",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalModeInfo"
+                }
+              }
+            },
+            "description": "Success"
+          },
+          "401": {
+            "description": "Bearer authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "operationId": "set_approval_mode",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetApprovalModeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalModeInfo"
                 }
               }
             },

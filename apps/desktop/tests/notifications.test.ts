@@ -1,8 +1,20 @@
-import { test } from "node:test";
+import { test, beforeEach, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { createNotifications } from "../src/main/notifications";
+import {
+  COMPLETION_GRACE_MS,
+  createNotifications,
+} from "../src/main/notifications";
 import type { EventEnvelope, Thread } from "@haarness/sdk";
+
+// Completion banners wait out a grace on a real timer; every test drives it.
+beforeEach(() => mock.timers.enable({ apis: ["setTimeout"] }));
+afterEach(() => mock.timers.reset());
+/** Advance the fake clock, then let the woken receive() calls run on. */
+async function tick(ms = COMPLETION_GRACE_MS) {
+  mock.timers.tick(ms);
+  await new Promise((resolve) => setImmediate(resolve));
+}
 
 const event = (extra: Partial<EventEnvelope> = {}): EventEnvelope => ({
   type: "turn.finished",
@@ -41,7 +53,8 @@ function fixture(policy?: { completionNotifications: "background" | "always" | "
     },
     open: (target, owner) => opened.push({ target, owner }),
   });
-  const receive = (value = event(), connection = "project-a") =>
+  /** Deliver one event without waiting out a completion's grace. */
+  const deliver = (value = event(), connection = "project-a") =>
     center.receive(
       connection,
       "My project",
@@ -49,10 +62,17 @@ function fixture(policy?: { completionNotifications: "background" | "always" | "
       value,
       async () => ({ title: "Fix 日本", id: "conversation" }) as Thread,
     );
+  /** Deliver one event and let any completion's grace run out. */
+  const receive = async (value = event(), connection = "project-a") => {
+    const pending = deliver(value, connection);
+    await tick();
+    await pending;
+  };
   return {
     center,
     shown,
     opened,
+    deliver,
     receive,
     enable: (value: boolean) => (enabled = value),
     focus: (value: boolean) => (focused = value),
@@ -70,7 +90,7 @@ test("click retains originating project and conversation and is one shot", async
 });
 test("deduplicates replay and overlapping subscriptions but scopes event IDs by project and instance", async () => {
   const f = fixture();
-  await Promise.all([f.receive(), f.receive()]);
+  await Promise.all([f.deliver(), f.deliver(), tick()]);
   await f.receive(event(), "project-b");
   await f.receive(event({ serverInstanceId: "restarted" }));
   assert.equal(f.shown.length, 3);
@@ -90,8 +110,8 @@ test("foreground and muted events stay suppressed after replay", async () => {
 test("failure is distinct; cancellation and delegated completion stay quiet", async () => {
   const f = fixture();
   await f.receive(event({ payload: { status: "interrupted" } }));
-  await f.receive(event({ threadId: "child" }));
-  await f.receive(event({ payload: { status: "failed" } }));
+  await f.receive(event({ eventId: 2, threadId: "child" }));
+  await f.receive(event({ eventId: 3, payload: { status: "failed" } }));
   assert.equal(f.shown.length, 1);
   assert.match(f.shown[0].title, /Task failed/);
 });
@@ -124,6 +144,7 @@ test("rechecks foreground and preference after asynchronous title lookup", async
     event(),
     () => new Promise((r) => (resolve = r)),
   );
+  await tick();
   f.focus(true);
   resolve({ title: "late" } as Thread);
   await pending;
@@ -155,6 +176,7 @@ test("forget invalidates an in-flight title lookup", async () => {
     event(),
     () => new Promise((r) => (resolve = r)),
   );
+  await tick();
   f.center.forget("a");
   resolve({ title: "late" } as Thread);
   await pending;
@@ -162,9 +184,11 @@ test("forget invalidates an in-flight title lookup", async () => {
 });
 test("a failed title lookup still offers a scoped notification", async () => {
   const f = fixture();
-  await f.center.receive("a", "a", 1, event(), async () => {
+  const pending = f.center.receive("a", "a", 1, event(), async () => {
     throw new Error("offline");
   });
+  await tick();
+  await pending;
   assert.equal(f.shown.length, 1);
   assert.match(f.shown[0].body, /Conversation conversa/);
 });
@@ -196,8 +220,88 @@ test("changing notification policy while resolving a conversation suppresses the
   const f = fixture(policy);
   let resolve!: (thread: Thread) => void;
   const pending = f.center.receive("a", "a", 1, event(), () => new Promise(r => resolve = r));
+  await tick();
   policy.completionNotifications = "never";
   resolve({title:"Late result"} as Thread);
   await pending;
   assert.equal(f.shown.length,0);
+});
+
+test("a completion waits out its grace before the banner goes out", async () => {
+  const f = fixture();
+  const pending = f.deliver();
+  await tick(COMPLETION_GRACE_MS - 1);
+  assert.equal(f.shown.length, 0, "nothing goes out inside the grace");
+  await tick(1);
+  await pending;
+  assert.equal(f.shown.length, 1);
+  assert.match(f.shown[0].title, /Task finished/);
+});
+test("a queue of prompts announces finished once, after its last turn", async () => {
+  const f = fixture();
+  const started = (eventId: number) =>
+    event({ eventId, type: "turn.started", payload: { status: "running" } });
+  // Each queued prompt starts as a new root turn moments after the last one.
+  const pending = [f.deliver(event({ eventId: 1 }))];
+  await tick(100);
+  pending.push(f.deliver(started(2)));
+  await tick(COMPLETION_GRACE_MS);
+  assert.equal(f.shown.length, 0, "the next prompt started: not finished");
+  pending.push(f.deliver(event({ eventId: 3 })));
+  await tick(30);
+  pending.push(f.deliver(started(4)));
+  pending.push(f.deliver(event({ eventId: 5 })));
+  await tick(COMPLETION_GRACE_MS - 1);
+  assert.equal(f.shown.length, 0);
+  await tick(1);
+  await Promise.all(pending);
+  assert.equal(f.shown.length, 1, "the final turn of the queue gets one banner");
+  assert.match(f.shown[0].title, /Task finished/);
+  // Two completions inside one grace (a turn too short to see) send one banner.
+  pending.push(f.deliver(event({ eventId: 6 })), f.deliver(event({ eventId: 7 })));
+  await tick();
+  await Promise.all(pending);
+  assert.equal(f.shown.length, 2);
+});
+test("a stop or failure inside the grace drops the held completion; failure shows once, stop nothing", async () => {
+  const f = fixture();
+  const held = f.deliver(event({ eventId: 1 }));
+  await f.receive(event({ eventId: 2, payload: { status: "failed" } }));
+  await held;
+  assert.deepEqual(
+    f.shown.map((notification) => notification.title),
+    ["Haarness — Task failed"],
+  );
+  const stopped = f.deliver(event({ eventId: 3 }));
+  await f.receive(event({ eventId: 4, payload: { status: "interrupted" } }));
+  await stopped;
+  await tick();
+  assert.equal(f.shown.length, 1, "a stop is never announced as finished");
+});
+test("other conversations and delegated agents starting do not drop a held completion", async () => {
+  const f = fixture();
+  const pending = f.deliver();
+  for (const [eventId, threadId, rootThreadId] of [
+    [2, "other", "other"],
+    [3, "child", "conversation"],
+  ] as const)
+    await f.deliver(
+      event({ eventId, type: "turn.started", threadId, rootThreadId }),
+    );
+  // The same conversation in another project is a different conversation.
+  await f.deliver(event({ eventId: 4, type: "turn.started" }), "project-b");
+  await tick();
+  await pending;
+  assert.equal(f.shown.length, 1);
+});
+test("forgetting a project or disposing drops completions still in their grace", async () => {
+  const f = fixture();
+  const forgotten = f.deliver();
+  f.center.forget("project-a");
+  await forgotten;
+  const disposed = f.deliver(event({ eventId: 2 }), "project-b");
+  f.center.dispose();
+  await disposed;
+  await tick();
+  assert.equal(f.shown.length, 0);
 });

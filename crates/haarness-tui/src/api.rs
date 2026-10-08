@@ -1442,6 +1442,29 @@ impl ApiClient {
             .json()
             .await?)
     }
+    pub async fn approval_mode(
+        &self,
+        id: haarness_protocol::ThreadId,
+    ) -> Result<haarness_protocol::ApprovalModeInfo> {
+        self.get(&format!("/v1/threads/{id}/approval-mode")).await
+    }
+    pub async fn set_approval_mode(
+        &self,
+        id: haarness_protocol::ThreadId,
+        request: &haarness_protocol::SetApprovalModeRequest,
+    ) -> Result<haarness_protocol::ApprovalModeInfo> {
+        Ok(self
+            .request(
+                reqwest::Method::PUT,
+                &format!("/v1/threads/{id}/approval-mode"),
+            )
+            .json(request)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
     pub async fn reply_permission(&self, id: &str, reply: PermissionReply) -> Result<()> {
         self.request(reqwest::Method::POST, &format!("/v1/permissions/{id}"))
             .json(&reply)

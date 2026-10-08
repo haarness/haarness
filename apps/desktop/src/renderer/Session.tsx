@@ -124,6 +124,21 @@ export function Session() {
   const app = useApp();
   const { state, set } = app;
   const thread = () => state.threads.find((t) => t.id === state.selected);
+  // Agents' own threads are archived when their work ends and never list in
+  // the sidebar, so only a conversation the reader archived says so.
+  const archived = () => !!thread()?.archived && !thread()?.isSubagent;
+  /** Bring an archived chat back to the sidebar. */
+  async function restore(
+    connection = state.connection?.id,
+    id = state.selected,
+  ) {
+    if (!connection || !id) return;
+    await window.haarness.api(connection, "updateThread", [
+      id,
+      { archived: false },
+    ]);
+    if (state.connection?.id === connection) await app.refresh();
+  }
   const remoteShared = () =>
     !!state.connection &&
     !!state.selected &&
@@ -1122,6 +1137,7 @@ export function Session() {
       agent: selectedAgent(),
     };
     const selected = state.selected;
+    const wasArchived = archived();
     const origin = owner();
     const originProject = draftProject();
     const text = draft();
@@ -1156,6 +1172,9 @@ export function Session() {
         connection = state.connection!.id;
         setDraft(text);
       }
+      // Continuing an archived chat brings it back to the sidebar, as
+      // resuming one does in the TUI; the server leaves that to clients.
+      if (selected && wasArchived) await restore(connection, selected);
       const threadId = await app.send(
         text,
         media,
@@ -1362,6 +1381,15 @@ export function Session() {
       <Show when={controls.busy()}>
         <div class="conversation-history-notice" role="status">
           {t("Updating conversation history…")}
+        </div>
+      </Show>
+      <Show when={archived()}>
+        <div class="conversation-history-notice archived-notice" role="status">
+          <Icon name="archive" size="sm" />
+          <span>{t("This chat is archived. Sending a message restores it.")}</span>
+          <button onClick={() => app.run(() => restore())}>
+            {t("Restore")}
+          </button>
         </div>
       </Show>
       <div class="transcript-frame">

@@ -3698,6 +3698,8 @@ test("workspace Auto stays scoped across collapsed projects and the new composer
   if ((await header.getAttribute("aria-expanded")) === "true")
     await header.click();
   await expect(header).toHaveAttribute("aria-expanded", "false");
+  // Desktop's Auto for new chats covers chats Desktop starts. A chat another
+  // client starts (the TUI, a phone, the API) stays in Review.
   const background = await client.createThread({
     title: "Collapsed Auto verification",
     provider: "echo",
@@ -3707,6 +3709,17 @@ test("workspace Auto stays scoped across collapsed projects and the new composer
     text: '!tool bash {"command":"printf collapsed-auto-proof > collapsed-auto.txt"}',
     requestId: crypto.randomUUID(),
   });
+  await expect
+    .poll(() => client.listPermissions().then((items) => items.length))
+    .toBe(1);
+  expect(
+    await readFile(join(workspace, "collapsed-auto.txt"), "utf8").catch(
+      () => null,
+    ),
+  ).toBeNull();
+  // The server keeps the mode, so Auto set elsewhere answers the waiting
+  // request while this project is collapsed and no window watches it.
+  await client.setApprovalMode(background.id, { mode: "auto" });
   await expect
     .poll(() => client.activeTurns().then((items) => items.length))
     .toBe(0);

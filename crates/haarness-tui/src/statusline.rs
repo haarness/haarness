@@ -53,6 +53,36 @@ pub enum Update {
     Error(String),
 }
 
+/// How loudly to log a status-line failure. The command runs every refresh
+/// (2 s by default), so a broken one would otherwise warn forever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogLevel {
+    Warn,
+    Debug,
+}
+
+/// Remembers the last status-line failure so only a change is a warning.
+#[derive(Debug, Default)]
+pub struct FailureLog {
+    last: Option<String>,
+}
+
+impl FailureLog {
+    /// A failure: WARN when it differs from the last one, DEBUG while it repeats.
+    pub fn failed(&mut self, error: &str) -> LogLevel {
+        if self.last.as_deref() == Some(error) {
+            return LogLevel::Debug;
+        }
+        self.last = Some(error.to_owned());
+        LogLevel::Warn
+    }
+
+    /// A success: INFO with the cleared error when it ends a run of failures.
+    pub fn recovered(&mut self) -> Option<String> {
+        self.last.take()
+    }
+}
+
 pub fn spawn(
     config: Option<StatusLineConfig>,
 ) -> (
@@ -168,6 +198,24 @@ fn strip_controls(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_failures_warn_once_and_recovery_is_noted() {
+        let mut log = FailureLog::default();
+        assert_eq!(log.recovered(), None, "a healthy command logs nothing");
+        assert_eq!(log.failed("exited 1: boom"), LogLevel::Warn);
+        assert_eq!(log.failed("exited 1: boom"), LogLevel::Debug);
+        assert_eq!(log.failed("exited 1: boom"), LogLevel::Debug);
+        assert_eq!(log.failed("timed out after 5000ms"), LogLevel::Warn);
+        assert_eq!(log.failed("timed out after 5000ms"), LogLevel::Debug);
+        assert_eq!(log.recovered().as_deref(), Some("timed out after 5000ms"));
+        assert_eq!(log.recovered(), None, "recovery is noted once");
+        assert_eq!(
+            log.failed("timed out after 5000ms"),
+            LogLevel::Warn,
+            "a failure after recovery warns again"
+        );
+    }
 
     #[tokio::test]
     async fn command_receives_context_and_strips_ansi() {

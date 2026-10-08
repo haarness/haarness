@@ -3,7 +3,10 @@
 //! A snapshot is a complete manifest of the files that Haarness is willing to
 //! manage. Hidden source files are included, gitignore rules are respected,
 //! and `.git` is never traversed. Large files remain in the manifest as
-//! unrestorable `omitted` entries instead of silently disappearing.
+//! unrestorable `omitted` entries instead of silently disappearing. So do
+//! entries that cannot be read (a root-owned directory, a file that keeps
+//! changing while it is read): one such path must not fail every capture,
+//! and no restore ever writes or deletes it.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -25,6 +28,11 @@ use similar::{ChangeTag, TextDiff};
 
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_DIFF_BYTES: usize = 10 * 1024 * 1024;
+/// The hash of an omitted entry whose content could not be read. It is not
+/// a SHA-256, so it never matches a live file and no blob is stored for it.
+const UNREADABLE: &str = "unreadable";
+/// Paths one store warns about before it stays quiet, whatever the tree holds.
+const MAX_WARNED_PATHS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EntryKind {
@@ -74,16 +82,78 @@ struct ManifestEntry {
     size: u64,
 }
 
+impl ManifestEntry {
+    /// An entry whose content could not be read. It compares equal across
+    /// snapshots, so a path that stays unreadable is never a change.
+    fn unreadable(path: &str) -> Self {
+        Self {
+            path: path.to_owned(),
+            hash: UNREADABLE.to_owned(),
+            kind: EntryKind::Omitted,
+            mode: None,
+            size: 0,
+        }
+    }
+
+    fn is_unreadable(&self) -> bool {
+        self.kind == EntryKind::Omitted && self.hash == UNREADABLE
+    }
+}
+
 #[derive(Debug)]
 struct SourcePath {
     absolute: PathBuf,
     relative: String,
+    /// Why the walk could not read this entry (a directory it could not
+    /// list); it is recorded without being scanned.
+    unreadable: Option<String>,
 }
 
 #[derive(Debug)]
 struct ScannedEntry {
     manifest: ManifestEntry,
     data: Option<Vec<u8>>,
+}
+
+/// One walked entry, read for a snapshot.
+#[derive(Debug)]
+enum Scan {
+    Entry(ScannedEntry),
+    /// Deleted after the walk listed it.
+    Gone,
+    /// Unreadable, or still changing when read a second time.
+    Unreadable(CoreError),
+}
+
+/// Read one entry, and once more if that fails: a file written to while it
+/// was read usually settles, and one replaced by a rename is back at once.
+fn scan_settled(absolute: &Path, mut scan: impl FnMut() -> CoreResult<ScannedEntry>) -> Scan {
+    let first = match scan() {
+        Ok(entry) => return Scan::Entry(entry),
+        Err(error) => error,
+    };
+    tracing::debug!(path = %absolute.display(), error = %first, "snapshot entry unreadable; retrying once");
+    match scan() {
+        Ok(entry) => Scan::Entry(entry),
+        Err(_)
+            if fs::symlink_metadata(absolute)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Scan::Gone
+        }
+        Err(error) => Scan::Unreadable(error),
+    }
+}
+
+/// The path a walk error is about, if it names one.
+fn walk_error_path(error: &ignore::Error) -> Option<&Path> {
+    match error {
+        ignore::Error::WithPath { path, .. } => Some(path),
+        ignore::Error::WithDepth { err, .. } | ignore::Error::WithLineNumber { err, .. } => {
+            walk_error_path(err)
+        }
+        _ => None,
+    }
 }
 
 #[derive(Debug)]
@@ -104,6 +174,8 @@ pub struct SqliteSnapshotStore {
     // contend with the hot thread/item path.
     connection: Arc<Mutex<Connection>>,
     workspace: PathBuf,
+    /// Unreadable paths already logged at WARN; every capture meets them again.
+    warned: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl SqliteSnapshotStore {
@@ -139,11 +211,14 @@ impl SqliteSnapshotStore {
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             workspace,
+            warned: Arc::default(),
         })
     }
 
     /// Walk the complete managed tree. `hidden(false)` means "do not filter
     /// hidden entries" in the `ignore` crate; gitignore rules remain enabled.
+    /// A directory below the root that cannot be listed becomes one
+    /// unreadable entry; the root itself must be readable.
     fn source_paths(&self) -> CoreResult<Vec<SourcePath>> {
         let mut builder = ignore::WalkBuilder::new(&self.workspace);
         builder.hidden(false).follow_links(false);
@@ -151,9 +226,27 @@ impl SqliteSnapshotStore {
 
         let mut sources = Vec::new();
         for result in builder.build() {
-            let entry = result.map_err(|error| {
-                CoreError::Storage(format!("cannot walk snapshot workspace: {error}"))
-            })?;
+            let entry = match result {
+                Ok(entry) => entry,
+                Err(error) => {
+                    let relative = walk_error_path(&error)
+                        .and_then(|path| path.strip_prefix(&self.workspace).ok())
+                        .filter(|relative| !relative.as_os_str().is_empty());
+                    let Some(relative) = relative else {
+                        return Err(CoreError::Storage(format!(
+                            "cannot walk snapshot workspace: {error}"
+                        )));
+                    };
+                    let relative = encode_relative_path(relative)?;
+                    let _ = decode_relative_path(&relative)?;
+                    sources.push(SourcePath {
+                        absolute: self.workspace.join(&relative),
+                        relative,
+                        unreadable: Some(error.to_string()),
+                    });
+                    continue;
+                }
+            };
             if entry.depth() == 0 {
                 continue;
             }
@@ -179,10 +272,42 @@ impl SqliteSnapshotStore {
             sources.push(SourcePath {
                 absolute: entry.into_path(),
                 relative,
+                unreadable: None,
             });
         }
         sources.sort_by(|left, right| left.relative.cmp(&right.relative));
+        // One path can be listed and then fail; the manifest holds it once.
+        sources.dedup_by(|later, earlier| later.relative == earlier.relative);
         Ok(sources)
+    }
+
+    /// Read one walked entry for a manifest. `None` when it is gone; an
+    /// entry that cannot be read is recorded as unreadable, so one busy or
+    /// root-owned path never fails a capture.
+    fn capture_entry(&self, source: &SourcePath, include_data: bool) -> Option<ScannedEntry> {
+        let error = match &source.unreadable {
+            Some(error) => error.clone(),
+            None => {
+                match scan_settled(&source.absolute, || self.scan_entry(source, include_data)) {
+                    Scan::Entry(entry) => return Some(entry),
+                    Scan::Gone => return None,
+                    Scan::Unreadable(error) => error.to_string(),
+                }
+            }
+        };
+        tracing::debug!(path = %source.relative, %error, "snapshot cannot read entry");
+        let mut warned = self.warned.lock();
+        if warned.len() < MAX_WARNED_PATHS && warned.insert(source.relative.clone()) {
+            tracing::warn!(
+                path = %source.relative,
+                %error,
+                "snapshots cannot read this path; recording it as omitted, and undo will not restore it"
+            );
+        }
+        Some(ScannedEntry {
+            manifest: ManifestEntry::unreadable(&source.relative),
+            data: None,
+        })
     }
 
     fn scan_entry(&self, source: &SourcePath, include_data: bool) -> CoreResult<ScannedEntry> {
@@ -282,8 +407,9 @@ impl SqliteSnapshotStore {
     fn scan_manifest(&self) -> CoreResult<BTreeMap<String, ManifestEntry>> {
         let mut manifest = BTreeMap::new();
         for source in self.source_paths()? {
-            let entry = self.scan_entry(&source, false)?.manifest;
-            manifest.insert(entry.path.clone(), entry);
+            if let Some(entry) = self.capture_entry(&source, false) {
+                manifest.insert(entry.manifest.path.clone(), entry.manifest);
+            }
         }
         Ok(manifest)
     }
@@ -347,6 +473,12 @@ impl SqliteSnapshotStore {
     }
 
     fn load_blob(&self, entry: &ManifestEntry) -> CoreResult<Vec<u8>> {
+        if entry.is_unreadable() {
+            return Err(CoreError::Conflict(format!(
+                "snapshot entry {} could not be read when it was captured",
+                entry.path
+            )));
+        }
         if !entry.kind.has_blob() {
             return Err(CoreError::Conflict(format!(
                 "snapshot entry {} was omitted because it exceeds {} bytes",
@@ -617,8 +749,12 @@ impl SqliteSnapshotStore {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage)?;
 
+        let mut file_count = 0_u64;
         for source in &sources {
-            let scanned = self.scan_entry(source, true)?;
+            let Some(scanned) = self.capture_entry(source, true) else {
+                continue;
+            };
+            file_count += 1;
             if let Some(data) = scanned.data {
                 let mut encoder =
                     flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
@@ -654,15 +790,12 @@ impl SqliteSnapshotStore {
                 id,
                 thread.to_string(),
                 Utc::now().to_rfc3339(),
-                i64::try_from(sources.len()).unwrap_or(i64::MAX)
+                i64::try_from(file_count).unwrap_or(i64::MAX)
             ],
         )
         .map_err(storage)?;
         tx.commit().map_err(storage)?;
-        Ok(SnapshotInfo {
-            id,
-            file_count: u64::try_from(sources.len()).unwrap_or(u64::MAX),
-        })
+        Ok(SnapshotInfo { id, file_count })
     }
 }
 
@@ -679,7 +812,10 @@ impl SnapshotStore for SqliteSnapshotStore {
     /// overlay behavior, but never delete files that are absent from the old
     /// manifest.
     async fn restore(&self, snapshot_id: &str) -> CoreResult<Vec<String>> {
-        let manifest = self.load_manifest(snapshot_id)?;
+        let mut manifest = self.load_manifest(snapshot_id)?;
+        // An overlay never deletes; a path the snapshot could not read is
+        // left as it is rather than refusing the whole restore.
+        manifest.retain(|_, entry| !entry.is_unreadable());
         // Validate every path, ancestor, and blob before the first write.
         for entry in manifest.values() {
             let _ = safe_target(&self.workspace, &entry.path)?;
@@ -720,6 +856,17 @@ impl SnapshotStore for SqliteSnapshotStore {
         for path in &changed {
             let target = safe_target(&self.workspace, path)?;
             ensure_safe_ancestors(&self.workspace, path)?;
+            // What was there when a snapshot could not read it is unknown:
+            // writing or deleting it could destroy work, so refuse.
+            if [expected.get(path), desired.get(path)]
+                .into_iter()
+                .flatten()
+                .any(ManifestEntry::is_unreadable)
+            {
+                return Err(CoreError::Conflict(format!(
+                    "workspace path could not be read when a snapshot was taken: {path}"
+                )));
+            }
             let actual = scan_live_entry(&target, path, &self.workspace)?;
             if !optional_entry_matches(expected.get(path), actual.as_ref()) {
                 return Err(CoreError::Conflict(format!(
@@ -1659,5 +1806,135 @@ mod tests {
             fs::read_to_string(outside.join("main.rs")).unwrap(),
             "outside"
         );
+    }
+
+    #[test]
+    fn an_entry_that_changes_while_read_is_read_again_then_recorded_unreadable() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::write(workspace.join("app.log"), "line\n").unwrap();
+        let source = SourcePath {
+            absolute: workspace.join("app.log"),
+            relative: "app.log".into(),
+            unreadable: None,
+        };
+        let changed = || CoreError::Conflict("snapshot entry changed while capturing".into());
+
+        // Written to during the first read: the second read is kept.
+        let mut reads = 0;
+        let settled = scan_settled(&source.absolute, || {
+            reads += 1;
+            if reads == 1 {
+                Err(changed())
+            } else {
+                store.scan_entry(&source, true)
+            }
+        });
+        assert_eq!(reads, 2);
+        let Scan::Entry(entry) = settled else {
+            panic!("expected the second read, got {settled:?}")
+        };
+        assert_eq!(entry.manifest.kind, EntryKind::File);
+        assert_eq!(entry.data.as_deref(), Some(&b"line\n"[..]));
+
+        // Still changing: recorded as unreadable instead of failing.
+        let mut reads = 0;
+        let settled = scan_settled(&source.absolute, || {
+            reads += 1;
+            Err(changed())
+        });
+        assert_eq!(reads, 2);
+        assert!(matches!(settled, Scan::Unreadable(CoreError::Conflict(_))));
+
+        // Deleted after the walk listed it: left out.
+        let gone = workspace.join("gone.tmp");
+        assert!(matches!(scan_settled(&gone, || Err(changed())), Scan::Gone));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unreadable_entries_never_fail_a_capture_and_restores_never_touch_them() {
+        use std::os::unix::fs::PermissionsExt;
+
+        /// Gives every locked path its permissions back, so cleanup works
+        /// even when an assertion fails.
+        struct Unlock(Vec<PathBuf>);
+        impl Drop for Unlock {
+            fn drop(&mut self) {
+                for path in &self.0 {
+                    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o755));
+                }
+            }
+        }
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::write(workspace.join("src/main.rs"), "before\n").unwrap();
+        fs::create_dir(workspace.join("docker-data")).unwrap();
+        fs::write(workspace.join("docker-data/db"), "root's\n").unwrap();
+        fs::write(workspace.join("sealed.log"), "private\n").unwrap();
+        let unlock = Unlock(vec![
+            workspace.clone(),
+            workspace.join("docker-data"),
+            workspace.join("sealed.log"),
+        ]);
+        let mode = |path: &Path, mode| {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        };
+        mode(&unlock.0[1], 0o000);
+        mode(&unlock.0[2], 0o000);
+        if fs::read(&unlock.0[2]).is_ok() {
+            // Root reads everything; there is nothing unreadable to test.
+            return;
+        }
+
+        let before = store.capture(ThreadId::new()).await.unwrap();
+        assert_eq!(before.file_count, 3);
+        let manifest = store.load_manifest(&before.id).unwrap();
+        assert!(manifest["docker-data"].is_unreadable());
+        assert!(manifest["sealed.log"].is_unreadable());
+        assert_eq!(manifest["src/main.rs"].kind, EntryKind::File);
+        fs::write(workspace.join("src/main.rs"), "after\n").unwrap();
+        let after = store.capture(ThreadId::new()).await.unwrap();
+        assert_eq!(
+            *store.warned.lock(),
+            BTreeSet::from(["docker-data".to_owned(), "sealed.log".to_owned()]),
+            "each path warns once, not once per capture"
+        );
+        assert_eq!(store.diff_live(&after.id).await.unwrap(), Vec::new());
+
+        // A path that stayed unreadable is no change: undo restores the rest.
+        let undone = store.restore_delta(&after.id, &before.id).await.unwrap();
+        assert_eq!(undone, vec!["src/main.rs"]);
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/main.rs")).unwrap(),
+            "before\n"
+        );
+
+        // Readable now, the directory's file is new to the manifest. Going
+        // back to a snapshot that could not see it refuses; nothing is deleted.
+        mode(&unlock.0[1], 0o755);
+        let readable = store.capture(ThreadId::new()).await.unwrap();
+        let error = store
+            .restore_delta(&readable.id, &before.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CoreError::Conflict(_)), "{error}");
+        assert_eq!(
+            fs::read_to_string(workspace.join("docker-data/db")).unwrap(),
+            "root's\n"
+        );
+
+        // The legacy overlay restores what it read and leaves the rest alone.
+        fs::write(workspace.join("src/main.rs"), "edited\n").unwrap();
+        assert_eq!(
+            store.restore(&before.id).await.unwrap(),
+            vec!["src/main.rs"]
+        );
+        assert!(workspace.join("docker-data/db").exists());
+
+        // The workspace root itself must still be readable.
+        mode(&workspace, 0o000);
+        let error = store.capture(ThreadId::new()).await.unwrap_err();
+        assert!(matches!(error, CoreError::Storage(_)), "{error}");
     }
 }

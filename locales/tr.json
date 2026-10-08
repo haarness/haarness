@@ -1681,5 +1681,10 @@
   "Stopped sharing. This chat stays on this computer.": "Paylaşım durduruldu. Bu sohbet bu bilgisayarda kalır.",
   "This chat keeps running on this computer, with its files and model keys, until you stop sharing.": "Bu sohbet, siz paylaşımı durdurana kadar dosyaları ve sağlayıcı anahtarlarıyla birlikte bu bilgisayarda çalışmaya devam eder.",
   "Use /remote-control, /remote-control status or /remote-control stop.": "/remote-control, /remote-control status veya /remote-control stop kullanın.",
-  "on {computer}": "{computer} üzerinde"
+  "on {computer}": "{computer} üzerinde",
+  "This chat is archived. Sending a message restores it.": "Bu sohbet arşivlendi. Mesaj göndermek onu geri yükler.",
+  "Approvals changed in another window. Try again.": "Onaylar başka bir pencerede değişti. Yeniden deneyin.",
+  "Auto on for this chat · requests are allowed once · ctrl+y to review": "Bu sohbet için otomatik açık · istekler bir kez izin alır · incelemek için ctrl+y",
+  "Review · this chat asks before acting · ctrl+y for Auto": "İnceleme · bu sohbet harekete geçmeden önce sorar · otomatik için ctrl+y",
+  "Approvals changed in another window · ctrl+y to switch": "Onaylar başka bir pencerede değişti · geçiş için ctrl+y"
 }

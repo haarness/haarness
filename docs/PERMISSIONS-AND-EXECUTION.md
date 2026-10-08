@@ -88,4 +88,6 @@ In global or project `extensions.json`, keep `timeout_ms` as the fallback and ov
 
 A deadline of `0` disables that deadline. Missing stage settings inherit `timeout_ms`; omitted project fields inherit global settings. The former five-minute maximum is removed. Message size defaults to 2 MiB and remains a positive configurable bound. Cancellation still terminates the host; timed-out or cancelled tools are not replayed. Large artifacts should normally be returned as files.
 
+Haarness Cloud actions that spend money or replace or delete something (launching, messaging, scheduling, changing or deleting Cloud sessions, templates and schedules) always ask, each time, with no **Always** choice; allow rules, `--yolo`, Auto approvals and hooks cannot skip the prompt, while a deny rule still refuses. See [Haarness account](HAARNESS-ACCOUNT.md).
+
 Generated media retains its existing approval default. Users who want it to run automatically can set `permission.media_generate` to `"allow"` in their existing ordered permission configuration. Browser transfer and diagnostic limits retain their existing bounds; they are separate from inline media reads.

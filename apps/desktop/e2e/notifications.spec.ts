@@ -483,6 +483,40 @@ test("failed and archived conversations open without changing their history", as
     ),
   ).toBe(false);
 });
+test("a queue of prompts sends one finished banner, after its last turn, and none while it runs", async () => {
+  await clearRecords();
+  await background();
+  const finished = async () =>
+    (await records()).filter(
+      (n) => n.body.startsWith(first.title + " · ") && n.title.includes("Task finished"),
+    ).length;
+  // Each queued prompt starts as its own root turn moments after the last
+  // one finishes; none of those intermediate ends is "finished".
+  const running = await clients[0].startTurn(first.id, {
+    text: "::mdslow queue head",
+    requestId: crypto.randomUUID(),
+  });
+  for (const text of ["queued follow-up one", "queued follow-up two"])
+    await clients[0].queueInput(first.id, {
+      text,
+      requestId: crypto.randomUUID(),
+      delivery: "queue",
+    });
+  await clients[0].waitTurn(running.id);
+  await expect
+    .poll(async () =>
+      (await clients[0].listItems(first.id)).some(
+        (item) =>
+          item.data.type === "assistant_message" &&
+          item.data.text.includes("queued follow-up two"),
+      ),
+    )
+    .toBe(true);
+  await expect.poll(finished).toBe(1);
+  // Long past the grace: still exactly one banner for the whole queue.
+  await page.waitForTimeout(1500);
+  expect(await finished()).toBe(1);
+});
 test("rapid notification clicks select the last destination and replay subscriptions do not duplicate alerts", async () => {
   await clearRecords();
   await background();

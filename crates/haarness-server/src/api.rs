@@ -262,6 +262,10 @@ pub async fn serve_with_access(
         .route("/threads/{id}/btw", post(btw))
         .route("/threads/{id}/compact", post(compact))
         .route("/threads/{id}/goal", get(get_goal).post(set_goal))
+        .route(
+            "/threads/{id}/approval-mode",
+            get(get_approval_mode).put(set_approval_mode),
+        )
         .route("/threads/{id}/loop", get(get_loop).post(set_loop))
         .route("/threads/{id}/usage", get(thread_usage))
         .route("/threads/{id}/shell", post(run_shell))
@@ -309,6 +313,8 @@ pub async fn serve_with_access(
     }
     let server_shutdown = shutdown.clone();
     let task = tokio::spawn(async move {
+        // Peer addresses let rejected-request log lines say who was turned away.
+        let app = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
         axum::serve(listener, app)
             .with_graceful_shutdown(server_shutdown.cancelled_owned())
             .await
@@ -643,6 +649,7 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
             "configuration-hot-reload.v1".into(),
             WORKSPACE_HISTORY_CAPABILITY.into(),
             haarness_protocol::INPUT_QUEUE_CAPABILITY.into(),
+            haarness_protocol::APPROVAL_MODE_CAPABILITY.into(),
             PTY_CAPABILITY.into(),
             SESSION_ARCHIVE_CAPABILITY.into(),
         ]
@@ -1373,6 +1380,20 @@ async fn compact(
 enum GoalRequest {
     Action(GoalActionRequest),
     Legacy { goal: Option<String> },
+}
+/// The chat's Auto/Review setting, which the server applies for every client.
+async fn get_approval_mode(
+    State(state): State<ServerState>,
+    Path(id): Path<ThreadId>,
+) -> ApiResult<Json<haarness_protocol::ApprovalModeInfo>> {
+    Ok(Json(state.runtime.approval_mode(id).await?))
+}
+async fn set_approval_mode(
+    State(state): State<ServerState>,
+    Path(id): Path<ThreadId>,
+    Json(request): Json<haarness_protocol::SetApprovalModeRequest>,
+) -> ApiResult<Json<haarness_protocol::ApprovalModeInfo>> {
+    Ok(Json(state.runtime.set_approval_mode(id, request).await?))
 }
 async fn get_goal(
     State(state): State<ServerState>,

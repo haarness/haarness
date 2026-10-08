@@ -1681,5 +1681,10 @@
   "Stopped sharing. This chat stays on this computer.": "공유를 중지했습니다. 이 채팅은 이 컴퓨터에 그대로 남아 있습니다.",
   "This chat keeps running on this computer, with its files and model keys, until you stop sharing.": "공유를 중지할 때까지 이 채팅은 파일과 공급자 키를 사용하며 이 컴퓨터에서 계속 실행됩니다.",
   "Use /remote-control, /remote-control status or /remote-control stop.": "/remote-control, /remote-control status 또는 /remote-control stop을 사용하세요.",
-  "on {computer}": "{computer}에서"
+  "on {computer}": "{computer}에서",
+  "This chat is archived. Sending a message restores it.": "이 채팅은 보관되었습니다. 메시지를 보내면 복원됩니다.",
+  "Approvals changed in another window. Try again.": "다른 창에서 승인 방식이 바뀌었습니다. 다시 시도하세요.",
+  "Auto on for this chat · requests are allowed once · ctrl+y to review": "이 채팅은 자동 승인 중 · 요청은 한 번만 허용 · ctrl+y로 검토",
+  "Review · this chat asks before acting · ctrl+y for Auto": "검토 · 이 채팅은 작업 전에 묻습니다 · ctrl+y로 자동",
+  "Approvals changed in another window · ctrl+y to switch": "다른 창에서 승인 방식이 바뀌었습니다 · ctrl+y로 전환"
 }
