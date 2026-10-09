@@ -3,9 +3,7 @@ from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.enum.shapes import MSO_SHAPE
-from pptx.enum.dml import MSO_THEME_COLOR
-from PIL import Image, ImageDraw, ImageFont
-import os, math
+import os
 
 OUT = os.path.expanduser('~/Desktop/Steve_Jobs_Life.pptx')
 PORTRAIT = '/tmp/steve_jobs_ppt/jobs.jpg'

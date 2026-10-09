@@ -2,7 +2,6 @@
 """Owned daemon + attached tmux chat, scoped JSON settings and live delivery proof."""
 import json, os, shlex, subprocess, sys, time, urllib.request, urllib.error
 from pathlib import Path
-from uuid import uuid4
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'sdks/tests'))
 from server import Fixture, BINARY
 

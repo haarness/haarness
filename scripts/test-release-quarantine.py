@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """macOS: verify quarantine removal on downloaded, checksum-verified app contents."""
-import hashlib, http.server, os, platform, shutil, subprocess, tempfile, threading
+import hashlib, http.server, os, platform, subprocess, tempfile, threading
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 if platform.system()!='Darwin': raise SystemExit('macOS-only quarantine test')

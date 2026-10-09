@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Model refresh through a real local server and tmux-driven terminal renderer."""
-import http.server,json,os,pathlib,shlex,subprocess,tempfile,threading,time,urllib.request
+import http.server,json,os,pathlib,shlex,subprocess,tempfile,threading,time
 binary=pathlib.Path(os.environ.get('HAARNESS_BIN','target/release/haarness')).resolve()
 root=pathlib.Path(tempfile.mkdtemp(prefix='haarness-models-tui-')).resolve()
 workspace=root/'workspace'

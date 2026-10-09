@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Real server and attached TUI: ordinary tools, manual approvals and retired policy migration."""
-import http.server, json, os, pathlib, shlex, subprocess, tempfile, threading, time, urllib.request, urllib.error, uuid
+import http.server, json, os, pathlib, shlex, subprocess, tempfile, threading, time, urllib.request, urllib.error
 
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve()
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-permissions-attach-')).resolve()

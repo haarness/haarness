@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Real tmux proof: hide native cursor on every screen, restore it on exit."""
 
-import json
 import os
 from pathlib import Path
 import shlex

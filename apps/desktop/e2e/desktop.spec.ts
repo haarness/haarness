@@ -9726,7 +9726,7 @@ test("composer border follows the selected agent in drafts and saved conversatio
 });
 
 test("provider artwork and combined reasoning follow each model's actual capability scale", async () => {
-  const provider = createServer((request, response) => {
+  const provider = createServer((_request, response) => {
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify({ data: [
       { id: "compact-reasoner", supported_parameters: ["reasoning_effort"], reasoning_efforts: ["low", "high"] },
@@ -11541,7 +11541,7 @@ tools=false
     await page.evaluate(() => {
       const original = Worker.prototype.postMessage;
       (window as any).__workerFailureInjected = false;
-      Worker.prototype.postMessage = function(message, options) {
+      Worker.prototype.postMessage = function() {
         Worker.prototype.postMessage = original;
         (window as any).__workerFailureInjected = true;
         throw new Error("Fixture worker transport failure");

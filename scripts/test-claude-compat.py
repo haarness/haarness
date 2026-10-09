@@ -3,7 +3,7 @@
 Uses Echo for deterministic tool requests; writes only within an isolated workspace.
 Pass --real-plugins to also install and customize Anthropic's public plugin-dev.
 """
-import json, os, pathlib, subprocess, tempfile, urllib.request, urllib.error, sys, time
+import json, os, pathlib, subprocess, tempfile, urllib.request, urllib.error, sys
 repo=pathlib.Path(__file__).resolve().parents[1]
 root=pathlib.Path(tempfile.mkdtemp(prefix='haarness-claude-compat-'))
 workspace=root/'workspace';workspace.mkdir();state=root/'state';home=root/'home';home.mkdir()
