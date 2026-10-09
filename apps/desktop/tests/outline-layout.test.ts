@@ -1,8 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  CLEAR,
-  EDGE,
   FOLD_MAX,
   INSET,
   PAD,
@@ -98,8 +96,4 @@ test("a prompt's title is its first written line, not its attached context", () 
     "a.png",
   );
   assert.equal(promptTitle("", [], name, "Attachment"), "Attachment");
-});
-
-test("text clears the widest dash", () => {
-  assert.equal(CLEAR, EDGE + 16 + 12);
 });

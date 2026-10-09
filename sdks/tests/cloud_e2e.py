@@ -4,12 +4,10 @@
 import asyncio
 import base64
 import inspect
-import json
 import os
 import sys
 import time
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
 from uuid import uuid4
 from haarness_sdk import HaarnessCloud, AsyncHaarnessCloud, ApiError
 from cloud_fixture import authorize, fund
@@ -63,7 +61,7 @@ async def scenario(asynchronous):
         runtime = await call(session.connect)
         await call(runtime.mutate_file, {"action": "mkdir", "path": "sdk-files"})
         payload = "shared file 雪\nSDK content " + label
-        saved = await call(
+        await call(
             runtime.write_file,
             {"path": "sdk-files/upload.txt", "content": payload, "revision": EMPTY},
         )

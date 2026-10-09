@@ -4,7 +4,6 @@
 HAARNESS_BILLING_LIVE=1 HAARNESS_CLOUD_API_URL=... HAARNESS_CLOUD_CONFIG_DIR=...
 Creates only a disposable local project/thread. Makes one small, paid model call.
 """
-from decimal import Decimal, ROUND_DOWN
 import json
 import os
 from pathlib import Path

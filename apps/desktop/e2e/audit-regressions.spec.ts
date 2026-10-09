@@ -159,7 +159,7 @@ test("audit: a workspace switch discards stale reads, writes and search results"
   await expect(button(page, "Save")).toBeDisabled();
 });
 
-test("audit: invalid create and rename retain input, retry successfully and preserve undo", async ({ desktop: { app, page, a } }) => {
+test("audit: invalid create and rename retain input, retry successfully and preserve undo", async ({ desktop: { page, a } }) => {
   await files(page); await button(page, "New file").click();
   const form = page.getByRole("dialog", { name: "New file", exact: true });
   const input = form.getByRole("textbox", { name: "Path relative to this folder" });

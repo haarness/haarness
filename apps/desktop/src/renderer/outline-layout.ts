@@ -18,8 +18,6 @@ export const INSET = 12;
 export const TOP = 32;
 /** Where the dashes sit from the leading edge. */
 export const EDGE = 10;
-/** Where transcript text may start without meeting the widest (16px) dash. */
-export const CLEAR = EDGE + 16 + 12;
 /** At most this many dashes; longer conversations fold into even slices. */
 export const FOLD_MAX = 24;
 /** At most this many rows in view in the panel; it scrolls through the rest. */

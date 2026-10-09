@@ -12,7 +12,6 @@ from . import types as T, cloud_types as C
 from .client import ChatResult
 from .router import HaarnessRouter, AsyncHaarnessRouter
 from .json_socket import JsonSocket, AsyncJsonSocket
-from .pty import PtyConnection, AsyncPtyConnection
 
 
 def gateway(value: str) -> str:

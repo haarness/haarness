@@ -2,7 +2,7 @@
 """Collect real build outputs, publish immutably, and verify every downloaded byte.
 No npm/Docker publication. Tokens are read from the environment, never arguments.
 """
-import argparse, hashlib, http.client, json, os, platform, shutil, subprocess, sys
+import argparse, hashlib, http.client, json, os, platform, shutil, subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit, urlencode

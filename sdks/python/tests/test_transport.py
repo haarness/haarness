@@ -3,7 +3,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
-from haarness_sdk import Haarness, AsyncHaarness, ApiError, TransportError, attachments
+from haarness_sdk import Haarness, AsyncHaarness, ApiError, attachments
 
 
 def test_media_twenty_mib_aggregate_boundary(tmp_path):

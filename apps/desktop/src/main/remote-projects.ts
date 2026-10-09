@@ -1,6 +1,6 @@
 import { authorizationHeaders, type ServerAuth } from "@haarness/sdk";
 import type { DirectoryListing } from "../shared";
-import type { WorkspaceInfo, WorkspaceListResponse } from "@haarness/sdk";
+import type { WorkspaceInfo } from "@haarness/sdk";
 
 /** Host credentials never leave Electron main. Directory APIs stay on one origin. */
 async function hostRequest<T>(
@@ -68,8 +68,6 @@ export const browseRemote = (
     "directories" + (query.size ? "?" + query : ""),
   );
 };
-export const remoteCatalog = (url: string, token: string | ServerAuth) =>
-  hostRequest<WorkspaceListResponse>(url, token, "projects");
 export const openRemote = (
   url: string,
   token: string | ServerAuth,

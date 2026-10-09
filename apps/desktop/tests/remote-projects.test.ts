@@ -8,7 +8,6 @@ import {
 import { once } from "node:events";
 import {
   browseRemote,
-  remoteCatalog,
   openRemote,
 } from "../src/main/remote-projects";
 
@@ -69,7 +68,7 @@ test("older servers explain the upgrade and upstream redirects are never followe
   let redirected = false;
   await withServer(
     (request, response) => {
-      if (request.url === "/v1/host/projects") {
+      if (request.url === "/v1/host/directories?path=%2Fmissing") {
         response.writeHead(404);
         response.end();
       } else if (request.url === "/target") {
@@ -82,7 +81,7 @@ test("older servers explain the upgrade and upstream redirects are never followe
     },
     async (url) => {
       await assert.rejects(
-        remoteCatalog(url, "private"),
+        browseRemote(url, "private", "/missing"),
         /Update Haarness.*current project remains available/,
       );
       await assert.rejects(browseRemote(url, "private"));
@@ -90,7 +89,7 @@ test("older servers explain the upgrade and upstream redirects are never followe
     },
   );
   await assert.rejects(
-    remoteCatalog("http://remote.example", "private"),
+    browseRemote("http://remote.example", "private"),
     /HTTPS/,
   );
 });
