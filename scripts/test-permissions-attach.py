@@ -86,7 +86,8 @@ try:
     before=start('bash',{'command':'printf review-one > first.txt'}); prompt('bash'); keys('a'); until(lambda:'until the Haarness server stops' in capture(),'Always confirmation missing'); keys('Enter'); assert not finish(before)['is_error']
     before=start('bash',{'command':'printf review-two > second.txt'}); assert not finish(before)['is_error']; assert (workspace/'second.txt').read_text()=='review-two'; assert not api('/permissions')
     check('Always approval retains command-prefix permission for the session')
-    send('/sandbox'); until(lambda:'Echo: /sandbox' in capture(),'retired command did not fall back to ordinary chat'); assert 'Tool sandbox' not in capture(); check('sandbox command is removed')
+    send('/sandbox'); until(lambda:'Unknown command /sandbox' in capture(),'retired command was not reported as unknown'); assert 'Tool sandbox' not in capture()
+    assert not any(item['data'].get('text','').strip()=='/sandbox' for item in items()),'unknown command reached the model'; check('sandbox command is removed')
     try: api('/manage/sandbox',{'action':'save','profile':'offline'}); raise AssertionError('retired API accepted')
     except urllib.error.HTTPError as error: assert error.code in (400,404,422),error.code
     (root/'items.json').write_text(json.dumps(items(),indent=2)); (root/'result.json').write_text(json.dumps({'passed':True,'checks':checks},indent=2))
