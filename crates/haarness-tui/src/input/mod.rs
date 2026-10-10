@@ -126,6 +126,11 @@ pub(crate) async fn answer_permission(
     Ok(())
 }
 
+/// How long a choice staged by its letter must have been on screen before the
+/// same letter confirms it: long enough to read what it grants, longer than
+/// the gap between the doubled letters of a typed word.
+const STAGED_READ_TIME: std::time::Duration = std::time::Duration::from_millis(400);
+
 /// A printable key while the approval card owns the keyboard. Returns false
 /// when the key is not an answer, which means the user is typing a message.
 ///
@@ -134,16 +139,14 @@ pub(crate) async fn answer_permission(
 /// answer), so those letters are remembered: when the next key shows they
 /// began a word ("update…", "always…", "hello"), they move to the composer
 /// with it and nothing is answered. A choice staged by a letter is confirmed
-/// only by that letter again (or Enter).
+/// only by that letter again once it could be read (or Enter): typed at
+/// speed, "www…" or "uuid" are words, not a folder rule or Auto.
 async fn permission_letter(app: &mut App, client: &ApiClient, letter: char) -> Result<bool> {
-    let typed = app
-        .permission_typed
-        .as_ref()
-        .map(|(typed, _)| typed.as_str());
     if let Some(staged) = app.confirm_always
-        && typed.is_some_and(|typed| typed.ends_with(staged))
+        && let Some((typed, _, at)) = &app.permission_typed
+        && typed.ends_with(staged)
     {
-        if letter != staged {
+        if letter != staged || at.elapsed() < STAGED_READ_TIME {
             return Ok(false);
         }
         answer_permission(app, client, letter).await?;
@@ -151,10 +154,11 @@ async fn permission_letter(app: &mut App, client: &ApiClient, letter: char) -> R
     }
     let selection = app.permission_selection;
     let remember = |app: &mut App| {
-        app.permission_typed
-            .get_or_insert_with(|| (String::new(), selection))
-            .0
-            .push(letter);
+        let typed = app
+            .permission_typed
+            .get_or_insert_with(|| (String::new(), selection, std::time::Instant::now()));
+        typed.0.push(letter);
+        typed.2 = std::time::Instant::now();
     };
     if matches!(letter, 'h' | 'l') {
         remember(app);
