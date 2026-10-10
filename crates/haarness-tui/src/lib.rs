@@ -580,11 +580,18 @@ async fn run_with_client(
                             }
                             Ok(AppAction::Continue) => {}
                             Err(error) => {
-                                tracing::warn!(error = %error, "key handling failed");
+                                // The whole chain: a context such as "Could not
+                                // start signing in" says what failed, its cause
+                                // says why, and only both together say what to do.
+                                tracing::warn!(
+                                    error = format!("{error:#}"),
+                                    status = ?crate::api::refusal_status(&error),
+                                    "key handling failed"
+                                );
                                 app.notice = "Ready".into();
                                 app.show_toast(
                                     Some("Error".into()),
-                                    error.to_string(),
+                                    format!("{error:#}"),
                                     ToastVariant::Error,
                                     Duration::from_secs(7),
                                 );
@@ -618,6 +625,7 @@ async fn run_with_client(
                             } else if matches!(app.overlay, state::Overlay::Options { kind: state::OptionsKind::ConnectApiKey, .. }) {
                                 // A pasted key never wants the surrounding whitespace.
                                 app.overlay_filter.push_str(text.trim());
+                                app.connect.key_error = None;
                             } else {
                                 app.overlay_filter.push_str(&text.replace(['\n', '\r'], " "));
                             }

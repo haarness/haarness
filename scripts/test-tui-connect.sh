@@ -99,10 +99,23 @@ printf -- '[providers.ollama]\nenabled = false\n[providers.lmstudio]\nenabled = 
 launch="env HAARNESS_DATA_DIR='$test_root' HAARNESS_OPENAI_OAUTH_ISSUER='$issuer' OPENAI_BASE_URL='$issuer/v1' ANTHROPIC_BASE_URL='$issuer/v1' SSH_TTY=fixture '$binary' --workspace '$test_root/ws'"
 tmux new-session -d -x 110 -y 34 -s "$session" "$launch"
 
-# 1. First run: the picker is the welcome screen and the home hint names it.
-wait_for "The connect picker did not open on first run" "Connect a provider" "OpenAI" "Anthropic"
+# 1. First run: the picker is the welcome screen, says why, shelves the
+#    popular providers first, and the home hint names it.
+wait_for "The connect picker did not open on first run" "Welcome to Haarness" "Haarness needs an AI model" "Popular" "More providers" "OpenAI" "Anthropic"
 tmux send-keys -t "$session":0.0 Escape
 wait_for "Home did not explain how to connect" "no provider connected" "/connect" "files · agents"
+# Sending anyway reopens the picker, keeps the draft and blames no provider.
+tmux send-keys -l -t "$session":0.0 "hello there"
+tmux send-keys -t "$session":0.0 Enter
+wait_for "Sending with nothing connected did not reopen the picker" "Welcome to Haarness" "Connect a provider to send your message" "hello there"
+pane="$(tmux capture-pane -p -t "$session":0.0)"
+if echo "$pane" | grep -Fq "OpenAI is not connected"; then
+  echo "$pane" >&2
+  echo "Sending with nothing connected named a provider nobody chose" >&2
+  exit 1
+fi
+tmux send-keys -t "$session":0.0 Escape
+tmux send-keys -t "$session":0.0 C-u
 
 # 2. `/connect openai` offers the sign-in methods; the code flow completes
 #    against the fixture without any typing beyond choosing it.
@@ -127,13 +140,22 @@ wait_for "The session did not switch to the connected provider" "openai/" "Ask a
 # 3. `/connect anthropic` is a single-method provider: straight to the masked
 #    key prompt, with the console link as a hint, then connected.
 tmux send-keys -t "$session":0.0 "/connect anthropic" Enter
-wait_for "The key prompt did not open for Anthropic" "Connect Anthropic" "console.anthropic.com" "ANTHROPIC_API_KEY" "enter connect"
+wait_for "The key prompt did not open for Anthropic" "Connect Anthropic" "console.anthropic.com" "ANTHROPIC_API_KEY" "enter connect" "esc back"
+# An empty key is explained under the field, and the explanation goes as
+# soon as a key is typed.
+tmux send-keys -t "$session":0.0 Enter
+wait_for "An empty key was not explained under the field" "Connect Anthropic" "Paste a key first."
 tmux send-keys -l -t "$session":0.0 "sk-ant-fixture-key"
 sleep 0.3
 pane="$(tmux capture-pane -p -t "$session":0.0)"
 if echo "$pane" | grep -Fq "sk-ant-fixture"; then
   echo "$pane" >&2
   echo "The key prompt echoed the secret" >&2
+  exit 1
+fi
+if echo "$pane" | grep -Fq "Paste a key first"; then
+  echo "$pane" >&2
+  echo "The empty-key notice outlived the typed key" >&2
   exit 1
 fi
 tmux send-keys -t "$session":0.0 Enter
@@ -154,6 +176,11 @@ tmux send-keys -t "$session":0.0 C-c
 #    the connection state instead of a raw id.
 tmux send-keys -t "$session":0.0 "/providers" Enter
 wait_for "The provider manager did not open" "Providers" "Connect a provider" "Connected"
+tmux send-keys -t "$session":0.0 Escape
+
+# 6. The picker marks connected providers in its gutter, so names line up.
+tmux send-keys -t "$session":0.0 "/connect" Enter
+wait_for "Connected providers were not marked in the picker" "Connect a provider" "✓  OpenAI" "✓  Anthropic"
 tmux send-keys -t "$session":0.0 Escape
 
 echo "TUI connect flow: ok"

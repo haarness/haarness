@@ -420,10 +420,10 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
             ref title,
             ref entries,
             kind,
-        } => (
-            title,
-            app.filtered_options(entries)
-                .into_iter()
+        } => {
+            let options = app.filtered_options(entries);
+            let mut rows: Vec<SelectorRow> = options
+                .iter()
                 .map(|entry| {
                     let current = match kind {
                         crate::state::OptionsKind::ReasoningEffort => {
@@ -476,10 +476,30 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
                         | crate::state::OptionsKind::GoalClearConfirmation
                         | crate::state::OptionsKind::GoalCompletion => false,
                     };
-                    SelectorRow::new(entry.label, entry.description, current)
+                    let mut row =
+                        SelectorRow::new(entry.label.clone(), entry.description.clone(), current);
+                    if kind == crate::state::OptionsKind::ConnectProvider {
+                        row.checked = app.connect_row_connected(&entry.value);
+                    }
+                    row
                 })
-                .collect(),
-        ),
+                .collect();
+            if kind == crate::state::OptionsKind::ConnectProvider {
+                // Shelves as in Desktop's picker: popular first, then the
+                // rest, then what is not a provider. Search keeps them, so a
+                // filtered list still says which shelf a match is on.
+                let mut previous = None;
+                for (row, entry) in rows.iter_mut().zip(&options) {
+                    let group = app.connect_row_group(&entry.value);
+                    if group.is_some() && group != previous {
+                        row.heading = group.map(|group| app.language.text(group).to_owned());
+                        row.gap = previous.is_some();
+                    }
+                    previous = group;
+                }
+            }
+            (title, rows)
+        }
         Overlay::None
         | Overlay::Panel { .. }
         | Overlay::Diff(_)
@@ -497,8 +517,26 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
     // A view's own words go above its choices, so a status or a hint is read
     // in place instead of hiding behind a row called "Details".
     let preface = preface_rows(app, card.content_width(), max_height / 3);
+    // A refused key is explained under the field it came from, not in the
+    // status bar at the far edge of the screen.
+    let field_error = match (&app.overlay, &app.connect.key_error) {
+        (
+            Overlay::Options {
+                kind: crate::state::OptionsKind::ConnectApiKey,
+                ..
+            },
+            Some(error),
+        ) => wrap_panel_text(
+            app.language.text(error),
+            card.content_width(),
+            "",
+            theme.danger,
+        ),
+        _ => Vec::new(),
+    };
     let body_budget = max_height
         .saturating_sub(if filterable { 7 } else { 6 })
+        .saturating_sub(field_error.len())
         .saturating_sub(if preface.is_empty() {
             0
         } else {
@@ -518,6 +556,9 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
             false,
         ));
     }
+    for row in field_error {
+        out.push(card.row(row, false));
+    }
     out.push(card.separator());
     if !preface.is_empty() {
         for row in preface {
@@ -530,6 +571,9 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
     } else {
         for (index, row) in rows.iter().enumerate().skip(start).take(end - start) {
             let selected = index == selection;
+            for line in row.heading_lines(theme, &layout) {
+                out.push(card.row(line, false));
+            }
             for line in row.lines(theme, &layout) {
                 out.push_tagged(card.row(line, selected), HitTarget::MenuRow(index));
             }
@@ -547,7 +591,14 @@ struct SelectorRow {
     label: String,
     detail: String,
     current: bool,
+    /// Already set up (a connected provider): a check in the gutter, so the
+    /// names stay in one column.
+    checked: bool,
     swatch: Option<[haarness_opentui::Color; 4]>,
+    /// The shelf this row opens, and whether a blank row separates it from
+    /// the shelf before.
+    heading: Option<String>,
+    gap: bool,
 }
 
 impl SelectorRow {
@@ -556,7 +607,10 @@ impl SelectorRow {
             label: label.into(),
             detail: detail.into(),
             current,
+            checked: false,
             swatch: None,
+            heading: None,
+            gap: false,
         }
     }
 
@@ -566,15 +620,35 @@ impl SelectorRow {
     }
 
     fn height(&self, stacked: bool) -> usize {
-        usize::from(stacked && !self.detail.is_empty()) + 1
+        usize::from(stacked && !self.detail.is_empty())
+            + 1
+            + usize::from(self.heading.is_some())
+            + usize::from(self.heading.is_some() && self.gap)
+    }
+
+    /// The shelf label above a row that opens one, aligned with the names.
+    fn heading_lines(&self, theme: &crate::theme::Theme, layout: &SelectorLayout) -> Vec<Line> {
+        let Some(heading) = &self.heading else {
+            return Vec::new();
+        };
+        let mut lines = Vec::new();
+        if self.gap {
+            lines.push(Line::empty());
+        }
+        lines.push(Line::new(vec![
+            Span::new(" ".repeat(layout.gutter()), theme.muted),
+            Span::new(heading.clone(), theme.accent).with_attributes(attr::BOLD),
+        ]));
+        lines
     }
 
     fn lines(&self, theme: &crate::theme::Theme, layout: &SelectorLayout) -> Vec<Line> {
-        let marker = if self.current { "●" } else { " " };
-        let marker_color = if self.current {
-            theme.primary
+        let (marker, marker_color) = if self.current {
+            ("●", theme.primary)
+        } else if self.checked {
+            ("✓", theme.success())
         } else {
-            theme.muted
+            (" ", theme.muted)
         };
         let mut primary = vec![
             Span::new(marker, marker_color),
@@ -859,7 +933,7 @@ fn selector_footer(app: &App, start: usize, end: usize, total: usize) -> String 
     if matches!(app.overlay, Overlay::Threads) {
         format!("{range}  \u{00b7}  enter resume  \u{00b7}  \u{2192} actions")
     } else if matches!(app.overlay, Overlay::Models) {
-        format!("{range}  ·  Ctrl+F favorite  ·  Enter select")
+        format!("{range}  ·  ctrl+f favorite  ·  enter select")
     } else if matches!(
         app.overlay,
         Overlay::Options {
@@ -1120,6 +1194,11 @@ fn billing_preface(billing: &haarness_account::billing::State) -> Vec<String> {
     lines
 }
 
+/// The welcome line above the first-run provider picker: why the screen is
+/// there, short enough to leave the list most of an 80x24 terminal.
+const WELCOME: &str =
+    "Haarness needs an AI model. Sign in with a subscription you have, or paste an API key.";
+
 fn preface_rows(app: &App, width: usize, cap: usize) -> Vec<Line> {
     let lines: Vec<String> = match app.overlay {
         Overlay::Options {
@@ -1137,6 +1216,11 @@ fn preface_rows(app: &App, width: usize, cap: usize) -> Vec<Line> {
             kind: crate::state::OptionsKind::ConnectApiKey,
             ..
         } => app.connect_key_hints(),
+        // The first screen says why it is there, as Desktop's welcome does.
+        Overlay::Options {
+            kind: crate::state::OptionsKind::ConnectProvider,
+            ..
+        } if !app.any_provider_connected() => vec![app.language.text(WELCOME).to_owned()],
         Overlay::Options {
             kind: crate::state::OptionsKind::Billing,
             ..
@@ -1159,8 +1243,15 @@ fn preface_rows(app: &App, width: usize, cap: usize) -> Vec<Line> {
     for item in &items {
         let mut item_rows = item.lines(app, width, label_column);
         // Two rows per line is plenty for a hint; the full text lives on the
-        // details page when there is more.
-        item_rows.truncate(2);
+        // details page when there is more. The welcome sentence is the one
+        // line that is read whole, so it may take a narrow card's third row.
+        item_rows.truncate(
+            if item.plain.as_deref() == Some(app.language.text(WELCOME)) {
+                3
+            } else {
+                2
+            },
+        );
         rows.extend(item_rows);
         if rows.len() >= cap {
             rows.truncate(cap);
@@ -1745,17 +1836,7 @@ impl<'a> ModalCard<'a> {
 
     fn header(&self, title: &str) -> Line {
         let hint = if self.content_width() >= 24 {
-            if matches!(
-                self.app.overlay,
-                Overlay::Options {
-                    kind: crate::state::OptionsKind::GoalClearConfirmation,
-                    ..
-                }
-            ) {
-                "esc back"
-            } else {
-                "esc close"
-            }
+            escape_hint(self.app)
         } else {
             ""
         };
@@ -1817,6 +1898,36 @@ impl<'a> ModalCard<'a> {
 
     fn bottom(&self) -> Line {
         self.row(Line::empty(), false)
+    }
+}
+
+/// What Escape does in the open dialog, in the words its footer uses. A step
+/// inside a flow goes back to the step before it; anything else closes.
+fn escape_hint(app: &App) -> &'static str {
+    use crate::state::OptionsKind;
+    match &app.overlay {
+        Overlay::Options {
+            kind:
+                OptionsKind::ConnectMethod
+                | OptionsKind::ConnectApiKey
+                | OptionsKind::GoalClearConfirmation
+                | OptionsKind::MessageActions
+                | OptionsKind::WorkspaceActions
+                | OptionsKind::WorkspaceResetConfirmation
+                | OptionsKind::WorkspaceRemoveConfirmation
+                | OptionsKind::WorkspaceCreateBase
+                | OptionsKind::WorkspaceCreateCustomBase
+                | OptionsKind::ManagementField
+                | OptionsKind::ManagementValue
+                | OptionsKind::ManagementConfirm,
+            ..
+        } => "esc back",
+        Overlay::ProviderLogin => match app.connect.login.as_ref().map(|login| &login.state) {
+            Some(crate::connect::LoginState::Pending) => "esc cancel",
+            Some(crate::connect::LoginState::Failed(_)) => "esc back",
+            _ => "esc close",
+        },
+        _ => "esc close",
     }
 }
 

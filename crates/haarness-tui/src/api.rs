@@ -1817,8 +1817,8 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
     let refusal = match serde_json::from_str::<haarness_protocol::ApiError>(&body) {
         Ok(error) => ApiRefusal {
             status,
+            message: without_category(&error.message).to_owned(),
             code: Some(error.code),
-            message: error.message,
         },
         Err(_) => {
             let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1835,6 +1835,22 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
         }
     };
     Err(refusal.into())
+}
+
+/// The server prefixes each message with its error category ("tool error:
+/// …"); the category is already in `code`, and people act on the sentence.
+fn without_category(message: &str) -> &str {
+    [
+        "tool error: ",
+        "invalid request: ",
+        "not found: ",
+        "conflict: ",
+        "permission denied: ",
+        "storage error: ",
+    ]
+    .iter()
+    .find_map(|prefix| message.strip_prefix(prefix))
+    .unwrap_or(message)
 }
 
 /// `error_for_status`, keeping the server's message: see `checked_response`.

@@ -283,7 +283,7 @@ impl ModelProvider for AnthropicProvider {
         let key = self.resolved_api_key();
         if key.is_none() && !self.assume_authenticated && self.headers.is_empty() {
             return Err(CoreError::Provider(format!(
-                "{} API key is not configured; store a credential for {} or set its api_key_env",
+                "{} isn't connected: its API key is not configured. Use /connect {} to add one.",
                 self.name, self.id
             )));
         }

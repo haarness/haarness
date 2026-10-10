@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -49,6 +49,9 @@ pub(crate) struct ConnectProvider {
     pub env: Vec<String>,
     #[serde(default)]
     pub note: Option<String>,
+    /// Place on the picker's "Popular" shelf; `None` is one of the rest.
+    #[serde(default)]
+    pub popular: Option<u8>,
 }
 
 impl ConnectProvider {
@@ -76,8 +79,18 @@ impl ConnectProvider {
         if let Some(oauth) = self.methods.iter().find(|method| method.kind == "oauth") {
             return if self.methods.iter().any(|method| method.kind == "api") {
                 format!("{} · or use an API key", oauth.label)
-            } else {
+            } else if oauth.description.is_empty() {
                 oauth.label.clone()
+            } else {
+                // A sign-in-only provider is chosen for what it gives, and
+                // the name beside it already says where the sign-in goes.
+                // The first clause is the gist and fits an 80-column card.
+                oauth
+                    .description
+                    .split(" · ")
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned()
             };
         }
         if self.methods.is_empty() {
@@ -120,6 +133,9 @@ pub(crate) struct ConnectFlow {
     /// Opened because nothing was connected yet, so success should also fix
     /// the session's model.
     pub onboarding: bool,
+    /// Why the key prompt did not take the last key, shown under the field
+    /// until the key is edited.
+    pub key_error: Option<String>,
 }
 
 /// Whether the workspace server is on this machine, so a browser callback to
@@ -184,16 +200,14 @@ impl App {
             }
             self.notice = format!("No provider called {id} · pick one from the list");
         }
+        // Connected rows are marked in the picker's gutter, so every name
+        // starts in the same column.
         let mut entries: Vec<OptionEntry> = self
             .connect
             .catalog
             .iter()
             .map(|provider| OptionEntry {
-                label: if provider.connected {
-                    format!("✓ {}", provider.name)
-                } else {
-                    provider.name.clone()
-                },
+                label: provider.name.clone(),
                 description: provider.status(),
                 value: provider.id.clone(),
             })
@@ -214,11 +228,51 @@ impl App {
             value: MANAGE.into(),
         });
         self.open_overlay(Overlay::Options {
-            title: "Connect a provider".into(),
+            title: if self.any_provider_connected() {
+                "Connect a provider"
+            } else {
+                "Welcome to Haarness"
+            }
+            .into(),
             kind: OptionsKind::ConnectProvider,
             entries,
         });
         Ok(())
+    }
+
+    /// Whether a picker row is a provider that already works. The view marks
+    /// these in the gutter.
+    pub(crate) fn connect_row_connected(&self, value: &str) -> bool {
+        self.connect
+            .catalog
+            .iter()
+            .any(|provider| provider.id == value && provider.connected)
+    }
+
+    /// The shelf a picker row belongs to: popular providers, every other
+    /// provider, then the rows that are not a provider at all. `None` when
+    /// the catalog carries no shelf, as an older server's does not.
+    pub(crate) fn connect_row_group(&self, value: &str) -> Option<&'static str> {
+        if !self
+            .connect
+            .catalog
+            .iter()
+            .any(|provider| provider.popular.is_some())
+        {
+            return None;
+        }
+        Some(
+            match self
+                .connect
+                .catalog
+                .iter()
+                .find(|provider| provider.id == value)
+            {
+                Some(provider) if provider.popular.is_some() => "Popular",
+                Some(_) => "More providers",
+                None => "Something else",
+            },
+        )
     }
 
     /// A row of the provider picker was chosen.
@@ -362,19 +416,45 @@ impl App {
                 kind: OptionsKind::ConnectApiKey,
                 entries: vec![OptionEntry {
                     label: "Connect".into(),
-                    description: format!("Save the {label} on this Haarness server"),
+                    description: if server_is_local(client) {
+                        format!("Save the {label} on this computer")
+                    } else {
+                        format!("Save the {label} on the server")
+                    },
                     value: "submit".into(),
                 }],
             });
+            self.connect.key_error = None;
             return Ok(());
         }
-        let view = client
+        let view = match client
             .manage(
                 "providers",
                 &json!({"action":"login","name":provider.id,"method":method}),
             )
             .await
-            .with_context(|| format!("Could not start signing in to {}", provider.name))?;
+        {
+            Ok(view) => view,
+            Err(error) => {
+                // The sign-in screen already knows how to say a sign-in
+                // failed and offer another try; it also keeps the server's
+                // reason, which is the part that says what to do.
+                self.connect.login = Some(PendingLogin {
+                    id: String::new(),
+                    provider: provider.id.clone(),
+                    name: provider.name.clone(),
+                    method: method.to_owned(),
+                    url: String::new(),
+                    code: String::new(),
+                    state: LoginState::Failed(format!("{error:#}")),
+                    started: Instant::now(),
+                    last_poll: None,
+                    opened: false,
+                });
+                self.open_overlay(Overlay::ProviderLogin);
+                return Ok(());
+            }
+        };
         let data = &view["data"];
         let url = data["url"].as_str().unwrap_or_default().to_owned();
         let mut login = PendingLogin {
@@ -408,8 +488,9 @@ impl App {
         };
         let key = key.trim();
         if key.is_empty() {
-            self.notice = "Paste a key first".into();
-            return self.choose_connect_method("api", client).await;
+            self.choose_connect_method("api", client).await?;
+            self.connect.key_error = Some("Paste a key first.".into());
+            return Ok(());
         }
         if let Err(error) = client
             .manage(
@@ -418,9 +499,17 @@ impl App {
             )
             .await
         {
-            self.notice = format!("Could not save the key: {error}");
+            // Keep the prompt and the key: the reason sits under the field,
+            // where the fix is made.
             self.choose_connect_method("api", client).await?;
             key.clone_into(&mut self.overlay_filter);
+            self.connect.key_error = Some(
+                if error.downcast_ref::<crate::api::ApiRefusal>().is_some() {
+                    error.to_string()
+                } else {
+                    format!("Could not save the key: {error:#}")
+                },
+            );
             return Ok(());
         }
         self.finish_connect(&provider.id, client).await
@@ -447,7 +536,7 @@ impl App {
             Ok(view) => view,
             Err(error) => {
                 if let Some(login) = self.connect.login.as_mut() {
-                    login.state = LoginState::Failed(error.to_string());
+                    login.state = LoginState::Failed(format!("{error:#}"));
                 }
                 return Ok(());
             }
@@ -604,6 +693,15 @@ impl App {
             return Vec::new();
         };
         let mut lines = Vec::new();
+        // Coming back to a provider that already has a key must not look
+        // like a first connection: a new key replaces the saved one.
+        if provider.connected && matches!(provider.source.as_deref(), Some("api" | "legacy api")) {
+            lines.push(
+                self.language
+                    .text("A key is already saved · paste a new one to replace it")
+                    .to_owned(),
+            );
+        }
         if let Some(url) = &provider.key_url {
             lines.push(format!("Create a key  {url}"));
         }
@@ -662,10 +760,14 @@ mod tests {
             "Sign in with ChatGPT · or use an API key"
         );
         // Haarness Cloud is an account sign-in only; offering a key would
-        // send people looking for one that does not exist.
+        // send people looking for one that does not exist. Its row says what
+        // signing in gives, which its name beside it does not.
         provider.methods.truncate(1);
         provider.methods[0].label = "Sign in to Haarness".into();
         assert_eq!(provider.status(), "Sign in to Haarness");
+        provider.methods[0].description =
+            "Cloud models on your Haarness plan · no API key needed".into();
+        assert_eq!(provider.status(), "Cloud models on your Haarness plan");
         provider.methods.clear();
         provider.note = Some("Local runtime".into());
         assert_eq!(provider.status(), "Local runtime");
