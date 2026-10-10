@@ -421,7 +421,11 @@ export function Session() {
   let revealTarget: string | undefined;
   let lastTop = 0;
   let touchY = 0;
+  // End scrolls to the bottom known when the key went down; virtual rows
+  // measured meanwhile move it. Re-pin once that scroll settles.
+  let settleAtEnd = false;
   function pauseFollowing() {
+    settleAtEnd = false;
     revealTarget = undefined;
     cancelAnimationFrame(revealFrame);
     if (scrolling.scrollHeight <= scrolling.clientHeight + 4) return;
@@ -474,9 +478,19 @@ export function Session() {
     const children = new MutationObserver(observe);
     children.observe(scrolling, { childList: true });
     observe();
+    const settle = () => {
+      if (!settleAtEnd) return;
+      // Done at the bottom; otherwise following scrolls and settles again.
+      const remaining =
+        scrolling.scrollHeight - scrolling.scrollTop - scrolling.clientHeight;
+      if (remaining < 1) settleAtEnd = false;
+      else followLatest();
+    };
+    scrolling.addEventListener("scrollend", settle);
     onCleanup(() => {
       children.disconnect();
       resize.disconnect();
+      scrolling.removeEventListener("scrollend", settle);
       cancelAnimationFrame(scrollFrame);
     });
   });
@@ -1434,21 +1448,22 @@ export function Session() {
               (event.key === " " && event.shiftKey)
             )
               pauseFollowing();
-            // End means the latest output, like Jump to latest. Native End
-            // stops at the height known when the key went down, short of
-            // virtual rows measured after it; following keeps up with them.
+            // End means the latest output, like Jump to latest. The native
+            // scroll still runs: it takes over a PageUp scroll in flight,
+            // which a scroll set from here would not stop.
             else if (
               event.key === "End" &&
               !(event.target as HTMLElement).closest(
                 "input, textarea, select, [contenteditable]",
               )
             ) {
-              event.preventDefault();
               setFollow(true);
-              followLatest();
+              settleAtEnd = true;
             }
           }}
           onPointerDown={(event) => {
+            // A drag that selects text can scroll; End no longer owns that.
+            settleAtEnd = false;
             // Include overlay scrollbars, which may report a zero-width gutter.
             if (event.clientX >= scrolling.getBoundingClientRect().right - 16)
               pauseFollowing();
