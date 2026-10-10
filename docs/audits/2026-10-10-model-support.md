@@ -33,7 +33,7 @@ few tokens. The changes are summarized in
 - A chat keeping an effort the new model lacks (`none` after GPT-6 Sol → GPT-6.1 Sol, `minimal` from a Cloud agent default): every turn 400. The runtime now uses the nearest listed level.
 - Gemini Nano Banana 2.1 (image model, no function calling) offered as a chat model, natively and on Cloud.
 - Moonshot fallback models retired by the provider.
-- Price table: Sonnet 5.5 cache read, Haiku 5.5, GPT-5.6 Sol, no long-context tiers; Cloud billed GPT-5.6 Sol at half its cost and tier cache writes at the base rate.
+- Price table: Sonnet 5.5 cache read, Haiku 5.5, GPT-5.6 Sol, no long-context tiers; Cloud billed GPT-5.6 Sol at half its cost, tier cache writes at the base rate, and GPT-6/5.6 cache writes (`cache_write_tokens`) at the input rate instead of 1.25×. Prices now come from a reviewed table shared by the app and Cloud ([Prices](../MODELS.md#prices)); a live GPT-6.1 Sol and GPT-5.6 Sol request through the local Cloud router settled its 7,027 written tokens at $2.50 and $5 per million.
 - Cloud router: Claude thinking invisible (no `display`), sampling parameters forwarded to Claude ≥ 4.7, no prefix-binding control, Nano Banana listed.
 - Routed OpenAI ids (`openai/o3`, `-pro` models) showed raw ids in Desktop.
 - Test harness bugs found on the way: the Desktop Cloud spec expected "Xhigh" (Desktop says "Extra high") and a withdrawn Gemini 2.5 model; the SDK Cloud fixture predated the fixture issuer's consent page; SDK e2e lacked coverage for five operations.

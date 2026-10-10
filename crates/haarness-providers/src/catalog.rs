@@ -5,8 +5,16 @@
 //! to know a context window. `[models."provider/model"]` config overrides win
 //! over this table (applied by the composition root). Prefix matching handles
 //! dated snapshots such as `claude-sonnet-4-6-20260201`.
+//!
+//! Prices come first from `model-prices.json`, Haarness's reviewed price
+//! table: provider list prices checked by hand against each provider's price
+//! page, the same file Haarness Cloud bills from. The catalog's own prices are
+//! the fallback for models the table does not list.
+
+use std::sync::LazyLock;
 
 use haarness_protocol::{LongContextPricing, ModelInfo, ModelPricing};
+use serde::{Deserialize, Deserializer};
 
 pub struct CatalogEntry {
     pub prefix: &'static str,
@@ -34,64 +42,30 @@ const fn entry(
 /// the longest matching prefix wins, so a variant priced differently from its
 /// family (`-pro`, `-mini`, `-nano`, `-image`) needs its own entry.
 ///
-/// Prices are the providers' list prices in USD per million tokens, checked
-/// against OpenRouter's live catalogue on 2026-10-10 (it passes list prices
-/// through) and the providers' own pricing pages where the two disagree.
-/// Gemini's context-cache storage is billed per hour, not per written token, so
-/// its cache-write price stays 0.
+/// Prices here are fallbacks for models the reviewed table does not list: the
+/// providers' list prices in USD per million tokens as OpenRouter's live
+/// catalogue gave them on 2026-10-10 (it passes list prices through). A model
+/// the table lists has no price here. Gemini's context-cache storage is billed
+/// per hour, not per written token, so its cache-write price stays 0.
 const CATALOG: &[(&str, &[CatalogEntry])] = &[
     (
         "openai",
         &[
-            entry(
-                "gpt-6.1-sol",
-                1_050_000,
-                128_000,
-                Some((2.0, 10.0, 0.1, 2.5)),
-            ),
-            entry("gpt-6-sol", 1_050_000, 128_000, Some((2.0, 10.0, 0.2, 2.5))),
-            entry(
-                "gpt-6-luna",
-                1_050_000,
-                128_000,
-                Some((0.1, 0.5, 0.01, 0.125)),
-            ),
-            entry(
-                "gpt-6-astra",
-                1_050_000,
-                128_000,
-                Some((10.0, 50.0, 1.0, 12.5)),
-            ),
-            entry(
-                "gpt-5.6-terra",
-                1_050_000,
-                128_000,
-                Some((2.0, 12.0, 0.2, 2.5)),
-            ),
-            entry(
-                "gpt-5.6-luna",
-                1_050_000,
-                128_000,
-                Some((0.2, 1.2, 0.02, 0.25)),
-            ),
-            // OpenAI's promotional GPT-5.6 Sol price (through at least
-            // 2026-11-21); OpenRouter still lists $2/$10. "Pro" is
-            // `reasoning.mode`, not a model, so there is no `-pro` entry.
-            entry(
-                "gpt-5.6-sol",
-                1_050_000,
-                128_000,
-                Some((4.0, 20.0, 0.4, 5.0)),
-            ),
-            // `gpt-5.6` is the documented alias for GPT-5.6 Sol.
-            entry("gpt-5.6", 1_050_000, 128_000, Some((4.0, 20.0, 0.4, 5.0))),
+            entry("gpt-6.1-sol", 1_050_000, 128_000, None),
+            entry("gpt-6-sol", 1_050_000, 128_000, None),
+            entry("gpt-6-luna", 1_050_000, 128_000, None),
+            entry("gpt-6-astra", 1_050_000, 128_000, None),
+            entry("gpt-5.6-terra", 1_050_000, 128_000, None),
+            entry("gpt-5.6-luna", 1_050_000, 128_000, None),
+            entry("gpt-5.6-sol", 1_050_000, 128_000, None),
+            entry("gpt-5.6", 1_050_000, 128_000, None),
             entry(
                 "gpt-5.5-pro",
                 1_050_000,
                 128_000,
                 Some((30.0, 180.0, 0.0, 0.0)),
             ),
-            entry("gpt-5.5", 1_050_000, 128_000, Some((5.0, 30.0, 0.5, 0.0))),
+            entry("gpt-5.5", 1_050_000, 128_000, None),
             entry(
                 "gpt-chat-latest",
                 400_000,
@@ -202,58 +176,16 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
         "anthropic",
         &[
             // Limits verified through Anthropic's live Models API on 2026-09-23.
-            // A newly discovered release never inherits its family's price: give
-            // it an entry once its list price is published.
-            entry(
-                "claude-opus-5-5",
-                1_000_000,
-                128_000,
-                Some((4.0, 20.0, 0.2, 5.0)),
-            ),
-            entry(
-                "claude-sonnet-5-5",
-                1_000_000,
-                128_000,
-                Some((2.0, 10.0, 0.1, 2.5)),
-            ),
-            // Prompts over 100K tokens cost 5x ($0.50/$2.50); this table
-            // holds the short-context rate only.
-            entry(
-                "claude-haiku-5-5",
-                1_000_000,
-                128_000,
-                Some((0.1, 0.5, 0.01, 0.125)),
-            ),
-            entry(
-                "claude-fable-5-1",
-                1_000_000,
-                128_000,
-                Some((10.0, 50.0, 0.25, 12.5)),
-            ),
-            entry(
-                "claude-mythos-5-1",
-                1_000_000,
-                128_000,
-                Some((10.0, 50.0, 0.25, 12.5)),
-            ),
-            entry(
-                "claude-opus-4-8",
-                1_000_000,
-                128_000,
-                Some((5.0, 25.0, 0.5, 6.25)),
-            ),
-            entry(
-                "claude-opus-4-7",
-                1_000_000,
-                128_000,
-                Some((5.0, 25.0, 0.5, 6.25)),
-            ),
-            entry(
-                "claude-opus-4-6",
-                1_000_000,
-                64_000,
-                Some((5.0, 25.0, 0.5, 6.25)),
-            ),
+            // A newly discovered release never inherits its family's price: list
+            // it in the price table once its list price is published.
+            entry("claude-opus-5-5", 1_000_000, 128_000, None),
+            entry("claude-sonnet-5-5", 1_000_000, 128_000, None),
+            entry("claude-haiku-5-5", 1_000_000, 128_000, None),
+            entry("claude-fable-5-1", 1_000_000, 128_000, None),
+            entry("claude-mythos-5-1", 1_000_000, 128_000, None),
+            entry("claude-opus-4-8", 1_000_000, 128_000, None),
+            entry("claude-opus-4-7", 1_000_000, 128_000, None),
+            entry("claude-opus-4-6", 1_000_000, 64_000, None),
             // Opus 4 and 4.1 kept the old Opus price; 4.5 onwards cost a third.
             entry(
                 "claude-opus-4-1",
@@ -273,12 +205,7 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
                 64_000,
                 Some((5.0, 25.0, 0.5, 6.25)),
             ),
-            entry(
-                "claude-sonnet-4-6",
-                1_000_000,
-                64_000,
-                Some((3.0, 15.0, 0.3, 3.75)),
-            ),
+            entry("claude-sonnet-4-6", 1_000_000, 64_000, None),
             entry(
                 "claude-sonnet-4",
                 200_000,
@@ -291,25 +218,9 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
                 64_000,
                 Some((1.0, 5.0, 0.1, 1.25)),
             ),
-            entry(
-                "claude-opus-5",
-                1_000_000,
-                128_000,
-                Some((5.0, 25.0, 0.5, 6.25)),
-            ),
-            // Sonnet 5 and 5.5 share one price.
-            entry(
-                "claude-sonnet-5",
-                1_000_000,
-                128_000,
-                Some((2.0, 10.0, 0.2, 2.5)),
-            ),
-            entry(
-                "claude-fable-5",
-                1_000_000,
-                128_000,
-                Some((10.0, 50.0, 1.0, 12.5)),
-            ),
+            entry("claude-opus-5", 1_000_000, 128_000, None),
+            entry("claude-sonnet-5", 1_000_000, 128_000, None),
+            entry("claude-fable-5", 1_000_000, 128_000, None),
             entry(
                 "claude-3-5-haiku",
                 200_000,
@@ -322,30 +233,15 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
     (
         "gemini",
         &[
-            entry(
-                "gemini-3.8-flash",
-                1_048_576,
-                65_536,
-                Some((0.75, 3.75, 0.075, 0.0)),
-            ),
+            entry("gemini-3.8-flash", 1_048_576, 65_536, None),
             entry(
                 "gemini-3.7-flash",
                 1_048_576,
                 65_536,
                 Some((0.75, 3.75, 0.075, 0.0)),
             ),
-            entry(
-                "gemini-3.6-flash",
-                1_048_576,
-                65_536,
-                Some((0.75, 3.75, 0.075, 0.0)),
-            ),
-            entry(
-                "gemini-3.5-flash-lite",
-                1_048_576,
-                65_536,
-                Some((0.3, 2.5, 0.03, 0.0)),
-            ),
+            entry("gemini-3.6-flash", 1_048_576, 65_536, None),
+            entry("gemini-3.5-flash-lite", 1_048_576, 65_536, None),
             entry(
                 "gemini-3.5-flash",
                 1_048_576,
@@ -365,12 +261,7 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
                 58_982,
                 Some((0.25, 1.5, 0.0, 0.0)),
             ),
-            entry(
-                "gemini-3.1-flash-lite",
-                1_048_576,
-                65_536,
-                Some((0.25, 1.5, 0.025, 0.0)),
-            ),
+            entry("gemini-3.1-flash-lite", 1_048_576, 65_536, None),
             entry(
                 "gemini-3.1-flash-image",
                 131_072,
@@ -395,56 +286,23 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
                 65_536,
                 Some((0.5, 3.0, 0.05, 0.0)),
             ),
-            entry(
-                "gemini-2.5-pro",
-                1_048_576,
-                65_536,
-                Some((1.25, 10.0, 0.125, 0.0)),
-            ),
-            entry(
-                "gemini-2.5-flash-lite",
-                1_048_576,
-                65_536,
-                Some((0.1, 0.4, 0.01, 0.0)),
-            ),
-            entry(
-                "gemini-2.5-flash",
-                1_048_576,
-                65_536,
-                Some((0.3, 2.5, 0.03, 0.0)),
-            ),
+            entry("gemini-2.5-pro", 1_048_576, 65_536, None),
+            entry("gemini-2.5-flash-lite", 1_048_576, 65_536, None),
+            entry("gemini-2.5-flash", 1_048_576, 65_536, None),
             entry("gemini", 1_048_576, 65_536, None),
         ],
     ),
 ];
 
-/// Whole-request rates once a prompt passes a size, keyed by the catalog
-/// entry's prefix: (provider, prefix, above input tokens, input, output, cache
-/// read, cache write). From the providers' price pages on 2026-10-10.
+/// Whole-request rates once a prompt passes a size for fallback-priced
+/// models, keyed by the catalog entry's prefix: (provider, prefix, above input
+/// tokens, input, output, cache read, cache write). From the providers' price
+/// pages on 2026-10-10.
 const LONG_CONTEXT: &[(&str, &str, u64, f64, f64, f64, f64)] = &[
-    ("openai", "gpt-6-astra", 272_000, 20.0, 75.0, 2.0, 25.0),
-    ("openai", "gpt-6.1-sol", 272_000, 4.0, 15.0, 0.2, 5.0),
-    ("openai", "gpt-6-sol", 272_000, 4.0, 15.0, 0.4, 5.0),
-    ("openai", "gpt-6-luna", 272_000, 0.2, 0.75, 0.02, 0.25),
-    ("openai", "gpt-5.6-sol", 272_000, 8.0, 30.0, 0.8, 10.0),
-    ("openai", "gpt-5.6", 272_000, 8.0, 30.0, 0.8, 10.0),
-    ("openai", "gpt-5.6-terra", 272_000, 4.0, 18.0, 0.4, 5.0),
-    ("openai", "gpt-5.6-luna", 272_000, 0.4, 1.8, 0.04, 0.5),
     ("openai", "gpt-5.5-pro", 272_000, 60.0, 270.0, 0.0, 0.0),
-    ("openai", "gpt-5.5", 272_000, 10.0, 45.0, 1.0, 0.0),
     ("openai", "gpt-5.4-pro", 272_000, 60.0, 270.0, 0.0, 0.0),
     ("openai", "gpt-5.4", 272_000, 5.0, 22.5, 0.5, 0.0),
-    (
-        "anthropic",
-        "claude-haiku-5-5",
-        100_000,
-        0.5,
-        2.5,
-        0.05,
-        0.625,
-    ),
     ("gemini", "gemini-3.1-pro", 200_000, 4.0, 18.0, 0.4, 0.0),
-    ("gemini", "gemini-2.5-pro", 200_000, 2.5, 15.0, 0.25, 0.0),
 ];
 
 fn long_context(provider: &str, prefix: &str) -> Option<LongContextPricing> {
@@ -462,6 +320,122 @@ fn long_context(provider: &str, prefix: &str) -> Option<LongContextPricing> {
                 }
             },
         )
+}
+
+/// The reviewed price table, shared byte for byte with Haarness Cloud's
+/// `config/model-prices.json`. `scripts/check-model-prices.py --sync` copies
+/// it over; a test fails while the two differ.
+const PRICE_TABLE: &str = include_str!("model-prices.json");
+
+static REVIEWED: LazyLock<Vec<ReviewedPrice>> = LazyLock::new(|| {
+    serde_json::from_str::<PriceTable>(PRICE_TABLE)
+        .expect("valid embedded price table")
+        .models
+});
+
+#[derive(Deserialize)]
+struct PriceTable {
+    models: Vec<ReviewedPrice>,
+}
+
+/// One reviewed model: `openai/gpt-6.1-sol`, with rates as decimal strings.
+#[derive(Deserialize)]
+struct ReviewedPrice {
+    id: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(deserialize_with = "rate")]
+    input: f64,
+    #[serde(deserialize_with = "rate")]
+    output: f64,
+    #[serde(deserialize_with = "rate")]
+    cache_read: f64,
+    #[serde(deserialize_with = "rate")]
+    cache_write: f64,
+    #[serde(default)]
+    long_context: Option<ReviewedTier>,
+}
+
+#[derive(Deserialize)]
+struct ReviewedTier {
+    above_input_tokens: u64,
+    #[serde(deserialize_with = "rate")]
+    input: f64,
+    #[serde(deserialize_with = "rate")]
+    output: f64,
+    #[serde(deserialize_with = "rate")]
+    cache_read: f64,
+    #[serde(deserialize_with = "rate")]
+    cache_write: f64,
+}
+
+fn rate<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+    String::deserialize(deserializer)?
+        .parse()
+        .map_err(serde::de::Error::custom)
+}
+
+/// `anthropic/claude-haiku-5.5`, `claude-haiku-5.5` and `claude-haiku-5-5`
+/// name one model: the vendor is dropped and dots read as dashes.
+fn price_key(id: &str) -> String {
+    id.rsplit_once('/')
+        .map_or(id, |(_, model)| model)
+        .to_ascii_lowercase()
+        .replace('.', "-")
+}
+
+/// A dated snapshot of a listed model: `-20251001` or `-2026-01-01`.
+fn is_snapshot(suffix: &str) -> bool {
+    let Some(date) = suffix.strip_prefix('-') else {
+        return false;
+    };
+    let digits = |part: &str, len: usize| {
+        part.len() == len && part.bytes().all(|byte| byte.is_ascii_digit())
+    };
+    digits(date, 8)
+        || matches!(date.split('-').collect::<Vec<_>>()[..], [year, month, day]
+            if digits(year, 4) && digits(month, 2) && digits(day, 2))
+}
+
+fn reviewed(model_id: &str) -> Option<&'static ReviewedPrice> {
+    let key = price_key(model_id);
+    REVIEWED.iter().find(|price| {
+        std::iter::once(&price.id).chain(&price.aliases).any(|id| {
+            let id = price_key(id);
+            key == id || key.strip_prefix(&id).is_some_and(is_snapshot)
+        })
+    })
+}
+
+/// A model's list price: the reviewed table's when it lists the model (by id,
+/// alias or dated snapshot, from any provider), else the catalog's fallback.
+#[must_use]
+pub fn pricing(provider: &str, model_id: &str) -> Option<ModelPricing> {
+    if let Some(price) = reviewed(model_id) {
+        return Some(ModelPricing {
+            input: price.input,
+            output: price.output,
+            cache_read: price.cache_read,
+            cache_write: price.cache_write,
+            long_context: price.long_context.as_ref().map(|tier| LongContextPricing {
+                above_input_tokens: tier.above_input_tokens,
+                input: tier.input,
+                output: tier.output,
+                cache_read: tier.cache_read,
+                cache_write: tier.cache_write,
+            }),
+        });
+    }
+    let (family, entry) = metadata(provider, model_id)?;
+    entry
+        .pricing
+        .map(|(input, output, cache_read, cache_write)| ModelPricing {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            long_context: long_context(family, entry.prefix),
+        })
 }
 
 #[must_use]
@@ -483,44 +457,38 @@ pub fn lookup(provider: &str, model_id: &str) -> Option<&'static CatalogEntry> {
         .max_by_key(|entry| entry.prefix.len())
 }
 
-/// Fill catalog metadata into a `ModelInfo`, leaving explicitly set values
-/// untouched.
-#[must_use]
-pub fn annotate(provider: &str, mut info: ModelInfo) -> ModelInfo {
-    info.display_name = haarness_protocol::model_display_name(&info.id, Some(&info.display_name));
-    let canonical = info
-        .id
-        .split_once('/')
-        .map_or(info.id.as_str(), |(_, id)| id);
-    let metadata = lookup(provider, &info.id)
+/// The provider's own entry, else the first native catalog that knows the id
+/// without its vendor prefix (`openai/gpt-6.1-sol` through a router).
+fn metadata<'a>(provider: &'a str, model_id: &str) -> Option<(&'a str, &'static CatalogEntry)> {
+    let canonical = model_id.split_once('/').map_or(model_id, |(_, id)| id);
+    lookup(provider, model_id)
         .map(|entry| (provider, entry))
         .or_else(|| {
             CATALOG.iter().find_map(|(provider, _)| {
                 lookup(provider, canonical).map(|entry| (*provider, entry))
             })
-        });
-    if let Some((family, entry)) = metadata {
+        })
+}
+
+/// Fill catalog metadata into a `ModelInfo`, leaving explicitly set values
+/// untouched.
+#[must_use]
+pub fn annotate(provider: &str, mut info: ModelInfo) -> ModelInfo {
+    info.display_name = haarness_protocol::model_display_name(&info.id, Some(&info.display_name));
+    if let Some((_, entry)) = metadata(provider, &info.id) {
         info.context_window.get_or_insert(entry.context_window);
         info.max_output_tokens
             .get_or_insert(entry.max_output_tokens);
-        if info.pricing.is_none() {
-            info.pricing = entry
-                .pricing
-                .map(|(input, output, cache_read, cache_write)| ModelPricing {
-                    input,
-                    output,
-                    cache_read,
-                    cache_write,
-                    long_context: long_context(family, entry.prefix),
-                });
-        }
+    }
+    if info.pricing.is_none() {
+        info.pricing = pricing(provider, &info.id);
     }
     info
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{annotate, lookup};
+    use super::{annotate, lookup, pricing, reviewed};
 
     #[test]
     fn longest_prefix_wins_and_dated_snapshots_match() {
@@ -575,14 +543,16 @@ mod tests {
             ("openai", "gpt-5.5", 5.0, 30.0),
             ("gemini", "gemini-3.8-flash", 0.75, 3.75),
             ("gemini", "gemini-3.1-pro-preview", 2.0, 12.0),
+            // Fallback prices for models the table does not list.
+            ("openai", "gpt-5.4", 2.5, 15.0),
+            ("anthropic", "claude-opus-4-1-20250805", 15.0, 75.0),
         ] {
-            let pricing = lookup(provider, model)
-                .and_then(|entry| entry.pricing)
+            let price = pricing(provider, model)
                 .unwrap_or_else(|| panic!("{provider}/{model} has no price"));
             assert!(
-                (pricing.0 - input).abs() < f64::EPSILON
-                    && (pricing.1 - output).abs() < f64::EPSILON,
-                "{provider}/{model}: {pricing:?}"
+                (price.input - input).abs() < f64::EPSILON
+                    && (price.output - output).abs() < f64::EPSILON,
+                "{provider}/{model}: {price:?}"
             );
         }
     }
@@ -665,5 +635,72 @@ mod tests {
         let pricing = annotated.pricing.unwrap();
         assert!((pricing.input - 3.0).abs() < f64::EPSILON);
         assert!((pricing.cache_write - 3.75).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn reviewed_table_matches_ids_aliases_and_snapshots_only() {
+        let input = |provider: &str, model: &str| pricing(provider, model).map(|price| price.input);
+        // Aliases and dated snapshots of a listed model.
+        assert_eq!(input("openai", "gpt-5.6"), Some(4.0));
+        assert_eq!(input("gemini", "gemini-3.1-flash-lite-preview"), Some(0.25));
+        assert_eq!(input("openai", "gpt-5.6-sol-2026-09-01"), Some(4.0));
+        assert_eq!(input("anthropic", "claude-haiku-4-5-20251001"), Some(1.0));
+        assert_eq!(input("bedrock", "anthropic/claude-sonnet-4.5"), Some(3.0));
+        // A different model that merely starts like a listed one is not it.
+        assert!(reviewed("gpt-6.1-sol-pro").is_none());
+        assert!(reviewed("claude-opus-4-1-20250805").is_none());
+        assert!(reviewed("gemini-3.1-pro-preview-customtools").is_none());
+        // Cache writes cost the 5-minute write price, or input where nothing is added.
+        let sol = pricing("openai", "gpt-6.1-sol").unwrap();
+        assert!((sol.cache_write - 2.5).abs() < f64::EPSILON);
+        assert!((sol.long_context.unwrap().cache_write - 5.0).abs() < f64::EPSILON);
+        let flash = pricing("gemini", "gemini-3.8-flash").unwrap();
+        assert!((flash.cache_write - flash.input).abs() < f64::EPSILON);
+        for price in super::REVIEWED.iter() {
+            let rates = [
+                price.input,
+                price.output,
+                price.cache_read,
+                price.cache_write,
+            ];
+            assert!(
+                rates.iter().all(|rate| rate.is_finite() && *rate >= 0.0),
+                "{}",
+                price.id
+            );
+            assert!(price.cache_read <= price.input, "{}", price.id);
+            if let Some(tier) = &price.long_context {
+                assert!(tier.input > price.input, "{}", price.id);
+            }
+        }
+    }
+
+    #[test]
+    fn catalog_prices_only_models_the_table_does_not_list() {
+        for (provider, entries) in super::CATALOG {
+            for entry in *entries {
+                assert!(
+                    entry.pricing.is_none() || reviewed(entry.prefix).is_none(),
+                    "{provider}/{}: priced in model-prices.json, drop the catalog price",
+                    entry.prefix
+                );
+            }
+        }
+        for (provider, prefix, ..) in super::LONG_CONTEXT {
+            assert!(reviewed(prefix).is_none(), "{provider}/{prefix}");
+        }
+    }
+
+    #[test]
+    fn price_table_matches_haarness_cloud() {
+        // Present when haarness-cloud is checked out beside this repository.
+        let cloud = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../haarness-cloud/config/model-prices.json");
+        if let Ok(cloud) = std::fs::read_to_string(cloud) {
+            assert!(
+                cloud == super::PRICE_TABLE,
+                "model-prices.json differs from Haarness Cloud's; run scripts/check-model-prices.py --sync"
+            );
+        }
     }
 }
