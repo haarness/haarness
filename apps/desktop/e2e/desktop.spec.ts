@@ -4179,13 +4179,28 @@ test("file editing protects unsaved drafts and conflicting external changes", as
   );
   await writeFile(join(workspace, "README.md"), "External edit wins");
   await page.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText(
-    /changed|revision|conflict/i,
-  );
+  // A conflicting save offers a choice where the edits are, not a dead end.
+  const changed = page.locator(".file-changed");
+  await expect(changed).toContainText(/changed on disk/i);
   expect(await readFile(join(workspace, "README.md"), "utf8")).toBe(
     "External edit wins",
   );
-  await page.getByRole("button", { name: "Dismiss error" }).click();
+  await changed.getByRole("button", { name: "Reload", exact: true }).click();
+  await expect(changed).toHaveCount(0);
+  await expect(page.locator(".file-preview .cm-content")).toHaveText(
+    "External edit wins",
+  );
+  await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  await page.locator(".file-preview .cm-content").fill("Kept desktop draft");
+  await writeFile(join(workspace, "README.md"), "External edit loses");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await changed.getByRole("button", { name: "Keep mine", exact: true }).click();
+  await expect(changed).toHaveCount(0);
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect
+    .poll(() => readFile(join(workspace, "README.md"), "utf8"))
+    .toBe("Kept desktop draft");
+  await page.locator(".file-preview .cm-content").fill("Discarded desktop draft");
   await page
     .getByRole("button", { name: "Close README.md", exact: true })
     .click();

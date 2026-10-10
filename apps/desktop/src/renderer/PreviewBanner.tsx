@@ -93,7 +93,7 @@ export function PreviewBanner(props: { metadata: unknown }) {
     const data = event.data as { type: string; payload?: { path?: string } };
     if (
       (data.type === "files.updated" && data.payload?.path === info()?.path) ||
-      data.type === "turn.completed"
+      data.type === "turn.finished"
     )
       void refresh();
   });

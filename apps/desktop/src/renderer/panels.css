@@ -617,5 +617,10 @@
 .preview-code { max-height: 400px; overflow: auto; padding: 12px; font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .preview-added { background: #22c55e25; }.preview-removed { background: #ef444425; text-decoration: line-through; }
 .preview-version-strip { padding: 8px 12px; background: var(--surface); display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+/* The open file moved on under unsaved edits: say so where the edits are. */
+.file-changed { flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2); padding: var(--s2) var(--s3); background: var(--surface); border-bottom: 1px solid var(--hairline); font-size: var(--ui); }
+.file-changed > .icon { color: var(--accent); flex: none; }
+.file-changed > span { flex: 1; min-width: 160px; }
+.file-changed button { min-height: var(--control-sm); padding: 0 var(--s2); }
 .preview-inline { border-top: 1px solid var(--border); }
 .file-actions { flex-wrap: wrap; }
