@@ -150,7 +150,7 @@ fn server_is_local(client: &ApiClient) -> bool {
 }
 
 /// Whether this terminal probably has no browser of its own.
-fn over_ssh() -> bool {
+pub(crate) fn over_ssh() -> bool {
     std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some()
 }
 

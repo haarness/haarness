@@ -670,6 +670,179 @@ async fn initial_goal_hydration_restores_the_existing_pursuit() {
 }
 
 #[tokio::test]
+async fn ctrl_u_and_ctrl_w_edit_a_dialog_filter_like_the_prompt() {
+    let mut app = selector_fixture();
+    app.open_overlay(crate::state::Overlay::Models);
+    let client = offline_client();
+    let press = |code, modifiers| KeyEvent::new(code, modifiers);
+    for character in "gpt mini".chars() {
+        crate::input::handle_key(
+            &mut app,
+            press(KeyCode::Char(character), KeyModifiers::NONE),
+            &client,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(app.overlay_filter, "gpt mini");
+    crate::input::handle_key(
+        &mut app,
+        press(KeyCode::Char('w'), KeyModifiers::CONTROL),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.overlay_filter, "gpt ");
+    crate::input::handle_key(
+        &mut app,
+        press(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.overlay_filter, "");
+    assert!(matches!(app.overlay, crate::state::Overlay::Models));
+}
+
+#[test]
+fn a_share_link_on_this_computer_says_nobody_else_can_open_it() {
+    use crate::management::{SHARE_ONLY_HERE, share_links};
+    let view = |lines: &[&str]| haarness_protocol::ManagementView {
+        title: "Share".into(),
+        lines: lines.iter().map(|line| (*line).to_owned()).collect(),
+        ..haarness_protocol::ManagementView::default()
+    };
+    let mut first = view(&["Publishes a snapshot.", "Review it.", "/s/abc"]);
+    share_links(&mut first, "http://127.0.0.1:57524", "view");
+    assert_eq!(
+        first.lines,
+        [
+            "Publishes a snapshot.",
+            "Review it.",
+            SHARE_ONLY_HERE,
+            "http://127.0.0.1:57524/s/abc"
+        ]
+    );
+    let mut created = view(&["/s/abc", "Expires tomorrow"]);
+    share_links(&mut created, "http://localhost:4096", "create");
+    assert_eq!(
+        created.lines.last().map(String::as_str),
+        Some(SHARE_ONLY_HERE)
+    );
+    assert_eq!(created.lines[0], "http://localhost:4096/s/abc");
+    let mut reachable = view(&["Publishes a snapshot.", "/s/abc"]);
+    share_links(&mut reachable, "https://haarness.example.com", "view");
+    assert!(!reachable.lines.iter().any(|line| line == SHARE_ONLY_HERE));
+    let mut preview = view(&["You: hello"]);
+    share_links(&mut preview, "http://127.0.0.1:1", "preview");
+    assert_eq!(preview.lines, ["You: hello"]);
+}
+
+#[test]
+fn only_pages_inside_a_management_view_offer_a_way_back() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    let entries = |app: &App| match &app.overlay {
+        crate::state::Overlay::Options { entries, .. } => entries.clone(),
+        _ => panic!("management view did not open"),
+    };
+    app.management = crate::management::Management {
+        resource: "servers".into(),
+        view: haarness_protocol::ManagementView {
+            title: "Servers".into(),
+            ..haarness_protocol::ManagementView::default()
+        },
+        root_title: Some("Servers".into()),
+        ..crate::management::Management::default()
+    };
+    app.show_management();
+    assert!(entries(&app).iter().all(|entry| entry.value != "back"));
+
+    app.management.view.title = "Server · fixture".into();
+    app.show_management();
+    let back = entries(&app)
+        .into_iter()
+        .find(|entry| entry.value == "back")
+        .unwrap();
+    assert_eq!(
+        (back.label.as_str(), back.description.as_str()),
+        ("Back", "Return to Servers")
+    );
+
+    // Opened straight onto an inner page, the list it belongs to is unknown.
+    app.management.root_title = None;
+    app.show_management();
+    let back = entries(&app)
+        .into_iter()
+        .find(|entry| entry.value == "back")
+        .unwrap();
+    assert_eq!(back.description, "Return to the list");
+}
+
+#[test]
+fn insights_takes_open_like_the_cli_and_stats_says_what_it_takes() {
+    use crate::commands::analytics_query;
+    let (query, open) = analytics_query("--days 7 --open", true).unwrap();
+    assert_eq!(query, [("days".to_owned(), "7".to_owned())]);
+    assert!(open);
+    assert!(!analytics_query("--open --no-open", true).unwrap().1);
+    assert!(!analytics_query("", true).unwrap().1);
+    let error = analytics_query("--open", false).unwrap_err().to_string();
+    assert!(error.starts_with("Unknown option --open;"), "{error}");
+    assert!(!error.contains("or --open"), "{error}");
+    let error = analytics_query("--bogus", true).unwrap_err().to_string();
+    assert!(error.ends_with("--limit N or --open"), "{error}");
+}
+
+#[test]
+fn a_paused_goal_says_in_full_what_it_waits_for() {
+    let thread = fixture_thread();
+    let items = vec![message_item(
+        1,
+        &thread,
+        ItemData::AssistantMessage {
+            text: "working on it".into(),
+        },
+    )];
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    let mut goal = fixture_goal(haarness_protocol::GoalStatus::Paused);
+    goal.paused_reason = Some("waiting for you to agree on its completion criteria".into());
+    app.goal = Some(goal);
+    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    let sidebar = words(
+        &crate::view::sidebar::sidebar_lines(&app, 40, 40)
+            .lines
+            .iter()
+            .map(|line| line_text(line) + "\n")
+            .collect::<String>(),
+    );
+    assert!(
+        sidebar.contains("paused · waiting for you to agree on its completion criteria"),
+        "{sidebar}"
+    );
+
+    app.open_goal_overlay();
+    let frame = app.lines((100, 30));
+    let dialog = words(&frame.iter().map(line_text).collect::<Vec<_>>().join("\n"));
+    assert!(
+        dialog.contains("Paused · waiting for you to agree on its completion criteria"),
+        "{dialog}"
+    );
+    assert!(dialog.contains("Goal paused"), "{dialog}");
+    assert!(!dialog.contains("criteria…"), "{dialog}");
+
+    // A goal the person paused themselves needs no reason.
+    if let Some(goal) = app.goal.as_mut() {
+        goal.paused_reason = Some("user-paused".into());
+    }
+    assert_eq!(
+        crate::commands::goal_status_label(app.goal.as_ref().unwrap()),
+        "paused"
+    );
+}
+
+#[tokio::test]
 async fn goal_management_exposes_refresh_and_makes_clear_cancel_safe() {
     let thread = fixture_thread();
     let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
@@ -9263,6 +9436,7 @@ async fn ctrl_b_toggles_sidebar_silently_in_root_and_child_views() {
     let mut root = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
     let client = offline_client();
     root.notice = "existing status".into();
+    root.lines((140, 40));
     let initial = root.sidebar_open;
 
     for expected in [!initial, initial] {
@@ -9279,6 +9453,7 @@ async fn ctrl_b_toggles_sidebar_silently_in_root_and_child_views() {
 
     let (mut child, _, _, _) = child_navigation_fixture();
     child.notice = "child status".into();
+    child.lines((140, 40));
     let initial = child.sidebar_open;
     for expected in [!initial, initial] {
         crate::input::handle_key(
@@ -9291,6 +9466,117 @@ async fn ctrl_b_toggles_sidebar_silently_in_root_and_child_views() {
         assert_eq!(child.sidebar_open, expected);
         assert_eq!(child.notice, "child status");
     }
+}
+
+#[tokio::test]
+async fn a_narrow_terminal_keeps_the_plan_in_one_row_and_ctrl_b_opens_the_sidebar_over_it() {
+    let thread = fixture_thread();
+    let items = vec![
+        message_item(
+            1,
+            &thread,
+            ItemData::UserMessage {
+                text: "plan it".into(),
+                attachments: vec![],
+                queued: false,
+                synthetic: false,
+            },
+        ),
+        message_item(
+            2,
+            &thread,
+            ItemData::ToolCall {
+                call_id: "todo-1".into(),
+                name: "todowrite".into(),
+                arguments: serde_json::json!({"todos": []}),
+                provider_metadata: serde_json::Value::Null,
+            },
+        ),
+        message_item(
+            3,
+            &thread,
+            ItemData::ToolResult {
+                call_id: "todo-1".into(),
+                name: "todowrite".into(),
+                output: "Todo list updated (3 items)".into(),
+                is_error: false,
+                metadata: serde_json::Value::Null,
+            },
+        ),
+    ];
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    let entry = |content: &str, status: &str| haarness_protocol::TodoEntry {
+        content: content.into(),
+        status: status.into(),
+        priority: "medium".into(),
+    };
+    app.todos = vec![
+        entry("Read the code", "completed"),
+        entry("Make the greeting friendlier", "in_progress"),
+        entry("Run the tests", "pending"),
+    ];
+    let client = offline_client();
+    let ctrl_b = || KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+    let frame = |app: &App, width: u32| {
+        let lines = app.lines((width, 24));
+        for line in &lines {
+            assert!(line.width() <= width as usize, "{}", line_text(line));
+        }
+        lines.iter().map(line_text).collect::<Vec<_>>().join("\n")
+    };
+
+    let narrow = frame(&app, 80);
+    assert!(
+        narrow.contains("[•] Make the greeting friendlier  ·  1/3 done  ·  ctrl+b shows the plan"),
+        "{narrow}"
+    );
+    assert!(!narrow.contains("▾ todo"), "{narrow}");
+    assert!(
+        app.hit_rows
+            .borrow()
+            .iter()
+            .any(|hit| { hit.target == crate::view::frame::HitTarget::SidebarToggle })
+    );
+
+    crate::input::handle_key(&mut app, ctrl_b(), &client)
+        .await
+        .unwrap();
+    let overlay = frame(&app, 80);
+    assert!(
+        overlay.contains("▾ todo") && overlay.contains("Run the tests"),
+        "{overlay}"
+    );
+    assert!(
+        overlay.contains("plan it"),
+        "the conversation stays beside it: {overlay}"
+    );
+    assert!(!overlay.contains("ctrl+b shows the plan"), "{overlay}");
+
+    crate::input::handle_key(&mut app, ctrl_b(), &client)
+        .await
+        .unwrap();
+    let hidden = frame(&app, 80);
+    assert!(!hidden.contains("▾ todo"), "{hidden}");
+    assert!(hidden.contains("ctrl+b shows the plan"), "{hidden}");
+
+    // Wide enough to dock, the sidebar holds the plan and the row goes away;
+    // hidden there, the row comes back.
+    app.sidebar_open = true;
+    let docked = frame(&app, 140);
+    assert!(docked.contains("▾ todo"), "{docked}");
+    assert!(!docked.contains("ctrl+b shows the plan"), "{docked}");
+    crate::input::handle_key(&mut app, ctrl_b(), &client)
+        .await
+        .unwrap();
+    let undocked = frame(&app, 140);
+    assert!(!undocked.contains("▾ todo"), "{undocked}");
+    assert!(undocked.contains("ctrl+b shows the plan"), "{undocked}");
+
+    // A finished plan leaves no row behind.
+    for todo in &mut app.todos {
+        todo.status = "completed".into();
+    }
+    assert!(!frame(&app, 80).contains("done  ·"));
 }
 
 #[test]
@@ -11639,6 +11925,85 @@ fn successful_tool_results_collapse_without_line_counts_and_expand_from_the_call
 }
 
 #[test]
+fn shell_mode_output_shows_under_the_command_and_a_non_zero_exit_reads_as_failed() {
+    let thread = fixture_thread();
+    let bash = |sequence: u64, call_id: &str, command: &str, exit: i64, output: &str| {
+        vec![
+            message_item(
+                sequence,
+                &thread,
+                ItemData::ToolCall {
+                    call_id: call_id.into(),
+                    name: "bash".into(),
+                    arguments: serde_json::json!({"command": command}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            message_item(
+                sequence + 1,
+                &thread,
+                ItemData::ToolResult {
+                    call_id: call_id.into(),
+                    name: "bash".into(),
+                    output: format!("exit: {exit}\n{output}"),
+                    is_error: false,
+                    metadata: serde_json::json!({"exit": exit, "truncated": false}),
+                },
+            ),
+        ]
+    };
+    let listing = (1..=14)
+        .map(|index| format!("file-{index}.py"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut items = bash(1, "shell-1", "ls src", 0, &listing);
+    items.extend(bash(
+        3,
+        "shell-2",
+        "cat missing.txt",
+        1,
+        "cat: missing.txt: No such file or directory",
+    ));
+    items.extend(bash(5, "agent-1", "grep -r nothing .", 1, ""));
+    items.extend(bash(7, "agent-2", "pwd", 0, "/workspace"));
+    let listing_id = items[1].id;
+    let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    let text = app
+        .lines((100, 60))
+        .iter()
+        .map(Line::text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    // A typed command shows its output, open, without the model's preamble.
+    assert!(text.contains("● bash ls src"), "{text}");
+    assert!(text.contains("file-1.py"), "{text}");
+    assert!(text.contains("file-10.py"), "{text}");
+    assert!(!text.contains("file-11.py"), "{text}");
+    assert!(text.contains("… +4 more lines · click to expand"), "{text}");
+    assert!(!text.contains("exit: 0"), "{text}");
+    // A non-zero exit fails the row and keeps its stderr in view, whoever ran it.
+    assert!(text.contains("✗ bash cat missing.txt  exit 1"), "{text}");
+    assert!(text.contains("No such file or directory"), "{text}");
+    assert!(
+        text.contains("✗ bash grep -r nothing .  exit 1  ·  no output"),
+        "{text}"
+    );
+    // An agent's successful command stays a compact row.
+    assert!(text.contains("● bash pwd"), "{text}");
+    assert!(!text.contains("/workspace"), "{text}");
+
+    app.expanded.insert(listing_id);
+    let expanded = app
+        .lines((100, 60))
+        .iter()
+        .map(Line::text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(expanded.contains("file-14.py"), "{expanded}");
+    assert!(!expanded.contains("exit: 0"), "{expanded}");
+}
+
+#[test]
 fn structurally_empty_tool_results_are_semantic_and_not_expandable() {
     let thread = fixture_thread();
     let items = vec![
@@ -12411,7 +12776,7 @@ fn workflow_dashboard_combines_runs_definitions_and_contextual_actions() {
         .map(Line::text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(rendered.contains("workflows"), "{rendered}");
+    assert!(rendered.contains("Workflows"), "{rendered}");
     assert!(rendered.contains("recent run"), "{rendered}");
     assert!(rendered.contains("Verify and publish"), "{rendered}");
 
@@ -12605,7 +12970,7 @@ fn workflow_dashboard_keeps_selected_content_and_chrome_on_a_narrow_terminal() {
 
     let lines = app.lines((40, 12));
     let text = lines.iter().map(Line::text).collect::<Vec<_>>().join("\n");
-    assert!(text.contains("workflows"), "{text}");
+    assert!(text.contains("Workflows"), "{text}");
     assert!(
         text.contains("release"),
         "selected last row was clipped: {text}"
@@ -14214,8 +14579,8 @@ fn prompt_context_snapshots_are_bounded_quoted_and_survive_composer_undo() {
     assert!(!body.contains("four"));
     let mut composer = crate::input::composer::Composer::default();
     composer.set_text("Read @a".into());
-    composer.attach_context(5, 7, "a:2-3", &body).unwrap();
-    assert!(composer.text().contains("[context 1:"));
+    composer.attach_context(5, 7, "@a:2-3", &body).unwrap();
+    assert_eq!(composer.text(), "Read [@a:2-3] ");
     assert!(composer.expanded_text().contains(&body));
     composer.undo();
     assert_eq!(composer.text(), "Read @a");
@@ -14237,6 +14602,149 @@ fn model_picker_prioritizes_favorites_then_recents_without_losing_search() {
     assert_eq!(app.filtered_models(), [first, second.clone()]);
     app.overlay_filter = "mini".into();
     assert_eq!(app.filtered_models(), [second]);
+}
+
+#[test]
+fn sent_references_read_as_their_chips_in_the_bubble_and_come_back_as_chips() {
+    use crate::prompt_context::{Part, display, parts, snapshot};
+    let file = snapshot(
+        "src/todo/<store>.py",
+        "def add():\n    return 1\n```\n",
+        None,
+    )
+    .unwrap();
+    let delegation = "Delegate the relevant work from this message and attached context using \
+                      the task tool with agent \"explore\". Keep normal permissions in effect.";
+    let sent = format!("Look at {file} and ask {delegation}\nthen report");
+    assert_eq!(
+        display(&sent),
+        "Look at @src/todo/<store>.py and ask @explore\nthen report"
+    );
+    assert!(matches!(
+        parts(&sent).as_slice(),
+        [Part::Text("Look at "), Part::Reference { body, .. }, Part::Text(" and ask "), Part::Reference { .. }, Part::Text("\nthen report")]
+            if *body == file
+    ));
+    // Text that only looks like a reference stays as typed.
+    for typed in [
+        "<details>\n<summary>Notes</summary>\n\nmine\n\n</details>",
+        "Delegate the relevant work later",
+    ] {
+        assert_eq!(display(typed), typed);
+    }
+
+    let thread = fixture_thread();
+    let items = vec![message_item(
+        1,
+        &thread,
+        ItemData::UserMessage {
+            text: sent.clone(),
+            attachments: vec![],
+            queued: false,
+            synthetic: false,
+        },
+    )];
+    let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    let text = app
+        .lines((100, 30))
+        .iter()
+        .map(Line::text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("▎ Look at @src/todo/<store>.py and ask @explore"),
+        "{text}"
+    );
+    assert!(text.contains("▎ then report"), "{text}");
+    for hidden in ["<details>", "def add", "Delegate the relevant work"] {
+        assert!(
+            !text.contains(hidden),
+            "{hidden} leaked into the bubble: {text}"
+        );
+    }
+
+    // Up brings the prompt back with its chips, and it sends unchanged.
+    let mut composer = crate::input::composer::Composer::default();
+    composer.set_text("Look at @sto".into());
+    composer
+        .attach_context(8, 12, "@src/todo/<store>.py", &file)
+        .unwrap();
+    composer.insert_str("and ask ");
+    composer
+        .attach_context(
+            composer.text().len(),
+            composer.text().len(),
+            "@explore",
+            delegation,
+        )
+        .unwrap();
+    assert_eq!(
+        composer.text(),
+        "Look at [@src/todo/<store>.py] and ask [@explore] "
+    );
+    let sent = composer.take();
+    assert!(sent.contains(&file) && sent.contains(delegation), "{sent}");
+    assert!(composer.history_prev());
+    assert_eq!(
+        composer.text(),
+        "Look at [@src/todo/<store>.py] and ask [@explore] "
+    );
+    assert_eq!(composer.expanded_text(), sent);
+    composer.backspace();
+    composer.backspace();
+    assert_eq!(composer.text(), "Look at [@src/todo/<store>.py] and ask ");
+}
+
+#[test]
+fn a_long_pasted_prompt_folds_to_its_opening_lines_until_clicked() {
+    let thread = fixture_thread();
+    let pasted = (1..=60)
+        .map(|index| format!("pasted line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let items = vec![message_item(
+        1,
+        &thread,
+        ItemData::UserMessage {
+            text: format!("Summarise this:\n{pasted}"),
+            attachments: vec![],
+            queued: false,
+            synthetic: false,
+        },
+    )];
+    let id = items[0].id;
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    let text = |app: &App| {
+        app.lines((100, 80))
+            .iter()
+            .map(Line::text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let folded = text(&app);
+    assert!(folded.contains("▎ pasted line 7"), "{folded}");
+    assert!(
+        !folded
+            .lines()
+            .any(|row| row.trim_end().ends_with("pasted line 8")),
+        "{folded}"
+    );
+    assert!(!folded.contains("pasted line 60"), "{folded}");
+    assert!(
+        folded.contains("▎ … +53 more lines · click to expand"),
+        "{folded}"
+    );
+    assert!(
+        app.hit_rows
+            .borrow()
+            .iter()
+            .any(|hit| { hit.target == crate::view::frame::HitTarget::ToolToggle(id) })
+    );
+
+    app.expanded.insert(id);
+    let open = text(&app);
+    assert!(open.contains("▎ pasted line 60"), "{open}");
+    assert!(open.contains("▎ … click to collapse"), "{open}");
 }
 
 #[test]

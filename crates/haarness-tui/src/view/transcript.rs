@@ -6,7 +6,7 @@
 //! activity reads as a status-dot row with a gutter-lined output block.
 //! Boxes for activity, open text for the conversation.
 
-use haarness_opentui::{Line, Span};
+use haarness_opentui::{Line, Span, attr};
 use haarness_protocol::{FileDiff, FileDiffStatus, Item, ItemData};
 
 use crate::diff::{render_added, render_diff};
@@ -14,7 +14,7 @@ use crate::markdown::render_markdown;
 use crate::state::{App, ChildTask};
 use crate::theme::Theme;
 use crate::view::frame::{HitTarget, TaggedLines};
-use crate::view::span::{line, single_line, spinner, task_state_style};
+use crate::view::span::{line, single_line, spinner, task_state_style, wrap_spans};
 
 /// Reasoning is the model thinking aloud, not a nested detail of something
 /// else, so it sits in the same text column and wraps to the same measure as
@@ -24,6 +24,12 @@ const REASONING_INDENT: &str = "  ";
 const TOOL_SUMMARY_ROWS: usize = 3;
 /// Errors earn more room; the model's failure detail matters.
 const TOOL_ERROR_ROWS: usize = 8;
+/// A command typed with `!` was run to read its output, so it shows open.
+const SHELL_OUTPUT_ROWS: usize = 10;
+/// A prompt longer than this, such as a long paste, folds to its opening
+/// `USER_PREVIEW_ROWS` rows.
+const USER_BLOCK_ROWS: usize = 12;
+const USER_PREVIEW_ROWS: usize = 8;
 const TOOL_BLOCK_ROWS: usize = 12;
 /// The argument worth showing beside an ordinary tool name (path, command, …).
 fn primary_argument(arguments: &serde_json::Value) -> Option<String> {
@@ -297,19 +303,65 @@ fn rejected_by_user(output: &str) -> bool {
         .starts_with("The user rejected this action")
 }
 
+/// A command the person typed in shell mode (`!`), as opposed to one the
+/// agent chose to run.
+fn is_user_shell(call_id: &str) -> bool {
+    call_id.starts_with("shell-")
+}
+
+/// The exit code of a command that ran and failed. The bash tool reports a
+/// non-zero exit as a successful call, since the command did run, but the
+/// row has to read as failed all the same.
+fn failed_exit(name: &str, metadata: &serde_json::Value) -> Option<i64> {
+    if name != "bash" {
+        return None;
+    }
+    metadata
+        .get("exit")
+        .and_then(serde_json::Value::as_i64)
+        .filter(|code| *code != 0)
+}
+
+/// Tool output as a reader wants it. The bash tool opens with an `exit: N`
+/// line for the model; the row's status already says how the command ended.
+fn displayed_output<'a>(name: &str, output: &'a str, metadata: &serde_json::Value) -> &'a str {
+    if name != "bash" || metadata.get("exit").is_none() {
+        return output;
+    }
+    let Some(rest) = output.strip_prefix("exit: ") else {
+        return output;
+    };
+    let (code, body) = rest.split_once('\n').unwrap_or((rest, ""));
+    if code.trim().parse::<i64>().is_ok() {
+        body
+    } else {
+        output
+    }
+}
+
 /// Every successful paired tool result is a compact activity row by default,
 /// regardless of tool name or output length. This prevents arbitrary provider
-/// formatting from changing the transcript hierarchy. Errors stay visible;
-/// `/tools show` and per-row expansion reveal successful details.
-fn folds_into_call_row(
-    app: &App,
-    output: &str,
-    is_error: bool,
-    metadata: &serde_json::Value,
-) -> bool {
+/// formatting from changing the transcript hierarchy. Errors (including a
+/// command that exited non-zero) stay visible, and so does the output of a
+/// command the person ran themselves; `/tools show` and per-row expansion
+/// reveal successful details.
+fn folds_into_call_row(app: &App, result: &ItemData) -> bool {
+    let ItemData::ToolResult {
+        call_id,
+        name,
+        output,
+        is_error,
+        metadata,
+    } = result
+    else {
+        return false;
+    };
     !is_error
+        && failed_exit(name, metadata).is_none()
+        && !is_user_shell(call_id)
         && !app.tool_details
-        && (empty_result_label(output).is_none() || file_diff_count(metadata) > 0)
+        && (empty_result_label(displayed_output(name, output, metadata)).is_none()
+            || file_diff_count(metadata) > 0)
 }
 
 /// Render only host-produced file bodies. Tool arguments describe intent and
@@ -579,15 +631,18 @@ fn render_tool_result(
 ) {
     let ItemData::ToolResult {
         call_id,
+        name,
         output,
         is_error,
         metadata,
-        ..
     } = &item.data
     else {
         return;
     };
     let theme = &app.theme;
+    let failed = *is_error || failed_exit(name, metadata).is_some();
+    let folds = folds_into_call_row(app, &item.data);
+    let output = displayed_output(name, output, metadata);
 
     let expanded = app.expanded.contains(&item.id);
 
@@ -609,7 +664,7 @@ fn render_tool_result(
     // rejected, whose result is the instruction written for the model, or a
     // call the user's stop cancelled, which the row already says.
     if !expanded
-        && (folds_into_call_row(app, output, *is_error, metadata)
+        && (folds
             || (*is_error && (rejected_by_user(output) || output.trim() == "operation cancelled")))
         && paired_call(app, item, call_id).is_some()
     {
@@ -621,22 +676,17 @@ fn render_tool_result(
 
     // Results live directly beneath their call, never in a second detached
     // batch. Errors earn more room; all blocks can expand in place.
-    let color = if *is_error { theme.danger } else { theme.muted };
-    let cap = if expanded {
-        usize::MAX
-    } else if *is_error {
+    let color = if failed { theme.danger } else { theme.muted };
+    let collapsed_cap = if is_user_shell(call_id) {
+        SHELL_OUTPUT_ROWS
+    } else if failed {
         TOOL_ERROR_ROWS
     } else {
         TOOL_SUMMARY_ROWS
     };
+    let cap = if expanded { usize::MAX } else { collapsed_cap };
     let rows: Vec<&str> = output.lines().collect();
-    let collapsed_cap = if *is_error {
-        TOOL_ERROR_ROWS
-    } else {
-        TOOL_SUMMARY_ROWS
-    };
-    let collapsible =
-        folds_into_call_row(app, output, *is_error, metadata) || rows.len() > collapsed_cap;
+    let collapsible = folds || rows.len() > collapsed_cap;
     for row in rows.iter().take(cap) {
         let row = gutter_row(row, width, color, theme);
         if collapsible {
@@ -683,25 +733,62 @@ fn mark_reply(lines: &mut [Line], theme: &Theme) {
 /// to the content width. It hangs off the same margin as the assistant's
 /// marker, so both sides of the conversation share one text column and tool
 /// activity is the only thing that indents.
+///
+/// Files and agents attached with `@` show as the chips they were typed as;
+/// the snapshot or delegation they expand to is for the model.
 fn user_block(text: &str, width: usize, theme: &Theme) -> Vec<Line> {
+    use unicode_width::UnicodeWidthStr as _;
     let inner = width.saturating_sub(4).max(10);
+    let mut paragraphs: Vec<Vec<Span>> = vec![Vec::new()];
+    for part in crate::prompt_context::parts(text) {
+        match part {
+            crate::prompt_context::Part::Text(typed) => {
+                for (index, piece) in typed.split('\n').enumerate() {
+                    if index > 0 {
+                        paragraphs.push(Vec::new());
+                    }
+                    let piece = piece.trim_end_matches('\r');
+                    if !piece.is_empty() {
+                        paragraphs
+                            .last_mut()
+                            .expect("one paragraph")
+                            .push(Span::new(piece, theme.text));
+                    }
+                }
+            }
+            crate::prompt_context::Part::Reference { label, .. } => paragraphs
+                .last_mut()
+                .expect("one paragraph")
+                .push(Span::new(label, theme.primary).with_attributes(attr::BOLD)),
+        }
+    }
+    if paragraphs.last().is_some_and(Vec::is_empty) && text.ends_with('\n') {
+        paragraphs.pop();
+    }
     let mut lines = Vec::new();
-    for paragraph in text.lines() {
-        let rows: Vec<String> = if paragraph.trim().is_empty() {
-            vec![String::new()]
+    for spans in paragraphs {
+        let rows = if spans.iter().all(|span| span.text.trim().is_empty()) {
+            vec![Line::new(Vec::new())]
         } else {
-            textwrap::wrap(paragraph, inner)
-                .into_iter()
-                .map(std::borrow::Cow::into_owned)
-                .collect()
+            wrap_spans(&spans, inner, "", "", theme.text)
         };
         for row in rows {
-            let pad = inner.saturating_sub(row.chars().count()) + 1;
-            lines.push(Line::new(vec![
-                Span::new("▎ ", theme.user).on(theme.surface),
-                Span::new(row, theme.text).on(theme.surface),
-                Span::new(" ".repeat(pad), theme.text).on(theme.surface),
-            ]));
+            let used = row
+                .spans
+                .iter()
+                .map(|span| span.text.width())
+                .sum::<usize>();
+            let mut spans = vec![Span::new("▎ ", theme.user).on(theme.surface)];
+            spans.extend(
+                row.spans
+                    .into_iter()
+                    .filter(|span| !span.text.is_empty())
+                    .map(|span| span.on(theme.surface)),
+            );
+            spans.push(
+                Span::new(" ".repeat(inner.saturating_sub(used) + 1), theme.text).on(theme.surface),
+            );
+            lines.push(Line::new(spans));
         }
     }
     if lines.is_empty() {
@@ -772,6 +859,8 @@ enum TranscriptGroup {
     Assistant,
     Reasoning,
     Tool,
+    /// A command the person ran with `!`: its own block, like a prompt.
+    Shell,
     Task,
     Plan,
     Review,
@@ -786,6 +875,7 @@ fn transcript_group(item: &Item) -> TranscriptGroup {
         ItemData::AssistantMessage { .. } => TranscriptGroup::Assistant,
         ItemData::Reasoning { .. } => TranscriptGroup::Reasoning,
         ItemData::ToolCall { name, .. } if name == "task" => TranscriptGroup::Task,
+        ItemData::ToolCall { call_id, .. } if is_user_shell(call_id) => TranscriptGroup::Shell,
         ItemData::ToolCall { .. } | ItemData::ToolResult { .. } => TranscriptGroup::Tool,
         ItemData::Plan { .. } => TranscriptGroup::Plan,
         ItemData::Review { .. } => TranscriptGroup::Review,
@@ -854,6 +944,70 @@ fn append_block(
     *previous = Some(group);
 }
 
+/// A todo snapshot, or the tool activity that reads or writes one.
+fn is_plan_update(item: &Item) -> bool {
+    matches!(&item.data, ItemData::Todo { .. })
+        || matches!(&item.data,
+            ItemData::ToolCall { name, .. } | ItemData::ToolResult { name, .. }
+            if matches!(name.as_str(), "todo" | "todowrite" | "todoread"))
+}
+
+/// Whether the plan still has work in it; the sidebar shows only such a plan.
+fn open_plan(app: &App) -> bool {
+    app.todos
+        .iter()
+        .any(|entry| matches!(entry.status.as_str(), "pending" | "in_progress"))
+}
+
+/// The plan in one row: the step in hand, how far along it is, and the key
+/// that shows all of it.
+fn plan_row(app: &App, width: usize) -> Line {
+    use unicode_width::UnicodeWidthStr as _;
+    let theme = &app.theme;
+    let current = app
+        .todos
+        .iter()
+        .find(|entry| entry.status == "in_progress")
+        .or_else(|| app.todos.iter().find(|entry| entry.status == "pending"));
+    let (marker, tone) = match current.map(|entry| entry.status.as_str()) {
+        Some("in_progress") => ("  [•] ", theme.accent),
+        _ => ("  [ ] ", theme.muted),
+    };
+    let done = app
+        .todos
+        .iter()
+        .filter(|entry| entry.status == "completed")
+        .count();
+    let progress = format!(
+        "  ·  {}",
+        app.language.format(
+            "{done}/{total} done",
+            &[
+                ("done", &done.to_string()),
+                ("total", &app.todos.len().to_string()),
+            ]
+        )
+    );
+    let hint = format!("  ·  {}", app.language.text("ctrl+b shows the plan"));
+    let room = |suffix: usize| width.saturating_sub(marker.width() + suffix);
+    // The step itself matters more than the hint on a narrow terminal.
+    let hint = if room(progress.width() + hint.width()) >= 16 {
+        hint
+    } else {
+        String::new()
+    };
+    let content = current.map_or("", |entry| entry.content.as_str());
+    Line::new(vec![
+        Span::new(marker, tone),
+        Span::new(
+            single_line(content, room(progress.width() + hint.width()).max(8)),
+            theme.text,
+        ),
+        Span::new(progress, theme.muted),
+        Span::new(hint, theme.muted),
+    ])
+}
+
 pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
     let theme = &app.theme;
     let mut transcript = TaggedLines::default();
@@ -871,18 +1025,36 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
     // does, instead of drawing it like live turns.
     let undone_after = app.thread.revert.as_ref().map(|revert| revert.sequence);
     let mut folded = false;
-    for item in presentation_order(&app.items) {
+    let ordered = presentation_order(&app.items);
+    // Off screen, the sidebar leaves one row in its place: the plan's
+    // progress where it last changed, which opens the sidebar.
+    let plan_at = (app.plan_inline.get() && open_plan(app))
+        .then(|| {
+            ordered
+                .iter()
+                .filter(|item| undone_after.is_none_or(|boundary| item.sequence <= boundary))
+                .rfind(|item| is_plan_update(item))
+                .map(|item| item.id)
+        })
+        .flatten();
+    for item in ordered {
         if undone_after.is_some_and(|boundary| item.sequence > boundary) {
             folded = true;
             continue;
         }
         // The sidebar owns TODO state. Hide both live tool activity and replayed
         // snapshots here so updates do not repeat the plan in the conversation.
-        if matches!(&item.data, ItemData::Todo { .. })
-            || matches!(&item.data,
-                ItemData::ToolCall { name, .. } | ItemData::ToolResult { name, .. }
-                if matches!(name.as_str(), "todo" | "todowrite" | "todoread"))
-        {
+        if is_plan_update(item) {
+            if plan_at == Some(item.id) {
+                let mut block = TaggedLines::default();
+                block.push_tagged(plan_row(app, width), HitTarget::SidebarToggle);
+                append_block(
+                    &mut transcript,
+                    block,
+                    TranscriptGroup::Tool,
+                    &mut previous_group,
+                );
+            }
             continue;
         }
         let group = transcript_group(item);
@@ -894,7 +1066,38 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 if waiting.contains(&item.id) {
                     continue;
                 }
-                block.extend(user_block(text, width, theme));
+                // A long paste reads as its opening lines until asked for;
+                // the whole of it is still what was sent.
+                let rows = user_block(text, width, theme);
+                if rows.len() > USER_BLOCK_ROWS {
+                    let expanded = app.expanded.contains(&item.id);
+                    let shown = if expanded {
+                        rows.len()
+                    } else {
+                        USER_PREVIEW_ROWS
+                    };
+                    let hidden = rows.len() - shown;
+                    for row in rows.into_iter().take(shown) {
+                        block.push_tagged(row, HitTarget::ToolToggle(item.id));
+                    }
+                    let toggle = if expanded {
+                        "… click to collapse".to_owned()
+                    } else {
+                        format!("… +{hidden} more lines · click to expand")
+                    };
+                    let mut toggle_row = user_block(&toggle, width, theme);
+                    for span in toggle_row
+                        .iter_mut()
+                        .flat_map(|row| row.spans.iter_mut().skip(1))
+                    {
+                        span.fg = theme.muted;
+                    }
+                    for row in toggle_row {
+                        block.push_tagged(row, HitTarget::ToolToggle(item.id));
+                    }
+                } else {
+                    block.extend(rows);
+                }
                 if !attachments.is_empty() {
                     let mut spans = vec![Span::new("  ", theme.muted)];
                     for (index, source) in attachments.iter().enumerate() {
@@ -932,6 +1135,17 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 ..
             } if !call_id.trim().is_empty() && !name.trim().is_empty() => {
                 let result = paired_result(app, item, call_id);
+                // A command that ran and exited non-zero failed too, and its
+                // row says with which code.
+                let exit_code = result.and_then(|item| match &item.data {
+                    ItemData::ToolResult {
+                        name,
+                        is_error: false,
+                        metadata,
+                        ..
+                    } => failed_exit(name, metadata),
+                    _ => None,
+                });
                 let result_status = result.and_then(|item| match &item.data {
                     ItemData::ToolResult {
                         output, is_error, ..
@@ -939,7 +1153,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         "cancelled"
                     } else if *is_error && rejected_by_user(output) {
                         "rejected"
-                    } else if *is_error {
+                    } else if *is_error || exit_code.is_some() {
                         "failed"
                     } else {
                         "done"
@@ -1009,7 +1223,11 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 // A request the user turned down is their decision, not a
                 // failure: it reads as quietly as a cancel.
                 let suffix = match status {
-                    Some(state @ ("failed" | "cancelled" | "rejected")) => {
+                    Some("failed") => exit_code.map_or_else(
+                        || format!("  {}", app.language.text("failed")),
+                        |code| format!("  exit {code}"),
+                    ),
+                    Some(state @ ("cancelled" | "rejected")) => {
                         format!("  {}", app.language.text(state))
                     }
                     None if queued => "  queued".to_owned(),
@@ -1034,15 +1252,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         format!("  ·  {total} {agents}")
                     }
                 };
-                let compact_result = result.filter(|item| match &item.data {
-                    ItemData::ToolResult {
-                        output,
-                        is_error,
-                        metadata,
-                        ..
-                    } => folds_into_call_row(app, output, *is_error, metadata),
-                    _ => false,
-                });
+                let compact_result = result.filter(|item| folds_into_call_row(app, &item.data));
                 // Keep ordinary successful activity rows quiet: the tool name,
                 // primary argument, and status dot already communicate what
                 // happened, while the tagged row remains available to expand.
@@ -1055,6 +1265,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         return String::new();
                     }
                     let ItemData::ToolResult {
+                        name,
                         output,
                         is_error,
                         metadata,
@@ -1066,6 +1277,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     if *is_error {
                         return String::new();
                     }
+                    let output = displayed_output(name, output, metadata);
                     let (files, added, removed) = file_diff_stat(metadata);
                     if files > 0 && compact_result.is_some() {
                         // The row already names the file; the line counts

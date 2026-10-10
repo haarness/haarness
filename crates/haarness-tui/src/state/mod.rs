@@ -724,8 +724,18 @@ pub struct App {
     /// Show successful read/list/search result bodies by default. Off keeps
     /// routine exploration compact; individual rows remain clickable.
     pub tool_details: bool,
-    /// Right pane visibility (auto-hidden on narrow terminals).
+    /// Right pane visibility where it docks beside the conversation (on by
+    /// default; terminals narrower than that never dock it).
     pub sidebar_open: bool,
+    /// The right pane opened over the conversation's right edge with ctrl+b
+    /// on a terminal too narrow to dock it, as Upstream does.
+    pub sidebar_overlay: bool,
+    /// Width of the last rendered frame, so ctrl+b can tell a docked sidebar
+    /// from one that has to open over the conversation.
+    pub frame_width: std::cell::Cell<usize>,
+    /// Whether the last frame left the sidebar off screen, so the transcript
+    /// carries a one-row summary of the plan in its place.
+    pub plan_inline: std::cell::Cell<bool>,
     /// Collapsed sidebar section indices.
     pub sidebar_collapsed: std::collections::HashSet<usize>,
     /// MCP status shown in the sidebar, refreshed when it opens.
@@ -956,6 +966,9 @@ impl App {
             expanded: std::collections::HashSet::new(),
             tool_details: false,
             sidebar_open: true,
+            sidebar_overlay: false,
+            frame_width: std::cell::Cell::new(0),
+            plan_inline: std::cell::Cell::new(false),
             sidebar_collapsed: std::collections::HashSet::new(),
             mcp_status: Vec::new(),
             server_commands: Vec::new(),
@@ -1413,13 +1426,12 @@ impl App {
         if entries.is_empty() {
             entries.push(OptionEntry {
                 label: "No workflows yet".into(),
-                description: "Add .haarness/workflows/<name>.ts or run haarness workflow list"
-                    .into(),
+                description: "Add one in .haarness/workflows/<name>.ts".into(),
                 value: "empty".into(),
             });
         }
         self.open_overlay(Overlay::Options {
-            title: "workflows".into(),
+            title: "Workflows".into(),
             kind: OptionsKind::WorkflowDashboard,
             entries,
         });

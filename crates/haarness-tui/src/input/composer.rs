@@ -50,6 +50,12 @@ impl SetAside {
     }
 }
 
+/// The chip an attached reference shows as while it is a draft: its label,
+/// such as `@src/main.rs` or `@explore`.
+fn context_placeholder(label: &str) -> String {
+    format!("[{}]", label.replace(['\n', '\r', ']'], " "))
+}
+
 fn expand(text: &str, expansions: &[Expansion]) -> String {
     let mut expansions = expansions.iter().collect::<Vec<_>>();
     expansions.sort_by_key(|e| e.start);
@@ -410,8 +416,7 @@ impl Composer {
             self.history_prefix = prefix;
         }
         self.history_index = Some(next_index);
-        self.text = self.history[next_index].clone();
-        self.expansions.clear();
+        self.load_expanded(&self.history[next_index].clone());
         self.last_edit = LastEdit::None;
         self.cursor = self.text.len();
         true
@@ -426,8 +431,7 @@ impl Composer {
             .find(|&next| self.history[next].starts_with(&self.history_prefix))
         {
             self.history_index = Some(next);
-            self.text = self.history[next].clone();
-            self.expansions.clear();
+            self.load_expanded(&self.history[next].clone());
         } else {
             self.history_index = None;
             if let Some(stash) = self.stash.take() {
@@ -461,20 +465,8 @@ impl Composer {
                     <= 128 * 1024,
             "Context must fit within 128 KiB and 20 references"
         );
-        let next = contexts
-            .iter()
-            .filter_map(|e| match e.kind {
-                ExpansionKind::Context(id) => Some(id),
-                ExpansionKind::Paste(_) => None,
-            })
-            .max()
-            .unwrap_or(0)
-            + 1;
-        let placeholder = format!(
-            "[context {}: {}]",
-            next,
-            label.replace(['\n', '\r', ']'], " ")
-        );
+        let next = self.next_context_id();
+        let placeholder = context_placeholder(label);
         let start = self.edit(start, end, &format!("{placeholder} "), LastEdit::Other);
         self.expansions.push(Expansion {
             start,
@@ -483,6 +475,42 @@ impl Composer {
             kind: ExpansionKind::Context(next),
         });
         Ok(())
+    }
+
+    fn next_context_id(&self) -> usize {
+        self.expansions
+            .iter()
+            .filter_map(|e| match e.kind {
+                ExpansionKind::Context(id) => Some(id),
+                ExpansionKind::Paste(_) => None,
+            })
+            .max()
+            .unwrap_or(0)
+            + 1
+    }
+
+    /// Load a prompt that was already expanded, such as a sent one coming
+    /// back from history: every `@` reference in it becomes its chip again,
+    /// holding the same text, so it reads as typed and sends unchanged.
+    fn load_expanded(&mut self, value: &str) {
+        self.text.clear();
+        self.expansions.clear();
+        for part in crate::prompt_context::parts(value) {
+            match part {
+                crate::prompt_context::Part::Text(text) => self.text.push_str(text),
+                crate::prompt_context::Part::Reference { label, body } => {
+                    let kind = ExpansionKind::Context(self.next_context_id());
+                    let start = self.text.len();
+                    self.text.push_str(&context_placeholder(&label));
+                    self.expansions.push(Expansion {
+                        start,
+                        end: self.text.len(),
+                        content: body.to_owned(),
+                        kind,
+                    });
+                }
+            }
+        }
     }
 
     pub fn expanded_text(&self) -> String {
@@ -532,12 +560,12 @@ impl Composer {
         self.last_edit = LastEdit::None;
     }
 
-    /// Replace the whole content (used by command completion).
+    /// Replace the whole content (used by command completion, and to put a
+    /// sent or set-aside prompt back, references and all).
     pub fn set_text(&mut self, value: String) {
         self.snapshot(LastEdit::Other);
-        self.cursor = value.len();
-        self.text = value;
-        self.expansions.clear();
+        self.load_expanded(&value);
+        self.cursor = self.text.len();
         self.history_index = None;
     }
 

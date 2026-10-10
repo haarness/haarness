@@ -95,7 +95,7 @@ impl App {
                 return Ok(ManagementView {
                     title: "Saved prompt".into(),
                     lines: vec![
-                        prompt.text.clone(),
+                        crate::prompt_context::display(&prompt.text).into_owned(),
                         format!(
                             "{} attachments · {}",
                             prompt.attachments.len(),
@@ -133,8 +133,7 @@ impl App {
         };
         for prompt in prompts {
             view.entries.push(ManagementEntry {
-                label: prompt
-                    .text
+                label: crate::prompt_context::display(&prompt.text)
                     .lines()
                     .next()
                     .filter(|v| !v.is_empty())

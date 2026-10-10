@@ -335,7 +335,10 @@ impl App {
 /// A queued message as one menu line; an attachment-only message still
 /// needs a name.
 pub(crate) fn queued_label(text: &str) -> String {
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = crate::prompt_context::display(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     if text.is_empty() {
         "Attachments".into()
     } else {
