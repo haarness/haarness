@@ -223,6 +223,7 @@ fn fixture_goal(status: haarness_protocol::GoalStatus) -> haarness_protocol::Goa
         status,
         tokens_used: 120,
         token_budget: Some(1_000),
+        token_allowance: None,
         time_used_seconds: 90,
         turns_used: 2,
         created_at: now,

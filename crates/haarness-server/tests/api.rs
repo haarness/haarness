@@ -151,7 +151,7 @@ impl ModelProvider for LongToolLoop {
         let round = self.rounds.fetch_add(1, Ordering::SeqCst) + 1;
         let guard = request.messages.iter().any(|message| {
             matches!(message, ProviderMessage::Text { role, content }
-                if role == "assistant"
+                if role == "user"
                     && content.starts_with("The configured maximum number of tool steps"))
         });
         let mut events = if guard {
@@ -3954,6 +3954,128 @@ async fn a_busy_provider_is_retried_instead_of_failing_the_turn() {
     assert!(retrying, "a turn.status retrying event is published");
 }
 
+/// Answers a structured-output turn with scripted rounds, in order.
+struct ScriptedStructured {
+    rounds: Arc<std::sync::atomic::AtomicUsize>,
+    answers: Vec<ProviderEvent>,
+}
+
+#[async_trait]
+impl ModelProvider for ScriptedStructured {
+    fn id(&self) -> &str {
+        "scripted"
+    }
+
+    fn info(&self) -> ProviderInfo {
+        ProviderInfo {
+            id: "scripted".into(),
+            name: "Scripted fixture".into(),
+            authenticated: true,
+            models: vec![ModelInfo {
+                id: "scripted-1".into(),
+                display_name: "Scripted fixture".into(),
+                reasoning: false,
+                reasoning_efforts: Vec::new(),
+                images: false,
+                video: false,
+                tools: true,
+                context_window: Some(100_000),
+                max_output_tokens: Some(4_096),
+                pricing: None,
+            }],
+        }
+    }
+
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        _cancel: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        if let Some(title) = title_fixture(&request) {
+            return title;
+        }
+        let round = self
+            .rounds
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let answer = self.answers[round.min(self.answers.len() - 1)].clone();
+        Ok(Box::pin(stream::iter(vec![
+            Ok(answer),
+            Ok(ProviderEvent::Finished {
+                reason: "done".into(),
+            }),
+        ])))
+    }
+}
+
+#[tokio::test]
+async fn structured_output_in_the_wrong_shape_is_asked_for_again() {
+    let schema = serde_json::json!({"type":"object","properties":{"count":{"type":"integer"}},"required":["count"],"additionalProperties":false});
+    let run = |answers: Vec<ProviderEvent>| {
+        let schema = schema.clone();
+        async move {
+            let rounds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let runtime = AgentRuntime::new(
+                Arc::new(SqliteStore::in_memory().unwrap()),
+                Arc::new(StaticProviderRegistry::new(vec![
+                    Arc::new(ScriptedStructured {
+                        rounds: rounds.clone(),
+                        answers,
+                    }) as Arc<dyn ModelProvider>,
+                ])),
+                Arc::new(EmptyToolRegistry),
+                EventBus::new(256),
+            );
+            let thread = runtime
+                .create_thread(CreateThreadRequest {
+                    title: Some("Structured".into()),
+                    provider: Some("scripted".into()),
+                    model: Some("scripted-1".into()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let turn = runtime
+                .start_workflow_agent_turn(
+                    thread.id,
+                    thread.id,
+                    turn_request("count"),
+                    Some(schema),
+                )
+                .await
+                .unwrap();
+            let status = wait_done(&runtime, &turn).await.status;
+            let items = runtime.items(thread.id, None).await.unwrap();
+            (
+                status,
+                rounds.load(std::sync::atomic::Ordering::SeqCst),
+                items,
+            )
+        }
+    };
+    // Prose, then the wrong type, then a valid answer: two corrective rounds.
+    let (status, rounds, items) = run(vec![
+        ProviderEvent::TextDelta("There are two.".into()),
+        ProviderEvent::StructuredOutput(serde_json::json!({"count": "two"})),
+        ProviderEvent::StructuredOutput(serde_json::json!({"count": 2})),
+    ])
+    .await;
+    assert_eq!(status, TurnStatus::Completed);
+    assert_eq!(rounds, 3);
+    let corrections = items
+        .iter()
+        .filter(|item| matches!(&item.data, haarness_protocol::ItemData::UserMessage { synthetic: true, text, .. } if text.contains("structured")))
+        .count();
+    assert_eq!(corrections, 2);
+    assert!(items.iter().any(|item| matches!(
+        &item.data,
+        haarness_protocol::ItemData::AssistantMessage { text } if text == r#"{"count":2}"#
+    )));
+    // A model that keeps answering in prose fails after two corrections.
+    let (status, rounds, _) = run(vec![ProviderEvent::TextDelta("Two.".into())]).await;
+    assert_eq!(status, TurnStatus::Failed);
+    assert_eq!(rounds, 3);
+}
+
 #[tokio::test]
 async fn context_overflow_compacts_once_and_replays_without_binary_media() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -7372,6 +7494,66 @@ async fn yolo_auto_approves_everything_and_records_rules() {
     assert_eq!(requested, 0, "--yolo never prompts");
 }
 
+#[tokio::test]
+async fn one_turns_auto_approval_never_approves_other_chats() {
+    let workspace = std::env::temp_dir();
+    let provider = Capturing::default();
+    let providers = Arc::new(StaticProviderRegistry::new(vec![
+        Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
+    ]));
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        providers,
+        Arc::new(haarness_server::NativeToolRegistry::new(workspace.clone())),
+        EventBus::new(2048),
+        workspace.clone(),
+        String::new(),
+        {
+            let mut config = haarness_core::RuntimeConfig::default();
+            config.base_rules.push(haarness_core::PermissionRule {
+                pattern: "bash:*".into(),
+                decision: haarness_core::PermissionDecision::Ask,
+            });
+            config
+        },
+    );
+    let chat = || {
+        runtime.create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+    };
+    // A scheduled run (or `run --yolo`) approves its own turn...
+    let scheduled = chat().await.unwrap();
+    let mut request = turn_request(r#"!tool bash {"command":"true"}"#);
+    request.auto_approve = true;
+    let turn = runtime.start_turn(scheduled.id, request).await.unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert!(runtime.pending_permissions().is_empty());
+    // ...but the same command in an ordinary chat still asks.
+    let interactive = chat().await.unwrap();
+    runtime
+        .start_turn(
+            interactive.id,
+            turn_request(r#"!tool bash {"command":"true"}"#),
+        )
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while runtime.pending_permissions().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the interactive chat ran without asking"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(runtime.pending_permissions()[0].thread_id, interactive.id);
+}
+
 // ---------------------------------------------------------------------------
 // P3: custom slash commands and custom agents.
 // ---------------------------------------------------------------------------
@@ -10030,6 +10212,16 @@ async fn published_remote_chat_cannot_read_or_control_other_conversations() {
             "{path}"
         );
     }
+    // A shared chat follows its own Auto/Review setting.
+    let wholesale = scoped
+        .post(format!("{base}/v1/threads/{}/turns", shared.id))
+        .json(
+            &serde_json::json!({"requestId": RequestId::new(), "text": "hi", "autoApprove": true}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wholesale.status(), reqwest::StatusCode::FORBIDDEN);
     let stream = scoped
         .get(format!("{base}/v1/events"))
         .send()
@@ -10458,6 +10650,41 @@ async fn delegated_agents_follow_the_chats_mode_and_forks_keep_their_own() {
     let inherited = runtime.approval_mode(child.id).await.unwrap();
     assert_eq!(inherited.mode, haarness_protocol::ApprovalMode::Auto);
     assert_eq!(inherited.source_thread_id, thread.id);
+    let set = |id, mode| {
+        runtime.set_approval_mode(
+            id,
+            haarness_protocol::SetApprovalModeRequest {
+                mode,
+                revision: None,
+            },
+        )
+    };
+    // The agent keeps its own Auto only until its chat is set to Review.
+    set(child.id, haarness_protocol::ApprovalModeSetting::Auto)
+        .await
+        .unwrap();
+    let mut events = runtime.events().subscribe(None).receiver;
+    set(thread.id, haarness_protocol::ApprovalModeSetting::Review)
+        .await
+        .unwrap();
+    let reviewed = runtime.approval_mode(child.id).await.unwrap();
+    assert_eq!(reviewed.mode, haarness_protocol::ApprovalMode::Review);
+    assert_eq!(reviewed.source_thread_id, thread.id);
+    let mut notified = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if event.event_type == "approval_mode.changed" {
+            notified.push(event.thread_id);
+        }
+    }
+    assert!(
+        notified.contains(&Some(child.id)),
+        "the agent hears of the change"
+    );
+    // Under a Review chat an agent cannot be switched to Auto on its own.
+    assert!(matches!(
+        set(child.id, haarness_protocol::ApprovalModeSetting::Auto).await,
+        Err(haarness_core::CoreError::Conflict(_))
+    ));
     let fork = runtime
         .fork_thread(thread.id, None, None)
         .await

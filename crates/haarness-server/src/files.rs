@@ -119,6 +119,20 @@ pub(crate) fn resolve(root: &Path, value: &str, create: bool) -> Result<PathBuf,
     }
     Ok(path)
 }
+/// A symlink the explorer can open as a folder: its target is a directory
+/// inside the workspace, outside `.git`, and not the listed folder or one of
+/// its ancestors (which would loop). Dangling links stay files.
+fn browsable_link(root: &Path, listed: &Path, link: &Path) -> bool {
+    let Ok(target) = link.canonicalize() else {
+        return false;
+    };
+    target.is_dir()
+        && target.starts_with(root)
+        && !listed.starts_with(&target)
+        && !target
+            .strip_prefix(root)
+            .is_ok_and(|inside| inside.components().any(|part| part.as_os_str() == ".git"))
+}
 pub(crate) fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -145,6 +159,8 @@ pub async fn list_files(
 ) -> Result<Json<FileListing>, Failure> {
     tokio::task::spawn_blocking(move || {
         let path = resolve(&state.workspace, &query.path, false)?;
+        let listed = path.canonicalize().map_err(bad)?;
+        let root = state.workspace.canonicalize().map_err(bad)?;
         let mut entries = Vec::new();
         for entry in fs::read_dir(path).map_err(bad)? {
             let entry = entry.map_err(bad)?;
@@ -161,7 +177,8 @@ pub async fn list_files(
                     .map_err(bad)?
                     .to_string_lossy()
                     .replace('\\', "/"),
-                directory: meta.is_dir(),
+                directory: meta.is_dir()
+                    || meta.is_symlink() && browsable_link(&root, &listed, &entry.path()),
                 symlink: meta.is_symlink(),
                 size: meta.len(),
             });
@@ -406,6 +423,30 @@ mod tests {
             std::os::unix::fs::symlink(root.join(".git"), root.join("metadata")).unwrap();
             assert!(resolve(&root, "metadata", false).is_err());
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn linked_folders_inside_the_workspace_browse_as_folders() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("haarness-links-{}", uuid::Uuid::now_v7()));
+        fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let nested = root.join("src/nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir(root.join(".git")).unwrap();
+        symlink(&nested, root.join("shortcut")).unwrap();
+        symlink(&root, nested.join("loop")).unwrap();
+        symlink(root.parent().unwrap(), root.join("outside")).unwrap();
+        symlink(root.join("missing"), root.join("dangling")).unwrap();
+        symlink(root.join(".git"), root.join("metadata")).unwrap();
+        let listed = root.clone();
+        assert!(browsable_link(&root, &listed, &root.join("shortcut")));
+        assert!(!browsable_link(&root, &listed, &root.join("outside")));
+        assert!(!browsable_link(&root, &listed, &root.join("dangling")));
+        assert!(!browsable_link(&root, &listed, &root.join("metadata")));
+        // A link back to the folder being listed (or above it) stays a file.
+        assert!(!browsable_link(&root, &nested, &nested.join("loop")));
         fs::remove_dir_all(root).unwrap();
     }
 }

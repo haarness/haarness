@@ -2050,6 +2050,15 @@
             "minimum": 0,
             "type": "integer"
           },
+          "tokenAllowance": {
+            "description": "The budget the goal was set with. Resuming an exhausted goal extends\n`token_budget` by this much; older goals use their current budget.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "tokenBudget": {
             "format": "int64",
             "minimum": 0,

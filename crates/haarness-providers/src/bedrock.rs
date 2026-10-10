@@ -91,16 +91,13 @@ impl BedrockProvider {
         let models = ids
             .into_iter()
             .map(|id| {
-                let anthropic = id.contains("anthropic.claude");
                 ModelInfo {
                     display_name: id.clone(),
                     id,
-                    reasoning: anthropic,
-                    reasoning_efforts: if anthropic {
-                        ["low", "medium", "high"].map(str::to_owned).to_vec()
-                    } else {
-                        Vec::new()
-                    },
+                    // Converse requests carry no thinking settings yet, so no
+                    // reasoning level is offered that would be ignored.
+                    reasoning: false,
+                    reasoning_efforts: Vec::new(),
                     images: true,
                     video: false,
                     tools: true,
@@ -283,7 +280,13 @@ fn bedrock_request(request: ProviderRequest) -> CoreResult<Value> {
             }
         }
     }
+    let max_tokens = request
+        .parameters
+        .max_output_tokens
+        .filter(|limit| *limit > 0)
+        .unwrap_or(8192);
     let structured = request.output_schema;
+    let forced = !crate::tool_schema::refuses_forced_tool_choice(&request.model);
     let mut requested_tools = request.tools;
     // Converse hands Claude the same tool schema as the Messages API.
     crate::tool_schema::retain_claude_compatible(&request.model, &mut requested_tools);
@@ -298,11 +301,12 @@ fn bedrock_request(request: ProviderRequest) -> CoreResult<Value> {
     let mut body = json!({
         "system":[{"text":request.system}],
         "messages":messages,
-        "inferenceConfig":{"maxTokens":4096}
+        // The Anthropic adapter's default; a configured limit wins.
+        "inferenceConfig":{"maxTokens":max_tokens}
     });
     if !tools.is_empty() {
         body["toolConfig"] = json!({"tools":tools});
-        if structured.is_some() {
+        if structured.is_some() && forced {
             body["toolConfig"]["toolChoice"] = json!({"tool":{"name":STRUCTURED_OUTPUT_TOOL_NAME}});
         }
     }
@@ -658,6 +662,50 @@ mod tests {
             body["messages"][2]["content"][0]["toolResult"]["content"][1]["document"]["format"],
             "pdf"
         );
+    }
+
+    #[test]
+    fn structured_output_forces_the_tool_only_where_claude_accepts_it() {
+        let choice = |model: &str| {
+            bedrock_request(ProviderRequest {
+                model: model.into(),
+                system: "system".into(),
+                messages: vec![ProviderMessage::Text {
+                    role: "user".into(),
+                    content: "count".into(),
+                }],
+                tools: Vec::new(),
+                reasoning_effort: None,
+                parameters: haarness_core::RequestParameters::default(),
+                output_schema: Some(json!({"type":"object","properties":{"n":{"type":"integer"}}})),
+            })
+            .unwrap()["toolConfig"]
+                .get("toolChoice")
+                .cloned()
+        };
+        assert!(choice("us.anthropic.claude-sonnet-4-6-v1:0").is_some());
+        // Answers are no longer cut at 4,096 tokens; a configured limit wins.
+        let limit = |max_output_tokens| {
+            bedrock_request(ProviderRequest {
+                model: "us.anthropic.claude-sonnet-5-5-v1:0".into(),
+                system: "system".into(),
+                messages: Vec::new(),
+                tools: Vec::new(),
+                reasoning_effort: None,
+                parameters: haarness_core::RequestParameters {
+                    max_output_tokens,
+                    ..haarness_core::RequestParameters::default()
+                },
+                output_schema: None,
+            })
+            .unwrap()["inferenceConfig"]["maxTokens"]
+                .clone()
+        };
+        assert_eq!(limit(None), 8192);
+        assert_eq!(limit(Some(32_000)), 32_000);
+        // Opus/Sonnet 5.5 and Fable 5.1 answer 400 to a forced tool choice.
+        assert!(choice("us.anthropic.claude-sonnet-5-5-v1:0").is_none());
+        assert!(choice("global.anthropic.claude-opus-5-5").is_none());
     }
 
     #[test]

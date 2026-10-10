@@ -99,7 +99,7 @@ export function matchesShortcut(
   event: Pick<
     KeyboardEvent,
     "key" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey"
-  >,
+  > & { code?: string },
   value: string,
   platform: string,
 ) {
@@ -121,7 +121,10 @@ export function matchesShortcut(
     if (wants("meta") !== event.metaKey) return false;
   }
   const pressed = event.key.toLowerCase();
-  return pressed === key || (key === "space" && event.key === " ");
+  // The recorder stores letters and digits by physical key (`event.code`):
+  // with Option held macOS reports ⌥Z as "Ω", which never equals "z".
+  const physical = /^(?:Key|Digit)(.)$/.exec(event.code ?? "")?.[1]?.toLowerCase();
+  return pressed === key || physical === key || (key === "space" && event.key === " ");
 }
 
 export function shortcutLabel(value: string, platform: string) {

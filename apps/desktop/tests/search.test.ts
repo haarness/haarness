@@ -79,4 +79,10 @@ test("shortcut matching requires every modifier to agree", () => {
   assert.equal(matchesShortcut(key("k", { ctrlKey: true }), "Mod+K", "darwin"), false);
   assert.equal(matchesShortcut(key("k", { ctrlKey: true }), "Mod+K", "win32"), true);
   assert.equal(matchesShortcut(key("."), "", "darwin"), false);
+
+  // Recorded chords name the physical key: ⌥⌘Z arrives as "Ω" on macOS.
+  const optionZ = { ...key("Ω", { metaKey: true, altKey: true }), code: "KeyZ" };
+  assert.equal(matchesShortcut(optionZ, "Mod+Alt+Z", "darwin"), true);
+  assert.equal(matchesShortcut(optionZ, "Mod+Alt+X", "darwin"), false);
+  assert.equal(matchesShortcut({ ...key("¡", { altKey: true }), code: "Digit1" }, "Alt+1", "darwin"), true);
 });

@@ -8,9 +8,11 @@ Auto approves eligible permission requests **once**; it never adds an Always rul
 The mode belongs to the chat, on its server, so every client sees and applies the same one. A TUI, a second Desktop window or a phone can no longer approve a request in a chat someone set to Review, and closing a client does not turn Auto off.
 
 - A chat without its own setting is in Review. Agents a chat delegates to follow it unless they have their own setting; forks and other chats keep their own.
+- Review wins down the chain: setting a chat to Review makes its agents ask again even if one was switched to Auto on its own, and an agent under a chat set to Review cannot be switched to Auto by itself (409).
 - The server answers eligible requests in an Auto chat without showing a prompt. Requests a tool always asks about, such as starting or deleting Cloud sessions, are never eligible.
 - Turning Auto on also approves, once, the eligible requests already waiting in that chat and the agents that follow it.
-- Every client hears an `approval_mode.changed` event for the chat and for the agents that follow it.
+- Every client hears an `approval_mode.changed` event for the chat and for every agent below it, in the order the changes were made.
+- A single turn started with `autoApprove` (a schedule, `haarness run --yolo`) approves its own requests once and teaches no rule to other chats; a shared chat cannot start such a turn.
 
 API (`approval-mode.v1` in the server's capabilities):
 
@@ -22,7 +24,7 @@ Clients connected to an older server keep the earlier client-side behaviour desc
 ## Desktop
 
 - Use the shield control at the left of the composer, or search for **Enable Auto approvals** / **Switch approvals to Review**.
-- With a conversation open, the control changes that conversation's mode on its server. From a child agent view it applies only to that child and its descendants; the parent and siblings keep their mode.
+- With a conversation open, the control changes that conversation's mode on its server. From a child agent view it applies only to that child and its descendants; the parent and siblings keep their mode. A parent set to Review keeps its agents in Review.
 - On a new chat, the control sets the mode for new chats Desktop starts in that workspace/checkout. It applies to chats Desktop creates, not to chats started by the TUI, a phone or the API.
 - **Allow once + Auto** answers the visible request first and enables Auto only after the reply succeeds and the view/mode has not changed.
 - Per-conversation Auto chosen before servers kept the mode moves to the server the first time Desktop connects to one that supports it.
