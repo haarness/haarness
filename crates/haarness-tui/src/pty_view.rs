@@ -46,7 +46,14 @@ impl TerminalWorkspace {
     }
 
     pub fn remove(&mut self, id: PtyId) {
-        self.tabs.retain(|tab| tab.info.id != id);
+        let Some(index) = self.tabs.iter().position(|tab| tab.info.id == id) else {
+            return;
+        };
+        self.tabs.remove(index);
+        // A shell exiting in a tab to the left must not move the one shown.
+        if index < self.active {
+            self.active -= 1;
+        }
         self.active = self.active.min(self.tabs.len().saturating_sub(1));
     }
 
