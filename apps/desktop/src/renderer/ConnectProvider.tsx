@@ -283,6 +283,7 @@ export function ConnectProvider(props: {
     <dialog
       ref={dialog}
       class="dialog editor-dialog connect-dialog"
+      classList={{ "connect-picking": step().kind === "pick" }}
       aria-label={title()}
       onCancel={(event) => {
         event.preventDefault();
@@ -331,7 +332,7 @@ export function ConnectProvider(props: {
           />
           <div class="connect-list">
             <Show when={loading() && !catalog().length}>
-              <p class="muted">{t("Loading…")}</p>
+              <p class="muted connect-empty">{t("Loading…")}</p>
             </Show>
             <For
               each={[
@@ -370,7 +371,7 @@ export function ConnectProvider(props: {
               )}
             </For>
             <Show when={!loading() && !filtered().popular.length && !filtered().other.length}>
-              <p class="muted">{t("No provider matches that search.")}</p>
+              <p class="muted connect-empty">{t("No provider matches that search.")}</p>
             </Show>
             <Show when={local()}>
               <section>

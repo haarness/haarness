@@ -77,13 +77,30 @@ export const defaults: Preferences = {
     diff: "Mod+Shift+D",
     terminal: "Mod+J",
     browser: "Mod+Shift+B",
-    // Composer keys, matched in the window rather than by the native menu,
-    // so they may be a bare key. These mirror the TUI's agent switching.
-    agentNext: "Tab",
-    agentPrev: "Shift+Tab",
+    // Composer keys, matched while the message box has focus rather than by
+    // the native menu. The TUI switches agents with Tab, but here Tab has to
+    // keep moving keyboard focus, so the defaults are chords.
+    agentNext: "Mod+.",
+    agentPrev: "Mod+Shift+.",
   },
   language: "en",
 };
+/**
+ * Tab and Shift+Tab used to switch agents from anywhere in the window, so
+ * keyboard users could not move focus. Saved preferences still hold those old
+ * defaults; move them to the new chords, unless another shortcut took one.
+ */
+export function migrateAgentKeys(shortcuts: Preferences["shortcuts"]) {
+  const next = { ...shortcuts };
+  const taken = (value: string) =>
+    Object.values(next).some((other) => other.toLowerCase() === value.toLowerCase());
+  for (const [name, old] of [["agentNext", "Tab"], ["agentPrev", "Shift+Tab"]] as const)
+    if (next[name] === old && !taken(defaults.shortcuts[name]))
+      next[name] = defaults.shortcuts[name];
+  return next.agentNext === shortcuts.agentNext && next.agentPrev === shortcuts.agentPrev
+    ? shortcuts
+    : next;
+}
 export interface SavedServer {
   id: string;
   label: string;

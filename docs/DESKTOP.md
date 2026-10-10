@@ -218,6 +218,8 @@ Context is a snapshot taken when attached, so subsequent file edits do not silen
 
 The composer sends messages to the selected agent. Drafts and prompt history stay scoped to each project.
 
+While the message box has focus, **Command/Ctrl+.** switches to the next agent and **Command/Ctrl+Shift+.** to the previous one, and screen readers announce the new agent. Tab and Shift+Tab move keyboard focus, as everywhere in the window; Tab still accepts an open @ or / suggestion. Change either agent key in Settings → Keyboard shortcuts. Saved preferences that still hold the old Tab defaults move to the new keys once.
+
 Press Up at the beginning of the input to recall a submitted entry. Up and Down browse history from either end of a recalled entry; Down past the newest entry restores the unfinished draft. A selection, modified arrow keys, and a caret inside multiline text retain normal editing behavior. Editing recalled text starts a fresh draft. Chat history includes its attachments and file/agent context. Each workspace keeps up to 100 chat history entries across reloads. Large media entries remain available in memory but are omitted from persisted history when they exceed the 1.5 MiB history storage budget.
 
 ## Provider logos and model reasoning

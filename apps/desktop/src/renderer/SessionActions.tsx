@@ -96,10 +96,17 @@ export async function renameSession(
   app: ReturnType<typeof useApp>,
   thread: Thread,
 ) {
-  const input = await ask(t("Rename session"), [
-    { name: "title", label: t("Title"), value: thread.title, required: true },
-  ]);
+  const input = await ask(
+    t("Rename session"),
+    [{ name: "title", label: t("Title"), value: thread.title, required: true }],
+    {
+      // `required` accepts spaces, which would leave a blank row and header.
+      onSubmit: async ({ title }) => {
+        if (!title.trim()) throw new Error(t("Enter a title."));
+        await app.api("updateThread", thread.id, { title: title.trim() });
+      },
+    },
+  );
   if (!input) return;
-  await app.api("updateThread", thread.id, { title: input.title });
   await app.refresh();
 }

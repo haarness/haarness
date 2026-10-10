@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   defaults,
+  migrateAgentKeys,
   type Preferences,
   type Recent,
   type SavedServer,
@@ -20,6 +21,8 @@ interface Data {
   servers: SavedServer[];
   values: Record<string, unknown>;
   credentials: Record<string, string>;
+  /** Set once the old Tab agent keys have moved to the current defaults. */
+  agentKeysMigrated?: boolean;
 }
 let state: Data = {
   preferences: { ...defaults },
@@ -46,12 +49,18 @@ export async function load() {
   }
   const recent = migrateProjectlessLocations(state.recent);
   const servers = migrateServers(recent, state.servers);
+  const shortcuts = state.agentKeysMigrated
+    ? state.preferences.shortcuts
+    : migrateAgentKeys(state.preferences.shortcuts);
+  state.agentKeysMigrated = true;
   if (
     recent !== state.recent ||
-    JSON.stringify(servers) !== JSON.stringify(state.servers)
+    JSON.stringify(servers) !== JSON.stringify(state.servers) ||
+    shortcuts !== state.preferences.shortcuts
   ) {
     state.servers = servers;
     state.recent = recent;
+    state.preferences = { ...state.preferences, shortcuts };
     await persist();
   }
   return state;
@@ -159,8 +168,8 @@ export async function preferences(input: Partial<Preferences>) {
   )
     throw new Error("Invalid appearance setting");
   // Menu shortcuts become native accelerators, so they need a modifier and a
-  // single character. Composer shortcuts are matched in the window and may be
-  // a bare named key, which is how Tab switches agents.
+  // single character. Composer shortcuts are matched in the message box and
+  // may also be a bare named key, such as Tab for people who want the TUI's.
   const KEY = "[a-z0-9,.;/\\[\\]\\\\\\-=`]|F(?:[1-9]|1[0-9]|2[0-4])";
   const NAMED = `${KEY}|Tab|Enter|Space|Escape|Backspace|Up|Down|Left|Right`;
   const MODIFIER = "Mod|Ctrl|Alt|Shift|Meta";

@@ -90,8 +90,9 @@ test("keys translated through a variable are in the catalog", () => {
     "Commands", "Shortcuts", "Conversation actions", "Project panels",
     "Editor actions", "Review actions", "Terminal actions", "Terminals",
     "Open files", "Slash commands", "Window", "Worktree actions",
-    // Keyboard shortcut names, from the `shortcutTitles` map.
-    "Next agent", "Previous agent",
+    // Keyboard shortcut names and notes, from `shortcutTitles` and
+    // `shortcutDescriptions`.
+    "Next agent", "Previous agent", "While the message box has focus",
     "Browser", "Review", "Terminal", "Context",
     "Browse and test websites with Haarness", "Browse and edit project files",
     "Inspect changes and compare diffs", "Run commands in this project",

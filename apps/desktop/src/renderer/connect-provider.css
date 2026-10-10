@@ -6,6 +6,11 @@
   flex-direction: column;
   max-height: min(85vh, 640px);
 }
+/* The picker keeps its height while the search filters the list: a centred
+   dialog that shrank would move the search field under the typing hand. */
+.connect-dialog.connect-picking {
+  height: min(85vh, 640px);
+}
 .connect-dialog > header {
   align-items: flex-start;
   margin-bottom: var(--s4);
@@ -51,6 +56,10 @@
 }
 .connect-list .section-label {
   display: block;
+  padding: var(--s1) var(--s2);
+}
+.connect-list .connect-empty {
+  margin: 0;
   padding: var(--s1) var(--s2);
 }
 .connect-row,

@@ -1,6 +1,6 @@
 import { t } from "./i18n";
 import { Show, createSignal, onMount, type Accessor, type JSX } from "solid-js";
-import { Button, dismissOnBackdrop } from "./ui";
+import { Button, dismissOnBackdrop, focusFirstField } from "./ui";
 
 /** Preserve failed drafts and allow dismissal without waiting for pending writes. */
 export function FormDialog(props: {
@@ -19,7 +19,10 @@ export function FormDialog(props: {
   const [error, setError] = createSignal("");
   let dialog!: HTMLDialogElement;
   let alert!: HTMLParagraphElement;
-  onMount(() => dialog.showModal());
+  onMount(() => {
+    dialog.showModal();
+    focusFirstField(dialog);
+  });
   const locked = () => busy() || !!props.pending;
   const close = () => {
     if (!dialog.isConnected || !dialog.open) return;
@@ -69,9 +72,12 @@ export function FormDialog(props: {
             onClick={close}
           />
         </header>
+        {/* Clear a failed save on click, not pointerdown: dropping the alert
+            shrinks the dialog, which re-centres, so the pointer would come up
+            outside the control it pressed and the click would be lost. */}
         <fieldset
           disabled={locked()}
-          onPointerDown={() => setError("")}
+          onClick={() => setError("")}
           onKeyDown={() => setError("")}
         >
           {props.children(locked)}
