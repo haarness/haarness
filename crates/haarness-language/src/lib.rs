@@ -519,24 +519,29 @@ impl LanguageService {
         let mut result = Vec::new();
         for (id, slot) in &state.servers {
             let client = slot.client.lock().await.clone();
-            let status = match &client {
-                Some(client) => client.status.read().await.clone(),
-                None if slot.error.read().await.is_some() => "error".into(),
-                None if !executable_available(
+            // A server that is not installed is missing, whatever launching
+            // it anyway reported.
+            let missing = client.is_none()
+                && !executable_available(
                     &slot.config.command,
                     &slot.config.environment,
                     &self.workspace,
-                ) =>
-                {
-                    "missing".into()
-                }
+                );
+            let status = match &client {
+                Some(client) => client.status.read().await.clone(),
+                None if missing => "missing".into(),
+                None if slot.error.read().await.is_some() => "error".into(),
                 None => "idle".into(),
             };
             result.push(LanguageStatus {
                 id: id.clone(),
                 status,
                 extensions: slot.config.extensions.clone(),
-                error: slot.error.read().await.clone(),
+                error: if missing {
+                    None
+                } else {
+                    slot.error.read().await.clone()
+                },
             });
         }
         result
@@ -858,7 +863,13 @@ impl Client {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let mut child = command.spawn().map_err(|error| error.to_string())?;
+        let mut child = command.spawn().map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                format!("{} is not installed", config.command[0])
+            } else {
+                error.to_string()
+            }
+        })?;
         let stdin = child.stdin.take().ok_or("language server has no stdin")?;
         let stdout = child.stdout.take().ok_or("language server has no stdout")?;
         let client = Arc::new(Self {
@@ -1423,6 +1434,43 @@ mod tests {
         .await
         .expect("cancellation must not wait for an unrelated startup or shutdown");
         assert!(result.unwrap_err().contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn a_server_that_is_not_installed_reads_as_missing_after_a_launch_attempt() {
+        let workspace = std::env::temp_dir();
+        let mut lsp = LspConfig {
+            builtins: false,
+            ..LspConfig::default()
+        };
+        lsp.servers.insert(
+            "ghost".into(),
+            LspServerConfig {
+                command: vec!["haarness-test-no-such-langserver".into()],
+                extensions: vec![".ghost".into()],
+                ..LspServerConfig::default()
+            },
+        );
+        let service = LanguageService::new(workspace.clone(), lsp, FormatterConfig::default());
+        let error = service
+            .query(
+                Operation::Hover,
+                &workspace.join("a.ghost"),
+                0,
+                0,
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("haarness-test-no-such-langserver is not installed"),
+            "{error}"
+        );
+        let status = service.status().await;
+        let ghost = status.iter().find(|server| server.id == "ghost").unwrap();
+        assert_eq!(ghost.status, "missing");
+        assert_eq!(ghost.error, None);
     }
 
     #[test]

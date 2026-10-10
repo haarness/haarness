@@ -228,7 +228,10 @@ async fn per_entry_disable_and_missing_commands_fail_open() {
         tokio::fs::read_to_string(source).await.unwrap(),
         "unchanged\n"
     );
-    assert_eq!(service.status().await[0].status, "error");
+    // Trying to launch it does not turn "not installed" into a raw OS error.
+    let status = service.status().await;
+    assert_eq!(status[0].status, "missing");
+    assert_eq!(status[0].error, None);
 }
 
 #[tokio::test]
