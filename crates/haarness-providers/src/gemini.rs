@@ -234,8 +234,8 @@ impl ModelProvider for GeminiProvider {
         let key = self.resolved_api_key();
         if key.is_none() && !self.assume_authenticated && self.headers.is_empty() {
             return Err(CoreError::Provider(format!(
-                "{} isn't connected: its API key is not configured. Use /connect {} to add one.",
-                self.name, self.id
+                "{name} isn't connected: its API key is not configured. Connect {name} to add a key.",
+                name = self.name
             )));
         }
         let url = format!(

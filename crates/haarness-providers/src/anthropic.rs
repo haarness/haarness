@@ -283,8 +283,8 @@ impl ModelProvider for AnthropicProvider {
         let key = self.resolved_api_key();
         if key.is_none() && !self.assume_authenticated && self.headers.is_empty() {
             return Err(CoreError::Provider(format!(
-                "{} isn't connected: its API key is not configured. Use /connect {} to add one.",
-                self.name, self.id
+                "{name} isn't connected: its API key is not configured. Connect {name} to add a key.",
+                name = self.name
             )));
         }
         let adaptive = self
@@ -920,6 +920,30 @@ mod tests {
         assert_eq!(
             provider.endpoint,
             "https://models.example.test/anthropic/v1/messages"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_key_says_what_to_connect_in_words_every_client_can_follow() {
+        let mut provider = AnthropicProvider::for_test("http://127.0.0.1:9/messages".into());
+        provider.api_key = None;
+        let request = ProviderRequest {
+            model: "claude-test".into(),
+            system: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            reasoning_effort: None,
+            parameters: haarness_core::RequestParameters::default(),
+            output_schema: None,
+        };
+        let Err(error) = provider.stream(request, CancellationToken::new()).await else {
+            panic!("a provider without a key cannot stream");
+        };
+        // The same text reaches the TUI, Desktop and `haarness run`, so it
+        // names no client's command; Desktop's e2e matches the middle clause.
+        assert_eq!(
+            error.to_string(),
+            "provider error: Anthropic isn't connected: its API key is not configured. Connect Anthropic to add a key."
         );
     }
 
