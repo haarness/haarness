@@ -16419,7 +16419,7 @@
       },
       "PlanCode": {
         "type": "string",
-        "description": "`\"pro\" | \"power\" | \"max\" | \"ultra\"` or an enterprise code."
+        "description": "A plan in the catalogue: `\"pro\" | \"max\" | \"ultra\" | \"team\"`."
       },
       "PlanDto": {
         "type": "object",
