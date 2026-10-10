@@ -17,6 +17,24 @@ export function patchText(file: FileDiff): string {
     )
   );
 }
+/**
+ * The one span that differs between two texts, as a single replacement. An
+ * editor that applies only this keeps its cursor and scroll position when the
+ * file changes somewhere else.
+ */
+export function changedSpan(before: string, after: string) {
+  const limit = Math.min(before.length, after.length);
+  let from = 0;
+  while (from < limit && before.charCodeAt(from) === after.charCodeAt(from)) from++;
+  let end = 0;
+  while (
+    end < limit - from &&
+    before.charCodeAt(before.length - 1 - end) ===
+      after.charCodeAt(after.length - 1 - end)
+  )
+    end++;
+  return { from, to: before.length - end, insert: after.slice(from, after.length - end) };
+}
 export function lines(file: FileDiff): DiffLine[] {
   const patch = patchText(file);
   try {

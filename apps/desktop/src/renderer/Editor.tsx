@@ -30,6 +30,7 @@ import {
 } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 import { editorLanguage } from "./editor-language";
+import { changedSpan } from "./diff";
 /** Owned by an open document, so closing it releases history and scroll state. */
 export interface EditorSession {
   state?: EditorState;
@@ -220,8 +221,10 @@ export function Editor(props: {
     if (value !== editor.state.doc.toString()) {
       updating = true;
       try {
+        // Only the span that changed, so a file updated on disk elsewhere
+        // keeps the cursor and scroll position.
         editor.dispatch({
-          changes: { from: 0, to: editor.state.doc.length, insert: value },
+          changes: changedSpan(editor.state.doc.toString(), value),
         });
       } finally {
         updating = false;
