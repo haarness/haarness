@@ -1668,6 +1668,9 @@
               }
             }
           },
+          "204": {
+            "description": "No subscription: no plan yet, the trial, or a granted plan"
+          },
           "401": {
             "description": "No session or token",
             "content": {
@@ -1679,7 +1682,7 @@
             }
           },
           "404": {
-            "description": "`not_found`: no subscription, unknown account, or not a member",
+            "description": "`not_found`: unknown account, or not a member",
             "content": {
               "application/json": {
                 "schema": {
