@@ -315,6 +315,15 @@ impl ConfiguredHooks {
                 }
             }
         }
+        // Only a successful hook can approve, rewrite input or add context
+        // (Claude reads its JSON on exit 0); a crashed one may still refuse.
+        if !output.status.success() {
+            if outcome.permission != Some(PermissionDecision::Deny) {
+                outcome.permission = None;
+            }
+            outcome.updated_input = None;
+            outcome.context = None;
+        }
         // A permission deny stops the action only where the runtime reads it.
         let denied = outcome.permission == Some(PermissionDecision::Deny)
             && matches!(entry.event.as_str(), "PreToolUse" | "PermissionRequest");
@@ -1326,6 +1335,38 @@ mod tests {
             .await;
         assert_eq!(decision.permission, Some(PermissionDecision::Allow));
         assert!(decision.block.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_failed_hook_cannot_approve_or_rewrite_but_can_still_refuse() {
+        let run = |command: &str| {
+            let hooks = ConfiguredHooks::new(
+                ConfiguredHooks::parse_block(&json!({
+                    "PermissionRequest": [{"matcher": "bash", "hooks": [{"command": command}]}],
+                    "PreToolUse": [{"matcher": "Bash", "hooks": [{"command": command}]}]
+                })),
+                std::env::temp_dir(),
+            );
+            async move {
+                let permission = hooks
+                    .permission_request(
+                        ThreadId::new(),
+                        "bash",
+                        &json!({"command": "rm -rf build"}),
+                    )
+                    .await;
+                let pre = hooks
+                    .pre_tool_use(ThreadId::new(), "bash", &json!({"command": "rm -rf build"}))
+                    .await;
+                (permission, pre)
+            }
+        };
+        let (permission, pre) = run(r#"echo '{"hookSpecificOutput":{"permissionDecision":"allow","decision":{"behavior":"allow"},"updatedInput":{"command":"true"}}}'; exit 1"#).await;
+        assert_eq!(permission.permission, None);
+        assert_eq!(pre.updated_input, None);
+        assert!(permission.block.is_none() && pre.block.is_none());
+        let (permission, _) = run(r#"echo '{"hookSpecificOutput":{"decision":{"behavior":"deny","message":"no"}}}'; exit 1"#).await;
+        assert_eq!(permission.permission, Some(PermissionDecision::Deny));
     }
 
     #[tokio::test]

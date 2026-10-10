@@ -272,6 +272,9 @@ fn unpack(value: Value) -> Result<Value> {
     if let Some(error) = value.get("error") {
         bail!("extension: {error}");
     }
+    if let Some(warning) = value.get("warning").and_then(Value::as_str) {
+        tracing::warn!(warning, "extension observer failed; the hook still ran");
+    }
     value
         .get("result")
         .cloned()

@@ -103,6 +103,11 @@ impl PermissionEngine {
         self.rules.push(normalize_rule_aliases(rule));
     }
     pub fn add_repository_grant(&mut self, rule: PermissionRule) { self.repository_grants.push(normalize_rule_aliases(rule)); }
+    /// An "always" answer (this session or this workspace). It settles what
+    /// the configured rules leave as a question and never reopens their deny.
+    pub fn add_grant(&mut self, rule: PermissionRule) {
+        self.session_rules.push(normalize_rule_aliases(rule));
+    }
     pub fn add_ceiling(&mut self, rule: PermissionRule) {
         self.ceilings.push(normalize_rule_aliases(rule));
     }
@@ -110,7 +115,11 @@ impl PermissionEngine {
     /// parent's boundary as a child agent's ceiling.
     #[must_use]
     pub fn flattened_rules(&self) -> Vec<PermissionRule> {
-        self.repository_grants.iter().chain(&self.rules).chain(&self.session_rules)
+        // Configured rules last, so their deny stays final for a child too.
+        self.repository_grants
+            .iter()
+            .chain(&self.session_rules)
+            .chain(&self.rules)
             .cloned()
             .collect()
     }
@@ -146,14 +155,23 @@ impl PermissionEngine {
                 };
             }
         }
-        let matched = self
+        let configured = self
             .rules
             .iter()
-            .chain(&self.session_rules)
+            .rfind(|rule| wildcard_match(&rule.pattern, operation.as_ref()));
+        let grant = self
+            .session_rules
+            .iter()
             .rfind(|rule| wildcard_match(&rule.pattern, operation.as_ref()));
         let repository = self.repository_grants.iter().rfind(|rule| wildcard_match(&rule.pattern, operation.as_ref()));
-        // Sharing consent never reopens an explicit deny in this worktree.
-        let matched = if matched.is_none_or(|rule| rule.decision != PermissionDecision::Deny) { repository.or(matched) } else { matched };
+        // An "always" answer or sharing consent never reopens a configured
+        // deny: `always` on `git push origin` must not allow a denied
+        // `git push --force`.
+        let matched = if configured.is_none_or(|rule| rule.decision != PermissionDecision::Deny) {
+            repository.or(grant).or(configured)
+        } else {
+            configured
+        };
         Evaluation {
             decision: matched.map_or(PermissionDecision::Ask, |rule| rule.decision),
             matched: matched.map(|rule| rule.pattern.clone()),
@@ -703,6 +721,33 @@ mod tests {
             PathBuf::from(home).display()
         );
         assert_eq!(engine.evaluate(&operation), PermissionDecision::Allow);
+    }
+
+    #[test]
+    fn an_always_answer_never_reopens_a_configured_deny() {
+        let mut engine = PermissionEngine::new(vec![
+            rule("bash:*", PermissionDecision::Ask),
+            rule("bash:git push --force *", PermissionDecision::Deny),
+        ]);
+        // "Always" on `git push origin main` learns `git push *`.
+        engine.add_grant(rule("bash:git push *", PermissionDecision::Allow));
+        assert_eq!(
+            engine.evaluate("bash:git push origin main"),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            engine.evaluate("bash:git push --force origin main"),
+            PermissionDecision::Deny
+        );
+        // A child agent's boundary keeps the deny too.
+        let mut child = PermissionEngine::new(vec![rule("bash:*", PermissionDecision::Allow)]);
+        for ceiling in engine.boundary() {
+            child.add_ceiling(ceiling);
+        }
+        assert_eq!(
+            child.evaluate("bash:git push --force origin main"),
+            PermissionDecision::Deny
+        );
     }
 
     #[test]

@@ -2236,18 +2236,9 @@ async fn session_command(
             let mut payload = serde_json::to_vec_pretty(&archive)?;
             payload.push(b'\n');
             if let Some(path) = output {
-                let mut options = fs::OpenOptions::new();
-                options.write(true);
-                if force {
-                    options.create(true).truncate(true);
-                } else {
-                    options.create_new(true);
-                }
-                let mut file = options.open(&path).with_context(|| {
+                write_archive(&path, &payload, force).with_context(|| {
                     format!("failed to create session archive {}", path.display())
                 })?;
-                set_private(&file)?;
-                file.write_all(&payload)?;
                 println!(
                     "Exported {} session{} to {}{}",
                     archive.threads.len(),
@@ -6701,11 +6692,10 @@ fn runtime_config(
     if let Some(permissions) = &config.permissions {
         base_rules.extend(compile_permissions(permissions)?);
     }
-    // JSON/Claude-compat rules follow TOML rules (later files win)…
+    // JSON/Claude-compat rules follow TOML rules (later files win). Interactive
+    // "always for this workspace" approvals are grants: they answer what the
+    // rules leave as a question and never reopen a configured deny.
     base_rules.extend(json_rules);
-    // …and interactive "always for this workspace" approvals apply after all
-    // config rules, before session approvals.
-    base_rules.extend(persisted_rules);
     let defaults = config.defaults.clone().unwrap_or_default();
     let compaction = config.compaction.clone().unwrap_or_default();
     let goal_harness = config
@@ -6743,6 +6733,7 @@ fn runtime_config(
         },
         read_roots: Vec::new(),
         base_rules,
+        granted_rules: persisted_rules,
         default_agent: defaults.agent,
         default_provider: defaults.provider,
         default_model: defaults.model,
@@ -7841,12 +7832,93 @@ fn set_private(file: &fs::File) -> Result<()> {
 fn set_private(_file: &fs::File) -> Result<()> {
     Ok(())
 }
+/// Write a session archive in full or not at all: a private temporary file
+/// beside the target, then a hard link (which refuses an existing file) or,
+/// with `--force`, a rename that replaces the target itself, never a file a
+/// symlink there points to. A failed write leaves no partial archive behind.
+fn write_archive(path: &Path, payload: &[u8], force: bool) -> Result<()> {
+    let name = path
+        .file_name()
+        .context("the archive path names no file")?
+        .to_string_lossy();
+    let temporary = path.with_file_name(format!(".{name}.{}.tmp", Uuid::now_v7().simple()));
+    let result = (|| -> Result<()> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        set_private(&file)?;
+        file.write_all(payload)?;
+        file.sync_all()?;
+        drop(file);
+        if force {
+            fs::rename(&temporary, path)?;
+        } else {
+            fs::hard_link(&temporary, path).map_err(|error| {
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    anyhow::anyhow!(
+                        "{} already exists; pass --force to replace it",
+                        path.display()
+                    )
+                } else {
+                    error.into()
+                }
+            })?;
+        }
+        Ok(())
+    })();
+    let _ = fs::remove_file(&temporary);
+    result
+}
+
 fn random_token() -> String {
     format!("{}{}", Uuid::now_v7().simple(), Uuid::now_v7().simple())
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn session_archives_are_written_whole_private_and_never_through_a_link() {
+        let root = std::env::temp_dir().join(format!("haarness-archive-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("chat.json");
+        super::write_archive(&path, b"first", false).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"first");
+        let error = super::write_archive(&path, b"second", false).unwrap_err();
+        assert!(error.to_string().contains("already exists"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), b"first");
+        super::write_archive(&path, b"second", true).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"second");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            let victim = root.join("victim.txt");
+            fs::write(&victim, b"keep").unwrap();
+            let link = root.join("link.json");
+            std::os::unix::fs::symlink(&victim, &link).unwrap();
+            super::write_archive(&link, b"archive", true).unwrap();
+            assert_eq!(fs::read(&victim).unwrap(), b"keep");
+            assert_eq!(fs::read(&link).unwrap(), b"archive");
+        }
+        // No temporary file is left behind.
+        assert!(fs::read_dir(&root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn project_configuration_is_default_on_with_an_explicit_opt_out() {
         let default = super::Cli::try_parse_from(["haarness", "run", "hello"]).unwrap();

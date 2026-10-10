@@ -17,6 +17,22 @@ const ROOT_COMBINERS: [&str; 3] = ["oneOf", "anyOf", "allOf"];
 
 static WARNED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
 
+/// Claude models that answer 400 to a forced tool choice (`any` or a named
+/// tool), under any vendor prefix: `claude-opus-5-5`, `anthropic/claude-sonnet-5.5`,
+/// `us.anthropic.claude-fable-5-1-v1:0`. Structured output then relies on the
+/// runtime's request to call the tool and its corrective retry.
+pub(crate) fn refuses_forced_tool_choice(model: &str) -> bool {
+    let model = model.to_ascii_lowercase().replace('.', "-");
+    [
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-fable-5-1",
+        "claude-mythos-5-1",
+    ]
+    .iter()
+    .any(|family| model.contains(family))
+}
+
 pub(crate) fn claude_model(model: &str) -> bool {
     model.to_ascii_lowercase().contains("claude")
 }
@@ -106,6 +122,21 @@ mod tests {
         }
         for model in ["MiniMax-M3", "gpt-6.1-sol", "amazon.nova-pro-v1:0"] {
             assert!(!claude_model(model), "{model}");
+        }
+        for model in [
+            "claude-opus-5-5",
+            "anthropic/claude-sonnet-5.5",
+            "us.anthropic.claude-fable-5-1-v1:0",
+            "claude-mythos-5-1",
+        ] {
+            assert!(refuses_forced_tool_choice(model), "{model}");
+        }
+        for model in [
+            "claude-sonnet-5",
+            "anthropic/claude-haiku-5.5",
+            "gpt-6.1-sol",
+        ] {
+            assert!(!refuses_forced_tool_choice(model), "{model}");
         }
     }
 

@@ -1287,7 +1287,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
         }
         if native_json {
             body["response_format"] = json!({"type":"json_schema","json_schema":{"name":STRUCTURED_OUTPUT_TOOL_NAME,"schema":structured_output}});
-        } else if structured_output.is_some() {
+        } else if structured_output.is_some()
+            && !crate::tool_schema::refuses_forced_tool_choice(&model)
+        {
             body["tool_choice"] = json!("required");
         }
         if self.id != "perplexity"

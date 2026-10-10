@@ -127,6 +127,49 @@ async fn typed_tools_hooks_state_and_schema_use_real_bun() {
 }
 
 #[tokio::test]
+async fn a_throwing_event_observer_never_skips_or_fails_the_real_hook() {
+    let (root, config) = fixture(
+        r"
+export default () => ({apiVersion:1, name:'observer', hooks: {
+  event: () => { throw new Error('observer broke'); },
+  prompt: () => ({context:'STILL_RUNS'}),
+  chat: () => ({context:'CHAT_STILL_RUNS'}),
+  'tool.before': () => ({})
+}});
+",
+    );
+    let extensions = Extensions::load(&config, root.path()).await.unwrap();
+    let hooks = extensions.wrap_hooks(None);
+    let thread = ThreadId::new();
+    assert_eq!(
+        hooks
+            .user_prompt_submit(thread, "hello")
+            .await
+            .context
+            .as_deref(),
+        Some("STILL_RUNS")
+    );
+    assert!(
+        hooks
+            .pre_tool_use(thread, "read", &json!({"path":"a"}))
+            .await
+            .block
+            .is_none()
+    );
+    let mut request = ProviderRequest {
+        model: "fixture-model".into(),
+        system: "BASE".into(),
+        messages: vec![],
+        tools: vec![],
+        reasoning_effort: None,
+        parameters: haarness_core::RequestParameters::default(),
+        output_schema: None,
+    };
+    hooks.prepare_request(thread, &mut request).await.unwrap();
+    assert_eq!(request.system, "BASE\nCHAT_STILL_RUNS");
+}
+
+#[tokio::test]
 async fn disabled_extensions_never_execute_even_invalid_sources() {
     let config = Config {
         enabled: false,

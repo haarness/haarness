@@ -1327,8 +1327,17 @@ async fn pending_question(
 async fn start_turn(
     State(state): State<ServerState>,
     Path(id): Path<ThreadId>,
+    headers: HeaderMap,
     Json(request): Json<StartTurnRequest>,
 ) -> ApiResult<(StatusCode, Json<Turn>)> {
+    // A published chat follows its own Auto/Review setting; a remote client
+    // cannot approve a turn's requests wholesale.
+    if request.auto_approve && crate::remote_scope::root(&headers).is_some() {
+        return Err(CoreError::PermissionDenied(
+            "A shared chat cannot start a turn that approves its own requests".into(),
+        )
+        .into());
+    }
     if let Some(effort) = request.reasoning_effort.as_deref()
         && effort != "ultracode"
         && !haarness_protocol::REASONING_EFFORTS.contains(&effort)
@@ -1695,7 +1704,8 @@ fn explicit_path_suggestions(
                 return None;
             }
             let score = fuzzy_score(&name.to_ascii_lowercase(), &fragment)?;
-            let is_dir = entry.file_type().ok()?.is_dir();
+            // Follows symlinks, so a linked folder completes with its `/`.
+            let is_dir = entry.path().is_dir();
             let mut display = format!("{display_prefix}{name}");
             if is_dir && !display.ends_with('/') {
                 display.push('/');

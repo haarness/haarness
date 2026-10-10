@@ -54,6 +54,7 @@ for await (const line of lines) {
   try {
     request = JSON.parse(line);
     let result: unknown;
+    let warning: string | undefined;
     if (request.method === "load") {
       context = Object.freeze(request.context);
       const module = await import(pathToFileURL(request.source).href);
@@ -85,7 +86,12 @@ for await (const line of lines) {
     } else if (request.method === "hook") {
       if (!Object.hasOwn(CONTRACTS, request.name)) throw new Error(`Unknown hook: ${request.name}`);
       if (extension.hooks?.event && request.name !== "event") {
-        await extension.hooks.event({ type: request.name, ...request.input }, context);
+        // An observer that throws must not skip, block or fail the real hook.
+        try {
+          await extension.hooks.event({ type: request.name, ...request.input }, context);
+        } catch (error) {
+          warning = `event hook failed: ${error instanceof Error ? error.message : String(error)}`;
+        }
       }
       result = await extension.hooks?.[request.name]?.(request.input, context) ?? {};
       if (typeof result !== "object" || Array.isArray(result)) throw new Error("Hooks must return an object or nothing");
@@ -93,7 +99,7 @@ for await (const line of lines) {
     } else {
       throw new Error("Unknown host method");
     }
-    reply({ id: request.id, result });
+    reply(warning ? { id: request.id, result, warning } : { id: request.id, result });
   } catch (error) {
     reply({ id: request?.id, error: error instanceof Error ? error.message : String(error) });
   }

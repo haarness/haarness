@@ -1966,14 +1966,17 @@ impl AgentRuntime {
             for rule in self.repository_rules.lock().iter().cloned() {
                 engine.add_repository_grant(rule);
             }
+            for rule in components.config.base_rules.iter().cloned() {
+                engine.add_rule(rule);
+            }
             for rule in components
                 .config
-                .base_rules
+                .granted_rules
                 .iter()
                 .chain(self.session_rules.lock().iter())
                 .cloned()
             {
-                engine.add_rule(rule);
+                engine.add_grant(rule);
             }
             if let Some(custom) = custom {
                 for rule in custom.permissions {
@@ -3033,8 +3036,14 @@ impl AgentRuntime {
         for rule in components.config.base_rules.iter().cloned() {
             engine.add_rule(rule);
         }
-        for rule in self.session_rules.lock().iter().cloned() {
-            engine.add_rule(rule);
+        for rule in components
+            .config
+            .granted_rules
+            .iter()
+            .chain(self.session_rules.lock().iter())
+            .cloned()
+        {
+            engine.add_grant(rule);
         }
         if let Some(custom) = self.custom_agent(&thread.agent) {
             if crate::definitions::tool_override(&custom.tools, name) == Some(false) {
@@ -3577,12 +3586,25 @@ impl AgentRuntime {
             .set(id, request.mode, request.revision.as_deref())
             .await?;
         let followers = self.approval_modes.followers(id).await?;
+        let mut modes = Vec::with_capacity(followers.len());
+        for follower in &followers {
+            modes.push(if *follower == id {
+                info.clone()
+            } else {
+                self.approval_modes.effective(*follower).await?
+            });
+        }
+        let auto: Vec<ThreadId> = modes
+            .iter()
+            .filter(|mode| mode.mode == haarness_protocol::ApprovalMode::Auto)
+            .map(|mode| mode.thread_id)
+            .collect();
         let mut released = Vec::new();
         if info.mode == haarness_protocol::ApprovalMode::Auto {
             let waiting: Vec<String> = self
                 .permissions
                 .iter()
-                .filter(|entry| !entry.value().forced && followers.contains(&entry.value().thread_id))
+                .filter(|entry| !entry.value().forced && auto.contains(&entry.value().thread_id))
                 .map(|entry| entry.key().clone())
                 .collect();
             for permission_id in waiting {
@@ -3596,7 +3618,6 @@ impl AgentRuntime {
                 }
             }
         }
-        drop(gate);
         tracing::info!(
             thread = %id,
             mode = ?info.mode,
@@ -3604,22 +3625,19 @@ impl AgentRuntime {
             released = released.len(),
             "approval mode changed"
         );
+        // Published under the gate, so two quick changes reach clients in order.
         let root = self.approval_modes.root(id).await;
-        for follower in followers {
-            let current = if follower == id {
-                info.clone()
-            } else {
-                self.approval_modes.effective(follower).await?
-            };
+        for current in modes {
             self.events.publish_scoped(
                 "approval_mode.changed",
-                Some(follower),
+                Some(current.thread_id),
                 Some(root),
                 None,
                 None,
                 json!(current),
             );
         }
+        drop(gate);
         Ok(info)
     }
 
@@ -4361,8 +4379,14 @@ impl AgentRuntime {
         for rule in components.config.base_rules.iter().cloned() {
             engine.add_rule(rule);
         }
-        for rule in self.session_rules.lock().iter().cloned() {
-            engine.add_rule(rule);
+        for rule in components
+            .config
+            .granted_rules
+            .iter()
+            .chain(self.session_rules.lock().iter())
+            .cloned()
+        {
+            engine.add_grant(rule);
         }
         if let Some(custom) = self.custom_agent(agent) {
             for rule in custom.permissions {
@@ -5508,6 +5532,10 @@ impl RunnerTask {
                 .unwrap_or(crate::goal::MAX_GOAL_TURNS);
             let mut compactions_this_turn = 0_u8;
             let mut recoveries = 0_u8;
+            // Corrective rounds after a structured-output turn answered in the
+            // wrong shape: without a forced tool choice a model can reply in
+            // prose, and no provider validates the schema for us.
+            let mut structured_retries = 0_u8;
             let mut transient_retries = 0_u8;
             let mut recovering = false;
             // UserPromptSubmit hooks may block the turn or inject context.
@@ -5884,8 +5912,10 @@ impl RunnerTask {
                 );
                 let tool_round_limit_reached = max_rounds.is_some_and(|limit| tool_rounds >= limit);
                 if tool_round_limit_reached {
+                    // A user message: a trailing assistant message is a
+                    // prefill, which Claude 4.6 and later answer with a 400.
                     messages.push(ProviderMessage::Text {
-                        role: "assistant".into(),
+                        role: "user".into(),
                         content: "The configured maximum number of tool steps has been reached. Tools are disabled for this response. Summarize the work completed, explain anything unfinished, and respond to the user without calling tools.".into(),
                     });
                 }
@@ -6203,16 +6233,54 @@ impl RunnerTask {
                 self.flush_reasoning_segment(&mut reasoning).await?;
                 if blocked.is_some() {
                     self.flush_assistant_segment(&mut text, &mut goal_turn_assistant_text).await?;
-                } else if self.output_schema.is_some() {
+                } else if let Some(schema) = self.output_schema.as_ref() {
+                    // Final output alongside tool calls is premature: run the
+                    // calls and ask for the final answer again afterwards.
+                    if structured_output.is_some() && !calls.is_empty() {
+                        structured_output = None;
+                    }
                     let invalid = if !text.trim().is_empty() {
-                        Some("provider returned plain text for a structured-output turn")
-                    } else if structured_output.is_some() && !calls.is_empty() {
-                        Some("provider mixed final structured output with ordinary tool calls")
+                        Some("provider returned plain text for a structured-output turn".to_owned())
                     } else if structured_output.is_none() && calls.is_empty() {
-                        Some("model did not produce structured output")
+                        Some("model did not produce structured output".to_owned())
                     } else {
-                        None
+                        structured_output.as_ref().and_then(|value| {
+                            crate::tool_validation::validate_arguments(
+                                &crate::structured_output_tool(schema),
+                                value,
+                            )
+                            .err()
+                            .map(|error| {
+                                format!("structured output does not match the schema: {error}")
+                            })
+                        })
                     };
+                    if let Some(message) = invalid.as_ref().filter(|_| structured_retries < 2) {
+                        structured_retries += 1;
+                        self.flush_assistant_segment(&mut text, &mut goal_turn_assistant_text)
+                            .await?;
+                        self.publish_round_usage(
+                            usage,
+                            prompt_usage.clone(),
+                            &streamed,
+                            provider_id,
+                            &model,
+                        )
+                        .await?;
+                        tracing::info!(thread = %self.thread.id, attempt = structured_retries, message, "asking again for structured output");
+                        self.publish_item(ItemData::UserMessage {
+                            text: format!(
+                                "{message}. Give the final answer now as JSON matching the required \
+                                 schema (call the {} tool once when it is offered) and write no other text.",
+                                crate::STRUCTURED_OUTPUT_TOOL_NAME
+                            ),
+                            attachments: Vec::new(),
+                            queued: false,
+                            synthetic: true,
+                        })
+                        .await?;
+                        continue 'provider_round;
+                    }
                     if let Some(message) = invalid {
                         self.publish_round_usage(
                             usage,
@@ -6222,7 +6290,7 @@ impl RunnerTask {
                             &model,
                         )
                         .await?;
-                        return Err(CoreError::Provider(message.into()));
+                        return Err(CoreError::Provider(message));
                     }
                     if let Some(value) = structured_output {
                         let text = serde_json::to_string(&value).map_err(|error| {
@@ -7477,8 +7545,14 @@ impl RunnerTask {
         for rule in self.config.base_rules.iter().cloned() {
             engine.add_rule(rule);
         }
-        for rule in session_rules.iter().cloned() {
-            engine.add_rule(rule);
+        for rule in self
+            .config
+            .granted_rules
+            .iter()
+            .chain(session_rules)
+            .cloned()
+        {
+            engine.add_grant(rule);
         }
         if let Some(custom) = self.custom_agent(agent) {
             for rule in custom.permissions {
@@ -7506,16 +7580,19 @@ impl RunnerTask {
         let always_rules = plan.always_rules();
         let automatic = self.config.auto_approve || self.request.auto_approve;
         if automatic && !forced {
-            // --yolo: approve and remember, exactly as an "always" answer
-            // would, so repeated commands stay silent even mid-run.
-            let mut session = self.session_rules.lock();
-            for pattern in &always_rules {
-                session.push(PermissionRule {
-                    pattern: pattern.clone(),
-                    decision: PermissionDecision::Allow,
-                });
+            // A --yolo daemon approves and remembers, exactly as an "always"
+            // answer would, so repeated commands stay silent even mid-run. A
+            // single turn's flag (a schedule, `run --yolo`, ACP) approves once:
+            // its rules would otherwise reach every chat on this daemon.
+            if self.config.auto_approve {
+                let mut session = self.session_rules.lock();
+                for pattern in &always_rules {
+                    session.push(PermissionRule {
+                        pattern: pattern.clone(),
+                        decision: PermissionDecision::Allow,
+                    });
+                }
             }
-            drop(session);
             tracing::info!(operation, "auto-approved (--yolo)");
             return Ok(PermissionResolution {
                 allowed: true,

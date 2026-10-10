@@ -58,6 +58,7 @@ fn goal_state_unchecked(
         status: GoalStatus::Active,
         tokens_used: 0,
         token_budget,
+        token_allowance: token_budget,
         time_used_seconds: 0,
         turns_used: 0,
         created_at: now,
@@ -523,6 +524,17 @@ pub fn apply_goal_action(
         },
         GoalActionRequest::Resume => match current {
             Some(mut state) if state.status != GoalStatus::Complete => {
+                // A resumed goal gets a fresh window: the automatic
+                // continuations start over, and an exhausted token budget
+                // grows by the allowance it was set with. Otherwise the goal
+                // stops again right after the next turn.
+                state.turns_used = 0;
+                if let Some(budget) = state.token_budget
+                    && state.tokens_used >= budget
+                {
+                    let allowance = state.token_allowance.unwrap_or(budget);
+                    state.token_budget = Some(state.tokens_used.saturating_add(allowance));
+                }
                 state.status = GoalStatus::Active;
                 state.paused_reason = None;
                 state.awaiting_user_input = false;
@@ -708,6 +720,33 @@ mod tests {
         state = advance_goal_turn(state, 20);
         assert_eq!(state.status, GoalStatus::Paused);
         assert_eq!(state.turns_used, 20);
+    }
+
+    #[test]
+    fn resuming_after_a_limit_gives_a_fresh_window() {
+        // Continuation limit: resume, then the next turn continues.
+        let mut state = new_goal_state("ship", None).unwrap();
+        for _ in 0..=3 {
+            state = advance_goal_turn(state, 3);
+        }
+        assert_eq!(state.status, GoalStatus::Paused);
+        let (next, _, _) = apply_goal_action(Some(state), GoalActionRequest::Resume).unwrap();
+        let state = advance_goal_turn(next.unwrap(), 3);
+        assert_eq!(state.status, GoalStatus::Active);
+        assert_eq!(state.turns_used, 1);
+        // Token budget: resuming extends it by the allowance the goal was set with.
+        let state = new_goal_state("ship", Some(1_000)).unwrap();
+        let state = account_goal_usage(state, 1_200, 0, 0, 1);
+        assert_eq!(state.status, GoalStatus::BudgetLimited);
+        let (next, _, _) = apply_goal_action(Some(state), GoalActionRequest::Resume).unwrap();
+        let state = next.unwrap();
+        assert_eq!(state.token_budget, Some(2_200));
+        let state = account_goal_usage(state, 500, 0, 0, 1);
+        assert_eq!(state.status, GoalStatus::Active);
+        let state = account_goal_usage(state, 600, 0, 0, 1);
+        assert_eq!(state.status, GoalStatus::BudgetLimited);
+        let (next, _, _) = apply_goal_action(Some(state), GoalActionRequest::Resume).unwrap();
+        assert_eq!(next.unwrap().token_budget, Some(3_300));
     }
 
     #[test]

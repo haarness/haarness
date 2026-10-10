@@ -116,6 +116,10 @@ pub struct GoalState {
     pub tokens_used: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<u64>,
+    /// The budget the goal was set with. Resuming an exhausted goal extends
+    /// `token_budget` by this much; older goals use their current budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_allowance: Option<u64>,
     #[serde(default)]
     pub time_used_seconds: u64,
     #[serde(default)]
@@ -307,6 +311,7 @@ mod tests {
             status: GoalStatus::Active,
             tokens_used: 0,
             token_budget: None,
+            token_allowance: None,
             time_used_seconds: 0,
             turns_used: 0,
             created_at: Utc.timestamp_millis_opt(1_700_000_000_123).unwrap(),

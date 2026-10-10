@@ -50,8 +50,11 @@ pub struct RuntimeConfig {
     /// Canonical directories containing installed skill resources or owned scratch files.
     pub read_roots: Vec<std::path::PathBuf>,
     /// Ordered permission rules appended after the agent profile's defaults
-    /// and before session approvals (last match wins).
+    /// (last match wins).
     pub base_rules: Vec<PermissionRule>,
+    /// "Always for this workspace" answers. Like session approvals they settle
+    /// what the rules leave as a question and never reopen a configured deny.
+    pub granted_rules: Vec<PermissionRule>,
     pub default_agent: Option<String>,
     pub default_provider: Option<String>,
     pub default_model: Option<String>,

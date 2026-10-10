@@ -62,11 +62,14 @@ impl ApprovalModes {
     }
 
     /// The mode that applies to `id`: its own setting, else the setting of
-    /// the agent that delegated to it, else Review. Forks keep their own.
+    /// the agent that delegated to it, else Review. A Review anywhere up the
+    /// chain wins, so switching a chat to Review stops its agents' Auto too.
+    /// Forks keep their own.
     pub(crate) async fn effective(&self, id: ThreadId) -> CoreResult<ApprovalModeInfo> {
         let mut versions = Vec::new();
         let mut seen = HashSet::new();
         let mut current = Some(id);
+        let mut auto = None;
         while let Some(thread_id) = current {
             if !seen.insert(thread_id) || seen.len() > MAX_DEPTH {
                 break;
@@ -79,12 +82,37 @@ impl ApprovalModes {
             };
             let stored = self.stored(thread_id).await?;
             versions.push(format!("{thread_id}:{}", stored.revision));
-            if let Some(mode) = stored.mode {
-                return Ok(info(id, mode, thread_id, true, &versions));
+            match stored.mode {
+                Some(ApprovalMode::Review) => {
+                    return Ok(info(id, ApprovalMode::Review, thread_id, true, &versions));
+                }
+                Some(ApprovalMode::Auto) if auto.is_none() => auto = Some(thread_id),
+                _ => {}
             }
             current = if thread.is_subagent { thread.parent_id } else { None };
         }
-        Ok(info(id, ApprovalMode::Review, id, false, &versions))
+        Ok(match auto {
+            Some(source) => info(id, ApprovalMode::Auto, source, true, &versions),
+            None => info(id, ApprovalMode::Review, id, false, &versions),
+        })
+    }
+
+    /// The delegating chats above `id`, nearest first.
+    async fn ancestors(&self, id: ThreadId) -> CoreResult<Vec<ThreadId>> {
+        let mut result = Vec::new();
+        let mut current = self.repository.get_thread(id).await?;
+        while current.is_subagent && result.len() < MAX_DEPTH {
+            let Some(parent) = current.parent_id.filter(|parent| !result.contains(parent)) else {
+                break;
+            };
+            result.push(parent);
+            current = match self.repository.get_thread(parent).await {
+                Ok(thread) => thread,
+                Err(CoreError::NotFound(_)) => break,
+                Err(error) => return Err(error),
+            };
+        }
+        Ok(result)
     }
 
     pub(crate) async fn is_auto(&self, id: ThreadId) -> bool {
@@ -109,6 +137,16 @@ impl ApprovalModes {
             return Err(CoreError::Conflict(
                 "Approvals changed in another window. Refresh and try again.".into(),
             ));
+        }
+        if setting == ApprovalModeSetting::Auto {
+            for ancestor in self.ancestors(id).await? {
+                if self.stored(ancestor).await?.mode == Some(ApprovalMode::Review) {
+                    return Err(CoreError::Conflict(
+                        "The chat that started this agent is set to Review. Turn on Auto there instead."
+                            .into(),
+                    ));
+                }
+            }
         }
         let revision = self.next_revision().await?;
         let stored = Stored {
@@ -164,8 +202,9 @@ impl ApprovalModes {
         root
     }
 
-    /// Chats whose effective mode follows `id`: itself and the agents it
-    /// delegated to, recursively, unless they have their own setting.
+    /// Chats whose effective mode may change with `id`: itself and the
+    /// agents it delegated to, recursively (a Review reaches even those with
+    /// their own Auto).
     pub(crate) async fn followers(&self, id: ThreadId) -> CoreResult<Vec<ThreadId>> {
         let threads = self.repository.list_threads(true).await?;
         let mut result = vec![id];
@@ -176,7 +215,7 @@ impl ApprovalModes {
                 .iter()
                 .filter(|thread| thread.is_subagent && thread.parent_id == Some(parent))
             {
-                if !result.contains(&thread.id) && self.stored(thread.id).await?.mode.is_none() {
+                if !result.contains(&thread.id) {
                     result.push(thread.id);
                 }
             }
