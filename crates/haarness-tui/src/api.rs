@@ -17,6 +17,7 @@ use std::{
     sync::{Arc, Mutex, RwLock},
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 /// A loaded review: the files to show, plus what the server had to leave out
 /// to stay inside its bounds.
@@ -395,6 +396,7 @@ impl ApiClient {
         endpoint
             .client
             .request(method, format!("{}{path}", endpoint.base))
+            .headers(trace_headers())
     }
 
     async fn rediscover_endpoint(
@@ -1320,15 +1322,22 @@ impl ApiClient {
         id: haarness_protocol::ThreadId,
         mut request: StartTurnRequest,
     ) -> Result<Turn> {
-        request.attachments = self.attachments(request.attachments).await?;
-        Ok(self
-            .request(reqwest::Method::POST, &format!("/v1/threads/{id}/turns"))
-            .json(&request)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
+        // The server's request and turn spans join this span's trace, so one
+        // prompt is one trace from the client through every model and tool call.
+        let span = tracing::info_span!("haarness.client.turn", "otel.kind" = "client");
+        async {
+            request.attachments = self.attachments(request.attachments).await?;
+            Ok(self
+                .request(reqwest::Method::POST, &format!("/v1/threads/{id}/turns"))
+                .json(&request)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?)
+        }
+        .instrument(span)
+        .await
     }
     pub async fn execute_command(
         &self,
@@ -1752,6 +1761,29 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
             }
         });
     anyhow::bail!("HTTP {status} from {path}: {detail}")
+}
+
+/// W3C trace context for the caller's current span, so the server's spans join
+/// the client's trace. Empty when tracing is off (the global propagator is a no-op).
+fn trace_headers() -> reqwest::header::HeaderMap {
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    struct Injector<'a>(&'a mut reqwest::header::HeaderMap);
+    impl opentelemetry::propagation::Injector for Injector<'_> {
+        fn set(&mut self, key: &str, value: String) {
+            if let (Ok(name), Ok(value)) = (
+                reqwest::header::HeaderName::from_bytes(key.as_bytes()),
+                reqwest::header::HeaderValue::from_str(&value),
+            ) {
+                self.0.insert(name, value);
+            }
+        }
+    }
+    let mut headers = reqwest::header::HeaderMap::new();
+    let context = tracing::Span::current().context();
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&context, &mut Injector(&mut headers));
+    });
+    headers
 }
 
 #[cfg(test)]

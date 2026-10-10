@@ -45,6 +45,27 @@ pub enum CoreError {
     Cancelled,
 }
 
+impl CoreError {
+    /// A short, stable category for telemetry (`error.type` on spans). Never the
+    /// message: provider and tool messages can carry response bodies and paths.
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::NotFound(_) => "not_found",
+            Self::Conflict(_) => "conflict",
+            Self::PermissionDenied(_) => "permission_denied",
+            Self::PermissionRejected(_) => "permission_rejected",
+            Self::Invalid(_) => "invalid_request",
+            Self::Provider(_) => "provider_error",
+            Self::ProviderBlocked(_) => "provider_blocked",
+            Self::ProviderIncomplete(_) => "provider_incomplete",
+            Self::Storage(_) => "storage_error",
+            Self::Tool(_) => "tool_error",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 pub type CoreResult<T> = Result<T, CoreError>;
 
 #[async_trait]

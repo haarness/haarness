@@ -179,14 +179,15 @@ async fn exports_otlp_protobuf_and_continues_inbound_trace_context() {
 
     let client = reqwest::Client::new();
     let response = client
-        .get(format!("http://{server_address}/healthz"))
+        .get(format!("http://{server_address}/v1/info"))
+        .bearer_auth("otel-e2e-token")
         .header(
             "traceparent",
             "00-11111111111111111111111111111111-2222222222222222-01",
         )
         .send()
         .await
-        .expect("call instrumented health endpoint");
+        .expect("call instrumented info endpoint");
     assert_eq!(response.status(), StatusCode::OK);
     let shutdown = client
         .post(format!("http://{server_address}/v1/shutdown"))
@@ -244,6 +245,9 @@ async fn exports_otlp_protobuf_and_continues_inbound_trace_context() {
             string_attribute(&resource.attributes, "service.name").as_deref()
                 == Some("haarness-e2e")
                 && string_attribute(&resource.attributes, "service.version").is_some()
+                && string_attribute(&resource.attributes, "service.instance.id").is_some()
+                && string_attribute(&resource.attributes, "haarness.process.role").as_deref()
+                    == Some("server")
         })
     }));
     let spans = resource_spans
@@ -251,26 +255,200 @@ async fn exports_otlp_protobuf_and_continues_inbound_trace_context() {
         .flat_map(|resource| &resource.scope_spans)
         .flat_map(|scope| &scope.spans)
         .collect::<Vec<&Span>>();
-    let command_span = spans
+    // A server lives for hours; its requests are traced, not the whole process.
+    assert!(!spans.iter().any(|span| span.name.starts_with("haarness ")));
+    let info_span = spans
         .iter()
-        .find(|span| span.name == "haarness.command")
-        .expect("export haarness.command span");
+        .find(|span| span.name == "GET /v1/info")
+        .expect("export the info request's server span");
+    assert_eq!(info_span.trace_id, TRACE_ID);
+    assert_eq!(info_span.parent_span_id, PARENT_SPAN_ID);
+    assert_eq!(info_span.kind, 2, "HTTP span must have SERVER kind");
     assert_eq!(
-        string_attribute(&command_span.attributes, "haarness.command.name").as_deref(),
-        Some("serve")
+        string_attribute(&info_span.attributes, "http.route").as_deref(),
+        Some("/v1/info")
     );
-    let health_span = spans
-        .iter()
-        .find(|span| {
-            span.name == "http.request"
-                && string_attribute(&span.attributes, "url.path").as_deref() == Some("/healthz")
-        })
-        .expect("export health HTTP server span");
-    assert_eq!(health_span.trace_id, TRACE_ID);
-    assert_eq!(health_span.parent_span_id, PARENT_SPAN_ID);
-    assert_eq!(health_span.kind, 2, "HTTP span must have SERVER kind");
+    assert!(
+        attribute(&info_span.attributes, "url.path").is_none(),
+        "raw paths carry ids and share tokens"
+    );
     assert_eq!(
-        int_attribute(&health_span.attributes, "http.response.status_code"),
+        int_attribute(&info_span.attributes, "http.response.status_code"),
         Some(200)
     );
+}
+
+/// An isolated `haarness` invocation: its own HOME and data dir, no OTEL
+/// settings from the developer's shell, and the scripted echo provider.
+fn isolated(directory: &Path, workspace: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_haarness"));
+    command
+        .arg("--workspace")
+        .arg(workspace)
+        .arg("--data-dir")
+        .arg(directory.join("data"))
+        .current_dir(workspace)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", directory.join("home"))
+        .env("XDG_CONFIG_HOME", directory.join("xdg-config"))
+        .env("XDG_DATA_HOME", directory.join("xdg-data"))
+        .env("XDG_CACHE_HOME", directory.join("xdg-cache"))
+        .env("HAARNESS_HOME", directory.join("haarness-home"))
+        .env("HAARNESS_TEST_PROVIDER", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    command
+}
+
+async fn mock_collector() -> (SocketAddr, CollectorState, tokio::task::JoinHandle<()>) {
+    let state = CollectorState::default();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock OTLP collector");
+    let address = listener.local_addr().expect("collector address");
+    let router = Router::new()
+        .route("/v1/traces", post(collect_traces))
+        .with_state(state.clone());
+    let task = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    (address, state, task)
+}
+
+fn exported_spans(state: &CollectorState) -> Vec<Span> {
+    state
+        .exports
+        .lock()
+        .expect("collector state lock")
+        .iter()
+        .flat_map(|export| {
+            ExportTraceServiceRequest::decode(export.body.as_slice())
+                .expect("decode OTLP protobuf export")
+                .resource_spans
+        })
+        .flat_map(|resource| resource.scope_spans)
+        .flat_map(|scope| scope.spans)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_run_is_one_trace_with_errors_usage_and_no_content() {
+    let (collector, state, collector_task) = mock_collector().await;
+    let directory = TestDirectory::new();
+    let workspace = directory.0.join("workspace");
+    std::fs::create_dir_all(&workspace).expect("create workspace");
+    std::fs::write(workspace.join("README.md"), "# readme\n").expect("write readme");
+    let otel = [
+        ("OTEL_EXPORTER_OTLP_ENDPOINT", format!("http://{collector}")),
+        ("OTEL_EXPORTER_OTLP_HEADERS", "x-collector-key=SENTINEL_KEY".to_owned()),
+        ("OTEL_BSP_SCHEDULE_DELAY", "25".to_owned()),
+    ];
+    let prompt = r#"!multi [{"name":"read","arguments":{"path":"README.md"}},{"name":"read","arguments":{"path":"SENTINEL_MISSING.txt"}},{"name":"bash","arguments":{"command":"printenv > env.txt"}},{"name":"task","arguments":{"description":"child","prompt":"SENTINEL_CHILD","agent":"general"}}]"#;
+    let output = timeout(
+        Duration::from_secs(60),
+        isolated(&directory.0, &workspace)
+            .envs(otel.clone())
+            .args(["--yolo", "run", "--provider", "echo", "--model", "echo-1", prompt])
+            .output(),
+    )
+    .await
+    .expect("haarness run finished within a minute")
+    .expect("run haarness");
+    // The run's daemon flushes its spans when it stops.
+    let _ = timeout(
+        Duration::from_secs(30),
+        isolated(&directory.0, &workspace)
+            .envs(otel)
+            .args(["serve", "--stop"])
+            .output(),
+    )
+    .await;
+    collector_task.abort();
+    assert!(
+        output.status.success(),
+        "run failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Commands the agent runs never see the collector key or the server's credentials.
+    let environment = std::fs::read_to_string(workspace.join("env.txt")).expect("read env.txt");
+    assert!(!environment.contains("OTEL_"), "{environment}");
+    assert!(!environment.contains("HAARNESS_SERVER_"), "{environment}");
+
+    let spans = exported_spans(&state);
+    let named = |name: &'static str| spans.iter().filter(move |span| span.name == name);
+    let command = named("haarness run").next().expect("command span");
+    let in_run = |span: &&Span| span.trace_id == command.trace_id;
+    let parent_of = |span: &Span| {
+        spans
+            .iter()
+            .find(|candidate| candidate.span_id == span.parent_span_id)
+            .map(|parent| parent.name.as_str())
+    };
+    let root_turn = named("invoke_agent build").next().expect("root agent turn");
+    assert!(in_run(&root_turn), "the turn joins the command's trace");
+    assert_eq!(parent_of(root_turn), Some("start_turn"));
+    let request = spans
+        .iter()
+        .find(|span| span.name == "POST /v1/threads/{id}/turns")
+        .expect("turn request span");
+    assert_eq!(parent_of(request), Some("haarness.client.turn"));
+    let tools: Vec<&Span> = named("execute_tool read").collect();
+    assert_eq!(tools.len(), 2);
+    assert!(tools.iter().all(|tool| in_run(tool) && parent_of(tool) == Some("invoke_agent build")));
+    let failed = tools
+        .iter()
+        .find(|tool| tool.status.as_ref().is_some_and(|status| status.code == 2))
+        .expect("the missing file's read is a failed span");
+    assert_eq!(
+        string_attribute(&failed.attributes, "error.type").as_deref(),
+        Some("tool_error")
+    );
+    let child = named("invoke_agent general").next().expect("subagent turn");
+    assert!(in_run(&child));
+    assert_eq!(parent_of(child), Some("execute_tool task"));
+    let chat = named("chat echo-1").next().expect("model request span");
+    assert!(int_attribute(&chat.attributes, "gen_ai.usage.input_tokens").is_some());
+    assert!(int_attribute(&chat.attributes, "gen_ai.usage.output_tokens").is_some());
+
+    // Polling reads stay out of traces, and nothing the person wrote leaves with one.
+    assert!(!spans.iter().any(|span| span.name == "GET /v1/turns/{id}"));
+    let exported = format!("{spans:?}");
+    for sentinel in ["SENTINEL_KEY", "SENTINEL_MISSING", "SENTINEL_CHILD", "README.md", "printenv"] {
+        assert!(!exported.contains(sentinel), "{sentinel} was exported");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settings_haarness_cannot_use_never_fail_a_command() {
+    let directory = TestDirectory::new();
+    let workspace = directory.0.join("workspace");
+    std::fs::create_dir_all(&workspace).expect("create workspace");
+    for (name, value) in [
+        ("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc"),
+        ("OTEL_TRACES_SAMPLER", "bogus"),
+        ("OTEL_TRACES_SAMPLER_ARG", "2"),
+        ("OTEL_PROPAGATORS", "b3"),
+        ("OTEL_EXPORTER_OTLP_COMPRESSION", "zstd"),
+        ("OTEL_EXPORTER_OTLP_ENDPOINT", "not-a-url"),
+    ] {
+        let mut command = isolated(&directory.0, &workspace);
+        if name != "OTEL_EXPORTER_OTLP_ENDPOINT" {
+            command.env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:9");
+            command.env("OTEL_EXPORTER_OTLP_TIMEOUT", "200");
+        }
+        let output = command
+            .env(name, value)
+            .arg("agents")
+            .output()
+            .await
+            .expect("run haarness agents");
+        assert!(
+            output.status.success(),
+            "{name}={value} failed the command:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

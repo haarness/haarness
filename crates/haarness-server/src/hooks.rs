@@ -180,6 +180,9 @@ impl ConfiguredHooks {
             command.args(entry.args.iter().map(|arg| expand(arg)));
             command
         };
+        for name in haarness_core::private_env_names() {
+            command.env_remove(name);
+        }
         command
             .current_dir(&self.workspace)
             .env("HAARNESS_PROJECT_DIR", &self.workspace)

@@ -18,11 +18,13 @@ impl Drop for ProcessGroup {
 }
 
 /// `env` adds or overrides variables for this one invocation (`shell.env`
-/// hooks); the parent environment is otherwise inherited unchanged.
+/// hooks); the parent environment is otherwise inherited, minus the server's
+/// private variables (`haarness_core::private_env_names`).
 pub(crate) async fn run(command: &str, workdir: &Path, timeout_ms: u64, cancel: &CancellationToken, directory: &Path, env: &BTreeMap<String, String>) -> CoreResult<ToolOutput> {
     let error = |e: std::io::Error| CoreError::Tool(e.to_string());
     let mut command = haarness_ripgrep::shell_command(command).map_err(error)?;
     command.current_dir(workdir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    for name in haarness_core::private_env_names() { command.env_remove(name); }
     command.envs(env.iter().filter(|(key, value)| !key.is_empty() && !key.contains(['=', '\0']) && !value.contains('\0')));
     #[cfg(unix)]
     { use std::os::unix::process::CommandExt; command.process_group(0); }

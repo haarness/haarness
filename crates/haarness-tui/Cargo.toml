@@ -17,6 +17,7 @@ futures.workspace = true
 haarness-opentui = { path = "../haarness-opentui" }
 haarness-protocol = { path = "../haarness-protocol" }
 haarness-account = { path = "../haarness-account" }
+opentelemetry.workspace = true
 pulldown-cmark.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -29,6 +30,7 @@ tokio-tungstenite.workspace = true
 tokio-util.workspace = true
 toml.workspace = true
 tracing.workspace = true
+tracing-opentelemetry.workspace = true
 unicode-width.workspace = true
 url.workspace = true
 uuid.workspace = true

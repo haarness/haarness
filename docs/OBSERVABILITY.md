@@ -21,27 +21,61 @@ Use `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` when the complete traces URL should be 
 - `OTEL_BSP_SCHEDULE_DELAY`, `OTEL_BSP_EXPORT_TIMEOUT`, `OTEL_BSP_MAX_QUEUE_SIZE`, and `OTEL_BSP_MAX_EXPORT_BATCH_SIZE`
 - `OTEL_TRACES_SAMPLER` and `OTEL_TRACES_SAMPLER_ARG`
 
-Supported sampler names are `always_on`, `always_off`, `traceidratio`, `parentbased_always_on`, `parentbased_always_off`, and `parentbased_traceidratio`. The default is `parentbased_always_on`. Set `OTEL_SDK_DISABLED=true` to disable export even when an endpoint remains in the environment.
+Supported sampler names are `always_on`, `always_off`, `traceidratio`, `parentbased_always_on`, `parentbased_always_off`, and `parentbased_traceidratio`. The default is `parentbased_always_on`. `OTEL_PROPAGATORS` accepts `tracecontext` (the default), `baggage` and `none`. `OTEL_EXPORTER_OTLP_COMPRESSION=gzip` compresses exports. Set `OTEL_SDK_DISABLED=true` to disable export even when an endpoint remains in the environment.
 
-Haarness deliberately rejects configured `grpc` or `http/json` protocols because this binary ships only the `http/protobuf` transport. It fails during startup rather than silently sending with a different protocol.
+A setting Haarness cannot use never fails a command, because shells often set `OTEL_*` variables for other tools. Haarness reports it and carries on: on a terminal it prints a `haarness:` line on stderr, and it always writes a warning to the log.
+
+| Setting | What happens |
+| --- | --- |
+| `grpc` or `http/json` protocol | Exports with http/protobuf (the only transport this binary ships) |
+| Unknown sampler or a ratio outside 0–1 | Uses `parentbased_always_on` or a ratio of 1 |
+| Unknown propagator (`b3`, `jaeger`, `xray`) | Ignored; `tracecontext` and `baggage` still work |
+| An endpoint that is not an `http(s)` URL with a host | Trace export stays off |
+| Anything the exporter rejects (an unsupported compression, malformed headers) | Trace export stays off, with the exporter's reason |
+
+When the collector cannot be reached or refuses an export, the SDK's error is written to the log, and a command on a terminal ends with `haarness: traces could not be exported: …`. A command that ran out of time flushing says the last spans may be missing.
 
 `HAARNESS_LOG` and `RUST_LOG` continue to control file/stderr logs. They do not suppress OTLP spans. Use `HAARNESS_OTEL_FILTER` for an independent `tracing-subscriber` filter; its default records `info` and above for Haarness crates and `warn` and above elsewhere.
 
+### The server keeps the settings it started with
+
+Clients reuse the project's running server (daemon), and an OTLP exporter cannot be reconfigured in a running process. The server records the endpoint it exports to in its discovery file. When a command with an endpoint configured reuses a server that exports elsewhere, or not at all, it says so once and names the fix: `haarness serve --stop`, then run the command again. Haarness never restarts the server for you, since that would cancel turns other windows are running. The reverse also holds: a server started with OTEL settings (for example by a Desktop launched from such a shell) keeps exporting for every client until it stops.
+
 ## Span contract
 
-The exported resource includes `service.name`, `service.version`, the OpenTelemetry SDK attributes, and configured `OTEL_RESOURCE_ATTRIBUTES`. The primary spans are:
+The exported resource includes `service.name` (from `OTEL_SERVICE_NAME`, else `service.name` in `OTEL_RESOURCE_ATTRIBUTES`, else `haarness`), `service.version`, `service.instance.id` (random per process), `process.pid`, `process.executable.name`, `haarness.process.role` (`cli`, `tui` or `server`), the OpenTelemetry SDK attributes and the rest of `OTEL_RESOURCE_ATTRIBUTES`.
 
-- `haarness.command`: one process-level command, including the command name and workspace ID.
-- `http.request`: server requests with W3C `traceparent`/`tracestate` extraction, method, path without query parameters, response status, and server span kind.
-- `agent.turn`: a durable agent turn with thread/turn IDs, agent, provider/model, and child depth.
-- `provider.request`: provider stream latency with provider/model and agent identifiers.
-- `tool.call`: tool latency with tool name/call ID and agent identifiers.
+One `haarness run` is one trace. The CLI and the TUI send W3C `traceparent` with every request to the server, and the server keeps that context across the background work a request starts:
 
-Existing structured `tracing` events emitted inside those spans are available as span events. The batch processor is flushed during ordinary process shutdown, including graceful `serve` shutdown.
+```text
+haarness run                                  INTERNAL  CLI process
+├─ POST /v1/threads                           SERVER
+└─ haarness.client.turn                       CLIENT
+   └─ POST /v1/threads/{id}/turns             SERVER
+      └─ start_turn
+         └─ invoke_agent build                agent.turn
+            ├─ chat {model}                   provider.request, CLIENT
+            ├─ execute_tool read              tool.call
+            ├─ execute_tool task              tool.call
+            │  └─ invoke_agent general        the subagent's turn
+            │     └─ chat {model}
+            └─ chat {model}
+```
+
+- `haarness.command` (named `haarness <command>`): one finite command, with `haarness.command.name` and `haarness.workspace.id`. Long-lived processes (`serve`, the TUI, `attach`, `desktop`, `acp`, `remote`) have no command span: a span lasting hours is lost when the process is killed. Their traces start per request; the TUI adds a `haarness.client.turn` span when it sends a prompt.
+- `http.request` (named `{METHOD} {route}`): server requests, including remote host routes, with `traceparent`/`tracestate` extraction, `http.request.method`, `http.route` (the route template, never the raw path, which carries ids and share tokens), `http.response.status_code` and server span kind. 5xx responses are errors. Polling reads (`GET /v1/turns/{id}`, `/v1/questions`, `/v1/permissions`, `/v1/turns/active`, `/v1/events` and `/healthz`) are debug-level, so the default filter leaves them out.
+- `agent.turn` (named `invoke_agent {agent}`): one agent turn, with `gen_ai.agent.name`, `gen_ai.conversation.id` (the chat), `haarness.turn.id`, `gen_ai.provider.name`, `gen_ai.request.model` and `haarness.agent.depth` (0 for the chat's own agent).
+- `provider.request` (named `chat {model}`): one model request, with `gen_ai.*` provider and model, `gen_ai.response.finish_reasons`, and the integer token counts `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens` and `gen_ai.usage.cache_creation.input_tokens`. Each retry is its own span.
+- `tool.call` (named `execute_tool {tool}`): one tool call, with `gen_ai.tool.name` and `gen_ai.tool.call.id`. Parallel reads and `task` calls stay under their turn; a `task` call's subagent turn is its child.
+- `workflow.run`, `chat.title` and `context.compact`: a workflow run, chat titling and context summarization, each in the trace that started it.
+
+A failed turn, model request or tool call has status ERROR with `error.type` set to a stable category (`provider_error`, `provider_blocked`, `provider_incomplete`, `tool_error`, `permission_denied`, …). The error message is not exported. A stop the person asked for is not an error.
+
+The batch processor is flushed during ordinary process shutdown, including graceful `serve` shutdown.
 
 ## Diagnostic log lines
 
-These lines are designed to be safe to keep in daemon logs and span events:
+These lines are designed to be safe to keep in daemon logs (they are not exported with traces):
 
 - `hook command failed` (WARN): a hook exited non-zero (other than a clean exit-2 block) or was killed, including `async` hooks. Fields: `event`, `tool` when the event has one, `program`, `code` or `signal`, `asynchronous`, and the start of `stderr` (up to 300 characters). Such a failure never blocks the action.
 - `hook blocked` (INFO): exactly once per block from `PreToolUse`, `PermissionRequest` or `UserPromptSubmit`, whether by exit code 2, a JSON `block`/`continue: false`, or a permission `deny`. Fields: `event`, `tool`, `program`, `code` and the first line of the `reason` (up to 200 characters). A block from a command that also failed logs both lines. Observational events cannot block, so their block answers log only at DEBUG.
@@ -56,9 +90,11 @@ These lines are designed to be safe to keep in daemon logs and span events:
 
 ## Data handling
 
-The instrumentation does not add prompts, model responses, tool arguments, tool output, HTTP headers, bearer tokens, or OTLP authorization headers as span attributes. Existing structured log events can become span events and may contain the same operational paths and error messages already admitted to Haarness logs. Protect collector access and retention accordingly.
+Spans carry no prompts, model responses, tool arguments, tool output, file paths, HTTP headers, bearer tokens or OTLP authorization headers. Log lines are not exported with traces: their fields can hold provider error bodies, approval prompts, paths and client addresses, so they stay in the local log files. Only events written for traces (target `haarness::trace`: `child agent spawned`, and `retrying provider request` with the attempt and error category) become span events.
 
-The integration test launches the real `haarness serve` executable, sends a request with a fixed W3C parent, shuts the server down through its authenticated API, decodes the exported protobuf in a local mock collector, and verifies resource metadata, batching/flush, exporter headers, HTTP status, and trace/parent IDs:
+Processes the server starts for the agent, terminals, hooks, MCP servers and extensions do not inherit `OTEL_*` variables or the server's own credentials (`HAARNESS_SERVER_TOKEN`, `HAARNESS_SERVER_PASSWORD`, `HAARNESS_SERVER_USERNAME`). `OTEL_EXPORTER_OTLP_HEADERS` usually holds a collector key, and instrumented programs would otherwise export into your collector. Set a variable explicitly where a command needs it (a `shell.env` hook, or an MCP server's `env`).
+
+The integration tests run the real executable against a mock collector and decode the exported protobuf. They check that a server request continues a W3C parent, with resource metadata, exporter headers, route and status. They check that one `haarness run` with tools, a failing tool and a subagent is a single trace with the tree above, error status, integer token usage, no polling spans and no prompt, path or collector key. And they check that unusable settings never fail a command:
 
 ```sh
 cargo test -p haarness-cli --test otel_e2e

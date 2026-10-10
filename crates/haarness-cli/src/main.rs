@@ -14,6 +14,7 @@ mod jsonconfig;
 mod layout;
 mod management;
 mod memory_settings;
+mod otel;
 mod plugins;
 mod profile;
 mod remote;
@@ -50,13 +51,8 @@ use haarness_store::SqliteStore;
 use haarness_workflow_catalog::WorkflowCatalog;
 use haarness_workflows::{ExecutorConfig, WorkflowCoordinator, WorkflowExecutor};
 use haarness_workspaces::WorkspaceManager;
-use opentelemetry::{KeyValue, global, trace::TracerProvider as _};
-use opentelemetry_otlp::{Protocol, WithExportConfig as _};
-use opentelemetry_sdk::{
-    Resource,
-    propagation::TraceContextPropagator,
-    trace::{Sampler, SdkTracerProvider},
-};
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
@@ -1071,11 +1067,32 @@ async fn main() -> Result<()> {
     let stderr_logs = cli.print_logs || matches!(cli.command, Some(Command::Serve(_)));
     // Read-only commands stay out of the log files they inspect.
     let file_logs = !matches!(cli.command, Some(Command::Logs { .. } | Command::Doctor));
+    // Processes that live as long as a window or a server get no command span:
+    // one span lasting hours is lost when the process is killed, and every
+    // request would nest under it. Their traces start per request instead.
+    let long_running = matches!(
+        cli.command,
+        None | Some(
+            Command::Tui(_)
+                | Command::Attach(_)
+                | Command::Serve(_)
+                | Command::Desktop
+                | Command::Acp(_)
+                | Command::Remote(_)
+        )
+    );
+    let role = match &cli.command {
+        Some(Command::Serve(_)) => otel::ProcessRole::Server,
+        None | Some(Command::Tui(_) | Command::Attach(_)) => otel::ProcessRole::Tui,
+        _ => otel::ProcessRole::Cli,
+    };
     let telemetry_guard = init_logging(
         &base_paths,
         cli.log_level.as_deref(),
         stderr_logs,
         file_logs,
+        role,
+        !long_running && io::stderr().is_terminal(),
     )?;
     let command_name = cli.command.as_ref().map_or("tui", Command::name);
     let workspace = cli
@@ -1088,11 +1105,16 @@ async fn main() -> Result<()> {
         .map_err(anyhow::Error::new)?;
     let migrate_legacy = workspace_manager.registered_count()? == 1;
     let paths = base_paths.scoped(&current_workspace.id, migrate_legacy)?;
-    let command_span = tracing::info_span!(
-        "haarness.command",
-        "haarness.command.name" = command_name,
-        "workspace.id" = %current_workspace.id,
-    );
+    let command_span = if long_running {
+        tracing::Span::none()
+    } else {
+        tracing::info_span!(
+            "haarness.command",
+            "otel.name" = format!("haarness {command_name}"),
+            "haarness.command.name" = command_name,
+            "haarness.workspace.id" = %current_workspace.id,
+        )
+    };
     let outcome = async {
         tracing::info!(
             version = env!("CARGO_PKG_VERSION"),
@@ -3110,6 +3132,7 @@ async fn serve_command(
             workspace: Some(workspace.display().to_string()),
             executable_fingerprint: Some(current_executable_fingerprint()?),
             access_fingerprint,
+            trace_endpoint: otel::configured_endpoint(),
         },
     )?;
     if !args.background_child {
@@ -6872,14 +6895,27 @@ fn plugin_command(
 struct TelemetryGuard {
     _file_writer: Option<tracing_appender::non_blocking::WorkerGuard>,
     tracer_provider: Option<SdkTracerProvider>,
+    /// Telemetry problems are also printed on stderr (a CLI command on a terminal).
+    interactive: bool,
 }
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
-        if let Some(provider) = &self.tracer_provider
-            && let Err(error) = provider.shutdown()
+        let Some(provider) = &self.tracer_provider else {
+            return;
+        };
+        let shutdown = otel::shutdown(provider);
+        // An export the SDK already gave up on explains missing spans better
+        // than the shutdown result, which only covers the final flush.
+        for notice in otel::take_export_failure()
+            .map(|failure| format!("traces could not be exported: {failure}"))
+            .into_iter()
+            .chain(shutdown)
         {
-            eprintln!("failed to flush OpenTelemetry traces: {error}");
+            tracing::warn!("{notice}");
+            if self.interactive {
+                eprintln!("haarness: {notice}");
+            }
         }
     }
 }
@@ -6892,8 +6928,11 @@ fn init_logging(
     level: Option<&str>,
     stderr_logs: bool,
     file_logs: bool,
+    role: otel::ProcessRole,
+    interactive: bool,
 ) -> Result<TelemetryGuard> {
     use tracing_subscriber::Layer as _;
+    use tracing_subscriber::filter::FilterExt as _;
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
     let log_filter = match level {
@@ -6927,100 +6966,44 @@ fn init_logging(
                 .with_filter(log_filter),
         ));
     }
-    let tracer_provider = init_tracer_provider()?;
+    let otel::Tracing {
+        provider: tracer_provider,
+        notices,
+    } = otel::tracer_provider(role);
     if let Some(provider) = &tracer_provider {
         let telemetry_filter = EnvFilter::try_from_env("HAARNESS_OTEL_FILTER")
             .unwrap_or_else(|_| EnvFilter::new(haarness_filter("info")));
+        // Spans follow the filter; only events written for traces become span
+        // events (see `haarness_core::TRACE_EVENT_TARGET`).
+        let exported = tracing_subscriber::filter::filter_fn(|metadata| {
+            !metadata.is_event() || metadata.target() == otel::TRACE_EVENT_TARGET
+        });
         let tracer = provider.tracer("haarness");
         layers.push(Box::new(
             tracing_opentelemetry::layer()
                 .with_tracer(tracer)
                 .with_location(true)
-                .with_threads(true)
-                .with_filter(telemetry_filter),
+                // OS thread ids mean nothing for async work and read like a chat id.
+                .with_threads(false)
+                .with_filter(telemetry_filter.and(exported)),
         ));
+        layers.push(Box::new(otel::ExportFailureWatch));
     }
     tracing_subscriber::registry()
         .with(layers)
         .try_init()
         .context("initialize tracing subscriber")?;
+    for notice in &notices {
+        tracing::warn!("{notice}");
+        if interactive {
+            eprintln!("haarness: {notice}");
+        }
+    }
     Ok(TelemetryGuard {
         _file_writer: file_writer_guard,
         tracer_provider,
+        interactive,
     })
-}
-
-fn init_tracer_provider() -> Result<Option<SdkTracerProvider>> {
-    if std::env::var("OTEL_SDK_DISABLED").is_ok_and(|value| value.eq_ignore_ascii_case("true"))
-        || ![
-            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-            "OTEL_EXPORTER_OTLP_ENDPOINT",
-        ]
-        .into_iter()
-        .any(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()))
-    {
-        return Ok(None);
-    }
-
-    let protocol = std::env::var("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL")
-        .ok()
-        .or_else(|| std::env::var("OTEL_EXPORTER_OTLP_PROTOCOL").ok());
-    if let Some(protocol) = protocol
-        && !protocol.eq_ignore_ascii_case("http/protobuf")
-    {
-        anyhow::bail!(
-            "unsupported OTLP trace protocol {protocol:?}; Haarness supports http/protobuf"
-        );
-    }
-
-    let exporter = opentelemetry_otlp::SpanExporter::builder()
-        .with_http()
-        .with_protocol(Protocol::HttpBinary)
-        .build()
-        .context("configure OTLP trace exporter")?;
-    let service_name = std::env::var("OTEL_SERVICE_NAME")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "haarness".to_owned());
-    let resource = Resource::builder()
-        .with_service_name(service_name)
-        .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")))
-        .build();
-    let provider = SdkTracerProvider::builder()
-        .with_sampler(otel_sampler_from_env()?)
-        .with_resource(resource)
-        .with_batch_exporter(exporter)
-        .build();
-    global::set_text_map_propagator(TraceContextPropagator::new());
-    global::set_tracer_provider(provider.clone());
-    Ok(Some(provider))
-}
-
-fn otel_sampler_from_env() -> Result<Sampler> {
-    let configured = std::env::var("OTEL_TRACES_SAMPLER")
-        .unwrap_or_else(|_| "parentbased_always_on".to_owned())
-        .to_ascii_lowercase();
-    let ratio = || -> Result<f64> {
-        let value = std::env::var("OTEL_TRACES_SAMPLER_ARG")
-            .unwrap_or_else(|_| "1.0".to_owned())
-            .parse::<f64>()
-            .context("OTEL_TRACES_SAMPLER_ARG must be a number between 0 and 1")?;
-        if !(0.0..=1.0).contains(&value) {
-            anyhow::bail!("OTEL_TRACES_SAMPLER_ARG must be between 0 and 1");
-        }
-        Ok(value)
-    };
-    match configured.as_str() {
-        "always_on" => Ok(Sampler::AlwaysOn),
-        "always_off" => Ok(Sampler::AlwaysOff),
-        "traceidratio" => Ok(Sampler::TraceIdRatioBased(ratio()?)),
-        "parentbased_always_on" => Ok(Sampler::ParentBased(Box::new(Sampler::AlwaysOn))),
-        "parentbased_always_off" => Ok(Sampler::ParentBased(Box::new(Sampler::AlwaysOff))),
-        "parentbased_traceidratio" => Ok(Sampler::ParentBased(Box::new(
-            Sampler::TraceIdRatioBased(ratio()?),
-        ))),
-        _ => anyhow::bail!("unsupported OTEL_TRACES_SAMPLER value {configured:?}"),
-    }
 }
 
 /// `warn` globally, the chosen level for every haarness crate.
@@ -7280,6 +7263,10 @@ struct RuntimeDiscovery {
     executable_fingerprint: Option<String>,
     #[serde(default)]
     access_fingerprint: Option<String>,
+    /// The OTLP traces endpoint the daemon exports to, if any. A client reusing
+    /// the daemon with different OTEL settings is told its spans go elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trace_endpoint: Option<String>,
 }
 #[derive(Clone, Debug)]
 struct LiveWorkspaceServer {
@@ -7600,6 +7587,30 @@ async fn ensure_workspace_server(
     .await
 }
 
+/// The daemon keeps the OTEL settings it started with. A client that asks for
+/// trace export and reuses a daemon exporting elsewhere (or nowhere) is told
+/// so; restarting the daemon would cancel turns other windows may be running.
+fn warn_trace_endpoint_mismatch(discovery: &RuntimeDiscovery) {
+    let Some(wanted) = otel::configured_endpoint() else {
+        return;
+    };
+    if discovery.trace_endpoint.as_deref() == Some(wanted.as_str()) {
+        return;
+    }
+    let current = discovery.trace_endpoint.as_deref().map_or_else(
+        || "does not export traces".to_owned(),
+        |endpoint| format!("exports traces to {endpoint}"),
+    );
+    let notice = format!(
+        "the Haarness server already running for this project (pid {}) {current}, so its spans will not reach {wanted}. Stop it with `haarness serve --stop` and run again to apply your OTEL settings.",
+        discovery.pid
+    );
+    tracing::warn!("{notice}");
+    if io::stderr().is_terminal() {
+        eprintln!("haarness: {notice}");
+    }
+}
+
 async fn ensure_workspace_server_at(
     paths: &Paths,
     workspace: &Path,
@@ -7640,6 +7651,7 @@ async fn ensure_workspace_server_at(
                 live.info.project_trusted == Some(trust),
                 "The configured server uses different project configuration settings. Restart it with the desired --disable-project-config setting before connecting."
             );
+            warn_trace_endpoint_mismatch(&live.discovery);
             return Ok(live.discovery);
         }
         if let Some(reason) = local_server_compatibility_error(&live).or_else(|| {
@@ -7648,6 +7660,7 @@ async fn ensure_workspace_server_at(
         }) {
             replace_incompatible_workspace_server(paths, workspace, live, &reason).await?;
         } else {
+            warn_trace_endpoint_mismatch(&live.discovery);
             return Ok(live.discovery);
         }
     }
@@ -8768,6 +8781,7 @@ mod tests {
                 workspace: None,
                 executable_fingerprint: Some(current),
                 access_fingerprint: None,
+                trace_endpoint: None,
             },
             info: fixture_server_info(vec![
                 WORKSPACE_HISTORY_CAPABILITY.into(),
@@ -8804,6 +8818,7 @@ mod tests {
             workspace: Some(workspace.display().to_string()),
             executable_fingerprint: None,
             access_fingerprint: None,
+            trace_endpoint: None,
         };
         write_runtime(&paths, &discovery).unwrap();
         let runtime_path = paths.runtime.clone();

@@ -23,6 +23,7 @@ use haarness_protocol::{
 use haarness_workflow_catalog::{CatalogError, WorkflowCatalog};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
+use tracing::Instrument as _;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -737,9 +738,19 @@ impl WorkflowCoordinator {
             },
         );
         let coordinator = Arc::clone(self);
-        tokio::spawn(async move {
-            coordinator.execute_saved(id, timeout, cancellation).await;
-        });
+        // The run outlives the request or tool call that started it; its agent
+        // turns join the starter's trace under one `workflow.run` span.
+        let span = tracing::info_span!(
+            "workflow.run",
+            "otel.kind" = "internal",
+            "haarness.workflow.run.id" = %id,
+        );
+        tokio::spawn(
+            async move {
+                coordinator.execute_saved(id, timeout, cancellation).await;
+            }
+            .instrument(span),
+        );
         Ok(())
     }
 

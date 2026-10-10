@@ -399,6 +399,9 @@ impl NativeMcpRegistry {
                             if let Some(cwd) = &config.cwd {
                                 command.current_dir(cwd);
                             }
+                            for name in haarness_core::private_env_names() {
+                                command.env_remove(name);
+                            }
                             command.envs(
                                 config
                                     .env
@@ -1438,6 +1441,9 @@ async fn resolve_headers(
     };
     if let Some(cwd) = &config.cwd {
         command.current_dir(cwd);
+    }
+    for name in haarness_core::private_env_names() {
+        command.env_remove(name);
     }
     command
         .envs(&config.env)
