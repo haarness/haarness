@@ -179,8 +179,6 @@ export function Forms() {
                   // Disabling the form while it saved dropped focus; give it
                   // back so the field can be corrected straight away.
                   if (focused instanceof HTMLElement && dialog.contains(focused)) focused.focus();
-                } finally {
-                  setBusy(false);
                 }
               }}
             >
