@@ -317,11 +317,14 @@ fn chatgpt_alias(model: &str) -> &str {
 
 /// Static knowledge for the moments before the account catalog has loaded:
 /// the model families the ChatGPT transport is known to serve. The catalog
-/// replaces this as soon as it is read.
+/// replaces this as soon as it is read. Aliases are left out: `gpt-5.6` is
+/// Sol by another name, and listing both shows "GPT-5.6 Sol" twice. A thread
+/// already on the alias keeps working through `chatgpt_alias`.
 fn chatgpt_fallback_models(preferred: &[ModelInfo]) -> Vec<ModelInfo> {
     preferred
         .iter()
         .filter(|model| model.id.starts_with("gpt-6") || model.id.starts_with("gpt-5.6"))
+        .filter(|model| chatgpt_alias(&model.id) == model.id)
         .cloned()
         .collect()
 }
@@ -1344,7 +1347,9 @@ mod tests {
             store.clone(),
         ));
         let oauth_models = provider.info().models;
-        assert!(oauth_models.iter().any(|model| model.id == "gpt-5.6"));
+        assert!(oauth_models.iter().any(|model| model.id == "gpt-5.6-sol"));
+        // The alias names the same model; listing it too showed Sol twice.
+        assert!(oauth_models.iter().all(|model| model.id != "gpt-5.6"));
         assert!(oauth_models.iter().all(|model| model.id != "gpt-5.4-nano"));
 
         let request = || ProviderRequest {
