@@ -468,8 +468,9 @@
   position: fixed;
   /* The embedded browser is native and would hide toasts; sit beside it. */
   inset-inline-end: calc(var(--s4) + var(--native-inline-end, 0px));
-  /* Above the composer's Send and Stop buttons and a waiting approval. */
-  bottom: calc(var(--s4) + var(--composer-clearance, 0px));
+  /* Above the composer's Send and Stop buttons and a waiting approval, but
+     never past the middle: a tall question would lift it off the window. */
+  bottom: min(calc(var(--s4) + var(--composer-clearance, 0px)), 50vh);
   z-index: 70;
   display: flex;
   flex-direction: column;
