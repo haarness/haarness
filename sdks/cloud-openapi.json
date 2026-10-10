@@ -14979,6 +14979,7 @@
           "provider",
           "inputPerMillionUsd",
           "outputPerMillionUsd",
+          "priceSource",
           "inputCreditsPerMillion",
           "outputCreditsPerMillion",
           "status"
@@ -14989,6 +14990,13 @@
               "string",
               "null"
             ]
+          },
+          "cacheWritePerMillionUsd": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The five-minute cache-write rate, where the model has one."
           },
           "contextLength": {
             "type": [
@@ -15020,6 +15028,17 @@
           },
           "outputPerMillionUsd": {
             "type": "string"
+          },
+          "priceCheckedOn": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For `haarness` rates, the day they were checked against the provider's page (`YYYY-MM-DD`)."
+          },
+          "priceSource": {
+            "type": "string",
+            "description": "Where these rates come from: `haarness` (reviewed against the provider's price page), `openrouter`\n(models the reviewed table does not list), or `fixture` in tests."
           },
           "provider": {
             "type": "string"
@@ -16165,7 +16184,7 @@
                   ]
                 },
                 "quantities": {
-                  "description": "`{\"uncachedInputTokens\":..,\"cachedInputTokens\":..,\"outputTokens\":..}` | `{\"unitSeconds\":..,\"multiplier\":..}`"
+                  "description": "`{\"uncachedInputTokens\":..,\"cachedInputTokens\":..,\"cacheWriteTokens\":..,\"outputTokens\":..}` | `{\"unitSeconds\":..,\"multiplier\":..}`"
                 },
                 "requestId": {
                   "type": [
@@ -18433,7 +18452,7 @@
             ]
           },
           "quantities": {
-            "description": "`{\"uncachedInputTokens\":..,\"cachedInputTokens\":..,\"outputTokens\":..}` | `{\"unitSeconds\":..,\"multiplier\":..}`"
+            "description": "`{\"uncachedInputTokens\":..,\"cachedInputTokens\":..,\"cacheWriteTokens\":..,\"outputTokens\":..}` | `{\"unitSeconds\":..,\"multiplier\":..}`"
           },
           "requestId": {
             "type": [
