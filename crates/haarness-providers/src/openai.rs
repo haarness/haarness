@@ -2,8 +2,8 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use futures::StreamExt;
 use haarness_core::{
-    CoreError, CoreResult, ModelProvider, ProviderEvent, ProviderMessage, ProviderRequest,
-    ProviderStream, STRUCTURED_OUTPUT_TOOL_NAME, structured_output_tool,
+    CoreError, CoreResult, KeyCheck, ModelProvider, ProviderEvent, ProviderMessage,
+    ProviderRequest, ProviderStream, STRUCTURED_OUTPUT_TOOL_NAME, structured_output_tool,
 };
 use haarness_protocol::{ModelInfo, ModelPricing, ProviderInfo};
 use secrecy::{ExposeSecret, SecretString};
@@ -472,6 +472,13 @@ impl ModelProvider for OpenAiProvider {
                 .await;
         }
     }
+    async fn check_api_key(&self, key: &str) -> KeyCheck {
+        let Some(base) = self.endpoint.strip_suffix("/responses") else {
+            return KeyCheck::Unsupported;
+        };
+        let request = self.client.get(format!("{base}/models")).bearer_auth(key);
+        crate::key_check::check("OpenAI", request).await
+    }
     fn id(&self) -> &str {
         "openai"
     }
@@ -820,7 +827,7 @@ fn model(id: &str, reasoning: bool) -> ModelInfo {
         },
     )
 }
-fn preferred_models() -> Vec<ModelInfo> {
+pub(crate) fn preferred_models() -> Vec<ModelInfo> {
     vec![
         model("gpt-6.1-sol", true),
         model("gpt-6-astra", true),

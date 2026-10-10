@@ -33,6 +33,7 @@ pub use permissions::{
 pub use ports::*;
 pub use runtime::{
     AgentRuntime, ContextUsage, DirectToolResult, EmptyToolRegistry, StaticProviderRegistry,
+    shorten_title,
 };
 pub use tool_catalog::{LOAD_TOOL_NAME, LazyToolSettings, load_tool_definition, select_tools};
 pub use workflows::{WorkflowLogDraft, WorkflowRepository};

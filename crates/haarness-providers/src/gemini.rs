@@ -2,8 +2,8 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use futures::StreamExt;
 use haarness_core::{
-    CoreError, CoreResult, ModelProvider, ProviderEvent, ProviderMessage, ProviderRequest,
-    ProviderStream, STRUCTURED_OUTPUT_TOOL_NAME, structured_output_tool,
+    CoreError, CoreResult, KeyCheck, ModelProvider, ProviderEvent, ProviderMessage,
+    ProviderRequest, ProviderStream, STRUCTURED_OUTPUT_TOOL_NAME, structured_output_tool,
 };
 use haarness_protocol::{ModelInfo, ProviderInfo};
 use reqwest::header::{HeaderName, HeaderValue};
@@ -197,6 +197,21 @@ impl ModelProvider for GeminiProvider {
         self.live_models
             .refresh(force, || self.fetch_models())
             .await;
+    }
+    async fn check_api_key(&self, key: &str) -> KeyCheck {
+        let Ok(key) = HeaderValue::from_str(key) else {
+            return KeyCheck::Unsupported;
+        };
+        let mut headers = self.headers.map();
+        headers.insert(HeaderName::from_static("x-goog-api-key"), key);
+        let request = self
+            .client
+            .get(format!(
+                "{}/models?pageSize=1",
+                self.base_url.trim_end_matches('/')
+            ))
+            .headers(headers);
+        crate::key_check::check(&self.name, request).await
     }
     fn id(&self) -> &str {
         &self.id
@@ -499,7 +514,7 @@ fn supports_harness_chat(id: &str, require_gemini_prefix: bool) -> bool {
         && !unsupported.iter().any(|kind| id.contains(kind))
 }
 
-fn preferred_models() -> Vec<ModelInfo> {
+pub(crate) fn preferred_models() -> Vec<ModelInfo> {
     vec![
         model("gemini-3.8-flash"),
         model("gemini-3.7-flash"),

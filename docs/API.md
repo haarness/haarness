@@ -15,7 +15,9 @@ report; `GET /v1/insights` returns a text summary and standalone HTML. Both acce
 and publish schemas in OpenAPI. See [Insights](INSIGHTS.md) for accounting rules.
 
 The server binds loopback by default. Explicit `haarness serve` accepts anonymous
-requests unless a password or legacy token is configured. Password servers use
+requests unless a password or legacy token is configured. On a network address
+(`--host 0.0.0.0`) it refuses to start without a password or token unless
+`--anonymous` says that unauthenticated access is intended. Password servers use
 `Authorization: Basic <base64(username:password)>`, with UTF-8 credentials and the
 default username `haarness`. All protected routes, event streams, management APIs,
 remote project gateway requests and terminal upgrades use the same authentication

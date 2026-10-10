@@ -99,6 +99,7 @@ pub fn load_layers(
     ] {
         apply_json_config(&mut layers, &config_dir.join(name), true);
     }
+    let global_providers = layers.native.providers.clone();
     // Project files override global defaults; nested worktree layers override ancestors.
     for directory in crate::layout::project_directories(workspace)
         .into_iter()
@@ -127,6 +128,8 @@ pub fn load_layers(
             }
         }
     }
+    layers.native.provider_notices =
+        super::guard_project_providers(&global_providers, &mut layers.native.providers);
     // Plugin bundles: the user installed them, so their hooks/MCP are
     // trusted. Commands/agents merge like any other root.
     for root in plugin_roots {

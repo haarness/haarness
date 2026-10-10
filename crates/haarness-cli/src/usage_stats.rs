@@ -52,10 +52,11 @@ const BUILTIN_TOOLS: &[&str] = &[
     "write",
 ];
 
-/// Providers Haarness ships, reported by name with their model ids. Other
-/// provider ids are names people chose for their own gateways: reported as
-/// `custom`, without the model. Local runtimes report `local` models, since a
-/// local model's name can be private.
+/// Providers Haarness ships, reported by name; a model only when Haarness
+/// ships it too (`other` for fine-tunes and anything else). Other provider
+/// ids are names people chose for their own gateways: reported as `custom`,
+/// without the model. Local runtimes report `local` models, since a local
+/// model's name can be private.
 const NATIVE_PROVIDERS: &[&str] = &[
     "haarness",
     "openai",
@@ -68,6 +69,9 @@ const NATIVE_PROVIDERS: &[&str] = &[
     "amazon-bedrock",
 ];
 const LOCAL_PROVIDERS: &[&str] = &["ollama", "lmstudio"];
+/// Native providers whose model ids are the account's own deployment names,
+/// ARNs or endpoints: reported as `custom` models.
+const DEPLOYMENT_PROVIDERS: &[&str] = &["azure", "google-vertex", "amazon-bedrock"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -244,8 +248,17 @@ fn clean(value: &str) -> String {
 }
 
 fn reported_model(provider: &str, model: &str) -> (String, String) {
-    if NATIVE_PROVIDERS.contains(&provider) || haarness_providers::compatible_preset(provider).is_some() {
-        (clean(provider), clean(model))
+    if DEPLOYMENT_PROVIDERS.contains(&provider) {
+        (clean(provider), "custom".to_owned())
+    } else if NATIVE_PROVIDERS.contains(&provider)
+        || haarness_providers::compatible_preset(provider).is_some()
+    {
+        let model = if haarness_providers::ships_model(provider, model) {
+            clean(model)
+        } else {
+            "other".to_owned()
+        };
+        (clean(provider), model)
     } else if LOCAL_PROVIDERS.contains(&provider) {
         (clean(provider), "local".to_owned())
     } else {
@@ -587,9 +600,54 @@ mod tests {
             reported_model("anthropic", "claude-sonnet-5-5"),
             ("anthropic".into(), "claude-sonnet-5-5".into())
         );
-        assert_eq!(reported_model("openrouter", "a/b"), ("openrouter".into(), "a/b".into()));
-        assert_eq!(reported_model("ollama", "acme-private-7b"), ("ollama".into(), "local".into()));
-        assert_eq!(reported_model("acme-gateway", "secret"), ("custom".into(), "custom".into()));
+        assert_eq!(
+            reported_model("openrouter", "anthropic/claude-sonnet-4.5"),
+            ("openrouter".into(), "anthropic/claude-sonnet-4.5".into())
+        );
+        assert_eq!(
+            reported_model("xai", "grok-4.7"),
+            ("xai".into(), "grok-4.7".into())
+        );
+        assert_eq!(
+            reported_model("ollama", "acme-private-7b"),
+            ("ollama".into(), "local".into())
+        );
+        assert_eq!(
+            reported_model("acme-gateway", "secret"),
+            ("custom".into(), "custom".into())
+        );
+        // Only models Haarness ships: fine-tunes, router models it does not
+        // list and look-alikes are `other`; deployments and ARNs `custom`.
+        for (provider, model) in [
+            ("openai", "ft:gpt-4o-mini:acme-corp:project-falcon:AbC123"),
+            ("openai", "gpt-5.4-acme-tuned"),
+            ("openrouter", "a/b"),
+            ("openrouter", "acme-secret-org/claude-opus-5-5"),
+            ("fireworks", "accounts/acme/models/llama-finetune"),
+        ] {
+            assert_eq!(
+                reported_model(provider, model),
+                (provider.into(), "other".into()),
+                "{provider}/{model}"
+            );
+        }
+        for (provider, model) in [
+            (
+                "amazon-bedrock",
+                "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/acmeprod",
+            ),
+            ("azure", "acme-internal-deployment"),
+            (
+                "google-vertex",
+                "projects/acme/locations/us-central1/endpoints/42",
+            ),
+        ] {
+            assert_eq!(
+                reported_model(provider, model),
+                (provider.into(), "custom".into()),
+                "{provider}/{model}"
+            );
+        }
         assert_eq!(reported_tool("bash"), "bash");
         assert_eq!(reported_tool("mcp__acme__deploy"), "mcp");
         assert_eq!(reported_tool("acme_release"), "other");

@@ -175,7 +175,8 @@ pub async fn catalog(path: &str, query: &[(&str, String)]) -> Result<Value> {
             .header("x-haarness-workspace", workspace)
             .bearer_auth(token)
             .send()
-            .await?;
+            .await
+            .map_err(unreachable)?;
         ensure!(
             response.status().is_success(),
             "Cloud catalog request failed ({})",
@@ -282,6 +283,18 @@ async fn resolve(input: &Value) -> Result<String> {
         .into())
 }
 
+/// A transport failure in words a person can act on. reqwest's own text
+/// ("error sending request") names neither the cause nor the fix.
+fn unreachable(error: reqwest::Error) -> anyhow::Error {
+    let message = if error.is_timeout() {
+        "The marketplace did not answer in time. Try again."
+    } else {
+        "Can't reach the marketplace. Check your internet connection and try again."
+    };
+    tracing::debug!(error = %error.without_url(), "marketplace request failed");
+    anyhow::anyhow!(message)
+}
+
 async fn download(url: &str, limit: usize) -> Result<Vec<u8>> {
     let parsed = reqwest::Url::parse(url)?;
     let private_catalog_host = std::env::var("HAARNESS_CLOUD_MARKETPLACE_URL")
@@ -326,7 +339,7 @@ async fn download(url: &str, limit: usize) -> Result<Vec<u8>> {
                 .bearer_auth(token);
         }
     }
-    let mut response = request.send().await.map_err(reqwest::Error::without_url)?;
+    let mut response = request.send().await.map_err(unreachable)?;
     ensure!(
         response.status().is_success(),
         "Marketplace download failed ({})",

@@ -457,6 +457,33 @@ pub fn lookup(provider: &str, model_id: &str) -> Option<&'static CatalogEntry> {
         .max_by_key(|entry| entry.prefix.len())
 }
 
+/// Whether a catalog entry or the reviewed price table names `model_id`
+/// itself, or a dated snapshot of it, for any vendor (a router's
+/// `vendor/model` included). Unlike `lookup`, an id that merely starts with a
+/// listed family (`gpt-5.4-acme-tuned`, `ft:gpt-5.4:acme`) does not count.
+#[must_use]
+pub fn ships(model_id: &str) -> bool {
+    // A router's `vendor/model` only for the vendors listed here: any other
+    // prefix or a deeper path can name an account or a deployment.
+    let Some(canonical) = (match model_id.split('/').collect::<Vec<_>>()[..] {
+        [model] | ["openai" | "anthropic" | "google" | "gemini", model] => Some(model),
+        _ => None,
+    }) else {
+        return false;
+    };
+    reviewed(model_id).is_some()
+        || CATALOG.iter().any(|(provider, entries)| {
+            let id = if *provider == "anthropic" {
+                canonical.replace('.', "-")
+            } else {
+                canonical.to_owned()
+            };
+            entries.iter().any(|entry| {
+                id == entry.prefix || id.strip_prefix(entry.prefix).is_some_and(is_snapshot)
+            })
+        })
+}
+
 /// The provider's own entry, else the first native catalog that knows the id
 /// without its vendor prefix (`openai/gpt-6.1-sol` through a router).
 fn metadata<'a>(provider: &'a str, model_id: &str) -> Option<(&'a str, &'static CatalogEntry)> {
@@ -488,7 +515,24 @@ pub fn annotate(provider: &str, mut info: ModelInfo) -> ModelInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{annotate, lookup, pricing, reviewed};
+    use super::{annotate, lookup, pricing, reviewed, ships};
+
+    #[test]
+    fn only_listed_models_and_their_snapshots_are_shipped() {
+        assert!(ships("gpt-5.4-mini"));
+        assert!(ships("gpt-5.4-mini-2026-01-01"));
+        assert!(ships("claude-sonnet-4-6-20260201"));
+        assert!(ships("anthropic/claude-sonnet-4.5"));
+        assert!(ships("claude-haiku-4-5"));
+        assert!(!ships("gpt-5.4-acme-tuned"));
+        assert!(!ships("ft:gpt-4o-mini:acme-corp:project-falcon:AbC123"));
+        assert!(!ships("accounts/acme/models/claude-opus-5-5"));
+        assert!(!ships("acme-secret-org/claude-opus-5-5"));
+        assert!(!ships(
+            "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/acmeprod"
+        ));
+        assert!(!ships("acme-internal-deployment"));
+    }
 
     #[test]
     fn longest_prefix_wins_and_dated_snapshots_match() {
