@@ -199,9 +199,10 @@ pub async fn catalog(path: &str, query: &[(&str, String)]) -> Result<Value> {
             url.path(),
             url.query().map(|q| format!("?{q}")).unwrap_or_default()
         );
-        return Ok(haarness_account::Client::new(config)?
+        return haarness_account::Client::new(config)?
             .request(reqwest::Method::GET, &path, None)
-            .await?);
+            .await
+            .map_err(account_error);
     }
     let bytes = download(url.as_str(), 8 * 1024 * 1024).await?;
     Ok(serde_json::from_slice(&bytes)?)
@@ -293,6 +294,15 @@ fn unreachable(error: reqwest::Error) -> anyhow::Error {
     };
     tracing::debug!(error = %error.without_url(), "marketplace request failed");
     anyhow::anyhow!(message)
+}
+
+/// A signed-in catalog request's failure; transport failures read as above
+/// instead of the account client's raw reqwest text.
+fn account_error(error: haarness_account::Error) -> anyhow::Error {
+    match error {
+        haarness_account::Error::Http(error) => unreachable(error),
+        error => error.into(),
+    }
 }
 
 async fn download(url: &str, limit: usize) -> Result<Vec<u8>> {
@@ -808,6 +818,29 @@ pub fn tree_digest(root: &Path) -> Result<String> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[tokio::test]
+    async fn an_unreachable_marketplace_is_explained_in_words() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let offline = reqwest::get(format!("http://127.0.0.1:{port}/api/v1/marketplace"))
+            .await
+            .unwrap_err();
+        // Signed in, the account client's error used to end in reqwest's
+        // "error sending request for url (…)".
+        assert_eq!(
+            account_error(haarness_account::Error::Http(offline)).to_string(),
+            "Can't reach the marketplace. Check your internet connection and try again."
+        );
+        assert!(
+            account_error(haarness_account::Error::NotLoggedIn)
+                .to_string()
+                .starts_with("Sign in to Haarness")
+        );
+    }
 
     fn archive(files: &[(&str, &str)]) -> Vec<u8> {
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));

@@ -3369,4 +3369,88 @@ mod tests {
         assert_eq!(done["data"]["state"], "connected", "{done}");
         let _ = fs::remove_dir_all(root);
     }
+
+    /// Answers key checks like a provider: `sk-good` is accepted, the
+    /// provider cannot be reached for `sk-offline`, anything else is refused.
+    struct KeyCheckingProvider;
+
+    #[async_trait]
+    impl haarness_core::ModelProvider for KeyCheckingProvider {
+        fn id(&self) -> &str {
+            "acme"
+        }
+        fn info(&self) -> haarness_protocol::ProviderInfo {
+            haarness_protocol::ProviderInfo {
+                id: "acme".into(),
+                name: "Acme".into(),
+                authenticated: false,
+                models: Vec::new(),
+            }
+        }
+        async fn check_api_key(&self, key: &str) -> haarness_core::KeyCheck {
+            use haarness_core::KeyCheck;
+            match key {
+                "sk-good" => KeyCheck::Accepted,
+                "sk-offline" => KeyCheck::Unchecked("Haarness could not reach Acme".into()),
+                _ => KeyCheck::Rejected(Some("invalid x-api-key".into())),
+            }
+        }
+        async fn stream(
+            &self,
+            _request: haarness_core::ProviderRequest,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> CoreResult<haarness_core::ProviderStream> {
+            Err(CoreError::Provider("unused".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_api_key_is_not_saved_and_an_unchecked_one_is_saved_with_a_warning() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-key-check-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(root.join("project")).unwrap();
+        let service = login_service(&root, "http://127.0.0.1:1", 0);
+        let provider: Arc<dyn haarness_core::ModelProvider> = Arc::new(KeyCheckingProvider);
+        let runtime = Arc::new(AgentRuntime::new(
+            Arc::new(haarness_store::SqliteStore::open(root.join("haarness.db")).unwrap()),
+            Arc::new(haarness_core::StaticProviderRegistry::new(vec![provider])),
+            Arc::new(haarness_core::EmptyToolRegistry),
+            haarness_core::EventBus::new(8),
+        ));
+        service.attach_runtime(&runtime);
+        let service = &service;
+        let save = |key: &'static str| async move {
+            service
+                .ui_request(
+                    "providers",
+                    &json!({"action":"credential","name":"acme","key":key}),
+                )
+                .await
+        };
+        let stored = || {
+            CredentialStore::new(service.paths.auth.clone())
+                .get("acme")
+                .unwrap()
+                .and_then(|credential| credential.api_key().map(str::to_owned))
+        };
+        let refused = save("sk-fake").await.unwrap_err().to_string();
+        assert_eq!(
+            refused,
+            "Acme rejected this API key (invalid x-api-key). Check that you copied all of it, then try again."
+        );
+        assert_eq!(stored(), None, "a refused key is not saved");
+
+        let offline = save("sk-offline").await.unwrap();
+        assert_eq!(
+            offline["data"]["warning"],
+            "Saved, but the key could not be checked: Haarness could not reach Acme. If chats then fail to authenticate, replace the key."
+        );
+        assert_eq!(offline["lines"][1], offline["data"]["warning"]);
+        assert_eq!(stored().as_deref(), Some("sk-offline"));
+
+        let accepted = save("sk-good").await.unwrap();
+        assert!(accepted["data"].get("warning").is_none(), "{accepted}");
+        assert_eq!(stored().as_deref(), Some("sk-good"));
+        let _ = fs::remove_dir_all(root);
+    }
 }
