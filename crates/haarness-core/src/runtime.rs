@@ -6525,7 +6525,7 @@ impl RunnerTask {
                                     None
                                 } else if state.needs_criteria && state.turns_used >= 1 {
                                     Some(
-                                        "completion criteria were not approved after the bootstrap retry; waiting for user direction"
+                                        "waiting for you to agree on its completion criteria"
                                             .to_owned(),
                                     )
                                 } else {
