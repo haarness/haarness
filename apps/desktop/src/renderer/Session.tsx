@@ -66,7 +66,7 @@ import { isWorktree, locationName } from "../projects";
 import { createWorktree } from "./worktrees";
 import { ChangePreview, ToolActivity } from "./ToolActivity";
 import { Mark } from "./brand";
-import { matchesShortcut } from "./search";
+import { matchesShortcut, shortcutText } from "./search";
 import {
   describeTool,
   errorRecovery,
@@ -1941,7 +1941,7 @@ export function Session() {
                       title={
                         voice.active()
                           ? t("Stop dictation")
-                          : `${t("Start dictation")} (⌘⇧M)`
+                          : `${t("Start dictation")} (${shortcutText("Mod+Shift+M", state.platform)})`
                       }
                       aria-pressed={voice.active()}
                       disabled={

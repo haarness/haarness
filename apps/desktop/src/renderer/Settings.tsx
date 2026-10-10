@@ -554,7 +554,7 @@ function Shortcuts() {
             target={"shortcut:" + name}
             description={shortcutDescriptions[name]}
           >
-            <kbd class="shortcut-preview" aria-hidden="true">
+            <kbd class="shortcut-preview" dir="ltr" aria-hidden="true">
               {shortcutLabel(value, app.state.platform)}
             </kbd>
             <input
@@ -592,13 +592,13 @@ function Shortcuts() {
         )}
       </For>
       <Row title="New line">
-        <kbd>{shortcutLabel("Shift+Enter", app.state.platform)}</kbd>
+        <kbd dir="ltr">{shortcutLabel("Shift+Enter", app.state.platform)}</kbd>
       </Row>
       <Row title="Save file">
-        <kbd>{shortcutLabel("Mod+S", app.state.platform)}</kbd>
+        <kbd dir="ltr">{shortcutLabel("Mod+S", app.state.platform)}</kbd>
       </Row>
       <Row title="Find in file">
-        <kbd>{shortcutLabel("Mod+F", app.state.platform)}</kbd>
+        <kbd dir="ltr">{shortcutLabel("Mod+F", app.state.platform)}</kbd>
       </Row>
       <Row title="Close dialog">
         <kbd>{t("Escape")}</kbd>

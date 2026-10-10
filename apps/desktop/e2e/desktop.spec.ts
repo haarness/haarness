@@ -8682,7 +8682,7 @@ test("universal search opens settings controls, shortcuts, files and commands di
   await find("new session");
   await expect(
     page.getByRole("option", { name: "New session", exact: true }),
-  ).toContainText(process.platform === "darwin" ? "⌘ ⇧ L" : "Ctrl Shift L");
+  ).toContainText(process.platform === "darwin" ? "⌘ ⇧ L" : "Ctrl+Shift+L");
   await page
     .getByRole("combobox", { name: "Search Haarness", exact: true })
     .press("Escape");

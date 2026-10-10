@@ -188,7 +188,7 @@ function ProjectGroup(props: {
           aria-busy={props.project.locations.some(
             (location) => location.id === state.openingProject,
           )}
-          title={props.project.root}
+          title={props.project.label + "\n" + props.project.root}
           aria-description={pinned() ? t("Pinned") : undefined}
           onClick={() =>
             app.run(async () => {
@@ -400,7 +400,7 @@ export function ProjectSection(props: {
       {...drop}
     >
       <div class="project-section-row" data-drop-position={drop["data-drop-position"]}>
-        <span>{props.name}</span>
+        <span title={props.name}>{props.name}</span>
         <Show when={!props.fixed}>
         <MenuButton
           label={t("Section options for {name}", { name: props.name })}
@@ -677,6 +677,7 @@ export function SessionList(props: {
                     .join(". ") || undefined
                 }
                 aria-current={selected()}
+                title={row().thread.title || t("Untitled session")}
                 onClick={() =>
                   app.run(() =>
                     app.chooseProjectSession(

@@ -5,6 +5,7 @@ import {
   physicalKey,
   searchEntries,
   shortcutLabel,
+  shortcutText,
   type SearchEntry,
 } from "../src/renderer/search";
 import { defaults, migrateAgentKeys } from "../src/shared";
@@ -52,7 +53,13 @@ test("search finds configured shortcut notation and preserves same-title workspa
   );
   assert.equal(searchEntries(entries, "Ctrl+Shift+L")[0].key, "new");
   assert.equal(shortcutLabel("Mod+Shift+L", "darwin"), "⌘ ⇧ L");
-  assert.equal(shortcutLabel("Mod+Shift+L", "win32"), "Ctrl Shift L");
+  assert.equal(shortcutLabel("Mod+Shift+L", "win32"), "Ctrl+Shift+L");
+  assert.equal(shortcutLabel("Mod+Alt+Z", "darwin"), "⌘ ⌥ Z");
+  assert.equal(shortcutLabel("Ctrl+Space", "darwin"), "⌃ Space");
+  assert.equal(shortcutLabel("Mod+F", "linux"), "Ctrl+F");
+  // Either form finds the shortcut it names.
+  assert.equal(searchEntries([entry("new", "New chat", { hint: "Ctrl+Shift+L" })], "⌘ ⇧ L")[0].key, "new");
+  assert.equal(shortcutText("Mod+K", "darwin"), "\u2066⌘ K\u2069");
 });
 test("search does not cut off conversations at eight and excludes nonmatching names", () => {
   const entries = Array.from({ length: 30 }, (_, i) =>

@@ -309,7 +309,7 @@ export function UniversalSearch(props: { close: () => void }) {
                     </Show>
                   </span>
                   <Show when={entry.hint}>
-                    <kbd>{entry.hint}</kbd>
+                    <kbd dir="ltr">{entry.hint}</kbd>
                   </Show>
                 </button>
               </>

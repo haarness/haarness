@@ -607,53 +607,56 @@ export function Review(props: { compact?: boolean } = {}) {
               {t(files().length === 1 ? "{count} file" : "{count} files", { count: files().length })}
             </span>
           </span>
-          <div class="grow" />
-          <Select
-            class="pill-select"
-            aria-label={t("Diff source")}
-            value={mode()}
-            onChange={(value) => setMode(value)}
-            options={[
-              { value: "working", label: t("Working tree") },
-              { value: "branch", label: t("Current branch") },
-              {
-                value: "last",
-                label: t("Last turn"),
-                disabled: !app.state.selected,
-              },
-            ]}
-          />
-          <Select
-            class="pill-select"
-            aria-label={t("Diff layout")}
-            value={app.state.preferences.diffLayout}
-            onChange={(value) =>
-              app.run(() =>
-                app.settings({ diffLayout: value as "split" | "unified" }),
-              )
-            }
-            options={[
-              { value: "split", label: t("Split") },
-              { value: "unified", label: t("Unified") },
-            ]}
-          />
-          <Select
-            class="pill-select"
-            aria-label={t("Context lines")}
-            value={context()}
-            onChange={(value) => setContext(Number(value))}
-            options={[
-              { value: 4, label: t("{count} lines", { count: 4 }) },
-              { value: 12, label: t("{count} lines", { count: 12 }) },
-              { value: 50, label: t("{count} lines", { count: 50 }) },
-              { value: 10000, label: t("Full file") },
-            ]}
-          />
-          <Button
-            icon="refresh"
-            label={t("Refresh changes")}
-            onClick={() => void refresh()}
-          />
+          {/* The view controls move to a second row together when the panel is
+              too narrow, so refresh never wraps onto a row of its own. */}
+          <div class="review-view">
+            <Select
+              class="pill-select"
+              aria-label={t("Diff source")}
+              value={mode()}
+              onChange={(value) => setMode(value)}
+              options={[
+                { value: "working", label: t("Working tree") },
+                { value: "branch", label: t("Current branch") },
+                {
+                  value: "last",
+                  label: t("Last turn"),
+                  disabled: !app.state.selected,
+                },
+              ]}
+            />
+            <Select
+              class="pill-select"
+              aria-label={t("Diff layout")}
+              value={app.state.preferences.diffLayout}
+              onChange={(value) =>
+                app.run(() =>
+                  app.settings({ diffLayout: value as "split" | "unified" }),
+                )
+              }
+              options={[
+                { value: "split", label: t("Split") },
+                { value: "unified", label: t("Unified") },
+              ]}
+            />
+            <Select
+              class="pill-select"
+              aria-label={t("Context lines")}
+              value={context()}
+              onChange={(value) => setContext(Number(value))}
+              options={[
+                { value: 4, label: t("{count} lines", { count: 4 }) },
+                { value: 12, label: t("{count} lines", { count: 12 }) },
+                { value: 50, label: t("{count} lines", { count: 50 }) },
+                { value: 10000, label: t("Full file") },
+              ]}
+            />
+            <Button
+              icon="refresh"
+              label={t("Refresh changes")}
+              onClick={() => void refresh()}
+            />
+          </div>
         </div>
       </Show>
       <div class="file-workspace">
