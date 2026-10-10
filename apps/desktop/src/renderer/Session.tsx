@@ -1434,6 +1434,19 @@ export function Session() {
               (event.key === " " && event.shiftKey)
             )
               pauseFollowing();
+            // End means the latest output, like Jump to latest. Native End
+            // stops at the height known when the key went down, short of
+            // virtual rows measured after it; following keeps up with them.
+            else if (
+              event.key === "End" &&
+              !(event.target as HTMLElement).closest(
+                "input, textarea, select, [contenteditable]",
+              )
+            ) {
+              event.preventDefault();
+              setFollow(true);
+              followLatest();
+            }
           }}
           onPointerDown={(event) => {
             // Include overlay scrollbars, which may report a zero-width gutter.

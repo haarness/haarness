@@ -11,7 +11,6 @@ import {
 } from "solid-js";
 import { Icon } from "./ui";
 import { Shimmer } from "./Shimmer";
-import { lines } from "./diff";
 import {
   batchLabel,
   batchSteps,
@@ -22,6 +21,8 @@ import {
   toolOutput,
   toolFailed,
   routineEditOutput,
+  changeRows,
+  changeStats,
   CHANGE_PREVIEW_LINES,
   type Change,
   type ToolResult,
@@ -87,21 +88,7 @@ export function ToolActivity(props: {
     toolChanges(toolName(props.name), props.args, props.result),
   );
   // An edit's size is the first thing a reader wants after its file name.
-  const stats = createMemo(() => {
-    let additions = 0,
-      deletions = 0;
-    for (const change of changes()) {
-      if (change.additions !== undefined && change.deletions !== undefined) {
-        additions += change.additions;
-        deletions += change.deletions;
-        continue;
-      }
-      for (const row of changeRows(change))
-        if (row.kind === "add") additions++;
-        else if (row.kind === "remove") deletions++;
-    }
-    return additions || deletions ? { additions, deletions } : undefined;
-  });
+  const stats = createMemo(() => changeStats(changes()));
   const input = createMemo(() => toolInput(props.name, props.args));
   const output = createMemo(
     () => props.result && toolOutput(props.name, props.result.output),
@@ -244,14 +231,6 @@ export function ToolActivity(props: {
       </Show>
     </details>}><PreviewBanner metadata={props.result?.metadata} /></Show>
   );
-}
-function changeRows(change: Change) {
-  return lines({
-    file: change.path || "change",
-    patch: change.patch,
-    before: change.before,
-    after: change.after,
-  } as Parameters<typeof lines>[0]).filter((row) => row.kind !== "hunk");
 }
 export function ChangePreview(props: { change: Change; showPath?: boolean }) {
   const rows = createMemo(() => changeRows(props.change));

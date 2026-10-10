@@ -3,7 +3,8 @@ import { createEffect, onCleanup } from "solid-js";
 import { createMarkdownClient } from "./markdown-client";
 import { createMarkdownDOM } from "./markdown-dom";
 
-export function Markdown(props: { text: string; live?: boolean }) {
+/** `document` renders a Markdown file, where a lone newline is not a line break. */
+export function Markdown(props: { text: string; live?: boolean; document?: boolean }) {
   const app = useApp();
   let host!: HTMLDivElement;
   let patch: ReturnType<typeof createMarkdownDOM> | undefined;
@@ -34,7 +35,7 @@ export function Markdown(props: { text: string; live?: boolean }) {
   });
   createEffect(() => {
     host.dataset.markdownReady = "false";
-    client.update(props.text, !!props.live);
+    client.update(props.text, !!props.live, !props.document);
   });
   onCleanup(() => {
     disposed = true;

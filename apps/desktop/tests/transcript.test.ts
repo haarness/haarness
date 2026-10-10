@@ -18,6 +18,8 @@ import {
   toolResult,
   patchFiles,
   routineEditOutput,
+  changeRows,
+  changeStats,
 } from "../src/renderer/transcript";
 import { lines } from "../src/renderer/diff";
 
@@ -267,6 +269,38 @@ test("edits are recognised as changes, other calls are not", () => {
   );
   assert.deepEqual(toolChanges("bash", { command: "rm -rf /" }), []);
   assert.deepEqual(toolChanges("todowrite", { todos: [] }), []);
+});
+
+test("an edit preview keeps the old snippet's last line as context", () => {
+  const [change] = toolChanges("edit", {
+    path: "src/store.js",
+    old: "const todos = [];",
+    new: "// In-memory store; resets on restart.\nconst todos = [];\nlet nextId = 1;",
+  });
+  assert.deepEqual(
+    changeRows(change).map((row) => [row.kind, row.text]),
+    [
+      ["add", "// In-memory store; resets on restart."],
+      ["context", "const todos = [];"],
+      ["add", "let nextId = 1;"],
+    ],
+  );
+  assert.deepEqual(changeStats([change]), { additions: 2, deletions: 0 });
+  // A replacement is still one line out and one in, newline or not.
+  assert.deepEqual(changeStats(toolChanges("edit", { path: "a", old: "one", new: "two\n" })), {
+    additions: 1,
+    deletions: 1,
+  });
+  // A whole new file, and counts a tool reports, are taken as they are.
+  assert.deepEqual(changeStats(toolChanges("write", { path: "b", content: "x\ny" })), {
+    additions: 2,
+    deletions: 0,
+  });
+  assert.deepEqual(changeStats([{ path: "c", before: "a", after: "b", additions: 5, deletions: 3 }]), {
+    additions: 5,
+    deletions: 3,
+  });
+  assert.equal(changeStats(toolChanges("edit", { path: "d", old: "same", new: "same" })), undefined);
 });
 
 test("a Codex patch envelope reads as the files it edits, and the result's diffs win", () => {
