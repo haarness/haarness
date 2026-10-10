@@ -158,6 +158,12 @@ struct RecordedTurn {
     project: String,
     project_name: String,
     model: String,
+    provider: String,
+    model_name: String,
+    /// Run by a subagent (a `task` call), not the chat's own agent.
+    subagent: bool,
+    /// Part of a scheduled chat.
+    scheduled: bool,
     created: DateTime<Utc>,
     metrics: Metrics,
     tools: BTreeMap<String, Metrics>,
@@ -235,83 +241,12 @@ pub fn collect_at(
         duplicate_turns_skipped: 0,
         detached_items_skipped: 0,
     };
-    let mut sources = Vec::new();
-    let directory = data.join("workspaces");
-    if directory.exists() {
-        for entry in std::fs::read_dir(directory)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
-                continue;
-            }
-            let id = entry.file_name().to_string_lossy().into_owned();
-            let registered = registry.workspaces.iter().find(|w| w.id == id);
-            let project = registered.map_or(id.as_str(), |w| w.project_id.as_str());
-            if project_filter.as_ref().is_some_and(|p| p != project) {
-                continue;
-            }
-            let name = registry
-                .projects
-                .iter()
-                .find(|p| p.id == project)
-                .map_or_else(
-                    || format!("Unregistered workspace {id}"),
-                    |p| p.name.clone(),
-                );
-            let path = entry.path().join("haarness.db");
-            if path.is_file() {
-                sources.push(Source {
-                    path,
-                    project: project.to_owned(),
-                    name,
-                    workspace: registered.map(|workspace| PathBuf::from(&workspace.path)),
-                });
-            }
-        }
-    }
-    if project_filter.is_none() && data.join("haarness.db").is_file() {
-        sources.push(Source {
-            path: data.join("haarness.db"),
-            project: "legacy".into(),
-            name: "Legacy history (unassigned)".into(),
-            workspace: None,
-        });
-    }
-    sources.sort_by(|a, b| a.path.cmp(&b.path));
-    let mut turns = Vec::new();
-    for source in sources {
-        match read_source(&source, since, now) {
-            Ok((records, detached)) => {
-                turns.extend(records);
-                report.databases_read += 1;
-                report.detached_items_skipped += detached;
-            }
-            Err(error) => report.warnings.push(format!(
-                "Could not read {}: {error:#}",
-                source.path.display()
-            )),
-        }
-    }
-    // Archive imports preserve turn IDs. Prefer the most complete copy, then stable source order.
-    turns.sort_by(|a, b| {
-        a.metrics
-            .turns_without_usage
-            .cmp(&b.metrics.turns_without_usage)
-            .then_with(|| b.metrics.tokens().cmp(&a.metrics.tokens()))
-            .then_with(|| b.metrics.tool_results.cmp(&a.metrics.tool_results))
-            .then_with(|| {
-                b.metrics
-                    .priced_usage_records
-                    .cmp(&a.metrics.priced_usage_records)
-            })
-    });
-    let mut seen = BTreeSet::new();
-    turns.retain(|turn| {
-        let unique = seen.insert(turn.id.clone());
-        if !unique {
-            report.duplicate_turns_skipped += 1;
-        }
-        unique
-    });
+    let scan = scan(data, &registry, project_filter.as_deref(), since, now)?;
+    report.databases_read = scan.databases_read;
+    report.detached_items_skipped = scan.detached_items;
+    report.duplicate_turns_skipped = scan.duplicate_turns;
+    report.warnings.extend(scan.warnings);
+    let turns = scan.turns;
     let mut recent = BTreeMap::<String, DateTime<Utc>>::new();
     for turn in &turns {
         recent
@@ -369,6 +304,198 @@ pub fn collect_at(
     Ok(report)
 }
 
+/// One UTC day of activity across every workspace: the source of the usage
+/// statistics Haarness shares unless they are turned off
+/// (docs/USAGE-STATISTICS.md). Counts and model names only; no titles,
+/// projects, paths or file names.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyUsage {
+    /// `YYYY-MM-DD`, by turn start in UTC.
+    pub day: String,
+    pub total: Metrics,
+    /// Turns run by subagents (`task` calls).
+    pub subagent_turns: u64,
+    /// Turns in scheduled chats.
+    pub scheduled_turns: u64,
+    pub models: Vec<ModelUsage>,
+    /// Keyed by tool name.
+    pub tools: Vec<Group>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelUsage {
+    pub provider: String,
+    pub model: String,
+    pub metrics: Metrics,
+}
+
+/// The last `days` UTC days (today included) of every workspace, oldest first.
+/// Days without turns are left out.
+pub fn daily_usage(data: &Path, days: u32, now: DateTime<Utc>) -> Result<Vec<DailyUsage>> {
+    anyhow::ensure!((1..=366).contains(&days), "days must be between 1 and 366");
+    let registry_path = data.join("workspaces.json");
+    let registry: Registry = if registry_path.exists() {
+        serde_json::from_slice(&std::fs::read(&registry_path)?)
+            .context("read workspace registry")?
+    } else {
+        Registry::default()
+    };
+    let start = (now - chrono::Duration::days(i64::from(days) - 1))
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .context("start of day")?
+        .and_utc();
+    let scan = scan(data, &registry, None, Some(start), now)?;
+    let mut by_day = BTreeMap::<String, (DailyUsage, BTreeSet<String>)>::new();
+    for turn in scan.turns {
+        let day = turn.created.format("%Y-%m-%d").to_string();
+        let (usage, sessions) = by_day.entry(day.clone()).or_insert_with(|| {
+            (
+                DailyUsage {
+                    day,
+                    ..DailyUsage::default()
+                },
+                BTreeSet::new(),
+            )
+        });
+        usage.total.add(&turn.metrics);
+        if sessions.insert(turn.session.clone()) {
+            usage.total.sessions += 1;
+        }
+        usage.subagent_turns += u64::from(turn.subagent);
+        usage.scheduled_turns += u64::from(turn.scheduled);
+        match usage
+            .models
+            .iter_mut()
+            .find(|row| row.provider == turn.provider && row.model == turn.model_name)
+        {
+            Some(row) => row.metrics.add(&turn.metrics),
+            None => usage.models.push(ModelUsage {
+                provider: turn.provider.clone(),
+                model: turn.model_name.clone(),
+                metrics: turn.metrics.clone(),
+            }),
+        }
+        for (name, metrics) in turn.tools {
+            match usage.tools.iter_mut().find(|row| row.id == name) {
+                Some(row) => row.metrics.add(&metrics),
+                None => usage.tools.push(Group {
+                    id: name.clone(),
+                    name,
+                    metrics,
+                }),
+            }
+        }
+    }
+    Ok(by_day.into_values().map(|(usage, _)| usage).collect())
+}
+
+/// Every recorded turn in the window, across workspace databases, once each.
+struct Scan {
+    turns: Vec<RecordedTurn>,
+    databases_read: usize,
+    detached_items: u64,
+    duplicate_turns: usize,
+    warnings: Vec<String>,
+}
+
+fn scan(
+    data: &Path,
+    registry: &Registry,
+    project_filter: Option<&str>,
+    since: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Result<Scan> {
+    let mut result = Scan {
+        turns: Vec::new(),
+        databases_read: 0,
+        detached_items: 0,
+        duplicate_turns: 0,
+        warnings: Vec::new(),
+    };
+    let mut sources = Vec::new();
+    let directory = data.join("workspaces");
+    if directory.exists() {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().into_owned();
+            let registered = registry.workspaces.iter().find(|w| w.id == id);
+            let project = registered.map_or(id.as_str(), |w| w.project_id.as_str());
+            if project_filter.is_some_and(|p| p != project) {
+                continue;
+            }
+            let name = registry
+                .projects
+                .iter()
+                .find(|p| p.id == project)
+                .map_or_else(
+                    || format!("Unregistered workspace {id}"),
+                    |p| p.name.clone(),
+                );
+            let path = entry.path().join("haarness.db");
+            if path.is_file() {
+                sources.push(Source {
+                    path,
+                    project: project.to_owned(),
+                    name,
+                    workspace: registered.map(|workspace| PathBuf::from(&workspace.path)),
+                });
+            }
+        }
+    }
+    if project_filter.is_none() && data.join("haarness.db").is_file() {
+        sources.push(Source {
+            path: data.join("haarness.db"),
+            project: "legacy".into(),
+            name: "Legacy history (unassigned)".into(),
+            workspace: None,
+        });
+    }
+    sources.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut turns = Vec::new();
+    for source in sources {
+        match read_source(&source, since, now) {
+            Ok((records, detached)) => {
+                turns.extend(records);
+                result.databases_read += 1;
+                result.detached_items += detached;
+            }
+            Err(error) => result.warnings.push(format!(
+                "Could not read {}: {error:#}",
+                source.path.display()
+            )),
+        }
+    }
+    // Archive imports preserve turn IDs. Prefer the most complete copy, then stable source order.
+    turns.sort_by(|a, b| {
+        a.metrics
+            .turns_without_usage
+            .cmp(&b.metrics.turns_without_usage)
+            .then_with(|| b.metrics.tokens().cmp(&a.metrics.tokens()))
+            .then_with(|| b.metrics.tool_results.cmp(&a.metrics.tool_results))
+            .then_with(|| {
+                b.metrics
+                    .priced_usage_records
+                    .cmp(&a.metrics.priced_usage_records)
+            })
+    });
+    let mut seen = BTreeSet::new();
+    turns.retain(|turn| {
+        let unique = seen.insert(turn.id.clone());
+        if !unique {
+            result.duplicate_turns += 1;
+        }
+        unique
+    });
+    result.turns = turns;
+    Ok(result)
+}
+
 fn group<'a>(map: &'a mut BTreeMap<String, Group>, id: &str, name: &str) -> &'a mut Metrics {
     &mut map
         .entry(id.to_owned())
@@ -400,21 +527,39 @@ fn read_source(
     let mut connection = history_connection(&source.path)?;
     connection.busy_timeout(Duration::from_secs(5))?;
     let tx = connection.transaction()?;
-    let mut statement = tx.prepare("SELECT t.id,t.thread_id,h.title,t.provider,t.model,t.status,t.created_at FROM turns t JOIN threads h ON h.id=t.thread_id ORDER BY t.created_at,t.id")?;
+    // Older databases predate these columns; their turns count as the chat's own.
+    let has_column = |column: &str| -> Result<bool> {
+        Ok(tx.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('threads') WHERE name=?1",
+            [column],
+            |r| r.get::<_, i64>(0),
+        )? > 0)
+    };
+    let subagent = if has_column("is_subagent")? { "h.is_subagent" } else { "0" };
+    let scheduled = if has_column("schedule_json")? {
+        "h.schedule_json IS NOT NULL"
+    } else {
+        "0"
+    };
+    let mut statement = tx.prepare(&format!("SELECT t.id,t.thread_id,h.title,t.provider,t.model,t.status,t.created_at,{subagent},{scheduled} FROM turns t JOIN threads h ON h.id=t.thread_id ORDER BY t.created_at,t.id"))?;
     let rows = statement.query_map([], |r| {
         Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, String>(4)?,
-            r.get::<_, String>(5)?,
-            r.get::<_, String>(6)?,
+            (
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+            ),
+            r.get::<_, bool>(7)?,
+            r.get::<_, bool>(8)?,
         ))
     })?;
     let mut turns = BTreeMap::new();
     for row in rows {
-        let (id, session, title, provider, model, status, date) = row?;
+        let ((id, session, title, provider, model, status, date), subagent, scheduled) = row?;
         let created = DateTime::parse_from_rfc3339(&date)?.with_timezone(&Utc);
         if created > now || since.is_some_and(|start| created < start) {
             continue;
@@ -438,6 +583,10 @@ fn read_source(
                 project: source.project.clone(),
                 project_name: source.name.clone(),
                 model: format!("{provider}/{model}"),
+                provider,
+                model_name: model,
+                subagent,
+                scheduled,
                 created,
                 metrics,
                 tools: BTreeMap::new(),

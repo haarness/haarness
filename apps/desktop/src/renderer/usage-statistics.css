@@ -1,0 +1,28 @@
+/* Usage statistics: the settings hint and the preview of the exact report. */
+/* Under its row: says why the switch cannot be changed here. */
+.usage-setting-hint {
+  margin: calc(-1 * var(--s2)) 0 var(--s3);
+  font-size: var(--ui-sm);
+}
+.usage-preview-dialog {
+  width: 680px;
+}
+.usage-preview-empty {
+  margin: 0 0 var(--s3);
+}
+.usage-preview {
+  margin: 0;
+  max-height: min(60vh, 520px);
+  overflow: auto;
+  padding: var(--s3);
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  font-family: var(--mono);
+  font-size: var(--ui-sm);
+  line-height: 1.5;
+  white-space: pre;
+  /* JSON reads left to right in every language. */
+  direction: ltr;
+  text-align: left;
+}

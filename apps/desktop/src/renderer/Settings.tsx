@@ -1,6 +1,7 @@
 import { createSettingsSearch } from "./settings-search";
 import { searchEntries, shortcutLabel } from "./search";
 import { SettingRow as Row } from "./SettingRow";
+import { UsageStatisticsSetting } from "./UsageStatistics";
 import { BrowserSettings } from "./BrowserSettings";
 import { Notifications } from "./Notifications";
 import { t, languages } from "./i18n";
@@ -531,6 +532,7 @@ function General() {
           ]}
         />
       </Row>
+      <UsageStatisticsSetting />
       <p class="muted">
         {t("Drafts, appearance and saved projects are saved on this computer. Conversations and tasks are saved separately for each project folder or worktree.")}
       </p>

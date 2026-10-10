@@ -95,6 +95,10 @@ let preload = resolve(here, "../preload/index.cjs");
 let uiSession: Awaited<ReturnType<typeof createUiSession>> | undefined;
 const windows = new Set<BrowserWindow>();
 const subscriptions = new Map<string, { owner: number; client: Haarness }>();
+// Test runs never share usage statistics. Every server and CLI process
+// inherits this.
+if (process.env.HAARNESS_DESKTOP_TEST === "1" && process.env.HAARNESS_TELEMETRY === undefined)
+  process.env.HAARNESS_TELEMETRY = "0";
 const commandOwners = new Map<string, number>();
 const terminals = new Map<string, { owner: number; socket: PtyConnection }>();
 const projectTransaction = createProjectQueue();

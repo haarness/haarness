@@ -15,6 +15,7 @@ mod layout;
 mod management;
 mod memory_settings;
 mod otel;
+mod usage_stats;
 mod plugins;
 mod profile;
 mod remote;
@@ -148,6 +149,8 @@ enum Command {
     Stats(insights::StatsArgs),
     /// Generate a private HTML report with cross-project findings.
     Insights(insights::InsightsArgs),
+    /// Usage statistics shared with Haarness Cloud: status, on, off, preview, send.
+    Telemetry(usage_stats::TelemetryArgs),
     /// Serve the Agent Client Protocol over stdin/stdout for editor integrations.
     Acp(AcpArgs),
     Serve(ServeArgs),
@@ -1059,6 +1062,9 @@ async fn main() -> Result<()> {
         Some(Command::Insights(args)) => {
             return insights::insights(&base_paths.data, &cli.workspace, args);
         }
+        Some(Command::Telemetry(args)) => {
+            return usage_stats::run(&base_paths.data, base_paths.config_dir(), args).await;
+        }
         _ => {}
     }
     // Logs always land in <data>/logs (rotated daily) so problems seen in
@@ -1127,7 +1133,7 @@ async fn main() -> Result<()> {
         Some(Command::Remote(args)) => remote_cloud::run(&paths, &workspace, project_config, args).await,
         Some(Command::Desktop) => desktop::run(&paths, &workspace, project_config).await,
         Some(Command::Login(_) | Command::Logout | Command::Account(_) | Command::Cloud(_)) => unreachable!("account command handled before project setup"),
-        Some(Command::Stats(_) | Command::Insights(_) | Command::Profile(_)) => unreachable!("standalone commands dispatched before runtime setup"),
+        Some(Command::Stats(_) | Command::Insights(_) | Command::Profile(_) | Command::Telemetry(_)) => unreachable!("standalone commands dispatched before runtime setup"),
         None => {
             interactive(
                 &paths,
@@ -1281,6 +1287,7 @@ impl Command {
             Self::Extension(_) => "extension",
             Self::Stats(_) => "stats",
             Self::Insights(_) => "insights",
+            Self::Telemetry(_) => "telemetry",
             Self::Acp(_) => "acp",
             Self::Serve(_) => "serve",
             Self::Attach(_) => "attach",
@@ -5054,6 +5061,7 @@ async fn application_at(
     // must never arm duplicate loop timers or "recover" work owned by it.
     if recover {
         spawn_loop_driver(runtime.clone());
+        usage_stats::spawn_uploader(paths.data.clone(), paths.config_dir().to_path_buf());
     }
     let hot_reload = HotReloadController {
         browser: browser.clone(),

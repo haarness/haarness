@@ -701,7 +701,13 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
                 .management
                 .as_ref()
                 .into_iter()
-                .flat_map(|_| ["input-settings.v1".into(), "browser-settings.v1".into()]),
+                .flat_map(|_| {
+                    [
+                        "input-settings.v1".into(),
+                        "browser-settings.v1".into(),
+                        "usage-statistics.v1".into(),
+                    ]
+                }),
         )
         .collect(),
         workspace: Some(state.workspace.display().to_string()),

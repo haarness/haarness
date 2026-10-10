@@ -1,6 +1,6 @@
 # Observability
 
-Haarness keeps its existing structured daily logs and can additionally export traces through native OpenTelemetry OTLP. Export is disabled unless an endpoint is configured, so a normal local invocation does not contact a collector.
+Haarness keeps its existing structured daily logs and can additionally export traces through native OpenTelemetry OTLP. Export is disabled unless an endpoint is configured, so a normal local invocation does not contact a collector. Trace export is separate from [usage statistics](USAGE-STATISTICS.md), the daily summary Haarness shares with Haarness Cloud unless you turn it off.
 
 ## Enable OTLP traces
 

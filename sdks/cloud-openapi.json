@@ -7299,6 +7299,141 @@
         }
       }
     },
+    "/api/v1/telemetry/usage": {
+      "get": {
+        "tags": [
+          "telemetry"
+        ],
+        "summary": "The caller's usage statistics, summed over every installation linked to them: per day, top models and tools,\nand the installations.",
+        "description": "Auth: `cookie|bearer` (bearer scope `account`).",
+        "operationId": "usage_summary",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "description": "1..=366, default 30.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The caller's statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageSummaryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`days` outside 1..=366",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No session or token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A token without the `account` scope, or an API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "telemetry"
+        ],
+        "summary": "Report the usage statistics of a desktop or CLI installation: 1–31 daily snapshots, each replacing what was\nstored for that installation and day.",
+        "description": "Auth: public; an optional `Authorization: Bearer` (a native access token or an API key) links the installation\nto its user. A missing, invalid or expired bearer is anonymous, never `401`, and an anonymous report never\nunlinks an installation. No CSRF. Body ≤ 256 KiB. One accepted report per installation per 60 s.",
+        "operationId": "report_usage",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UsageReportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageReportResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_request`: the message names the offending field",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body over 256 KiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Not `application/json`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "This installation's previous report was accepted less than 60 s ago (`Retry-After`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/workspaces": {
       "get": {
         "tags": [
@@ -9374,6 +9509,61 @@
           },
           "404": {
             "description": "Unknown version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/ops/telemetry/usage": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Usage statistics across every installation: per-day totals, top models and tools, client versions, operating\nsystems and the 50 users with the most tokens (user ids, never emails).",
+        "description": "Auth: `internal` (an ops route, available in every environment; the metrics token does not open it).",
+        "operationId": "internal_usage_summary",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "description": "1..=366, default 30.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Totals across everyone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageOpsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`days` outside 1..=366",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong internal token",
             "content": {
               "application/json": {
                 "schema": {
@@ -14445,6 +14635,26 @@
           },
           {
             "type": "object",
+            "description": "Deletes usage statistics days older than 400 days and the installations not seen for that long.",
+            "required": [
+              "payload",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "usage_statistics_sweep"
+                ]
+              },
+              "payload": {
+                "type": "object",
+                "description": "Deletes usage statistics days older than 400 days and the installations not seen for that long."
+              }
+            }
+          },
+          {
+            "type": "object",
             "required": [
               "payload",
               "kind"
@@ -18406,6 +18616,328 @@
           }
         }
       },
+      "UsageArch": {
+        "type": "string",
+        "enum": [
+          "aarch64",
+          "x86_64",
+          "other"
+        ]
+      },
+      "UsageBuild": {
+        "type": "string",
+        "enum": [
+          "release",
+          "debug"
+        ]
+      },
+      "UsageClientDto": {
+        "type": "object",
+        "required": [
+          "version",
+          "os",
+          "arch",
+          "build"
+        ],
+        "properties": {
+          "arch": {
+            "$ref": "#/components/schemas/UsageArch"
+          },
+          "build": {
+            "$ref": "#/components/schemas/UsageBuild"
+          },
+          "os": {
+            "$ref": "#/components/schemas/UsageOs"
+          },
+          "version": {
+            "type": "string",
+            "description": "1–64 characters of `[A-Za-z0-9._+-]`, e.g. `0.1.1-preview.1`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "UsageDayReport": {
+        "type": "object",
+        "description": "One day as the client counted it (in its local calendar).",
+        "required": [
+          "day",
+          "chats",
+          "turns",
+          "completedTurns",
+          "failedTurns",
+          "interruptedTurns",
+          "subagentTurns",
+          "scheduledTurns",
+          "inputTokens",
+          "outputTokens",
+          "cacheReadTokens",
+          "cacheWriteTokens",
+          "toolCalls",
+          "toolErrors",
+          "fileChanges",
+          "linesAdded",
+          "linesRemoved"
+        ],
+        "properties": {
+          "cacheReadTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "cacheWriteTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "chats": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "completedTurns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "costUsd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The client's cost estimate in USD; omitted or `null` when unknown."
+          },
+          "day": {
+            "type": "string",
+            "format": "date",
+            "description": "`YYYY-MM-DD`",
+            "example": "2026-10-10"
+          },
+          "failedTurns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "fileChanges": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "inputTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "interruptedTurns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "linesAdded": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "linesRemoved": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageModelReport"
+            },
+            "description": "At most 50, unique by `(provider, model)`."
+          },
+          "outputTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "scheduledTurns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "subagentTurns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "toolCalls": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "toolErrors": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageToolReport"
+            },
+            "description": "At most 64, unique by `name`."
+          },
+          "turns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "UsageDayTotalsDto": {
+        "type": "object",
+        "required": [
+          "day",
+          "chats",
+          "turns",
+          "completedTurns",
+          "failedTurns",
+          "interruptedTurns",
+          "subagentTurns",
+          "scheduledTurns",
+          "inputTokens",
+          "outputTokens",
+          "cacheReadTokens",
+          "cacheWriteTokens",
+          "toolCalls",
+          "toolErrors",
+          "fileChanges",
+          "linesAdded",
+          "linesRemoved"
+        ],
+        "properties": {
+          "cacheReadTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "cacheWriteTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "chats": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "completedTurns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "costUsd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Absent when no installation knew its cost that day."
+          },
+          "day": {
+            "type": "string",
+            "format": "date"
+          },
+          "failedTurns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "fileChanges": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "inputTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "interruptedTurns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "linesAdded": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "linesRemoved": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "outputTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "scheduledTurns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "subagentTurns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "toolCalls": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "toolErrors": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "turns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "UsageInstallDto": {
+        "type": "object",
+        "description": "One of the caller's installations. The install id is shortened: the full id is the app's own secret.",
+        "required": [
+          "installId",
+          "version",
+          "os",
+          "arch",
+          "lastSeenAt"
+        ],
+        "properties": {
+          "arch": {
+            "type": "string",
+            "description": "`aarch64|x86_64|other`"
+          },
+          "installId": {
+            "type": "string",
+            "description": "The first 8 hex digits of the install id."
+          },
+          "lastSeenAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "os": {
+            "type": "string",
+            "description": "`macos|linux|windows|other`"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
       "UsageItemDto": {
         "type": "object",
         "required": [
@@ -18473,6 +19005,490 @@
                 "$ref": "#/components/schemas/WorkspaceId"
               }
             ]
+          }
+        }
+      },
+      "UsageModelReport": {
+        "type": "object",
+        "required": [
+          "provider",
+          "model",
+          "turns",
+          "inputTokens",
+          "outputTokens",
+          "cacheReadTokens",
+          "cacheWriteTokens"
+        ],
+        "properties": {
+          "cacheReadTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "cacheWriteTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "costUsd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "inputTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "model": {
+            "type": "string",
+            "description": "1–100 characters of `[A-Za-z0-9._:/@+-]`."
+          },
+          "outputTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "provider": {
+            "type": "string",
+            "description": "1–100 characters of `[A-Za-z0-9._:/@+-]`."
+          },
+          "turns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "UsageModelTotalsDto": {
+        "type": "object",
+        "required": [
+          "provider",
+          "model",
+          "turns",
+          "inputTokens",
+          "outputTokens",
+          "cacheReadTokens",
+          "cacheWriteTokens"
+        ],
+        "properties": {
+          "cacheReadTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "cacheWriteTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "costUsd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "inputTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "model": {
+            "type": "string"
+          },
+          "outputTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "provider": {
+            "type": "string"
+          },
+          "turns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "UsageOpsDayDto": {
+        "type": "object",
+        "required": [
+          "day",
+          "activeInstalls",
+          "linkedUsers",
+          "anonymousInstalls",
+          "chats",
+          "turns",
+          "inputTokens",
+          "outputTokens",
+          "cacheReadTokens",
+          "cacheWriteTokens"
+        ],
+        "properties": {
+          "activeInstalls": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Installations that reported this day.",
+            "minimum": 0
+          },
+          "anonymousInstalls": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Those installations that are not linked to anyone.",
+            "minimum": 0
+          },
+          "cacheReadTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "cacheWriteTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "chats": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "costUsd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "day": {
+            "type": "string",
+            "format": "date"
+          },
+          "inputTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "linkedUsers": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Distinct users those installations are linked to.",
+            "minimum": 0
+          },
+          "outputTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "turns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "UsageOpsResponse": {
+        "type": "object",
+        "description": "`GET /internal/ops/telemetry/usage`: totals across every installation. User ids only, never emails.",
+        "required": [
+          "from",
+          "to",
+          "days",
+          "models",
+          "tools",
+          "versions",
+          "os",
+          "users"
+        ],
+        "properties": {
+          "days": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageOpsDayDto"
+            },
+            "description": "The days of the window with at least one report, oldest first."
+          },
+          "from": {
+            "type": "string",
+            "format": "date"
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageModelTotalsDto"
+            }
+          },
+          "os": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageValueCountDto"
+            },
+            "description": "Installations active in the window by operating system, most common first."
+          },
+          "to": {
+            "type": "string",
+            "format": "date"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageToolTotalsDto"
+            }
+          },
+          "users": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageUserTotalsDto"
+            },
+            "description": "The 50 linked users with the most tokens (input + output + cache read + cache write) in the window."
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageValueCountDto"
+            },
+            "description": "Installations active in the window by their current client version, most common first."
+          }
+        }
+      },
+      "UsageOs": {
+        "type": "string",
+        "enum": [
+          "macos",
+          "linux",
+          "windows",
+          "other"
+        ]
+      },
+      "UsageReportRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/telemetry/usage`: one installation's latest snapshot of 1–31 days.\n\nEach day **replaces** what was stored for `(installId, day)`; clients resend the last week every few hours and\nthe server never adds two snapshots of a day together. Every count is an integer from 0 to 10^15; `costUsd` is\na finite number from 0 to 10^9, or omitted/`null` when the client does not know it.",
+        "required": [
+          "schemaVersion",
+          "installId",
+          "client",
+          "days"
+        ],
+        "properties": {
+          "client": {
+            "$ref": "#/components/schemas/UsageClientDto"
+          },
+          "days": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageDayReport"
+            },
+            "description": "1–31 days with distinct `day` values, each between today−35 and today+1 (UTC)."
+          },
+          "installId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "A random id the app generates once per installation."
+          },
+          "schemaVersion": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Always `1`.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "UsageReportResponse": {
+        "type": "object",
+        "description": "`202` to [`UsageReportRequest`].",
+        "required": [
+          "accepted",
+          "days",
+          "linked"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "boolean"
+          },
+          "days": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many days were stored.",
+            "minimum": 0
+          },
+          "linked": {
+            "type": "boolean",
+            "description": "The report carried a valid bearer and the installation is now linked to that user."
+          }
+        }
+      },
+      "UsageSummaryResponse": {
+        "type": "object",
+        "description": "`GET /api/v1/telemetry/usage`: the caller's statistics summed over every installation linked to them.",
+        "required": [
+          "from",
+          "to",
+          "days",
+          "models",
+          "tools",
+          "installs"
+        ],
+        "properties": {
+          "days": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageDayTotalsDto"
+            },
+            "description": "The days of the window with at least one report, oldest first."
+          },
+          "from": {
+            "type": "string",
+            "format": "date"
+          },
+          "installs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageInstallDto"
+            },
+            "description": "The installations linked to the caller, most recently seen first."
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageModelTotalsDto"
+            },
+            "description": "The models with the most turns in the window."
+          },
+          "to": {
+            "type": "string",
+            "format": "date"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageToolTotalsDto"
+            },
+            "description": "The most-called tools in the window."
+          }
+        }
+      },
+      "UsageToolReport": {
+        "type": "object",
+        "required": [
+          "name",
+          "calls",
+          "errors"
+        ],
+        "properties": {
+          "calls": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "errors": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "1–100 characters of `[A-Za-z0-9._:/@+-]`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "UsageToolTotalsDto": {
+        "type": "object",
+        "required": [
+          "name",
+          "calls",
+          "errors"
+        ],
+        "properties": {
+          "calls": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "errors": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "UsageUserTotalsDto": {
+        "type": "object",
+        "required": [
+          "userId",
+          "installs",
+          "turns",
+          "inputTokens",
+          "outputTokens",
+          "cacheReadTokens",
+          "cacheWriteTokens"
+        ],
+        "properties": {
+          "cacheReadTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "cacheWriteTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "costUsd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "inputTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "installs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Their installations that reported in the window.",
+            "minimum": 0
+          },
+          "outputTokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "turns": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "userId": {
+            "$ref": "#/components/schemas/UserId"
+          }
+        }
+      },
+      "UsageValueCountDto": {
+        "type": "object",
+        "required": [
+          "value",
+          "installs"
+        ],
+        "properties": {
+          "installs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "value": {
+            "type": "string"
           }
         }
       },
@@ -19008,6 +20024,10 @@
     {
       "name": "profiles",
       "description": "Profile archives"
+    },
+    {
+      "name": "telemetry",
+      "description": "Usage statistics of the desktop and CLI apps"
     },
     {
       "name": "internal",

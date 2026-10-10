@@ -52,6 +52,12 @@ publishing, platform validation and rollback.
   `haarness insights --days 7` generates a private HTML report with findings.
   The TUI exposes `/stats` and `/insights`. See [Insights](docs/INSIGHTS.md).
 
+- Usage statistics: a daily summary of chats, turns, tokens, models and tool calls
+  (never prompts, code, file names or paths) shared with Haarness Cloud.
+  `haarness telemetry preview` shows exactly what is sent;
+  `haarness telemetry off`, `HAARNESS_TELEMETRY=0` or `DO_NOT_TRACK=1` turns it off.
+  See [Usage statistics](docs/USAGE-STATISTICS.md).
+
 - Durable UUIDv7 Thread → Turn → Item history in SQLite, idempotent turn requests, ordered events, bounded SSE replay, interruption, compaction records, forking, and restart recovery without tool replay.
 - Agent Client Protocol v1 over stdio for editor integrations, including durable create/load, streamed text and reasoning, tool lifecycle and approvals, plans, PDF/image/audio/video context, cancellation, and stdio/HTTP/SSE MCP handoff.
 - Persistent goals with runtime-owned token/time accounting, bounded autonomous continuations, negotiated evidence-backed completion criteria, strict blocked/complete exits, durable lifecycle events, and localized completion actions.

@@ -1686,5 +1686,14 @@
   "Approvals changed in another window. Try again.": "다른 창에서 승인 방식이 바뀌었습니다. 다시 시도하세요.",
   "Auto on for this chat · requests are allowed once · ctrl+y to review": "이 채팅은 자동 승인 중 · 요청은 한 번만 허용 · ctrl+y로 검토",
   "Review · this chat asks before acting · ctrl+y for Auto": "검토 · 이 채팅은 작업 전에 묻습니다 · ctrl+y로 자동",
-  "Approvals changed in another window · ctrl+y to switch": "다른 창에서 승인 방식이 바뀌었습니다 · ctrl+y로 전환"
+  "Approvals changed in another window · ctrl+y to switch": "다른 창에서 승인 방식이 바뀌었습니다 · ctrl+y로 전환",
+  "Share usage statistics": "사용 통계 공유",
+  "Daily counts of chats, turns, tokens, models and tool calls, linked to your Haarness account when you're signed in. Never prompts, code, file names or paths.": "채팅, 턴, 토큰, 모델, 도구 호출의 일별 집계로, 로그인한 경우 Haarness 계정에 연결됩니다. 프롬프트, 코드, 파일 이름, 경로는 절대 포함되지 않습니다.",
+  "See what's shared": "공유되는 내용 보기",
+  "Off because DO_NOT_TRACK is set where Haarness started.": "Haarness를 시작한 환경에 DO_NOT_TRACK이 설정되어 있어 꺼져 있습니다.",
+  "Set by {variable} where Haarness started.": "Haarness를 시작한 환경에서 {variable}에 의해 설정되었습니다.",
+  "What Haarness shares": "Haarness가 공유하는 내용",
+  "The report exactly as it would be sent now: one snapshot per day for the last 7 days. Each replaces the one sent before for the same day.": "지금 전송될 내용과 정확히 같은 보고서입니다. 최근 7일 동안 하루에 스냅샷 하나이며, 각 스냅샷은 같은 날 이전에 전송된 것을 대체합니다.",
+  "Share or stop sharing usage statistics": "사용 통계 공유 시작 또는 중지",
+  "No activity in the last 7 days yet, so there is nothing to send.": "최근 7일간 활동이 아직 없어 보낼 내용이 없습니다."
 }

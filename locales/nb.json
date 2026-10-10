@@ -1686,5 +1686,14 @@
   "Approvals changed in another window. Try again.": "Godkjenningene ble endret i et annet vindu. Prøv igjen.",
   "Auto on for this chat · requests are allowed once · ctrl+y to review": "Automatisk på for denne chatten · forespørsler tillates én gang · ctrl+y for gjennomgang",
   "Review · this chat asks before acting · ctrl+y for Auto": "Gjennomgang · denne chatten spør før den handler · ctrl+y for automatisk",
-  "Approvals changed in another window · ctrl+y to switch": "Godkjenningene ble endret i et annet vindu · ctrl+y for å bytte"
+  "Approvals changed in another window · ctrl+y to switch": "Godkjenningene ble endret i et annet vindu · ctrl+y for å bytte",
+  "Share usage statistics": "Del bruksstatistikk",
+  "Daily counts of chats, turns, tokens, models and tool calls, linked to your Haarness account when you're signed in. Never prompts, code, file names or paths.": "Daglig antall chatter, turer, tokens, modeller og verktøykall, knyttet til Haarness-kontoen din når du er logget inn. Aldri prompts, kode, filnavn eller stier.",
+  "See what's shared": "Se hva som deles",
+  "Off because DO_NOT_TRACK is set where Haarness started.": "Av fordi DO_NOT_TRACK er satt der Haarness ble startet.",
+  "Set by {variable} where Haarness started.": "Satt av {variable} der Haarness ble startet.",
+  "What Haarness shares": "Hva Haarness deler",
+  "The report exactly as it would be sent now: one snapshot per day for the last 7 days. Each replaces the one sent before for the same day.": "Rapporten nøyaktig slik den ville blitt sendt nå: ett øyeblikksbilde per dag for de siste 7 dagene. Hvert erstatter det som ble sendt tidligere for samme dag.",
+  "Share or stop sharing usage statistics": "Del eller slutt å dele bruksstatistikk",
+  "No activity in the last 7 days yet, so there is nothing to send.": "Ingen aktivitet de siste 7 dagene ennå, så det er ingenting å sende."
 }

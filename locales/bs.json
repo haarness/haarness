@@ -1686,5 +1686,14 @@
   "Approvals changed in another window. Try again.": "Odobrenja su promijenjena u drugom prozoru. Pokušajte ponovo.",
   "Auto on for this chat · requests are allowed once · ctrl+y to review": "Automatski način uključen za ovaj chat · zahtjevi su dozvoljeni jednom · ctrl+y za pregled",
   "Review · this chat asks before acting · ctrl+y for Auto": "Pregled · ovaj chat pita prije djelovanja · ctrl+y za automatski način",
-  "Approvals changed in another window · ctrl+y to switch": "Odobrenja su promijenjena u drugom prozoru · ctrl+y za prebacivanje"
+  "Approvals changed in another window · ctrl+y to switch": "Odobrenja su promijenjena u drugom prozoru · ctrl+y za prebacivanje",
+  "Share usage statistics": "Dijeli statistiku korištenja",
+  "Daily counts of chats, turns, tokens, models and tool calls, linked to your Haarness account when you're signed in. Never prompts, code, file names or paths.": "Dnevni broj razgovora, krugova, tokena, modela i poziva alata, povezan s vašim Haarness računom kada ste prijavljeni. Nikad ne uključuje promptove, kod, nazive datoteka ni putanje.",
+  "See what's shared": "Pogledaj šta se dijeli",
+  "Off because DO_NOT_TRACK is set where Haarness started.": "Isključeno jer je DO_NOT_TRACK postavljen tamo gdje je Haarness pokrenut.",
+  "Set by {variable} where Haarness started.": "Postavljeno varijablom {variable} tamo gdje je Haarness pokrenut.",
+  "What Haarness shares": "Šta Haarness dijeli",
+  "The report exactly as it would be sent now: one snapshot per day for the last 7 days. Each replaces the one sent before for the same day.": "Izvještaj tačno onakav kakav bi sada bio poslan: jedan snimak po danu za posljednjih 7 dana. Svaki zamjenjuje onaj poslan ranije za isti dan.",
+  "Share or stop sharing usage statistics": "Dijeli statistiku korištenja ili prestani dijeliti",
+  "No activity in the last 7 days yet, so there is nothing to send.": "Još nema aktivnosti u posljednjih 7 dana, pa nema šta poslati."
 }

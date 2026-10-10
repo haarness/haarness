@@ -1686,5 +1686,14 @@
   "Approvals changed in another window. Try again.": "Разрешения изменены в другом окне. Попробуйте ещё раз.",
   "Auto on for this chat · requests are allowed once · ctrl+y to review": "Авто для этого чата · запросы разрешаются один раз · ctrl+y для обзора",
   "Review · this chat asks before acting · ctrl+y for Auto": "Обзор · этот чат спрашивает перед действием · ctrl+y для авто",
-  "Approvals changed in another window · ctrl+y to switch": "Разрешения изменены в другом окне · ctrl+y для переключения"
+  "Approvals changed in another window · ctrl+y to switch": "Разрешения изменены в другом окне · ctrl+y для переключения",
+  "Share usage statistics": "Делиться статистикой использования",
+  "Daily counts of chats, turns, tokens, models and tool calls, linked to your Haarness account when you're signed in. Never prompts, code, file names or paths.": "Ежедневное количество чатов, ходов, токенов, моделей и вызовов инструментов, связанное с вашим аккаунтом Haarness, если выполнен вход. Никогда не включает запросы, код, имена файлов и пути.",
+  "See what's shared": "Посмотреть, что передаётся",
+  "Off because DO_NOT_TRACK is set where Haarness started.": "Выключено, так как DO_NOT_TRACK задана там, где запущен Haarness.",
+  "Set by {variable} where Haarness started.": "Задано переменной {variable} там, где запущен Haarness.",
+  "What Haarness shares": "Чем делится Haarness",
+  "The report exactly as it would be sent now: one snapshot per day for the last 7 days. Each replaces the one sent before for the same day.": "Отчёт в точности такой, каким он был бы отправлен сейчас: по одному снимку в день за последние 7 дней. Каждый заменяет снимок, отправленный ранее за тот же день.",
+  "Share or stop sharing usage statistics": "Начать или прекратить делиться статистикой использования",
+  "No activity in the last 7 days yet, so there is nothing to send.": "За последние 7 дней активности пока нет, поэтому отправлять нечего."
 }
