@@ -327,14 +327,13 @@ pub(crate) enum ServerRestart {
     Failed,
 }
 
-/// An undone prompt waiting in the composer. Typing `/` over it starts a
-/// command instead of appending to it; the prompt returns once the command is
-/// done, except after `/redo`, which brings the turn itself back.
+/// An undone prompt set aside by a slash command typed over it. It returns
+/// to the composer once the command is done or erased, except after `/redo`,
+/// which brings the turn itself back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct UndoDraft {
     pub text: String,
     pub attachments: Vec<String>,
-    pub set_aside: bool,
 }
 
 impl PhaseInfo {
@@ -586,8 +585,8 @@ pub struct App {
     /// The notice last seen by the render tick and when it appeared, so an
     /// answer to something the user did fades instead of describing the past.
     pub(crate) notice_shown: Option<(String, std::time::Instant)>,
-    /// The prompt `/undo` put back in the composer, while it is unedited or
-    /// set aside by a slash command typed over it.
+    /// The prompt `/undo` put back in the composer, while a slash command
+    /// typed over it holds its place.
     pub(crate) undo_draft: Option<UndoDraft>,
     /// First non-empty line produced by the configured status-line command.
     pub custom_status_line: Option<String>,
@@ -1165,12 +1164,11 @@ impl App {
     }
 
     /// Whether the composer still holds the prompt `/undo` put there,
-    /// untouched.
+    /// unedited. It is read from the chat, not remembered, so the prompt is
+    /// still known after leaving the chat and coming back to its draft.
     pub(crate) fn holds_undo_draft(&self) -> bool {
-        self.undo_draft.as_ref().is_some_and(|draft| {
-            !draft.set_aside
-                && self.composer.text() == draft.text
-                && self.attachments == draft.attachments
+        self.undone_prompt().is_some_and(|(text, attachments)| {
+            self.composer.text() == text && self.attachments == attachments
         })
     }
 
@@ -1180,10 +1178,9 @@ impl App {
         if !self.composer.is_empty() || !self.attachments.is_empty() {
             return;
         }
-        if let Some(draft) = self.undo_draft.as_mut().filter(|draft| draft.set_aside) {
-            draft.set_aside = false;
-            self.composer.set_text(draft.text.clone());
-            self.attachments = draft.attachments.clone();
+        if let Some(draft) = self.undo_draft.take() {
+            self.composer.set_text(draft.text);
+            self.attachments = draft.attachments;
         }
     }
 

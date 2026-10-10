@@ -15893,13 +15893,17 @@ fn a_new_terminal_tab_can_take_focus() {
         cols: 20,
         rows: 4,
     };
-    let (first, second) = (info("first"), info("second"));
-    let mut terminal = crate::pty_view::TerminalWorkspace::new(vec![first.clone(), second.clone()]);
+    let (first, second, third) = (info("first"), info("second"), info("third"));
+    let mut terminal =
+        crate::pty_view::TerminalWorkspace::new(vec![first.clone(), second.clone(), third.clone()]);
     assert_eq!(terminal.active_id(), Some(first.id));
     terminal.focus(second.id);
     assert_eq!(terminal.active_id(), Some(second.id));
+    // A shell exiting in another tab leaves the shown one in place.
+    terminal.remove(first.id);
+    assert_eq!(terminal.active_id(), Some(second.id));
     terminal.remove(second.id);
-    assert_eq!(terminal.active_id(), Some(first.id));
+    assert_eq!(terminal.active_id(), Some(third.id));
     assert_eq!(terminal.page_rows(), 2);
 }
 
@@ -16049,6 +16053,16 @@ async fn undo_restores_the_prompt_and_slash_starts_a_command_over_it() {
         .unwrap();
     }
     assert_eq!(app.composer.text(), "write the file");
+    // With the cursor moved into the prompt, `/` is part of an edit.
+    for key in [
+        KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+    ] {
+        crate::input::handle_key(&mut app, key, &client)
+            .await
+            .unwrap();
+    }
+    assert_eq!(app.composer.text(), "write the fil/e");
 }
 
 #[tokio::test]
@@ -16059,12 +16073,9 @@ async fn redo_typed_over_an_undone_prompt_runs_and_leaves_the_composer_empty() {
         snapshot_id: "backup".into(),
         base_snapshot_id: Some("base".into()),
     });
+    // A draft that is still the undone prompt, as the composer holds it
+    // after /undo or after coming back to the chat later.
     app.composer.set_text("write the file".into());
-    app.undo_draft = Some(crate::state::UndoDraft {
-        text: "write the file".into(),
-        attachments: Vec::new(),
-        set_aside: false,
-    });
     let items = serde_json::to_string(&app.items).unwrap();
     let (client, server) = workspace_http_status_client(
         vec![
@@ -16096,6 +16107,52 @@ async fn redo_typed_over_an_undone_prompt_runs_and_leaves_the_composer_empty() {
     assert!(app.composer.is_empty(), "{}", app.composer.text());
     assert!(app.thread.revert.is_none());
     assert!(app.notice.starts_with("Redone"), "{}", app.notice);
+}
+
+#[tokio::test]
+async fn redo_from_elsewhere_drops_the_undone_prompt_copy_from_the_composer() {
+    let (mut app, thread) = undo_fixture();
+    app.thread.revert = Some(haarness_protocol::RevertState {
+        sequence: 2,
+        snapshot_id: "backup".into(),
+        base_snapshot_id: Some("base".into()),
+    });
+    app.composer.set_text("write the file".into());
+    // Moving the cursor is not an edit of the text: the copy still goes.
+    app.composer.move_home();
+    let items = serde_json::to_string(&app.items).unwrap();
+    let (client, server) = workspace_http_status_client(
+        vec![
+            (200, serde_json::to_string(&thread).unwrap()),
+            (200, items),
+            (200, "[]".into()),
+        ],
+        false,
+    )
+    .await;
+    app.execute_command("/redo", &client).await.unwrap();
+    server.await.unwrap();
+    assert!(app.composer.is_empty(), "{}", app.composer.text());
+}
+
+#[tokio::test]
+async fn leaving_over_a_set_aside_undone_prompt_keeps_it_as_the_draft() {
+    let (mut app, thread) = undo_fixture();
+    app.undo_draft = Some(crate::state::UndoDraft {
+        text: "write the file".into(),
+        attachments: Vec::new(),
+    });
+    let other = fixture_thread();
+    let (client, server) = navigation_client().await;
+    app.switch_thread(other.clone(), &client).await.unwrap();
+    server.await.unwrap();
+    assert_eq!(app.thread.id, other.id);
+    assert!(app.composer.is_empty(), "{}", app.composer.text());
+    assert!(app.undo_draft.is_none());
+    assert_eq!(
+        app.drafts.get(&thread.id).map(|draft| draft.text.as_str()),
+        Some("write the file")
+    );
 }
 
 #[test]

@@ -865,6 +865,24 @@ impl App {
         }
     }
 
+    /// The prompt of the earliest turn `/undo` took back, which the composer
+    /// offers for editing until the next turn confirms the undo.
+    pub(crate) fn undone_prompt(&self) -> Option<(String, Vec<String>)> {
+        let boundary = self.thread.revert.as_ref()?.sequence;
+        self.items
+            .iter()
+            .filter(|item| item.sequence > boundary)
+            .find_map(|item| match &item.data {
+                haarness_protocol::ItemData::UserMessage {
+                    text,
+                    attachments,
+                    synthetic: false,
+                    ..
+                } => Some((text.clone(), attachments.clone())),
+                _ => None,
+            })
+    }
+
     fn undo_notice(&self, verb: &str) -> String {
         let (undo, redo) = self.undo_depth();
         let mut parts = vec![verb.to_owned()];
@@ -2545,32 +2563,14 @@ impl App {
                 }
                 match client.revert(self.thread.id).await {
                     Ok(thread) => {
-                        let restored = thread.revert.as_ref().and_then(|revert| {
-                            self.items
-                                .iter()
-                                .filter(|item| item.sequence > revert.sequence)
-                                .find_map(|item| match &item.data {
-                                    haarness_protocol::ItemData::UserMessage {
-                                        text,
-                                        attachments,
-                                        synthetic: false,
-                                        ..
-                                    } => Some((text.clone(), attachments.clone())),
-                                    _ => None,
-                                })
-                        });
                         self.thread = thread;
+                        let restored = self.undone_prompt();
                         self.items = client.items(self.thread.id).await?;
                         self.todos = client.todos(self.thread.id).await.unwrap_or_default();
                         self.undo_draft = None;
                         if let Some((text, attachments)) = restored {
-                            self.composer.set_text(text.clone());
-                            self.attachments.clone_from(&attachments);
-                            self.undo_draft = Some(crate::state::UndoDraft {
-                                text,
-                                attachments,
-                                set_aside: false,
-                            });
+                            self.composer.set_text(text);
+                            self.attachments = attachments;
                         }
                         self.notice = self.undo_notice("Undone — the next turn confirms");
                     }
@@ -2579,24 +2579,25 @@ impl App {
             }
             "timeline" => self.open_timeline_overlay(),
             "messages" => self.open_messages((!arguments.is_empty()).then_some(arguments)),
-            "redo" => match client.unrevert(self.thread.id).await {
-                Ok(thread) => {
-                    // The undone prompt is back in the transcript; a copy
-                    // left in the composer would only send it twice.
-                    if let Some(draft) = self.undo_draft.take()
-                        && !draft.set_aside
-                        && self.composer.text() == draft.text
-                    {
-                        self.composer.clear();
-                        self.attachments.clear();
+            "redo" => {
+                let held = self.holds_undo_draft();
+                match client.unrevert(self.thread.id).await {
+                    Ok(thread) => {
+                        // The undone prompt is back in the transcript; a copy
+                        // left in the composer would only send it twice.
+                        self.undo_draft = None;
+                        if held {
+                            self.composer.clear();
+                            self.attachments.clear();
+                        }
+                        self.thread = thread;
+                        self.items = client.items(self.thread.id).await?;
+                        self.todos = client.todos(self.thread.id).await.unwrap_or_default();
+                        self.notice = self.undo_notice("Redone");
                     }
-                    self.thread = thread;
-                    self.items = client.items(self.thread.id).await?;
-                    self.todos = client.todos(self.thread.id).await.unwrap_or_default();
-                    self.notice = self.undo_notice("Redone");
+                    Err(error) => self.notice = undo_error(&error, "Redo"),
                 }
-                Err(error) => self.notice = undo_error(&error, "Redo"),
-            },
+            }
             "fork" => {
                 if arguments.is_empty() {
                     self.open_fork_overlay();
@@ -3979,6 +3980,9 @@ impl App {
         // An unsaved queued-message edit belongs to the session being left;
         // its set-aside draft is what that session keeps.
         self.cancel_queue_edit();
+        // A prompt `/undo` restored stays that chat's draft, even when
+        // the command that leaves it (`/new`) was typed over it.
+        self.return_undo_draft();
         self.undo_draft = None;
         if self.composer.is_empty() && self.attachments.is_empty() {
             self.drafts.remove(&previous_thread);

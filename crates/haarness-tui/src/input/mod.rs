@@ -1011,12 +1011,17 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
         KeyCode::Char(character) => {
             // `/` over an untouched undone prompt starts a command (such as
             // the /redo the undo notice offers) rather than appending to it.
-            if character == '/' && app.holds_undo_draft() {
+            // With the cursor moved into the prompt, it is part of an edit
+            // (`src/main.rs`).
+            if character == '/'
+                && app.composer.cursor() == app.composer.text().len()
+                && app.holds_undo_draft()
+            {
+                app.undo_draft = Some(crate::state::UndoDraft {
+                    text: app.composer.text().to_owned(),
+                    attachments: std::mem::take(&mut app.attachments),
+                });
                 app.composer.clear();
-                app.attachments.clear();
-                if let Some(draft) = &mut app.undo_draft {
-                    draft.set_aside = true;
-                }
             }
             app.composer.insert_char(character);
             app.autocomplete_hidden = false;
