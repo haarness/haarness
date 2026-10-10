@@ -571,7 +571,7 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
     } else {
         for (index, row) in rows.iter().enumerate().skip(start).take(end - start) {
             let selected = index == selection;
-            for line in row.heading_lines(theme, &layout) {
+            for line in row.heading_lines(theme, &layout, index == start) {
                 out.push(card.row(line, false));
             }
             for line in row.lines(theme, &layout) {
@@ -627,12 +627,19 @@ impl SelectorRow {
     }
 
     /// The shelf label above a row that opens one, aligned with the names.
-    fn heading_lines(&self, theme: &crate::theme::Theme, layout: &SelectorLayout) -> Vec<Line> {
+    /// At the top of the visible list the separator already sets the shelf
+    /// apart, so the blank row before it is left out.
+    fn heading_lines(
+        &self,
+        theme: &crate::theme::Theme,
+        layout: &SelectorLayout,
+        first_visible: bool,
+    ) -> Vec<Line> {
         let Some(heading) = &self.heading else {
             return Vec::new();
         };
         let mut lines = Vec::new();
-        if self.gap {
+        if self.gap && !first_visible {
             lines.push(Line::empty());
         }
         lines.push(Line::new(vec![

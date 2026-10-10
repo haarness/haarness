@@ -1846,6 +1846,7 @@ fn without_category(message: &str) -> &str {
         "not found: ",
         "conflict: ",
         "permission denied: ",
+        "provider error: ",
         "storage error: ",
     ]
     .iter()
