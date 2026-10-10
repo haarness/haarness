@@ -34,8 +34,8 @@ Clients connected to an older server keep the earlier client-side behaviour desc
 ## TUI
 
 - **Ctrl+Y** toggles Auto/Review for the open chat. `/permissions-mode auto`, `/permissions-mode review`, and `/permission-mode` work through the command menu too.
-- A pending permission offers **Once + Auto** (`u`). It enables Auto only after a successful one-time reply.
-- The status band shows the open chat's mode when space permits, and follows a change made from another client.
+- A pending permission offers **Once + Auto** (`u`). Because it changes how the whole chat is answered, the first press only stages it, like the Always choices; Enter or `u` again confirms. It enables Auto only after a successful one-time reply.
+- The status band shows the open chat's mode as `approvals: review` or `approvals: auto` when space permits, and follows a change made from another client.
 - `/new` starts the new chat in the open chat's mode.
 - With an older server, the mode is local to the TUI launch and covers new requests from every chat on that server, as before.
 

@@ -72,7 +72,7 @@ with tempfile.TemporaryDirectory(prefix='haarness-recent-fixes-') as directory:
     def pending():
         value = until(lambda: api('/permissions'), 'external approval missing')
         assert value[0]['permission'] == 'external_directory', value
-        until(lambda: 'Reach outside the workspace' in capture() and '←→ select · enter choose · esc reject' in capture(), 'approval not rendered in TUI')
+        until(lambda: 'Access outside the project' in capture() and '←→ select · enter choose · esc reject' in capture(), 'approval not rendered in TUI')
         captures.append(capture())
 
     try:

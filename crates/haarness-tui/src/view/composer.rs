@@ -366,13 +366,18 @@ fn status_band(app: &App, width: usize) -> Line {
             left_width += place_width;
         }
     }
-    // Permission mode uses spare space without displacing location, queue or stop hints.
-    let mode = if app.auto_permissions {
-        "  ⏵⏵ auto"
-    } else {
-        "  ⏸ review"
-    };
-    if left_width + right_width + mode.width() + 3 <= width {
+    // Permission mode uses spare space without displacing location, queue or
+    // stop hints. It names what it is: an agent can be called "review" too.
+    let mode = format!(
+        "  {}",
+        app.language.text(if app.auto_permissions {
+            "approvals: auto"
+        } else {
+            "approvals: review"
+        })
+    );
+    let mode_width = mode.width();
+    if left_width + right_width + mode_width + 3 <= width {
         left.push(
             Span::new(
                 mode,
@@ -384,7 +389,7 @@ fn status_band(app: &App, width: usize) -> Line {
             )
             .on(theme.surface),
         );
-        left_width += mode.width();
+        left_width += mode_width;
     }
     let mut spans = left;
     if !right.is_empty() {
@@ -901,6 +906,28 @@ fn phase_text(app: &App) -> String {
 /// around the cursor, with the cursor cell on the selection background.
 fn input_rows(app: &App, width: usize) -> Vec<Line> {
     let theme = &app.theme;
+    // While the approval card owns the keyboard the prompt draws no live
+    // cursor: keys answer the card until one is clearly typing, or ctrl+g
+    // hands the keyboard back.
+    let card_owns_keys = app.permission_focus && !app.pending_permissions.is_empty();
+    if app.composer.is_empty() && card_owns_keys {
+        // Wrapped rather than cut: the way back to typing is its last words.
+        let hint = app
+            .language
+            .text("Answer the approval above · ctrl+g to type");
+        return textwrap::wrap(hint, width.saturating_sub(INSET * 2).max(10))
+            .into_iter()
+            .map(|row| {
+                clamp(
+                    vec![
+                        Span::new(" ".repeat(INSET), theme.muted),
+                        Span::new(row.into_owned(), theme.muted),
+                    ],
+                    width,
+                )
+            })
+            .collect();
+    }
     if app.composer.is_empty() {
         let placeholder = if app.shell_mode {
             "shell command…"
@@ -993,7 +1020,11 @@ fn input_rows(app: &App, width: usize) -> Vec<Line> {
             }
             let after: String = tail.collect();
             spans.push(Span::new(before, theme.text));
-            spans.push(cursor_span(at, app));
+            if card_owns_keys {
+                spans.push(Span::new(at, theme.text));
+            } else {
+                spans.push(cursor_span(at, app));
+            }
             spans.push(Span::new(after, theme.text));
         } else {
             spans.push(Span::new(row.clone(), theme.text));

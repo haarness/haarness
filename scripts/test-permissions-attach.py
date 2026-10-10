@@ -83,7 +83,7 @@ try:
     check('environment secrets require approval while examples run normally')
     before=start('bash',{'command':'printf blocked > blocked.txt'}); assert finish(before)['is_error']; assert not (workspace/'blocked.txt').exists(); assert not api('/permissions')
     check('configured Deny prevents execution without a bypass prompt')
-    before=start('bash',{'command':'printf review-one > first.txt'}); prompt('bash'); keys('a'); until(lambda:'Always allow for this session' in capture(),'Always confirmation missing'); keys('Enter'); assert not finish(before)['is_error']
+    before=start('bash',{'command':'printf review-one > first.txt'}); prompt('bash'); keys('a'); until(lambda:'until the Haarness server stops' in capture(),'Always confirmation missing'); keys('Enter'); assert not finish(before)['is_error']
     before=start('bash',{'command':'printf review-two > second.txt'}); assert not finish(before)['is_error']; assert (workspace/'second.txt').read_text()=='review-two'; assert not api('/permissions')
     check('Always approval retains command-prefix permission for the session')
     send('/sandbox'); until(lambda:'Echo: /sandbox' in capture(),'retired command did not fall back to ordinary chat'); assert 'Tool sandbox' not in capture(); check('sandbox command is removed')
