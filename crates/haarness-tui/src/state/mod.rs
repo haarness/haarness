@@ -1178,10 +1178,12 @@ impl App {
 
     /// Whether the composer still holds the prompt `/undo` put there,
     /// unedited. It is read from the chat, not remembered, so the prompt is
-    /// still known after leaving the chat and coming back to its draft.
+    /// still known after leaving the chat and coming back to its draft. It is
+    /// compared as sent, references expanded, since that is what the chat
+    /// keeps.
     pub(crate) fn holds_undo_draft(&self) -> bool {
         self.undone_prompt().is_some_and(|(text, attachments)| {
-            self.composer.text() == text && self.attachments == attachments
+            self.composer.expanded_text() == text && self.attachments == attachments
         })
     }
 

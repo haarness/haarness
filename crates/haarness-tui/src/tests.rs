@@ -12003,6 +12003,74 @@ fn shell_mode_output_shows_under_the_command_and_a_non_zero_exit_reads_as_failed
     assert!(!expanded.contains("exit: 0"), "{expanded}");
 }
 
+#[tokio::test]
+async fn a_shell_command_in_view_needs_no_card_unless_it_failed() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let client = offline_client();
+    let run = |sequence: u64, call_id: &str, command: &str, exit: i64| {
+        let call = message_item(
+            sequence,
+            &thread,
+            ItemData::ToolCall {
+                call_id: call_id.into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"command": command}),
+                provider_metadata: serde_json::Value::Null,
+            },
+        );
+        let result = message_item(
+            sequence + 1,
+            &thread,
+            ItemData::ToolResult {
+                call_id: call_id.into(),
+                name: "bash".into(),
+                output: format!("exit: {exit}\n"),
+                is_error: false,
+                metadata: serde_json::json!({"exit": exit}),
+            },
+        );
+        (
+            call,
+            fixture_event(
+                "item.created",
+                thread.id,
+                thread.id,
+                serde_json::to_value(result).unwrap(),
+            ),
+        )
+    };
+
+    // Its output is right there under the command: the status line says so.
+    let (call, finished) = run(1, "shell-1", "ls src", 0);
+    app.items.push(call);
+    app.reduce(finished, &client).await.unwrap();
+    assert!(app.notification_toast.is_none());
+    assert_eq!(app.notice, "Shell finished");
+
+    // Out of sight, the card says which command finished.
+    app.terminal_focused = false;
+    let (call, finished) = run(3, "shell-2", "make build", 0);
+    app.items.push(call);
+    app.reduce(finished, &client).await.unwrap();
+    let toast = app.notification_toast.take().expect("a card");
+    assert_eq!(
+        (toast.title.as_deref(), toast.message.as_str()),
+        (Some("Shell finished"), "make build")
+    );
+
+    // A failure always earns one.
+    app.terminal_focused = true;
+    let (call, failed) = run(5, "shell-3", "cat missing.txt", 1);
+    app.items.push(call);
+    app.reduce(failed, &client).await.unwrap();
+    let toast = app.notification_toast.take().expect("a card");
+    assert_eq!(
+        (toast.title.as_deref(), toast.message.as_str()),
+        (Some("Shell failed"), "cat missing.txt · exit 1")
+    );
+}
+
 #[test]
 fn structurally_empty_tool_results_are_semantic_and_not_expandable() {
     let thread = fixture_thread();
@@ -14625,6 +14693,15 @@ fn sent_references_read_as_their_chips_in_the_bubble_and_come_back_as_chips() {
         [Part::Text("Look at "), Part::Reference { body, .. }, Part::Text(" and ask "), Part::Reference { .. }, Part::Text("\nthen report")]
             if *body == file
     ));
+    // Desktop's shape: references after the text, an editor selection that
+    // was not saved, and a quoted path.
+    assert_eq!(
+        display(
+            "Fix this\n\n<details>\n<summary>File context: say &quot;hi&quot;.ts:2-3 (unsaved \
+             editor snapshot)</summary>\n\n```\nhi()\n```\n\n</details>"
+        ),
+        "Fix this\n\n@say \"hi\".ts:2-3"
+    );
     // Text that only looks like a reference stays as typed.
     for typed in [
         "<details>\n<summary>Notes</summary>\n\nmine\n\n</details>",
@@ -16571,6 +16648,37 @@ async fn undo_restores_the_prompt_and_slash_starts_a_command_over_it() {
             .unwrap();
     }
     assert_eq!(app.composer.text(), "write the fil/e");
+}
+
+#[tokio::test]
+async fn an_undone_prompt_with_a_reference_keeps_its_chip_under_a_slash_command() {
+    let (mut app, _) = undo_fixture();
+    let file = crate::prompt_context::snapshot("src/a.py", "x = 1\n", None).unwrap();
+    let sent = format!("fix {file}");
+    if let ItemData::UserMessage { text, .. } = &mut app.items[2].data {
+        text.clone_from(&sent);
+    }
+    app.thread.revert = Some(haarness_protocol::RevertState {
+        sequence: 2,
+        snapshot_id: "backup".into(),
+        base_snapshot_id: Some("base".into()),
+    });
+    // As /undo puts it back: the reference reads as its chip.
+    app.composer.set_text(sent.clone());
+    assert_eq!(app.composer.text(), "fix [@src/a.py]");
+    assert!(app.holds_undo_draft());
+
+    let client = offline_client();
+    let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    crate::input::handle_key(&mut app, press(KeyCode::Char('/')), &client)
+        .await
+        .unwrap();
+    assert_eq!(app.composer.text(), "/");
+    crate::input::handle_key(&mut app, press(KeyCode::Backspace), &client)
+        .await
+        .unwrap();
+    assert_eq!(app.composer.text(), "fix [@src/a.py]");
+    assert_eq!(app.composer.expanded_text(), sent);
 }
 
 #[tokio::test]

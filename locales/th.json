@@ -1764,6 +1764,7 @@
   "ctrl+b shows the plan": "ctrl+b เพื่อดูแผน",
   "No loop is running": "ไม่มีลูปที่กำลังทำงาน",
   "Loop stopped": "หยุดลูปแล้ว",
+  "Shell finished": "คำสั่ง shell เสร็จสิ้นแล้ว",
   "Allow this request once and enable Auto for this chat and its agents": "อนุญาตคำขอนี้หนึ่งครั้งและเปิดโหมดอัตโนมัติสำหรับแชทนี้และเอเจนต์",
   "Back to parent chat": "กลับไปยังแชทหลัก",
   "Close find in chat": "ปิดการค้นหาในแชท",

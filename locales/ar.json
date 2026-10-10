@@ -1764,6 +1764,7 @@
   "ctrl+b shows the plan": "ctrl+b يعرض الخطة",
   "No loop is running": "لا توجد حلقة قيد التشغيل",
   "Loop stopped": "أُوقفت الحلقة",
+  "Shell finished": "اكتمل أمر Shell",
   "Allow this request once and enable Auto for this chat and its agents": "اسمح بهذا الطلب مرة واحدة وفعّل الوضع التلقائي لهذه المحادثة ووكلائها",
   "Back to parent chat": "العودة إلى المحادثة الأصلية",
   "Close find in chat": "إغلاق البحث في المحادثة",

@@ -1764,6 +1764,7 @@
   "ctrl+b shows the plan": "ctrl+b 檢視計畫",
   "No loop is running": "沒有正在執行的循環",
   "Loop stopped": "循環已停止",
+  "Shell finished": "Shell 命令已完成",
   "Allow this request once and enable Auto for this chat and its agents": "允許本次請求，並為此對話及其智能體啟用自動核准",
   "Back to parent chat": "返回上層對話",
   "Close find in chat": "關閉對話尋找",

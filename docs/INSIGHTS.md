@@ -27,8 +27,9 @@ opens the browser; `--no-open` and `--no-llm` explicitly describe the defaults.
 `--output-dir` selects another directory. Existing reports are never replaced.
 
 In the TUI, `/stats` shows a summary panel. `/insights` also saves HTML on the
-**client's machine** and copies its path. Both accept `--days N`, `--limit N`,
-`--current-project` and `--project ID`. Attached clients analyze the server's history.
+**client's machine** and copies its path; with `--open` it also opens the report,
+except over SSH. Both accept `--days N`, `--limit N`, `--current-project` and
+`--project ID`. Attached clients analyze the server's history.
 
 ## Accounting and coverage
 

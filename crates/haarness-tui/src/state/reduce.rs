@@ -567,7 +567,9 @@ impl App {
                                 self.notice = "Shell command not run".into();
                             } else {
                                 // The output joins the transcript under the
-                                // command, so the card only says how it ended.
+                                // command. A card only says how it ended, and
+                                // only when that needs attention: it failed,
+                                // or the terminal was not in front.
                                 let exit = metadata
                                     .get("exit")
                                     .and_then(serde_json::Value::as_i64)
@@ -598,20 +600,24 @@ impl App {
                                     (None, Some(command)) => command,
                                     (None, None) => "Command completed".into(),
                                 };
-                                self.show_toast(
-                                    Some(if failed {
-                                        "Shell failed".into()
-                                    } else {
-                                        "Shell finished".into()
-                                    }),
-                                    message,
-                                    if failed {
-                                        ToastVariant::Error
-                                    } else {
-                                        ToastVariant::Success
-                                    },
-                                    std::time::Duration::from_secs(if failed { 8 } else { 4 }),
-                                );
+                                if failed || !self.terminal_focused {
+                                    self.show_toast(
+                                        Some(if failed {
+                                            "Shell failed".into()
+                                        } else {
+                                            "Shell finished".into()
+                                        }),
+                                        message,
+                                        if failed {
+                                            ToastVariant::Error
+                                        } else {
+                                            ToastVariant::Success
+                                        },
+                                        std::time::Duration::from_secs(if failed { 8 } else { 4 }),
+                                    );
+                                } else {
+                                    self.notice = "Shell finished".into();
+                                }
                             }
                         }
                         let item_turn_id = item.turn_id;

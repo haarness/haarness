@@ -1764,6 +1764,7 @@
   "ctrl+b shows the plan": "ctrl+b показывает план",
   "No loop is running": "Цикл не запущен",
   "Loop stopped": "Цикл остановлен",
+  "Shell finished": "Команда оболочки выполнена",
   "Allow this request once and enable Auto for this chat and its agents": "Разрешить этот запрос один раз и включить Авто для этого чата и его агентов",
   "Back to parent chat": "Назад к родительскому чату",
   "Close find in chat": "Закрыть поиск в чате",

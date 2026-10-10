@@ -1764,6 +1764,7 @@
   "ctrl+b shows the plan": "ctrl+b pokazuje plan",
   "No loop is running": "Żadna pętla nie działa",
   "Loop stopped": "Pętla zatrzymana",
+  "Shell finished": "Polecenie powłoki zakończone",
   "Allow this request once and enable Auto for this chat and its agents": "Zezwól na to żądanie raz i włącz Auto dla tego czatu i jego agentów",
   "Back to parent chat": "Wróć do czatu nadrzędnego",
   "Close find in chat": "Zamknij wyszukiwanie w czacie",
