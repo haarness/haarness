@@ -57,11 +57,12 @@ fn request_interrupt(app: &mut App, client: &ApiClient, target: InterruptTarget)
     });
 }
 
-/// Answer the first pending permission with one of the y/a/w/n choices —
-/// one reply path shared by the hotkeys, the approval panel's chips, and
-/// mouse clicks. The persisting 'a'/'w' variants stage a confirmation
-/// first: the panel swaps to confirm/cancel showing the exact rules, and
-/// Enter (or the same hotkey again) commits.
+/// Answer the first pending permission with one of the chips' keys — one
+/// reply path shared by the hotkeys, the approval panel's chips, and mouse
+/// clicks. The answers that reach past this one request (the persisting
+/// 'a'/'w'/'r' rules, and 'u', which switches the whole chat to Auto) stage
+/// a confirmation first: the panel swaps to confirm/cancel saying exactly
+/// what is granted, and Enter (or the same key again) commits.
 pub(crate) async fn answer_permission(
     app: &mut App,
     client: &ApiClient,
@@ -73,27 +74,26 @@ pub(crate) async fn answer_permission(
     if matches!(choice, 'a' | 'w' | 'r' | 'u') && pending.allow_always == Some(false) { return Ok(()); }
     if choice == 'r' && pending.repository_scope.is_none() { return Ok(()); }
     let id = pending.permission_id.clone();
-    let always_patterns = pending.always_patterns.clone();
-    if matches!(choice, 'a' | 'w' | 'r')
-        && app.confirm_always != Some(choice)
-        // Legacy prompts without patterns skip staging and reply directly.
-        && !always_patterns.is_empty()
-    {
+    let lead = crate::view::approval::staged_lead(choice, pending);
+    // A legacy prompt without patterns stages too: the rule it stores is the
+    // subject itself, which the card already shows.
+    if matches!(choice, 'a' | 'w' | 'r' | 'u') && app.confirm_always != Some(choice) {
         app.confirm_always = Some(choice);
         // Confirm is the panel's first chip, so a bare Enter commits.
         app.permission_selection = 0;
-        let scope = if choice == 'r' { "this repository and its worktrees" } else if choice == 'w' {
-            "this folder"
-        } else {
-            "this session"
-        };
+        // Keys first: the band is narrower than the card, which already
+        // spells the grant out in full.
         app.notice = format!(
-            "Always allow for {scope}: {}  ·  enter or {choice} confirms, esc cancels",
-            always_patterns.join("  ")
+            "{} · {}",
+            app.language
+                .text("enter or {key} confirms, esc cancels")
+                .replace("{key}", &choice.to_string()),
+            app.language.text(lead)
         );
         return Ok(());
     }
     app.confirm_always = None;
+    app.permission_typed = None;
     let decision = match choice {
         'y' | 'u' => PermissionReplyDecision::Once,
         'a' => PermissionReplyDecision::Always,
@@ -124,6 +124,56 @@ pub(crate) async fn answer_permission(
         app.change_approval_mode(true, client).await;
     }
     Ok(())
+}
+
+/// A printable key while the approval card owns the keyboard. Returns false
+/// when the key is not an answer, which means the user is typing a message.
+///
+/// `y` and `n` answer at once. Everything else a letter does here can be
+/// undone (`h`/`l` move the selection; `a`/`w`/`r`/`u` only stage their
+/// answer), so those letters are remembered: when the next key shows they
+/// began a word ("update…", "always…", "hello"), they move to the composer
+/// with it and nothing is answered. A choice staged by a letter is confirmed
+/// only by that letter again (or Enter).
+async fn permission_letter(app: &mut App, client: &ApiClient, letter: char) -> Result<bool> {
+    let typed = app
+        .permission_typed
+        .as_ref()
+        .map(|(typed, _)| typed.as_str());
+    if let Some(staged) = app.confirm_always
+        && typed.is_some_and(|typed| typed.ends_with(staged))
+    {
+        if letter != staged {
+            return Ok(false);
+        }
+        answer_permission(app, client, letter).await?;
+        return Ok(true);
+    }
+    let selection = app.permission_selection;
+    let remember = |app: &mut App| {
+        app.permission_typed
+            .get_or_insert_with(|| (String::new(), selection))
+            .0
+            .push(letter);
+    };
+    if matches!(letter, 'h' | 'l') {
+        remember(app);
+        move_permission_selection(app, if letter == 'h' { -1 } else { 1 });
+        return Ok(true);
+    }
+    let Some(choice) = PermissionChoice::available(app)
+        .into_iter()
+        .find(|choice| choice.key() == letter)
+    else {
+        return Ok(false);
+    };
+    answer_permission(app, client, letter).await?;
+    if choice.staged() && app.confirm_always == Some(letter) {
+        remember(app);
+    } else {
+        app.permission_typed = None;
+    }
+    Ok(true)
 }
 
 /// Move the approval panel's chip selection, wrapping both directions.
@@ -319,70 +369,90 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
         app.change_approval_mode(!app.auto_permissions, client).await;
         return Ok(AppAction::Continue);
     }
-    // Permission keys only fire while the prompt owns focus: typing a word
-    // containing "a" into the composer must never answer an approval.
+    // Permission keys only fire while the prompt owns focus, and only the
+    // keys that answer it: anything else typed there goes to the composer, so
+    // a message started while the card waits never answers it by accident.
     if app.permission_focus {
         if app.first_pending_permission().is_some() {
-            let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::NONE;
-            match key.code {
-                KeyCode::Char(choice @ ('y' | 'u' | 'a' | 'w' | 'r' | 'n')) if plain => {
-                    answer_permission(app, client, choice).await?;
+            let plain = key.modifiers.is_empty();
+            if let KeyCode::Char(letter) = key.code
+                && (plain || key.modifiers == KeyModifiers::SHIFT)
+            {
+                if plain && permission_letter(app, client, letter).await? {
                     return Ok(AppAction::Continue);
                 }
-                KeyCode::Left | KeyCode::Char('h') if plain => {
-                    move_permission_selection(app, -1);
-                    return Ok(AppAction::Continue);
-                }
-                KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab if plain => {
-                    move_permission_selection(app, 1);
-                    return Ok(AppAction::Continue);
-                }
-                KeyCode::BackTab => {
-                    move_permission_selection(app, -1);
-                    return Ok(AppAction::Continue);
-                }
-                KeyCode::Enter if plain => {
-                    if let Some(staged) = app.confirm_always {
-                        if app.permission_selection == 0 {
-                            answer_permission(app, client, staged).await?;
-                        } else {
-                            app.confirm_always = None;
-                            app.permission_selection = 0;
-                            app.update_permission_notice();
-                        }
-                    } else {
-                        let choices = PermissionChoice::available(app);
-                        let choice = choices[app.permission_selection.min(choices.len() - 1)];
-                        answer_permission(app, client, choice.key()).await?;
-                    }
-                    return Ok(AppAction::Continue);
-                }
-                KeyCode::Esc => {
-                    if app.confirm_always.take().is_some() {
-                        app.permission_selection = 0;
-                        app.update_permission_notice();
-                    } else if let Some(pending) = app.first_pending_permission() {
-                        let id = pending.permission_id.clone();
-                        let _ = client
-                            .reply_permission(
-                                &id,
-                                PermissionReply {
-                                    decision: PermissionReplyDecision::Reject,
-                                    feedback: None,
-                                },
-                            )
-                            .await;
-                        app.permission_answered(&id);
-                        app.notice = "Permission rejected".into();
-                    }
-                    return Ok(AppAction::Continue);
-                }
-                _ => {
-                    // Swallow everything else so a stray keystroke neither
-                    // answers the prompt nor types into the composer.
+                // A child thread has no composer to type into.
+                if app.is_child_view() {
+                    app.permission_typed = None;
                     app.confirm_always = None;
                     app.update_permission_notice();
                     return Ok(AppAction::Continue);
+                }
+                app.release_permission_focus(true);
+            } else {
+                // Any other key is a deliberate move on the card.
+                app.permission_typed = None;
+                match key.code {
+                    KeyCode::Char('g') if key.modifiers == KeyModifiers::CONTROL => {
+                        // The keyboard goes back to the prompt; the card waits.
+                        app.release_permission_focus(false);
+                        return Ok(AppAction::Continue);
+                    }
+                    KeyCode::Left if plain => {
+                        move_permission_selection(app, -1);
+                        return Ok(AppAction::Continue);
+                    }
+                    KeyCode::Right | KeyCode::Tab if plain => {
+                        move_permission_selection(app, 1);
+                        return Ok(AppAction::Continue);
+                    }
+                    KeyCode::BackTab => {
+                        move_permission_selection(app, -1);
+                        return Ok(AppAction::Continue);
+                    }
+                    KeyCode::Enter if plain => {
+                        if let Some(staged) = app.confirm_always {
+                            if app.permission_selection == 0 {
+                                answer_permission(app, client, staged).await?;
+                            } else {
+                                app.confirm_always = None;
+                                app.permission_selection = 0;
+                                app.update_permission_notice();
+                            }
+                        } else {
+                            let choices = PermissionChoice::available(app);
+                            let choice = choices[app.permission_selection.min(choices.len() - 1)];
+                            answer_permission(app, client, choice.key()).await?;
+                        }
+                        return Ok(AppAction::Continue);
+                    }
+                    KeyCode::Esc => {
+                        if app.confirm_always.take().is_some() {
+                            app.permission_selection = 0;
+                            app.update_permission_notice();
+                        } else if let Some(pending) = app.first_pending_permission() {
+                            let id = pending.permission_id.clone();
+                            let _ = client
+                                .reply_permission(
+                                    &id,
+                                    PermissionReply {
+                                        decision: PermissionReplyDecision::Reject,
+                                        feedback: None,
+                                    },
+                                )
+                                .await;
+                            app.permission_answered(&id);
+                            app.notice = "Permission rejected".into();
+                        }
+                        return Ok(AppAction::Continue);
+                    }
+                    _ => {
+                        // Swallow everything else so a stray key neither
+                        // answers the prompt nor edits a prompt it hides.
+                        app.confirm_always = None;
+                        app.update_permission_notice();
+                        return Ok(AppAction::Continue);
+                    }
                 }
             }
         }

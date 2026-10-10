@@ -5,9 +5,11 @@ Haarness uses one runtime policy for Desktop, attached TUI, CLI, workflows and n
 ## Choose what an approval remembers
 
 - **Allow once** authorizes this request.
-- **Always** in the TUI remembers it for the running server session.
+- **Always** in the TUI remembers it for every chat on the running server, until that server stops.
 - **Always for this folder** persists it for the exact workspace.
 - **Always for this repository** explicitly shares it with linked Git worktrees. In the TUI choose **Repository** (`r`), review the displayed rules, then press Enter.
+
+In the TUI every choice that reaches past the one request (Always, This folder, Repository and Once + Auto) is staged first: the card names exactly what will be granted, and Enter or the same key again confirms. While the card has the keyboard, a key that is not an answer goes to the prompt instead, so a message started as the card appears answers nothing.
 
 Repository consent uses the canonical Git common directory, never a remote URL or repository name. Independent clones and unrelated repositories retain separate approvals. Grants live in `repository-approvals.sqlite3` in Haarness's data directory. Existing folder approvals stay folder-scoped. A matching deny in the destination worktree remains effective. Non-Git folders offer folder/session consent only. Failed persistence keeps the prompt available to retry.
 

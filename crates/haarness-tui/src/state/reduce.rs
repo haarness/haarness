@@ -74,7 +74,7 @@ impl App {
                 self.notice = if enabled {
                     "Auto on for this chat · requests are allowed once · ctrl+y to review"
                 } else {
-                    "Review · this chat asks before acting · ctrl+y for Auto"
+                    "Review · asks before risky steps · ctrl+y for Auto"
                 }
                 .into();
             }
@@ -414,17 +414,24 @@ impl App {
                         self.permission_focus = true;
                     }
                     self.update_permission_notice();
-                    let message = format!(
-                        "Haarness needs approval: {}",
-                        event.payload["operation"].as_str().unwrap_or("a tool call")
-                    );
-                    self.pending_notification = Some(message.clone());
-                    self.show_toast(
-                        None,
-                        message,
-                        ToastVariant::Warning,
-                        std::time::Duration::from_secs(8),
-                    );
+                    if let Some(message) = self
+                        .pending_permissions
+                        .iter()
+                        .find(|pending| pending.permission_id == id)
+                        .map(|pending| self.approval_notification(pending))
+                    {
+                        self.pending_notification = Some(message.clone());
+                        // Drawn only where the card itself is hidden.
+                        self.show_toast(
+                            None,
+                            message,
+                            ToastVariant::Warning,
+                            std::time::Duration::from_secs(8),
+                        );
+                        if let Some(toast) = &mut self.notification_toast {
+                            toast.approval = true;
+                        }
+                    }
                 }
             }
             "permission.resolved" => {
@@ -442,7 +449,7 @@ impl App {
                         .pending_permissions
                         .iter()
                         .find(|pending| pending.permission_id == id)
-                        .map(|pending| format!("Haarness needs approval: {}", pending.operation));
+                        .map(|pending| self.approval_notification(pending));
                     let was_first = self
                         .pending_permissions
                         .first()
@@ -454,6 +461,7 @@ impl App {
                         // "always" confirmation or chip selection for the old
                         // one must not carry over.
                         self.confirm_always = None;
+                        self.permission_typed = None;
                         self.permission_selection = 0;
                     }
                     if let Some(message) = resolved_notification {
@@ -954,27 +962,60 @@ impl App {
         Ok(())
     }
 
-    /// Refresh the status-line hint for pending approvals.
+    /// The desktop banner and toast for one approval, in the card's words.
+    fn approval_notification(&self, pending: &PendingPermissionInfo) -> String {
+        format!(
+            "{}: {}",
+            self.language.text("Haarness needs approval"),
+            crate::view::approval::summary(pending, self.language)
+        )
+    }
+
+    /// Refresh the status-line hint for pending approvals, in the card's
+    /// words. The chips carry their own keys, so the hint does not list them.
     pub fn update_permission_notice(&mut self) {
-        match self.pending_permissions.len() {
-            0 => {}
-            1 => {
-                let operation = self.pending_permissions[0].operation.clone();
-                self.notice = if self.permission_focus {
-                    format!("Allow {operation}?  y once / a always / w workspace / n reject")
-                } else {
-                    format!("Approval pending: {operation}  ·  ctrl+g to answer")
-                };
-            }
-            count => {
-                let operation = self.pending_permissions[0].operation.clone();
-                self.notice = if self.permission_focus {
-                    format!("[1/{count}] Allow {operation}?  y / a / w / n")
-                } else {
-                    format!("{count} approvals pending  ·  ctrl+g to answer")
-                };
+        let Some(first) = self.pending_permissions.first() else {
+            return;
+        };
+        let summary = crate::view::approval::summary(first, self.language);
+        let language = self.language;
+        self.notice = match (self.pending_permissions.len(), self.permission_focus) {
+            (1, true) => summary,
+            (count, true) => format!("[1/{count}] {summary}"),
+            (1, false) => format!(
+                "{}: {summary}  ·  {}",
+                language.text("Approval pending"),
+                language.text("ctrl+g to answer")
+            ),
+            (count, false) => format!(
+                "{}  ·  {}",
+                language
+                    .text("{count} approvals pending")
+                    .replace("{count}", &count.to_string()),
+                language.text("ctrl+g to answer")
+            ),
+        };
+    }
+
+    /// Give the keyboard back to the composer while an approval waits. With
+    /// `keep_typed`, letters the card took as hotkeys before it was clear the
+    /// user was typing a message go to the composer; otherwise they are
+    /// dropped. Either way the card returns to the choice it showed before
+    /// them, and nothing staged stays staged.
+    pub fn release_permission_focus(&mut self, keep_typed: bool) {
+        if self.confirm_always.take().is_some() {
+            self.permission_selection = 0;
+        }
+        if let Some((typed, selection)) = self.permission_typed.take() {
+            self.permission_selection = selection;
+            if keep_typed {
+                for letter in typed.chars() {
+                    self.composer.insert_char(letter);
+                }
             }
         }
+        self.permission_focus = false;
+        self.update_permission_notice();
     }
 
     /// Drop an answered permission and move focus to the next one (or back to
@@ -984,15 +1025,11 @@ impl App {
             .pending_permissions
             .iter()
             .find(|pending| pending.permission_id == id)
-            .map(|pending| {
-                (
-                    format!("Haarness needs approval: {}", pending.operation),
-                    pending.thread_id,
-                )
-            });
+            .map(|pending| (self.approval_notification(pending), pending.thread_id));
         self.pending_permissions
             .retain(|pending| pending.permission_id != id);
         self.confirm_always = None;
+        self.permission_typed = None;
         self.permission_selection = 0;
         if let Some((message, _)) = &answered {
             self.dismiss_notification(message);

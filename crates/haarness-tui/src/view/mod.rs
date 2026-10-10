@@ -247,9 +247,17 @@ impl App {
         // Blocking prompts and queued follow-ups dock directly above the
         // composer: the approval card is the loudest thing on screen while a
         // tool waits, and the strip keeps unheard messages out of the
-        // conversation until the agent picks them up.
-        let approval = approval::approval_lines(self, width);
+        // conversation until the agent picks them up. On a short terminal
+        // the card trims its detail rather than push the prompt off screen,
+        // leaving a transcript row and the gutter above the prompt.
         let queued = composer::queued_strip(self, width);
+        let approval = approval::approval_lines(
+            self,
+            width,
+            height.saturating_sub(lines.len() + composer.len() + queued.len() + 2),
+        );
+        let card_shown = !approval.is_empty();
+        let docked = card_shown || !queued.is_empty();
         let mut bottom = frame::TaggedLines::default();
         if matches!(self.overlay, Overlay::None) {
             // Header, full composer, and the newest transcript row have fixed
@@ -261,6 +269,13 @@ impl App {
         }
         bottom.append(approval);
         bottom.append(queued);
+        // A docked panel gets the same one-row gutter the transcript has, so
+        // the prompt never reads as the panel's last row. It is the first
+        // decoration kept when rows are scarce, and still yields rather than
+        // cost the transcript its only row.
+        if docked && height.saturating_sub(lines.len() + bottom.len() + composer.len()) >= 2 {
+            bottom.push(Line::empty());
+        }
         bottom.extend(composer);
         // Root conversations need the same visual boundary that child panes
         // already carry in their footer. Keep the gutter outside the
@@ -432,7 +447,18 @@ impl App {
         }
         lines.extend(bottom.lines);
         apply_dialog(self, &mut lines, &mut hits, width, height);
-        apply_toast(self, &mut lines, &mut hits, width, height);
+        // The approval card is the attention surface whenever it is on
+        // screen; a toast repeating it would only cover the conversation (or,
+        // on a short terminal, the card itself).
+        let toast_repeats_card = card_shown
+            && matches!(self.overlay, Overlay::None)
+            && self
+                .notification_toast
+                .as_ref()
+                .is_some_and(|toast| toast.approval);
+        if !toast_repeats_card {
+            apply_toast(self, &mut lines, &mut hits, width, height);
+        }
         self.finish_frame(lines, hits, height)
     }
 
@@ -615,13 +641,18 @@ fn apply_toast(
     card.push(toast_row("", false, card_width, app));
     let top = 2.min(height.saturating_sub(card.len()));
     let left = width.saturating_sub(card_width + 2);
+    // The margin right of the card is cleared too: a row of text running
+    // under the toast must not leave a stray glyph or two beside it.
+    let margin = width.saturating_sub(left + card_width);
     lines.resize_with(height, Line::empty);
-    for (offset, row) in card.into_iter().enumerate() {
+    for (offset, mut row) in card.into_iter().enumerate() {
         if top + offset >= height {
             break;
         }
+        row.spans
+            .push(Span::new(" ".repeat(margin), app.theme.muted));
         let base = std::mem::take(&mut lines[top + offset]);
-        lines[top + offset] = overlay_row(base, row, left, card_width, width, app);
+        lines[top + offset] = overlay_row(base, row, left, card_width + margin, width, app);
         hits.push(frame::HitRegion {
             row: top + offset,
             start: left,

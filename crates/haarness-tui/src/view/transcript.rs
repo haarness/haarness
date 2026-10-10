@@ -289,6 +289,14 @@ fn patch_argument(arguments: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// A tool result that only says the user turned the request down. The
+/// server words it for the model ("…take a different approach…").
+fn rejected_by_user(output: &str) -> bool {
+    output
+        .trim_start()
+        .starts_with("The user rejected this action")
+}
+
 /// Every successful paired tool result is a compact activity row by default,
 /// regardless of tool name or output length. This prevents arbitrary provider
 /// formatting from changing the transcript hierarchy. Errors stay visible;
@@ -597,8 +605,11 @@ fn render_tool_result(
         }
     }
 
+    // Folded into the call row: a quiet success, or a request the user
+    // rejected, whose result is the instruction written for the model.
     if !expanded
-        && folds_into_call_row(app, output, *is_error, metadata)
+        && (folds_into_call_row(app, output, *is_error, metadata)
+            || (*is_error && rejected_by_user(output)))
         && paired_call(app, item, call_id).is_some()
     {
         return;
@@ -916,6 +927,8 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         output, is_error, ..
                     } => Some(if *is_error && output.trim() == "operation cancelled" {
                         "cancelled"
+                    } else if *is_error && rejected_by_user(output) {
+                        "rejected"
                     } else if *is_error {
                         "failed"
                     } else {
@@ -978,16 +991,19 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         None if queued => "  ○ ".into(),
                         None => format!("  {} ", spinner(app.tick)),
                         Some("failed") => "  ✗ ".into(),
-                        Some("cancelled") => "  ⊘ ".into(),
+                        Some("cancelled" | "rejected") => "  ⊘ ".into(),
                         Some(_) => "  ● ".into(),
                     },
                     |state| format!("  {} ", task_state_style(state, app.tick, theme).0),
                 );
+                // A request the user turned down is their decision, not a
+                // failure: it reads as quietly as a cancel.
                 let suffix = match status {
-                    Some("failed") => "  failed",
-                    Some("cancelled") => "  cancelled",
-                    None if queued => "  queued",
-                    _ => "",
+                    Some(state @ ("failed" | "cancelled" | "rejected")) => {
+                        format!("  {}", app.language.text(state))
+                    }
+                    None if queued => "  queued".to_owned(),
+                    _ => String::new(),
                 };
                 // Child-agent tasks are alive: show what the child is doing
                 // right now, not just that it was spawned.
@@ -1101,7 +1117,9 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     && let Some(run_id) = workflow_run_id(arguments, result)
                 {
                     block.push_tagged(row, HitTarget::WorkflowOpen(run_id));
-                } else if let Some(result) = compact_result {
+                } else if let Some(result) =
+                    compact_result.or(result.filter(|_| status == Some("rejected")))
+                {
                     block.push_tagged(row, HitTarget::ToolToggle(result.id));
                 } else {
                     block.push(row);
@@ -1213,6 +1231,14 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     },
                     width,
                 );
+            }
+            // The user's own stop is not a failure: a quiet marker, as a
+            // stopped reply reads in Upstream.
+            ItemData::Error { message, .. } if message.trim() == "operation cancelled" => {
+                block.push(line(
+                    format!("  · {}", app.language.text("interrupted")),
+                    theme.muted,
+                ));
             }
             ItemData::Error { message, .. } => {
                 for (index, wrapped) in textwrap::wrap(message, width.saturating_sub(4).max(10))

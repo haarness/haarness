@@ -41,8 +41,9 @@ pub enum PermissionChoice {
 
 impl PermissionChoice {
     /// The chips the approval panel offers, in display order. While an
-    /// "always" answer awaits its confirming press the panel shows
-    /// confirm/cancel instead, so callers must check `confirm_always` first.
+    /// "always" or Once + Auto answer awaits its confirming press the panel
+    /// shows confirm/cancel instead, so callers must check `confirm_always`
+    /// first.
     pub const ALL: [Self; 5] = [
         Self::Once,
         Self::Always,
@@ -90,6 +91,16 @@ impl PermissionChoice {
             Self::Repository => "Repository",
             Self::Reject => "Reject",
         }
+    }
+
+    /// Answers that reach past this one request (a standing rule, or Auto for
+    /// the whole chat) wait for a second, confirming press.
+    #[must_use]
+    pub const fn staged(self) -> bool {
+        matches!(
+            self,
+            Self::Always | Self::Workspace | Self::Repository | Self::Auto
+        )
     }
 }
 
@@ -501,6 +512,9 @@ pub struct Toast {
     pub message: String,
     pub variant: ToastVariant,
     pub expires_at: std::time::Instant,
+    /// Repeats the approval card. It stays hidden while the card itself is on
+    /// screen, and only shows where a dialog or a small terminal hides it.
+    pub approval: bool,
 }
 
 #[allow(clippy::struct_excessive_bools)] // independent UI toggles, not a state machine
@@ -581,12 +595,19 @@ pub struct App {
     /// The server applies Auto itself, for every client.
     pub approval_server: bool,
     pub approval_mode: Option<haarness_protocol::ApprovalModeInfo>,
-    /// True while y/a/w/n answer the first pending permission; toggled off
-    /// with Esc so typing never answers a prompt by accident.
+    /// True while the approval card owns the keyboard: its hotkeys answer the
+    /// first pending permission and the composer draws no cursor. Ctrl+G and
+    /// any key that is not an answer hand the keyboard back to the composer.
     pub permission_focus: bool,
-    /// A pending 'a'/'w' answer awaiting its confirmation press, after the
-    /// always-patterns were shown.
+    /// A pending 'a'/'w'/'r'/'u' answer awaiting its confirmation press: the
+    /// "always" rules, or Once + Auto, which changes how the whole chat is
+    /// answered from then on.
     pub confirm_always: Option<char>,
+    /// Letters the focused approval card took without answering (`h`/`l`
+    /// moves and staged choices), with the chip selection from before them.
+    /// When the next key shows they began a message, they move to the
+    /// composer with it instead.
+    pub permission_typed: Option<(String, usize)>,
     /// Highlighted chip on the docked approval panel: an index into
     /// `permission_choices`, or into confirm/cancel while `confirm_always`
     /// is staged.
@@ -861,6 +882,7 @@ impl App {
             approval_mode: None,
             permission_focus: false,
             confirm_always: None,
+            permission_typed: None,
             permission_selection: 0,
             phase: None,
             pending_questions: Vec::new(),
@@ -1107,6 +1129,7 @@ impl App {
             message,
             variant,
             expires_at: std::time::Instant::now() + duration,
+            approval: false,
         });
     }
 

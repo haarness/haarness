@@ -638,6 +638,12 @@ async fn run_with_client(
                         if app.is_child_view() {
                             continue;
                         }
+                        // Pasting is writing a message: the keyboard leaves a
+                        // waiting approval card, or the next Enter would
+                        // answer the card instead of sending the paste.
+                        if app.permission_focus {
+                            app.release_permission_focus(true);
+                        }
                         match crate::media::paths_from_paste(&text) {
                             Ok(Some(paths)) => {
                                 let added = app.add_attachments(paths);

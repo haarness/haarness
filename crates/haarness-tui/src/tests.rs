@@ -6626,9 +6626,16 @@ async fn child_thread_permission_surfaces_in_the_root_view() {
         app.permission_focus,
         "an idle composer hands focus to the prompt"
     );
-    assert!(app.notice.contains("bash:sleep 10"));
+    assert_eq!(app.notice, "Run a shell command: sleep 10");
     assert!(app.pending_notification.is_some());
+    // The card on screen is the attention surface; no toast repeats it.
     let frame = app.lines((100, 30));
+    let rendered = frame.iter().map(Line::text).collect::<Vec<_>>().join("\n");
+    assert!(!rendered.contains("needs approval"), "{rendered}");
+    // Where a dialog hides the card, the toast stands in for it.
+    app.open_overlay(crate::state::Overlay::Commands);
+    let frame = app.lines((100, 30));
+    app.close_overlay();
     let rendered = frame.iter().map(Line::text).collect::<Vec<_>>().join("\n");
     assert!(rendered.contains("needs approval"), "{rendered}");
     let toast = frame
@@ -7574,7 +7581,7 @@ fn agent_switch_approval_discloses_destination_model_and_scope() {
             "Agent: review",
             "Model: fixture/next",
             "Previous model: fixture/previous",
-            "only agent review in this session",
+            "only agent review in this chat",
         ] {
             assert!(frame.contains(text), "missing {text}: {frame}");
         }
@@ -7703,7 +7710,7 @@ fn an_always_rule_identical_to_the_subject_is_not_repeated() {
     for staged in [None, Some('a')] {
         app.confirm_always = staged;
         let text = frame_text(&app, (120, 40));
-        assert!(text.contains("⚠ Reach outside the workspace"), "{text}");
+        assert!(text.contains("⚠ Access outside the project"), "{text}");
         assert_eq!(
             text.matches(path).count(),
             1,
@@ -7717,7 +7724,12 @@ fn an_always_rule_identical_to_the_subject_is_not_repeated() {
 
     // Staged, the chips already read Confirm and Cancel; nothing restates them.
     let text = frame_text(&app, (120, 40));
-    assert!(text.contains("always allow for this session"), "{text}");
+    // Plain Always lives in the server, for every chat it runs, not in this
+    // chat alone.
+    assert!(
+        text.contains("always allow in every chat until the Haarness server stops"),
+        "{text}"
+    );
     assert_eq!(text.matches("Confirm").count(), 1, "{text}");
     assert_eq!(text.matches("Cancel").count(), 1, "{text}");
 }
@@ -7780,7 +7792,10 @@ async fn enter_on_always_stages_the_confirm_chips_before_committing() {
     .unwrap();
     assert_eq!(app.confirm_always, Some('a'));
     let text = frame_text(&app, (100, 40));
-    assert!(text.contains("always allow for this session:"), "{text}");
+    assert!(
+        text.contains("always allow in every chat until the Haarness server stops:"),
+        "{text}"
+    );
     assert!(text.contains("git push *"), "{text}");
     // The command stays on screen while the rule is staged: this is the
     // moment you want to re-read what you are granting standing access to.
@@ -7856,6 +7871,401 @@ async fn clicking_a_chip_answers_the_approval() {
     }
     assert!(app.pending_permissions.is_empty());
     assert_eq!(server.await.unwrap().len(), 1);
+}
+
+fn outside_write_event(thread: &Thread, id: &str) -> haarness_protocol::EventEnvelope {
+    fixture_event(
+        "permission.requested",
+        thread.id,
+        thread.id,
+        serde_json::json!({
+            "permissionId": id,
+            "permission": "external_directory",
+            "operation": "external_directory:/tmp/elsewhere/*",
+            "patterns": ["/tmp/elsewhere/*"],
+            "alwaysPatterns": ["external_directory:/tmp/elsewhere/*"],
+            "repositoryScope": "/tmp/proj",
+            "detail": {"path": "/tmp/elsewhere/notes.txt"},
+        }),
+    )
+}
+
+async fn type_text(app: &mut App, text: &str, client: &crate::api::ApiClient) {
+    for character in text.chars() {
+        crate::input::handle_key(
+            app,
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            client,
+        )
+        .await
+        .unwrap();
+    }
+}
+
+/// The card takes the keyboard when it arrives on an empty prompt, but a
+/// message typed anyway lands in the prompt whole and answers nothing, even
+/// when its first letters are hotkeys ("u" is Once + Auto, "a" Always, "r"
+/// Repository, "h"/"l" move the selection).
+#[tokio::test]
+async fn typing_a_message_while_the_card_waits_answers_nothing() {
+    for message in [
+        "update the readme too",
+        "always ask me",
+        "hello",
+        "run it again",
+    ] {
+        let thread = fixture_thread();
+        let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+        // Any reply would fail against this client; none must be attempted.
+        let client = offline_client();
+        app.reduce(outside_write_event(&thread, "perm-typing"), &client)
+            .await
+            .unwrap();
+        assert!(app.permission_focus);
+        type_text(&mut app, message, &client).await;
+        assert_eq!(app.composer.text(), message);
+        assert_eq!(app.pending_permissions.len(), 1, "{message}");
+        assert!(!app.auto_permissions, "{message}");
+        assert_eq!(app.confirm_always, None, "{message}");
+        assert_eq!(app.permission_selection, 0, "{message}");
+        assert!(!app.permission_focus, "{message}");
+        assert!(
+            app.notice.contains("ctrl+g to answer"),
+            "the card still says how to answer it: {}",
+            app.notice
+        );
+    }
+}
+
+/// A prompt from an older server carries no "always" patterns; its Always
+/// still waits for a confirming press instead of answering on one letter.
+#[tokio::test]
+async fn always_without_patterns_is_still_staged() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let mut event = outside_write_event(&thread, "perm-legacy");
+    event.payload["alwaysPatterns"] = serde_json::json!([]);
+    app.reduce(event, &offline_client()).await.unwrap();
+    press_key(&mut app, KeyCode::Char('a')).await;
+    assert_eq!(app.confirm_always, Some('a'));
+    assert_eq!(app.pending_permissions.len(), 1);
+    let text = frame_text(&app, (100, 40));
+    assert!(
+        text.contains("always allow in every chat until the Haarness server stops"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn once_plus_auto_is_staged_before_it_switches_the_chat() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(outside_write_event(&thread, "perm-auto"), &offline_client())
+        .await
+        .unwrap();
+    press_key(&mut app, KeyCode::Char('u')).await;
+    assert_eq!(app.confirm_always, Some('u'));
+    assert!(!app.auto_permissions);
+    let text = frame_text(&app, (100, 40));
+    assert!(
+        text.contains("allow once and switch this chat to Auto"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Confirm") && text.contains("Cancel"),
+        "{text}"
+    );
+    // The path rules only matter to "always" answers.
+    assert!(!text.contains("/tmp/elsewhere/*"), "{text}");
+    assert_eq!(
+        app.notice,
+        "enter or u confirms, esc cancels · allow once and switch this chat to Auto: later requests are allowed without asking"
+    );
+
+    let (client, server) = workspace_http_status_client(vec![(200, "{}".into())], false).await;
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert!(app.auto_permissions);
+    assert!(app.pending_permissions.is_empty());
+    assert!(server.await.unwrap()[0].contains("\"decision\":\"once\""));
+}
+
+#[tokio::test]
+async fn the_prompt_draws_no_cursor_while_the_card_owns_the_keyboard() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(
+        outside_write_event(&thread, "perm-cursor"),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    let text = frame_text(&app, (100, 40));
+    assert!(
+        text.contains("Answer the approval above · ctrl+g to type"),
+        "{text}"
+    );
+    assert!(!text.contains("Ask anything…"), "{text}");
+    // Ctrl+G hands the keyboard back without answering.
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert!(!app.permission_focus);
+    assert_eq!(app.pending_permissions.len(), 1);
+    let text = frame_text(&app, (100, 40));
+    assert!(text.contains("Ask anything…"), "{text}");
+    assert!(text.contains("ctrl+g answer"), "{text}");
+    // A draft keeps its text but loses its live cursor when the card is
+    // focused again.
+    type_text(&mut app, "draft", &offline_client()).await;
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert!(app.permission_focus);
+    let lines = app.lines((100, 40));
+    let row = lines
+        .iter()
+        .find(|line| line_text(line).contains("draft"))
+        .expect("draft row");
+    assert!(
+        row.spans
+            .iter()
+            .all(|span| span.bg != Some(app.theme.primary)),
+        "no cursor cell while the card owns the keyboard"
+    );
+}
+
+/// Every choice stays on screen and clickable at 80, 60 and 40 columns: the
+/// chips wrap instead of running off the edge, and Reject never disappears.
+#[tokio::test]
+async fn approval_chips_wrap_instead_of_clipping() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(outside_write_event(&thread, "perm-wrap"), &offline_client())
+        .await
+        .unwrap();
+    let labels = [
+        "Allow once",
+        "Always",
+        "This folder",
+        "Repository",
+        "Reject",
+        "Once + Auto",
+    ];
+    for (width, height) in [(120, 36), (80, 24), (60, 20), (40, 24)] {
+        let lines = app.lines((width, height));
+        let text: String = lines.iter().map(|line| line_text(line) + "\n").collect();
+        assert!(
+            lines.iter().all(|line| line.width() <= width as usize),
+            "{text}"
+        );
+        for label in labels {
+            assert!(text.contains(label), "{width} columns lost {label}: {text}");
+        }
+        let hits = app.hit_rows.borrow();
+        for (index, expected) in labels.iter().enumerate() {
+            let hit = hits
+                .iter()
+                .find(|hit| hit.target == crate::view::frame::HitTarget::PermissionOption(index))
+                .unwrap_or_else(|| panic!("chip {index} not clickable at {width}: {text}"));
+            assert!(hit.end <= width as usize, "{width}: {text}");
+            let row = line_text(&lines[hit.row]);
+            let label: String = row
+                .chars()
+                .skip(hit.start)
+                .take(hit.end - hit.start)
+                .collect();
+            assert!(
+                label.contains(expected),
+                "{width}: hit {label:?} for {expected}"
+            );
+        }
+        // The headline is not cut short for a queue position it does not have.
+        assert!(text.contains("⚠ Access outside the project"), "{text}");
+        // One quiet row between the card and the prompt.
+        let prompt = lines
+            .iter()
+            .position(|line| line_text(line).contains("Answer the approval above"))
+            .expect("prompt row");
+        assert!(line_text(&lines[prompt - 1]).trim().is_empty(), "{text}");
+        assert!(
+            line_text(&lines[prompt - 2]).contains("esc reject"),
+            "{text}"
+        );
+    }
+}
+
+/// A short terminal trims the card's detail before the prompt and band.
+#[tokio::test]
+async fn a_short_terminal_trims_the_card_not_the_prompt() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let long = format!("/tmp/{}/notes.txt", "deeply/nested/folder".repeat(8));
+    let mut event = outside_write_event(&thread, "perm-short");
+    event.payload["detail"]["path"] = serde_json::json!(long);
+    app.reduce(event, &offline_client()).await.unwrap();
+    for (width, height) in [(40, 15), (60, 14), (80, 12)] {
+        let lines = app.lines((width, height));
+        let text: String = lines.iter().map(|line| line_text(line) + "\n").collect();
+        assert_eq!(lines.len(), height as usize);
+        assert!(
+            line_text(&lines[height as usize - 1]).contains("approve"),
+            "{text}"
+        );
+        // The whole hint stays readable, wrapped if need be, and keeps its
+        // quiet row above it.
+        assert!(text.contains("to type"), "{text}");
+        let prompt = lines
+            .iter()
+            .position(|line| line_text(line).contains("Answer the approval above"))
+            .expect("prompt row");
+        assert!(line_text(&lines[prompt - 1]).trim().is_empty(), "{text}");
+        assert!(text.contains("⚠ Access outside the project"), "{text}");
+        assert!(text.contains("/tmp/deeply"), "{text}");
+        for label in ["Allow once", "Reject", "Once + Auto"] {
+            assert!(
+                text.contains(label),
+                "{width}x{height} lost {label}: {text}"
+            );
+        }
+    }
+}
+
+/// The card is the attention surface whenever it shows; the toast and the
+/// status hint repeat it in its own plain words, never the wire's rule key.
+#[tokio::test]
+async fn approval_hints_use_plain_words_and_the_toast_yields_to_the_card() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(
+        outside_write_event(&thread, "perm-words"),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        app.notice,
+        "Access outside the project: /tmp/elsewhere/notes.txt"
+    );
+    let message = "Haarness needs approval: Access outside the project: /tmp/elsewhere/notes.txt";
+    assert_eq!(app.pending_notification.as_deref(), Some(message));
+    let text = frame_text(&app, (120, 36));
+    assert!(!text.contains("Haarness needs approval"), "{text}");
+    assert!(!text.contains("external_directory"), "{text}");
+    // Where a dialog hides the card, the toast stands in for it.
+    app.open_overlay(crate::state::Overlay::Commands);
+    let text = frame_text(&app, (120, 36));
+    assert!(text.contains("Haarness needs approval"), "{text}");
+    assert!(!text.contains("external_directory"), "{text}");
+    app.close_overlay();
+
+    app.release_permission_focus(false);
+    assert_eq!(
+        app.notice,
+        "Approval pending: Access outside the project: /tmp/elsewhere/notes.txt  ·  ctrl+g to answer"
+    );
+    // Staging Always names its real reach: every chat the server runs.
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    press_key(&mut app, KeyCode::Char('a')).await;
+    assert_eq!(
+        app.notice,
+        "enter or a confirms, esc cancels · always allow in every chat until the Haarness server stops"
+    );
+    assert!(!app.notice.contains("session"), "{}", app.notice);
+}
+
+#[test]
+fn a_rejected_tool_and_a_stopped_turn_read_as_choices_not_failures() {
+    let thread = fixture_thread();
+    let call = message_item(
+        1,
+        &thread,
+        ItemData::ToolCall {
+            call_id: "call-1".into(),
+            name: "write".into(),
+            arguments: serde_json::json!({"path": "/tmp/elsewhere/notes.txt", "content": "x"}),
+            provider_metadata: serde_json::Value::Null,
+        },
+    );
+    let result = message_item(
+        2,
+        &thread,
+        ItemData::ToolResult {
+            call_id: "call-1".into(),
+            name: "write".into(),
+            output: "The user rejected this action. Ask a question or take a different approach instead of retrying.".into(),
+            is_error: true,
+            metadata: serde_json::Value::Null,
+        },
+    );
+    let stopped = message_item(
+        3,
+        &thread,
+        ItemData::Error {
+            message: "operation cancelled".into(),
+            retryable: false,
+        },
+    );
+    let app = App::new(
+        thread.clone(),
+        vec![thread],
+        vec![call, result, stopped],
+        vec![],
+        vec![],
+    );
+    let transcript = crate::view::transcript::transcript_lines(&app, 100);
+    let text: String = transcript
+        .lines
+        .iter()
+        .map(|line| line_text(line) + "\n")
+        .collect();
+    assert!(
+        text.contains("⊘ write /tmp/elsewhere/notes.txt  rejected"),
+        "{text}"
+    );
+    assert!(!text.contains("failed"), "{text}");
+    assert!(!text.contains("The user rejected"), "{text}");
+    assert!(text.contains("· interrupted"), "{text}");
+    assert!(!text.contains("operation cancelled"), "{text}");
+    for line in &transcript.lines {
+        assert!(
+            line.spans.iter().all(|span| span.fg != app.theme.danger),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn the_band_names_the_approval_mode_apart_from_a_review_agent() {
+    let mut thread = fixture_thread();
+    thread.agent = "review".into();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    let band = frame_text(&app, (120, 36));
+    let band = band.lines().last().unwrap();
+    assert!(band.contains("approvals: review"), "{band}");
+    assert!(!band.contains("⏸"), "{band}");
+    app.auto_permissions = true;
+    let band = frame_text(&app, (120, 36));
+    assert!(band.lines().last().unwrap().contains("approvals: auto"));
 }
 
 #[test]
@@ -13563,15 +13973,22 @@ async fn auto_mode_failure_stays_manual_and_allow_once_auto_requires_success() {
     assert_eq!(server.await.unwrap().len(), 1);
     assert_eq!(app.pending_permissions.len(), 1);
     app.set_auto_permissions(false);
+    // Once + Auto changes the whole chat, so the first press only stages it.
+    crate::input::answer_permission(&mut app, &offline_client(), 'u')
+        .await
+        .unwrap();
+    assert_eq!(app.confirm_always, Some('u'));
     crate::input::answer_permission(&mut app, &offline_client(), 'u')
         .await
         .unwrap();
     assert!(!app.auto_permissions);
     assert_eq!(app.pending_permissions.len(), 1);
     let (client, server) = workspace_http_status_client(vec![(200, "{}".into())], false).await;
-    crate::input::answer_permission(&mut app, &client, 'u')
-        .await
-        .unwrap();
+    for _ in 0..2 {
+        crate::input::answer_permission(&mut app, &client, 'u')
+            .await
+            .unwrap();
+    }
     assert!(app.auto_permissions);
     assert!(app.pending_permissions.is_empty());
     assert!(server.await.unwrap()[0].contains("\"decision\":\"once\""));
@@ -13599,7 +14016,7 @@ async fn auto_mode_shortcut_and_restricted_requests_are_manual() {
     }
     assert_eq!(app.pending_permissions.len(), 3);
     assert!(app.auto_permissions_seen.values().all(|approved| !approved));
-    assert!(frame_text(&app, (140, 40)).contains("⏵⏵ auto"));
+    assert!(frame_text(&app, (140, 40)).contains("approvals: auto"));
     crate::input::handle_key(
         &mut app,
         KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),

@@ -148,12 +148,14 @@ async fn click(app: &mut App, row: usize, column: usize, client: &ApiClient) -> 
         HitTarget::PermissionFocus => {
             if !app.pending_permissions.is_empty() {
                 app.permission_focus = true;
+                app.permission_typed = None;
                 app.update_permission_notice();
             }
         }
         HitTarget::PermissionOption(index) => {
             if app.first_pending_permission().is_some() {
                 app.permission_focus = true;
+                app.permission_typed = None;
                 if let Some(staged) = app.confirm_always {
                     // Confirm/cancel chips while an "always" answer is staged.
                     if index == 0 {

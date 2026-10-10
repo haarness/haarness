@@ -1527,11 +1527,11 @@ tmux send-keys -t "$session":0.0 Enter
 attempt=0
 while [ "$attempt" -lt 80 ]; do
   pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
-  echo "$pane" | grep -q "Allow bash:touch shell-e2e.txt?" && break
+  echo "$pane" | grep -q "Run a shell command: touch shell-e2e.txt" && break
   attempt=$((attempt + 1))
   sleep 0.1
 done
-if ! echo "$pane" | grep -q "Allow bash:touch shell-e2e.txt?"; then
+if ! echo "$pane" | grep -q "Run a shell command: touch shell-e2e.txt"; then
   echo "$pane" >&2
   echo "Permission-gated shell command blocked the TUI event loop" >&2
   exit 1
@@ -1555,11 +1555,11 @@ tmux send-keys -t "$session":0.0 Enter
 attempt=0
 while [ "$attempt" -lt 100 ]; do
   pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
-  echo "$pane" | grep -q "Allow edit:e2e.txt" && break
+  echo "$pane" | grep -Eq "Edit a file: .*e2e.txt" && break
   attempt=$((attempt + 1))
   sleep 0.1
 done
-if ! echo "$pane" | grep -q "Allow edit:e2e.txt"; then
+if ! echo "$pane" | grep -Eq "Edit a file: .*e2e.txt"; then
   echo "$pane" >&2
   echo "Mutating tool did not prompt for permission" >&2
   exit 1
@@ -1749,13 +1749,13 @@ tmux send-keys -t "$session":0.0 Enter
 attempt=0
 while [ "$attempt" -lt 100 ]; do
   pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
-  echo "$pane" | grep -q "Allow external_directory:" \
-    && echo "$pane" | grep -q "external-list/\*" \
+  echo "$pane" | grep -q "Access outside the project" \
+    && echo "$pane" | grep -q "/external-list" \
     && break
   attempt=$((attempt + 1))
   sleep 0.1
 done
-if ! echo "$pane" | grep -q "Allow external_directory:" || ! echo "$pane" | grep -q "external-list/\*"; then
+if ! echo "$pane" | grep -q "Access outside the project" || ! echo "$pane" | grep -q "/external-list"; then
   echo "$pane" >&2
   echo "External list did not surface an approval prompt" >&2
   exit 1
@@ -1820,41 +1820,23 @@ tmux send-keys -t "$session":0.0 Enter
 attempt=0
 while [ "$attempt" -lt 100 ]; do
   pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
-  echo "$pane" | grep -q "Allow bash:sleep 8?" && break
+  echo "$pane" | grep -q "Run a shell command: sleep 8" && break
   attempt=$((attempt + 1))
   sleep 0.1
 done
-if ! echo "$pane" | grep -q "Allow bash:sleep 8?"; then
+if ! echo "$pane" | grep -q "Run a shell command: sleep 8"; then
   echo "$pane" >&2
   echo "Child-thread permission prompt never surfaced" >&2
   exit 1
 fi
-# The approval card is one of the few toasts left: it sits at the top, is
-# clickable, and dismissing it must not touch the prompt underneath.
-attempt=0
-while [ "$attempt" -lt 20 ]; do
-  pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
-  echo "$pane" | grep -q "Haarness needs approval" && break
-  attempt=$((attempt + 1))
-  sleep 0.1
-done
-toast_row="$(echo "$pane" | awk '/Haarness needs approval/ { print NR; exit }')"
-if [ -z "$toast_row" ] || [ "$toast_row" -gt 8 ]; then
-  echo "$pane" >&2
-  echo "Approval toast was not positioned at the top" >&2
-  exit 1
-fi
-toast_line="$(echo "$pane" | awk '/Haarness needs approval/ { print; exit }')"
-toast_col="$(cell_column "$toast_line" "Haarness needs approval")"
-mouse_down="$(printf '\033[<0;%s;%sM' "$toast_col" "$toast_row")"
-mouse_up="$(printf '\033[<0;%s;%sm' "$toast_col" "$toast_row")"
-tmux send-keys -l -t "$session":0.0 "$mouse_down"
-tmux send-keys -l -t "$session":0.0 "$mouse_up"
-sleep 0.2
+# The approval card is the attention surface while it is on screen: no toast
+# repeats it over the conversation, and the prompt below it says how to type.
+sleep 0.5
 pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
-if echo "$pane" | grep -q "Haarness needs approval" || ! echo "$pane" | grep -q "Allow bash:sleep 8?"; then
+if echo "$pane" | grep -q "Haarness needs approval" \
+  || ! echo "$pane" | grep -q "Answer the approval above"; then
   echo "$pane" >&2
-  echo "Clicking the approval toast did not dismiss it while keeping the prompt" >&2
+  echo "An approval toast covered the conversation while the card was visible" >&2
   exit 1
 fi
 # One Always answer must cover both identical sibling prompts. The first
@@ -1863,7 +1845,7 @@ tmux send-keys -t "$session":0.0 "a"
 attempt=0
 while [ "$attempt" -lt 40 ]; do
   pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
-  echo "$pane" | grep -qi "Always allow for this session" && break
+  echo "$pane" | grep -q "until the Haarness server stops" && break
   attempt=$((attempt + 1))
   sleep 0.1
 done
@@ -1880,8 +1862,8 @@ while [ "$attempt" -lt 60 ]; do
     && echo "$pane" | grep -Eq "!tool bash" \
     && echo "$pane" | grep -Eq "[Gg]eneral.*bash.*tools" \
     && echo "$pane" | grep -q "running in background" \
-    && ! echo "$pane" | grep -Eq "needs approval|waiting for approval|Allow bash:sleep" \
-    && ! echo "$pane" | grep -qi "Always allow for this session" \
+    && ! echo "$pane" | grep -Eq "needs approval|waiting for approval|Run a shell command: sleep" \
+    && ! echo "$pane" | grep -q "until the Haarness server stops" \
     && ! echo "$pane" | grep -q "Haarness needs approval" \
     && break
   attempt=$((attempt + 1))
@@ -1891,8 +1873,8 @@ if ! echo "$pane" | grep -q "▾ agents" \
   || ! echo "$pane" | grep -Eq "!tool bash" \
   || ! echo "$pane" | grep -Eq "[Gg]eneral.*bash.*tools" \
   || ! echo "$pane" | grep -q "running in background" \
-  || echo "$pane" | grep -Eq "needs approval|waiting for approval|Allow bash:sleep" \
-  || echo "$pane" | grep -qi "Always allow for this session" \
+  || echo "$pane" | grep -Eq "needs approval|waiting for approval|Run a shell command: sleep" \
+  || echo "$pane" | grep -q "until the Haarness server stops" \
   || echo "$pane" | grep -q "Haarness needs approval"; then
   echo "$pane" >&2
   echo "Live child rows did not settle after the permission resolution" >&2
@@ -2692,11 +2674,11 @@ tmux send-keys -t "$session":0.0 Enter
 attempt=0
 while [ "$attempt" -lt 100 ]; do
   pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
-  echo "$pane" | grep -q 'Allow agent_switch:' && break
+  echo "$pane" | grep -q 'Switch the active agent' && break
   attempt=$((attempt + 1))
   sleep 0.1
 done
-if ! echo "$pane" | grep -q 'Allow agent_switch:'; then
+if ! echo "$pane" | grep -q 'Switch the active agent'; then
   echo "$pane" >&2
   echo "agent_switch did not require explicit approval" >&2
   exit 1
