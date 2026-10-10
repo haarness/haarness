@@ -8195,7 +8195,7 @@ async fn answered_goal_question_does_not_start_an_unbounded_criteria_loop() {
         state
             .paused_reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("criteria were not approved"))
+            .is_some_and(|reason| reason.contains("agree on its completion criteria"))
     );
     let update = events
         .subscribe(None)
@@ -8208,7 +8208,7 @@ async fn answered_goal_question_does_not_start_an_unbounded_criteria_loop() {
     assert!(
         update.payload["message"]
             .as_str()
-            .is_some_and(|message| message.contains("waiting for user direction"))
+            .is_some_and(|message| message.contains("waiting for you"))
     );
 
     let replay_before_followup = events.subscribe(None).replay.len();
