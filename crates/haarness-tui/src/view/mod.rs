@@ -209,7 +209,7 @@ impl App {
         let width = size.0.max(1) as usize;
         let height = size.1.max(1) as usize;
         if let Some(terminal) = &self.terminal {
-            let lines = crate::pty_view::frame(terminal, self.theme, width, height);
+            let lines = crate::pty_view::frame(terminal, self.theme, self.language, width, height);
             return self.finish_frame(lines, Vec::new(), height);
         }
         // Review is a place, not a dialog: it takes the whole terminal so a
@@ -320,6 +320,7 @@ impl App {
         // and clamps to the transcript length.
         let max_offset = body.lines.len().saturating_sub(transcript_height);
         self.max_viewport_offset.set(max_offset);
+        self.transcript_rows.set(transcript_height);
         let previous_offset = self.effective_viewport_offset();
         let previous_len = self.last_transcript_len.replace(body.lines.len());
         // Once the reader leaves the bottom, preserve the document-relative

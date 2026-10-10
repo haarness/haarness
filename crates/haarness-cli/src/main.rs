@@ -3719,6 +3719,7 @@ async fn interactive(
             initial_thread,
             resume,
             runtime_endpoint_resolver(&active_paths, &active_workspace),
+            workspace_server_restarter(&active_paths, &active_workspace, trust, yolo),
         )
         .await?;
         let Some(path) = selected else {
@@ -4073,6 +4074,7 @@ async fn tui_command(
             resume,
             fork,
             runtime_endpoint_resolver(&active_paths, &active_workspace),
+            workspace_server_restarter(&active_paths, &active_workspace, trust, yolo),
         )
         .await?;
         let Some(path) = selected else {
@@ -8751,6 +8753,35 @@ fn runtime_endpoint_resolver(
             discovery.url,
             discovery.token,
         ))
+    })
+}
+
+/// Bring the workspace server back for an open TUI after it stopped or
+/// crashed, as launching the TUI starts it. Unlike [`ensure_workspace_server`]
+/// this leaves a running server alone, even one from another build: another
+/// client may have started it, and taking it down would only make that
+/// client restart its own in turn.
+fn workspace_server_restarter(
+    paths: &Paths,
+    workspace: &Path,
+    trust: bool,
+    yolo: bool,
+) -> haarness_tui::api::ServerRestarter {
+    let paths = paths.clone();
+    let workspace = workspace.to_path_buf();
+    Arc::new(move || {
+        let paths = paths.clone();
+        let workspace = workspace.clone();
+        Box::pin(async move {
+            let discovery = match inspect_workspace_server(&paths, &workspace).await? {
+                Some(live) => live.discovery,
+                None => ensure_workspace_server(&paths, &workspace, trust, yolo).await?,
+            };
+            Ok(haarness_tui::api::EndpointCredentials::new(
+                discovery.url,
+                discovery.token,
+            ))
+        })
     })
 }
 

@@ -10,7 +10,7 @@ use haarness_opentui::{Color, Line, Span, attr};
 use haarness_protocol::ItemData;
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
-use crate::state::{App, InterruptTarget};
+use crate::state::{App, InterruptTarget, ServerRestart};
 use crate::theme::Theme;
 use crate::view::frame::{HitTarget, TaggedLines};
 use crate::view::span::{compact_count, single_line};
@@ -578,9 +578,25 @@ fn right_segments(app: &App, width: usize) -> (Vec<Vec<Span>>, usize) {
     };
 
     if let Some(attempt) = app.connection_lost {
+        let reconnecting = app.language.text("reconnecting").to_owned();
+        // Counting attempts forever explains nothing: once a few have
+        // failed, say what is going on and what this client does about it.
+        let state = match app.server_restart {
+            Some(ServerRestart::Starting) => app.language.text("server stopped · restarting it"),
+            Some(ServerRestart::Failed) => app
+                .language
+                .text("server stopped · restart failed · retrying"),
+            None if attempt >= 3 => app.language.text("server unreachable · still retrying"),
+            None => {
+                return detail(vec![
+                    plain(format!("reconnecting · attempt {attempt}"), theme.danger),
+                    plain(reconnecting, theme.danger),
+                ]);
+            }
+        };
         return detail(vec![
-            plain(format!("reconnecting · attempt {attempt}"), theme.danger),
-            plain(app.language.text("reconnecting").to_owned(), theme.danger),
+            plain(state.to_owned(), theme.danger),
+            plain(reconnecting, theme.danger),
         ]);
     }
     if !app.pending_permissions.is_empty() {

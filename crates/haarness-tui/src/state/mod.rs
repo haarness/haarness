@@ -19,6 +19,11 @@ use crate::commands::COMMANDS;
 use crate::input::{WorkspaceMutation, WorkspaceRefOperation, composer::Composer};
 use crate::theme::Theme;
 
+/// How long a status-line notice stays once it has appeared.
+pub(crate) const NOTICE_TTL: std::time::Duration = std::time::Duration::from_secs(8);
+/// A notice younger than this is still the answer to the user's own action.
+const FRESH_NOTICE: std::time::Duration = std::time::Duration::from_secs(4);
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum InterruptTarget {
     Turn(TurnId),
@@ -316,6 +321,22 @@ pub struct LiveThreadState {
     pub phase: Option<PhaseInfo>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ServerRestart {
+    Starting,
+    Failed,
+}
+
+/// An undone prompt waiting in the composer. Typing `/` over it starts a
+/// command instead of appending to it; the prompt returns once the command is
+/// done, except after `/redo`, which brings the turn itself back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UndoDraft {
+    pub text: String,
+    pub attachments: Vec<String>,
+    pub set_aside: bool,
+}
+
 impl PhaseInfo {
     pub fn elapsed_seconds(&self) -> i64 {
         self.since
@@ -562,6 +583,12 @@ pub struct App {
     pub reasoning_preview: String,
     pub live_threads: std::collections::HashMap<ThreadId, LiveThreadState>,
     pub notice: String,
+    /// The notice last seen by the render tick and when it appeared, so an
+    /// answer to something the user did fades instead of describing the past.
+    pub(crate) notice_shown: Option<(String, std::time::Instant)>,
+    /// The prompt `/undo` put back in the composer, while it is unedited or
+    /// set aside by a slash command typed over it.
+    pub(crate) undo_draft: Option<UndoDraft>,
     /// First non-empty line produced by the configured status-line command.
     pub custom_status_line: Option<String>,
     pub billing: haarness_account::billing::State,
@@ -569,6 +596,9 @@ pub struct App {
     /// SSE health: while present, stale activity is explicitly labelled as
     /// reconnecting rather than looking like a hung model.
     pub connection_lost: Option<u32>,
+    /// While disconnected: whether this client is bringing its local server
+    /// back, or failed to.
+    pub(crate) server_restart: Option<ServerRestart>,
     pub overlay: Overlay,
     pub reasoning: bool,
     pub active_turn: Option<TurnId>,
@@ -650,6 +680,9 @@ pub struct App {
     /// Largest meaningful transcript offset for the most recently rendered
     /// viewport. Scroll input clamps to this instead of accumulating forever.
     pub max_viewport_offset: std::cell::Cell<usize>,
+    /// Rows the transcript had in the most recently rendered frame; page keys
+    /// move by about this much.
+    pub transcript_rows: std::cell::Cell<usize>,
     /// Render-time correction to the saved bottom-relative offset while the
     /// user is scrolled up. This is signed because append-only Markdown can
     /// reflow to either more or fewer terminal rows as delimiters close.
@@ -854,10 +887,13 @@ impl App {
             reasoning_preview: String::new(),
             live_threads: std::collections::HashMap::new(),
             notice,
+            notice_shown: None,
+            undo_draft: None,
             custom_status_line: None,
             billing: haarness_account::billing::State::default(),
             language: crate::locale::Language::default(),
             connection_lost: None,
+            server_restart: None,
             overlay: Overlay::None,
             reasoning: true,
             active_turn: None,
@@ -894,6 +930,7 @@ impl App {
             autocomplete_hidden: false,
             viewport_offset: 0,
             max_viewport_offset: std::cell::Cell::new(0),
+            transcript_rows: std::cell::Cell::new(0),
             scroll_adjustment: std::cell::Cell::new(0),
             last_transcript_len: std::cell::Cell::new(0),
             context_tokens: std::cell::Cell::new(None),
@@ -1125,6 +1162,65 @@ impl App {
             expires_at: std::time::Instant::now() + duration,
             approval: false,
         });
+    }
+
+    /// Whether the composer still holds the prompt `/undo` put there,
+    /// untouched.
+    pub(crate) fn holds_undo_draft(&self) -> bool {
+        self.undo_draft.as_ref().is_some_and(|draft| {
+            !draft.set_aside
+                && self.composer.text() == draft.text
+                && self.attachments == draft.attachments
+        })
+    }
+
+    /// Put an undone prompt that a slash command was typed over back in an
+    /// empty composer, once that command has run or been erased.
+    pub(crate) fn return_undo_draft(&mut self) {
+        if !self.composer.is_empty() || !self.attachments.is_empty() {
+            return;
+        }
+        if let Some(draft) = self.undo_draft.as_mut().filter(|draft| draft.set_aside) {
+            draft.set_aside = false;
+            self.composer.set_text(draft.text.clone());
+            self.attachments = draft.attachments.clone();
+        }
+    }
+
+    /// Age the status-line notice. Notices are set from many places, so the
+    /// render tick notes when the text changes and clears it once it has
+    /// been on screen for [`NOTICE_TTL`]. A notice that describes a state
+    /// still in force stays: an approval waiting, shell mode, a queued
+    /// message being edited, a folder operation in flight.
+    pub fn expire_notice(&mut self, now: std::time::Instant) {
+        if self.notice.is_empty() {
+            self.notice_shown = None;
+            return;
+        }
+        match &self.notice_shown {
+            Some((text, since)) if *text == self.notice => {
+                let holds = !self.pending_permissions.is_empty()
+                    || self.shell_mode
+                    || self.queue_edit.is_some()
+                    || self.workspace_mutation.is_some()
+                    || self.workspace_ref_operation.is_some();
+                if !holds && now.duration_since(*since) >= NOTICE_TTL {
+                    self.notice.clear();
+                    self.notice_shown = None;
+                }
+            }
+            _ => self.notice_shown = Some((self.notice.clone(), now)),
+        }
+    }
+
+    /// Whether the notice still answers something that happened a moment
+    /// ago. Ambient news, such as the configuration reload a setting change
+    /// causes, must not replace it.
+    pub(crate) fn notice_is_fresh(&self, now: std::time::Instant) -> bool {
+        !self.notice.trim().is_empty()
+            && self.notice_shown.as_ref().is_none_or(|(text, since)| {
+                *text != self.notice || now.duration_since(*since) < FRESH_NOTICE
+            })
     }
 
     pub fn expire_notification(&mut self) {
@@ -1648,6 +1744,16 @@ impl App {
                 .min(self.max_viewport_offset.get());
         } else {
             self.viewport_offset = current.saturating_sub(step.unsigned_abs());
+        }
+    }
+    /// One page for PgUp/PgDn: the transcript's visible rows less a little
+    /// overlap, so the line read last stays in view.
+    pub fn page_rows(&self) -> isize {
+        const OVERLAP: usize = 2;
+        match self.transcript_rows.get() {
+            // Nothing rendered yet.
+            0 => 10,
+            rows => isize::try_from(rows.saturating_sub(OVERLAP).max(1)).unwrap_or(isize::MAX),
         }
     }
     pub fn scroll_to_bottom(&mut self) {

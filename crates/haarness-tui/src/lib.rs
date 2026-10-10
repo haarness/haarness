@@ -37,7 +37,7 @@ use haarness_opentui::{Color, ColorSupport, Renderer};
 use haarness_protocol::CreateThreadRequest;
 use std::{path::PathBuf, time::Duration};
 
-use crate::api::{ApiClient, EndpointResolver};
+use crate::api::{ApiClient, EndpointResolver, ServerRestarter};
 use crate::input::{AppAction, handle_key};
 /// The model a new chat starts on when none is configured; `haarness run`
 /// picks the same way.
@@ -208,12 +208,15 @@ pub async fn resume_attached_with_resolver(
 /// `--thread`/`--session` id wins over both. Returns a workspace path the user
 /// switched to, once the terminal has been restored, so the CLI can start
 /// that workspace's own server without nesting TUIs.
+/// `restarter` brings the workspace server back if it stops or crashes while
+/// the TUI is open.
 pub async fn run_with_thread_and_resolver_switching(
     server: &str,
     token: &str,
     initial_thread: Option<uuid::Uuid>,
     continue_last: bool,
     resolver: EndpointResolver,
+    restarter: ServerRestarter,
 ) -> Result<Option<PathBuf>> {
     run_with_thread_and_resolver_fork_switching(
         server,
@@ -222,6 +225,7 @@ pub async fn run_with_thread_and_resolver_switching(
         continue_last,
         false,
         resolver,
+        restarter,
     )
     .await
 }
@@ -235,9 +239,12 @@ pub async fn run_with_thread_and_resolver_fork_switching(
     continue_last: bool,
     fork: bool,
     resolver: EndpointResolver,
+    restarter: ServerRestarter,
 ) -> Result<Option<PathBuf>> {
     Box::pin(run_with_client(
-        ApiClient::new(server, token)?.with_endpoint_resolver(resolver),
+        ApiClient::new(server, token)?
+            .with_endpoint_resolver(resolver)
+            .with_server_restarter(restarter),
         initial_thread,
         continue_last,
         fork,
@@ -389,7 +396,7 @@ async fn run_with_client(
     app.theme_selected = saved_theme.is_some() || saved_variant.is_some();
     let initial_theme = saved_theme.unwrap_or_else(|| theme::DEFAULT_THEME.into());
     let detected_variant = crate::terminal::detect_background_variant().map(str::to_owned);
-    let _terminal = TerminalGuard::enter()?;
+    let terminal_guard = TerminalGuard::enter()?;
     let (width, height) = crossterm::terminal::size()?;
     let mut renderer = Renderer::new(u32::from(width), u32::from(height), false)
         .context("initialize embedded OpenTUI renderer")?;
@@ -476,6 +483,9 @@ async fn run_with_client(
         .and_then(haarness_account::Client::new)
         .map(haarness_account::billing::watch)
         .ok();
+    // Only leaving on purpose earns the way-back footer; a signal may mean
+    // the terminal is already gone.
+    let mut quit = false;
     loop {
         if let Some(connection) = app.pending_server.take() {
             match servers::save_current(&app, &client) {
@@ -547,7 +557,10 @@ async fn run_with_client(
                         // A failed request behind a keystroke becomes a
                         // notice; it must never take the whole TUI down.
                         match handle_key(&mut app, key, &client).await {
-                            Ok(AppAction::Quit) => break,
+                            Ok(AppAction::Quit) => {
+                                quit = true;
+                                break;
+                            }
                             Ok(AppAction::OpenEditor) => {
                                 open_external_editor(&mut app, &mut renderer);
                                 force_redraw = true;
@@ -677,7 +690,10 @@ async fn run_with_client(
                             continue;
                         }
                         match crate::input::mouse::handle_mouse(&mut app, mouse, &client).await {
-                            Ok(AppAction::Quit) => break,
+                            Ok(AppAction::Quit) => {
+                                quit = true;
+                                break;
+                            }
                             Ok(AppAction::OpenEditor) => {
                                 open_external_editor(&mut app, &mut renderer);
                                 force_redraw = true;
@@ -783,15 +799,54 @@ async fn run_with_client(
                             );
                         }
                     }
+                    crate::api::SubscriptionEvent::ServerRestarting => {
+                        app.server_restart = Some(state::ServerRestart::Starting);
+                    }
+                    crate::api::SubscriptionEvent::ServerRestartFailed(error) => {
+                        if app.server_restart != Some(state::ServerRestart::Failed) {
+                            app.show_toast(
+                                Some(app.language.text("Could not restart the server").into()),
+                                error,
+                                ToastVariant::Error,
+                                Duration::from_secs(8),
+                            );
+                        }
+                        app.server_restart = Some(state::ServerRestart::Failed);
+                    }
                     crate::api::SubscriptionEvent::Reconnected => {
                         app.connection_lost = None;
-                        app.notice = "Reconnected".into();
+                        app.notice = if app.server_restart.take()
+                            == Some(state::ServerRestart::Starting)
+                        {
+                            "Server restarted · reconnected"
+                        } else {
+                            "Reconnected"
+                        }
+                        .into();
                     }
                 }
             },
             Ok(event) = pty_rx.recv() => {
                 if let Some(terminal) = &mut app.terminal {
+                    let exited = match event {
+                        crate::api::PtyClientEvent::Exited(id) => Some(id),
+                        _ => None,
+                    };
                     terminal.apply(event);
+                    // A shell that exits closes its tab, as in any terminal
+                    // emulator; the last one returns to the chat, so `exit`
+                    // always leads back even where no shortcut gets through.
+                    if let Some(id) = exited {
+                        terminal.remove(id);
+                        let client = client.clone();
+                        tokio::spawn(async move {
+                            let _ = client.delete_pty(id).await;
+                        });
+                        if terminal.is_empty() {
+                            app.terminal = None;
+                            app.notice = "Terminal closed · the shell exited".into();
+                        }
+                    }
                 }
             },
             Some(completion) = workspace_mutation_rx.recv() => {
@@ -857,6 +912,7 @@ async fn run_with_client(
                 app.tick = app.tick.wrapping_add(1);
                 let _ = statusline_context.send(statusline::Context::from_app(&app));
                 app.expire_notification();
+                app.expire_notice(std::time::Instant::now());
                 app.release_completions(std::time::Instant::now());
                 app.reveal_goal_completion();
                 if matches!(app.overlay, state::Overlay::ProviderLogin) {
@@ -927,7 +983,109 @@ async fn run_with_client(
         }
     });
     draft_save?;
+    if quit && meaningful && client.supports_local_workspace_switch() {
+        let root = app.parent_stack.first().unwrap_or(&app.thread);
+        let summary = exit_summary(
+            app.language,
+            &root.title,
+            &resume_command(root.id, app.server_info.as_ref()),
+            app.active_turn.is_some(),
+            std::io::IsTerminal::is_terminal(&std::io::stdout()),
+        );
+        drop(renderer);
+        drop(terminal_guard);
+        let _ = std::io::Write::write_all(&mut std::io::stdout(), summary.as_bytes());
+    }
     Ok(selected_workspace)
+}
+
+/// `haarness -s <id>`, naming the folder too when the chat lives somewhere
+/// other than where the shell is now (after switching folders in the TUI).
+fn resume_command(
+    thread: haarness_protocol::ThreadId,
+    info: Option<&haarness_protocol::ServerInfo>,
+) -> String {
+    let here = std::env::current_dir()
+        .ok()
+        .and_then(|path| path.canonicalize().ok());
+    let workspace = info
+        .and_then(|info| info.workspace.as_deref())
+        .filter(|workspace| {
+            let path = std::path::Path::new(workspace);
+            here.as_deref() != Some(path.canonicalize().as_deref().unwrap_or(path))
+        });
+    match workspace {
+        Some(workspace) => format!(
+            "haarness --workspace {} -s {thread}",
+            shell_quote(workspace)
+        ),
+        None => format!("haarness -s {thread}"),
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "/._-+:@".contains(character))
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+/// The footer left in the shell after quitting, as Upstream leaves one: which
+/// chat this was and the exact command that reopens it.
+fn exit_summary(
+    language: crate::locale::Language,
+    title: &str,
+    command: &str,
+    running: bool,
+    styled: bool,
+) -> String {
+    use std::fmt::Write as _;
+    use unicode_width::UnicodeWidthStr as _;
+    let (dim, bold, reset) = if styled {
+        ("\x1b[2m", "\x1b[1m", "\x1b[0m")
+    } else {
+        ("", "", "")
+    };
+    let title = title.trim();
+    let title: String = if title.chars().count() > 50 {
+        title.chars().take(49).chain(std::iter::once('…')).collect()
+    } else {
+        title.to_owned()
+    };
+    let mut rows = Vec::new();
+    if !title.is_empty() {
+        rows.push((language.text("Chat"), title));
+    }
+    rows.push((language.text("Continue"), command.to_owned()));
+    if running {
+        rows.push((
+            language.text("Working"),
+            language
+                .text("the agent keeps going on the server")
+                .to_owned(),
+        ));
+    }
+    let pad = rows
+        .iter()
+        .map(|(label, _)| label.width())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let mut out = format!(
+        "\n  {dim}{}{reset}\n\n",
+        crate::view::home::wordmark(usize::MAX)
+    );
+    for (label, value) in rows {
+        let gap = " ".repeat(pad - label.width());
+        let _ = writeln!(out, "  {dim}{label}{gap}{reset}{bold}{value}{reset}");
+    }
+    out.push('\n');
+    out
 }
 
 /// Pure launch selection contract, kept separate so default-new vs explicit

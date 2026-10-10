@@ -15814,3 +15814,436 @@ async fn ctrl_u_clears_every_dialog_filter() {
     assert!(rendered.contains("ctrl+f favorite"), "{rendered}");
     assert!(!rendered.contains("Ctrl+F"), "{rendered}");
 }
+
+// ---------------------------------------------------------------------------
+// Terminal exits, unknown commands, undo drafts, paging and notices.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn every_encoding_of_ctrl_bracket_and_f12_leave_the_terminal() {
+    use crate::pty_view::is_detach_key;
+    // Kitty/CSI-u terminals report the key itself.
+    assert!(is_detach_key(KeyEvent::new(
+        KeyCode::Char(']'),
+        KeyModifiers::CONTROL
+    )));
+    // tmux and Terminal.app send GS (0x1d), which crossterm decodes as Ctrl+5.
+    assert!(is_detach_key(KeyEvent::new(
+        KeyCode::Char('5'),
+        KeyModifiers::CONTROL
+    )));
+    assert!(is_detach_key(KeyEvent::new(
+        KeyCode::F(12),
+        KeyModifiers::NONE
+    )));
+    for typed in [']', '5'] {
+        assert!(!is_detach_key(KeyEvent::new(
+            KeyCode::Char(typed),
+            KeyModifiers::NONE
+        )));
+    }
+    // The other legacy control symbols reach the shell instead of vanishing.
+    for (code, byte) in [('\\', 0x1c), ('4', 0x1c), ('6', 0x1e), ('7', 0x1f)] {
+        assert_eq!(
+            crate::pty_view::key_bytes(KeyEvent::new(KeyCode::Char(code), KeyModifiers::CONTROL)),
+            Some(vec![byte]),
+            "ctrl+{code}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ctrl_five_detaches_the_terminal_view() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.terminal = Some(crate::pty_view::TerminalWorkspace::new(vec![
+        haarness_protocol::PtyInfo {
+            id: haarness_protocol::PtyId::new(),
+            title: "zsh".into(),
+            command: "zsh".into(),
+            args: Vec::new(),
+            cwd: "/tmp".into(),
+            status: haarness_protocol::PtyStatus::Running,
+            pid: None,
+            cols: 80,
+            rows: 24,
+        },
+    ]));
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert!(app.terminal.is_none());
+    assert!(app.notice.contains("Terminal detached"), "{}", app.notice);
+}
+
+#[test]
+fn a_new_terminal_tab_can_take_focus() {
+    let info = |title: &str| haarness_protocol::PtyInfo {
+        id: haarness_protocol::PtyId::new(),
+        title: title.into(),
+        command: "sh".into(),
+        args: Vec::new(),
+        cwd: "/tmp".into(),
+        status: haarness_protocol::PtyStatus::Running,
+        pid: None,
+        cols: 20,
+        rows: 4,
+    };
+    let (first, second) = (info("first"), info("second"));
+    let mut terminal = crate::pty_view::TerminalWorkspace::new(vec![first.clone(), second.clone()]);
+    assert_eq!(terminal.active_id(), Some(first.id));
+    terminal.focus(second.id);
+    assert_eq!(terminal.active_id(), Some(second.id));
+    terminal.remove(second.id);
+    assert_eq!(terminal.active_id(), Some(first.id));
+    assert_eq!(terminal.page_rows(), 2);
+}
+
+#[test]
+fn a_typo_of_a_command_is_named_instead_of_sent() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    assert_eq!(crate::commands::edit_distance("stauts", "status"), 1);
+    for (draft, unknown) in [
+        ("/stauts", Some("stauts")),
+        ("/logout now", Some("logout")),
+        ("/status", None),
+        ("/usr/bin is on PATH", None),
+        (" /stauts", None),
+        ("/ what is this", None),
+        ("plain prose", None),
+    ] {
+        app.composer.set_text(draft.into());
+        assert_eq!(
+            crate::input::unknown_slash_command(&app).as_deref(),
+            unknown,
+            "{draft:?}"
+        );
+    }
+    assert_eq!(
+        app.unknown_command_notice("stauts"),
+        "Unknown command /stauts · did you mean /status?"
+    );
+    assert_eq!(
+        app.unknown_command_notice("frobnicate"),
+        "Unknown command /frobnicate · start with a space to send it as text"
+    );
+}
+
+#[tokio::test]
+async fn enter_on_an_unknown_command_keeps_the_draft_and_sends_nothing() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.composer.set_text("/stauts".into());
+    // Nothing listens on the offline client: a prompt submission would fail.
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.composer.text(), "/stauts");
+    assert_eq!(
+        app.notice,
+        "Unknown command /stauts · did you mean /status?"
+    );
+}
+
+fn undo_fixture() -> (App, Thread) {
+    let thread = fixture_thread();
+    let items = vec![
+        message_item(
+            1,
+            &thread,
+            ItemData::UserMessage {
+                text: "kept prompt".into(),
+                attachments: Vec::new(),
+                queued: false,
+                synthetic: false,
+            },
+        ),
+        message_item(
+            2,
+            &thread,
+            ItemData::AssistantMessage {
+                text: "kept reply".into(),
+            },
+        ),
+        message_item(
+            3,
+            &thread,
+            ItemData::UserMessage {
+                text: "write the file".into(),
+                attachments: Vec::new(),
+                queued: false,
+                synthetic: false,
+            },
+        ),
+        message_item(
+            4,
+            &thread,
+            ItemData::AssistantMessage {
+                text: "undone reply".into(),
+            },
+        ),
+    ];
+    let app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    (app, thread)
+}
+
+#[tokio::test]
+async fn undo_restores_the_prompt_and_slash_starts_a_command_over_it() {
+    let (mut app, thread) = undo_fixture();
+    let mut reverted = thread.clone();
+    reverted.revert = Some(haarness_protocol::RevertState {
+        sequence: 2,
+        snapshot_id: "backup".into(),
+        base_snapshot_id: Some("base".into()),
+    });
+    let items = serde_json::to_string(&app.items).unwrap();
+    let (client, server) = workspace_http_status_client(
+        vec![
+            (200, serde_json::to_string(&reverted).unwrap()),
+            (200, items),
+            (200, "[]".into()),
+        ],
+        false,
+    )
+    .await;
+    app.execute_command("/undo", &client).await.unwrap();
+    server.await.unwrap();
+    assert_eq!(app.composer.text(), "write the file");
+
+    // The undone turn folds into one marker instead of reading as live.
+    let rows: Vec<String> = app.lines((100, 30)).iter().map(line_text).collect();
+    let text = rows.join("\n");
+    assert!(text.contains("kept reply"), "{text}");
+    assert!(!text.contains("undone reply"), "{text}");
+    assert!(text.contains("undone · /redo to restore"), "{text}");
+
+    // `/` starts a command rather than appending to the restored prompt.
+    let client = offline_client();
+    for character in "/re".chars() {
+        crate::input::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            &client,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(app.composer.text(), "/re");
+    // Erasing the command brings the prompt back.
+    for _ in 0..3 {
+        crate::input::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &client,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(app.composer.text(), "write the file");
+}
+
+#[tokio::test]
+async fn redo_typed_over_an_undone_prompt_runs_and_leaves_the_composer_empty() {
+    let (mut app, thread) = undo_fixture();
+    app.thread.revert = Some(haarness_protocol::RevertState {
+        sequence: 2,
+        snapshot_id: "backup".into(),
+        base_snapshot_id: Some("base".into()),
+    });
+    app.composer.set_text("write the file".into());
+    app.undo_draft = Some(crate::state::UndoDraft {
+        text: "write the file".into(),
+        attachments: Vec::new(),
+        set_aside: false,
+    });
+    let items = serde_json::to_string(&app.items).unwrap();
+    let (client, server) = workspace_http_status_client(
+        vec![
+            (200, serde_json::to_string(&thread).unwrap()),
+            (200, items),
+            (200, "[]".into()),
+        ],
+        false,
+    )
+    .await;
+    for character in "/redo".chars() {
+        crate::input::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            &client,
+        )
+        .await
+        .unwrap();
+    }
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    let requests = server.await.unwrap();
+    assert!(requests[0].contains("/unrevert"), "{requests:?}");
+    assert!(app.composer.is_empty(), "{}", app.composer.text());
+    assert!(app.thread.revert.is_none());
+    assert!(app.notice.starts_with("Redone"), "{}", app.notice);
+}
+
+#[test]
+fn page_keys_move_by_the_visible_transcript_less_an_overlap() {
+    let thread = fixture_thread();
+    let items = (1..=200)
+        .map(|sequence| {
+            message_item(
+                sequence,
+                &thread,
+                ItemData::AssistantMessage {
+                    text: format!("line-{sequence}"),
+                },
+            )
+        })
+        .collect();
+    let mut app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    assert_eq!(app.page_rows(), 10, "a default before the first frame");
+    let _ = app.lines((120, 36));
+    let rows = app.transcript_rows.get();
+    assert!(rows > 20, "{rows}");
+    app.scroll(app.page_rows());
+    assert_eq!(app.viewport_offset, rows - 2);
+    let _ = app.lines((120, 60));
+    assert!(app.page_rows() > isize::try_from(rows).unwrap());
+}
+
+#[test]
+fn notices_fade_unless_they_describe_a_standing_state() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    let start = std::time::Instant::now();
+    app.notice = "Copied selection".into();
+    app.expire_notice(start);
+    assert!(app.notice_is_fresh(start));
+    app.expire_notice(start + std::time::Duration::from_secs(5));
+    assert_eq!(app.notice, "Copied selection");
+    assert!(!app.notice_is_fresh(start + std::time::Duration::from_secs(5)));
+    app.expire_notice(start + crate::state::NOTICE_TTL);
+    assert!(app.notice.is_empty());
+
+    app.notice = "shell — Enter runs the command, Esc leaves".into();
+    app.shell_mode = true;
+    app.expire_notice(start);
+    app.expire_notice(start + std::time::Duration::from_secs(60));
+    assert!(!app.notice.is_empty(), "shell mode keeps its hint");
+}
+
+#[tokio::test]
+async fn a_configuration_reload_does_not_replace_the_answer_to_a_setting_change() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let reload = || {
+        fixture_event(
+            "configuration.reloaded",
+            thread.id,
+            thread.id,
+            serde_json::json!({}),
+        )
+    };
+    app.notice = "Input mode: queue · saved for this project".into();
+    app.reduce(reload(), &offline_client()).await.unwrap();
+    assert_eq!(app.notice, "Input mode: queue · saved for this project");
+
+    // A reload nobody here asked for still reports itself.
+    app.notice.clear();
+    app.reduce(reload(), &offline_client()).await.unwrap();
+    assert_eq!(app.notice, "Configuration reloaded");
+}
+
+#[test]
+fn quitting_names_the_chat_and_the_command_that_reopens_it() {
+    let thread = ThreadId::new();
+    let summary = crate::exit_summary(
+        crate::locale::Language::English,
+        "Fix the flaky login test",
+        &format!("haarness -s {thread}"),
+        false,
+        false,
+    );
+    let rows: Vec<&str> = summary.lines().map(str::trim_end).collect();
+    assert!(
+        rows.contains(&"  Chat      Fix the flaky login test"),
+        "{summary}"
+    );
+    assert!(
+        rows.contains(&format!("  Continue  haarness -s {thread}").as_str()),
+        "{summary}"
+    );
+    assert!(!summary.contains('\x1b'), "plain when piped");
+
+    // A turn still running is said, and an untitled chat has no empty row.
+    let summary = crate::exit_summary(
+        crate::locale::Language::English,
+        "  ",
+        "haarness -s x",
+        true,
+        true,
+    );
+    assert!(!summary.contains("Chat"), "{summary}");
+    assert!(
+        summary.contains("the agent keeps going on the server"),
+        "{summary}"
+    );
+    assert!(summary.contains("\x1b[1mhaarness -s x\x1b[0m"), "{summary}");
+
+    assert_eq!(crate::shell_quote("/work/my-app"), "/work/my-app");
+    assert_eq!(
+        crate::shell_quote("/work/My Projects/it's"),
+        r"'/work/My Projects/it'\''s'"
+    );
+}
+
+#[test]
+fn a_lost_server_says_what_this_client_does_about_it() {
+    use crate::state::ServerRestart;
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    let status = |app: &App| {
+        app.lines((120, 30))
+            .last()
+            .map(line_text)
+            .unwrap_or_default()
+    };
+    app.connection_lost = Some(1);
+    assert!(
+        status(&app).contains("reconnecting · attempt 1"),
+        "{}",
+        status(&app)
+    );
+    // An attached server this client cannot start keeps being retried, and
+    // the band stops counting to say so.
+    app.connection_lost = Some(4);
+    assert!(
+        status(&app).contains("server unreachable · still retrying"),
+        "{}",
+        status(&app)
+    );
+    app.server_restart = Some(ServerRestart::Starting);
+    assert!(
+        status(&app).contains("server stopped · restarting it"),
+        "{}",
+        status(&app)
+    );
+    app.server_restart = Some(ServerRestart::Failed);
+    assert!(
+        status(&app).contains("server stopped · restart failed · retrying"),
+        "{}",
+        status(&app)
+    );
+}
