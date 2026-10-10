@@ -74,6 +74,9 @@ pub fn render_text(report: &Report) -> String {
         ("Tools", &report.tools),
     ] {
         let _ = writeln!(text, "\n{title}");
+        if groups.is_empty() {
+            let _ = writeln!(text, "  none");
+        }
         for group in groups {
             let m = &group.metrics;
             let _ = writeln!(
@@ -87,6 +90,9 @@ pub fn render_text(report: &Report) -> String {
                 noun(m.tool_errors, "error", "errors")
             );
         }
+    }
+    if !report.findings.is_empty() {
+        let _ = writeln!(text, "\nFindings");
     }
     for finding in &report.findings {
         let _ = writeln!(text, "\n• {}", terminal_text(finding));

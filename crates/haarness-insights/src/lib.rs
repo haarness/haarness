@@ -1,5 +1,6 @@
 //! Read-only cross-workspace analytics. No provider calls or transcript export.
 mod render;
+use render::count;
 pub use render::{render_html, render_text, write_report};
 
 use anyhow::{Context, Result, bail};
