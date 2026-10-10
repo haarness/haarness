@@ -555,9 +555,11 @@ fn materialize_plugin_tree(source: &Path, destination: &Path) -> Result<()> {
 
 /// Register a marketplace from a git URL or a local directory.
 pub fn marketplace_add(data: &Path, source: &str) -> Result<String> {
-    let local = Path::new(source);
+    let local = local_path(source).unwrap_or_else(|| PathBuf::from(source));
     let root = if local.exists() {
         local.canonicalize()?
+    } else if local_path(source).is_some() {
+        bail!("{source} does not exist");
     } else {
         // Normalize owner/repo shorthand to a GitHub URL.
         let url = git_url(source);
@@ -580,10 +582,21 @@ pub fn marketplace_add(data: &Path, source: &str) -> Result<String> {
     Ok(manifest.name)
 }
 
+/// A source that names a folder on this computer: absolute, `~/…`, `./…` or
+/// `../…`. Anything else may be a plugin name or an `owner/repo` shorthand.
+fn local_path(spec: &str) -> Option<PathBuf> {
+    if let Some(rest) = spec.strip_prefix("~/") {
+        return std::env::var_os("HOME").map(|home| PathBuf::from(home).join(rest));
+    }
+    let relative = [".", ".."].contains(&spec) || spec.starts_with("./") || spec.starts_with("../");
+    (relative || Path::new(spec).is_absolute()).then(|| PathBuf::from(spec))
+}
+
 /// Install `name@marketplace` (or `name` when only one marketplace exists),
 /// or register a local Claude-format plugin directory/plugin.json directly.
 pub fn install(data: &Path, spec: &str) -> Result<InstalledPlugin> {
-    let local = Path::new(spec);
+    let local = local_path(spec).unwrap_or_else(|| PathBuf::from(spec));
+    let local = local.as_path();
     if local.exists() {
         let path = if local.is_file()
             && local.file_name().and_then(|name| name.to_str()) == Some("plugin.json")
@@ -625,6 +638,11 @@ pub fn install(data: &Path, spec: &str) -> Result<InstalledPlugin> {
         write_map(&installed_file(data), &plugins)?;
         return Ok(plugin);
     }
+    // Plugin names never contain a path separator.
+    let name = spec.split_once('@').map_or(spec, |(name, _)| name);
+    if local_path(spec).is_some() || name.contains(['/', '\\']) {
+        bail!("{spec} does not exist");
+    }
     let marketplaces: BTreeMap<String, PathBuf> = read_map(&marketplaces_file(data));
     let (name, market) = match spec.split_once('@') {
         Some((name, market)) => (name.to_owned(), market.to_owned()),
@@ -632,10 +650,14 @@ pub fn install(data: &Path, spec: &str) -> Result<InstalledPlugin> {
             if marketplaces.len() == 1 {
                 let market = marketplaces.keys().next().cloned().unwrap_or_default();
                 (spec.to_owned(), market)
+            } else if marketplaces.is_empty() {
+                bail!(
+                    "{spec} is not a folder on this computer, and no plugin marketplace has been added to install it from"
+                );
             } else {
                 bail!(
-                    "use name@marketplace (marketplaces: {:?})",
-                    marketplaces.keys()
+                    "Say which marketplace to install {spec} from: {spec}@<marketplace> (added: {})",
+                    marketplaces.keys().cloned().collect::<Vec<_>>().join(", ")
                 );
             }
         }
@@ -1068,6 +1090,32 @@ mod tests {
         );
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_missing_local_folder_says_so() {
+        let root = std::env::temp_dir().join(format!("haarness-missing-{}", uuid::Uuid::now_v7()));
+        let data = root.join("data");
+        let missing = root.join("does-not-exist/my-plugin");
+        let missing = missing.to_str().unwrap();
+        assert_eq!(
+            install(&data, missing).unwrap_err().to_string(),
+            format!("{missing} does not exist")
+        );
+        assert_eq!(
+            marketplace_add(&data, missing).unwrap_err().to_string(),
+            format!("{missing} does not exist")
+        );
+        assert_eq!(
+            install(&data, "./not-here").unwrap_err().to_string(),
+            "./not-here does not exist"
+        );
+        assert_eq!(
+            install(&data, "kit").unwrap_err().to_string(),
+            "kit is not a folder on this computer, and no plugin marketplace has been added to install it from",
+            "a plain name is still a marketplace plugin"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

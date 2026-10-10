@@ -3323,4 +3323,50 @@ mod tests {
         assert!(!error.contains("Unsupported"), "{error}");
         let _ = fs::remove_dir_all(root);
     }
+
+    #[tokio::test]
+    async fn a_browser_sign_in_can_always_be_retried_on_its_port() {
+        let root = std::env::temp_dir().join(format!("haarness-connect-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(root.join("project")).unwrap();
+        let (issuer, _) = fixture_issuer().await;
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let service = login_service(&root, &issuer, port);
+        let browser = json!({"action":"login","name":"openai","method":"browser"});
+        let start = || service.ui_request("providers", &browser);
+        let first = start().await.unwrap();
+        let first = first["data"]["id"].as_str().unwrap().to_owned();
+        service
+            .ui_request("providers", &json!({"action":"login_cancel","id":first}))
+            .await
+            .unwrap();
+        // Cancelled: the port is free again.
+        let second = start().await.unwrap();
+        let second = second["data"]["id"].as_str().unwrap().to_owned();
+        // Never cancelled (a client went away): the new attempt replaces it.
+        let third = start().await.unwrap();
+        assert!(
+            service
+                .ui_request("providers", &json!({"action":"login_status","id":second}))
+                .await
+                .is_err(),
+            "the replaced attempt is forgotten"
+        );
+        let url = reqwest::Url::parse(third["data"]["url"].as_str().unwrap()).unwrap();
+        let state = url
+            .query_pairs()
+            .find(|(key, _)| key == "state")
+            .map(|(_, value)| value.into_owned())
+            .unwrap();
+        let response = reqwest::get(format!(
+            "http://127.0.0.1:{port}/auth/callback?code=code-1&state={state}"
+        ))
+        .await
+        .unwrap();
+        assert!(response.status().is_success(), "{}", response.status());
+        let done = wait_for_login(&service, third["data"]["id"].as_str().unwrap()).await;
+        assert_eq!(done["data"]["state"], "connected", "{done}");
+        let _ = fs::remove_dir_all(root);
+    }
 }

@@ -6,8 +6,8 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use futures::StreamExt;
 use haarness_core::{
-    CoreError, CoreResult, ModelProvider, ProviderEvent, ProviderMessage, ProviderRequest,
-    ProviderStream, STRUCTURED_OUTPUT_TOOL_NAME, structured_output_tool,
+    CoreError, CoreResult, KeyCheck, ModelProvider, ProviderEvent, ProviderMessage,
+    ProviderRequest, ProviderStream, STRUCTURED_OUTPUT_TOOL_NAME, structured_output_tool,
 };
 use haarness_protocol::{ModelInfo, ModelPricing, ProviderInfo};
 use reqwest::header::{AUTHORIZATION, HeaderValue};
@@ -1115,6 +1115,21 @@ impl ModelProvider for OpenAiCompatibleProvider {
         self.live_models
             .refresh(force, || self.fetch_models())
             .await;
+    }
+    async fn check_api_key(&self, key: &str) -> KeyCheck {
+        // Presets without a usable `/models` route have nothing cheap to ask.
+        let listed = crate::compatible_preset(&self.id).is_none_or(|preset| preset.discover_models);
+        let (true, Some(base), Ok(value)) = (
+            listed,
+            self.endpoint.strip_suffix("/chat/completions"),
+            HeaderValue::from_str(&format!("Bearer {key}")),
+        ) else {
+            return KeyCheck::Unsupported;
+        };
+        let mut headers = self.headers.map();
+        headers.insert(AUTHORIZATION, value);
+        let request = self.client.get(format!("{base}/models")).headers(headers);
+        crate::key_check::check(&self.name, request).await
     }
     fn id(&self) -> &str {
         &self.id

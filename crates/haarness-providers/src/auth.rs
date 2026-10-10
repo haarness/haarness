@@ -401,14 +401,7 @@ impl OpenAiOAuthClient {
     }
 
     pub async fn start_browser_login(&self) -> AuthResult<OpenAiBrowserLogin> {
-        let listener = TcpListener::bind(("localhost", self.config.callback_port))
-            .await
-            .map_err(|error| {
-                AuthError::OpenAi(format!(
-                    "could not listen on localhost:{}: {error}",
-                    self.config.callback_port
-                ))
-            })?;
+        let listeners = bind_callback(self.config.callback_port).await?;
         let redirect = format!(
             "http://localhost:{}/auth/callback",
             self.config.callback_port
@@ -419,7 +412,7 @@ impl OpenAiOAuthClient {
         let client = self.clone();
         let task = tokio::spawn(async move {
             let callback =
-                tokio::time::timeout(CALLBACK_TIMEOUT, wait_for_callback(listener, &state))
+                tokio::time::timeout(CALLBACK_TIMEOUT, wait_for_callback(&listeners, &state))
                     .await
                     .map_err(|_| AuthError::OpenAi("browser authorization timed out".into()))??;
             let result = client
@@ -538,13 +531,17 @@ pub struct OpenAiBrowserLogin {
 
 impl OpenAiBrowserLogin {
     pub async fn finish(mut self) -> AuthResult<Credential> {
-        let Some(task) = self.task.take() else {
+        // The task stays owned by `self` while it runs: when a cancelled
+        // sign-in drops this future, `Drop` aborts the task and its callback
+        // listener closes, so the next attempt can use the port.
+        let Some(task) = self.task.as_mut() else {
             return Err(AuthError::OpenAi(
                 "browser authorization was already completed".into(),
             ));
         };
-        task.await
-            .map_err(|error| AuthError::OpenAi(format!("authorization task failed: {error}")))?
+        let result = task.await;
+        self.task = None;
+        result.map_err(|error| AuthError::OpenAi(format!("authorization task failed: {error}")))?
     }
 }
 
@@ -975,11 +972,49 @@ struct BrowserCallback {
     stream: TcpStream,
 }
 
-async fn wait_for_callback(listener: TcpListener, state: &str) -> AuthResult<BrowserCallback> {
+/// The callback listeners: IPv4 and, where the machine has it, IPv6 loopback
+/// on one port, so `localhost` reaches this sign-in whichever family the
+/// browser tries first. A cancelled attempt releases the port as it shuts
+/// down, so a busy port is retried for a moment before giving up.
+async fn bind_callback(port: u16) -> AuthResult<Vec<TcpListener>> {
+    let mut attempts = 0;
     loop {
-        let (mut stream, _) = listener
-            .accept()
-            .await
+        match bind_loopback(port).await {
+            Ok(listeners) => return Ok(listeners),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse && attempts < 20 => {
+                attempts += 1;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                return Err(AuthError::OpenAi(format!(
+                    "another sign-in is using port {port} on this computer. Finish or close it (Codex CLI uses the same port), then try again."
+                )));
+            }
+            Err(error) => {
+                return Err(AuthError::OpenAi(format!(
+                    "could not open port {port} on this computer for the browser to return to ({error})."
+                )));
+            }
+        }
+    }
+}
+
+async fn bind_loopback(port: u16) -> std::io::Result<Vec<TcpListener>> {
+    let ipv4 = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
+    let port = ipv4.local_addr()?.port();
+    match TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port)).await {
+        Ok(ipv6) => Ok(vec![ipv4, ipv6]),
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => Err(error),
+        // No IPv6 loopback here: browsers reach `localhost` over IPv4.
+        Err(_) => Ok(vec![ipv4]),
+    }
+}
+
+async fn wait_for_callback(listeners: &[TcpListener], state: &str) -> AuthResult<BrowserCallback> {
+    loop {
+        let accepts = listeners.iter().map(|listener| Box::pin(listener.accept()));
+        let (accepted, _, _) = futures::future::select_all(accepts).await;
+        let (mut stream, _) = accepted
             .map_err(|error| AuthError::OpenAi(format!("callback listener failed: {error}")))?;
         let mut buffer = vec![0_u8; 16 * 1024];
         let count = stream
@@ -1321,6 +1356,46 @@ mod tests {
             Some(redirect.as_str())
         );
         drop(login);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_browser_login_releases_its_callback_port() {
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let client = OpenAiOAuthClient::new(OpenAiOAuthConfig {
+            callback_port: port,
+            ..OpenAiOAuthConfig::default()
+        });
+        let login = client.start_browser_login().await.unwrap();
+        // Cancelling a sign-in drops the future waiting for it.
+        let waiting = tokio::spawn(login.finish());
+        tokio::task::yield_now().await;
+        waiting.abort();
+        let _ = waiting.await;
+        let again = client.start_browser_login().await;
+        assert!(
+            again.is_ok(),
+            "the retry gets the port: {:?}",
+            again.as_ref().err()
+        );
+
+        // A port someone else keeps says so in words.
+        let held = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = held.local_addr().unwrap().port();
+        let error = OpenAiOAuthClient::new(OpenAiOAuthConfig {
+            callback_port: port,
+            ..OpenAiOAuthConfig::default()
+        })
+        .start_browser_login()
+        .await
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(
+            error.contains(&format!("another sign-in is using port {port}")),
+            "{error}"
+        );
     }
 
     #[tokio::test]

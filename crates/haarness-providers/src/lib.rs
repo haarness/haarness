@@ -10,6 +10,7 @@ mod compatibility_tests;
 pub mod connect;
 mod gemini;
 mod haarness_cloud;
+mod key_check;
 mod live_models;
 mod media;
 mod model_order;
@@ -741,6 +742,45 @@ pub fn compatible_preset(id: &str) -> Option<&'static CompatiblePreset> {
     COMPAT_PRESETS
         .iter()
         .find(|preset| preset.id == id || preset.aliases.contains(&id))
+}
+
+/// Provider ids Haarness defines itself: native providers, local runtimes and
+/// compatible presets (with their aliases). A credential stored for one of
+/// them belongs to that provider's own endpoint.
+#[must_use]
+pub fn builtin_provider(id: &str) -> bool {
+    matches!(
+        id,
+        "haarness"
+            | "openai"
+            | "anthropic"
+            | "gemini"
+            | "azure"
+            | "google-vertex"
+            | "github-copilot"
+            | "amazon-bedrock"
+            | "openai-compatible"
+            | "ollama"
+            | "lmstudio"
+            | "echo"
+    ) || compatible_preset(id).is_some()
+}
+
+/// Whether Haarness itself ships `model` for `provider`: one of the
+/// provider's built-in models, or a model the catalog or the reviewed price
+/// table names (by id or dated snapshot). Fine-tunes, deployment names and
+/// other ids people choose are not, even when they start like a known model.
+#[must_use]
+pub fn ships_model(provider: &str, model: &str) -> bool {
+    let builtin = match provider {
+        "anthropic" => anthropic::preferred_models(),
+        "openai" => openai::preferred_models(),
+        "gemini" => gemini::preferred_models(),
+        _ => Vec::new(),
+    };
+    builtin.iter().any(|info| info.id == model)
+        || compatible_preset(provider).is_some_and(|preset| preset.models.contains(&model))
+        || catalog::ships(model)
 }
 
 fn preset_id_in(ids: &std::collections::HashSet<String>, preset: &CompatiblePreset) -> bool {

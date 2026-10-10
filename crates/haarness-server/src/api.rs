@@ -452,7 +452,7 @@ async fn analytics_report(
     })
     .await
     .map_err(|e| CoreError::Storage(e.to_string()))?
-    .map_err(|e| ApiFailure(CoreError::Invalid(e.to_string())))
+    .map_err(|e| ApiFailure::from(CoreError::Invalid(e.to_string())))
 }
 
 #[utoipa::path(get, path = "/v1/stats", params(
@@ -1171,7 +1171,7 @@ async fn plugin_action(
     let plugins = tokio::task::spawn_blocking(move || registry.apply(&request))
         .await
         .map_err(|error| CoreError::Tool(error.to_string()))?
-        .map_err(|error| CoreError::Tool(error.to_string()))?;
+        .map_err(|error| ApiFailure::plain(CoreError::Tool(error.to_string())))?;
     Ok(Json(plugins))
 }
 async fn skills(State(state): State<ServerState>) -> ApiResult<Json<Vec<SkillInfo>>> {
@@ -1964,7 +1964,12 @@ async fn manage_resource(
     let registry = state.management.as_ref().ok_or_else(|| {
         haarness_core::CoreError::Tool("Client management is unavailable on this server".into())
     })?;
-    Ok(Json(registry.user_request(&resource, input).await?))
+    Ok(Json(
+        registry
+            .user_request(&resource, input)
+            .await
+            .map_err(ApiFailure::plain)?,
+    ))
 }
 /// Account-authenticated Cloud agents, using this host's signed-in account.
 #[utoipa::path(post, path = "/v1/cloud/agents", request_body = CloudAgentInput, responses((status = 200, body = Value), (status = 401, description = "Authentication required")))]
@@ -2223,10 +2228,21 @@ fn to_sse(event: &EventEnvelope) -> Event {
 }
 
 pub(crate) type ApiResult<T> = Result<T, ApiFailure>;
-pub(crate) struct ApiFailure(CoreError);
+pub(crate) struct ApiFailure(CoreError, Option<String>);
+impl ApiFailure {
+    /// Management answers people directly: a failed action reads as its own
+    /// sentence, without the `tool error:` category prefix.
+    fn plain(error: CoreError) -> Self {
+        let message = match &error {
+            CoreError::Tool(message) => Some(message.clone()),
+            _ => None,
+        };
+        Self(error, message)
+    }
+}
 impl From<CoreError> for ApiFailure {
     fn from(value: CoreError) -> Self {
-        Self(value)
+        Self(value, None)
     }
 }
 impl IntoResponse for ApiFailure {
@@ -2252,10 +2268,38 @@ impl IntoResponse for ApiFailure {
             status,
             Json(ApiError {
                 code: code.into(),
-                message: self.0.to_string(),
+                message: self.1.unwrap_or_else(|| self.0.to_string()),
                 retryable,
             }),
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::{ApiFailure, CoreError};
+    use axum::response::IntoResponse as _;
+
+    async fn message(failure: ApiFailure) -> serde_json::Value {
+        let response = failure.into_response();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn management_failures_read_as_sentences() {
+        let plain = message(ApiFailure::plain(CoreError::Tool(
+            "/tmp/missing does not exist".into(),
+        )))
+        .await;
+        assert_eq!(plain["message"], "/tmp/missing does not exist");
+        assert_eq!(plain["code"], "tool_error");
+        let invalid = message(ApiFailure::plain(CoreError::Invalid("bad".into()))).await;
+        assert_eq!(invalid["message"], "invalid request: bad");
+        let elsewhere = message(ApiFailure::from(CoreError::Tool("boom".into()))).await;
+        assert_eq!(elsewhere["message"], "tool error: boom");
     }
 }

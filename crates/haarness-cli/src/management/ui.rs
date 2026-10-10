@@ -2,6 +2,7 @@
 //! operations as Desktop and CLI; the terminal never edits the host's files.
 use super::*;
 use anyhow::ensure;
+use haarness_core::KeyCheck;
 use haarness_protocol::{
     ManagementEntry as Entry, ManagementField as Field, ManagementView as View,
 };
@@ -465,6 +466,7 @@ impl ManagementService {
         ) {
             return output(self.ui_view(resource, input).await?);
         }
+        let mut warning = None;
         match resource {
             // Signing out of Haarness Cloud signs out of the account; there
             // is no provider key to remove.
@@ -472,6 +474,10 @@ impl ManagementService {
                 haarness_account::Client::new(haarness_account::Config::from_env()?)?
                     .logout()
                     .await?;
+            }
+            "providers" if action == "credential" => {
+                warning = self.check_credential(input).await?;
+                self.provider_mutation(input)?;
             }
             "providers" => self.provider_mutation(input)?,
             "mcp" => {
@@ -529,7 +535,44 @@ impl ManagementService {
             0,
             "Saved. Runtime configuration changes apply when active work is idle.".into(),
         );
+        if let Some(warning) = warning {
+            view.lines.insert(1, warning.clone());
+            match view.data.as_mut().and_then(Value::as_object_mut) {
+                Some(data) => {
+                    data.insert("warning".into(), json!(warning));
+                }
+                None => view.data = Some(json!({ "warning": warning })),
+            }
+        }
         output(view)
+    }
+
+    /// Ask the provider about an API key before it is stored. A refusal is an
+    /// error and nothing is saved; a key that could not be checked is saved
+    /// with the returned warning.
+    async fn check_credential(&self, input: &Value) -> Result<Option<String>> {
+        let id = required_string(input, "name")?;
+        let key = required_string(input, "key")?.trim();
+        let provider = self
+            .runtime()
+            .ok()
+            .and_then(|runtime| runtime.providers().get(id));
+        let Some(provider) = provider.filter(|_| !key.is_empty()) else {
+            return Ok(None);
+        };
+        let name = provider.info().name;
+        Ok(match provider.check_api_key(key).await {
+            KeyCheck::Accepted | KeyCheck::Unsupported => None,
+            KeyCheck::Rejected(reason) => bail!(
+                "{name} rejected this API key{}. Check that you copied all of it, then try again.",
+                reason
+                    .map(|reason| format!(" ({reason})"))
+                    .unwrap_or_default()
+            ),
+            KeyCheck::Unchecked(reason) => Some(format!(
+                "Saved, but the key could not be checked: {reason}. If chats then fail to authenticate, replace the key."
+            )),
+        })
     }
 
     async fn capabilities_view(&self, input: &Value) -> Result<View> {
@@ -572,11 +615,20 @@ impl ManagementService {
                 }
             }
         } else {
-            let page=self.marketplace_request(&json!({"action":"search","q":input["q"],"kind":input["kind"],"cursor":input["cursor"]})).await?;
-            for row in page["items"].as_array().into_iter().flatten() {
-                view.entries.push(entry(format!("{} · {} · {}",text(row,"name"),text(row,"kind"),text(row,"visibility")),text(row,"summary"),json!({"action":"inspect","id":row["id"]})));
+            // Offline or Cloud down: say so, and keep installed resources reachable.
+            match self.marketplace_request(&json!({"action":"search","q":input["q"],"kind":input["kind"],"cursor":input["cursor"]})).await {
+                Ok(page) => {
+                    for row in page["items"].as_array().into_iter().flatten() {
+                        view.entries.push(entry(format!("{} · {} · {}",text(row,"name"),text(row,"kind"),text(row,"visibility")),text(row,"summary"),json!({"action":"inspect","id":row["id"]})));
+                    }
+                    if page["nextCursor"].is_string() {view.entries.push(entry("Next page","",json!({"action":"search","q":input["q"],"kind":input["kind"],"cursor":page["nextCursor"]})));}
+                }
+                Err(error) => {
+                    view.lines.pop();
+                    view.lines.push(error.to_string());
+                    view.entries.push(entry("Try again","",json!({"action":"search","q":input["q"],"kind":input["kind"]})));
+                }
             }
-            if page["nextCursor"].is_string() {view.entries.push(entry("Next page","",json!({"action":"search","q":input["q"],"kind":input["kind"],"cursor":page["nextCursor"]})));}
         }
         Ok(view)
     }
@@ -1036,6 +1088,10 @@ impl ManagementService {
                 store.remove(id)?;
             }
             "add" => {
+                ensure!(
+                    !haarness_providers::builtin_provider(id),
+                    "{id} is a built-in provider. Give your endpoint its own ID, for example {id}-proxy"
+                );
                 let url = required_string(input, "url")?;
                 ensure!(
                     crate::valid_provider_url(url),
@@ -1689,6 +1745,30 @@ impl ManagementService {
         Ok(())
     }
 
+    /// Stop pending provider sign-ins of one provider and method.
+    async fn cancel_logins(&self, target: &str, method: &str) {
+        let stale: Vec<Login> = {
+            let mut logins = self
+                .logins
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let ids: Vec<String> = logins
+                .iter()
+                .filter(|(_, login)| {
+                    login.resource == "providers"
+                        && login.target == target
+                        && login.method == method
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.iter().filter_map(|id| logins.remove(id)).collect()
+        };
+        for mut login in stale {
+            login.task.abort();
+            let _ = (&mut login.task).await;
+        }
+    }
+
     async fn start_login(&self, resource: &str, input: &Value) -> Result<Value> {
         let name = required_string(input, "name")?.to_owned();
         let method = match text(input, "method") {
@@ -1750,6 +1830,9 @@ impl ManagementService {
             let (url, code, future): (String, String, Completion<Credential>) =
                 match (name.as_str(), method) {
                     ("openai", "browser") => {
+                        // A new attempt replaces one still holding the
+                        // callback port, so the browser returns to this one.
+                        self.cancel_logins(&name, method).await;
                         let login = OpenAiOAuthClient::new(self.openai_oauth.clone())
                             .start_browser_login()
                             .await?;

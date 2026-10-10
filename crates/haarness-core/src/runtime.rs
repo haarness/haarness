@@ -686,6 +686,12 @@ fn is_provider_context_overflow(error: &CoreError) -> bool {
 /// actionable failure. Providers use several JSON shapes for the same error;
 /// extract their human message/code before falling back to bounded plain text.
 fn user_facing_error(error: &CoreError) -> String {
+    describe_error(error, None)
+}
+
+/// `user_facing_error`, naming the provider (when known) that has no
+/// credentials or refused them, so the fix is clear: connect it again.
+fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
     let CoreError::Provider(raw) = error else {
         return error.to_string();
     };
@@ -727,13 +733,42 @@ fn user_facing_error(error: &CoreError) -> String {
     if lower.contains("timed out") || lower.contains("timeout") {
         return "The provider did not respond in time. Try again.".into();
     }
-    if lower.contains("http 401")
-        || lower.contains("status 401")
-        || lower.contains("api_key is not configured")
-        || lower.contains("unauthorized")
+    if lower.contains("api_key is not configured") || lower.contains("api key is not configured") {
+        return match provider {
+            Some(name) => format!(
+                "{name} is not connected. Connect it with an API key or by signing in, then try again."
+            ),
+            None => "This provider is not connected. Connect it with an API key or by signing in, then try again.".into(),
+        };
+    }
+    if lower.contains("http 401") || lower.contains("status 401") || lower.contains("unauthorized")
     {
-        return "Provider authentication failed. Check the configured credentials and try again."
-            .into();
+        // `HTTP 401 Unauthorized: invalid x-api-key`: the provider's reason,
+        // without a `[code]` prefix or a JSON envelope.
+        let reason = raw
+            .split_once(": ")
+            .map(|(_, reason)| {
+                let reason = reason.trim();
+                if let Some((message, _, _)) = provider_error_fields(reason) {
+                    return clean_error_text(message.trim_end_matches('.'), 160);
+                }
+                let reason = reason
+                    .strip_prefix('[')
+                    .and_then(|rest| rest.split_once("] "))
+                    .map_or(reason, |(_, rest)| rest);
+                clean_error_text(reason.trim_end_matches('.'), 160)
+            })
+            .filter(|reason| !reason.is_empty())
+            .map(|reason| format!(" ({reason})"))
+            .unwrap_or_default();
+        return match provider {
+            Some(name) => format!(
+                "{name} rejected the API key or sign-in{reason}. Connect {name} again to replace it."
+            ),
+            None => format!(
+                "The provider rejected the API key or sign-in{reason}. Connect it again to replace it."
+            ),
+        };
     }
     if is_provider_usage_limit(error) {
         return "Provider rate limit or quota reached. Wait and retry, or check the account quota."
@@ -5030,6 +5065,15 @@ struct ChatTurnSettings {
 }
 
 impl RunnerTask {
+    /// The transcript's words for a failure of this turn, naming its provider.
+    fn visible_error(&self, error: &CoreError) -> String {
+        let name = self
+            .providers
+            .get(&self.turn.provider)
+            .map(|provider| provider.info().name);
+        describe_error(error, name.as_deref())
+    }
+
     fn custom_agent(&self, agent: &str) -> Option<crate::CustomAgent> {
         self.live_agents
             .read()
@@ -5138,7 +5182,7 @@ impl RunnerTask {
             }
             let visible_error = stop_reason
                 .as_deref()
-                .map_or_else(|| user_facing_error(error_value), stopped_turn_message);
+                .map_or_else(|| self.visible_error(error_value), stopped_turn_message);
             if self.depth == 0 {
                 let goal_lock = goal_mutation_lock(&self.goal_mutations, self.thread.id);
                 let goal_guard = goal_lock.lock().await;
@@ -5222,7 +5266,7 @@ impl RunnerTask {
                 CoreError::Tool(_) => "tool",
                 _ => "other",
             };
-            let detail = json!({"error":category,"error_details":user_facing_error(error),"provider_id":self.turn.provider,"model_id":self.turn.model});
+            let detail = json!({"error":category,"error_details":self.visible_error(error),"provider_id":self.turn.provider,"model_id":self.turn.model});
             tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => {},
@@ -5275,7 +5319,7 @@ impl RunnerTask {
             .publish_item(ItemData::Error {
                 message: format!(
                     "Queued input could not be delivered before the turn failed; retry it: {}",
-                    user_facing_error(error_value)
+                    self.visible_error(error_value)
                 ),
                 retryable: true,
             })
@@ -9105,21 +9149,40 @@ async fn generate_title(
     let text = regex::Regex::new(r"(?s)<think>.*?</think>")
         .expect("valid title cleanup pattern")
         .replace_all(&text, "");
-    let title: String = text
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or_default()
-        .trim_matches('"')
-        .chars()
-        .take(50)
-        .collect();
+    let title = shorten_title(
+        text.lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or_default()
+            .trim_matches('"'),
+        50,
+    );
     if title.is_empty() {
         return Err(CoreError::Provider(
             "title generation returned no text".into(),
         ));
     }
     Ok(title)
+}
+
+/// At most `limit` characters, cut at a word boundary with an ellipsis so a
+/// title never ends mid-word. Text without spaces (Chinese, Japanese) or one
+/// very long word is cut where it has to be.
+pub fn shorten_title(title: &str, limit: usize) -> String {
+    if title.chars().count() <= limit {
+        return title.to_owned();
+    }
+    let mut chars = title.chars();
+    let head: String = chars.by_ref().take(limit.saturating_sub(1)).collect();
+    let cut = if chars.next().is_some_and(char::is_whitespace) {
+        head.as_str()
+    } else {
+        head.rfind(char::is_whitespace)
+            .filter(|index| *index >= head.len() / 2)
+            .map_or(head.as_str(), |index| &head[..index])
+    };
+    let cut = cut.trim_end_matches(|c: char| c.is_whitespace() || ",;:-–—".contains(c));
+    format!("{cut}…")
 }
 
 fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
@@ -11549,6 +11612,26 @@ mod tests {
     }
 
     #[test]
+    fn long_titles_end_at_a_word_with_an_ellipsis() {
+        assert_eq!(
+            super::shorten_title("Echo: Hello! Can you explain what this project does?", 50),
+            "Echo: Hello! Can you explain what this project…"
+        );
+        assert_eq!(
+            super::shorten_title("Fix the login bug", 50),
+            "Fix the login bug"
+        );
+        assert_eq!(
+            super::shorten_title("Review the parser, the lexer and the formatter today", 30),
+            "Review the parser, the lexer…"
+        );
+        let cjk = "解释这个项目做什么以及它是如何组织的请详细说明每个模块的职责和它们之间的关系";
+        let short = super::shorten_title(cjk, 20);
+        assert_eq!(short.chars().count(), 20);
+        assert!(short.ends_with('…'));
+    }
+
+    #[test]
     fn provider_failures_are_clean_and_actionable_in_the_transcript() {
         assert!(
             super::user_facing_error(&CoreError::Provider(
@@ -11573,6 +11656,44 @@ mod tests {
         assert_eq!(
             super::user_facing_error(&CoreError::Provider("HTTP 429: insufficient_quota".into())),
             "Provider rate limit or quota reached. Wait and retry, or check the account quota."
+        );
+        assert_eq!(
+            super::describe_error(
+                &CoreError::Provider("HTTP 401 Unauthorized: invalid x-api-key".into()),
+                Some("Anthropic")
+            ),
+            "Anthropic rejected the API key or sign-in (invalid x-api-key). Connect Anthropic again to replace it."
+        );
+        assert_eq!(
+            super::describe_error(
+                &CoreError::Provider(
+                    "HTTP 401 Unauthorized: [invalid_api_key] Incorrect API key provided.".into()
+                ),
+                Some("OpenAI")
+            ),
+            "OpenAI rejected the API key or sign-in (Incorrect API key provided). Connect OpenAI again to replace it."
+        );
+        assert_eq!(
+            super::describe_error(
+                &CoreError::Provider(
+                    r#"HTTP 401 Unauthorized: {"error":{"type":"authentication_error","message":"Invalid bearer token."}}"#.into()
+                ),
+                Some("Amazon Bedrock")
+            ),
+            "Amazon Bedrock rejected the API key or sign-in (Invalid bearer token). Connect Amazon Bedrock again to replace it."
+        );
+        assert_eq!(
+            super::user_facing_error(&CoreError::Provider("HTTP 401 Unauthorized".into())),
+            "The provider rejected the API key or sign-in. Connect it again to replace it."
+        );
+        assert_eq!(
+            super::describe_error(
+                &CoreError::Provider(
+                    "Anthropic API key is not configured; store a credential for anthropic or set its api_key_env".into()
+                ),
+                Some("Anthropic")
+            ),
+            "Anthropic is not connected. Connect it with an API key or by signing in, then try again."
         );
     }
 

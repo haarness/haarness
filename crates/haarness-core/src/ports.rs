@@ -413,6 +413,20 @@ impl ProviderEvent {
 
 pub type ProviderStream = Pin<Box<dyn Stream<Item = CoreResult<ProviderEvent>> + Send>>;
 
+/// What a provider said about an API key that is about to be stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyCheck {
+    /// The provider accepted the key.
+    Accepted,
+    /// The provider refused the key, with its own reason when it gave one.
+    Rejected(Option<String>),
+    /// The key could not be checked: the provider was unreachable, slow, or
+    /// failed for another reason. Says why, in a few words.
+    Unchecked(String),
+    /// The provider has no cheap request that tells.
+    Unsupported,
+}
+
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
     fn id(&self) -> &str;
@@ -428,6 +442,11 @@ pub trait ModelProvider: Send + Sync {
     }
     /// Revalidate model availability and metadata without interrupting active requests.
     async fn refresh_models(&self, _force: bool) {}
+    /// Ask the provider whether it accepts `key`, without storing or using it
+    /// for anything else: one cheap authenticated request, where there is one.
+    async fn check_api_key(&self, _key: &str) -> KeyCheck {
+        KeyCheck::Unsupported
+    }
     async fn stream(
         &self,
         request: ProviderRequest,

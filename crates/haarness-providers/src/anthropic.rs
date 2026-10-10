@@ -2,8 +2,8 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use futures::StreamExt;
 use haarness_core::{
-    CoreError, CoreResult, ModelProvider, ProviderEvent, ProviderMessage, ProviderRequest,
-    ProviderStream, STRUCTURED_OUTPUT_TOOL_NAME, structured_output_tool,
+    CoreError, CoreResult, KeyCheck, ModelProvider, ProviderEvent, ProviderMessage,
+    ProviderRequest, ProviderStream, STRUCTURED_OUTPUT_TOOL_NAME, structured_output_tool,
 };
 use haarness_protocol::{ModelInfo, ProviderInfo};
 use reqwest::header::{HeaderName, HeaderValue};
@@ -221,6 +221,24 @@ impl ModelProvider for AnthropicProvider {
         self.live_models
             .refresh(force, || self.fetch_models())
             .await;
+    }
+    async fn check_api_key(&self, key: &str) -> KeyCheck {
+        let (Some(base), Ok(key)) = (
+            self.endpoint.strip_suffix("/messages"),
+            HeaderValue::from_str(key),
+        ) else {
+            return KeyCheck::Unsupported;
+        };
+        let mut headers = self.headers.map();
+        headers
+            .entry(HeaderName::from_static("anthropic-version"))
+            .or_insert(HeaderValue::from_static("2023-06-01"));
+        headers.insert(HeaderName::from_static("x-api-key"), key);
+        let request = self
+            .client
+            .get(format!("{base}/models?limit=1"))
+            .headers(headers);
+        crate::key_check::check(&self.name, request).await
     }
     fn id(&self) -> &str {
         &self.id
@@ -760,7 +778,7 @@ fn positive_u64(value: &Value) -> Option<u64> {
     value.as_u64().filter(|value| *value > 0)
 }
 
-fn preferred_models() -> Vec<ModelInfo> {
+pub(crate) fn preferred_models() -> Vec<ModelInfo> {
     vec![
         model("claude-opus-5-5"),
         model("claude-sonnet-5-5"),
@@ -796,7 +814,7 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_util::sync::CancellationToken;
 
-    use haarness_core::{ModelProvider, ProviderEvent, ProviderMessage, ProviderRequest};
+    use haarness_core::{KeyCheck, ModelProvider, ProviderEvent, ProviderMessage, ProviderRequest};
 
     #[test]
     fn base_url_follows_the_sdk_convention() {
@@ -1040,6 +1058,36 @@ mod tests {
             .unwrap();
         assert_eq!(future.context_window, Some(2_000_000));
         assert_eq!(future.max_output_tokens, Some(192_000));
+    }
+
+    #[tokio::test]
+    async fn a_key_is_checked_with_one_model_listing() {
+        async fn listing(headers: axum::http::HeaderMap) -> axum::response::Response {
+            use axum::response::IntoResponse as _;
+            assert_eq!(headers["anthropic-version"], "2023-06-01");
+            if headers["x-api-key"] == "sk-ant-good" {
+                Json(json!({"data": [], "has_more": false})).into_response()
+            } else {
+                (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    Json(json!({"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}})),
+                )
+                    .into_response()
+            }
+        }
+        let router = Router::new().route("/models", get(listing));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = AnthropicProvider::for_test(format!("http://{address}/messages"));
+        assert_eq!(
+            provider.check_api_key("sk-ant-good").await,
+            KeyCheck::Accepted
+        );
+        assert_eq!(
+            provider.check_api_key("sk-ant-fake").await,
+            KeyCheck::Rejected(Some("invalid x-api-key".into()))
+        );
     }
 
     #[tokio::test]

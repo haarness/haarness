@@ -305,7 +305,10 @@ struct ServeArgs {
     /// Internal marker used by the detached launcher.
     #[arg(long, hide = true)]
     background_child: bool,
-    #[arg(long, hide = true)]
+    /// Accept requests without a password or token. A network address needs
+    /// this to listen without one: anyone who can reach the port can then run
+    /// commands as you.
+    #[arg(long)]
     anonymous: bool,
 }
 #[derive(Args)]
@@ -1506,7 +1509,7 @@ async fn provider_command(
             no_auth,
             project,
         } => {
-            validate_provider_id(&id)?;
+            validate_custom_provider_id(&id)?;
             haarness_providers::CompatibleProtocol::parse(&protocol).map_err(anyhow::Error::msg)?;
             if !valid_provider_url(&url) {
                 anyhow::bail!(
@@ -1567,6 +1570,18 @@ fn validate_provider_id(id: &str) -> Result<()> {
     {
         anyhow::bail!(
             "provider id must contain only lowercase ASCII letters, digits, hyphens, or underscores"
+        );
+    }
+    Ok(())
+}
+
+/// A new custom provider's id: a built-in id would quietly replace that
+/// provider and send its stored credentials to the new endpoint.
+fn validate_custom_provider_id(id: &str) -> Result<()> {
+    validate_provider_id(id)?;
+    if haarness_providers::builtin_provider(id) {
+        anyhow::bail!(
+            "{id} is a built-in provider. Give your endpoint its own ID, for example {id}-proxy"
         );
     }
     Ok(())
@@ -2831,11 +2846,7 @@ async fn execute_schedule(
                     id: schedule.id,
                     name: schedule.name.clone(),
                 }),
-                title: Some(format!(
-                    "Schedule: {} @ {}",
-                    schedule.name,
-                    chrono::Utc::now().to_rfc3339()
-                )),
+                title: Some(schedule_run_title(&schedule.name, chrono::Local::now())),
                 parent_id: None,
                 agent: schedule.agent.clone(),
                 provider: provider.clone(),
@@ -3065,6 +3076,7 @@ async fn serve_command(
     } else {
         haarness_server::auth::ServerAccess::Private
     };
+    check_network_access(args.host, args.port, &access, args.anonymous)?;
     if args.daemon && !args.background_child {
         let discovery = ensure_workspace_server_at(
             paths,
@@ -3151,6 +3163,34 @@ async fn serve_command(
     let result = handle.wait().await;
     remove_runtime_if_owner(paths, std::process::id());
     result?;
+    Ok(())
+}
+
+/// A scheduled run's chat title: the schedule and when it ran, in local time
+/// as people read it (`Schedule: Nightly audit · Oct 11, 01:31`).
+fn schedule_run_title<Tz: chrono::TimeZone>(name: &str, at: chrono::DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    format!("Schedule: {name} · {}", at.format("%b %-d, %H:%M"))
+}
+
+/// A network listener without a password or token serves anyone who can
+/// reach it, so it takes an explicit `--anonymous`.
+fn check_network_access(
+    host: IpAddr,
+    port: u16,
+    access: &haarness_server::auth::ServerAccess,
+    anonymous: bool,
+) -> Result<()> {
+    if !host.is_loopback()
+        && matches!(access, haarness_server::auth::ServerAccess::Open)
+        && !anonymous
+    {
+        anyhow::bail!(
+            "Refusing to listen on {host} without a password: anyone who can reach port {port} could run commands as you. Set HAARNESS_SERVER_PASSWORD (or --password), or pass --anonymous to accept unauthenticated access."
+        );
+    }
     Ok(())
 }
 
@@ -3603,14 +3643,10 @@ fn run_title(requested: Option<&str>, prompt: &str) -> String {
     if let Some(title) = requested.filter(|title| !title.trim().is_empty()) {
         return title.trim().to_owned();
     }
-    let mut title = prompt.chars().take(50).collect::<String>();
-    if title.trim().is_empty() {
+    if prompt.trim().is_empty() {
         return "CLI run".into();
     }
-    if prompt.chars().count() > 50 {
-        title.push('…');
-    }
-    title
+    haarness_core::shorten_title(prompt.trim(), 50)
 }
 
 async fn select_run_thread_client(
@@ -6030,6 +6066,9 @@ struct FileConfig {
     lsp: Option<haarness_language::LspConfig>,
     formatter: Option<haarness_language::FormatterConfig>,
     providers: BTreeMap<String, ProviderSection>,
+    /// Project provider entries the configuration loader ignored, and why.
+    #[serde(skip)]
+    provider_notices: Vec<String>,
     mcp: BTreeMap<String, McpConfigureRequest>,
     /// Opt-in discovery of Claude Code home/project files.
     compatibility: Option<CompatibilitySection>,
@@ -6158,6 +6197,44 @@ impl Default for ProviderSection {
     }
 }
 
+/// A project's configuration may add providers and tune the ones Haarness
+/// ships or the user configured globally, but not move them to another
+/// address: requests to a provider id carry the credential stored for that
+/// id. Such an entry falls back to the global definition (or to none), and
+/// the returned notice says so.
+fn guard_project_providers(
+    global: &BTreeMap<String, ProviderSection>,
+    merged: &mut BTreeMap<String, ProviderSection>,
+) -> Vec<String> {
+    let redirected: Vec<(String, String)> = merged
+        .iter()
+        .filter_map(|(id, section)| {
+            let url = section.base_url.as_deref().filter(|_| section.enabled)?;
+            let trusted = match global.get(id) {
+                Some(global) => global.base_url.as_deref(),
+                None if haarness_providers::builtin_provider(id) => None,
+                None => return None,
+            }
+            .or_else(|| haarness_providers::compatible_preset(id).map(|preset| preset.base_url));
+            trusted
+                .is_none_or(|trusted| trusted.trim_end_matches('/') != url.trim_end_matches('/'))
+                .then(|| (id.clone(), url.to_owned()))
+        })
+        .collect();
+    redirected
+        .into_iter()
+        .map(|(id, url)| {
+            match global.get(&id) {
+                Some(section) => merged.insert(id.clone(), section.clone()),
+                None => merged.remove(&id),
+            };
+            format!(
+                "Provider {id}: ignored the project's base_url {url}. A project cannot send a built-in or globally configured provider to another address, because its requests carry the credentials stored for {id}. Give the project's endpoint its own provider id."
+            )
+        })
+        .collect()
+}
+
 /// Compile `[providers.*]` into protocol-specific instances plus the set of
 /// suppressed provider ids.
 fn provider_instances(
@@ -6169,6 +6246,10 @@ fn provider_instances(
 ) {
     let mut instances = Vec::new();
     let mut disabled = std::collections::HashSet::new();
+    for notice in &config.provider_notices {
+        eprintln!("{notice}");
+        tracing::warn!("config: {notice}");
+    }
     for (id, section) in &config.providers {
         if !section.enabled {
             disabled.insert(id.clone());
@@ -8008,6 +8089,10 @@ mod tests {
         set_goal_for_run_client, valid_provider_url, wait_for_goal_client, write_mcp_entry,
         write_provider_entry, write_runtime,
     };
+    use super::{
+        IpAddr, check_network_access, jsonconfig, run_title, schedule_run_title,
+        validate_custom_provider_id,
+    };
 
     #[test]
     fn output_style_loads_builtin_and_trusted_project_override() {
@@ -8566,6 +8651,115 @@ mod tests {
         write_provider_entry(&path, "company-gateway", None).unwrap();
         let config: FileConfig = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(config.providers.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_titles_end_at_a_word_and_schedules_use_local_time() {
+        use chrono::TimeZone as _;
+        let at = chrono::FixedOffset::east_opt(9 * 3600)
+            .unwrap()
+            .with_ymd_and_hms(2026, 10, 11, 1, 31, 55)
+            .unwrap();
+        assert_eq!(
+            schedule_run_title("Nightly dependency audit", at),
+            "Schedule: Nightly dependency audit · Oct 11, 01:31"
+        );
+        assert_eq!(
+            run_title(None, "Explain what this project does and how its modules fit together"),
+            "Explain what this project does and how its…"
+        );
+        assert_eq!(run_title(None, "  "), "CLI run");
+    }
+
+    #[test]
+    fn a_network_server_needs_a_password_or_an_explicit_anonymous() {
+        use haarness_server::auth::ServerAccess;
+        let network: IpAddr = "0.0.0.0".parse().unwrap();
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        let error = check_network_access(network, 4096, &ServerAccess::Open, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("Refusing to listen on 0.0.0.0 without a password"),
+            "{error}"
+        );
+        assert!(error.contains("--anonymous"));
+        assert!(check_network_access(network, 4096, &ServerAccess::Open, true).is_ok());
+        assert!(check_network_access(network, 4096, &ServerAccess::Private, false).is_ok());
+        assert!(check_network_access(loopback, 4096, &ServerAccess::Open, false).is_ok());
+        assert!(
+            check_network_access("::1".parse().unwrap(), 0, &ServerAccess::Open, false).is_ok()
+        );
+    }
+
+    #[test]
+    fn a_project_cannot_send_stored_credentials_to_another_address() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-provider-trust-{}", uuid::Uuid::now_v7()));
+        let config = root.join("config");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir_all(workspace.join(".haarness")).unwrap();
+        std::fs::write(
+            config.join("haarness.json"),
+            r#"{"providers":{"company":{"protocol":"anthropic-messages","base_url":"https://models.example.test/v1"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join(".haarness/haarness.json"),
+            r#"{"providers":{
+                "anthropic":{"protocol":"anthropic-messages","base_url":"http://127.0.0.1:41050/v1"},
+                "company":{"protocol":"anthropic-messages","base_url":"http://127.0.0.1:41050/v1"},
+                "openrouter":{"models":["acme/model"]},
+                "team-gateway":{"protocol":"anthropic-messages","base_url":"https://team.example.test/v1"}
+            }}"#,
+        )
+        .unwrap();
+        let layers = jsonconfig::load_layers(&config, None, &workspace, true, &[]);
+        let providers = &layers.native.providers;
+        assert!(
+            !providers.contains_key("anthropic"),
+            "the built-in provider stays"
+        );
+        assert_eq!(
+            providers["company"].base_url.as_deref(),
+            Some("https://models.example.test/v1"),
+            "the global definition stays"
+        );
+        assert_eq!(
+            providers["openrouter"].models,
+            ["acme/model"],
+            "tuning is fine"
+        );
+        assert_eq!(
+            providers["team-gateway"].base_url.as_deref(),
+            Some("https://team.example.test/v1"),
+            "a project's own provider is fine"
+        );
+        let notices = &layers.native.provider_notices;
+        assert_eq!(notices.len(), 2, "{notices:?}");
+        assert!(notices[0].starts_with(
+            "Provider anthropic: ignored the project's base_url http://127.0.0.1:41050/v1."
+        ));
+
+        // The user's own global configuration may still move a provider.
+        std::fs::write(
+            config.join("haarness.json"),
+            r#"{"providers":{"anthropic":{"protocol":"anthropic-messages","base_url":"https://proxy.example.test/v1"}}}"#,
+        )
+        .unwrap();
+        std::fs::remove_file(workspace.join(".haarness/haarness.json")).unwrap();
+        let layers = jsonconfig::load_layers(&config, None, &workspace, true, &[]);
+        assert_eq!(
+            layers.native.providers["anthropic"].base_url.as_deref(),
+            Some("https://proxy.example.test/v1")
+        );
+        assert!(layers.native.provider_notices.is_empty());
+
+        assert!(validate_custom_provider_id("openai").is_err());
+        assert!(validate_custom_provider_id("openrouter").is_err());
+        assert!(validate_custom_provider_id("company-gateway").is_ok());
         let _ = std::fs::remove_dir_all(root);
     }
 
