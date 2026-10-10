@@ -212,6 +212,9 @@ impl Process {
         let mut flag = std::ffi::OsString::from("--config=");
         flag.push(&bunfig);
         let mut command = Command::new(bun()?);
+        for name in haarness_core::private_env_names() {
+            command.env_remove(name);
+        }
         command
             .arg(flag)
             .arg("--no-install")

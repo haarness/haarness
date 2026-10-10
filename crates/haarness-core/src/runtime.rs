@@ -3902,7 +3902,7 @@ impl AgentRuntime {
         }
     }
 
-    #[instrument(skip_all, fields(thread_id = %thread_id))]
+    #[instrument(skip_all, fields(gen_ai.conversation.id = %thread_id))]
     pub async fn start_turn(
         &self,
         thread_id: ThreadId,
@@ -4273,10 +4273,15 @@ impl AgentRuntime {
         }
         let runtime = self.clone();
         let from_queue = queue_revision.is_some();
-        tokio::spawn(async move {
-            let result = Arc::clone(&task).run_with_cleanup().await;
-            runtime.follow_turn(task, result, from_queue).await;
-        });
+        // The turn outlives the request that started it; keep it in that
+        // request's trace instead of starting a new one.
+        tokio::spawn(
+            async move {
+                let result = Arc::clone(&task).run_with_cleanup().await;
+                runtime.follow_turn(task, result, from_queue).await;
+            }
+            .in_current_span(),
+        );
         Ok(turn)
     }
 
@@ -4369,7 +4374,7 @@ impl AgentRuntime {
                     Err(error) => tracing::debug!(error = %error, attempt, "auto-title failed"),
                 }
             }
-        });
+        }.in_current_span());
     }
 
     fn permission_boundary(&self, agent: &str) -> Vec<PermissionRule> {
@@ -5037,12 +5042,17 @@ impl RunnerTask {
         name = "agent.turn",
         skip_all,
         fields(
-            thread_id = %self.thread.id,
-            turn_id = %self.turn.id,
-            agent_name = %self.thread.agent,
-            provider_name = %self.thread.provider,
-            model = %self.thread.model,
-            agent_depth = self.depth,
+            otel.name = %format!("invoke_agent {}", self.thread.agent),
+            otel.status_code = tracing::field::Empty,
+            otel.status_message = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+            gen_ai.operation.name = "invoke_agent",
+            gen_ai.agent.name = %self.thread.agent,
+            gen_ai.conversation.id = %self.thread.id,
+            gen_ai.provider.name = %self.thread.provider,
+            gen_ai.request.model = %self.thread.model,
+            haarness.turn.id = %self.turn.id,
+            haarness.agent.depth = i64::from(self.depth),
         )
     )]
     async fn run_with_cleanup(self: Arc<Self>) -> CoreResult<()> {
@@ -5096,6 +5106,7 @@ impl RunnerTask {
             }
         }
         if let Err(error_value) = &result {
+            record_span_error(&tracing::Span::current(), error_value);
             // A turn the runtime stopped (server shutdown, upgrade) must not
             // read like the user's own stop.
             let stop_reason = matches!(error_value, CoreError::Cancelled)
@@ -5315,6 +5326,14 @@ impl RunnerTask {
             delay_secs = delay.as_secs(),
             %error,
             "provider unavailable; retrying"
+        );
+        // The same moment for traces, without the provider's message.
+        tracing::info!(
+            target: crate::TRACE_EVENT_TARGET,
+            attempt = i64::from(attempt),
+            delay_secs = i64::try_from(delay.as_secs()).unwrap_or(i64::MAX),
+            error.type = error.kind(),
+            "retrying provider request"
         );
         self.set_status("retrying", None);
         tokio::select! {
@@ -6029,11 +6048,20 @@ impl RunnerTask {
                 let provider_span = tracing::info_span!(
                     "provider.request",
                     "otel.kind" = "client",
-                    "thread.id" = %self.thread.id,
-                    "turn.id" = %self.turn.id,
+                    "otel.name" = format!("chat {model}"),
+                    "otel.status_code" = tracing::field::Empty,
+                    "otel.status_message" = tracing::field::Empty,
+                    "error.type" = tracing::field::Empty,
+                    "gen_ai.conversation.id" = %self.thread.id,
+                    "haarness.turn.id" = %self.turn.id,
                     "gen_ai.operation.name" = "chat",
                     "gen_ai.provider.name" = provider_id,
                     "gen_ai.request.model" = %model,
+                    "gen_ai.response.finish_reasons" = tracing::field::Empty,
+                    "gen_ai.usage.input_tokens" = tracing::field::Empty,
+                    "gen_ai.usage.output_tokens" = tracing::field::Empty,
+                    "gen_ai.usage.cache_read.input_tokens" = tracing::field::Empty,
+                    "gen_ai.usage.cache_creation.input_tokens" = tracing::field::Empty,
                 );
                 let stream_result = tokio::select! {
                     biased;
@@ -6045,6 +6073,7 @@ impl RunnerTask {
                 let mut stream = match stream_result {
                     Ok(stream) => stream,
                     Err(error_value) => {
+                        record_span_error(&provider_span, &error_value);
                         if compactions_this_turn < MAX_COMPACTIONS_PER_TURN
                             && is_provider_context_overflow(&error_value)
                             && self.recover_context_overflow(&provider, &model).await?
@@ -6089,6 +6118,7 @@ impl RunnerTask {
                     let event = match event {
                         Ok(event) => event,
                         Err(error_value) => {
+                            record_span_error(&provider_span, &error_value);
                             if !saw_provider_event
                                 && compactions_this_turn < MAX_COMPACTIONS_PER_TURN
                                 && is_provider_context_overflow(&error_value)
@@ -6208,6 +6238,12 @@ impl RunnerTask {
                             cache_read_tokens,
                             cache_write_tokens,
                         } if input_tokens > 0 || output_tokens > 0 => {
+                            // Integers, not the strings an exported u64 becomes.
+                            let count = |tokens: u64| i64::try_from(tokens).unwrap_or(i64::MAX);
+                            provider_span.record("gen_ai.usage.input_tokens", count(input_tokens));
+                            provider_span.record("gen_ai.usage.output_tokens", count(output_tokens));
+                            provider_span.record("gen_ai.usage.cache_read.input_tokens", count(cache_read_tokens));
+                            provider_span.record("gen_ai.usage.cache_creation.input_tokens", count(cache_write_tokens));
                             usage = Some((
                                 input_tokens,
                                 output_tokens,
@@ -6218,16 +6254,20 @@ impl RunnerTask {
                         ProviderEvent::Usage { .. } => {}
                         ProviderEvent::Finished { reason } => {
                             finished = true;
+                            provider_span.record("gen_ai.response.finish_reasons", reason.as_str());
                             if let Some(error) = ProviderEvent::finish_error(&reason) { blocked = Some(error); }
                         }
                     }
                 }
-                drop(provider_span);
                 if !finished && blocked.is_none() {
                     blocked = Some(CoreError::ProviderIncomplete(
                         "missing completion event".into(),
                     ));
                 }
+                if let Some(error) = &blocked {
+                    record_span_error(&provider_span, error);
+                }
+                drop(provider_span);
                 let partial = saw_provider_event
                     && (!text.is_empty() || !reasoning.is_empty() || !calls.is_empty());
                 self.flush_reasoning_segment(&mut reasoning).await?;
@@ -6560,9 +6600,12 @@ impl RunnerTask {
                         let agent = agent.to_owned();
                         task_handles.insert(
                             index,
-                            tokio::spawn(async move {
-                                this.execute_call(&agent, &call_id, "task", arguments).await
-                            }),
+                            tokio::spawn(
+                                async move {
+                                    this.execute_call(&agent, &call_id, "task", arguments).await
+                                }
+                                .in_current_span(),
+                            ),
                         );
                     }
                 }
@@ -6572,7 +6615,7 @@ impl RunnerTask {
                             if !self.tools.get(tool).is_some_and(|tool| tool.parallel_safe(args)) { break; }
                             let this = Arc::clone(&self);
                             let (id, tool, args, agent) = (id.clone(), tool.clone(), args.clone(), agent.to_owned());
-                            task_handles.insert(offset, tokio::spawn(async move { this.execute_call(&agent, &id, &tool, args).await }));
+                            task_handles.insert(offset, tokio::spawn(async move { this.execute_call(&agent, &id, &tool, args).await }.in_current_span()));
                         }
                     }
                     let fingerprint_arguments = arguments.clone();
@@ -7208,11 +7251,16 @@ impl RunnerTask {
         name = "tool.call",
         skip_all,
         fields(
-            thread_id = %self.thread.id,
-            turn_id = %self.turn.id,
-            agent_name = agent,
-            tool_name = name,
-            tool_call_id = call_id,
+            otel.name = %format!("execute_tool {name}"),
+            otel.status_code = tracing::field::Empty,
+            otel.status_message = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+            gen_ai.operation.name = "execute_tool",
+            gen_ai.tool.name = name,
+            gen_ai.tool.call.id = call_id,
+            gen_ai.agent.name = agent,
+            gen_ai.conversation.id = %self.thread.id,
+            haarness.turn.id = %self.turn.id,
         )
     )]
     async fn execute_call(
@@ -7222,8 +7270,13 @@ impl RunnerTask {
         name: &str,
         arguments: serde_json::Value,
     ) -> CoreResult<ToolOutput> {
-        self.execute_call_inner(agent, call_id, name, arguments, true, false)
-            .await
+        let result = self
+            .execute_call_inner(agent, call_id, name, arguments, true, false)
+            .await;
+        if let Err(error) = &result {
+            record_span_error(&tracing::Span::current(), error);
+        }
+        result
     }
 
     async fn execute_call_inner(
@@ -8212,6 +8265,7 @@ impl RunnerTask {
             .start_turn(child.id, request.clone())
             .await?;
         tracing::info!(
+            target: crate::TRACE_EVENT_TARGET,
             parent = %self.thread.id,
             child = %child.id,
             child_turn = %turn.id,
@@ -8364,6 +8418,7 @@ impl RunnerTask {
         let events = self.events.clone();
         let root_thread_id = self.root_thread_id;
         let worker = Arc::clone(&task);
+        // The child's turn is part of the parent's `task` tool call trace.
         tokio::spawn(async move {
             let _permit = permit;
             let result = match Arc::clone(&child_task).run_with_cleanup().await {
@@ -8407,7 +8462,7 @@ impl RunnerTask {
             }
             *worker.result.lock().await = Some(result);
             worker.done.notify_waiters();
-        });
+        }.in_current_span());
 
         if background {
             persist_task_state(
@@ -8945,6 +9000,11 @@ fn is_goal_tool(name: &str) -> bool {
 
 /// Fire-and-forget thread titling with the configured small model (falling
 /// back to the turn's model). Failures are logged, never surfaced.
+#[instrument(
+    name = "chat.title",
+    skip_all,
+    fields(gen_ai.conversation.id = %thread_id, gen_ai.operation.name = "chat")
+)]
 async fn auto_title(
     repository: &Arc<dyn ThreadRepository>,
     providers: &Arc<dyn ProviderRegistry>,
@@ -9257,6 +9317,11 @@ fn compaction_message(message: ProviderMessage) -> ProviderMessage {
 }
 
 /// Run a tools-disabled summarization request and collect the text.
+#[instrument(
+    name = "context.compact",
+    skip_all,
+    fields(gen_ai.operation.name = "chat", gen_ai.request.model = model)
+)]
 async fn summarize_context(
     provider: &Arc<dyn ModelProvider>,
     model: &str,
@@ -9916,6 +9981,18 @@ impl ProviderRegistry for StaticProviderRegistry {
             .map(|provider| provider.info())
             .collect()
     }
+}
+
+/// Marks a span failed with the error's category. The message stays in the
+/// local logs: provider and tool messages can carry response bodies and paths.
+/// A stop is an outcome someone asked for, not a failure.
+fn record_span_error(span: &tracing::Span, error: &CoreError) {
+    if matches!(error, CoreError::Cancelled) {
+        return;
+    }
+    span.record("otel.status_code", "ERROR");
+    span.record("otel.status_message", error.kind());
+    span.record("error.type", error.kind());
 }
 
 #[cfg(test)]

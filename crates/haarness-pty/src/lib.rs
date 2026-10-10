@@ -117,6 +117,9 @@ impl PtyManager {
         let mut builder = CommandBuilder::new(&command);
         builder.args(&request.args);
         builder.cwd(&cwd);
+        for name in haarness_core::private_env_names() {
+            builder.env_remove(name);
+        }
         builder.env(
             "PATH",
             haarness_ripgrep::prepend_path(std::env::var_os("PATH").as_deref())

@@ -1782,6 +1782,7 @@ dependencies = [
  "haarness-opentui",
  "haarness-protocol",
  "nix 0.31.3",
+ "opentelemetry",
  "pulldown-cmark",
  "reqwest",
  "serde",
@@ -1794,6 +1795,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing",
+ "tracing-opentelemetry",
  "unicode-segmentation",
  "unicode-width",
  "url",
@@ -2772,6 +2774,7 @@ dependencies = [
  "js-sys",
  "pin-project-lite",
  "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]
@@ -2793,6 +2796,7 @@ version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9966929966d17620d7c316c643ba62631826e10021409357772d5eea84f62c35"
 dependencies = [
+ "flate2",
  "http",
  "opentelemetry",
  "opentelemetry-http",

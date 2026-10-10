@@ -36,3 +36,32 @@ pub use runtime::{
 };
 pub use tool_catalog::{LOAD_TOOL_NAME, LazyToolSettings, load_tool_definition, select_tools};
 pub use workflows::{WorkflowLogDraft, WorkflowRepository};
+
+/// The `tracing` target for events that may be exported with OpenTelemetry
+/// traces. Other log lines stay in the local log files: their fields can carry
+/// provider error bodies, approval prompts, paths and client addresses.
+pub const TRACE_EVENT_TARGET: &str = "haarness::trace";
+
+/// Variables a process the server starts for the agent, a terminal, a hook, an
+/// MCP server or an extension must not inherit: the server's own credentials,
+/// and the OpenTelemetry settings (`OTEL_EXPORTER_OTLP_HEADERS` usually holds a
+/// collector key, and instrumented programs would export into the user's
+/// collector). Configured environments (`shell.env` hooks, MCP `env`) can still
+/// set them explicitly.
+#[must_use]
+pub fn private_env_names() -> Vec<std::ffi::OsString> {
+    std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| {
+            name.to_str().is_some_and(|name| {
+                name.starts_with("OTEL_")
+                    || matches!(
+                        name,
+                        "HAARNESS_SERVER_TOKEN"
+                            | "HAARNESS_SERVER_PASSWORD"
+                            | "HAARNESS_SERVER_USERNAME"
+                    )
+            })
+        })
+        .collect()
+}

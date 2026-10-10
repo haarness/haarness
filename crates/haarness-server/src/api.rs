@@ -301,8 +301,7 @@ pub async fn serve_with_access(
         .route("/healthz", get(health))
         .route("/openapi.json", get(openapi))
         .nest("/v1", protected)
-        .with_state(state)
-        .layer(middleware::from_fn(trace_request));
+        .with_state(state);
     if let Some(host) = host {
         app = app.merge(crate::remote::routes(host, shutdown.clone()).route_layer(
             middleware::from_fn_with_state(
@@ -311,6 +310,8 @@ pub async fn serve_with_access(
             ),
         ));
     }
+    // Last, so remote host routes are traced like every other request.
+    let app = app.layer(middleware::from_fn(trace_request));
     let server_shutdown = shutdown.clone();
     let task = tokio::spawn(async move {
         // Peer addresses let rejected-request log lines say who was turned away.
@@ -343,31 +344,65 @@ impl opentelemetry::propagation::Extractor for HeaderExtractor<'_> {
     }
 }
 
+/// Reads a client repeats every few milliseconds while it waits on a turn.
+/// Their spans are debug-level, so the default trace filter leaves them out
+/// instead of turning every `haarness run` into thousands of one-span traces.
+fn polling_route(method: &axum::http::Method, route: Option<&str>) -> bool {
+    method == axum::http::Method::GET
+        && matches!(
+            route,
+            Some(
+                "/healthz"
+                    | "/v1/events"
+                    | "/v1/turns/active"
+                    | "/v1/turns/{id}"
+                    | "/v1/questions"
+                    | "/v1/permissions"
+            )
+        )
+}
+
 async fn trace_request(request: Request, next: Next) -> Response {
     let parent = global::get_text_map_propagator(|propagator| {
         propagator.extract(&HeaderExtractor(request.headers()))
     });
     let method = request.method().clone();
-    let path = if request.uri().path().starts_with("/s/") {
-        "/s/{token}".into()
+    // The route template, never the raw path: paths carry thread ids and share tokens.
+    let route = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|path| path.as_str().to_owned());
+    let name = route
+        .as_deref()
+        .map_or_else(|| method.to_string(), |route| format!("{method} {route}"));
+    macro_rules! request_span {
+        ($span:ident) => {
+            tracing::$span!(
+                "http.request",
+                "otel.kind" = "server",
+                "otel.name" = %name,
+                "otel.status_code" = tracing::field::Empty,
+                "http.request.method" = %method,
+                "http.route" = route.as_deref(),
+                "url.scheme" = "http",
+                "http.response.status_code" = tracing::field::Empty,
+            )
+        };
+    }
+    let span = if polling_route(&method, route.as_deref()) {
+        request_span!(debug_span)
     } else {
-        request.uri().path().to_owned()
+        request_span!(info_span)
     };
-    let span = tracing::info_span!(
-        "http.request",
-        "otel.kind" = "server",
-        "http.request.method" = %method,
-        "url.path" = %path,
-        "http.response.status_code" = tracing::field::Empty,
-    );
     let _ = span.set_parent(parent);
     let response_span = span.clone();
     async move {
         let response = next.run(request).await;
-        response_span.record(
-            "http.response.status_code",
-            i64::from(response.status().as_u16()),
-        );
+        let status = response.status();
+        response_span.record("http.response.status_code", i64::from(status.as_u16()));
+        if status.is_server_error() {
+            response_span.record("otel.status_code", "ERROR");
+        }
         response
     }
     .instrument(span)
