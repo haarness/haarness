@@ -1686,5 +1686,14 @@
   "Approvals changed in another window. Try again.": "Godkendelserne blev ændret i et andet vindue. Prøv igen.",
   "Auto on for this chat · requests are allowed once · ctrl+y to review": "Automatisk slået til for denne chat · anmodninger tillades én gang · ctrl+y for gennemgang",
   "Review · this chat asks before acting · ctrl+y for Auto": "Gennemgang · denne chat spørger, før den handler · ctrl+y for automatisk",
-  "Approvals changed in another window · ctrl+y to switch": "Godkendelserne blev ændret i et andet vindue · ctrl+y for at skifte"
+  "Approvals changed in another window · ctrl+y to switch": "Godkendelserne blev ændret i et andet vindue · ctrl+y for at skifte",
+  "Share usage statistics": "Del brugsstatistik",
+  "Daily counts of chats, turns, tokens, models and tool calls, linked to your Haarness account when you're signed in. Never prompts, code, file names or paths.": "Daglige optællinger af chats, ture, tokens, modeller og værktøjskald, knyttet til din Haarness-konto, når du er logget ind. Aldrig prompts, kode, filnavne eller stier.",
+  "See what's shared": "Se, hvad der deles",
+  "Off because DO_NOT_TRACK is set where Haarness started.": "Slået fra, fordi DO_NOT_TRACK er sat, hvor Haarness blev startet.",
+  "Set by {variable} where Haarness started.": "Sat af {variable}, hvor Haarness blev startet.",
+  "What Haarness shares": "Hvad Haarness deler",
+  "The report exactly as it would be sent now: one snapshot per day for the last 7 days. Each replaces the one sent before for the same day.": "Rapporten præcis som den ville blive sendt nu: ét øjebliksbillede pr. dag for de seneste 7 dage. Hvert erstatter det, der tidligere blev sendt for samme dag.",
+  "Share or stop sharing usage statistics": "Del eller stop deling af brugsstatistik",
+  "No activity in the last 7 days yet, so there is nothing to send.": "Endnu ingen aktivitet de seneste 7 dage, så der er intet at sende."
 }

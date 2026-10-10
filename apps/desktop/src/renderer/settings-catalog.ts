@@ -30,7 +30,7 @@ export const settingsTitles: Record<string, string> = {
 };
 export const settingsKeywords: Record<string, string> = {
   general:
-    "language locale translation english appearance theme font notifications reasoning editor enter preferences steer queue input delivery project global inherited",
+    "language locale translation english appearance theme font notifications reasoning editor enter preferences steer queue input delivery project global inherited usage statistics telemetry privacy",
   browser: "web browser Chromium agent control enabled disabled localhost URL history downloads uploads cookies cache site permissions approval",
   shortcuts: "keyboard hotkey keybind key binding accelerators",
   servers: "connections remote host url token switch computer",
@@ -86,6 +86,7 @@ export const settingsControls = [
   ["general", "Wrap editor lines", "word wrap long code lines"],
   ["general", "Messages sent while working", "steer queue input delivery project global inherited"],
   ["general", "Send message with", "enter return command control send key"],
+  ["general", "Share usage statistics", "telemetry analytics privacy tokens tracking data collection"],
   ["tools", "Tool loading", "lazy schema context auto optional tools"],
   ["extensions", "Enable extensions", "javascript hooks scripts"],
   ["profiles", "Save a profile", "export snapshot configuration"],

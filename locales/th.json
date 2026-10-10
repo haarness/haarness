@@ -1686,5 +1686,14 @@
   "Approvals changed in another window. Try again.": "การอนุมัติถูกเปลี่ยนในหน้าต่างอื่น โปรดลองอีกครั้ง",
   "Auto on for this chat · requests are allowed once · ctrl+y to review": "เปิดอัตโนมัติสำหรับแชตนี้ · คำขอได้รับอนุญาตครั้งเดียว · ctrl+y เพื่อตรวจทาน",
   "Review · this chat asks before acting · ctrl+y for Auto": "ตรวจทาน · แชตนี้จะถามก่อนดำเนินการ · ctrl+y เพื่อใช้อัตโนมัติ",
-  "Approvals changed in another window · ctrl+y to switch": "การอนุมัติถูกเปลี่ยนในหน้าต่างอื่น · ctrl+y เพื่อสลับ"
+  "Approvals changed in another window · ctrl+y to switch": "การอนุมัติถูกเปลี่ยนในหน้าต่างอื่น · ctrl+y เพื่อสลับ",
+  "Share usage statistics": "แชร์สถิติการใช้งาน",
+  "Daily counts of chats, turns, tokens, models and tool calls, linked to your Haarness account when you're signed in. Never prompts, code, file names or paths.": "จำนวนรายวันของแชท เทิร์น โทเค็น โมเดล และการเรียกใช้เครื่องมือ เชื่อมโยงกับบัญชี Haarness ของคุณเมื่อลงชื่อเข้าใช้แล้ว จะไม่รวมพร้อมท์ โค้ด ชื่อไฟล์ หรือพาธเด็ดขาด",
+  "See what's shared": "ดูสิ่งที่แชร์",
+  "Off because DO_NOT_TRACK is set where Haarness started.": "ปิดอยู่เพราะมีการกำหนด DO_NOT_TRACK ไว้ในสภาพแวดล้อมที่เริ่ม Haarness",
+  "Set by {variable} where Haarness started.": "กำหนดโดย {variable} ในสภาพแวดล้อมที่เริ่ม Haarness",
+  "What Haarness shares": "สิ่งที่ Haarness แชร์",
+  "The report exactly as it would be sent now: one snapshot per day for the last 7 days. Each replaces the one sent before for the same day.": "รายงานตรงตามที่จะส่งในตอนนี้ คือหนึ่งสแนปช็อตต่อวันสำหรับ 7 วันล่าสุด แต่ละสแนปช็อตจะแทนที่อันที่ส่งไปก่อนหน้าของวันเดียวกัน",
+  "Share or stop sharing usage statistics": "แชร์หรือหยุดแชร์สถิติการใช้งาน",
+  "No activity in the last 7 days yet, so there is nothing to send.": "ยังไม่มีกิจกรรมใน 7 วันล่าสุด จึงไม่มีอะไรให้ส่ง"
 }

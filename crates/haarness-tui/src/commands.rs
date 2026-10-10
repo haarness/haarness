@@ -316,6 +316,11 @@ pub const COMMANDS: &[CommandSpec] = &[
     command("hooks", &[], "Manage runtime hooks"),
     command("memory", &[], "Manage project memory"),
     command(
+        "usage-statistics",
+        &["telemetry"],
+        "Share or stop sharing usage statistics",
+    ),
+    command(
         "profiles",
         &["profile"],
         "Save and restore configuration profiles",
@@ -2302,7 +2307,7 @@ impl App {
                     .await?;
             }
             "providers" | "mcp" | "schedules" | "hooks" | "memory" | "profiles" | "stash"
-            | "keybinds" | "servers" => {
+            | "keybinds" | "servers" | "usage-statistics" => {
                 self.open_management(spec.name, &serde_json::json!({"action":"view"}), client)
                     .await?;
             }

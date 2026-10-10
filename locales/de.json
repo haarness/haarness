@@ -1686,5 +1686,14 @@
   "Approvals changed in another window. Try again.": "Die Freigaben wurden in einem anderen Fenster geändert. Versuche es erneut.",
   "Auto on for this chat · requests are allowed once · ctrl+y to review": "Automatik für diesen Chat an · Anfragen werden einmal erlaubt · Strg+Y zum Überprüfen",
   "Review · this chat asks before acting · ctrl+y for Auto": "Überprüfung · dieser Chat fragt vor dem Handeln · Strg+Y für Automatik",
-  "Approvals changed in another window · ctrl+y to switch": "Freigaben in einem anderen Fenster geändert · Strg+Y zum Umschalten"
+  "Approvals changed in another window · ctrl+y to switch": "Freigaben in einem anderen Fenster geändert · Strg+Y zum Umschalten",
+  "Share usage statistics": "Nutzungsstatistiken teilen",
+  "Daily counts of chats, turns, tokens, models and tool calls, linked to your Haarness account when you're signed in. Never prompts, code, file names or paths.": "Tägliche Anzahl an Chats, Zügen, Token, Modellen und Toolaufrufen, verknüpft mit deinem Haarness-Konto, wenn du angemeldet bist. Niemals Prompts, Code, Dateinamen oder Pfade.",
+  "See what's shared": "Ansehen, was geteilt wird",
+  "Off because DO_NOT_TRACK is set where Haarness started.": "Aus, weil DO_NOT_TRACK dort gesetzt ist, wo Haarness gestartet wurde.",
+  "Set by {variable} where Haarness started.": "Gesetzt durch {variable} dort, wo Haarness gestartet wurde.",
+  "What Haarness shares": "Was Haarness teilt",
+  "The report exactly as it would be sent now: one snapshot per day for the last 7 days. Each replaces the one sent before for the same day.": "Der Bericht genau so, wie er jetzt gesendet würde: eine Momentaufnahme pro Tag für die letzten 7 Tage. Jede ersetzt die zuvor gesendete für denselben Tag.",
+  "Share or stop sharing usage statistics": "Nutzungsstatistiken teilen oder das Teilen beenden",
+  "No activity in the last 7 days yet, so there is nothing to send.": "In den letzten 7 Tagen gab es noch keine Aktivität, daher gibt es nichts zu senden."
 }

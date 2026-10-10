@@ -1686,5 +1686,14 @@
   "Approvals changed in another window. Try again.": "Les approbations ont changé dans une autre fenêtre. Réessayez.",
   "Auto on for this chat · requests are allowed once · ctrl+y to review": "Automatique activé pour cette conversation · demandes autorisées une fois · ctrl+y pour la revue",
   "Review · this chat asks before acting · ctrl+y for Auto": "Revue · cette conversation demande avant d’agir · ctrl+y pour l’automatique",
-  "Approvals changed in another window · ctrl+y to switch": "Approbations modifiées dans une autre fenêtre · ctrl+y pour basculer"
+  "Approvals changed in another window · ctrl+y to switch": "Approbations modifiées dans une autre fenêtre · ctrl+y pour basculer",
+  "Share usage statistics": "Partager les statistiques d’utilisation",
+  "Daily counts of chats, turns, tokens, models and tool calls, linked to your Haarness account when you're signed in. Never prompts, code, file names or paths.": "Décomptes quotidiens des discussions, tours, jetons, modèles et appels d’outils, associés à votre compte Haarness lorsque vous êtes connecté. Jamais de prompts, de code, de noms de fichiers ni de chemins.",
+  "See what's shared": "Voir ce qui est partagé",
+  "Off because DO_NOT_TRACK is set where Haarness started.": "Désactivé car DO_NOT_TRACK est défini là où Haarness a été lancé.",
+  "Set by {variable} where Haarness started.": "Défini par {variable} là où Haarness a été lancé.",
+  "What Haarness shares": "Ce que Haarness partage",
+  "The report exactly as it would be sent now: one snapshot per day for the last 7 days. Each replaces the one sent before for the same day.": "Le rapport exactement tel qu’il serait envoyé maintenant : un instantané par jour pour les 7 derniers jours. Chacun remplace celui envoyé auparavant pour le même jour.",
+  "Share or stop sharing usage statistics": "Partager ou arrêter de partager les statistiques d’utilisation",
+  "No activity in the last 7 days yet, so there is nothing to send.": "Aucune activité ces 7 derniers jours pour le moment, donc rien à envoyer."
 }

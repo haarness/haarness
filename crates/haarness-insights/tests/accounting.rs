@@ -268,3 +268,48 @@ async fn dates_unknown_cost_empty_missing_and_corrupt_databases_are_explicit() {
     assert_eq!(report.total.unpriced_usage_records, 1);
     assert!(report.total.known_cost_usd.abs() < f64::EPSILON);
 }
+
+#[tokio::test]
+async fn daily_usage_groups_days_models_tools_and_subagents_without_names() {
+    let fixture = Fixture::new();
+    let alpha = fixture.store("w1");
+    let parent = turn(&alpha, "model-a", 100, Some(0.5)).await;
+    turn(&alpha, "model-a", 50, None).await;
+    turn(&fixture.store("w2"), "model-b", 7, Some(0.25)).await;
+    // A subagent's turn: its thread has the chat as parent.
+    let child = alpha
+        .create_thread(CreateThreadRequest {
+            title: Some("Child title".into()),
+            parent_id: Some(parent.id),
+            provider: Some("test".into()),
+            model: Some("model-a".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    alpha
+        .start_turn(
+            child.id,
+            serde_json::from_value(json!({"requestId": RequestId::new(), "text":"child"})).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let days = haarness_insights::daily_usage(&fixture.0, 7, Utc::now()).unwrap();
+    assert_eq!(days.len(), 1, "everything happened today");
+    let today = &days[0];
+    assert_eq!(today.day, Utc::now().format("%Y-%m-%d").to_string());
+    assert_eq!(today.total.turns, 4);
+    assert_eq!(today.total.input_tokens, 157);
+    assert_eq!(today.subagent_turns, 1);
+    assert_eq!(today.scheduled_turns, 0);
+    let model_a = today.models.iter().find(|row| row.model == "model-a").unwrap();
+    assert_eq!((model_a.provider.as_str(), model_a.metrics.turns), ("test", 3));
+    assert!(!today.tools.is_empty());
+    let serialized = serde_json::to_string(&days).unwrap();
+    for private in ["Private title", "Child title", "SECRET PROMPT", "Alpha", "/alpha"] {
+        assert!(!serialized.contains(private), "{private} leaked");
+    }
+    // Older days fall outside the window.
+    assert!(haarness_insights::daily_usage(&fixture.0, 1, Utc::now() + Duration::days(2)).unwrap().is_empty());
+}

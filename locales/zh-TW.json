@@ -1686,5 +1686,14 @@
   "Approvals changed in another window. Try again.": "核准方式已在另一個視窗中變更。請再試一次。",
   "Auto on for this chat · requests are allowed once · ctrl+y to review": "此聊天已開啟自動核准 · 請求僅允許一次 · ctrl+y 切換為審查",
   "Review · this chat asks before acting · ctrl+y for Auto": "審查 · 此聊天執行操作前會先詢問 · ctrl+y 切換為自動",
-  "Approvals changed in another window · ctrl+y to switch": "核准方式已在另一個視窗中變更 · ctrl+y 切換"
+  "Approvals changed in another window · ctrl+y to switch": "核准方式已在另一個視窗中變更 · ctrl+y 切換",
+  "Share usage statistics": "分享使用統計",
+  "Daily counts of chats, turns, tokens, models and tool calls, linked to your Haarness account when you're signed in. Never prompts, code, file names or paths.": "每日的對話、輪次、token、模型與工具呼叫計數，登入後會關聯到你的 Haarness 帳戶。絕不包含提示詞、程式碼、檔案名稱或路徑。",
+  "See what's shared": "查看分享內容",
+  "Off because DO_NOT_TRACK is set where Haarness started.": "已關閉，因為啟動 Haarness 的環境中設定了 DO_NOT_TRACK。",
+  "Set by {variable} where Haarness started.": "由啟動 Haarness 的環境中的 {variable} 設定。",
+  "What Haarness shares": "Haarness 分享的內容",
+  "The report exactly as it would be sent now: one snapshot per day for the last 7 days. Each replaces the one sent before for the same day.": "與目前實際會傳送的內容完全相同的報告：最近 7 天，每天一份快照，每份快照都會取代先前為同一天傳送的那一份。",
+  "Share or stop sharing usage statistics": "分享或停止分享使用統計",
+  "No activity in the last 7 days yet, so there is nothing to send.": "最近 7 天尚無活動，因此沒有可傳送的內容。"
 }

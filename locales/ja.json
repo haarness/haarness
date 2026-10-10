@@ -1686,5 +1686,14 @@
   "Approvals changed in another window. Try again.": "承認方法が別のウィンドウで変更されました。もう一度お試しください。",
   "Auto on for this chat · requests are allowed once · ctrl+y to review": "このチャットは自動承認中 · リクエストは1回だけ許可 · ctrl+y でレビュー",
   "Review · this chat asks before acting · ctrl+y for Auto": "レビュー · このチャットは実行前に確認します · ctrl+y で自動",
-  "Approvals changed in another window · ctrl+y to switch": "承認方法が別のウィンドウで変更されました · ctrl+y で切り替え"
+  "Approvals changed in another window · ctrl+y to switch": "承認方法が別のウィンドウで変更されました · ctrl+y で切り替え",
+  "Share usage statistics": "使用状況の統計を共有",
+  "Daily counts of chats, turns, tokens, models and tool calls, linked to your Haarness account when you're signed in. Never prompts, code, file names or paths.": "チャット、ターン、トークン、モデル、ツール呼び出しの日別の件数です。サインインしている場合は Haarness アカウントに関連付けられます。プロンプト、コード、ファイル名、パスは含まれません。",
+  "See what's shared": "共有される内容を見る",
+  "Off because DO_NOT_TRACK is set where Haarness started.": "Haarness を起動した環境で DO_NOT_TRACK が設定されているため、オフになっています。",
+  "Set by {variable} where Haarness started.": "Haarness を起動した環境の {variable} で設定されています。",
+  "What Haarness shares": "Haarness が共有する内容",
+  "The report exactly as it would be sent now: one snapshot per day for the last 7 days. Each replaces the one sent before for the same day.": "いま送信される場合とまったく同じ内容のレポートです。直近7日間について1日につき1件のスナップショットを含み、それぞれ同じ日に以前送信されたものを置き換えます。",
+  "Share or stop sharing usage statistics": "使用状況の統計の共有を開始または停止",
+  "No activity in the last 7 days yet, so there is nothing to send.": "直近7日間のアクティビティはまだないため、送信する内容はありません。"
 }

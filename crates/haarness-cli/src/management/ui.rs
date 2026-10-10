@@ -148,6 +148,59 @@ fn row_request(action: &str, row: &Value) -> Value {
     json!({"action":action,"name":row["name"],"id":row["id"],"scope":row["scope"],"revision":row["revision"]})
 }
 
+/// `/usage-statistics` in the TUI; Desktop reads `data`.
+fn usage_statistics_view(status: Value, input: &Value) -> View {
+    let setting = &status["setting"];
+    let enabled = setting["enabled"].as_bool().unwrap_or(false);
+    let decided_by = match setting["source"].as_str() {
+        Some("environment") => format!(" ({} decides)", crate::usage_stats::ENV),
+        Some("doNotTrack") => " (DO_NOT_TRACK is set)".to_owned(),
+        _ => String::new(),
+    };
+    let mut lines = vec![format!(
+        "Sharing: {}{decided_by}",
+        if enabled { "on" } else { "off" }
+    )];
+    if text(input, "action") == "preview" {
+        // The header shows the first lines; the JSON follows under "Read everything".
+        let days = status["report"]["days"].as_array().map_or(0, Vec::len);
+        lines.push(if days == 0 {
+            "No activity in the last 7 days yet, so there is nothing to send.".to_owned()
+        } else {
+            format!("The report covers {days} day{} with activity. Read everything to see it exactly as it would be sent.", if days == 1 { "" } else { "s" })
+        });
+        lines.push(String::new());
+        lines.extend(
+            serde_json::to_string_pretty(&status["report"])
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned),
+        );
+    } else {
+        lines.push("Daily counts of chats, turns, tokens, models and tool calls. Never prompts, code, file names or paths.".to_owned());
+        lines.push("Linked to your Haarness account when you are signed in.".to_owned());
+        if let Some(sent) = status["lastSentAt"].as_str() {
+            lines.push(format!("Last sent: {sent}"));
+        }
+    }
+    let mut entries = Vec::new();
+    if setting["editable"].as_bool().unwrap_or(false) {
+        entries.push(entry(
+            if enabled { "Stop sharing usage statistics" } else { "Share usage statistics" },
+            "Applies to every project on this computer",
+            json!({"action":"set","enabled":!enabled}),
+        ));
+    }
+    entries.push(entry("Show what is shared", "The report exactly as it would be sent", json!({"action":"preview"})));
+    View {
+        title: "Usage statistics".into(),
+        lines,
+        entries,
+        data: Some(status),
+        ..View::default()
+    }
+}
+
 impl ManagementService {
     pub(super) async fn ui_request(&self, resource: &str, input: &Value) -> Result<Value> {
         if resource == "marketplace-ui" { return output(self.marketplace_view(input).await?); }
@@ -164,6 +217,11 @@ impl ManagementService {
                 data: Some(result),
                 ..View::default()
             });
+        }
+        if resource == "usage-statistics" {
+            let result =
+                crate::usage_stats::request(&self.paths.data, self.paths.config_dir(), input)?;
+            return output(usage_statistics_view(result, input));
         }
         if resource == "input-settings" {
             let result = crate::input_settings::request(

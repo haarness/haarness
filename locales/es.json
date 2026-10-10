@@ -1686,5 +1686,14 @@
   "Approvals changed in another window. Try again.": "Las aprobaciones cambiaron en otra ventana. Inténtalo de nuevo.",
   "Auto on for this chat · requests are allowed once · ctrl+y to review": "Automático activado en este chat · las solicitudes se permiten una vez · ctrl+y para revisar",
   "Review · this chat asks before acting · ctrl+y for Auto": "Revisión · este chat pregunta antes de actuar · ctrl+y para Automático",
-  "Approvals changed in another window · ctrl+y to switch": "Las aprobaciones cambiaron en otra ventana · ctrl+y para cambiar"
+  "Approvals changed in another window · ctrl+y to switch": "Las aprobaciones cambiaron en otra ventana · ctrl+y para cambiar",
+  "Share usage statistics": "Compartir estadísticas de uso",
+  "Daily counts of chats, turns, tokens, models and tool calls, linked to your Haarness account when you're signed in. Never prompts, code, file names or paths.": "Recuentos diarios de chats, turnos, tokens, modelos y llamadas a herramientas, vinculados a tu cuenta de Haarness cuando has iniciado sesión. Nunca incluye prompts, código, nombres de archivo ni rutas.",
+  "See what's shared": "Ver qué se comparte",
+  "Off because DO_NOT_TRACK is set where Haarness started.": "Desactivado porque DO_NOT_TRACK está definido donde se inició Haarness.",
+  "Set by {variable} where Haarness started.": "Definido por {variable} donde se inició Haarness.",
+  "What Haarness shares": "Qué comparte Haarness",
+  "The report exactly as it would be sent now: one snapshot per day for the last 7 days. Each replaces the one sent before for the same day.": "El informe exactamente como se enviaría ahora: una instantánea por día de los últimos 7 días. Cada una sustituye a la enviada antes para el mismo día.",
+  "Share or stop sharing usage statistics": "Compartir o dejar de compartir las estadísticas de uso",
+  "No activity in the last 7 days yet, so there is nothing to send.": "Aún no hay actividad en los últimos 7 días, así que no hay nada que enviar."
 }
