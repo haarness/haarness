@@ -3055,6 +3055,38 @@
         },
         "type": "object"
       },
+      "LongContextPricing": {
+        "description": "USD per million tokens once a prompt exceeds `above_input_tokens`.",
+        "properties": {
+          "aboveInputTokens": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "cacheRead": {
+            "format": "double",
+            "type": "number"
+          },
+          "cacheWrite": {
+            "format": "double",
+            "type": "number"
+          },
+          "input": {
+            "format": "double",
+            "type": "number"
+          },
+          "output": {
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "aboveInputTokens",
+          "input",
+          "output"
+        ],
+        "type": "object"
+      },
       "LoopConfig": {
         "description": "A recurring prompt attached to a thread: re-submitted `interval_seconds`\nafter each completed turn until `expires_at`.",
         "properties": {
@@ -3538,6 +3570,17 @@
           "input": {
             "format": "double",
             "type": "number"
+          },
+          "longContext": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LongContextPricing",
+                "description": "Rates for a whole request whose prompt is longer than\n`aboveInputTokens` (e.g. Claude Haiku 5.5 over 100K, GPT-6 over 272K)."
+              }
+            ]
           },
           "output": {
             "format": "double",

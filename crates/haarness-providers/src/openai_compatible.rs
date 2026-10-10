@@ -387,24 +387,51 @@ fn model_info(provider: &str, id: &str, defaults: CompatibleModelDefaults) -> Mo
                 output: 1.0,
                 cache_read: 0.0,
                 cache_write: 0.0,
+                long_context: None,
             }),
             "sonar-pro" => Some(ModelPricing {
                 input: 3.0,
                 output: 15.0,
                 cache_read: 0.0,
                 cache_write: 0.0,
+                long_context: None,
             }),
             "sonar-reasoning-pro" | "sonar-deep-research" => Some(ModelPricing {
                 input: 2.0,
                 output: 8.0,
                 cache_read: 0.0,
                 cache_write: 0.0,
+                long_context: None,
             }),
             _ => None,
         };
     }
     apply_known_compatible_metadata(provider, &mut info);
     apply_model_defaults(crate::catalog::annotate(provider, info), defaults)
+}
+
+/// The first OpenRouter-style `pricing.overrides[]` tier, which applies to a
+/// whole request from `min_prompt_tokens` on.
+fn long_context_override(entry: &Value) -> Option<haarness_protocol::LongContextPricing> {
+    let tier = entry
+        .pointer("/pricing/overrides")?
+        .as_array()?
+        .iter()
+        .filter_map(|tier| Some((tier.get("min_prompt_tokens")?.as_u64()?, tier)))
+        .min_by_key(|(threshold, _)| *threshold)?;
+    let rate = |key: &str| {
+        tier.1
+            .get(key)
+            .and_then(json_number)
+            .map(|value| value * 1_000_000.0)
+    };
+    Some(haarness_protocol::LongContextPricing {
+        above_input_tokens: tier.0.saturating_sub(1),
+        input: rate("prompt")?,
+        output: rate("completion")?,
+        cache_read: rate("input_cache_read").unwrap_or(0.0),
+        cache_write: rate("input_cache_write").unwrap_or(0.0),
+    })
 }
 
 fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
@@ -420,6 +447,14 @@ fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
                 output: 6.0,
                 cache_read: 0.5,
                 cache_write: 0.0,
+                // Prices double from 200K prompt tokens.
+                long_context: Some(haarness_protocol::LongContextPricing {
+                    above_input_tokens: 199_999,
+                    input: 4.0,
+                    output: 12.0,
+                    cache_read: 1.0,
+                    cache_write: 0.0,
+                }),
             });
         }
         ("groq", "openai/gpt-oss-120b") => {
@@ -432,6 +467,7 @@ fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
                 output: 0.60,
                 cache_read: 0.0,
                 cache_write: 0.0,
+                long_context: None,
             });
         }
         ("groq", "openai/gpt-oss-20b") => {
@@ -444,6 +480,7 @@ fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
                 output: 0.30,
                 cache_read: 0.0,
                 cache_write: 0.0,
+                long_context: None,
             });
         }
         ("xai", "grok-4.3") => {
@@ -455,6 +492,7 @@ fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
                 output: 2.50,
                 cache_read: 0.0,
                 cache_write: 0.0,
+                long_context: None,
             });
         }
         ("xai", "grok-build-0.1") => {
@@ -465,6 +503,7 @@ fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
                 output: 2.0,
                 cache_read: 0.0,
                 cache_write: 0.0,
+                long_context: None,
             });
         }
         (
@@ -494,6 +533,7 @@ fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
                 output: 4.40,
                 cache_read: 0.0,
                 cache_write: 0.0,
+                long_context: None,
             });
         }
         ("together" | "togetherai", "moonshotai/Kimi-K2.6") => {
@@ -504,6 +544,7 @@ fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
                 output: 4.50,
                 cache_read: 0.20,
                 cache_write: 0.0,
+                long_context: None,
             });
         }
         ("mistral", "mistral-medium-3-5" | "mistral-medium-2604") => {
@@ -515,6 +556,21 @@ fn apply_known_compatible_metadata(provider: &str, info: &mut ModelInfo) {
                 output: 7.5,
                 cache_read: 0.15,
                 cache_write: 0.0,
+                long_context: None,
+            });
+        }
+        // Mistral's pages spell the id both ways. A launch discount halves the
+        // list price until about 2026-10-20.
+        ("mistral", "mistral-large-4-0" | "mistral-large-4") => {
+            info.display_name = "Mistral Large 4".into();
+            info.images = true;
+            info.context_window = Some(1_048_576);
+            info.pricing = Some(ModelPricing {
+                input: 1.36,
+                output: 4.18,
+                cache_read: 0.14,
+                cache_write: 0.0,
+                long_context: None,
             });
         }
         ("mistral", "mistral-large-latest") => info.display_name = "Mistral Large".into(),
@@ -667,6 +723,7 @@ fn discovered_model_info(
                 .and_then(json_number)
                 .unwrap_or(0.0)
                 * 1_000_000.0,
+            long_context: long_context_override(entry),
         });
     }
     // DeepInfra's compatible model list reports USD-per-million values under
@@ -689,6 +746,7 @@ fn discovered_model_info(
                 .and_then(json_number)
                 .unwrap_or(0.0),
             cache_write: 0.0,
+            long_context: None,
         });
     }
     Some(apply_model_defaults(info, defaults))
@@ -860,7 +918,9 @@ fn known_reasoning_efforts(provider: &str, model: &str) -> Vec<&'static str> {
         ) => vec!["none", "low", "high", "max"],
         (
             "mistral",
-            "mistral-medium-3-5"
+            "mistral-large-4-0"
+            | "mistral-large-4"
+            | "mistral-medium-3-5"
             | "mistral-medium-3.5"
             | "mistral-medium-2604"
             | "mistral-small-2603"
@@ -1192,9 +1252,17 @@ impl ModelProvider for OpenAiCompatibleProvider {
         if self.server_output_limit {
             crate::tool_schema::retain_claude_compatible(&model, &mut requested_tools);
         }
+        // Opus 5.5, Sonnet 5.5 and Fable 5.1 refuse a forced tool choice. Haarness
+        // routers turn `response_format` into Claude's native JSON output, which
+        // the Anthropic adapter uses for these models too.
+        let native_json = structured_output.is_some()
+            && self.server_output_limit
+            && model.starts_with("anthropic/");
         if let Some(schema) = structured_output.as_ref() {
             requested_tools.retain(|tool| tool.name != STRUCTURED_OUTPUT_TOOL_NAME);
-            requested_tools.push(structured_output_tool(schema));
+            if !native_json {
+                requested_tools.push(structured_output_tool(schema));
+            }
         }
         let tools:Vec<_>=requested_tools.into_iter().map(|t|json!({"type":"function","function":{"name":t.name,"description":t.description,"parameters":t.input_schema}})).collect();
         let mut body = json!({"model":model,"messages":messages,"stream":true});
@@ -1217,7 +1285,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
         if supports_tools && !tools.is_empty() {
             body["tools"] = json!(tools);
         }
-        if structured_output.is_some() {
+        if native_json {
+            body["response_format"] = json!({"type":"json_schema","json_schema":{"name":STRUCTURED_OUTPUT_TOOL_NAME,"schema":structured_output}});
+        } else if structured_output.is_some() {
             body["tool_choice"] = json!("required");
         }
         if self.id != "perplexity"
@@ -1273,6 +1343,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             // The last detail whose text reached the transcript, so a new
             // block can be separated from the one before it.
             let mut emitted_reasoning: Option<Value> = None;
+            let mut json_output = String::new();
             while let Some(event)=events.next().await{
                 let event = match event {
                     Ok(event) => event,
@@ -1308,7 +1379,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     Err(CoreError::Provider(message))?;
                 }
                 let delta=&event["choices"][0]["delta"];
-                if let Some(text)=delta["content"].as_str().filter(|text| !text.is_empty()){yield ProviderEvent::TextDelta(text.into());}
+                if let Some(text)=delta["content"].as_str().filter(|text| !text.is_empty()){
+                    if native_json { json_output.push_str(text); } else { yield ProviderEvent::TextDelta(text.into()); }
+                }
                 if let Some(parts) = delta["content"].as_array() {
                     for part in parts {
                         mistral_content.push(part.clone());
@@ -1382,6 +1455,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
                         yield ProviderEvent::ToolCall{call_id,name,arguments,provider_metadata:provider_metadata.clone()};
                     }
                 }
+            }
+            if native_json && !json_output.trim().is_empty() {
+                let value = serde_json::from_str(&json_output).map_err(|error| CoreError::Provider(format!("OpenAI-compatible provider returned invalid structured output: {error}")))?;
+                yield ProviderEvent::StructuredOutput(value);
             }
             yield ProviderEvent::Finished{reason:finish_reason.unwrap_or_else(||"incomplete".into())};
         }))
@@ -2102,6 +2179,7 @@ mod tests {
                     ("bad header".to_owned(), "skipped".to_owned()),
                 ]),
                 options: serde_json::Map::from_iter([("seed".to_owned(), json!(7))]),
+                cache_key: None,
             },
             output_schema: None,
         };
@@ -2426,6 +2504,84 @@ mod tests {
             .find(|tool| tool["function"]["name"] == "StructuredOutput")
             .unwrap();
         assert_eq!(tool["function"]["parameters"]["required"][0], "count");
+    }
+
+    #[tokio::test]
+    async fn claude_on_a_haarness_router_returns_structured_output_as_native_json() {
+        async fn json_reply(
+            State(state): State<FixtureState>,
+            Json(request): Json<Value>,
+        ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+            state.0.lock().push(request);
+            let stream = [
+                r#"data: {"choices":[{"delta":{"content":"{\"count\":"}}]}"#,
+                r#"data: {"choices":[{"delta":{"content":"7}"},"finish_reason":"stop"}]}"#,
+            ]
+            .join("\n\n")
+                + "\n\n";
+            ([(CONTENT_TYPE, "text/event-stream")], stream)
+        }
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route("/chat/completions", post(json_reply))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider =
+            OpenAiCompatibleProvider::for_test(format!("http://{address}/chat/completions"))
+                .with_server_output_limit();
+        let schema =
+            json!({"type":"object","properties":{"count":{"type":"integer"}},"required":["count"]});
+        let events = provider
+            .stream(
+                ProviderRequest {
+                    model: "anthropic/claude-sonnet-5.5".into(),
+                    system: "test".into(),
+                    messages: vec![ProviderMessage::Text {
+                        role: "user".into(),
+                        content: "count".into(),
+                    }],
+                    tools: vec![haarness_core::ToolDefinition {
+                        name: "read".into(),
+                        description: "Read a file".into(),
+                        input_schema: json!({"type":"object"}),
+                    }],
+                    reasoning_effort: None,
+                    parameters: haarness_core::RequestParameters::default(),
+                    output_schema: Some(schema.clone()),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        let events: Vec<_> = events.into_iter().map(Result::unwrap).collect();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::StructuredOutput(value) if *value == json!({"count": 7})))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::TextDelta(_)))
+        );
+        let requests = state.0.lock();
+        assert!(requests[0].get("tool_choice").is_none());
+        assert_eq!(
+            requests[0]["response_format"]["json_schema"]["schema"],
+            schema
+        );
+        // Ordinary tools stay available; the structured-output tool is not offered.
+        let names: Vec<_> = requests[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["read"]);
     }
 
     #[tokio::test]

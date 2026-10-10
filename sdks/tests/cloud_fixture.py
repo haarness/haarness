@@ -18,6 +18,14 @@ def authorize(base, hint):
     location = start.headers["location"]
     assert urlparse(location).hostname in ("localhost", "127.0.0.1")
     reply = http.get(location + "&login_hint=" + hint)
+    if reply.status_code == 200:
+        # The fixture issuer asks once, like a real consent screen.
+        consent = re.search(r'name="request_id" value="([^"]+)"', reply.text)
+        assert consent, "Fixture sign-in page has no request"
+        reply = http.post(
+            location.split("?", 1)[0],
+            data={"request_id": consent.group(1), "decision": "approve"},
+        )
     callback = reply.headers["location"]
     assert callback.startswith(base + "/auth/google/callback")
     assert http.get(callback).status_code == 302

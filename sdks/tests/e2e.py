@@ -308,6 +308,32 @@ def scenario(mode):
                 c("wait_turn", permission["id"], {"timeout_ms": 10000})["status"]
                 == "completed"
             )
+            # Auto/Review is kept per chat on the server.
+            approval = c("get_approval_mode", tid)
+            assert approval["mode"] == "review", approval
+            approval = c("set_approval_mode", tid, {"mode": "auto", "revision": approval["revision"]})
+            assert approval["mode"] == "auto" and approval["explicit"], approval
+            assert c("set_approval_mode", tid, {"mode": "inherit"})["mode"] == "review"
+            # The preview tool records the exact version shown; clients fetch,
+            # compare and restore it. Only a preview-capable client offers it.
+            (fixture.workspace / "preview.md").write_text("# Shown\n")
+            shown = c(
+                "queue_input",
+                tid,
+                {"requestId": str(uuid4()), "preview": True, "text": '!tool preview {"filePath":"preview.md"}'},
+            )
+            assert c("wait_turn", shown["turn"]["id"], {"timeout_ms": 10000})["status"] == "completed"
+            version = next(
+                item["data"]["metadata"]["preview"]["version"]
+                for item in c("list_items", tid)
+                if item["data"]["type"] == "tool_result" and "preview" in (item["data"].get("metadata") or {})
+            )
+            assert c("preview_version", {"path": "preview.md", "hash": version})["content"] == "# Shown\n"
+            (fixture.workspace / "preview.md").write_text("# Edited\n")
+            current = c("current_preview", {"path": "preview.md"})["revision"]
+            restored = c("restore_preview", {"path": "preview.md", "hash": version, "revision": current})
+            assert restored["file"]["content"] == "# Shown\n" and restored["backup"]
+            assert (fixture.workspace / "preview.md").read_text() == "# Shown\n"
             # Mutating tools and undo/redo prove filesystem and transcript consistency.
             c("chat", tid, '!tool write {"path":"fixture.txt","content":"after\\n"}')
             assert (fixture.workspace / "fixture.txt").read_text() == "after\n"

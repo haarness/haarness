@@ -524,6 +524,7 @@ pub const COMPAT_PRESETS: &[CompatiblePreset] = &[
         "https://api.mistral.ai/v1",
         &["MISTRAL_API_KEY"],
         &[
+            "mistral-large-4-0",
             "mistral-medium-3-5",
             "mistral-small-latest",
             "mistral-large-latest",
@@ -633,7 +634,8 @@ pub const COMPAT_PRESETS: &[CompatiblePreset] = &[
         "Moonshot AI",
         "https://api.moonshot.ai/v1",
         &["MOONSHOT_API_KEY"],
-        &["kimi-k2.5", "kimi-k2-thinking"],
+        // kimi-k2.5 and kimi-k2-thinking were retired on 2026-08-31 and 2026-05-25.
+        &["kimi-k3", "kimi-k2.6"],
     ),
     preset_with_models(
         "siliconflow",
