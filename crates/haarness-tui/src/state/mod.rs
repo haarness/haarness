@@ -604,10 +604,10 @@ pub struct App {
     /// answered from then on.
     pub confirm_always: Option<char>,
     /// Letters the focused approval card took without answering (`h`/`l`
-    /// moves and staged choices), with the chip selection from before them.
-    /// When the next key shows they began a message, they move to the
-    /// composer with it instead.
-    pub permission_typed: Option<(String, usize)>,
+    /// moves and staged choices), with the chip selection from before them
+    /// and when the last one was taken. When the next key shows they began a
+    /// message, they move to the composer with it instead.
+    pub permission_typed: Option<(String, usize, std::time::Instant)>,
     /// Highlighted chip on the docked approval panel: an index into
     /// `permission_choices`, or into confirm/cancel while `confirm_always`
     /// is staged.

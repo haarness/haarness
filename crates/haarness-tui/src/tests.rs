@@ -7905,7 +7905,8 @@ async fn type_text(app: &mut App, text: &str, client: &crate::api::ApiClient) {
 /// The card takes the keyboard when it arrives on an empty prompt, but a
 /// message typed anyway lands in the prompt whole and answers nothing, even
 /// when its first letters are hotkeys ("u" is Once + Auto, "a" Always, "r"
-/// Repository, "h"/"l" move the selection).
+/// Repository, "h"/"l" move the selection), or a doubled one that would
+/// otherwise confirm what the first staged ("www", "uu").
 #[tokio::test]
 async fn typing_a_message_while_the_card_waits_answers_nothing() {
     for message in [
@@ -7913,6 +7914,8 @@ async fn typing_a_message_while_the_card_waits_answers_nothing() {
         "always ask me",
         "hello",
         "run it again",
+        "www.example.com is down",
+        "uuid parsing fails",
     ] {
         let thread = fixture_thread();
         let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
@@ -7982,6 +7985,11 @@ async fn once_plus_auto_is_staged_before_it_switches_the_chat() {
         "enter or u confirms, esc cancels · allow once and switch this chat to Auto: later requests are allowed without asking"
     );
 
+    // Pressed again once there was time to read the card, the same letter
+    // confirms.
+    if let Some((_, _, at)) = &mut app.permission_typed {
+        *at -= std::time::Duration::from_secs(1);
+    }
     let (client, server) = workspace_http_status_client(vec![(200, "{}".into())], false).await;
     crate::input::handle_key(
         &mut app,
@@ -7993,6 +8001,42 @@ async fn once_plus_auto_is_staged_before_it_switches_the_chat() {
     assert!(app.auto_permissions);
     assert!(app.pending_permissions.is_empty());
     assert!(server.await.unwrap()[0].contains("\"decision\":\"once\""));
+}
+
+/// A choice staged on a prompt whose turn ended unanswered does not carry over:
+/// the next prompt opens on its own chips, so Enter cannot confirm the old
+/// grant on a new request.
+#[tokio::test]
+async fn a_new_prompt_never_inherits_a_staged_answer() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let client = offline_client();
+    app.reduce(outside_write_event(&thread, "perm-old"), &client)
+        .await
+        .unwrap();
+    press_key(&mut app, KeyCode::Char('u')).await;
+    assert_eq!(app.confirm_always, Some('u'));
+    app.reduce(
+        fixture_event(
+            "turn.finished",
+            thread.id,
+            thread.id,
+            serde_json::json!({"status": "cancelled"}),
+        ),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert!(app.pending_permissions.is_empty());
+    app.reduce(outside_write_event(&thread, "perm-new"), &client)
+        .await
+        .unwrap();
+    assert!(app.permission_focus);
+    assert_eq!(app.confirm_always, None);
+    assert_eq!(app.permission_typed, None);
+    let text = frame_text(&app, (100, 40));
+    assert!(text.contains("Allow once"), "{text}");
+    assert!(!text.contains("Confirm"), "{text}");
 }
 
 #[tokio::test]
@@ -8217,8 +8261,30 @@ fn a_rejected_tool_and_a_stopped_turn_read_as_choices_not_failures() {
             metadata: serde_json::Value::Null,
         },
     );
-    let stopped = message_item(
+    // The stop also cancels the call that was waiting for its approval.
+    let waiting = message_item(
         3,
+        &thread,
+        ItemData::ToolCall {
+            call_id: "call-2".into(),
+            name: "write".into(),
+            arguments: serde_json::json!({"path": "/tmp/elsewhere/later.txt", "content": "x"}),
+            provider_metadata: serde_json::Value::Null,
+        },
+    );
+    let cancelled = message_item(
+        4,
+        &thread,
+        ItemData::ToolResult {
+            call_id: "call-2".into(),
+            name: "write".into(),
+            output: "operation cancelled".into(),
+            is_error: true,
+            metadata: serde_json::Value::Null,
+        },
+    );
+    let stopped = message_item(
+        5,
         &thread,
         ItemData::Error {
             message: "operation cancelled".into(),
@@ -8228,7 +8294,7 @@ fn a_rejected_tool_and_a_stopped_turn_read_as_choices_not_failures() {
     let app = App::new(
         thread.clone(),
         vec![thread],
-        vec![call, result, stopped],
+        vec![call, result, waiting, cancelled, stopped],
         vec![],
         vec![],
     );
@@ -8244,6 +8310,10 @@ fn a_rejected_tool_and_a_stopped_turn_read_as_choices_not_failures() {
     );
     assert!(!text.contains("failed"), "{text}");
     assert!(!text.contains("The user rejected"), "{text}");
+    assert!(
+        text.contains("⊘ write /tmp/elsewhere/later.txt  cancelled"),
+        "{text}"
+    );
     assert!(text.contains("· interrupted"), "{text}");
     assert!(!text.contains("operation cancelled"), "{text}");
     for line in &transcript.lines {

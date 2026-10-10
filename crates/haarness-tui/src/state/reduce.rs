@@ -407,8 +407,13 @@ impl App {
                         });
                     }
                     if self.pending_permissions.len() == 1 {
-                        // A fresh head prompt starts at the first chip.
+                        // A fresh head prompt starts at the first chip, with
+                        // nothing staged or typed for one that went away
+                        // unanswered (its turn ended): a bare Enter must not
+                        // confirm an old Always or Once + Auto here.
                         self.permission_selection = 0;
+                        self.confirm_always = None;
+                        self.permission_typed = None;
                     }
                     if self.composer.is_empty() && self.pending_questions.is_empty() {
                         self.permission_focus = true;
@@ -1006,7 +1011,7 @@ impl App {
         if self.confirm_always.take().is_some() {
             self.permission_selection = 0;
         }
-        if let Some((typed, selection)) = self.permission_typed.take() {
+        if let Some((typed, selection, _)) = self.permission_typed.take() {
             self.permission_selection = selection;
             if keep_typed {
                 for letter in typed.chars() {

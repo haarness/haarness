@@ -84,6 +84,8 @@ try:
     keys('u')
     until(lambda:'switch this chat to Auto' in capture(),'Once + Auto was not staged')
     assert not (workspace/'u.txt').exists()
+    # A second u at typing speed is a word ("uuid"), not a confirmation.
+    time.sleep(.5)
     keys('u')
     proof('u.txt','u-proof')
     until(lambda:'auto' in capture(),'Once + Auto did not enable Auto')

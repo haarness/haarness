@@ -1854,6 +1854,9 @@ if ! echo "$pane" | grep -Eq "(bash:)?sleep \*"; then
   echo "Always confirmation did not show the generalized rule" >&2
   exit 1
 fi
+# The same letter confirms only once the card could be read; pressed at
+# typing speed it would be the start of a word.
+sleep 0.5
 tmux send-keys -t "$session":0.0 "a"
 attempt=0
 while [ "$attempt" -lt 60 ]; do

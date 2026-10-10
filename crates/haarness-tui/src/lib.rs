@@ -363,10 +363,6 @@ async fn run_with_client(
         &client,
     )
     .await;
-    if !app.pending_permissions.is_empty() {
-        app.permission_focus = true;
-        app.update_permission_notice();
-    }
     app.sync_prompt_history(&client);
     servers::restore_drafts(&mut app, &client)?;
     // First run: nothing can answer a prompt yet, so connecting is the first
@@ -382,6 +378,12 @@ async fn run_with_client(
     }
     app.themes = config::load_theme_entries();
     app.language = config::load_language();
+    // A waiting prompt takes the keyboard unless a restored draft is being
+    // written, as one arriving live does; ctrl+g reaches it either way.
+    if !app.pending_permissions.is_empty() {
+        app.permission_focus = app.composer.is_empty();
+        app.update_permission_notice();
+    }
     let statusline_config = config::load_statusline();
     let (saved_theme, saved_variant) = config::load_theme_selection();
     app.theme_selected = saved_theme.is_some() || saved_variant.is_some();
@@ -751,7 +753,10 @@ async fn run_with_client(
                         let _ = app.refresh_threads(&client).await;
                         hydrate_goal_snapshot(&mut app, &client).await;
                         app.hydrate_permissions(client.pending_permissions().await.unwrap_or_default(), &client).await;
-                        app.permission_focus = !app.pending_permissions.is_empty();
+                        // Only an empty composer gives up the keyboard to a
+                        // prompt, as when it arrives live.
+                        app.permission_focus = !app.pending_permissions.is_empty()
+                            && (app.permission_focus || app.composer.is_empty());
                         app.reveal_goal_completion();
                         app.preview.clear();
                         app.reasoning_preview.clear();

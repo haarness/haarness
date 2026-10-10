@@ -605,11 +605,12 @@ fn render_tool_result(
         }
     }
 
-    // Folded into the call row: a quiet success, or a request the user
-    // rejected, whose result is the instruction written for the model.
+    // Folded into the call row: a quiet success, a request the user
+    // rejected, whose result is the instruction written for the model, or a
+    // call the user's stop cancelled, which the row already says.
     if !expanded
         && (folds_into_call_row(app, output, *is_error, metadata)
-            || (*is_error && rejected_by_user(output)))
+            || (*is_error && (rejected_by_user(output) || output.trim() == "operation cancelled")))
         && paired_call(app, item, call_id).is_some()
     {
         return;
