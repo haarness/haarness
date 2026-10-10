@@ -286,6 +286,8 @@ impl Service {
                     }
                     SubscriptionEvent::Event(_)
                     | SubscriptionEvent::ConnectionLost { .. }
+                    | SubscriptionEvent::ServerRestarting
+                    | SubscriptionEvent::ServerRestartFailed(_)
                     | SubscriptionEvent::Reconnected => {}
                 }
             }

@@ -337,6 +337,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
         } else if !app.composer.is_empty() || !app.attachments.is_empty() || app.shell_mode {
             app.composer.clear();
             app.attachments.clear();
+            app.undo_draft = None;
             app.mention_suggestions.clear();
             app.shell_mode = false;
             app.autocomplete_hidden = false;
@@ -509,8 +510,8 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             (KeyModifiers::NONE, KeyCode::Up) => app.leave_child(client).await?,
             (KeyModifiers::NONE, KeyCode::Left) => app.cycle_child(-1, client).await?,
             (KeyModifiers::NONE, KeyCode::Right) => app.cycle_child(1, client).await?,
-            (KeyModifiers::NONE, KeyCode::PageUp) => app.scroll(10),
-            (KeyModifiers::NONE, KeyCode::PageDown) => app.scroll(-10),
+            (KeyModifiers::NONE, KeyCode::PageUp) => app.scroll(app.page_rows()),
+            (KeyModifiers::NONE, KeyCode::PageDown) => app.scroll(-app.page_rows()),
             (KeyModifiers::NONE | KeyModifiers::CONTROL, KeyCode::Home) => app.scroll(1_000_000),
             (KeyModifiers::NONE | KeyModifiers::CONTROL, KeyCode::End) => app.scroll_to_bottom(),
             _ => {}
@@ -662,8 +663,8 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             KeyCode::Down => {
                 app.composer.move_down();
             }
-            KeyCode::PageUp if key.modifiers.is_empty() => app.scroll(10),
-            KeyCode::PageDown if key.modifiers.is_empty() => app.scroll(-10),
+            KeyCode::PageUp if key.modifiers.is_empty() => app.scroll(app.page_rows()),
+            KeyCode::PageDown if key.modifiers.is_empty() => app.scroll(-app.page_rows()),
             KeyCode::Char('z' | 'Z') if key.modifiers == KeyModifiers::SUPER => {
                 app.composer.undo();
             }
@@ -872,8 +873,8 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                 app.composer.move_end();
             }
         }
-        KeyCode::PageUp => app.scroll(10),
-        KeyCode::PageDown => app.scroll(-10),
+        KeyCode::PageUp => app.scroll(app.page_rows()),
+        KeyCode::PageDown => app.scroll(-app.page_rows()),
         KeyCode::Delete => {
             app.composer.delete();
             app.autocomplete_hidden = false;
@@ -908,6 +909,9 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                 }
             } else {
                 app.composer.backspace();
+                // Erasing a slash command typed over an undone prompt
+                // brings the prompt back.
+                app.return_undo_draft();
                 app.autocomplete_hidden = false;
                 app.selection = 0;
                 refresh_mentions(app, client).await;
@@ -950,7 +954,23 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             } else if let Some(raw) = selected_slash_command(app) {
                 app.composer.clear();
                 app.selection = 0;
-                return app.execute_command(&raw, client).await;
+                let action = app.execute_command(&raw, client).await;
+                app.return_undo_draft();
+                return action;
+            } else if let Some(name) = unknown_slash_command(app) {
+                // A mistyped command must not reach the model as a prompt.
+                // The draft stays so the typo can be fixed in place. A running
+                // turn owns the status line, so say it on a card then.
+                let notice = app.unknown_command_notice(&name);
+                if app.active_turn.is_some() {
+                    app.show_toast(
+                        None,
+                        notice.clone(),
+                        crate::state::ToastVariant::Warning,
+                        std::time::Duration::from_secs(5),
+                    );
+                }
+                app.notice = notice;
             } else if !app.composer.text().trim().is_empty() || !app.attachments.is_empty() {
                 // Resolve before taking the draft; a failed settings read must
                 // preserve text and attachments for retry.
@@ -970,7 +990,10 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                     app.submit_prompt(text.clone(), client).await
                 };
                 match sent {
-                    Ok(true) => app.save_prompt_history(),
+                    Ok(true) => {
+                        app.undo_draft = None;
+                        app.save_prompt_history();
+                    }
                     Ok(false) => app.composer.set_text(text),
                     Err(error) => {
                         app.composer.set_text(text);
@@ -986,6 +1009,15 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             app.notice = "shell — Enter runs the command, Esc leaves".into();
         }
         KeyCode::Char(character) => {
+            // `/` over an untouched undone prompt starts a command (such as
+            // the /redo the undo notice offers) rather than appending to it.
+            if character == '/' && app.holds_undo_draft() {
+                app.composer.clear();
+                app.attachments.clear();
+                if let Some(draft) = &mut app.undo_draft {
+                    draft.set_aside = true;
+                }
+            }
             app.composer.insert_char(character);
             app.autocomplete_hidden = false;
             app.selection = 0;
@@ -1004,7 +1036,7 @@ async fn handle_terminal_key(
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
-    if ctrl && key.code == KeyCode::Char(']') {
+    if crate::pty_view::is_detach_key(key) {
         if let Some(terminal) = app.terminal.take() {
             for id in terminal.ids() {
                 client.disconnect_pty(id);
@@ -1054,7 +1086,12 @@ async fn handle_terminal_key(
     }
     if shift && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
         if let Some(terminal) = &mut app.terminal {
-            terminal.scroll(if key.code == KeyCode::PageUp { -10 } else { 10 });
+            let page = terminal.page_rows();
+            terminal.scroll(if key.code == KeyCode::PageUp {
+                -page
+            } else {
+                page
+            });
         }
         return Ok(AppAction::Continue);
     }
@@ -1074,7 +1111,7 @@ async fn handle_terminal_key(
 
 /// Resolve Enter on a slash composer. A partial query activates the selected
 /// suggestion; a command with arguments executes only when its name is exact.
-/// Unknown slash-prefixed prose remains ordinary prompt text.
+/// Anything else is [`unknown_slash_command`] or ordinary prompt text.
 pub(crate) fn selected_slash_command(app: &App) -> Option<String> {
     if !app.composer.text().starts_with('/') {
         return None;
@@ -1089,6 +1126,19 @@ pub(crate) fn selected_slash_command(app: &App) -> Option<String> {
         return selected(&commands, app.selection).map(|entry| format!("/{}", entry.name));
     }
     None
+}
+
+/// The name a slash draft calls when no command answers to it. Paths and
+/// other prose (`/usr/bin is…`) still go to the model as text, and so does a
+/// draft that starts with a space.
+pub(crate) fn unknown_slash_command(app: &App) -> Option<String> {
+    let text = app.composer.text();
+    let name = text.strip_prefix('/')?.split(char::is_whitespace).next()?;
+    let command_like = name.starts_with(|character: char| character.is_ascii_alphabetic())
+        && name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | ':')
+        });
+    (command_like && !app.is_known_command(text)).then(|| name.to_owned())
 }
 
 /// Complete the selected @-mention, when suggestions are showing.

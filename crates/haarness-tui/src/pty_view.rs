@@ -3,8 +3,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use haarness_opentui::{Color, Line, Span, attr};
 use haarness_protocol::{PtyId, PtyInfo, PtyStatus, PtyUpdateRequest};
+use unicode_width::UnicodeWidthStr as _;
 
-use crate::{api::PtyClientEvent, theme::Theme};
+use crate::{api::PtyClientEvent, locale::Language, theme::Theme};
 
 const SCROLLBACK_LINES: usize = 10_000;
 
@@ -49,6 +50,13 @@ impl TerminalWorkspace {
         self.active = self.active.min(self.tabs.len().saturating_sub(1));
     }
 
+    /// Show this tab, when it is open here.
+    pub fn focus(&mut self, id: PtyId) {
+        if let Some(index) = self.tabs.iter().position(|tab| tab.info.id == id) {
+            self.active = index;
+        }
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.tabs.is_empty()
@@ -76,6 +84,14 @@ impl TerminalWorkspace {
             current.saturating_sub(delta.unsigned_abs())
         };
         tab.parser.screen_mut().set_scrollback(next);
+    }
+
+    /// One page of scrollback: the visible rows less a little overlap.
+    #[must_use]
+    pub fn page_rows(&self) -> isize {
+        self.tabs.get(self.active).map_or(10, |tab| {
+            isize::try_from(tab.info.rows.saturating_sub(2).max(1)).unwrap_or(isize::MAX)
+        })
     }
 
     pub fn follow_output(&mut self) {
@@ -174,8 +190,49 @@ pub fn dimensions(size: (u32, u32)) -> (u16, u16) {
     (cols, rows)
 }
 
+/// The way back to the chat. Kitty-protocol terminals report Ctrl+] as
+/// itself, but tmux and Terminal.app send the legacy GS byte (0x1d), which
+/// crossterm decodes as Ctrl+5; xterm sends the same byte for Ctrl+5. F12 also
+/// works on layouts where `]` needs AltGr or Option.
 #[must_use]
-pub fn frame(terminal: &TerminalWorkspace, theme: Theme, width: usize, height: usize) -> Vec<Line> {
+pub fn is_detach_key(key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Char(']' | '5') => key.modifiers.contains(KeyModifiers::CONTROL),
+        KeyCode::F(12) => true,
+        _ => false,
+    }
+}
+
+/// Key hints for the footer. Without enhanced key reporting, Ctrl+Shift+T and
+/// Ctrl+Shift+W arrive as Ctrl+T and Ctrl+W and belong to the shell, so they
+/// are not offered.
+fn footer_hints(enhanced: bool) -> &'static [&'static str] {
+    if enhanced {
+        &[
+            "ctrl+] or f12 chat",
+            "ctrl+shift+t new",
+            "ctrl+shift+w close",
+            "alt+←/→ tab",
+            "shift+pgup scroll",
+        ]
+    } else {
+        &[
+            "ctrl+] or f12 chat",
+            "alt+←/→ tab",
+            "shift+pgup scroll",
+            "exit closes the tab",
+        ]
+    }
+}
+
+#[must_use]
+pub fn frame(
+    terminal: &TerminalWorkspace,
+    theme: Theme,
+    language: Language,
+    width: usize,
+    height: usize,
+) -> Vec<Line> {
     let mut lines = Vec::with_capacity(height);
     let mut tabs = vec![Span::new(" TERMINAL  ", theme.primary).with_attributes(attr::BOLD)];
     for (index, tab) in terminal.tabs.iter().enumerate() {
@@ -272,10 +329,21 @@ pub fn frame(terminal: &TerminalWorkspace, theme: Theme, width: usize, height: u
     } else {
         lines.extend((0..content_rows).map(|_| Line::empty()));
     }
-    lines.push(Line::plain(
-        " ctrl+] chat   ctrl+shift+t new   ctrl+shift+w close   alt+←/→ tab   shift+pgup scroll ",
-        theme.muted,
-    ));
+    // Whole hints only, in order: the way back to the chat always shows.
+    let mut footer = String::new();
+    for hint in footer_hints(crate::terminal::keyboard_enhanced()) {
+        let hint = language.text(hint);
+        let next = if footer.is_empty() {
+            format!(" {hint}")
+        } else {
+            format!("{footer}   {hint}")
+        };
+        if !footer.is_empty() && next.width() >= width {
+            break;
+        }
+        footer = next;
+    }
+    lines.push(Line::plain(footer, theme.muted));
     lines.truncate(height);
     while lines.len() < height {
         lines.push(Line::empty());
@@ -292,10 +360,16 @@ pub fn key_bytes(key: KeyEvent) -> Option<Vec<u8>> {
             let upper = character.to_ascii_uppercase();
             if upper.is_ascii_alphabetic() {
                 vec![(upper as u8).saturating_sub(b'@')]
-            } else if character == ' ' {
-                vec![0]
             } else {
-                return None;
+                // The remaining C0 controls, in both their symbol form and
+                // the digit form legacy terminals decode them to.
+                match character {
+                    ' ' | '@' | '2' => vec![0],
+                    '\\' | '4' => vec![0x1c],
+                    '^' | '6' => vec![0x1e],
+                    '_' | '/' | '7' => vec![0x1f],
+                    _ => return None,
+                }
             }
         }
         KeyCode::Char(character) => {
@@ -419,9 +493,16 @@ mod tests {
             id,
             bytes: b"plain \x1b[31mred\x1b[0m".to_vec(),
         });
-        let rendered = frame(&terminal, Theme::editorial_dark(), 20, 6);
+        let rendered = frame(&terminal, Theme::editorial_dark(), Language::English, 20, 6);
         let body = rendered[1].text();
         assert!(body.contains("plain red"));
         assert!(!body.contains('\x1b'));
+        // A narrow footer drops whole hints, never the way back.
+        assert_eq!(rendered[5].text(), " ctrl+] or f12 chat");
+        let wide = frame(&terminal, Theme::editorial_dark(), Language::English, 60, 6);
+        assert_eq!(
+            wide[5].text(),
+            " ctrl+] or f12 chat   alt+←/→ tab   shift+pgup scroll"
+        );
     }
 }

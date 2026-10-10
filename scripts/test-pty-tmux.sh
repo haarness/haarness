@@ -69,8 +69,22 @@ fi
 
 # Detach to chat, re-open, and require the server replay to reconstruct the
 # child terminal. Killing the client pane afterwards must still leave the PTY.
+# tmux sends Ctrl+] as the legacy GS byte, which must still lead back.
 tmux send-keys -t "$session":tui.0 'C-]'
-sleep 0.2
+detached=0
+for _ in $(seq 1 200); do
+  pane="$(tmux capture-pane -p -t "$session":tui.0)"
+  if echo "$pane" | grep -q 'Terminal detached'; then
+    detached=1
+    break
+  fi
+  sleep 0.05
+done
+if [ "$detached" -ne 1 ]; then
+  echo "$pane" >&2
+  echo "Ctrl+] did not return from the terminal to the chat" >&2
+  exit 1
+fi
 tmux send-keys -l -t "$session":tui.0 '/terminal'
 tmux send-keys -t "$session":tui.0 Enter
 sleep 0.5

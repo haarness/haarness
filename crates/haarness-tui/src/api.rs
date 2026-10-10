@@ -148,6 +148,18 @@ impl EndpointCredentials {
 
 pub type EndpointResolver = Arc<dyn Fn() -> Option<EndpointCredentials> + Send + Sync>;
 
+/// Starts the local workspace server again after it stopped or crashed, and
+/// returns where it now listens. Only a TUI on this computer's own workspace
+/// server has one; an attached remote server is someone else's to restart.
+pub type ServerRestarter =
+    Arc<dyn Fn() -> futures::future::BoxFuture<'static, Result<EndpointCredentials>> + Send + Sync>;
+
+/// Failed reconnects before a local client starts its server again: long
+/// enough for a server that is merely restarting to come back on its own.
+const RESTART_AFTER_ATTEMPTS: u32 = 3;
+/// After a failed restart, reconnect this many more times before another.
+const RESTART_RETRY_ATTEMPTS: u32 = 5;
+
 #[derive(Clone)]
 struct ApiEndpoint {
     base: String,
@@ -196,6 +208,7 @@ impl ApiEndpoint {
 pub struct ApiClient {
     endpoint: Arc<RwLock<ApiEndpoint>>,
     endpoint_resolver: Option<EndpointResolver>,
+    server_restarter: Option<ServerRestarter>,
     upload_attachments: bool,
     local_workspace_switching: bool,
     pty_events: tokio::sync::broadcast::Sender<PtyClientEvent>,
@@ -227,6 +240,10 @@ pub enum SubscriptionEvent {
     ConnectionLost {
         attempt: u32,
     },
+    /// The local server is gone and this client is starting it again.
+    ServerRestarting,
+    /// Starting it again failed; reconnecting continues and retries later.
+    ServerRestartFailed(String),
     Reconnected,
 }
 
@@ -315,6 +332,7 @@ impl ApiClient {
         Ok(Self {
             endpoint: Arc::new(RwLock::new(ApiEndpoint::new(server, auth)?)),
             endpoint_resolver: None,
+            server_restarter: None,
             upload_attachments: false,
             local_workspace_switching: false,
             pty_events,
@@ -331,6 +349,12 @@ impl ApiClient {
     pub fn with_endpoint_resolver(mut self, resolver: EndpointResolver) -> Self {
         self.endpoint_resolver = Some(resolver);
         self.local_workspace_switching = true;
+        self
+    }
+
+    #[must_use]
+    pub fn with_server_restarter(mut self, restarter: ServerRestarter) -> Self {
+        self.server_restarter = Some(restarter);
         self
     }
 
@@ -1701,6 +1725,40 @@ impl ApiClient {
                         {
                             return;
                         }
+                        if let Some(restart) = this.server_restarter.as_ref().filter(|_| {
+                            attempt >= RESTART_AFTER_ATTEMPTS
+                                && (attempt - RESTART_AFTER_ATTEMPTS)
+                                    .is_multiple_of(RESTART_RETRY_ATTEMPTS)
+                        }) {
+                            if tx.send(SubscriptionEvent::ServerRestarting).await.is_err() {
+                                return;
+                            }
+                            match restart().await {
+                                Ok(credentials) => {
+                                    if !this.endpoint().matches(&credentials)
+                                        && let Ok(next) =
+                                            ApiEndpoint::new(&credentials.server, credentials.auth)
+                                    {
+                                        this.replace_endpoint(next);
+                                    }
+                                    // Reconnect at once; the new server's
+                                    // instance id triggers the resync.
+                                    continue;
+                                }
+                                Err(error) => {
+                                    tracing::warn!(%error, "could not restart the workspace server");
+                                    if tx
+                                        .send(SubscriptionEvent::ServerRestartFailed(format!(
+                                            "{error:#}"
+                                        )))
+                                        .await
+                                        .is_err()
+                                    {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
                         tokio::time::sleep(Duration::from_secs(
                             2_u64.saturating_pow(attempt.min(3)).min(5),
                         ))
@@ -1747,6 +1805,8 @@ impl ApiClient {
                                     }
                                 }
                                 SubscriptionEvent::ConnectionLost { .. }
+                                | SubscriptionEvent::ServerRestarting
+                                | SubscriptionEvent::ServerRestartFailed(_)
                                 | SubscriptionEvent::Reconnected => {}
                             }
                         }
@@ -2210,7 +2270,10 @@ mod tests {
                 SubscriptionEvent::Event(event) if event.server_instance_id == new_instance => {
                     received_event = true;
                 }
-                SubscriptionEvent::Event(_) | SubscriptionEvent::ConnectionLost { .. } => {}
+                SubscriptionEvent::Event(_)
+                | SubscriptionEvent::ConnectionLost { .. }
+                | SubscriptionEvent::ServerRestarting
+                | SubscriptionEvent::ServerRestartFailed(_) => {}
             }
         }
         event_task.abort();
@@ -2231,6 +2294,71 @@ mod tests {
         );
         assert!(
             new_requests
+                .iter()
+                .all(|request| request.contains("authorization: Bearer new-token"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_local_client_restarts_its_stopped_server_and_resyncs() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let instance = uuid::Uuid::now_v7();
+        let info = serde_json::to_string(&fixture_server_info(instance, "/workspace")).unwrap();
+        let server = tokio::spawn(serve_responses(
+            listener,
+            vec![
+                response("application/json", &info),
+                response("text/event-stream", ""),
+            ],
+        ));
+        let restarts = Arc::new(Mutex::new(0_u32));
+        let restarter: super::ServerRestarter = {
+            let restarts = restarts.clone();
+            Arc::new(move || {
+                *restarts.lock().unwrap() += 1;
+                Box::pin(async move {
+                    Ok(EndpointCredentials::new(
+                        format!("http://{address}"),
+                        "new-token",
+                    ))
+                })
+            })
+        };
+        // Nothing listens on port 1 any more: the server this TUI used is gone.
+        let client = ApiClient::new("http://127.0.0.1:1", "old-token")
+            .unwrap()
+            .with_endpoint_resolver(Arc::new(|| None))
+            .with_server_restarter(restarter);
+        let (mut events, event_task) = client.subscribe(Some((uuid::Uuid::now_v7(), 7)));
+
+        let mut seen = Vec::new();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(15), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            match event {
+                SubscriptionEvent::ConnectionLost { attempt } => {
+                    seen.push(format!("lost {attempt}"))
+                }
+                SubscriptionEvent::ServerRestarting => seen.push("restarting".into()),
+                SubscriptionEvent::ResyncRequired => seen.push("resync".into()),
+                SubscriptionEvent::Reconnected => break,
+                SubscriptionEvent::Event(_) | SubscriptionEvent::ServerRestartFailed(_) => {}
+            }
+        }
+        event_task.abort();
+        let _ = event_task.await;
+        assert_eq!(
+            seen,
+            ["lost 1", "lost 2", "lost 3", "restarting", "resync"],
+            "restarts only after a few failed reconnects"
+        );
+        assert_eq!(*restarts.lock().unwrap(), 1);
+        let requests = server.await.unwrap();
+        assert!(
+            requests
                 .iter()
                 .all(|request| request.contains("authorization: Bearer new-token"))
         );

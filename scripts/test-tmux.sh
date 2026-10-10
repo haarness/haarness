@@ -1712,9 +1712,9 @@ if [ -f "$test_root/ws/e2e.txt" ]; then
   echo "/undo did not revert the approved write" >&2
   exit 1
 fi
-# Undo restores the original user prompt into the composer for editing. Clear
-# that draft before exercising the separate redo command.
-tmux send-keys -t "$session":0.0 C-u
+# Undo restores the original user prompt into the composer for editing. A
+# slash typed over that untouched draft starts a command instead of appending
+# to it, so /redo runs as the undo notice suggests.
 tmux send-keys -t "$session":0.0 "/redo" Enter
 attempt=0
 while [ "$attempt" -lt 50 ]; do

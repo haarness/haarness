@@ -109,6 +109,15 @@ impl Language {
             .or_else(|| DICTIONARIES["en"].get(key))
             .map_or(key, String::as_str)
     }
+
+    /// [`Self::text`] with its `{placeholder}`s filled in.
+    pub fn format(self, key: &str, values: &[(&str, &str)]) -> String {
+        values
+            .iter()
+            .fold(self.text(key).to_owned(), |text, (name, value)| {
+                text.replace(&format!("{{{name}}}"), value)
+            })
+    }
 }
 
 static DICTIONARIES: LazyLock<HashMap<&'static str, HashMap<String, String>>> =

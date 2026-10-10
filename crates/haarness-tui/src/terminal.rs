@@ -11,6 +11,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(unix)]
 use std::{
     io::{IsTerminal, Read},
@@ -361,13 +362,24 @@ fn activate_terminal() -> Result<()> {
     }
     // Kitty keyboard protocol disambiguates Shift+Enter from Enter and
     // Ctrl+M from the models shortcut where the terminal supports it.
-    if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
+    let enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    if enhanced {
         let _ = execute!(
             io::stdout(),
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         );
     }
+    KEYBOARD_ENHANCED.store(enhanced, Ordering::Relaxed);
     Ok(())
+}
+
+static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the terminal reports modified keys unambiguously. Without it,
+/// tmux and Terminal.app send Ctrl+Shift+T as plain Ctrl+T, so hints must not
+/// promise Shift chords.
+pub fn keyboard_enhanced() -> bool {
+    KEYBOARD_ENHANCED.load(Ordering::Relaxed)
 }
 
 /// Re-emit terminal modes that terminal emulators may silently clear while

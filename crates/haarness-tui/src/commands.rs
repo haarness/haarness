@@ -611,6 +611,33 @@ pub(crate) fn workflow_command_args(
     }
 }
 
+/// Edits between two names, counting a swapped pair of neighbours as one:
+/// `/stauts` is one slip away from `/status`.
+pub(crate) fn edit_distance(left: &str, right: &str) -> usize {
+    let left: Vec<char> = left.chars().collect();
+    let right: Vec<char> = right.chars().collect();
+    let mut rows = vec![vec![0; right.len() + 1]; left.len() + 1];
+    for (index, row) in rows.iter_mut().enumerate() {
+        row[0] = index;
+    }
+    for (index, cell) in rows[0].iter_mut().enumerate() {
+        *cell = index;
+    }
+    for i in 1..=left.len() {
+        for j in 1..=right.len() {
+            let cost = usize::from(left[i - 1] != right[j - 1]);
+            let mut best = (rows[i - 1][j] + 1)
+                .min(rows[i][j - 1] + 1)
+                .min(rows[i - 1][j - 1] + cost);
+            if i > 1 && j > 1 && left[i - 1] == right[j - 2] && left[i - 2] == right[j - 1] {
+                best = best.min(rows[i - 2][j - 2] + 1);
+            }
+            rows[i][j] = best;
+        }
+    }
+    rows[left.len()][right.len()]
+}
+
 /// The `s` in "2 steps".
 const fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
@@ -1025,6 +1052,56 @@ impl App {
                 .workflow_definitions
                 .iter()
                 .any(|workflow| workflow.invocation.eq_ignore_ascii_case(name))
+    }
+
+    /// The status-line answer to a command nothing answers to, naming the
+    /// real one when the name reads as a typo of it.
+    pub(crate) fn unknown_command_notice(&self, name: &str) -> String {
+        match self.closest_command(name) {
+            Some(suggestion) => self.language.format(
+                "Unknown command /{name} · did you mean /{suggestion}?",
+                &[("name", name), ("suggestion", &suggestion)],
+            ),
+            None => self.language.format(
+                "Unknown command /{name} · start with a space to send it as text",
+                &[("name", name)],
+            ),
+        }
+    }
+
+    fn closest_command(&self, name: &str) -> Option<String> {
+        let name = name.to_ascii_lowercase();
+        let limit = if name.chars().count() <= 4 { 1 } else { 2 };
+        COMMANDS
+            .iter()
+            .flat_map(|entry| std::iter::once(entry.name).chain(entry.aliases.iter().copied()))
+            .map(str::to_owned)
+            .chain(
+                self.server_commands
+                    .iter()
+                    .map(|command| command.name.clone()),
+            )
+            .chain(
+                self.workflow_definitions
+                    .iter()
+                    .map(|workflow| workflow.invocation.clone()),
+            )
+            .map(|candidate| {
+                (
+                    edit_distance(&name, &candidate.to_ascii_lowercase()),
+                    candidate,
+                )
+            })
+            .filter(|(distance, _)| *distance <= limit)
+            // On a tie, a slip that kept the length (`/stauts`) meant the
+            // name of that length (`/status`, not `/stats`).
+            .min_by_key(|(distance, candidate)| {
+                (
+                    *distance,
+                    candidate.chars().count().abs_diff(name.chars().count()),
+                )
+            })
+            .map(|(_, candidate)| candidate)
     }
 
     fn open_tool_catalog(&mut self, mut catalog: haarness_protocol::ToolCatalogResponse) {
@@ -2165,7 +2242,7 @@ impl App {
                     .await?;
                 return Ok(AppAction::Continue);
             }
-            self.notice = format!("Unknown command /{name}. Type /help for commands.");
+            self.notice = self.unknown_command_notice(name);
             return Ok(AppAction::Continue);
         };
         match spec.name {
@@ -2435,14 +2512,31 @@ impl App {
                         return Ok(AppAction::Continue);
                     }
                 };
-                let mut terminals = client.ptys().await?;
-                if create || terminals.is_empty() {
-                    terminals.push(client.create_pty(&PtyCreateRequest::default()).await?);
+                // A shell that exited is a closed tab: forget it rather than
+                // reattach to its last screen.
+                let (mut terminals, exited): (Vec<_>, Vec<_>) = client
+                    .ptys()
+                    .await?
+                    .into_iter()
+                    .partition(|info| info.status != haarness_protocol::PtyStatus::Exited);
+                for info in exited {
+                    let _ = client.delete_pty(info.id).await;
                 }
+                let created = if create || terminals.is_empty() {
+                    let info = client.create_pty(&PtyCreateRequest::default()).await?;
+                    terminals.push(info.clone());
+                    Some(info.id)
+                } else {
+                    None
+                };
                 for info in &terminals {
                     client.connect_pty(info.id, 0);
                 }
-                self.terminal = Some(crate::pty_view::TerminalWorkspace::new(terminals));
+                let mut workspace = crate::pty_view::TerminalWorkspace::new(terminals);
+                if let Some(id) = created {
+                    workspace.focus(id);
+                }
+                self.terminal = Some(workspace);
                 self.notice = "Terminal attached · Ctrl+] returns to chat".into();
             }
             "undo" => {
@@ -2468,9 +2562,15 @@ impl App {
                         self.thread = thread;
                         self.items = client.items(self.thread.id).await?;
                         self.todos = client.todos(self.thread.id).await.unwrap_or_default();
+                        self.undo_draft = None;
                         if let Some((text, attachments)) = restored {
-                            self.composer.set_text(text);
-                            self.attachments = attachments;
+                            self.composer.set_text(text.clone());
+                            self.attachments.clone_from(&attachments);
+                            self.undo_draft = Some(crate::state::UndoDraft {
+                                text,
+                                attachments,
+                                set_aside: false,
+                            });
                         }
                         self.notice = self.undo_notice("Undone — the next turn confirms");
                     }
@@ -2481,6 +2581,15 @@ impl App {
             "messages" => self.open_messages((!arguments.is_empty()).then_some(arguments)),
             "redo" => match client.unrevert(self.thread.id).await {
                 Ok(thread) => {
+                    // The undone prompt is back in the transcript; a copy
+                    // left in the composer would only send it twice.
+                    if let Some(draft) = self.undo_draft.take()
+                        && !draft.set_aside
+                        && self.composer.text() == draft.text
+                    {
+                        self.composer.clear();
+                        self.attachments.clear();
+                    }
                     self.thread = thread;
                     self.items = client.items(self.thread.id).await?;
                     self.todos = client.todos(self.thread.id).await.unwrap_or_default();
@@ -3870,6 +3979,7 @@ impl App {
         // An unsaved queued-message edit belongs to the session being left;
         // its set-aside draft is what that session keeps.
         self.cancel_queue_edit();
+        self.undo_draft = None;
         if self.composer.is_empty() && self.attachments.is_empty() {
             self.drafts.remove(&previous_thread);
         } else {

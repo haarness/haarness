@@ -234,7 +234,12 @@ impl App {
                 }
             }
             "configuration.reloaded" => {
-                self.notice = "Configuration reloaded".into();
+                // Most reloads follow a setting this client just saved; the
+                // answer to that ("Anthropic connected · pick a model",
+                // "Input mode: queue · saved for this project") says more.
+                if !self.notice_is_fresh(std::time::Instant::now()) {
+                    self.notice = "Configuration reloaded".into();
+                }
             }
             "configuration.reload_queued" => {
                 self.notice =
@@ -942,6 +947,13 @@ impl App {
                                 .position(|agent| agent.id == thread.agent)
                         {
                             self.agent_index = index;
+                        }
+                        // Undo/redo elsewhere, or the next turn confirming an
+                        // undo, changes which items are live: reload them.
+                        if thread.revert.as_ref().map(|revert| revert.sequence)
+                            != self.thread.revert.as_ref().map(|revert| revert.sequence)
+                        {
+                            self.refresh_needed = true;
                         }
                         self.thread = thread.clone();
                         self.normalize_reasoning();

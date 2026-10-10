@@ -866,7 +866,16 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
         .iter()
         .map(|item| item.id)
         .collect();
+    // Undone work stays on the server until the next turn confirms it, but
+    // it is no longer the conversation: fold it into one marker, as Upstream
+    // does, instead of drawing it like live turns.
+    let undone_after = app.thread.revert.as_ref().map(|revert| revert.sequence);
+    let mut folded = false;
     for item in presentation_order(&app.items) {
+        if undone_after.is_some_and(|boundary| item.sequence > boundary) {
+            folded = true;
+            continue;
+        }
         // The sidebar owns TODO state. Hide both live tool activity and replayed
         // snapshots here so updates do not repeat the plan in the conversation.
         if matches!(&item.data, ItemData::Todo { .. })
@@ -1270,6 +1279,30 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 .messages
                 .push((item.id, transcript.len() - visible_rows));
         }
+    }
+    if folded {
+        let (_, steps) = app.undo_depth();
+        let text = if steps == 1 {
+            app.language
+                .text("1 step undone · /redo to restore")
+                .to_owned()
+        } else {
+            app.language.format(
+                "{count} steps undone · /redo to restore",
+                &[("count", &steps.to_string())],
+            )
+        };
+        let mut block = TaggedLines::default();
+        block.push(Line::new(vec![
+            Span::new("  ↶ ", theme.muted),
+            Span::new(single_line(&text, width.saturating_sub(4)), theme.muted),
+        ]));
+        append_block(
+            &mut transcript,
+            block,
+            TranscriptGroup::System,
+            &mut previous_group,
+        );
     }
     // Child-agent questions are durable on the child thread, not duplicated
     // into the root transcript. The structured root queue still renders the
