@@ -133,9 +133,11 @@ fn reference_at(text: &str) -> Option<(String, usize)> {
             }
             _ => body.find("\n\n</details>")? + "\n\n</details>".len(),
         };
+        // Desktop also escapes quotes.
         let label = label
             .replace("&lt;", "<")
             .replace("&gt;", ">")
+            .replace("&quot;", "\"")
             .replace("&amp;", "&");
         Some((
             format!("@{label}"),

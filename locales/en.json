@@ -1764,6 +1764,7 @@
   "ctrl+b shows the plan": "ctrl+b shows the plan",
   "No loop is running": "No loop is running",
   "Loop stopped": "Loop stopped",
+  "Shell finished": "Shell finished",
   "Allow this request once and enable Auto for this chat and its agents": "Allow this request once and enable Auto for this chat and its agents",
   "Back to parent chat": "Back to parent chat",
   "Close find in chat": "Close find in chat",

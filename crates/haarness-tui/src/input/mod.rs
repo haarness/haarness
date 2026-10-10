@@ -1018,7 +1018,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                 && app.holds_undo_draft()
             {
                 app.undo_draft = Some(crate::state::UndoDraft {
-                    text: app.composer.text().to_owned(),
+                    text: app.composer.expanded_text(),
                     attachments: std::mem::take(&mut app.attachments),
                 });
                 app.composer.clear();

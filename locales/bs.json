@@ -1764,6 +1764,7 @@
   "ctrl+b shows the plan": "ctrl+b prikazuje plan",
   "No loop is running": "Nijedna petlja nije pokrenuta",
   "Loop stopped": "Petlja je zaustavljena",
+  "Shell finished": "Shell naredba je završena",
   "Allow this request once and enable Auto for this chat and its agents": "Dopusti ovaj zahtjev jednom i uključi Auto za ovaj razgovor i njegove agente",
   "Back to parent chat": "Natrag na nadređeni razgovor",
   "Close find in chat": "Zatvori pretragu razgovora",

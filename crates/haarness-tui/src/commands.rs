@@ -1053,7 +1053,9 @@ impl App {
             return;
         }
         let note = crate::diffview::format_comments(&comments);
-        let existing = self.composer.text().to_owned();
+        // As sent, so the draft's attached references come back as chips
+        // rather than as their placeholders' bare text.
+        let existing = self.composer.expanded_text();
         let combined = if existing.trim().is_empty() {
             note
         } else {

@@ -1764,6 +1764,7 @@
   "ctrl+b shows the plan": "ctrl+b muestra el plan",
   "No loop is running": "No hay ningún bucle en marcha",
   "Loop stopped": "Bucle detenido",
+  "Shell finished": "Comando de shell completado",
   "Allow this request once and enable Auto for this chat and its agents": "Permitir esta solicitud una vez y activar Auto para este chat y sus agentes",
   "Back to parent chat": "Volver al chat principal",
   "Close find in chat": "Cerrar la búsqueda en el chat",

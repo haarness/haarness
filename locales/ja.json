@@ -1764,6 +1764,7 @@
   "ctrl+b shows the plan": "ctrl+b で計画を表示",
   "No loop is running": "実行中のループはありません",
   "Loop stopped": "ループを停止しました",
+  "Shell finished": "シェルコマンドが完了しました",
   "Allow this request once and enable Auto for this chat and its agents": "このリクエストを1回許可し、このチャットとそのエージェントで自動承認を有効にします",
   "Back to parent chat": "親のチャットに戻る",
   "Close find in chat": "チャット内検索を閉じる",
