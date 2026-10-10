@@ -1,13 +1,16 @@
 import { Preview } from "./preview";
 import { PreviewContent } from "./PreviewContent";
 import { t } from "./i18n";
-import { For, Show, createSignal, createEffect, onCleanup } from "solid-js";
+import { For, Show, batch, createSignal, createEffect, onCleanup } from "solid-js";
+import { createStore, reconcile } from "solid-js/store";
 import type { FileContent, FileEntry } from "../shared";
 import { useApp } from "./state";
 import { Button, Icon, ask, confirm, Empty } from "./ui";
 import { Editor, type EditorSession } from "./Editor";
 import { fileContext } from "./prompt-context";
-type OpenFile = FileContent & { editor: EditorSession; mode?: "preview" | "code"; pin?: string };
+import { shortcutLabel, shortcutText } from "./search";
+/** `changed` is the file on disk when it moved on under unsaved edits. */
+type OpenFile = FileContent & { editor: EditorSession; mode?: "preview" | "code"; pin?: string; changed?: FileContent };
 const emptyHash =
   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 export function Explorer() {
@@ -17,7 +20,10 @@ export function Explorer() {
     [results, setResults] = createSignal<string[]>([]),
     [tabs, setTabs] = createSignal<OpenFile[]>([]),
     [selected, setSelected] = createSignal(""),
-    [edits, setEdits] = createSignal<Record<string, string>>({});
+    [edits, setEdits] = createSignal<Record<string, string>>({}),
+    // Owned here, not by each row, so folders stay open while the tree is
+    // listed again after a save, a refresh or a change on disk.
+    [expanded, setExpanded] = createSignal<ReadonlySet<string>>(new Set());
   let timer: ReturnType<typeof setTimeout>;
   let workspaceGeneration = 0;
   let searchGeneration = 0;
@@ -82,6 +88,7 @@ export function Explorer() {
     setTabs([]);
     setSelected("");
     setEdits({});
+    setExpanded(new Set<string>());
     setVersion((v) => v + 1);
   });
   createEffect(() => {
@@ -121,6 +128,94 @@ export function Explorer() {
     selectionGeneration++;
     setSelected(path);
   }
+  function toggle(path: string) {
+    setExpanded((items) => {
+      const next = new Set(items);
+      if (!next.delete(path)) next.add(path);
+      return next;
+    });
+  }
+  /** Open the folders above a path so the file shows in the tree. */
+  function reveal(path: string) {
+    setExpanded((items) => {
+      const next = new Set(items);
+      const parts = path.split("/");
+      for (let index = 1; index < parts.length; index++)
+        next.add(parts.slice(0, index).join("/"));
+      return next;
+    });
+  }
+  /** Take the disk's version of a tab; `keep` keeps its unsaved edits on top. */
+  function adopt(editor: EditorSession, disk: FileContent, keep = false) {
+    batch(() => {
+      setTabs((items) => items.map((item) => item.editor === editor
+        ? { ...item, ...disk, editor, mode: item.mode, changed: undefined } : item));
+      if (!keep)
+        setEdits((items) => {
+          const next = { ...items };
+          delete next[disk.path];
+          return next;
+        });
+    });
+  }
+  /**
+   * The file moved on under an open tab. A tab without unsaved edits follows
+   * the disk; one with edits keeps them and asks whether to reload.
+   */
+  function diverged(editor: EditorSession, disk: FileContent) {
+    const value = tabs().find((item) => item.editor === editor);
+    if (!value || value.path !== disk.path) return;
+    if (!dirty(value.path) || edits()[value.path] === disk.content) adopt(editor, disk);
+    else if (value.changed?.revision !== disk.revision)
+      setTabs((items) => items.map((item) => item.editor === editor ? { ...item, changed: disk } : item));
+  }
+  async function recheck(path: string) {
+    const id = app.state.connection?.id;
+    const value = tabs().find((item) => item.path === path);
+    if (!id || !value || value.pin || pendingSaves.has(value.editor)) return;
+    const generation = workspaceGeneration;
+    const disk = await window.haarness
+      .files<FileContent>(id, "read", { path })
+      .catch(() => undefined);
+    const current = tabs().find((item) => item.editor === value.editor);
+    // A save or reload that finished meanwhile knows better than this read.
+    if (!disk || generation !== workspaceGeneration || !current ||
+        current.revision !== value.revision || pendingSaves.has(value.editor)) return;
+    if (disk.revision !== current.revision) diverged(value.editor, disk);
+    else if (current.changed)
+      setTabs((items) => items.map((item) => item.editor === value.editor ? { ...item, changed: undefined } : item));
+  }
+  // The agent, a terminal, another window or another editor can change files
+  // under the panel: list the tree again and bring open files up to date.
+  let changes: ReturnType<typeof setTimeout> | undefined;
+  function changedOnDisk() {
+    clearTimeout(changes);
+    changes = setTimeout(() => {
+      setVersion((v) => v + 1);
+      for (const item of tabs()) void recheck(item.path);
+    }, 250);
+  }
+  const off = window.haarness.onEvent((event) => {
+    if (event.kind !== "server" || event.connection !== app.state.connection?.id) return;
+    const data = event.data as {
+      type: string;
+      payload?: { data?: { type?: string; name?: string; is_error?: boolean } };
+    };
+    const result = data.type === "item.created" ? data.payload?.data : undefined;
+    if (
+      data.type === "files.updated" ||
+      data.type === "turn.finished" ||
+      (result?.type === "tool_result" && !result.is_error &&
+        /write|edit|patch|apply|bash|shell|move|delete/.test(result.name ?? ""))
+    )
+      changedOnDisk();
+  });
+  window.addEventListener("focus", changedOnDisk);
+  onCleanup(() => {
+    off();
+    window.removeEventListener("focus", changedOnDisk);
+    clearTimeout(changes);
+  });
   async function open(path: string, options?: { mode?: "preview" | "code"; version?: string; preview?: boolean }) {
     const intent = ++selectionGeneration;
     const generation = workspaceGeneration;
@@ -155,7 +250,7 @@ export function Explorer() {
       } finally {
         if (pendingOpens.get(key) === pending) pendingOpens.delete(key);
       }
-    }
+    } else void recheck(path);
     if (generation === workspaceGeneration && intent === selectionGeneration)
       setSelected(path);
   }
@@ -184,8 +279,16 @@ export function Explorer() {
       });
       setVersion((v) => v + 1);
       app.notify(t("Saved {path}", { path: value.path }));
-    }).catch((error) => {
-      if (generation === workspaceGeneration) throw error;
+    }).catch(async (error) => {
+      if (generation !== workspaceGeneration) return;
+      // Someone else wrote the file since it was read. Offer the choice
+      // rather than an error that only says to reload.
+      const disk = await window.haarness
+        .files<FileContent>(id, "read", { path: value.path })
+        .catch(() => undefined);
+      if (generation !== workspaceGeneration) return;
+      if (disk && disk.revision !== value.revision) return diverged(value.editor, disk);
+      throw error;
     }).finally(() => pendingSaves.delete(value.editor));
     pendingSaves.set(value.editor, pending);
     return pending;
@@ -243,7 +346,7 @@ export function Explorer() {
               group: "Editor actions",
               name: t("Save file"),
               icon: "check" as const,
-              hint: "Mod S",
+              hint: shortcutLabel("Mod+S", app.state.platform),
               detail: file()!.path,
               action: action(save),
             },
@@ -314,6 +417,7 @@ export function Explorer() {
       },
     });
     if (!input || generation !== workspaceGeneration) return;
+    reveal(input.path);
     setVersion((v) => v + 1);
     if (!directory) await open(input.path);
   }
@@ -347,6 +451,18 @@ export function Explorer() {
         setVersion((v) => v + 1);
       },
     });
+  }
+  async function reload() {
+    const value = file(), id = app.state.connection?.id;
+    const generation = workspaceGeneration;
+    if (!value || !id) return;
+    const disk = await window.haarness.files<FileContent>(id, "read", { path: value.path });
+    if (generation === workspaceGeneration) adopt(value.editor, disk);
+  }
+  /** Keep the edits; the next save replaces the file on disk. */
+  function keepMine() {
+    const value = file();
+    if (value?.changed) adopt(value.editor, value.changed, true);
   }
   async function restorePreview() {
     const value = file(), id = app.state.connection?.id;
@@ -411,6 +527,8 @@ export function Explorer() {
                 hidden={true}
                 selected={selected()}
                 open={(path) => app.run(() => open(path))}
+                expanded={(path) => expanded().has(path)}
+                toggle={toggle}
               />
             }
           >
@@ -470,7 +588,7 @@ export function Explorer() {
                         ? t("Add selection to context")
                         : t("Add file to context")
                     }
-                    hint="Command/Ctrl+Shift+L"
+                    hint={shortcutText("Mod+Shift+L", app.state.platform)}
                     disabled={!canAttach()}
                     onClick={() => app.run(attachContext)}
                   />
@@ -522,6 +640,24 @@ export function Explorer() {
               <>
                 <Show when={value().pin}>
                   <div class="preview-version-strip">{t("Saved preview version")} <button onClick={() => app.run(restorePreview)}>{t("Restore this version")}</button><button onClick={() => app.run(() => open(value().path, { preview: true }))}>{t("Show current")}</button></div>
+                </Show>
+                <Show when={value().changed}>
+                  <div class="file-changed" role="alert">
+                    <Icon name="alert" size="sm" />
+                    <span>{t("This file changed on disk while you were editing it.")}</span>
+                    <button
+                      title={t("Discard your edits and show the file on disk")}
+                      onClick={() => app.run(reload)}
+                    >
+                      {t("Reload")}
+                    </button>
+                    <button
+                      title={t("Keep your edits; saving replaces the file on disk")}
+                      onClick={keepMine}
+                    >
+                      {t("Keep mine")}
+                    </button>
+                  </div>
                 </Show>
                 <Show when={Preview.kind(value().path) && value().mode !== "code"} fallback={<>
                 <Show
@@ -594,9 +730,11 @@ function Tree(props: {
   hidden: boolean;
   selected: string;
   open: (path: string) => void;
+  expanded: (path: string) => boolean;
+  toggle: (path: string) => void;
 }) {
   const app = useApp();
-  const [entries, setEntries] = createSignal<FileEntry[]>([]),
+  const [entries, setEntries] = createStore<FileEntry[]>([]),
     [error, setError] = createSignal("");
   let generation = 0;
   createEffect(() => {
@@ -610,7 +748,8 @@ function Tree(props: {
       )
       .then((result) => {
         if (id !== generation) return;
-        setEntries(result.entries);
+        // Rows that are still there keep their place, and their open folders.
+        setEntries(reconcile(result.entries, { key: "path" }));
         setError(
           result.truncated
             ? "This older server returned a partial listing. Use file search to find other files."
@@ -622,7 +761,7 @@ function Tree(props: {
   onCleanup(() => generation++);
   return (
     <div role="tree">
-      <For each={entries()}>
+      <For each={entries}>
         {(item) => <Entry entry={item} {...props} />}
       </For>
       <Show when={error()}>
@@ -637,8 +776,10 @@ function Entry(props: {
   hidden: boolean;
   selected: string;
   open: (path: string) => void;
+  expanded: (path: string) => boolean;
+  toggle: (path: string) => void;
 }) {
-  const [expanded, setExpanded] = createSignal(false);
+  const expanded = () => props.expanded(props.entry.path);
   return (
     <div
       role="treeitem"
@@ -650,7 +791,7 @@ function Entry(props: {
         title={props.entry.path}
         onClick={() =>
           props.entry.directory
-            ? setExpanded((v) => !v)
+            ? props.toggle(props.entry.path)
             : props.open(props.entry.path)
         }
       >
@@ -675,6 +816,8 @@ function Entry(props: {
             hidden={props.hidden}
             selected={props.selected}
             open={props.open}
+            expanded={props.expanded}
+            toggle={props.toggle}
           />
         </div>
       </Show>
