@@ -283,10 +283,14 @@ fn push_goal_section(app: &App, out: &mut TaggedLines, width: usize) {
             | haarness_protocol::GoalStatus::BudgetLimited
             | haarness_protocol::GoalStatus::Cleared => theme.muted,
         };
-        out.push(line(
-            format!("  {}", crate::commands::goal_status_label(goal)),
-            tone,
-        ));
+        // The status carries why a goal stopped and what it waits for, so
+        // it wraps like the objective instead of running off the pane.
+        for row in textwrap::wrap(
+            &crate::commands::goal_status_label(goal),
+            width.saturating_sub(4).max(1),
+        ) {
+            out.push(line(format!("  {row}"), tone));
+        }
         if let Some(budget) = goal.token_budget {
             let cells = width.saturating_sub(8).clamp(6, 24);
             let filled =

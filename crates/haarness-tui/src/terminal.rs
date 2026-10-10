@@ -430,26 +430,36 @@ impl Drop for TerminalGuard {
 /// when there is no launcher to try, or it refused; the caller keeps showing
 /// the link either way.
 pub fn open_browser(url: &str) -> bool {
-    use std::process::{Command, Stdio};
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return false;
     }
+    launch(std::ffi::OsStr::new(url))
+}
+
+/// Open a file this client wrote, such as an HTML report, with the desktop's
+/// default application for it.
+pub fn open_file(path: &std::path::Path) -> bool {
+    path.is_file() && launch(path.as_os_str())
+}
+
+fn launch(target: &std::ffi::OsStr) -> bool {
+    use std::process::{Command, Stdio};
     #[cfg(target_os = "macos")]
     let mut command = {
         let mut command = Command::new("open");
-        command.arg(url);
+        command.arg(target);
         command
     };
     #[cfg(target_os = "windows")]
     let mut command = {
         let mut command = Command::new("cmd");
-        command.args(["/C", "start", "", url]);
+        command.args(["/C", "start", ""]).arg(target);
         command
     };
     #[cfg(all(unix, not(target_os = "macos")))]
     let mut command = {
         let mut command = Command::new("xdg-open");
-        command.arg(url);
+        command.arg(target);
         command
     };
     #[cfg(not(any(unix, target_os = "windows")))]

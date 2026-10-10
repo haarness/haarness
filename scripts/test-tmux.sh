@@ -411,11 +411,11 @@ tmux send-keys -t "$session":0.0 Enter
 attempt=0
 while [ "$attempt" -lt 80 ]; do
   pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
-  echo "$pane" | grep -q "workflows" && echo "$pane" | grep -q "tmux-demo" && break
+  echo "$pane" | grep -q "Workflows" && echo "$pane" | grep -q "tmux-demo" && break
   attempt=$((attempt + 1))
   sleep 0.1
 done
-if ! echo "$pane" | grep -q "workflows" || ! echo "$pane" | grep -q "tmux-demo"; then
+if ! echo "$pane" | grep -q "Workflows" || ! echo "$pane" | grep -q "tmux-demo"; then
   echo "$pane" >&2
   echo "The /workflow dashboard did not discover the project fixture" >&2
   exit 1

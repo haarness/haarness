@@ -818,6 +818,11 @@ impl ApiClient {
             .json()
             .await?)
     }
+    /// The chat's recurring loop, if one is running.
+    pub async fn get_loop(&self, id: haarness_protocol::ThreadId) -> Result<serde_json::Value> {
+        let response: serde_json::Value = self.get(&format!("/v1/threads/{id}/loop")).await?;
+        Ok(response["loop"].clone())
+    }
     pub async fn set_loop(
         &self,
         id: haarness_protocol::ThreadId,

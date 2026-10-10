@@ -59,7 +59,7 @@ impl App {
                     description: if text.trim().is_empty() {
                         "[Attachments]".into()
                     } else {
-                        text.into()
+                        crate::prompt_context::display(text).into_owned()
                     },
                     value: format!("{}/{}", self.thread.id, item.id),
                 }

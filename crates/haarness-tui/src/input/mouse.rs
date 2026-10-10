@@ -178,6 +178,12 @@ async fn click(app: &mut App, row: usize, column: usize, client: &ApiClient) -> 
                 app.sidebar_collapsed.insert(index);
             }
         }
+        HitTarget::SidebarToggle => {
+            app.toggle_sidebar();
+            if app.sidebar_open {
+                app.mcp_status = client.mcp().await.unwrap_or_default();
+            }
+        }
         HitTarget::QuestionChoice(index) => {
             if app.is_child_view() {
                 app.notice = "Return to the parent to answer".into();

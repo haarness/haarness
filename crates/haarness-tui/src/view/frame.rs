@@ -9,7 +9,7 @@ use haarness_protocol::{ItemId, RequestId, ThreadId, WorkflowId};
 /// pixel-level hit grid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HitTarget {
-    /// Expand/collapse a tool result's output block.
+    /// Expand/collapse a tool result's output block, or a long prompt.
     ToolToggle(ItemId),
     /// Open a child agent's live thread view (task rows).
     TaskOpen(String),
@@ -33,6 +33,8 @@ pub enum HitTarget {
     PermissionOption(usize),
     /// Collapse/expand a sidebar section by index.
     SidebarSection(usize),
+    /// Show or hide the sidebar, as ctrl+b does.
+    SidebarToggle,
     /// Focus/toggle a choice on the active single- or multi-select question.
     QuestionChoice(usize),
     /// Non-actionable cells inside a modal card; prevents click-through while

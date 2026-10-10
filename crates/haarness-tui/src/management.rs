@@ -11,6 +11,9 @@ use serde_json::{Value, json};
 /// moves to a separate page.
 pub(crate) const PREFACE_LINES: usize = 4;
 
+/// What a shared link on a loopback address can and cannot do.
+pub(crate) const SHARE_ONLY_HERE: &str = "Links from this server only open on this computer, while Haarness runs here. To work on this chat with someone else, use /remote-control.";
+
 #[derive(Clone, Default)]
 pub(crate) struct Management {
     pub resource: String,
@@ -18,7 +21,46 @@ pub(crate) struct Management {
     pub field: usize,
     pub pending: Option<Value>,
     pub details: bool,
+    /// Title of the resource's own first page, once it has been shown.
+    pub root_title: Option<String>,
 }
+
+impl Management {
+    /// Whether the view is a page inside the resource (an item, a form, a
+    /// result) rather than its first page, so it has somewhere to go back to.
+    fn nested(&self) -> bool {
+        self.root_title
+            .as_ref()
+            .is_none_or(|root| *root != self.view.title)
+    }
+}
+/// Turn the sharing view's `/s/<token>` paths into links on `base`, the
+/// server this client reaches. "Anyone who can reach the server" is nobody
+/// else when that is this computer, as on a default local setup, so say so.
+pub(crate) fn share_links(view: &mut ManagementView, base: &str, action: &str) {
+    for line in &mut view.lines {
+        if line.starts_with("/s/") {
+            *line = format!("{base}{line}");
+        }
+    }
+    let loopback = url::Url::parse(base).is_ok_and(|url| match url.host() {
+        Some(url::Host::Domain(name)) => name == "localhost",
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    });
+    if loopback && action != "preview" {
+        // Below the explanation and above the links on the first page; after
+        // the new link and its expiry once one is created.
+        let at = view
+            .lines
+            .iter()
+            .position(|line| line.starts_with(base) && action != "create")
+            .unwrap_or(view.lines.len());
+        view.lines.insert(at, SHARE_ONLY_HERE.into());
+    }
+}
+
 impl App {
     pub(crate) async fn open_management(
         &mut self,
@@ -66,22 +108,24 @@ impl App {
         }
         let mut view = view;
         if resource == "sharing" {
-            for line in &mut view.lines {
-                if line.starts_with("/s/") {
-                    *line = format!(
-                        "{}{line}",
-                        client
-                            .server_url()
-                            .split("/v1/host/workspaces/")
-                            .next()
-                            .unwrap_or(&client.server_url())
-                    );
-                }
-            }
+            let server = client.server_url();
+            let base = server
+                .split("/v1/host/workspaces/")
+                .next()
+                .unwrap_or(&server);
+            share_links(&mut view, base, action);
         }
+        let root_title = if action == "view" {
+            Some(view.title.clone())
+        } else {
+            Some(&self.management)
+                .filter(|current| current.resource == resource)
+                .and_then(|current| current.root_title.clone())
+        };
         self.management = Management {
             resource: resource.into(),
             view,
+            root_title,
             ..Management::default()
         };
         self.show_management();
@@ -140,11 +184,18 @@ impl App {
                 value: "details".into(),
             });
         }
-        entries.push(OptionEntry {
-            label: "Back to manager".into(),
-            description: String::new(),
-            value: "back".into(),
-        });
+        // The first page is where Esc leaves from; only the pages inside it
+        // need a way back.
+        if self.management.nested() {
+            entries.push(OptionEntry {
+                label: "Back".into(),
+                description: self.management.root_title.as_ref().map_or_else(
+                    || "Return to the list".into(),
+                    |title| format!("Return to {title}"),
+                ),
+                value: "back".into(),
+            });
+        }
         self.open_overlay(Overlay::Options {
             title: view.title.clone(),
             kind: OptionsKind::Management,

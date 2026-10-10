@@ -19,6 +19,10 @@ use crate::view::span::{compact_count, short_id, single_line};
 
 /// Prose wider than this stops feeling like an application.
 const MAX_CONTENT_WIDTH: usize = 100;
+/// The sidebar's columns, separator included.
+const SIDEBAR_WIDTH: usize = 42;
+/// The narrowest terminal that docks the sidebar beside the conversation.
+const SIDEBAR_DOCK_WIDTH: usize = 110;
 
 fn goal_header_tone(app: &App, goal: &haarness_protocol::GoalState) -> haarness_opentui::Color {
     match goal.status {
@@ -208,6 +212,7 @@ impl App {
     pub fn lines(&self, size: (u32, u32)) -> Vec<Line> {
         let width = size.0.max(1) as usize;
         let height = size.1.max(1) as usize;
+        self.frame_width.set(width);
         if let Some(terminal) = &self.terminal {
             let lines = crate::pty_view::frame(terminal, self.theme, self.language, width, height);
             return self.finish_frame(lines, Vec::new(), height);
@@ -231,8 +236,10 @@ impl App {
             return self.finish_frame(lines, hits, height);
         }
         let sidebar_width = self.sidebar_width(width);
+        let overlay_width = self.sidebar_overlay_width(width);
         let main_width = width - sidebar_width;
         let content = main_width.min(MAX_CONTENT_WIDTH);
+        self.plan_inline.set(sidebar_width == 0 && overlay_width == 0);
         let (mut lines, mut hits) = header_rows(self, width);
         let header_height = lines.len();
         // The masthead opens the transcript rather than pinning itself above
@@ -368,12 +375,13 @@ impl App {
         let window_base = lines.len();
         let window_len = window.len();
         lines.extend(window);
+        let transcript_end = main_width - overlay_width;
         for (row, target) in body.tags {
             if row >= start && row < end {
                 hits.push(frame::HitRegion {
                     row: window_base + (row - start),
                     start: 0,
-                    end: main_width,
+                    end: transcript_end,
                     target,
                     paint_hover: false,
                 });
@@ -383,8 +391,8 @@ impl App {
             if row >= start && row < end {
                 hits.push(frame::HitRegion {
                     row: window_base + (row - start),
-                    start: from.min(main_width),
-                    end: to.min(main_width),
+                    start: from.min(transcript_end),
+                    end: to.min(transcript_end),
                     target,
                     paint_hover: false,
                 });
@@ -393,14 +401,17 @@ impl App {
         for _ in 0..transcript_height.saturating_sub(window_len) {
             lines.push(Line::empty());
         }
-        // Right sidebar shares the transcript region.
-        if sidebar_width > 0 {
+        // Right sidebar shares the transcript region: docked beside it, or
+        // drawn over its right edge when the terminal is too narrow.
+        let panel_width = sidebar_width.max(overlay_width);
+        if panel_width > 0 {
             // The region starts at the quiet row so the panel surface reaches
             // the top edge unbroken; the sidebar's own leading blank keeps its
             // first heading on the same baseline as the first transcript row.
             let region_top = header_height;
             let region_end = region_top + region_height;
-            let sidebar = sidebar::sidebar_lines(self, sidebar_width.saturating_sub(2), height);
+            let panel_start = width - panel_width;
+            let sidebar = sidebar::sidebar_lines(self, panel_width.saturating_sub(2), height);
             let mut sidebar_rows = sidebar.lines.into_iter();
             // The divider belongs to the pane, not its content. Merge one
             // sidebar row (possibly empty) into every row of the region so
@@ -408,7 +419,14 @@ impl App {
             for row in region_top..region_end {
                 let side_line = sidebar_rows.next().unwrap_or_else(Line::empty);
                 if let Some(target) = lines.get_mut(row) {
-                    merge_columns(target, side_line, main_width, sidebar_width, &self.theme);
+                    // Over the conversation, the panel is in front: what it
+                    // covers recedes, as behind a dialog.
+                    if overlay_width > 0 {
+                        for span in &mut target.spans {
+                            span.fg = self.theme.muted;
+                        }
+                    }
+                    merge_columns(target, side_line, panel_start, panel_width, &self.theme);
                 }
             }
             for (row, target) in sidebar.tags {
@@ -416,7 +434,7 @@ impl App {
                 if absolute < region_end {
                     hits.push(frame::HitRegion {
                         row: absolute,
-                        start: main_width,
+                        start: panel_start,
                         end: width,
                         target,
                         paint_hover: true,
@@ -534,11 +552,33 @@ impl App {
 
     /// Sidebar columns (including its separator) when it fits and is open.
     pub fn sidebar_width(&self, width: usize) -> usize {
-        if self.sidebar_open && width >= 110 && !self.is_home() {
-            42
+        if self.sidebar_open && width >= SIDEBAR_DOCK_WIDTH && !self.is_home() {
+            SIDEBAR_WIDTH
         } else {
             0
         }
+    }
+
+    /// Sidebar columns drawn over the conversation's right edge on a
+    /// terminal too narrow to dock it.
+    pub fn sidebar_overlay_width(&self, width: usize) -> usize {
+        if self.sidebar_overlay && width < SIDEBAR_DOCK_WIDTH && !self.is_home() {
+            SIDEBAR_WIDTH.min(width)
+        } else {
+            0
+        }
+    }
+
+    /// Ctrl+B: show or hide the sidebar. Wide enough, it docks beside the
+    /// conversation; narrower, it opens over the conversation until hidden.
+    pub fn toggle_sidebar(&mut self) {
+        let shown = if self.frame_width.get() >= SIDEBAR_DOCK_WIDTH {
+            self.sidebar_open
+        } else {
+            self.sidebar_overlay
+        };
+        self.sidebar_open = !shown;
+        self.sidebar_overlay = !shown;
     }
 
     fn is_home(&self) -> bool {

@@ -675,7 +675,7 @@ impl ManagementService {
         if action == "revoke" {
             Snapshot::revoke(&self.paths.data, required_string(input, "token")?)?;
         }
-        let mut view=View{title:format!("Share · {}",current.title),lines:vec!["Create an immutable snapshot on this server. Anyone with its link can read it until it expires or you revoke it. Only the text in the preview is published. Review it for secrets before creating a link.".into()],entries:vec![entry("Review conversation snapshot","Messages only · expires in seven days",json!({"action":"preview","threadId":thread,"includeTools":false})),entry("Review with tool details","Includes commands and tool outputs",json!({"action":"preview","threadId":thread,"includeTools":true}))],..View::default()};
+        let mut view=View{title:format!("Share · {}",current.title),lines:vec!["Publishes a read-only snapshot of this chat on this Haarness server. Anyone who can reach the server can open its link until it expires or you revoke it.".into(),"Only the text in the preview is published. Review it for secrets before you create a link.".into()],entries:vec![entry("Review conversation snapshot","Messages only · expires in seven days",json!({"action":"preview","threadId":thread,"includeTools":false})),entry("Review with tool details","Includes commands and tool outputs",json!({"action":"preview","threadId":thread,"includeTools":true}))],..View::default()};
         for row in Snapshot::list(&self.paths.data, thread)? {
             view.lines.push(format!("/s/{}", row.token));
             view.entries.push(destructive(

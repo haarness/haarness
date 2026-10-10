@@ -555,7 +555,7 @@ impl App {
                             name,
                             output,
                             is_error,
-                            ..
+                            metadata,
                         } = &item.data
                             && name == "bash"
                             && call_id.starts_with("shell-")
@@ -566,23 +566,51 @@ impl App {
                                 // "failed" card would contradict their choice.
                                 self.notice = "Shell command not run".into();
                             } else {
+                                // The output joins the transcript under the
+                                // command, so the card only says how it ended.
+                                let exit = metadata
+                                    .get("exit")
+                                    .and_then(serde_json::Value::as_i64)
+                                    .filter(|code| *code != 0);
+                                let failed = *is_error || exit.is_some();
+                                let command =
+                                    self.items
+                                        .iter()
+                                        .rev()
+                                        .find_map(|candidate| match &candidate.data {
+                                            ItemData::ToolCall {
+                                                call_id: candidate_id,
+                                                arguments,
+                                                ..
+                                            } if candidate_id == call_id => arguments
+                                                .get("command")
+                                                .and_then(serde_json::Value::as_str)
+                                                .and_then(|command| command.lines().next())
+                                                .map(str::to_owned),
+                                            _ => None,
+                                        });
+                                let message = match (exit, command) {
+                                    _ if *is_error => output.clone(),
+                                    (Some(code), Some(command)) => {
+                                        format!("{command} · exit {code}")
+                                    }
+                                    (Some(code), None) => format!("exit {code}"),
+                                    (None, Some(command)) => command,
+                                    (None, None) => "Command completed".into(),
+                                };
                                 self.show_toast(
-                                    Some(if *is_error {
+                                    Some(if failed {
                                         "Shell failed".into()
                                     } else {
                                         "Shell finished".into()
                                     }),
-                                    if output.trim().is_empty() {
-                                        "Command completed".into()
-                                    } else {
-                                        output.clone()
-                                    },
-                                    if *is_error {
+                                    message,
+                                    if failed {
                                         ToastVariant::Error
                                     } else {
                                         ToastVariant::Success
                                     },
-                                    std::time::Duration::from_secs(if *is_error { 8 } else { 4 }),
+                                    std::time::Duration::from_secs(if failed { 8 } else { 4 }),
                                 );
                             }
                         }

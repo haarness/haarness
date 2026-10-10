@@ -490,7 +490,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
             }
             (KeyModifiers::CONTROL, KeyCode::Char('o')) => app.open_tasks_overlay(),
             (KeyModifiers::CONTROL, KeyCode::Char('b')) => {
-                app.sidebar_open = !app.sidebar_open;
+                app.toggle_sidebar();
                 if app.sidebar_open {
                     app.mcp_status = client.mcp().await.unwrap_or_default();
                 }
@@ -764,7 +764,7 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                 app.open_tasks_overlay();
             }
             KeyCode::Char('b') => {
-                app.sidebar_open = !app.sidebar_open;
+                app.toggle_sidebar();
                 if app.sidebar_open {
                     app.mcp_status = client.mcp().await.unwrap_or_default();
                 }
@@ -1702,6 +1702,24 @@ async fn handle_overlay_key(app: &mut App, key: KeyEvent, client: &ApiClient) ->
         }
         KeyCode::Backspace if app.overlay.is_filterable() => {
             app.overlay_filter.pop();
+            app.selection = 0;
+            app.preview_selected_theme();
+        }
+        // The filter is a one-line prompt, so it erases like one: Ctrl+U
+        // clears it and Ctrl+W takes back the last word.
+        KeyCode::Char('u' | 'w')
+            if app.overlay.is_filterable() && key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            if key.code == KeyCode::Char('u') {
+                app.overlay_filter.clear();
+            } else {
+                let kept = app.overlay_filter.trim_end().len();
+                let start = app.overlay_filter[..kept]
+                    .char_indices()
+                    .rfind(|(_, character)| character.is_whitespace())
+                    .map_or(0, |(index, character)| index + character.len_utf8());
+                app.overlay_filter.truncate(start);
+            }
             app.selection = 0;
             app.preview_selected_theme();
         }

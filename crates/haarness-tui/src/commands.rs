@@ -14,8 +14,14 @@ use crate::api::ApiClient;
 use crate::input::{AppAction, WorkspaceCreateRetry, WorkspaceMutation, WorkspaceRefOperation};
 use crate::state::{App, OptionEntry, OptionsKind, Overlay, OverlayChoice, ToastVariant};
 
-fn analytics_query(arguments: &str) -> Result<Vec<(String, String)>> {
+/// The server query for `/stats` and `/insights`, and whether `/insights`
+/// should open its report (`--open`, as `haarness insights` takes).
+pub(crate) fn analytics_query(
+    arguments: &str,
+    report: bool,
+) -> Result<(Vec<(String, String)>, bool)> {
     let mut query = Vec::new();
+    let mut open = false;
     let mut words = arguments.split_whitespace();
     while let Some(word) = words.next() {
         let (key, value) = match word {
@@ -26,14 +32,25 @@ fn analytics_query(arguments: &str) -> Result<Vec<(String, String)>> {
                     .ok_or_else(|| anyhow::anyhow!("{word} requires a value"))?;
                 (word.trim_start_matches('-'), value.to_owned())
             }
-            "--no-open" | "--no-llm" => continue,
+            "--open" if report => {
+                open = true;
+                continue;
+            }
+            "--no-open" if report => {
+                open = false;
+                continue;
+            }
+            "--no-llm" => continue,
+            _ if report => anyhow::bail!(
+                "Unknown option {word}; use --days N, --current-project, --project ID, --limit N or --open"
+            ),
             _ => anyhow::bail!(
                 "Unknown option {word}; use --days N, --current-project, --project ID or --limit N"
             ),
         };
         query.push((key.to_owned(), value));
     }
-    Ok(query)
+    Ok((query, open))
 }
 
 pub(crate) struct WorkspaceMutationCompletion {
@@ -294,7 +311,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     command(
         "insights",
         &[],
-        "Save an HTML insights report: --days N --current-project --project ID --limit N",
+        "Save an HTML insights report: --days N --current-project --project ID --limit N --open",
     ),
     command(
         "language",
@@ -689,7 +706,8 @@ impl App {
                     })
                     .and_then(|item| match &item.data {
                         haarness_protocol::ItemData::UserMessage { text, .. } => Some(
-                            text.lines()
+                            crate::prompt_context::display(text)
+                                .lines()
                                 .find(|line| !line.trim().is_empty())
                                 .unwrap_or_default()
                                 .trim()
@@ -2637,7 +2655,7 @@ impl App {
             }
             "reasoning" => match arguments {
                 "" => self.open_overlay(Overlay::Options {
-                    title: "reasoning".into(),
+                    title: "Reasoning".into(),
                     kind: OptionsKind::ReasoningEffort,
                     entries: reasoning_entries(self),
                 }),
@@ -2790,7 +2808,10 @@ impl App {
                 self.open_overlay(Overlay::Panel {
                     title: "Skills".into(),
                     lines: if skills.is_empty() {
-                        vec!["No skills discovered".into()]
+                        vec![
+                            "No skills discovered".into(),
+                            "Add one in .haarness/skills/<name>/SKILL.md".into(),
+                        ]
                     } else {
                         skills
                             .into_iter()
@@ -2954,12 +2975,17 @@ impl App {
             }
             "stats" | "insights" => {
                 let result = async {
-                    let query = analytics_query(arguments)?;
+                    let (query, open) = analytics_query(arguments, spec.name == "insights")?;
                     let document = client.insights(&query).await?;
                     let summary = document["summary"]
                         .as_str()
                         .ok_or_else(|| anyhow::anyhow!("missing insights summary"))?;
-                    let mut lines: Vec<String> = summary.lines().map(str::to_owned).collect();
+                    // The dialog already carries the report's title.
+                    let mut lines: Vec<String> = summary
+                        .lines()
+                        .skip_while(|line| line.starts_with("Haarness · "))
+                        .map(str::to_owned)
+                        .collect();
                     if spec.name == "insights" {
                         use std::io::Write as _;
                         let html = document["html"]
@@ -2976,7 +3002,18 @@ impl App {
                         }
                         options.open(&path)?.write_all(html.as_bytes())?;
                         crate::terminal::copy_to_clipboard(&path.display().to_string());
-                        lines.insert(0, format!("Report: {} (path copied)", path.display()));
+                        // A browser opened over SSH would open on the far
+                        // machine, if anywhere.
+                        let state = if !open {
+                            "path copied · /insights --open opens it"
+                        } else if crate::connect::over_ssh() {
+                            "path copied · not opened over SSH"
+                        } else if crate::terminal::open_file(&path) {
+                            "opened in your browser"
+                        } else {
+                            "path copied · no browser to open it"
+                        };
+                        lines.insert(0, format!("Report: {} ({state})", path.display()));
                     }
                     Ok::<_, anyhow::Error>(lines)
                 }
@@ -3051,10 +3088,14 @@ impl App {
                 if arguments.is_empty() {
                     self.notice = "Usage: /loop <interval, e.g. 5m> <prompt> · /loop stop".into();
                 } else if arguments == "stop" {
-                    client
-                        .set_loop(self.thread.id, serde_json::json!({"stop": true}))
-                        .await?;
-                    self.notice = "Loop stopped".into();
+                    if client.get_loop(self.thread.id).await?.is_null() {
+                        self.notice = "No loop is running".into();
+                    } else {
+                        client
+                            .set_loop(self.thread.id, serde_json::json!({"stop": true}))
+                            .await?;
+                        self.notice = "Loop stopped".into();
+                    }
                 } else {
                     let (interval, prompt) = arguments
                         .split_once(char::is_whitespace)
@@ -3257,15 +3298,21 @@ impl App {
 
     pub fn open_goal_overlay(&mut self) {
         let mut entries = Vec::new();
+        // The objective and why it stopped are printed in full above the
+        // choices (see `goal_preface`); the row itself stays short.
         entries.push(OptionEntry {
             label: self.goal.as_ref().map_or_else(
                 || "No active goal".into(),
-                |goal| format!("Goal {}", goal_status_label(goal)),
+                |goal| {
+                    let label = goal_status_label(goal);
+                    let state = label.split(" · ").next().unwrap_or_default();
+                    format!("Goal {state}")
+                },
             ),
             description: self
                 .goal
                 .as_ref()
-                .map_or_else(|| "Set one with /goal <objective>".into(), goal_status_line),
+                .map_or_else(|| "Set one with /goal <objective>".into(), goal_tokens),
             value: "current".into(),
         });
         entries.push(OptionEntry {
@@ -3633,6 +3680,24 @@ impl App {
             })
             .await?;
         self.upsert_workflow_run(run.clone());
+        // A chat opened only to run a workflow would otherwise stay "New
+        // thread" forever, as nothing in it is a prompt to title it from.
+        if self.thread.title == "New thread" && !self.thread.is_subagent {
+            let request = UpdateThreadRequest {
+                title: Some(format!("Workflow · {}", run.workflow_name)),
+                archived: None,
+                agent: None,
+                provider: None,
+                model: None,
+                ultracode: None,
+            };
+            if let Ok(thread) = client.update_thread(self.thread.id, request).await {
+                if let Some(listed) = self.threads.iter_mut().find(|t| t.id == thread.id) {
+                    listed.title.clone_from(&thread.title);
+                }
+                self.thread.title = thread.title;
+            }
+        }
         self.notice = format!(
             "Workflow {} started · {}",
             run.workflow_name,
@@ -4785,9 +4850,11 @@ pub(crate) fn goal_tokens(goal: &GoalState) -> String {
 pub(crate) fn goal_status_label(goal: &GoalState) -> String {
     match goal.status {
         GoalStatus::Active => format!("pursuing · {}", goal_tokens(goal)),
+        // A goal the person paused needs no explanation of its own.
         GoalStatus::Paused => goal
             .paused_reason
             .as_ref()
+            .filter(|reason| reason.as_str() != "user-paused")
             .map_or_else(|| "paused".into(), |reason| format!("paused · {reason}")),
         GoalStatus::Blocked => goal
             .last_reason
@@ -4812,8 +4879,16 @@ fn single_line_goal(value: &str, max_chars: usize) -> String {
         + "…"
 }
 
-pub(crate) fn goal_status_line(goal: &GoalState) -> String {
-    format!("{} · {}", goal.goal, goal_status_label(goal))
+/// What the goal dialog prints above its choices: the objective, and its
+/// status with whatever it is waiting for, both in full.
+pub(crate) fn goal_preface(goal: Option<&GoalState>) -> Vec<String> {
+    goal.map_or_else(Vec::new, |goal| {
+        let mut status = goal_status_label(goal);
+        if let Some(first) = status.get_mut(..1) {
+            first.make_ascii_uppercase();
+        }
+        vec![goal.goal.clone(), status]
+    })
 }
 
 pub(crate) fn default_goal_completion() -> haarness_protocol::GoalCompletion {
@@ -4844,7 +4919,7 @@ pub(crate) fn default_goal_completion() -> haarness_protocol::GoalCompletion {
 fn reasoning_entries(app: &App) -> Vec<OptionEntry> {
     let active = |value: &str| {
         if !app.thread.ultracode && app.reasoning_effort.as_deref() == Some(value) {
-            "  · active"
+            " · active"
         } else {
             ""
         }
@@ -4854,7 +4929,7 @@ fn reasoning_entries(app: &App) -> Vec<OptionEntry> {
         description: format!(
             "Let the model decide{}",
             if app.reasoning_effort.is_none() && !app.thread.ultracode {
-                "  · active"
+                " · active"
             } else {
                 ""
             }
@@ -4883,7 +4958,7 @@ fn reasoning_entries(app: &App) -> Vec<OptionEntry> {
         description: format!(
             "Workflow orchestration · strongest compatible reasoning{}",
             if app.thread.ultracode {
-                "  · active"
+                " · active"
             } else {
                 ""
             }

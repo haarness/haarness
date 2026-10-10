@@ -1232,6 +1232,10 @@ fn preface_rows(app: &App, width: usize, cap: usize) -> Vec<Line> {
             kind: crate::state::OptionsKind::Billing,
             ..
         } => billing_preface(&app.billing),
+        Overlay::Options {
+            kind: crate::state::OptionsKind::GoalActions,
+            ..
+        } => crate::commands::goal_preface(app.goal.as_ref()),
         _ => Vec::new(),
     };
     if lines.is_empty() || cap == 0 {
