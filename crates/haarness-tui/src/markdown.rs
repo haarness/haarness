@@ -255,6 +255,18 @@ impl Renderer<'_> {
                 let marker = if done { "☑ " } else { "☐ " };
                 self.inline.push(Span::new(marker, self.theme.muted));
             }
+            // A terminal cannot render HTML, and in agent output anything
+            // shaped like a tag is far more often a generic (`Vec<String>`)
+            // or a placeholder (`<root>`) than markup: print it as written.
+            Event::InlineHtml(html) => self.event(Event::Text(html)),
+            Event::Html(html) => {
+                for (index, row) in html.split('\n').enumerate() {
+                    if index > 0 {
+                        self.flush_inline();
+                    }
+                    self.push_inline(row.trim_end_matches('\r'));
+                }
+            }
             _ => {}
         }
     }
@@ -326,7 +338,7 @@ impl Renderer<'_> {
                 self.bold = self.bold.saturating_sub(1);
                 self.blank();
             }
-            TagEnd::Paragraph => {
+            TagEnd::Paragraph | TagEnd::HtmlBlock => {
                 self.flush_inline();
                 self.blank();
             }
@@ -600,6 +612,44 @@ mod tests {
                 .skip(1)
                 .flat_map(|line| &line.spans)
                 .any(|span| span.attributes & attr::BOLD == attr::BOLD)
+        );
+    }
+
+    #[test]
+    fn text_shaped_like_html_prints_literally() {
+        let theme = Theme::editorial_dark();
+        let lines = render_markdown(
+            "Return a Vec<String> from parse(); the <root> element and a <div class=\"x\"> tag; \
+             also 3 < 5 and a->b, or Result<Vec<u8>, E>.\n\n- <root>: unexpected fields\n\n\
+             <details>\n<summary>More</summary>\n\nbody\n</details>\n\n| type |\n|---|\n| Option<T> |",
+            200,
+            &theme,
+            "  ",
+        );
+        let text = text_of(&lines);
+        for literal in [
+            "Return a Vec<String> from parse(); the <root> element and a <div class=\"x\"> tag;",
+            "also 3 < 5 and a->b, or Result<Vec<u8>, E>.",
+            "• <root>: unexpected fields",
+            "<details>",
+            "<summary>More</summary>",
+            "</details>",
+            "Option<T>",
+        ] {
+            assert!(text.contains(literal), "missing {literal:?} in:\n{text}");
+        }
+        let summary = text
+            .lines()
+            .position(|row| row.contains("<summary>"))
+            .unwrap();
+        let details = text
+            .lines()
+            .position(|row| row.contains("<details>"))
+            .unwrap();
+        assert_eq!(
+            summary,
+            details + 1,
+            "an HTML block keeps its rows:\n{text}"
         );
     }
 
