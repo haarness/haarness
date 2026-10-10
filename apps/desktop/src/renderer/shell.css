@@ -728,13 +728,16 @@ html[data-order-dragging] * {
 .workspace-tabs::-webkit-scrollbar {
   display: none;
 }
+/* Tabs share the strip evenly: each grows toward its own title's width (at
+   most 190px), so a short title never gets crushed while long ones stay
+   wide. Below 96px each, the strip scrolls. */
 .workspace-tab {
   display: flex;
   align-items: center;
   height: 26px;
-  max-width: 190px;
-  flex: 0 1 auto;
-  min-width: 76px;
+  max-width: max-content;
+  flex: 1 1 0;
+  min-width: 96px;
   border-radius: var(--r-md);
   padding-inline-end: 2px;
 }
@@ -748,6 +751,7 @@ html[data-order-dragging] * {
   border: 0;
   min-height: 0;
   height: 26px;
+  max-width: 170px;
   font-size: var(--ui-sm);
   color: var(--muted);
   padding-block: 0;

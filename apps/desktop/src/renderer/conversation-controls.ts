@@ -3,7 +3,7 @@ import { t } from "./i18n";
 import type { Item, Thread } from "@haarness/sdk";
 import { useApp } from "./state";
 import { lastUserMessage } from "./conversation-history";
-import type { SearchEntry } from "./search";
+import { shortcutLabel, type SearchEntry } from "./search";
 
 export const historyCommands = [
   { name: "undo", description: "Undo the last turn and restore its prompt" },
@@ -93,7 +93,7 @@ export function createConversationControls(props: {
             group: "Conversation actions",
             name: t("Find in conversation"),
             icon: "search",
-            hint: "Mod+F",
+            hint: shortcutLabel("Mod+F", app.state.platform),
             action: props.openFind,
           },
           ...(!thread()!.isSubagent

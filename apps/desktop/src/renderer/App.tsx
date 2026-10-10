@@ -717,7 +717,7 @@ export function App() {
             >
               <Icon name="compose" size="md" />
               {t("New chat")}
-              <kbd>
+              <kbd dir="ltr">
                 {shortcutLabel(
                   state.preferences.shortcuts.new,
                   state.platform,
@@ -729,7 +729,7 @@ export function App() {
             <button class="nav-row" aria-label={t("Search")} onClick={openPalette}>
               <Icon name="search" size="md" />
               {t("Search")}
-              <kbd>
+              <kbd dir="ltr">
                 {shortcutLabel(
                   state.preferences.shortcuts.palette,
                   state.platform,
@@ -879,7 +879,11 @@ export function App() {
                                 shortcut stays out of the tab order. */}
                           <span
                             class="session-bar-name"
-                            title={t("Double-click to rename")}
+                            title={
+                              (selected()!.title || t("Untitled session")) +
+                              "\n" +
+                              t("Double-click to rename")
+                            }
                             onDblClick={() =>
                               app.run(() => renameSession(app, selected()!))
                             }
@@ -909,6 +913,10 @@ export function App() {
                             <button
                               role="tab"
                               aria-selected={id === state.selected}
+                              title={
+                                state.threads.find((thread) => thread.id === id)
+                                  ?.title
+                              }
                               onClick={() => app.run(() => app.choose(id))}
                             >
                               <Show when={running(id)}>
@@ -1056,13 +1064,11 @@ export function App() {
                           {t(item.name)}
                           <small>{t(item.detail)}</small>
                         </span>
-                        <kbd>
-                          {state.preferences.shortcuts[item.shortcut]
-                            ?.replace(
-                              "Mod",
-                              state.platform === "darwin" ? "⌘" : "Ctrl",
-                            )
-                            .replaceAll("+", " ")}
+                        <kbd dir="ltr">
+                          {shortcutLabel(
+                            state.preferences.shortcuts[item.shortcut] ?? "",
+                            state.platform,
+                          )}
                         </kbd>
                       </button>
                     )}
