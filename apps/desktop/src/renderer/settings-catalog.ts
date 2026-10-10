@@ -105,3 +105,8 @@ export const shortcutTitles: Record<string, string> = {
   agentNext: "Next agent",
   agentPrev: "Previous agent",
 };
+/** Composer keys work only in the message box; Tab elsewhere moves focus. */
+export const shortcutDescriptions: Record<string, string> = {
+  agentNext: "While the message box has focus",
+  agentPrev: "While the message box has focus",
+};

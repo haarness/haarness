@@ -229,6 +229,12 @@ textarea:focus-visible,
 .select-trigger:focus-visible {
   outline: none;
 }
+/* A text field shows where typing goes, from the pointer or the keyboard: its
+   hairline darkens to the muted text colour, at least 3:1 on every surface. */
+input:not([type="checkbox"], [type="range"]):focus,
+textarea:focus {
+  border-color: var(--muted);
+}
 input[type="checkbox"] {
   appearance: none;
   width: 15px;

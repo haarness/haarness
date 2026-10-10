@@ -263,6 +263,67 @@ test("audit: Settings owns initial focus, traps keyboard, restores trigger and n
   await page.keyboard.press("Escape"); await expect(settings).toHaveCount(0); await expect(button(page, "Settings")).toBeFocused();
 });
 
+test("audit: Tab moves focus everywhere, agent keys stay in the message box and dialogs start on their field", async ({ desktop: { page } }) => {
+  const agent = page.getByRole("combobox", { name: "Agent", exact: true });
+  const message = page.getByRole("textbox", { name: "Message", exact: true });
+  // The focused control's name, and whether focus moved since the last call.
+  const focused = () => page.evaluate(() => {
+    const state = window as unknown as { lastFocus?: Element | null };
+    const element = document.activeElement, moved = element !== state.lastFocus;
+    state.lastFocus = element;
+    return { moved, name: element?.getAttribute("aria-label") ?? element?.textContent?.trim() };
+  });
+  await message.fill(' !tool bash {"command":"echo keyboard"}');
+  await message.press("Enter");
+  await expect(button(page, "Allow once")).toBeVisible();
+  // From the sidebar, Tab walks every control down to the approval dock and
+  // never touches the chat's agent.
+  await button(page, "Search").focus();
+  await focused();
+  const visited: { moved: boolean; name?: string | null }[] = [];
+  for (let i = 0; i < 40 && visited.at(-1)?.name !== "Allow once"; i++) {
+    await page.keyboard.press("Tab");
+    visited.push(await focused());
+  }
+  expect(visited.at(-1)?.name).toBe("Allow once");
+  expect(visited.filter((step) => !step.moved)).toEqual([]);
+  await expect(agent).toHaveAttribute("data-value", "build");
+  await page.keyboard.press("Shift+Tab");
+  await expect(button(page, "Allow once")).not.toBeFocused();
+  await button(page, "Allow once").click();
+  await expect(page.locator(".transcript")).toContainText("keyboard");
+  // Tab leaves the message box; the agent chords switch and are announced.
+  await message.focus();
+  await page.keyboard.press("Tab");
+  await expect(message).not.toBeFocused();
+  await expect(agent).toHaveAttribute("data-value", "build");
+  await message.focus();
+  await page.keyboard.press("ControlOrMeta+Period");
+  await expect(agent).toHaveAttribute("data-value", "plan");
+  await expect(page.locator(".composer [role=status]").filter({ hasText: "Agent: plan" })).toHaveCount(1);
+  await expect(message).toBeFocused();
+  await page.keyboard.press("ControlOrMeta+Shift+Period");
+  await expect(agent).toHaveAttribute("data-value", "build");
+  await button(page, "Search").focus();
+  await page.keyboard.press("ControlOrMeta+Period");
+  await expect(agent).toHaveAttribute("data-value", "build");
+  // Rename opens on its field with the title selected and refuses a blank one.
+  await button(page, "Session actions").click();
+  await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
+  const rename = page.getByRole("dialog", { name: "Rename session", exact: true });
+  const title = rename.getByRole("textbox", { name: "Title", exact: true });
+  await expect(title).toBeFocused();
+  expect(await title.evaluate((input: HTMLInputElement) => input.selectionEnd! - input.selectionStart!)).toBe((await title.inputValue()).length);
+  await page.keyboard.type("   ");
+  await page.keyboard.press("Enter");
+  await expect(rename.getByRole("alert")).toHaveText("Enter a title.");
+  await expect(title).toBeFocused();
+  await title.fill("  Keyboard proof  ");
+  await page.keyboard.press("Enter");
+  await expect(rename).toHaveCount(0);
+  await expect(page.locator(".sidebar").getByRole("button", { name: "Keyboard proof", exact: true })).toBeVisible();
+});
+
 test("audit: unsent image drafts survive reload and project switching and removal stays removed", async ({ desktop }) => {
   const { app, page, a } = desktop;
   await page.getByRole("textbox", { name: "Message", exact: true }).fill("Retained draft");

@@ -121,10 +121,20 @@ export function matchesShortcut(
     if (wants("meta") !== event.metaKey) return false;
   }
   const pressed = event.key.toLowerCase();
-  // The recorder stores letters and digits by physical key (`event.code`):
-  // with Option held macOS reports ⌥Z as "Ω", which never equals "z".
-  const physical = /^(?:Key|Digit)(.)$/.exec(event.code ?? "")?.[1]?.toLowerCase();
+  // The recorder stores keys by physical key (`event.code`): with Option held
+  // macOS reports ⌥Z as "Ω", and Shift turns "." into ">".
+  const physical = physicalKey(event.code)?.toLowerCase();
   return pressed === key || physical === key || (key === "space" && event.key === " ");
+}
+
+const punctuation: Record<string, string> = {
+  Period: ".", Comma: ",", Slash: "/", Semicolon: ";", Backslash: "\\",
+  BracketLeft: "[", BracketRight: "]", Minus: "-", Equal: "=", Backquote: "`",
+};
+/** The shortcut key for a physical key (`event.code`): a letter, a digit or a
+ * punctuation key, whatever Shift or Option turn it into. */
+export function physicalKey(code = "") {
+  return /^(?:Key|Digit)(.)$/.exec(code)?.[1] ?? punctuation[code];
 }
 
 export function shortcutLabel(value: string, platform: string) {

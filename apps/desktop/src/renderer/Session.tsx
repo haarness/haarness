@@ -214,48 +214,44 @@ export function Session() {
     });
   }
   /* Step through the conversation agents, as Tab does in the TUI. The list
-     wraps, so pressing again walks the whole set and returns. */
+     wraps, so pressing again walks the whole set and returns. Focus stays in
+     the message box, so the change is announced as well as shown. */
+  const [cycledAgent, setCycledAgent] = createSignal("");
+  let cycledTimer: ReturnType<typeof setTimeout> | undefined;
+  onCleanup(() => clearTimeout(cycledTimer));
   function cycleAgent(step: 1 | -1) {
     const available = conversationAgents(state.agents);
     if (available.length < 2) return;
     const index = available.findIndex((agent) => agent.id === selectedAgent());
     const next = available[(index + step + available.length) % available.length];
-    if (next && next.id !== selectedAgent()) chooseAgent(next.id);
+    if (!next || next.id === selectedAgent()) return;
+    chooseAgent(next.id);
+    setCycledAgent(next.id);
+    // Clear it again so landing on the same agent later is announced too.
+    clearTimeout(cycledTimer);
+    cycledTimer = setTimeout(() => setCycledAgent(""), 4000);
   }
-  /* The agent keys work from anywhere in the chat, not only the composer, as
-     in the TUI. They yield to whatever claimed the key first — the mention and
-     slash popovers, menus, the editor and the terminal all prevent default —
-     and stay out of dialogs, where Tab has to keep moving focus. */
-  onMount(() => {
-    const keys = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.isComposing || event.repeat) return;
-      if (document.querySelector("dialog[open]")) return;
-      const target = event.target instanceof Element ? event.target : null;
+  /* The agent keys belong to the message box, not the window: anywhere else
+     Tab and Shift+Tab have to keep moving focus. Popovers in the box claim
+     their keys first by preventing default. */
+  function agentKey(event: KeyboardEvent) {
+    if (controls.busy()) return false;
+    const shortcuts = state.preferences.shortcuts;
+    for (const [name, step] of [
+      ["agentPrev", -1],
+      ["agentNext", 1],
+    ] as const) {
       if (
-        target?.closest(
-          ".cm-editor, .xterm, [role='menu'], [role='listbox'], .select-popover, .action-menu",
-        )
-      )
-        return;
-      if (controls.busy()) return;
-      const shortcuts = state.preferences.shortcuts;
-      for (const [name, step] of [
-        ["agentPrev", -1],
-        ["agentNext", 1],
-      ] as const) {
-        if (
-          shortcuts[name] &&
-          matchesShortcut(event, shortcuts[name], state.platform)
-        ) {
-          event.preventDefault();
-          cycleAgent(step);
-          return;
-        }
+        shortcuts[name] &&
+        matchesShortcut(event, shortcuts[name], state.platform)
+      ) {
+        event.preventDefault();
+        if (!event.repeat) cycleAgent(step);
+        return true;
       }
-    };
-    document.addEventListener("keydown", keys);
-    onCleanup(() => document.removeEventListener("keydown", keys));
-  });
+    }
+    return false;
+  }
   const selectedModel = createMemo(() =>
     selectModel({
       providers: state.providers,
@@ -483,6 +479,27 @@ export function Session() {
       resize.disconnect();
       cancelAnimationFrame(scrollFrame);
     });
+  });
+  /* Toasts sit in the window's bottom corner, where the composer keeps Send,
+     Stop and a waiting approval; lift them above that dock. Its top moves when
+     the dock grows and when the window or the terminal resizes the chat. */
+  let dock: HTMLDivElement | undefined;
+  const liftToasts = () => {
+    const root = document.documentElement.style;
+    if (!dock?.isConnected) return root.removeProperty("--composer-clearance");
+    const clearance = window.innerHeight - dock.getBoundingClientRect().top;
+    root.setProperty("--composer-clearance", Math.max(0, Math.round(clearance)) + "px");
+  };
+  const dockResize = new ResizeObserver(liftToasts);
+  const observeDock = (element: HTMLDivElement) => {
+    dock = element;
+    dockResize.disconnect();
+    dockResize.observe(element);
+    if (element.parentElement) dockResize.observe(element.parentElement);
+  };
+  onCleanup(() => {
+    dockResize.disconnect();
+    document.documentElement.style.removeProperty("--composer-clearance");
   });
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
   let draftSave: { key: string; text: string } | undefined;
@@ -1548,7 +1565,7 @@ export function Session() {
         </Show>
       </div>
       <Show when={editable() || pending() || !follow() || todos().length}>
-        <div class="composer-area">
+        <div class="composer-area" ref={observeDock}>
           <Show when={empty()}>
             <div class="composer-project">
               <ProjectPicker />
@@ -1729,6 +1746,7 @@ export function Session() {
                       return;
                     }
                   }
+                  if (agentKey(event)) return;
                   // Leaving a queued-message edit never stops the running work.
                   if (event.key === "Escape" && queue.editing()) {
                     event.preventDefault();
@@ -1872,6 +1890,9 @@ export function Session() {
                         }),
                       )}
                     />
+                    <span class="sr-only" role="status">
+                      {cycledAgent() && t("Agent: {agent}", { agent: cycledAgent() })}
+                    </span>
                     <Show
                       when={selectedModel()}
                       fallback={

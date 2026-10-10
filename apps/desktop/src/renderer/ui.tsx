@@ -118,6 +118,21 @@ export function dismissOnBackdrop(close: () => void) {
   };
 }
 
+/**
+ * Start a form on its first field, not on the header's Close button that the
+ * browser would pick, with the text selected so typing replaces it. A field
+ * marked `autofocus` keeps its focus; a form without fields starts on
+ * `fallback`.
+ */
+export function focusFirstField(dialog: HTMLElement, fallback?: HTMLElement | null) {
+  if (dialog.querySelector("[autofocus]")) return;
+  const field =
+    dialog.querySelector<HTMLElement>(
+      "fieldset :is(input:not([type=hidden]), textarea, button):not(:disabled, [readonly])",
+    ) ?? fallback;
+  field?.focus();
+  if (field instanceof HTMLInputElement && field.type !== "checkbox") field.select();
+}
 export function Forms() {
   let dialog!: HTMLDialogElement;
   return (
@@ -132,7 +147,12 @@ export function Forms() {
           setForm(null);
           current.resolve(value);
         };
-        onMount(() => dialog.showModal());
+        onMount(() => {
+          dialog.showModal();
+          // A confirmation has no field: start on Cancel, so Enter never
+          // removes or deletes anything by accident.
+          focusFirstField(dialog, dialog.querySelector<HTMLElement>("footer button"));
+        });
         return (
           <dialog
             ref={dialog}
@@ -146,6 +166,7 @@ export function Forms() {
                 event.preventDefault();
                 if (busy()) return;
                 const input = Object.fromEntries(new FormData(event.currentTarget).entries()) as Record<string, string>;
+                const focused = document.activeElement;
                 setError("");
                 setBusy(true);
                 try {
@@ -154,6 +175,10 @@ export function Forms() {
                   finish(input);
                 } catch (error) {
                   setError(error instanceof Error ? error.message : String(error));
+                  setBusy(false);
+                  // Disabling the form while it saved dropped focus; give it
+                  // back so the field can be corrected straight away.
+                  if (focused instanceof HTMLElement && dialog.contains(focused)) focused.focus();
                 } finally {
                   setBusy(false);
                 }

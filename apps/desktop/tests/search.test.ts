@@ -2,10 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   matchesShortcut,
+  physicalKey,
   searchEntries,
   shortcutLabel,
   type SearchEntry,
 } from "../src/renderer/search";
+import { defaults, migrateAgentKeys } from "../src/shared";
 const entry = (
   key: string,
   name: string,
@@ -85,4 +87,28 @@ test("shortcut matching requires every modifier to agree", () => {
   assert.equal(matchesShortcut(optionZ, "Mod+Alt+Z", "darwin"), true);
   assert.equal(matchesShortcut(optionZ, "Mod+Alt+X", "darwin"), false);
   assert.equal(matchesShortcut({ ...key("¡", { altKey: true }), code: "Digit1" }, "Alt+1", "darwin"), true);
+
+  // Shift turns "." into ">", so punctuation also matches by physical key.
+  const shiftPeriod = { ...key(">", { metaKey: true, shiftKey: true }), code: "Period" };
+  assert.equal(matchesShortcut(shiftPeriod, "Mod+Shift+.", "darwin"), true);
+  assert.equal(matchesShortcut(shiftPeriod, "Mod+.", "darwin"), false);
+  assert.equal(matchesShortcut({ ...key(".", { ctrlKey: true }), code: "Period" }, "Mod+.", "win32"), true);
+  assert.equal(physicalKey("Period"), ".");
+  assert.equal(physicalKey("KeyE"), "E");
+  assert.equal(physicalKey("Tab"), undefined);
+});
+
+test("agent keys default to chords so Tab keeps moving focus", () => {
+  assert.equal(defaults.shortcuts.agentNext, "Mod+.");
+  assert.equal(defaults.shortcuts.agentPrev, "Mod+Shift+.");
+  for (const value of Object.values(defaults.shortcuts)) assert.doesNotMatch(value, /^(Shift\+)?Tab$/);
+  // Saved preferences still holding the old Tab defaults move to the chords.
+  const old = { ...defaults.shortcuts, agentNext: "Tab", agentPrev: "Shift+Tab" };
+  assert.deepEqual(migrateAgentKeys(old), defaults.shortcuts);
+  // A key someone chose is kept, and so is Tab when its chord is taken.
+  const custom = { ...defaults.shortcuts, agentNext: "Ctrl+Space", agentPrev: "Shift+Tab" };
+  assert.deepEqual(migrateAgentKeys(custom), { ...custom, agentPrev: "Mod+Shift+." });
+  const taken = { ...old, palette: "Mod+." };
+  assert.deepEqual(migrateAgentKeys(taken), { ...taken, agentPrev: "Mod+Shift+." });
+  assert.equal(migrateAgentKeys(defaults.shortcuts), defaults.shortcuts);
 });

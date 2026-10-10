@@ -1,5 +1,5 @@
 import { createSettingsSearch } from "./settings-search";
-import { searchEntries, shortcutLabel } from "./search";
+import { physicalKey, searchEntries, shortcutLabel } from "./search";
 import { SettingRow as Row } from "./SettingRow";
 import { UsageStatisticsSetting } from "./UsageStatistics";
 import { BrowserSettings } from "./BrowserSettings";
@@ -38,6 +38,7 @@ import { Button, Icon, ask, confirm, stringify, Empty } from "./ui";
 import {
   settingsSections as sections,
   settingsTitles as titles,
+  shortcutDescriptions,
   shortcutTitles,
 } from "./settings-catalog";
 export function Settings() {
@@ -548,7 +549,11 @@ function Shortcuts() {
       </p>
       <For each={Object.entries(app.state.preferences.shortcuts)}>
         {([name, value]) => (
-          <Row title={shortcutTitles[name] ?? name} target={"shortcut:" + name}>
+          <Row
+            title={shortcutTitles[name] ?? name}
+            target={"shortcut:" + name}
+            description={shortcutDescriptions[name]}
+          >
             <kbd class="shortcut-preview" aria-hidden="true">
               {shortcutLabel(value, app.state.platform)}
             </kbd>
@@ -562,9 +567,8 @@ function Shortcuts() {
                 if ((!mod && !event.altKey) || ["Meta", "Control", "Shift", "Alt"].includes(event.key))
                   return;
                 event.preventDefault();
-                const key = /^(Key|Digit)/.test(event.code)
-                  ? event.code.replace(/^(Key|Digit)/, "")
-                  : event.key.length === 1 ? event.key.toUpperCase() : event.key;
+                const key = physicalKey(event.code)
+                  ?? (event.key.length === 1 ? event.key.toUpperCase() : event.key);
                 event.currentTarget.value = [
                   mod && "Mod",
                   event.altKey && "Alt",
