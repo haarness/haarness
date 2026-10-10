@@ -324,11 +324,7 @@ fn chatgpt_alias(model: &str) -> &str {
 fn chatgpt_fallback_models(preferred: &[ModelInfo]) -> Vec<ModelInfo> {
     preferred
         .iter()
-        .filter(|model| {
-            model.id.starts_with("gpt-6")
-                || model.id.starts_with("gpt-5.6")
-                || model.id == "gpt-5.5"
-        })
+        .filter(|model| model.id.starts_with("gpt-6") || model.id.starts_with("gpt-5.6"))
         .cloned()
         .collect()
 }
@@ -396,6 +392,7 @@ fn chatgpt_catalog(body: &Value) -> Option<ChatGptCatalog> {
                     output: 0.0,
                     cache_read: 0.0,
                     cache_write: 0.0,
+                    long_context: None,
                 }),
             },
         );
@@ -618,6 +615,9 @@ impl ModelProvider for OpenAiProvider {
             body["reasoning"] = json!({"effort": effort, "summary": "auto"});
         }
         let parameters = request.parameters;
+        if let Some(key) = &parameters.cache_key {
+            body["prompt_cache_key"] = json!(key);
+        }
         // The ChatGPT transport rejects output limits and sampling controls
         // outright ("Unsupported parameter"); they only apply to the public API.
         if !subscription {
@@ -645,6 +645,11 @@ impl ModelProvider for OpenAiProvider {
                 }
                 if let Some(residency) = residency {
                     request = request.header("x-openai-internal-codex-residency", residency);
+                }
+                // The backend routes a conversation to its cache by this header;
+                // `prompt_cache_key` alone hits only now and then.
+                if let Some(key) = &parameters.cache_key {
+                    request = request.header("session_id", key);
                 }
                 request
             }
@@ -744,7 +749,7 @@ fn gpt5_minor(id: &str) -> Option<u32> {
 
 /// Reasoning tiers the public Responses API accepts per OpenAI model family,
 /// lightest first. GPT-5.1 replaced `minimal` with `none`, 5.2 added `xhigh`,
-/// 5.6 added `max`, GPT-6 Astra dropped `none`; Sol/Luna retain it. Codex, Pro and chat variants keep
+/// 5.6 added `max`, GPT-6 Astra and GPT-6.1 Sol dropped `none`; GPT-6 Sol/Luna retain it. Codex, Pro and chat variants keep
 /// their own narrower sets. A request outside the set is a 400.
 fn openai_reasoning_efforts(id: &str) -> Vec<&'static str> {
     let lower = id.to_ascii_lowercase();
@@ -817,6 +822,7 @@ fn model(id: &str, reasoning: bool) -> ModelInfo {
 }
 fn preferred_models() -> Vec<ModelInfo> {
     vec![
+        model("gpt-6.1-sol", true),
         model("gpt-6-astra", true),
         model("gpt-6-sol", true),
         model("gpt-6-luna", true),
@@ -1021,6 +1027,11 @@ mod tests {
             openai_reasoning_efforts("gpt-6-astra"),
             ["low", "medium", "high", "xhigh", "max"]
         );
+        // Probed 2026-10-10: GPT-6.1 Sol answers 400 to `none` and `temperature`.
+        assert_eq!(
+            openai_reasoning_efforts("gpt-6.1-sol"),
+            ["low", "medium", "high", "xhigh", "max"]
+        );
         assert_eq!(
             openai_reasoning_efforts("gpt-5.6-luna"),
             ["none", "low", "medium", "high", "xhigh", "max"]
@@ -1190,10 +1201,12 @@ mod tests {
         // serve are offered.
         let fallback = provider.info().models;
         assert!(fallback.iter().any(|model| model.id == "gpt-6-astra"));
+        assert_eq!(fallback[0].id, "gpt-6.1-sol");
+        // GPT-5.4 never ran on ChatGPT; GPT-5.5 retires there on 2026-10-14.
         assert!(
             fallback
                 .iter()
-                .all(|model| !model.id.starts_with("gpt-5.4"))
+                .all(|model| !model.id.starts_with("gpt-5.4") && model.id != "gpt-5.5")
         );
 
         provider.refresh_models(true).await;
@@ -1237,6 +1250,7 @@ mod tests {
                 max_output_tokens: Some(500),
                 temperature: Some(0.2),
                 top_p: Some(0.9),
+                cache_key: Some("thread-1".into()),
                 ..haarness_core::RequestParameters::default()
             },
             output_schema: None,
@@ -1275,6 +1289,9 @@ mod tests {
                     && request.get("top_p").is_none(),
                 "the ChatGPT transport rejects sampling and output limits: {request}"
             );
+            // Without both the ChatGPT backend rarely reuses a prompt prefix.
+            assert_eq!(request["prompt_cache_key"], "thread-1");
+            assert_eq!(request["_session_id_header"], "thread-1");
         }
         drop(requests);
         let _ = std::fs::remove_dir_all(root);
@@ -1356,8 +1373,14 @@ mod tests {
     async fn responses(
         State(state): State<FixtureState>,
         headers: HeaderMap,
-        Json(request): Json<Value>,
+        Json(mut request): Json<Value>,
     ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+        if let Some(session) = headers
+            .get("session_id")
+            .and_then(|value| value.to_str().ok())
+        {
+            request["_session_id_header"] = json!(session);
+        }
         state.requests.lock().push(request);
         state.auth_headers.lock().push((
             headers

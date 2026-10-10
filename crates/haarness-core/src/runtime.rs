@@ -2019,7 +2019,11 @@ impl AgentRuntime {
                     messages,
                     tools: selection.advertised,
                     reasoning_effort: None,
-                    parameters: crate::RequestParameters::default(),
+                    // Same prefix as the chat, so the same prompt cache.
+                    parameters: crate::RequestParameters {
+                        cache_key: Some(thread.id.to_string()),
+                        ..crate::RequestParameters::default()
+                    },
                     output_schema: None,
                 },
             )
@@ -5959,6 +5963,9 @@ impl RunnerTask {
                             .reasoning_effort
                             .clone()
                             .or_else(|| self.config.default_reasoning_effort.clone())
+                            .map(|effort| {
+                                supported_reasoning_effort(&provider_models, &model, effort)
+                            })
                             .or_else(|| {
                                 default_visible_reasoning_effort(
                                     &provider_models,
@@ -5967,7 +5974,10 @@ impl RunnerTask {
                                 )
                             })
                     },
-                    parameters: crate::RequestParameters::default(),
+                    parameters: crate::RequestParameters {
+                        cache_key: Some(self.thread.id.to_string()),
+                        ..crate::RequestParameters::default()
+                    },
                     output_schema: self.output_schema.clone(),
                 };
                 if let Some(hooks) = &self.hooks {
@@ -9249,15 +9259,27 @@ fn cost_usd(
     #[allow(clippy::cast_precision_loss)] // billing display, not accounting
     pricing.map(|pricing| {
         let per = 1_000_000.0;
+        // A long prompt moves the whole request to the long-context rates.
+        let (input, output, cache_read, cache_write) = match pricing.long_context {
+            Some(tier) if input_tokens > tier.above_input_tokens => {
+                (tier.input, tier.output, tier.cache_read, tier.cache_write)
+            }
+            _ => (
+                pricing.input,
+                pricing.output,
+                pricing.cache_read,
+                pricing.cache_write,
+            ),
+        };
         // input_tokens counts the whole prompt; the cached parts are charged
         // at their own rates instead of the input rate, never both.
         let uncached = input_tokens
             .saturating_sub(cache_read_tokens)
             .saturating_sub(cache_write_tokens);
-        uncached as f64 / per * pricing.input
-            + output_tokens as f64 / per * pricing.output
-            + cache_read_tokens as f64 / per * pricing.cache_read
-            + cache_write_tokens as f64 / per * pricing.cache_write
+        uncached as f64 / per * input
+            + output_tokens as f64 / per * output
+            + cache_read_tokens as f64 / per * cache_read
+            + cache_write_tokens as f64 / per * cache_write
     })
 }
 
@@ -9301,6 +9323,42 @@ fn default_visible_reasoning_effort(
         .iter()
         .any(|effort| effort == "medium")
         .then(|| "medium".to_owned())
+}
+
+/// A chat keeps its effort when it switches model, and configured defaults name
+/// any level, but providers answer 400 to a level a model lacks (`none` on
+/// GPT-6.1 Sol, `minimal` on Claude). Use the nearest level the model lists,
+/// the stronger one on a tie. Models that list no levels keep the request.
+fn supported_reasoning_effort(
+    models: &[haarness_protocol::ModelInfo],
+    requested: &str,
+    effort: String,
+) -> String {
+    let Some(metadata) =
+        model_metadata(models, requested).filter(|model| !model.reasoning_efforts.is_empty())
+    else {
+        return effort;
+    };
+    if metadata.reasoning_efforts.contains(&effort) {
+        return effort;
+    }
+    let rank = |level: &str| {
+        haarness_protocol::REASONING_EFFORTS
+            .iter()
+            .position(|known| *known == level)
+            // `ultra` and other levels beyond `max` rank as the strongest.
+            .unwrap_or(haarness_protocol::REASONING_EFFORTS.len())
+    };
+    let wanted = rank(&effort);
+    metadata
+        .reasoning_efforts
+        .iter()
+        .min_by_key(|level| {
+            let rank = rank(level);
+            (rank.abs_diff(wanted), std::cmp::Reverse(rank))
+        })
+        .cloned()
+        .unwrap_or(effort)
 }
 
 /// Resolve the symbolic Ultracode choice at execution time. The model catalog
@@ -10985,12 +11043,44 @@ mod tests {
     }
 
     #[test]
+    fn a_level_the_model_lacks_falls_back_to_the_nearest_one() {
+        let mut sol = model_info("gpt-6.1-sol", 1_050_000);
+        sol.reasoning_efforts = ["low", "medium", "high", "xhigh", "max"]
+            .map(str::to_owned)
+            .to_vec();
+        let mut haiku = model_info("claude-haiku-4-5", 200_000);
+        haiku.reasoning_efforts = ["low", "medium", "high"].map(str::to_owned).to_vec();
+        let mut pro = model_info("gpt-5-pro", 400_000);
+        pro.reasoning_efforts = vec!["high".to_owned()];
+        let models = vec![sol, haiku, pro, model_info("custom-model", 100_000)];
+        for (model, requested, expected) in [
+            ("gpt-6.1-sol", "none", "low"),
+            ("gpt-6.1-sol", "minimal", "low"),
+            ("gpt-6.1-sol", "max", "max"),
+            ("gpt-6.1-sol", "ultra", "max"),
+            ("claude-haiku-4-5", "xhigh", "high"),
+            ("claude-haiku-4-5", "max", "high"),
+            ("gpt-5-pro", "low", "high"),
+            // No advertised levels: the provider decides.
+            ("custom-model", "minimal", "minimal"),
+            ("unknown", "none", "none"),
+        ] {
+            assert_eq!(
+                super::supported_reasoning_effort(&models, model, requested.to_owned()),
+                expected,
+                "{model} {requested}"
+            );
+        }
+    }
+
+    #[test]
     fn cost_math_uses_per_million_pricing() {
         let pricing = haarness_protocol::ModelPricing {
             input: 3.0,
             output: 15.0,
             cache_read: 0.3,
             cache_write: 3.75,
+            long_context: None,
         };
         // 3M prompt tokens of which 2M were cache reads: 1M at the input rate.
         let cost = super::cost_usd(Some(pricing), 3_000_000, 100_000, 2_000_000, 0).unwrap();
@@ -10999,6 +11089,24 @@ mod tests {
         let cost = super::cost_usd(Some(pricing), 1_000_000, 0, 0, 1_000_000).unwrap();
         assert!((cost - 3.75).abs() < 1e-9, "{cost}");
         assert!(super::cost_usd(None, 1, 1, 0, 0).is_none());
+        // Claude Haiku 5.5: a prompt over 100K tokens is priced 5x, cache included.
+        let haiku = haarness_protocol::ModelPricing {
+            input: 0.1,
+            output: 0.5,
+            cache_read: 0.01,
+            cache_write: 0.125,
+            long_context: Some(haarness_protocol::LongContextPricing {
+                above_input_tokens: 100_000,
+                input: 0.5,
+                output: 2.5,
+                cache_read: 0.05,
+                cache_write: 0.625,
+            }),
+        };
+        let short = super::cost_usd(Some(haiku), 100_000, 1_000_000, 0, 0).unwrap();
+        assert!((short - (0.01 + 0.5)).abs() < 1e-9, "{short}");
+        let long = super::cost_usd(Some(haiku), 200_000, 1_000_000, 150_000, 50_000).unwrap();
+        assert!((long - (0.0075 + 0.03125 + 2.5)).abs() < 1e-9, "{long}");
     }
 
     #[test]

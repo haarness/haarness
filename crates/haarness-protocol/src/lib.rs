@@ -675,9 +675,26 @@ pub struct ModelInfo {
 }
 
 /// USD per million tokens.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelPricing {
+    pub input: f64,
+    pub output: f64,
+    #[serde(default)]
+    pub cache_read: f64,
+    #[serde(default)]
+    pub cache_write: f64,
+    /// Rates for a whole request whose prompt is longer than
+    /// `aboveInputTokens` (e.g. Claude Haiku 5.5 over 100K, GPT-6 over 272K).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub long_context: Option<LongContextPricing>,
+}
+
+/// USD per million tokens once a prompt exceeds `above_input_tokens`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LongContextPricing {
+    pub above_input_tokens: u64,
     pub input: f64,
     pub output: f64,
     #[serde(default)]
@@ -1073,6 +1090,7 @@ pub struct ApiError {
         ProviderInfo,
         ModelInfo,
         ModelPricing,
+        LongContextPricing,
         AgentProfile,
         SkillInfo,
         McpServerInfo,

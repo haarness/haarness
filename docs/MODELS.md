@@ -44,6 +44,28 @@ models are grouped by provider and family, with numeric generations newest first
 and larger variants before smaller ones. Existing curated provider order and TUI
 favorites/recents retain priority; dated snapshots follow the aliases.
 
+## API and metadata update: 2026-10-10
+
+New since the last update: Claude Sonnet 5.5 and Haiku 5.5, GPT-6.1 Sol, Gemini
+Nano Banana 2.1, Mistral Large 4 and Kimi K3. Each fact below was checked
+against the provider's docs and, where a request could settle it, a direct API
+probe. The record and the live results are in
+[the model-support audit](audits/2026-10-10-model-support.md).
+
+| Provider | Change |
+| --- | --- |
+| Anthropic | Sonnet 5.5 ($2/$10, cache read $0.10) and Haiku 5.5 ($0.10/$0.50) are priced and in the fallback list. Haiku 5.5 is an adaptive-only family: before the live catalog loads it no longer gets budget thinking or `temperature`, both of which it answers with a 400. Prompt-bound thinking (`block_binding: drop_block`) now also covers Sonnet and Haiku 5.5. Haiku and Sonnet 4.5, which take a thinking budget but no `effort`, offer low/medium/high again instead of no reasoning at all. |
+| OpenAI | GPT-6.1 Sol is first in the fallback list; its public API accepts low to max, not `none` or `minimal`, and rejects `temperature`. GPT-5.5 left the ChatGPT fallback (it retires there on 2026-10-14; the API keeps it). Every request carries `prompt_cache_key`, and ChatGPT requests also `session_id`: without them the ChatGPT backend cached nothing between rounds. GPT-5.6 Sol is priced at OpenAI's current $4/$20 (OpenRouter still lists $2/$10). "Pro" is `reasoning.mode`, not a model id. |
+| Gemini | Image models named after the brand (`gemini-nano-banana-2.1`) and the robotics and computer-use previews stay out of the chat picker, as on the Cloud router. Forced function calling (workflow structured output) no longer sends `maxItems`, which Gemini's decoder rejects with "invalid argument" over complex items; the runtime still validates the full schema. |
+| Compatible | Mistral Large 4 (`mistral-large-4-0`): name, 1M context, images, `none`/`high` effort, list price. Moonshot's fallback list moved from the retired `kimi-k2.5`/`kimi-k2-thinking` to `kimi-k3`/`kimi-k2.6`. Claude through a Haarness router returns structured output as native JSON (`response_format`) because Opus 5.5, Sonnet 5.5 and Fable 5.1 refuse a forced tool choice. |
+| All | A chat keeps its effort when it switches model; a level the new model lacks now becomes the nearest one it lists instead of a provider 400. Prices can carry a long-context tier (`pricing.longContext`): Haiku 5.5 over 100K, GPT-6/5.6/5.5/5.4 over 272K, Gemini 3.1/2.5 Pro over 200K and Grok 4.7 from 200K cost more for the whole request, and turn costs follow it. OpenRouter and Haarness Cloud tiers (`pricing.overrides`) are read too. Routed ids such as `openai/o3` fall back to the bare model's name. |
+
+`scripts/check-model-prices.py` now also compares cache prices and long-context
+tiers, and lists where the provider's own page overrides OpenRouter.
+`scripts/test-models-live.py --scenarios tools,reasoning,image,schema,cost,fallback`
+runs the scenarios used for this update against any connected provider,
+Haarness Cloud included.
+
 ## API and metadata update: 2026-09-23
 
 | Provider | Change |

@@ -31,7 +31,12 @@ pub fn model_display_name(id: &str, supplied: Option<&str>) -> String {
     if let Some(name) = supplied.filter(|name| !name.trim().is_empty() && *name != id) {
         return name.to_owned();
     }
-    NAMES.get(id).cloned().unwrap_or_else(|| id.to_owned())
+    // Routers name a model `provider/model`; the bare id may be known.
+    NAMES
+        .get(id)
+        .or_else(|| id.rsplit_once('/').and_then(|(_, model)| NAMES.get(model)))
+        .cloned()
+        .unwrap_or_else(|| id.to_owned())
 }
 #[cfg(test)]
 mod tests {
@@ -39,6 +44,16 @@ mod tests {
     #[test]
     fn shared_names_preserve_live_names_and_unknown_ids() {
         assert_eq!(model_display_name("gpt-6-astra", None), "GPT-6 Astra");
+        // Routed ids fall back to the bare model's name; unknown ones stay intact.
+        assert_eq!(model_display_name("openai/o3-pro", None), "o3 Pro");
+        assert_eq!(
+            model_display_name("router/openai/gpt-6.1-sol", None),
+            "GPT-6.1 Sol"
+        );
+        assert_eq!(
+            model_display_name("my-company/future-7", None),
+            "my-company/future-7"
+        );
         assert_eq!(
             model_display_name("claude-fable-5-1", Some("claude-fable-5-1")),
             "Claude Fable 5.1"

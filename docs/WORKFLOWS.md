@@ -120,8 +120,10 @@ export default workflow({
 
 `ctx.agent({ schema })` is enforced through the provider request, not only by
 prompt wording: Haarness exposes a required `StructuredOutput` tool whose input
-schema is the requested JSON Schema on OpenAI, Anthropic, Gemini, and
-tool-capable OpenAI-compatible providers. The captured value is serialized
+schema is the requested JSON Schema on OpenAI, Gemini, older Claude models and
+tool-capable OpenAI-compatible providers. Claude models with adaptive thinking,
+directly or through a Haarness router, use Claude's native JSON output instead,
+because Opus 5.5, Sonnet 5.5 and Fable 5.1 refuse a forced tool choice. The captured value is serialized
 canonically and validated again after the turn before the workflow receives
 `result.data`. Ordinary agent turns and schema-free workflow agents keep their
 normal text/tool behavior.

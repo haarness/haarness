@@ -212,7 +212,7 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
 /// Abilities nearly every model shares (reasoning, vision, tools) and the
 /// output ceiling are noise in a list of fifty; only a missing tool ability
 /// is worth a word, since agents depend on it.
-fn model_detail(app: &App, qualified: &str, status: &str) -> String {
+pub(crate) fn model_detail(app: &App, qualified: &str, status: &str) -> String {
     let Some((provider_id, model_id)) = qualified.split_once('/') else {
         return status.to_owned();
     };
@@ -242,6 +242,14 @@ fn model_detail(app: &App, qualified: &str, status: &str) -> String {
                 compact_price(pricing.input),
                 compact_price(pricing.output)
             ));
+            if let Some(tier) = pricing.long_context {
+                parts.push(format!(
+                    "${}/{} over {}",
+                    compact_price(tier.input),
+                    compact_price(tier.output),
+                    token_limit(tier.above_input_tokens)
+                ));
+            }
         }
     }
     parts.join(" · ")

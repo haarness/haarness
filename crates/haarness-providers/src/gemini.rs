@@ -235,9 +235,17 @@ impl ModelProvider for GeminiProvider {
             requested_tools.retain(|tool| tool.name != STRUCTURED_OUTPUT_TOOL_NAME);
             requested_tools.push(structured_output_tool(schema));
         }
+        let forced = structured_output.is_some();
         let declarations: Vec<_> = requested_tools
             .into_iter()
-            .map(|t| json!({"name":t.name,"description":t.description,"parametersJsonSchema":t.input_schema}))
+            .map(|t| {
+                let schema = if forced {
+                    without_max_items(t.input_schema)
+                } else {
+                    t.input_schema
+                };
+                json!({"name":t.name,"description":t.description,"parametersJsonSchema":schema})
+            })
             .collect();
         let mut body = json!({"systemInstruction":{"parts":[{"text":request.system}]},"contents":contents,"tools":[{"functionDeclarations":declarations}]});
         if structured_output.is_some() {
@@ -350,6 +358,25 @@ impl ModelProvider for GeminiProvider {
         }))
     }
 }
+/// Forced function calling (`ANY`) compiles every declaration into a decoding
+/// grammar, and Gemini answers 400 "invalid argument" to an array bound over
+/// complex items (`browser_fill_form`'s 100 `anyOf` fields). The runtime still
+/// validates each call against the full schema.
+fn without_max_items(mut schema: Value) -> Value {
+    fn strip(value: &mut Value) {
+        match value {
+            Value::Object(object) => {
+                object.remove("maxItems");
+                object.values_mut().for_each(strip);
+            }
+            Value::Array(items) => items.iter_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    strip(&mut schema);
+    schema
+}
+
 fn gemini_reasoning_efforts(id: &str) -> Vec<&'static str> {
     if id.starts_with("gemini-3.8-flash")
         || id.starts_with("gemini-3.7-flash")
@@ -455,12 +482,17 @@ fn discovered_model_for(entry: &Value, require_gemini_prefix: bool) -> Option<Mo
 fn supports_harness_chat(id: &str, require_gemini_prefix: bool) -> bool {
     let unsupported = [
         "-image",
+        // Image models named after the brand rather than `-image`.
+        "nano-banana",
         "-tts",
         "-live",
         "native-audio",
         "omni-flash",
         "gemini-omni-",
         "-transcribe",
+        // Specialty models that need their own tools; the Cloud router skips them too.
+        "robotics",
+        "computer-use",
     ];
     (!require_gemini_prefix || id.starts_with("gemini-"))
         && !id.is_empty()
@@ -785,7 +817,14 @@ mod tests {
                         role: "user".into(),
                         content: "count".into(),
                     }],
-                    tools: Vec::new(),
+                    tools: vec![haarness_core::ToolDefinition {
+                        name: "fill".into(),
+                        description: "Fill fields".into(),
+                        input_schema: json!({"type":"object","properties":{"fields":{
+                            "type":"array","maxItems":100,"minItems":1,
+                            "items":{"anyOf":[{"type":"object","properties":{"value":{"type":"string","maxLength":2048}}}]}
+                        }}}),
+                    }],
                     reasoning_effort: None,
                     parameters: haarness_core::RequestParameters::default(),
                     output_schema: Some(json!({
@@ -806,6 +845,15 @@ mod tests {
         assert_eq!(
             requests[0]["toolConfig"]["functionCallingConfig"]["mode"],
             "ANY"
+        );
+        // Gemini rejects this array bound under forced calling; other bounds stay.
+        let fields = &requests[0]["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"]["properties"]
+            ["fields"];
+        assert!(fields.get("maxItems").is_none());
+        assert_eq!(fields["minItems"], 1);
+        assert_eq!(
+            fields["items"]["anyOf"][0]["properties"]["value"]["maxLength"],
+            2048
         );
         let declaration = requests[0]["tools"][0]["functionDeclarations"]
             .as_array()
@@ -844,7 +892,15 @@ mod tests {
         assert_eq!(info.context_window, Some(2_097_152));
         assert_eq!(info.max_output_tokens, Some(131_072));
         assert!(info.reasoning);
-        for id in ["gemini-omni-1.1-flash", "gemini-3.5-transcribe"] {
+        for id in [
+            "gemini-omni-1.1-flash",
+            "gemini-3.5-transcribe",
+            "gemini-nano-banana-2.1",
+            "gemini-3.8-flash-lite-tts",
+            "gemini-3.8-live",
+            "gemini-robotics-er-2-preview",
+            "gemini-2.5-computer-use-preview-10-2025",
+        ] {
             assert!(discovered_model(&json!({"name":format!("models/{id}"),"supportedGenerationMethods":["generateContent"]})).is_none());
         }
         let plain = discovered_model(&json!({"name":"models/gemini-future-plain","supportedGenerationMethods":["generateContent"],"thinking":false})).unwrap();

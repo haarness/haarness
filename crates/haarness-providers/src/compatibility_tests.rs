@@ -226,6 +226,8 @@ async fn openai_new_and_legacy_sampling_and_encrypted_tool_round_trip() {
     let provider = OpenAiProvider::for_test(format!("{base}/responses"), "fixture");
     for (model, effort, sampling) in [
         ("gpt-6-astra", Some("low"), false),
+        ("gpt-6.1-sol", Some("low"), false),
+        ("gpt-6.1-sol", None, false),
         ("gpt-6-sol", None, false),
         ("gpt-6-sol", Some("none"), true),
         ("gpt-6-luna", Some("low"), false),
@@ -255,6 +257,17 @@ async fn openai_new_and_legacy_sampling_and_encrypted_tool_round_trip() {
         assert!(info.reasoning_efforts.contains(&"none".into()));
         assert_eq!(info.context_window, Some(1_050_000));
     }
+    let sol = provider
+        .info()
+        .models
+        .into_iter()
+        .find(|m| m.id == "gpt-6.1-sol")
+        .unwrap();
+    assert_eq!(
+        sol.reasoning_efforts,
+        ["low", "medium", "high", "xhigh", "max"]
+    );
+    assert_eq!(sol.context_window, Some(1_050_000));
     task.abort();
 }
 
@@ -263,6 +276,10 @@ async fn claude_signed_and_redacted_thinking_round_trip_and_legacy_sampling() {
     let (base, captures, task) = fixture().await;
     for (model, effort, sampling, binding) in [
         ("claude-opus-5-5", Some("low"), false, true),
+        ("claude-sonnet-5-5", Some("medium"), false, true),
+        // Haiku 5.5 answers 400 to budget thinking and to `temperature`.
+        ("claude-haiku-5-5", None, false, true),
+        ("claude-haiku-5-5", Some("max"), false, true),
         ("claude-fable-5-1", Some("high"), false, true),
         ("claude-opus-5", Some("low"), false, false),
         ("claude-sonnet-5", None, false, false),
@@ -298,6 +315,13 @@ async fn claude_signed_and_redacted_thinking_round_trip_and_legacy_sampling() {
         );
         assert_eq!(blocks[2]["type"], "tool_use");
         assert_eq!(body["thinking"].get("block_binding").is_some(), binding);
+        if ["opus-5", "sonnet-5", "haiku-5", "fable-5"]
+            .iter()
+            .any(|family| model.starts_with(&format!("claude-{family}")))
+        {
+            // Claude 5 families accept only adaptive thinking.
+            assert_eq!(body["thinking"]["type"], "adaptive", "{model}");
+        }
         assert_eq!(
             headers["anthropic-beta"]
                 .to_str()
@@ -374,6 +398,7 @@ async fn compatible_reasoning_is_provider_scoped_and_replayed() {
         ("deepseek", "deepseek-v4-pro", "none"),
         ("xai", "grok-4.7", "xhigh"),
         ("mistral", "mistral-medium-3-5", "high"),
+        ("mistral", "mistral-large-4-0", "none"),
         ("groq", "openai/gpt-oss-120b", "low"),
         ("custom", "legacy-model", "high"),
     ] {
@@ -389,6 +414,13 @@ async fn compatible_reasoning_is_provider_scoped_and_replayed() {
             assume_authenticated: false,
             headers: ProviderHeaders::default(),
         });
+        if model == "mistral-large-4-0" {
+            let info = provider.info().models.into_iter().next().unwrap();
+            assert_eq!(info.display_name, "Mistral Large 4");
+            assert_eq!(info.reasoning_efforts, ["none", "high"]);
+            assert!(info.images);
+            assert_eq!(info.context_window, Some(1_048_576));
+        }
         let mut req = request(model, Some(effort));
         let first = events(&provider, req.clone()).await;
         assert!(

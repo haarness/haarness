@@ -432,9 +432,16 @@ impl ModelProvider for AnthropicProvider {
             }
         }
         let parameters = &request.parameters;
+        // The models whose thinking blocks are bound to the prompt before them.
         let bound_thinking = adaptive
-            && (request.model.starts_with("claude-fable-5-1")
-                || request.model.starts_with("claude-opus-5-5"));
+            && [
+                "claude-fable-5-1",
+                "claude-opus-5-5",
+                "claude-sonnet-5-5",
+                "claude-haiku-5-5",
+            ]
+            .iter()
+            .any(|prefix| request.model.starts_with(prefix));
         if bound_thinking {
             // Like OpenCode, allow prompt/tool refresh and compaction to retire
             // invalidated reasoning instead of breaking the conversation.
@@ -627,6 +634,7 @@ fn adaptive_thinking(id: &str) -> bool {
         "claude-mythos-5",
         "claude-opus-5",
         "claude-sonnet-5",
+        "claude-haiku-5",
         "claude-opus-4-7",
         "claude-opus-4-8",
     ]
@@ -717,9 +725,20 @@ fn discovered_model_for(entry: &Value, require_claude_prefix: bool) -> Option<Mo
             info.reasoning_efforts.clear();
         }
     }
+    // Haiku and Sonnet 4.5 take no `effort` but do take a thinking budget,
+    // which Haarness derives from the same low/medium/high levels.
+    let budget_thinking = entry
+        .pointer("/capabilities/thinking/types/enabled/supported")
+        .and_then(Value::as_bool)
+        == Some(true)
+        && info.reasoning;
     if let Some(effort) = entry.pointer("/capabilities/effort") {
         if effort["supported"].as_bool() == Some(false) {
-            info.reasoning_efforts.clear();
+            info.reasoning_efforts = if budget_thinking {
+                ["low", "medium", "high"].map(str::to_owned).to_vec()
+            } else {
+                Vec::new()
+            };
         } else if effort["supported"].as_bool() == Some(true) {
             info.reasoning_efforts = ["low", "medium", "high", "xhigh", "max"]
                 .into_iter()
@@ -744,6 +763,8 @@ fn positive_u64(value: &Value) -> Option<u64> {
 fn preferred_models() -> Vec<ModelInfo> {
     vec![
         model("claude-opus-5-5"),
+        model("claude-sonnet-5-5"),
+        model("claude-haiku-5-5"),
         model("claude-fable-5-1"),
         model("claude-fable-5"),
         model("claude-opus-5"),
@@ -1342,6 +1363,18 @@ mod tests {
         }
         let info = super::discovered_model(&json!({"id":"claude-future", "capabilities":{"effort":{"supported":true,"low":{"supported":true},"max":{"supported":true}}}})).unwrap();
         assert_eq!(info.reasoning_efforts, ["low", "max"]);
+        // Anthropic lists Haiku 4.5 with budget thinking and no effort parameter.
+        let haiku = super::discovered_model(&json!({"id":"claude-haiku-4-5-20251001", "capabilities":{
+            "effort":{"supported":false,"low":{"supported":false}},
+            "thinking":{"supported":true,"types":{"enabled":{"supported":true},"adaptive":{"supported":false}}}
+        }})).unwrap();
+        assert_eq!(haiku.reasoning_efforts, ["low", "medium", "high"]);
+        let plain = super::discovered_model(&json!({"id":"claude-plain", "capabilities":{
+            "effort":{"supported":false},
+            "thinking":{"supported":false}
+        }}))
+        .unwrap();
+        assert!(plain.reasoning_efforts.is_empty() && !plain.reasoning);
     }
 
     #[tokio::test]

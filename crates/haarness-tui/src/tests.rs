@@ -13610,6 +13610,29 @@ async fn auto_mode_shortcut_and_restricted_requests_are_manual() {
 }
 
 #[test]
+fn model_picker_shows_the_long_context_price() {
+    let mut app = selector_fixture();
+    app.providers[0].models[0].pricing = Some(haarness_protocol::ModelPricing {
+        input: 0.1,
+        output: 0.5,
+        cache_read: 0.01,
+        cache_write: 0.125,
+        long_context: Some(haarness_protocol::LongContextPricing {
+            above_input_tokens: 100_000,
+            input: 0.5,
+            output: 2.5,
+            cache_read: 0.05,
+            cache_write: 0.625,
+        }),
+    });
+    let detail = crate::view::menu::model_detail(&app, "openai/gpt-5.4", "");
+    assert!(
+        detail.contains("$0.1/0.5 per MTok · $0.5/2.5 over 100K"),
+        "{detail}"
+    );
+}
+
+#[test]
 fn model_picker_uses_friendly_names_and_only_connected_models() {
     let mut app = selector_fixture();
     app.providers[0].models[0].id = "gpt-6-astra".into();

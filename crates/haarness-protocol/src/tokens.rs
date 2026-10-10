@@ -746,6 +746,9 @@ mod tests {
     fn models_map_to_their_tokenizer() {
         for (model, family) in [
             ("claude-sonnet-5-5", Tokenizer::Claude),
+            // Counted 2026-10-10: Haiku 5.5 matches Opus 5.5 token for token.
+            ("claude-haiku-5-5", Tokenizer::Claude),
+            ("anthropic/claude-haiku-5.5", Tokenizer::Claude),
             ("router/anthropic/claude-opus-4.7", Tokenizer::Claude),
             ("claude-fable-5-1", Tokenizer::Claude),
             ("claude-opus-4-6", Tokenizer::ClaudeLegacy),
@@ -756,6 +759,7 @@ mod tests {
             ("claude-3-5-sonnet-20241022", Tokenizer::ClaudeLegacy),
             ("anthropic/claude-sonnet-4.6", Tokenizer::ClaudeLegacy),
             ("gpt-5.5", Tokenizer::OpenAi),
+            ("gpt-6.1-sol", Tokenizer::OpenAi),
             ("router/openai/gpt-5-mini", Tokenizer::OpenAi),
             ("o3", Tokenizer::OpenAi),
             ("o4-mini", Tokenizer::OpenAi),

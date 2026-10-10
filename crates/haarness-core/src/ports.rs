@@ -333,6 +333,10 @@ pub struct RequestParameters {
     pub headers: BTreeMap<String, String>,
     /// Extra JSON body fields merged into OpenAI-compatible requests.
     pub options: serde_json::Map<String, Value>,
+    /// Stable id of the conversation. `OpenAI` sends it as `prompt_cache_key`:
+    /// without it the `ChatGPT` backend caches nothing between rounds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]

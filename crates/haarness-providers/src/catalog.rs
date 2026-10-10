@@ -6,7 +6,7 @@
 //! over this table (applied by the composition root). Prefix matching handles
 //! dated snapshots such as `claude-sonnet-4-6-20260201`.
 
-use haarness_protocol::{ModelInfo, ModelPricing};
+use haarness_protocol::{LongContextPricing, ModelInfo, ModelPricing};
 
 pub struct CatalogEntry {
     pub prefix: &'static str,
@@ -35,9 +35,10 @@ const fn entry(
 /// family (`-pro`, `-mini`, `-nano`, `-image`) needs its own entry.
 ///
 /// Prices are the providers' list prices in USD per million tokens, checked
-/// against OpenRouter's live catalogue on 2026-10-05 (it passes list prices
-/// through). Gemini's context-cache storage is billed per hour, not per written
-/// token, so its cache-write price stays 0.
+/// against OpenRouter's live catalogue on 2026-10-10 (it passes list prices
+/// through) and the providers' own pricing pages where the two disagree.
+/// Gemini's context-cache storage is billed per hour, not per written token, so
+/// its cache-write price stays 0.
 const CATALOG: &[(&str, &[CatalogEntry])] = &[
     (
         "openai",
@@ -73,20 +74,17 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
                 128_000,
                 Some((0.2, 1.2, 0.02, 0.25)),
             ),
-            entry(
-                "gpt-5.6-sol-pro",
-                1_050_000,
-                128_000,
-                Some((4.0, 20.0, 0.4, 5.0)),
-            ),
+            // OpenAI's promotional GPT-5.6 Sol price (through at least
+            // 2026-11-21); OpenRouter still lists $2/$10. "Pro" is
+            // `reasoning.mode`, not a model, so there is no `-pro` entry.
             entry(
                 "gpt-5.6-sol",
                 1_050_000,
                 128_000,
-                Some((2.0, 10.0, 0.2, 2.5)),
+                Some((4.0, 20.0, 0.4, 5.0)),
             ),
             // `gpt-5.6` is the documented alias for GPT-5.6 Sol.
-            entry("gpt-5.6", 1_050_000, 128_000, Some((2.0, 10.0, 0.2, 2.5))),
+            entry("gpt-5.6", 1_050_000, 128_000, Some((4.0, 20.0, 0.4, 5.0))),
             entry(
                 "gpt-5.5-pro",
                 1_050_000,
@@ -211,6 +209,20 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
                 1_000_000,
                 128_000,
                 Some((4.0, 20.0, 0.2, 5.0)),
+            ),
+            entry(
+                "claude-sonnet-5-5",
+                1_000_000,
+                128_000,
+                Some((2.0, 10.0, 0.1, 2.5)),
+            ),
+            // Prompts over 100K tokens cost 5x ($0.50/$2.50); this table
+            // holds the short-context rate only.
+            entry(
+                "claude-haiku-5-5",
+                1_000_000,
+                128_000,
+                Some((0.1, 0.5, 0.01, 0.125)),
             ),
             entry(
                 "claude-fable-5-1",
@@ -340,6 +352,13 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
                 65_536,
                 Some((1.5, 9.0, 0.15, 0.0)),
             ),
+            // Image generation and editing; never offered for chat.
+            entry(
+                "gemini-nano-banana",
+                131_072,
+                32_768,
+                Some((1.5, 7.5, 0.0, 0.0)),
+            ),
             entry(
                 "gemini-3.1-flash-lite-image",
                 65_536,
@@ -399,6 +418,52 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
     ),
 ];
 
+/// Whole-request rates once a prompt passes a size, keyed by the catalog
+/// entry's prefix: (provider, prefix, above input tokens, input, output, cache
+/// read, cache write). From the providers' price pages on 2026-10-10.
+const LONG_CONTEXT: &[(&str, &str, u64, f64, f64, f64, f64)] = &[
+    ("openai", "gpt-6-astra", 272_000, 20.0, 75.0, 2.0, 25.0),
+    ("openai", "gpt-6.1-sol", 272_000, 4.0, 15.0, 0.2, 5.0),
+    ("openai", "gpt-6-sol", 272_000, 4.0, 15.0, 0.4, 5.0),
+    ("openai", "gpt-6-luna", 272_000, 0.2, 0.75, 0.02, 0.25),
+    ("openai", "gpt-5.6-sol", 272_000, 8.0, 30.0, 0.8, 10.0),
+    ("openai", "gpt-5.6", 272_000, 8.0, 30.0, 0.8, 10.0),
+    ("openai", "gpt-5.6-terra", 272_000, 4.0, 18.0, 0.4, 5.0),
+    ("openai", "gpt-5.6-luna", 272_000, 0.4, 1.8, 0.04, 0.5),
+    ("openai", "gpt-5.5-pro", 272_000, 60.0, 270.0, 0.0, 0.0),
+    ("openai", "gpt-5.5", 272_000, 10.0, 45.0, 1.0, 0.0),
+    ("openai", "gpt-5.4-pro", 272_000, 60.0, 270.0, 0.0, 0.0),
+    ("openai", "gpt-5.4", 272_000, 5.0, 22.5, 0.5, 0.0),
+    (
+        "anthropic",
+        "claude-haiku-5-5",
+        100_000,
+        0.5,
+        2.5,
+        0.05,
+        0.625,
+    ),
+    ("gemini", "gemini-3.1-pro", 200_000, 4.0, 18.0, 0.4, 0.0),
+    ("gemini", "gemini-2.5-pro", 200_000, 2.5, 15.0, 0.25, 0.0),
+];
+
+fn long_context(provider: &str, prefix: &str) -> Option<LongContextPricing> {
+    LONG_CONTEXT
+        .iter()
+        .find(|entry| entry.0 == provider && entry.1 == prefix)
+        .map(
+            |&(_, _, above_input_tokens, input, output, cache_read, cache_write)| {
+                LongContextPricing {
+                    above_input_tokens,
+                    input,
+                    output,
+                    cache_read,
+                    cache_write,
+                }
+            },
+        )
+}
+
 #[must_use]
 pub fn lookup(provider: &str, model_id: &str) -> Option<&'static CatalogEntry> {
     let entries = CATALOG
@@ -427,12 +492,14 @@ pub fn annotate(provider: &str, mut info: ModelInfo) -> ModelInfo {
         .id
         .split_once('/')
         .map_or(info.id.as_str(), |(_, id)| id);
-    let metadata = lookup(provider, &info.id).or_else(|| {
-        CATALOG
-            .iter()
-            .find_map(|(provider, _)| lookup(provider, canonical))
-    });
-    if let Some(entry) = metadata {
+    let metadata = lookup(provider, &info.id)
+        .map(|entry| (provider, entry))
+        .or_else(|| {
+            CATALOG.iter().find_map(|(provider, _)| {
+                lookup(provider, canonical).map(|entry| (*provider, entry))
+            })
+        });
+    if let Some((family, entry)) = metadata {
         info.context_window.get_or_insert(entry.context_window);
         info.max_output_tokens
             .get_or_insert(entry.max_output_tokens);
@@ -444,6 +511,7 @@ pub fn annotate(provider: &str, mut info: ModelInfo) -> ModelInfo {
                     output,
                     cache_read,
                     cache_write,
+                    long_context: long_context(family, entry.prefix),
                 });
         }
     }
@@ -499,6 +567,8 @@ mod tests {
         for (provider, model, input, output) in [
             ("anthropic", "claude-opus-5-5", 4.0, 20.0),
             ("anthropic", "claude-sonnet-5-5", 2.0, 10.0),
+            ("anthropic", "claude-haiku-5-5", 0.1, 0.5),
+            ("openai", "gpt-5.6-sol", 4.0, 20.0),
             ("anthropic", "claude-fable-5-1", 10.0, 50.0),
             ("openai", "gpt-6.1-sol", 2.0, 10.0),
             ("openai", "gpt-6-sol", 2.0, 10.0),
@@ -514,6 +584,43 @@ mod tests {
                     && (pricing.1 - output).abs() < f64::EPSILON,
                 "{provider}/{model}: {pricing:?}"
             );
+        }
+    }
+
+    #[test]
+    fn long_prompts_carry_their_tier() {
+        let info = |id: &str| haarness_protocol::ModelInfo {
+            id: id.into(),
+            display_name: id.into(),
+            reasoning: true,
+            reasoning_efforts: Vec::new(),
+            images: true,
+            video: false,
+            tools: true,
+            context_window: None,
+            max_output_tokens: None,
+            pricing: None,
+        };
+        let haiku = annotate("anthropic", info("claude-haiku-5-5"))
+            .pricing
+            .unwrap();
+        let tier = haiku.long_context.unwrap();
+        assert_eq!(tier.above_input_tokens, 100_000);
+        assert!(
+            (tier.input - 0.5).abs() < f64::EPSILON && (tier.output - 2.5).abs() < f64::EPSILON
+        );
+        // Routed ids find the native tier too.
+        let routed = annotate("router", info("openai/gpt-6.1-sol"))
+            .pricing
+            .unwrap();
+        assert_eq!(routed.long_context.unwrap().above_input_tokens, 272_000);
+        let sonnet = annotate("anthropic", info("claude-sonnet-5-5"))
+            .pricing
+            .unwrap();
+        assert!(sonnet.long_context.is_none());
+        // Every tier belongs to an existing entry.
+        for (provider, prefix, ..) in super::LONG_CONTEXT {
+            assert_eq!(lookup(provider, prefix).unwrap().prefix, *prefix);
         }
     }
 
