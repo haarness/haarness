@@ -55,19 +55,97 @@ impl Default for StatusLineConfig {
     }
 }
 
-fn config_dir() -> Option<PathBuf> {
-    if let Some(root) = std::env::var_os("HAARNESS_DATA_DIR") {
+/// The folder that holds config.toml for every Haarness client, resolved as
+/// the CLI's storage layout does: `HAARNESS_DATA_DIR`, then `HAARNESS_HOME`,
+/// then `$XDG_CONFIG_HOME/haarness` or `~/.config/haarness` on every OS.
+fn resolve_config_dir(
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(root) = env("HAARNESS_DATA_DIR") {
         return Some(PathBuf::from(root).join("config"));
     }
-    // HAARNESS_HOME keeps everything under one folder.
-    if let Some(root) = std::env::var_os("HAARNESS_HOME")
+    if let Some(root) = env("HAARNESS_HOME")
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .filter(|root| root.is_absolute())
+        .filter(|path| path.is_absolute())
     {
         return Some(root.join("config"));
     }
-    directories::ProjectDirs::from("dev", "haarness", "haarness")
-        .map(|project| project.config_dir().to_path_buf())
+    env("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| home.map(|home| home.join(".config")))
+        .map(|base| base.join("haarness"))
+}
+
+/// Where earlier versions kept the TUI's files: the platform folder, which
+/// on macOS is `~/Library/Application Support/dev.haarness.haarness` rather
+/// than the folder everything else reads. `None` where the two agree, or when
+/// an explicit root makes the install self-contained.
+fn legacy_config_dir() -> Option<PathBuf> {
+    if std::env::var_os("HAARNESS_DATA_DIR").is_some()
+        || std::env::var_os("HAARNESS_HOME").is_some_and(|value| !value.is_empty())
+    {
+        return None;
+    }
+    let legacy = directories::ProjectDirs::from("dev", "haarness", "haarness")?
+        .config_dir()
+        .to_path_buf();
+    (Some(&legacy) != current_config_dir().as_ref()).then_some(legacy)
+}
+
+/// The TUI's own files, which follow it to the shared folder.
+const CLIENT_FILES: [&str; 7] = [
+    "tui-state.toml",
+    "tui-history.jsonl",
+    "tui-history-v2.json",
+    "tui-stash.json",
+    "tui-servers.json",
+    "tui-server-drafts.json",
+    "themes",
+];
+
+/// Copy the TUI's files from the old folder into the shared one, once, without
+/// overwriting anything already there. The old copies stay where they are.
+fn adopt_legacy_files(target: &std::path::Path, legacy: &std::path::Path) {
+    for name in CLIENT_FILES {
+        let from = legacy.join(name);
+        let to = target.join(name);
+        if to.exists() || !from.exists() {
+            continue;
+        }
+        let _ = std::fs::create_dir_all(target);
+        if from.is_dir() {
+            let _ = std::fs::create_dir_all(&to);
+            if let Ok(files) = std::fs::read_dir(&from) {
+                for file in files.flatten().filter(|file| file.path().is_file()) {
+                    let _ = std::fs::copy(file.path(), to.join(file.file_name()));
+                }
+            }
+        } else {
+            let _ = std::fs::copy(&from, &to);
+        }
+    }
+}
+
+fn current_config_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()));
+    resolve_config_dir(|key| std::env::var_os(key), home)
+}
+
+fn config_dir() -> Option<PathBuf> {
+    static ADOPTED: std::sync::Once = std::sync::Once::new();
+    let directory = current_config_dir()?;
+    ADOPTED.call_once(|| {
+        if let Some(legacy) = legacy_config_dir() {
+            adopt_legacy_files(&directory, &legacy);
+        }
+    });
+    Some(directory)
 }
 
 fn history_path() -> Option<PathBuf> {
@@ -362,12 +440,10 @@ pub fn load_theme_selection() -> (Option<String>, Option<String>) {
     }
     let mut theme = None;
     let mut variant = None;
-    if let Some(directory) = config_dir() {
-        if let Ok(content) = std::fs::read_to_string(directory.join("config.toml")) {
-            if let Ok(config) = toml::from_str::<ConfigFile>(&content) {
-                theme = config.tui.theme;
-                variant = config.tui.variant;
-            }
+    if let Some(content) = client_config_text() {
+        if let Ok(config) = toml::from_str::<ConfigFile>(&content) {
+            theme = config.tui.theme;
+            variant = config.tui.variant;
         }
     }
     let state = load_state();
@@ -384,11 +460,7 @@ pub fn load_theme_selection() -> (Option<String>, Option<String>) {
 /// exact RGB terminals keep the theme page color, while limited-color
 /// terminals keep their own configured background until a theme is chosen.
 pub fn load_background_mode() -> BackgroundMode {
-    let Some(directory) = config_dir() else {
-        return BackgroundMode::default();
-    };
-    std::fs::read_to_string(directory.join("config.toml"))
-        .ok()
+    client_config_text()
         .and_then(|content| parse_background_mode(&content))
         .unwrap_or_default()
 }
@@ -407,8 +479,7 @@ pub fn load_statusline() -> Option<StatusLineConfig> {
     struct ConfigFile {
         tui: TuiSection,
     }
-    let directory = config_dir()?;
-    let content = std::fs::read_to_string(directory.join("config.toml")).ok()?;
+    let content = client_config_text()?;
     let mut config = toml::from_str::<ConfigFile>(&content)
         .ok()?
         .tui
@@ -462,8 +533,7 @@ pub fn load_language() -> crate::locale::Language {
     struct ConfigFile {
         tui: TuiSection,
     }
-    let configured = config_dir()
-        .and_then(|directory| std::fs::read_to_string(directory.join("config.toml")).ok())
+    let configured = client_config_text()
         .and_then(|content| toml::from_str::<ConfigFile>(&content).ok())
         .and_then(|config| config.tui.language);
     load_state()
@@ -543,13 +613,167 @@ pub(crate) fn update_client_json<T: serde::de::DeserializeOwned + serde::Seriali
     save_client_json(name, &value)
 }
 
+/// The shared config.toml, as the TUI reads it: its `[tui]` settings are
+/// laid over any that only the TUI's old folder still has, so moving to the
+/// shared file never loses a setting.
 pub(crate) fn client_config_text() -> Option<String> {
-    std::fs::read_to_string(config_dir()?.join("config.toml")).ok()
+    let read = |directory: PathBuf| std::fs::read_to_string(directory.join("config.toml")).ok();
+    merge_tui_settings(
+        config_dir().and_then(read),
+        legacy_config_dir().and_then(read),
+    )
+}
+
+fn merge_tui_settings(current: Option<String>, legacy: Option<String>) -> Option<String> {
+    let Some(legacy_tui) = legacy
+        .as_deref()
+        .and_then(|text| toml::from_str::<toml::Table>(text).ok())
+        .and_then(|mut table| table.remove("tui"))
+    else {
+        return current;
+    };
+    let mut table = match current.as_deref().map(toml::from_str::<toml::Table>) {
+        Some(Ok(table)) => table,
+        // A broken shared file is reported by whoever reads it, as before.
+        Some(Err(_)) => return current,
+        None => toml::Table::new(),
+    };
+    let merged = match table.remove("tui") {
+        Some(tui) => overlay(legacy_tui, tui),
+        None => legacy_tui,
+    };
+    table.insert("tui".into(), merged);
+    toml::to_string(&table).ok().or(current)
+}
+
+/// `over` wins, table by table.
+fn overlay(base: toml::Value, over: toml::Value) -> toml::Value {
+    match (base, over) {
+        (toml::Value::Table(mut base), toml::Value::Table(over)) => {
+            for (key, value) in over {
+                let value = match base.remove(&key) {
+                    Some(previous) => overlay(previous, value),
+                    None => value,
+                };
+                base.insert(key, value);
+            }
+            toml::Value::Table(base)
+        }
+        (_, over) => over,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BackgroundMode, parse_background_mode};
+    use super::{
+        BackgroundMode, adopt_legacy_files, merge_tui_settings, parse_background_mode,
+        resolve_config_dir,
+    };
+    use std::path::PathBuf;
+
+    #[test]
+    fn config_folder_is_the_one_the_cli_uses_on_every_os() {
+        let env = |pairs: &'static [(&str, &str)]| {
+            move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| std::ffi::OsString::from(value))
+            }
+        };
+        let home = Some(PathBuf::from("/Users/someone"));
+        // Not ~/Library/Application Support: the server reads ~/.config.
+        assert_eq!(
+            resolve_config_dir(env(&[]), home.clone()),
+            Some(PathBuf::from("/Users/someone/.config/haarness"))
+        );
+        assert_eq!(
+            resolve_config_dir(env(&[("XDG_CONFIG_HOME", "/xdg")]), home.clone()),
+            Some(PathBuf::from("/xdg/haarness"))
+        );
+        // A relative XDG value is ignored, as the CLI ignores it.
+        assert_eq!(
+            resolve_config_dir(env(&[("XDG_CONFIG_HOME", "xdg")]), home.clone()),
+            Some(PathBuf::from("/Users/someone/.config/haarness"))
+        );
+        assert_eq!(
+            resolve_config_dir(
+                env(&[("HAARNESS_HOME", "/opt/h"), ("XDG_CONFIG_HOME", "/xdg")]),
+                home.clone()
+            ),
+            Some(PathBuf::from("/opt/h/config"))
+        );
+        assert_eq!(
+            resolve_config_dir(
+                env(&[("HAARNESS_DATA_DIR", "/data"), ("HAARNESS_HOME", "/opt/h")]),
+                home
+            ),
+            Some(PathBuf::from("/data/config"))
+        );
+    }
+
+    #[test]
+    fn tui_settings_from_the_old_folder_survive_under_the_shared_ones() {
+        let current = "[providers.ollama]\nenabled = false\n[tui]\ntheme = \"nord\"\n[tui.keybinds]\nmodels = \"F6\"\n";
+        let legacy = "[tui]\ntheme = \"dracula\"\nbackground_mode = \"theme\"\n[tui.keybinds]\nagents = \"F7\"\nmodels = \"F8\"\n";
+        let merged: toml::Table =
+            toml::from_str(&merge_tui_settings(Some(current.into()), Some(legacy.into())).unwrap())
+                .unwrap();
+        let tui = &merged["tui"];
+        assert_eq!(tui["theme"].as_str(), Some("nord"));
+        assert_eq!(tui["background_mode"].as_str(), Some("theme"));
+        assert_eq!(tui["keybinds"]["models"].as_str(), Some("F6"));
+        assert_eq!(tui["keybinds"]["agents"].as_str(), Some("F7"));
+        assert_eq!(
+            merged["providers"]["ollama"]["enabled"].as_bool(),
+            Some(false)
+        );
+        // Only the old file: its settings still apply.
+        assert_eq!(
+            parse_background_mode(&merge_tui_settings(None, Some(legacy.into())).unwrap()),
+            Some(BackgroundMode::Theme)
+        );
+        // Nothing to merge, or a broken shared file: the text is left alone.
+        assert_eq!(
+            merge_tui_settings(Some("[tui".into()), Some(legacy.into())).as_deref(),
+            Some("[tui")
+        );
+        assert_eq!(
+            merge_tui_settings(Some(current.into()), None).as_deref(),
+            Some(current)
+        );
+    }
+
+    #[test]
+    fn the_tui_files_move_to_the_shared_folder_without_overwriting() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-tui-config-{}", uuid::Uuid::now_v7()));
+        let legacy = root.join("legacy");
+        let target = root.join("target");
+        std::fs::create_dir_all(legacy.join("themes")).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(legacy.join("tui-state.toml"), "theme = \"old\"").unwrap();
+        std::fs::write(legacy.join("tui-history-v2.json"), "[]").unwrap();
+        std::fs::write(legacy.join("themes/mine.toml"), "x").unwrap();
+        std::fs::write(legacy.join("auth.json"), "{}").unwrap();
+        std::fs::write(target.join("tui-history-v2.json"), "[\"newer\"]").unwrap();
+
+        adopt_legacy_files(&target, &legacy);
+
+        assert_eq!(
+            std::fs::read_to_string(target.join("tui-state.toml")).unwrap(),
+            "theme = \"old\""
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("tui-history-v2.json")).unwrap(),
+            "[\"newer\"]"
+        );
+        assert!(target.join("themes/mine.toml").is_file());
+        // Only the TUI's own files: credentials are the CLI's to move.
+        assert!(!target.join("auth.json").exists());
+        assert!(legacy.join("tui-state.toml").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn background_mode_parses_all_supported_values_and_defaults_safely() {
