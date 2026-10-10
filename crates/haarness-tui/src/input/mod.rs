@@ -1394,18 +1394,37 @@ async fn handle_overlay_key(app: &mut App, key: KeyEvent, client: &ApiClient) ->
             app.management = crate::management::Management::default();
         }
     }
+    // The key prompt's inline reason belongs to the key it was about; any
+    // edit makes it stale.
+    if key.code != KeyCode::Enter
+        && matches!(
+            app.overlay,
+            Overlay::Options {
+                kind: crate::state::OptionsKind::ConnectApiKey,
+                ..
+            }
+        )
+    {
+        app.connect.key_error = None;
+    }
+    // Ctrl+U clears whatever is typed into a dialog, as it clears the
+    // composer: a search, a form field, or a key.
     if key.code == KeyCode::Char('u')
         && key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(
+        && app.overlay.is_filterable()
+    {
+        app.overlay_filter.clear();
+        if !matches!(
             app.overlay,
             Overlay::Options {
                 kind: crate::state::OptionsKind::ManagementField
                     | crate::state::OptionsKind::ConnectApiKey,
                 ..
             }
-        )
-    {
-        app.overlay_filter.clear();
+        ) {
+            app.selection = 0;
+            app.preview_selected_theme();
+        }
         return Ok(AppAction::Continue);
     }
     if app.workspace_mutation.is_some() || app.workspace_ref_operation.is_some() {
@@ -1436,6 +1455,12 @@ async fn handle_overlay_key(app: &mut App, key: KeyEvent, client: &ApiClient) ->
             .as_ref()
             .is_some_and(|login| matches!(login.state, crate::connect::LoginState::Failed(_)));
         match key.code {
+            // A failed sign-in has nothing left to cancel; Escape goes back to
+            // the providers, as its "esc back" says.
+            KeyCode::Esc if failed => {
+                app.connect.login = None;
+                app.open_connect_picker(None, client).await?;
+            }
             KeyCode::Esc => app.cancel_login(client).await,
             KeyCode::Enter if failed => app.retry_login(client).await?,
             KeyCode::Enter | KeyCode::Char('o') => app.reopen_login_browser(),

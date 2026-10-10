@@ -830,14 +830,8 @@ impl App {
             .any(|provider| provider.id == thread.provider && provider.authenticated)
         {
             "Connected".into()
-        } else if providers.is_empty()
-            || providers
-                .iter()
-                .any(|provider| provider.authenticated && !provider.models.is_empty())
-        {
-            not_connected(&providers, &thread.provider)
         } else {
-            "Connect a provider to start · /connect".into()
+            unconnected_notice(&providers, &thread.provider)
         };
         let root_thread_id = compute_root(&threads, thread.id);
         let children = durable_children(&items);
@@ -2490,8 +2484,9 @@ impl App {
 
 /// Root of a thread's parent chain, resolved against the known thread list.
 /// Unknown parents resolve to the deepest reachable ancestor.
-/// "OpenAI is not connected · /connect": the provider's own name, not its
-/// id, so Cloud reads as "Haarness Cloud" rather than an internal "haarness".
+/// "OpenAI is not connected · /connect openai": the provider's own name, not
+/// its id, so Cloud reads as "Haarness Cloud" rather than an internal
+/// "haarness", and the command that connects exactly that provider.
 pub(crate) fn not_connected(providers: &[ProviderInfo], id: &str) -> String {
     let name = providers
         .iter()
@@ -2500,7 +2495,22 @@ pub(crate) fn not_connected(providers: &[ProviderInfo], id: &str) -> String {
             || haarness_protocol::provider_display_id(id).to_owned(),
             |provider| provider.name.clone(),
         );
-    format!("{name} is not connected · /connect")
+    format!("{name} is not connected · /connect {id}")
+}
+
+/// The status of a chat whose provider cannot answer. A chat starts on the
+/// server's default provider, which nobody chose on a fresh install, so it is
+/// named only once something else is connected.
+pub(crate) fn unconnected_notice(providers: &[ProviderInfo], id: &str) -> String {
+    if providers.is_empty()
+        || providers
+            .iter()
+            .any(|provider| provider.authenticated && !provider.models.is_empty())
+    {
+        not_connected(providers, id)
+    } else {
+        "Connect a provider to start · /connect".into()
+    }
 }
 
 pub fn compute_root(threads: &[Thread], mut id: ThreadId) -> ThreadId {

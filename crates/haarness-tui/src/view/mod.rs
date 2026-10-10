@@ -734,9 +734,17 @@ fn apply_dialog(
     let left = width.saturating_sub(card_width) / 2;
     let top = height.saturating_sub(card_height) / 2;
     hits.clear();
+    // A margin of a few cells shows only fragments of the dimmed screen
+    // beside the card — the last digit of the version, half a word — so it
+    // stays blank; a wide margin still shows the chat behind.
+    let sliver = left < 6;
     for (offset, card_line) in card.lines.into_iter().take(card_height).enumerate() {
         let row = top + offset;
-        let base = std::mem::take(&mut lines[row]);
+        let base = if sliver {
+            Line::empty()
+        } else {
+            std::mem::take(&mut lines[row])
+        };
         lines[row] = overlay_row(base, card_line, left, card_width, width, app);
     }
     // Broad surface targets sit below specific rows in z-order. Hit testing

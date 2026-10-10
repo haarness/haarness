@@ -60,7 +60,8 @@ impl App {
                 .iter()
                 .any(|provider| provider.id == self.thread.provider && provider.authenticated)
             {
-                self.notice = crate::state::not_connected(&self.providers, &self.thread.provider);
+                self.notice =
+                    crate::state::unconnected_notice(&self.providers, &self.thread.provider);
             }
         }
         let mut view = view;

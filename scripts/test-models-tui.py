@@ -51,7 +51,7 @@ try:
     keys('Enter')
     until(lambda:'Future Reasoner' in capture() and 'Select model' not in capture(),'New model was not selected')
     models.clear();keys('Escape');time.sleep(1.1);command('/models')
-    until(lambda:'Connect a provider' in capture(),'Empty catalog did not offer provider setup')
+    until(lambda:'Welcome to Haarness' in capture() and 'Haarness needs an AI model' in capture(),'Empty catalog did not offer provider setup')
     (root/'empty.txt').write_text(capture())
     print('PASS real TUI: friendly name, connected-only picker, refresh, selection, empty catalog. Evidence: '+str(root),flush=True)
 finally:

@@ -3536,7 +3536,12 @@ async fn reasoning_commands_use_each_models_advertised_domain() {
         .await
         .unwrap();
     assert_eq!(app.reasoning_effort.as_deref(), Some("xhigh"));
-    assert!(app.notice.contains("does not support max"));
+    // The model's name as the picker shows it, and what it does offer,
+    // instead of the raw id and the command just typed.
+    assert_eq!(
+        app.notice,
+        "GPT-5.4 does not support max reasoning · it offers none or xhigh"
+    );
     app.execute_command("/reasoning", &offline_client())
         .await
         .unwrap();
@@ -14818,7 +14823,18 @@ async fn connect_picker_lists_providers_and_falls_back_to_a_key_prompt_offline()
         panic!("connect opens the provider picker");
     };
     assert!(matches!(kind, crate::state::OptionsKind::ConnectProvider));
-    assert_eq!(title, "Connect a provider");
+    // Nothing works yet, so the picker is the welcome screen and says why.
+    assert_eq!(title, "Welcome to Haarness");
+    let rendered = app
+        .lines((100, 30))
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("Haarness needs an AI model."),
+        "{rendered}"
+    );
     let labels: Vec<_> = entries.iter().map(|entry| entry.label.as_str()).collect();
     assert!(labels.contains(&"OpenAI"), "{labels:?}");
     assert!(labels.contains(&"Anthropic"), "{labels:?}");
@@ -14929,8 +14945,11 @@ async fn sign_in_wait_screen_shows_the_link_and_code_and_recovers_from_failure()
         .join("\n");
     assert!(rendered.contains("Could not connect OpenAI"), "{rendered}");
     assert!(rendered.contains("enter retry"), "{rendered}");
+    // The header says what Escape does, as the footer does.
+    assert!(rendered.contains("esc back"), "{rendered}");
+    assert!(!rendered.contains("esc close"), "{rendered}");
 
-    // Escape leaves the flow cleanly.
+    // Escape goes back to the providers, and the failed sign-in is gone.
     crate::input::handle_key(
         &mut app,
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
@@ -14938,8 +14957,183 @@ async fn sign_in_wait_screen_shows_the_link_and_code_and_recovers_from_failure()
     )
     .await
     .unwrap();
-    assert!(matches!(app.overlay, crate::state::Overlay::None));
+    assert!(matches!(
+        app.overlay,
+        crate::state::Overlay::Options {
+            kind: crate::state::OptionsKind::ConnectProvider,
+            ..
+        }
+    ));
     assert!(app.connect.login.is_none());
+}
+
+#[tokio::test]
+async fn a_sign_in_that_cannot_start_says_why_and_offers_another_try() {
+    let mut app = connect_fixture();
+    let client = offline_client();
+    app.connect.provider = Some(crate::connect::ConnectProvider {
+        id: "haarness".into(),
+        name: "Haarness Cloud".into(),
+        ..crate::connect::ConnectProvider::default()
+    });
+    // Before, the reason was dropped and the dialog closed on a bare
+    // "Could not start signing in to Haarness Cloud".
+    app.choose_connect_method("device", &client).await.unwrap();
+    assert!(matches!(app.overlay, crate::state::Overlay::ProviderLogin));
+    let login = app.connect.login.as_ref().unwrap();
+    let crate::connect::LoginState::Failed(reason) = &login.state else {
+        panic!("{:?}", login.state);
+    };
+    assert!(reason.contains("127.0.0.1:1"), "{reason}");
+    assert_eq!(login.method, "device");
+    let rendered = app
+        .lines((100, 30))
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("Could not connect Haarness Cloud"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("enter retry"), "{rendered}");
+}
+
+#[tokio::test]
+async fn key_prompt_explains_a_refused_key_under_the_field_until_it_is_edited() {
+    let mut app = connect_fixture();
+    let client = offline_client();
+    app.connect.provider = Some(crate::connect::ConnectProvider {
+        id: "anthropic".into(),
+        name: "Anthropic".into(),
+        connected: true,
+        source: Some("api".into()),
+        ..crate::connect::ConnectProvider::default()
+    });
+    app.choose_connect_method("api", &client).await.unwrap();
+    let screen = |app: &App| {
+        app.lines((100, 30))
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let rendered = screen(&app);
+    // A saved key is not a first connection; a local server is this computer.
+    assert!(rendered.contains("A key is already saved"), "{rendered}");
+    assert!(rendered.contains("on this computer"), "{rendered}");
+    assert!(!rendered.contains("Haarness server"), "{rendered}");
+    assert!(rendered.contains("esc back"), "{rendered}");
+    assert!(!rendered.contains("esc close"), "{rendered}");
+
+    // An empty key: the reason sits under the field, not in the status bar.
+    app.close_overlay();
+    app.submit_connect_key("  ", &client).await.unwrap();
+    let rendered = screen(&app);
+    let field = rendered
+        .lines()
+        .position(|line| line.contains("Key  "))
+        .unwrap();
+    assert!(
+        rendered
+            .lines()
+            .nth(field + 1)
+            .unwrap()
+            .contains("Paste a key first."),
+        "{rendered}"
+    );
+    assert_ne!(app.notice, "Paste a key first");
+    press_key(&mut app, KeyCode::Char('s')).await;
+    assert!(!screen(&app).contains("Paste a key first."));
+
+    // A key the server could not take keeps the prompt and the key, and
+    // says why under the field.
+    app.close_overlay();
+    app.submit_connect_key("sk-ant-test", &client)
+        .await
+        .unwrap();
+    assert!(matches!(
+        app.overlay,
+        crate::state::Overlay::Options {
+            kind: crate::state::OptionsKind::ConnectApiKey,
+            ..
+        }
+    ));
+    assert_eq!(app.overlay_filter, "sk-ant-test");
+    let error = app.connect.key_error.clone().unwrap();
+    assert!(error.starts_with("Could not save the key: "), "{error}");
+    assert!(screen(&app).contains("Could not save the key"));
+    press_key(&mut app, KeyCode::Backspace).await;
+    assert!(app.connect.key_error.is_none());
+}
+
+#[test]
+fn connect_picker_marks_connected_rows_in_the_gutter_and_shelves_popular_first() {
+    let mut app = connect_fixture();
+    app.providers[1].authenticated = true;
+    let row = |id: &str, name: &str, connected: bool, popular: Option<u8>| {
+        crate::connect::ConnectProvider {
+            id: id.into(),
+            name: name.into(),
+            connected,
+            popular,
+            ..crate::connect::ConnectProvider::default()
+        }
+    };
+    app.connect.catalog = vec![
+        row("openai", "OpenAI", false, Some(0)),
+        row("anthropic", "Anthropic", true, Some(1)),
+        row("groq", "Groq", false, None),
+    ];
+    let entry = |label: &str, value: &str| crate::state::OptionEntry {
+        label: label.into(),
+        description: "API key".into(),
+        value: value.into(),
+    };
+    app.open_overlay(crate::state::Overlay::Options {
+        title: "Connect a provider".into(),
+        kind: crate::state::OptionsKind::ConnectProvider,
+        entries: vec![
+            entry("OpenAI", "openai"),
+            entry("Anthropic", "anthropic"),
+            entry("Groq", "groq"),
+            entry("Custom endpoint…", "\u{0}custom"),
+        ],
+    });
+    let rendered: Vec<String> = app.lines((100, 36)).iter().map(line_text).collect();
+    let column = |name: &str| {
+        let line = rendered.iter().find(|line| line.contains(name)).unwrap();
+        line[..line.find(name).unwrap()].chars().count()
+    };
+    // The check lives in the gutter, so names share one column.
+    assert_eq!(column("Anthropic"), column("OpenAI"));
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("✓") && line.contains("Anthropic")),
+        "{rendered:#?}"
+    );
+    let at = |text: &str| {
+        rendered
+            .iter()
+            .position(|line| line.contains(text))
+            .unwrap()
+    };
+    assert!(at("Popular") < at("OpenAI"));
+    assert!(at("Anthropic") < at("More providers"));
+    assert!(at("More providers") < at("Groq"));
+    assert!(at("Groq") < at("Something else"));
+    assert!(at("Something else") < at("Custom endpoint"));
+    // A shelf label is not a choice: clicking it selects nothing.
+    let heading_row = at("More providers");
+    assert!(
+        !app.hit_rows
+            .borrow()
+            .iter()
+            .any(|hit| hit.row == heading_row
+                && matches!(hit.target, crate::view::frame::HitTarget::MenuRow(_))),
+        "the shelf label is not a row"
+    );
 }
 
 #[test]
@@ -15488,4 +15682,125 @@ async fn remote_control_aliases_open_the_dialog_and_report_a_failed_start() {
         error.to_string().contains("/remote-control stop"),
         "{error}"
     );
+}
+
+#[tokio::test]
+async fn sending_with_nothing_connected_opens_the_picker_and_names_no_provider() {
+    let mut app = connect_fixture();
+    let client = offline_client();
+    // The chat sits on the server's default provider, which nobody chose.
+    assert_eq!(app.thread.provider, "openai");
+    let sent = app.submit_prompt("hello".into(), &client).await.unwrap();
+    assert!(!sent, "the caller keeps the draft");
+    assert!(matches!(
+        app.overlay,
+        crate::state::Overlay::Options {
+            kind: crate::state::OptionsKind::ConnectProvider,
+            ..
+        }
+    ));
+    assert!(app.connect.onboarding);
+    assert!(!app.notice.contains("OpenAI"), "{}", app.notice);
+    assert_eq!(
+        crate::state::unconnected_notice(&app.providers, "openai"),
+        "Connect a provider to start · /connect"
+    );
+    // Once something works, a chat on another provider names it, with the
+    // command that connects exactly that one.
+    app.providers[1].authenticated = true;
+    assert_eq!(
+        crate::state::unconnected_notice(&app.providers, "openai"),
+        "OpenAI is not connected · /connect openai"
+    );
+}
+
+#[tokio::test]
+async fn choosing_a_model_of_an_unconnected_provider_says_so() {
+    let mut app = connect_fixture();
+    app.providers[1].models.clear();
+    app.execute_command("/models anthropic/claude-sonnet-4-5", &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(
+        app.notice,
+        "Anthropic is not connected · /connect anthropic"
+    );
+    app.execute_command("/models nowhere/model", &offline_client())
+        .await
+        .unwrap();
+    assert_eq!(app.notice, "Unknown model nowhere/model");
+}
+
+#[test]
+fn undo_redo_and_diff_failures_read_as_what_to_do() {
+    let server = |status: u16, code: &str, message: &str| -> anyhow::Error {
+        crate::api::ApiRefusal {
+            status: reqwest::StatusCode::from_u16(status).unwrap(),
+            code: Some(code.into()),
+            message: message.into(),
+        }
+        .into()
+    };
+    assert_eq!(
+        crate::commands::undo_error(
+            &server(
+                400,
+                "invalid_request",
+                "invalid request: thread is not reverted"
+            ),
+            "Redo"
+        ),
+        "Nothing to redo"
+    );
+    assert_eq!(
+        crate::commands::undo_error(
+            &server(404, "not_found", "not found: no snapshot to revert to"),
+            "Undo"
+        ),
+        "Nothing to undo"
+    );
+    assert_eq!(
+        crate::commands::undo_error(
+            &server(409, "conflict", "conflict: a turn is running"),
+            "Undo"
+        ),
+        "Undo failed: a turn is running"
+    );
+    assert_eq!(
+        crate::commands::diff_error(&server(
+            422,
+            "tool_error",
+            "tool error: Git diff failed: workspace is not inside a Git worktree: /tmp/x"
+        )),
+        "This folder isn’t a Git repository · /diff last shows the last turn’s changes"
+    );
+    assert!(
+        !crate::commands::diff_error(&server(422, "tool_error", "tool error: boom"))
+            .contains("HTTP")
+    );
+}
+
+#[tokio::test]
+async fn ctrl_u_clears_every_dialog_filter() {
+    let mut app = selector_fixture();
+    app.open_overlay(crate::state::Overlay::Models);
+    app.overlay_filter = "/workspace/help".into();
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert!(app.overlay_filter.is_empty());
+    assert!(matches!(app.overlay, crate::state::Overlay::Models));
+    let rendered = app
+        .lines((100, 30))
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    // One key-hint style: lowercase, as every other footer.
+    assert!(rendered.contains("ctrl+f favorite"), "{rendered}");
+    assert!(!rendered.contains("Ctrl+F"), "{rendered}");
 }

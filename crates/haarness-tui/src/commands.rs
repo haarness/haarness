@@ -83,11 +83,33 @@ pub(crate) async fn run_diff_load(
         }
         None => client.last_turn_diff(thread).await,
     }
-    .map_err(|error| error.to_string());
+    .map_err(|error| diff_error(&error));
     DiffLoadCompletion {
         source,
         context_step,
         result,
+    }
+}
+
+/// A failed review in words that say what to do. A folder that is not a Git
+/// repository has no working-tree review, but its last turn still has one.
+pub(crate) fn diff_error(error: &anyhow::Error) -> String {
+    let text = format!("{error:#}");
+    if text.contains("not inside a Git worktree") {
+        return "This folder isn’t a Git repository · /diff last shows the last turn’s changes"
+            .into();
+    }
+    format!("Diff failed: {text}")
+}
+
+/// `/undo` and `/redo` when there is nothing to take back or bring back say
+/// so, instead of quoting the server's reason for refusing.
+pub(crate) fn undo_error(error: &anyhow::Error, action: &str) -> String {
+    let text = error.to_string();
+    match action {
+        "Undo" if text.contains("snapshot to revert to") => "Nothing to undo".into(),
+        "Redo" if text.contains("is not reverted") => "Nothing to redo".into(),
+        _ => format!("{action} failed: {error:#}"),
     }
 }
 
@@ -758,7 +780,7 @@ impl App {
                 }
                 Err(error) => {
                     if steps == 0 {
-                        self.notice = format!("Undo failed: {error}");
+                        self.notice = undo_error(&error, "Undo");
                         return Ok(());
                     }
                     stopped = Some(format!(
@@ -944,7 +966,7 @@ impl App {
                 if viewer.files.is_empty() {
                     self.close_diff_viewer();
                 }
-                self.notice = format!("Diff failed: {error}");
+                self.notice = error;
             }
         }
     }
@@ -2452,7 +2474,7 @@ impl App {
                         }
                         self.notice = self.undo_notice("Undone — the next turn confirms");
                     }
-                    Err(error) => self.notice = format!("Undo failed: {error}"),
+                    Err(error) => self.notice = undo_error(&error, "Undo"),
                 }
             }
             "timeline" => self.open_timeline_overlay(),
@@ -2464,7 +2486,7 @@ impl App {
                     self.todos = client.todos(self.thread.id).await.unwrap_or_default();
                     self.notice = self.undo_notice("Redone");
                 }
-                Err(error) => self.notice = format!("Redo failed: {error}"),
+                Err(error) => self.notice = undo_error(&error, "Redo"),
             },
             "fork" => {
                 if arguments.is_empty() {
@@ -2726,7 +2748,17 @@ impl App {
             }
             "router" => {
                 let account = haarness_account::Client::new(haarness_account::Config::from_env()?)?;
-                let catalog = account.routers().await?;
+                let catalog = match account.routers().await {
+                    Ok(catalog) => catalog,
+                    // Signed out: sign in right here, as /billing offers, rather
+                    // than sending the person to a shell command.
+                    Err(haarness_account::Error::NotLoggedIn) => {
+                        self.open_connect_picker(Some("haarness"), client).await?;
+                        self.notice = "Sign in to Haarness Cloud to choose a router".into();
+                        return Ok(AppAction::Continue);
+                    }
+                    Err(error) => return Err(error.into()),
+                };
                 let selected = account.config.selected_router()?;
                 let entries = catalog["items"]
                     .as_array()
@@ -3078,10 +3110,7 @@ impl App {
                         .iter()
                         .any(|supported| supported == effort)
                     {
-                        self.notice = format!(
-                            "{} does not support {effort} reasoning; use /reasoning",
-                            self.thread.model
-                        );
+                        self.notice = self.unsupported_effort(effort);
                         return;
                     }
                     self.thread.ultracode = false;
@@ -3345,6 +3374,20 @@ impl App {
         self.notice = "Edit the objective, then press Enter".into();
     }
 
+    /// Why a reasoning effort cannot be chosen, naming the model as the
+    /// picker does and the efforts it does have.
+    fn unsupported_effort(&self, effort: &str) -> String {
+        let model = self.model_label(&format!("{}/{}", self.thread.provider, self.thread.model));
+        match self.reasoning_efforts() {
+            [] => format!("{model} does not support reasoning effort"),
+            [only] => format!("{model} does not support {effort} reasoning · it offers {only}"),
+            [rest @ .., last] => format!(
+                "{model} does not support {effort} reasoning · it offers {} or {last}",
+                rest.join(", ")
+            ),
+        }
+    }
+
     async fn set_reasoning_option(&mut self, value: &str, client: &ApiClient) -> Result<()> {
         if !matches!(value, "off" | "ultracode" | "display")
             && !self
@@ -3352,10 +3395,7 @@ impl App {
                 .iter()
                 .any(|effort| effort == value)
         {
-            self.notice = format!(
-                "{} does not support {value} reasoning; use /reasoning",
-                self.thread.model
-            );
+            self.notice = self.unsupported_effort(value);
             return Ok(());
         }
         if value != "display" {
@@ -3780,6 +3820,15 @@ impl App {
             .iter()
             .any(|provider| provider.id == self.thread.provider && provider.authenticated)
         {
+            if !self.any_provider_connected() {
+                // Nothing can answer yet, and the chat's default provider is
+                // not a choice the person made: open the picker and keep the
+                // draft rather than name a provider they never picked.
+                self.connect.onboarding = true;
+                self.open_connect_picker(None, client).await?;
+                self.notice = "Connect a provider to send your message".into();
+                return Ok(false);
+            }
             self.notice = crate::state::not_connected(&self.providers, &self.thread.provider);
             return Ok(false);
         }
@@ -3938,7 +3987,7 @@ impl App {
         {
             "Ready".into()
         } else {
-            crate::state::not_connected(&self.providers, &self.thread.provider)
+            crate::state::unconnected_notice(&self.providers, &self.thread.provider)
         };
         Ok(())
     }
@@ -4531,19 +4580,21 @@ impl App {
             return Ok(());
         };
         let provider = haarness_protocol::provider_storage_id(provider);
+        // An unconnected provider lists no models, so check the connection
+        // first: its model is not unknown, it is waiting for /connect.
+        if self
+            .providers
+            .iter()
+            .any(|candidate| candidate.id == provider && !candidate.authenticated)
+        {
+            self.notice = crate::state::not_connected(&self.providers, provider);
+            return Ok(());
+        }
         let exists = self.providers.iter().any(|candidate| {
             candidate.id == provider && candidate.models.iter().any(|value| value.id == model)
         });
         if !exists {
             self.notice = format!("Unknown model {provider}/{model}");
-            return Ok(());
-        }
-        if !self
-            .providers
-            .iter()
-            .any(|candidate| candidate.id == provider && candidate.authenticated)
-        {
-            self.notice = crate::state::not_connected(&self.providers, provider);
             return Ok(());
         }
         self.thread = client

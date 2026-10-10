@@ -775,7 +775,7 @@ impl ManagementService {
         let providers = self.runtime()?.providers().list();
         match text(input, "action") {
             "form" if id.is_empty() => Ok(form(
-                "Custom provider",
+                "Custom endpoint",
                 json!({"action":"add"}),
                 vec![
                     field("name", "Provider ID", "", true),
@@ -804,7 +804,7 @@ impl ManagementService {
             "edit_form" => {
                 let (_, path, section) = self.provider_source(input)?;
                 Ok(form(
-                    "Edit custom provider",
+                    "Edit custom endpoint",
                     json!({"action":"edit","name":id,"scope":input["scope"],"source":path,"revision":revision(&path)?}),
                     vec![
                         field(
@@ -897,11 +897,7 @@ impl ManagementService {
                         )),
                         haarness_providers::connect::MethodKind::Api => view.entries.push(entry(
                             if stored.is_some() {
-                                method.label.replacen("Use a", "Replace the", 1).replacen(
-                                    "Use an",
-                                    "Replace the",
-                                    1,
-                                )
+                                replace_label(method.label)
                             } else {
                                 method.label.to_owned()
                             },
@@ -962,8 +958,8 @@ impl ManagementService {
                         json!({"action":"router_form"}),
                     )))
                     .chain(std::iter::once(entry(
-                        "Add custom provider",
-                        "Connect your own model endpoint",
+                        "Add a custom endpoint",
+                        "Any OpenAI-, Anthropic- or Gemini-compatible API",
                         json!({"action":"form"}),
                     )))
                     .chain(sorted.into_iter().map(|p| {
@@ -1947,6 +1943,11 @@ impl ManagementService {
     }
 }
 
+/// "Use an API key" → "Replace the API key": the action once one is stored.
+fn replace_label(label: &str) -> String {
+    format!("Replace the {}", key_field_label(label))
+}
+
 /// "Use an API key" → "API key": the noun a form field is labelled with.
 fn key_field_label(label: &str) -> &str {
     ["Use an ", "Use a ", "Use "]
@@ -2039,5 +2040,25 @@ fn router_form(input: &Value, needs_key: bool) -> View {
             "The connection is checked and saved on this Haarness server. localhost refers to this server.".into(),
             if needs_key { "This router requires an access key. Enter it to connect.".into() } else { "Your provider API keys stay on the router.".into() }],
         entries: vec![entry(if advanced { "Hide advanced" } else { "Advanced" }, "Connection name and project scope", advanced_request)],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace_label;
+
+    #[test]
+    fn replacing_a_stored_key_reads_as_a_sentence() {
+        // "Use an API key" once became "Replace then API key": the "Use a"
+        // rule matched the start of "Use an".
+        assert_eq!(replace_label("Use an API key"), "Replace the API key");
+        assert_eq!(
+            replace_label("Use an access token"),
+            "Replace the access token"
+        );
+        assert_eq!(
+            replace_label("Use a GitHub token"),
+            "Replace the GitHub token"
+        );
     }
 }
