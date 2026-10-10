@@ -6,7 +6,8 @@
  * reasoned about and tested on their own.
  */
 import type { IconName } from "./icons";
-import type { Item } from "@haarness/sdk";
+import type { FileDiff, Item } from "@haarness/sdk";
+import { lines, type DiffLine } from "./diff";
 
 /** Provider call IDs can repeat in another turn; output belongs to one call. */
 export function toolResult(items: Item[], call?: Item, boundary = Infinity) {
@@ -533,6 +534,39 @@ export function routineEditOutput(output: string) {
 }
 /** Transcript diffs stay a preview; the Review panel is where the whole file lives. */
 export const CHANGE_PREVIEW_LINES = 24;
+
+/**
+ * The lines a change preview shows. An edit's snippets rarely end in a newline,
+ * and a line diff reads "a" and "a\n" as different lines, so the unchanged last
+ * line of `old` would show as removed and added again. Both sides end in one
+ * before they are compared.
+ */
+export function changeRows(change: Change): DiffLine[] {
+  const ended = (text = "") => (text && !text.endsWith("\n") ? text + "\n" : text);
+  return lines({
+    file: change.path || "change",
+    patch: change.patch,
+    before: ended(change.before),
+    after: ended(change.after),
+  } as FileDiff).filter((row) => row.kind !== "hunk");
+}
+
+/** Lines added and removed across changes, counted from the rows a reader sees. */
+export function changeStats(changes: Change[]) {
+  let additions = 0,
+    deletions = 0;
+  for (const change of changes) {
+    if (change.additions !== undefined && change.deletions !== undefined) {
+      additions += change.additions;
+      deletions += change.deletions;
+      continue;
+    }
+    for (const row of changeRows(change))
+      if (row.kind === "add") additions++;
+      else if (row.kind === "remove") deletions++;
+  }
+  return additions || deletions ? { additions, deletions } : undefined;
+}
 
 /** The tail of a path, which is the part that identifies a checkout to a reader. */
 export function shortPath(value: string, keep = 2) {

@@ -21,7 +21,7 @@ export function PreviewContent(props: { file: FileContent; fit?: boolean }) {
           }
         >
           <div class="document-preview">
-            <Markdown text={props.file.content} />
+            <Markdown text={props.file.content} document />
           </div>
         </Show>
       }

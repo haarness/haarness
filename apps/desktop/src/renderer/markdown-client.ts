@@ -1,6 +1,6 @@
 import { projectMarkdown, markdownPatch, type MarkdownPatch, type MarkdownProjection } from "./markdown-project";
 
-type Request = { key: number; revision: number; text: string; live: boolean };
+type Request = { key: number; revision: number; text: string; live: boolean; breaks: boolean };
 type Reply = { key: number; revision: number; patch?: MarkdownPatch; error?: boolean };
 type Client = {
   latest?: Request;
@@ -18,7 +18,7 @@ let failed = false;
 let idle: ReturnType<typeof setTimeout> | undefined;
 
 function fallback(client: Client, request: Request) {
-  const next = projectMarkdown(client.projection, request.text, request.live);
+  const next = projectMarkdown(client.projection, request.text, request.live, request.breaks);
   // Switching from a worker requires a complete patch, since its projection
   // lives in the other realm. The DOM reconciler still retains identical nodes.
   client.receive(markdownPatch(client.projection, next), request.live);
@@ -78,9 +78,9 @@ export function createMarkdownClient(receive: Client["receive"]) {
   const client: Client = { receive, buffered: [], rendered: [] };
   clients.set(key, client);
   return {
-    update(text: string, live: boolean) {
+    update(text: string, live: boolean, breaks = true) {
       if (disposed) return;
-      client.latest = { key, revision: ++revision, text, live };
+      client.latest = { key, revision: ++revision, text, live, breaks };
       dispatch(client);
     },
     dispose() {
