@@ -15134,6 +15134,16 @@ fn connect_picker_marks_connected_rows_in_the_gutter_and_shelves_popular_first()
                 && matches!(hit.target, crate::view::frame::HitTarget::MenuRow(_))),
         "the shelf label is not a row"
     );
+    // Scrolled so a shelf opens the visible list: its label sits right under
+    // the separator, without the blank row that parts it from a shelf above.
+    app.selection = 2;
+    let rendered: Vec<String> = app.lines((100, 12)).iter().map(line_text).collect();
+    let heading = rendered
+        .iter()
+        .position(|line| line.contains("More providers"))
+        .unwrap();
+    assert!(!rendered.iter().any(|line| line.contains("OpenAI")));
+    assert!(rendered[heading - 1].contains('─'), "{rendered:#?}");
 }
 
 #[test]
