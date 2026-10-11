@@ -128,10 +128,13 @@ pub enum SessionCommand {
     /// Capture saved settings in an inert template with a fresh deploy key.
     SaveAgent {
         id: String,
+        /// The new cloud agent's name.
         #[arg(long)]
         name: String,
+        /// The session's current `version`; a session changed since is refused.
         #[arg(long)]
         version: i64,
+        /// Copy the session's environment values into the agent as well.
         #[arg(long)]
         include_environment: bool,
     },

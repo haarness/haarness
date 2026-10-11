@@ -4043,7 +4043,9 @@ impl RunWatch {
     fn new() -> Self {
         let terminal = io::stderr().is_terminal();
         Self {
-            approver: if terminal && io::stdin().is_terminal() {
+            // Piped context (`git diff | haarness run …`) still leaves the
+            // person at the terminal to ask.
+            approver: if terminal && (io::stdin().is_terminal() || answer_terminal().is_ok()) {
                 Approver::Terminal
             } else {
                 Approver::Nobody
@@ -4109,9 +4111,16 @@ impl RunWatch {
             } else {
                 PermissionReplyDecision::Reject
             };
-            client
+            // While the terminal waited, the prompt may have been answered in
+            // the terminal UI or Desktop, or its turn stopped: nothing is left
+            // to answer, and the run goes on watching.
+            if let Err(error) = client
                 .reply_permission(&pending.permission_id, reply(decision))
-                .await?;
+                .await
+                && haarness_tui::api::refusal_status(&error) != Some(reqwest::StatusCode::NOT_FOUND)
+            {
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -4122,13 +4131,28 @@ impl RunWatch {
         let _ = io::stderr().flush();
         let answer = tokio::task::spawn_blocking(|| {
             let mut line = String::new();
-            io::stdin().read_line(&mut line).map(|_| line)
+            if io::stdin().is_terminal() {
+                io::stdin().read_line(&mut line)?;
+            } else {
+                io::BufRead::read_line(&mut io::BufReader::new(answer_terminal()?), &mut line)?;
+            }
+            io::Result::Ok(line)
         })
         .await??;
         Ok(matches!(
             answer.trim().to_ascii_lowercase().as_str(),
             "y" | "yes"
         ))
+    }
+}
+
+/// The terminal a run's approvals are typed into when stdin carries piped
+/// text. Scripts and CI jobs have none.
+fn answer_terminal() -> io::Result<fs::File> {
+    if cfg!(unix) {
+        fs::File::open("/dev/tty")
+    } else {
+        Err(io::ErrorKind::Unsupported.into())
     }
 }
 
@@ -4151,11 +4175,14 @@ fn describe_permission(pending: &haarness_protocol::PendingPermissionInfo) -> St
         "browser" | "browser_site" | "multiple" => "use the browser".to_owned(),
         "workflow" => "run a workflow".to_owned(),
         "agent_switch" => "switch agents".to_owned(),
+        "media_generate" => "generate an image or video".to_owned(),
         "doom_loop" => "keep repeating the same action".to_owned(),
         "" => "use a tool".to_owned(),
         other => format!("use {other}"),
     };
-    let subject = ["command", "path", "url"]
+    // An agent switch's pattern is an encoded chat id and agent name; its
+    // arguments name the agent.
+    let subject = ["command", "path", "url", "agent"]
         .into_iter()
         .find_map(|key| {
             pending
@@ -5861,9 +5888,6 @@ async fn auth_command(
         }
         AuthCommand::Login { provider, method } => {
             let provider = provider.trim_end_matches('/').to_ascii_lowercase();
-            if haarness_protocol::provider_storage_id(&provider) != "haarness" {
-                known_auth_provider(paths, workspace, trust, &provider)?;
-            }
             if haarness_protocol::provider_storage_id(&provider) == "haarness" {
                 return account::login(&account::LoginArgs {
                     device: method == Some(AuthLoginMethod::Headless),
@@ -5872,6 +5896,8 @@ async fn auth_command(
                 })
                 .await;
             }
+            // Stored under the provider's own id, as `auth set` stores it.
+            let provider = known_auth_provider(paths, workspace, trust, &provider)?;
             let method = method.unwrap_or(
                 if matches!(provider.as_str(), "openai" | "xai" | "github-copilot") {
                     AuthLoginMethod::Browser
@@ -10556,6 +10582,18 @@ mod tests {
         pending.permission = "bash".into();
         pending.detail = serde_json::json!({"command": "git push"});
         assert_eq!(describe_permission(&pending), "run a command (git push)");
+        pending.permission = "agent_switch".into();
+        pending.patterns = vec!["01a1:706c616e".into()];
+        pending.detail =
+            serde_json::json!({"agent": "plan", "__agentSwitch": {"threadId": "01a1"}});
+        assert_eq!(describe_permission(&pending), "switch agents (plan)");
+        pending.permission = "media_generate".into();
+        pending.patterns = vec!["image:generate".into()];
+        pending.detail = serde_json::json!({"prompt": "a lighthouse"});
+        assert_eq!(
+            describe_permission(&pending),
+            "generate an image or video (image:generate)"
+        );
     }
 
     #[tokio::test]
