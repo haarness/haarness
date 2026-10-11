@@ -1428,6 +1428,54 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use tokio::sync::Semaphore;
 
+    #[tokio::test]
+    async fn a_scheduled_runs_workflow_threads_belong_to_the_run() {
+        let workspace = std::env::temp_dir().join(format!(
+            "haarness-workflow-schedule-{}",
+            uuid::Uuid::now_v7()
+        ));
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        let runtime = Arc::new(AgentRuntime::with_workspace(
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            Arc::new(StaticProviderRegistry::new(
+                Vec::<Arc<dyn ModelProvider>>::new(),
+            )),
+            Arc::new(crate::NativeToolRegistry::new(workspace.clone())),
+            EventBus::new(16),
+            workspace.clone(),
+        ));
+        let run = runtime
+            .create_thread(CreateThreadRequest {
+                schedule: Some(haarness_protocol::ScheduleOrigin {
+                    id: uuid::Uuid::now_v7(),
+                    name: "Nightly".into(),
+                }),
+                title: Some("Nightly".into()),
+                ..CreateThreadRequest::default()
+            })
+            .await
+            .unwrap();
+        let host = WorkflowRuntimeAdapter::new();
+        host.attach(&runtime);
+        let lookup = crate::browser::runtime_threads(&runtime);
+        // A workflow the run starts is part of the run: Automatic keeps it
+        // out of the user's Chrome, and its Chrome gates fail at once.
+        let started = host
+            .create_run_thread(Some(run.id), "Workflow · nightly")
+            .await
+            .unwrap();
+        assert!(runtime.scheduled_run(started).await);
+        assert!(lookup(started).await.unwrap().scheduled);
+        // One launched outside any chat belongs to no schedule.
+        let detached = host
+            .create_run_thread(None, "Workflow · cli")
+            .await
+            .unwrap();
+        assert!(!runtime.scheduled_run(detached).await);
+        assert!(!lookup(detached).await.unwrap().scheduled);
+        tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
     #[test]
     fn shell_result_separates_the_internal_exit_prefix() {
         assert_eq!(
