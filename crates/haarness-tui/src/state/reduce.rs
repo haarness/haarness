@@ -135,7 +135,8 @@ impl App {
 
     /// `--yolo`: answer a request in the conversation this TUI shows once,
     /// as `haarness run --yolo` does for its run. A request that must ask
-    /// every time (no Always choice) still gets its card.
+    /// every time (no Always choice) and Chrome site access (`explicit`) still
+    /// get their card.
     async fn yolo_permission(&mut self, id: &str, eligible: bool, client: &ApiClient) -> bool {
         if !self.yolo || !eligible {
             return false;
@@ -174,7 +175,10 @@ impl App {
         self.refresh_approval_mode(client).await;
         let mut pending = Vec::new();
         for request in requests {
+            // Chrome site access always waits for a person, whatever this
+            // client's yolo or Auto says.
             let eligible = request.allow_always != Some(false)
+                && !request.explicit
                 && !matches!(request.permission.as_str(), "instruction_import");
             let in_conversation = request.root_thread_id == Some(self.root_thread_id)
                 || request.thread_id == self.thread.id;
@@ -210,6 +214,7 @@ impl App {
         {
             let eligible = event.payload["allowOnce"] != false
                 && event.payload["allowAlways"] != false
+                && event.payload["explicit"] != true
                 && !matches!(
                     event.payload["permission"].as_str(),
                     Some("instruction_import")

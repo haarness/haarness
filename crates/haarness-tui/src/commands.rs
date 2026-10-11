@@ -350,6 +350,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         &["rc", "remote"],
         "Continue this chat from your phone or any browser · /remote-control stop",
     ),
+    command("chrome", &["browser"], "Use your Chrome with Haarness"),
     command("mcp", &["mcps"], "Manage MCP connections"),
     command("schedules", &["schedule"], "Manage scheduled runs"),
     command("hooks", &[], "Manage runtime hooks"),
@@ -2456,6 +2457,7 @@ impl App {
                     .await?;
             }
             "remote-control" => self.remote_control_command(arguments, client)?,
+            "chrome" => self.chrome_command(arguments, client)?,
             "usage" => {
                 let usage = client.thread_usage(self.thread.id).await?;
                 let number = |key: &str| usage[key].as_u64().unwrap_or(0);
@@ -2938,6 +2940,7 @@ impl App {
             "status" => {
                 let lsp = client.lsp_status().await.unwrap_or_default();
                 let formatters = client.formatter_status().await.unwrap_or_default();
+                let chrome = crate::chrome::fetch_hosts(client, self.thread.id).await;
                 let mut lines = vec![
                     format!("thread   {}", self.thread.id),
                     format!("agent    {}", self.agent()),
@@ -2958,6 +2961,10 @@ impl App {
                         } else {
                             "idle"
                         }
+                    ),
+                    format!(
+                        "Chrome   {}",
+                        crate::chrome::status_line(&chrome, self.language)
                     ),
                 ];
                 lines.push(format!("LSP      {} configured", lsp.len()));
