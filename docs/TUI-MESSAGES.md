@@ -1,5 +1,7 @@
 # Browse conversation messages in the TUI
 
+> **User guide:** [Find messages and ask side questions](https://haarness.ai/docs/tui/messages). This page has the engineering detail.
+
 Press **Alt+M** or run **`/messages`** to browse the current conversation's
 prompts and assistant replies. You can also start with a search:
 

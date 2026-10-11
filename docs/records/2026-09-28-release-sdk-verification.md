@@ -111,6 +111,6 @@ This is complete **local macOS ARM64 release proof**, not a production or six-pl
 - The owned mounted test DMG was ejected; fixture servers remain running for manual testing.
   Unrelated dirty primary Cloud work and its dependency symlink were preserved.
 
-Follow [release testing](../skills/haarness-release/SKILL.md) and
-[SDK testing](../skills/haarness-sdk-surface/SKILL.md). Explore relevant undocumented cases
+Follow [release testing](../../skills/haarness-release/SKILL.md) and
+[SDK testing](../../skills/haarness-sdk-surface/SKILL.md). Explore relevant undocumented cases
 and keep actual evidence separate from prerequisites or previous results.

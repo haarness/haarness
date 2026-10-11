@@ -1,5 +1,7 @@
 # Cross-project analytics
 
+> **User guide:** [See your usage and cost](https://haarness.ai/docs/cli/stats-and-insights). This page has the engineering detail.
+
 `haarness stats` and `haarness insights` read session history across every workspace
 in the current local data root. Servers can be running or stopped. Analytics do not
 start servers, register projects, migrate databases, load credentials or call providers.

@@ -1,5 +1,7 @@
 # Notifications that open the conversation
 
+> **User guide:** [Get notified](https://haarness.ai/docs/desktop/settings#get-notified). This page has the engineering detail.
+
 Enable **Notifications** in Desktop settings. While Haarness is in the background, a notification identifies the conversation and project when a task finishes, fails, needs approval, or asks a question. Click it to bring Haarness forward and open that conversation, including switching to its saved server and exact remote project or worktree. The chat's unsent draft stays with it.
 
 Notifications keep working for projects opened during the current app run even when their sidebar group is collapsed. They survive renderer reloads; on macOS, where closing the last window leaves Haarness running, clicking a notification creates a window again. Quitting the application stops notification monitoring. OS notification permissions and Focus settings still control whether banners appear.

@@ -90,4 +90,4 @@ Desktop or `haarness run`:
 
 Open the link in Chrome and send a follow-up. Ask the original assistant to read the remote
 messages, stop the session, resume it, and read the file again. Stop the session when finished.
-See [account and Cloud usage](HAARNESS-ACCOUNT.md) for CLI commands and lifecycle semantics.
+See [account and Cloud usage](../HAARNESS-ACCOUNT.md) for CLI commands and lifecycle semantics.

@@ -1,5 +1,7 @@
 # TypeScript and JavaScript extensions
 
+> **User guide:** [Add a custom tool with an extension](https://haarness.ai/docs/cli/extensions). This page has the engineering detail.
+
 Haarness extensions add tools and change chat behavior through a versioned,
 typed API. Authors write TypeScript or JavaScript; the application and its
 permission, persistence, and lifecycle machinery stay in Rust. There is no

@@ -5,7 +5,7 @@ description: Verify Haarness Python sync/async and TypeScript SDK coverage of ru
 
 # SDK contract and end-to-end coverage
 
-The native repository contains `sdks/`; Cloud contracts generate `haarness-cloud/docs/openapi.json`. Read `haarness/docs/CLOUD-SDK-VERIFICATION-2026-09-27.md` and the native build skill. Regenerate from the matching Cloud checkout, not a stale sibling primary checkout:
+The native repository contains `sdks/`; Cloud contracts generate `haarness-cloud/docs/openapi.json`. Read `haarness/docs/records/2026-09-27-cloud-sdk-verification.md` and the native build skill. Regenerate from the matching Cloud checkout, not a stale sibling primary checkout:
 
 ```sh
 # Cloud checkout

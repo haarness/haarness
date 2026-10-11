@@ -1,5 +1,7 @@
 # Remote computers through Haarness Cloud
 
+> **User guide:** [Remote control](https://haarness.ai/docs/cloud/remote-hosts). This page has the engineering detail.
+
 Use your own machine from Cloud web, the Cloud API, or the Python and TypeScript SDKs. The machine runs Haarness and makes an outbound authenticated WebSocket connection. No inbound port, SSH server, tunnel or Apple service is needed.
 
 ```sh

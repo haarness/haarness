@@ -1,5 +1,7 @@
 # Portable configuration profiles
 
+> **User guide:** [Save and restore your setup](https://haarness.ai/docs/cli/configuration#save-and-restore-your-setup). This page has the engineering detail.
+
 Profiles move Haarness configuration between installations and projects. Each
 ZIP archive has a versioned manifest and SHA-256 checksums for every file.
 Profile commands do not start models, register workspaces, or load credentials.

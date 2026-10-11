@@ -47,7 +47,7 @@ Haarness uses separate ownership for project navigation, draft state, and direct
 
 The preferred CLI/TUI management command is `worktree` / `/worktree`. Existing `workspace`, `workspaces`, and API `/v1/workspaces` remain compatible aliases/contracts; database and runtime directory names are unchanged. This naming change does not migrate or copy live conversation databases.
 
-See [desktop verification](DESKTOP-VERIFICATION.md) for executed scenarios and evidence limits.
+See [desktop verification](records/2026-09-07-desktop-verification.md) for executed scenarios and evidence limits.
 
 ## Projects are required
 

@@ -68,5 +68,5 @@ Surfaces:
 
 - Mistral Large 4, Kimi K3, xAI and DeepSeek: no keys. Metadata follows the providers' pages; Mistral's pages spell the id both `mistral-large-4-0` and `mistral-large-4`, so both are recognized.
 - Opus 5.5 and Fable 5.1 were not re-run natively, to limit spend; their request shapes are covered by fixtures and they share the adaptive path exercised by Sonnet and Haiku 5.5.
-- Bedrock and third-party gateways (OpenRouter) no longer force `tool_choice` for Opus 5.5, Sonnet 5.5 and Fable 5.1, and the runtime now asks again when structured output comes back in the wrong shape ([Upstream port](../RELIABILITY-PORT-2026-10-10.md)); neither path was run live (no AWS or OpenRouter key).
+- Bedrock and third-party gateways (OpenRouter) no longer force `tool_choice` for Opus 5.5, Sonnet 5.5 and Fable 5.1, and the runtime now asks again when structured output comes back in the wrong shape ([Upstream port](2026-10-10-reliability-port.md)); neither path was run live (no AWS or OpenRouter key).
 - The managed Cloud router serves Anthropic, OpenAI and Google only; Mistral, xAI and DeepSeek models stay disabled in its catalog until it has keys for them.

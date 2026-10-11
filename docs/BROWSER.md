@@ -1,5 +1,7 @@
 # Browser alongside chat
 
+> **User guide:** [Test a website in the browser](https://haarness.ai/docs/desktop/projects-and-panels#test-a-website-in-the-browser). This page has the engineering detail.
+
 Open a project, open the side panel, then choose **Browser**. You can browse from the new-chat screen before creating a conversation. Use **+** to add tabs, enter a URL, and navigate with Back, Forward and Reload. The command palette also offers **Open browser** (⌘⇧B on macOS, Ctrl⇧B elsewhere). Expanding the side panel gives the page more room.
 
 The new-chat screen has a separate browser for each project. Browsing does not create a conversation or send a prompt. When you send the first message, those live tabs move into the new conversation, preserving form input, cookies, page state, and downloads so the agent can use them immediately. Opening another new chat starts with its own tabs. Draft tab URLs also return after restarting Desktop; temporary logins reset on restart as they do for conversation browsers.

@@ -1,5 +1,7 @@
 # Sign in to Haarness
 
+> **User guide:** [Sign in and secure your account](https://haarness.ai/docs/cloud/sign-in). This page has the engineering detail.
+
 Run `haarness login`, finish sign-in in your browser, then choose a model under **Haarness Cloud**. For an SSH or headless terminal, use `haarness login --device` and approve the displayed code from another device. `haarness auth login haarness` is an alias for the same account flow. In the TUI, `/connect haarness` (or **Haarness Cloud** in the first-run picker) runs the same sign-in without leaving the terminal and lands in the Cloud model picker; **Manage providers → Haarness Cloud → Sign out of Haarness** signs out again.
 
 `/billing` in the TUI shows the plan and balances with the next step as a row to choose: **Add credits**, **Choose a plan** (or **Change plan**) and **Usage** open the matching Cloud page in your browser. Purchased credits are only spent once overage is on; when they are waiting on it, `/billing` says so and offers **Turn on overage**, and a refused request explains the same instead of reporting a raw `402`.

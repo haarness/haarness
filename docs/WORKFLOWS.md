@@ -1,5 +1,7 @@
 # Dynamic workflows
 
+> **User guide:** [Run and write workflows](https://haarness.ai/docs/cli/workflows). This page has the engineering detail.
+
 Haarness discovers reusable JavaScript and TypeScript workflows, executes each
 run in a dedicated child session, and stores the source snapshot, arguments,
 phase, logs, child agents, result, and lifecycle state in SQLite. Runs survive

@@ -1,5 +1,7 @@
 # Steer and Queue
 
+> **User guide:** [Send more while it works](https://haarness.ai/docs/desktop/the-conversation#send-more-while-it-works). This page has the engineering detail.
+
 Use **Steer** to correct the task the agent is doing now. Use **Queue** to give it another task after the current work finishes.
 
 For example, while the agent is fixing a bug:
