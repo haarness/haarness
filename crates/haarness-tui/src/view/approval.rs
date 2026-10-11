@@ -47,8 +47,11 @@ fn category(pending: &PendingPermissionInfo) -> &str {
 /// whose subject half the panel already prints verbatim on the row below, so
 /// naming the category here is what stops the card from saying the same
 /// string twice.
-fn headline(category: &str) -> &str {
-    match category {
+fn headline(pending: &PendingPermissionInfo) -> &str {
+    if pending.explicit {
+        return "Allow in Chrome";
+    }
+    match category(pending) {
         "bash" => "Run a shell command",
         "edit" => "Edit a file",
         "read" => "Read a file",
@@ -69,9 +72,65 @@ fn headline(category: &str) -> &str {
     }
 }
 
+/// One Chrome site gate in words. The server asks with a remember pattern,
+/// `chrome-<category>:<thread id>:<origin>` (prefixed `browser_site:` when it
+/// rides in a combined request), and the person should read what it lets the
+/// agent do, not the rule.
+fn chrome_access(pattern: &str, language: Language) -> Option<String> {
+    let rest = pattern.strip_prefix("browser_site:").unwrap_or(pattern);
+    let (category, rest) = rest.strip_prefix("chrome-")?.split_once(':')?;
+    // The origin carries a colon of its own; the chat id never does.
+    let origin = if rest.starts_with("http://") || rest.starts_with("https://") {
+        rest
+    } else {
+        rest.split_once(':')?.1
+    };
+    let key = match category {
+        "browsing" => "Use {origin} in Chrome",
+        "downloads" => "Send downloads from {origin} in Chrome to the agent",
+        "uploads" => "Upload files to {origin} in Chrome",
+        "scripts" => "Run scripts on {origin} in Chrome",
+        _ => return None,
+    };
+    Some(language.format(key, &[("origin", origin)]))
+}
+
+/// What a Chrome request lets the agent do, one line per site and kind of
+/// access, followed by anything else it asks alongside (a file it would
+/// upload). The browser action itself is what the site lines describe.
+fn chrome_subject(pending: &PendingPermissionInfo, language: Language) -> Option<String> {
+    let mut lines = Vec::new();
+    let mut other = Vec::new();
+    for pattern in &pending.patterns {
+        // A navigation asks for the site and its `www.` twin together, so
+        // one answer covers both; the twin is the same site to a person.
+        let bare = pattern.replacen("://www.", "://", 1);
+        if bare != *pattern && pending.patterns.contains(&bare) {
+            continue;
+        }
+        if let Some(line) = chrome_access(pattern, language) {
+            if !lines.contains(&line) {
+                lines.push(line);
+            }
+        } else if !pattern.starts_with("browser:") && !pattern.starts_with("browser_site:") {
+            other.push(pattern.clone());
+        }
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    lines.extend(other);
+    Some(lines.join("\n"))
+}
+
 /// The one thing being approved: the command, path, or url the server sent as
 /// detail, else the raw patterns, else the operation string's subject half.
-fn subject(pending: &PendingPermissionInfo) -> Option<String> {
+fn subject(pending: &PendingPermissionInfo, language: Language) -> Option<String> {
+    if pending.explicit
+        && let Some(subject) = chrome_subject(pending, language)
+    {
+        return Some(subject);
+    }
     if category(pending) == "agent_switch" {
         let details = &pending.detail["__agentSwitch"];
         if let (Some(agent), Some(model)) = (details["agent"].as_str(), details["model"].as_str()) {
@@ -126,6 +185,11 @@ fn always_rules(
     subject: Option<&str>,
     language: Language,
 ) -> Vec<String> {
+    // Allowing a Chrome site in this chat covers exactly the lines shown;
+    // the chip says so, and the stored rule is plumbing.
+    if pending.explicit {
+        return Vec::new();
+    }
     // The server keys a remembered switch by chat as well as agent.
     if let Some(agent) = pending.detail["__agentSwitch"]["agent"]
         .as_str()
@@ -168,8 +232,8 @@ fn always_rules(
 /// band, the desktop banner and the toast shown while the card is hidden.
 /// Never the wire's `kind:subject` rule.
 pub fn summary(pending: &PendingPermissionInfo, language: Language) -> String {
-    let headline = language.text(headline(category(pending)));
-    match subject(pending) {
+    let headline = language.text(headline(pending));
+    match subject(pending, language) {
         Some(subject) => format!("{headline}: {}", subject.lines().next().unwrap_or_default()),
         None => headline.to_owned(),
     }
@@ -208,8 +272,7 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
     let inner = width.saturating_sub(RAIL.width() + 2).max(20);
     let staged = app.confirm_always.filter(|_| focused);
 
-    let category = category(pending);
-    let subject = subject(pending);
+    let subject = subject(pending, language);
     let rules = always_rules(pending, subject.as_deref(), language);
 
     // The thing being approved, verbatim: the command for bash, the path for
@@ -293,7 +356,7 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
             .with_attributes(attr::BOLD),
         Span::new(
             single_line(
-                language.text(headline(category)),
+                language.text(headline(pending)),
                 inner.saturating_sub(position.as_ref().map_or(0, |text| text.width())),
             ),
             theme.text,
@@ -517,11 +580,14 @@ fn chips(app: &App, staged: bool) -> Vec<(String, String)> {
             (app.language.text("Cancel").to_owned(), "esc".into()),
         ];
     }
+    let explicit = app
+        .first_pending_permission()
+        .is_some_and(|pending| pending.explicit);
     PermissionChoice::available(app)
         .iter()
         .map(|choice| {
             (
-                app.language.text(choice.label()).to_owned(),
+                app.language.text(choice.label_for(explicit)).to_owned(),
                 choice.key().to_string(),
             )
         })
@@ -613,10 +679,16 @@ fn chip_rows(app: &App, width: usize, staged: bool) -> Vec<ChipRow> {
 fn footer(app: &App, width: usize, staged: bool) -> Vec<Span> {
     let theme = &app.theme;
     let surface = theme.overlay;
+    let explicit = app
+        .first_pending_permission()
+        .is_some_and(|pending| pending.explicit);
     let pairs: &[(&str, &str)] = if !app.permission_focus {
         &[("ctrl+g", "answer"), ("click", "choose")]
     } else if staged {
         &[]
+    } else if explicit {
+        // Escape answers the same as the Deny chip beside it.
+        &[("←→", "select"), ("enter", "choose"), ("esc", "deny")]
     } else {
         &[("←→", "select"), ("enter", "choose"), ("esc", "reject")]
     };

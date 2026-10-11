@@ -2178,5 +2178,12 @@
   "Approval needed": "Godkjenning kreves",
   "Answer needed": "Svar kreves",
   "Browse and manage durable workflows": "Bla i og administrer varige arbeidsflyter",
-  "Set or manage a persistent autonomous goal": "Angi eller administrer et vedvarende autonomt mål"
+  "Set or manage a persistent autonomous goal": "Angi eller administrer et vedvarende autonomt mål",
+  "Allow in Chrome": "Tillat i Chrome",
+  "Use {origin} in Chrome": "Bruk {origin} i Chrome",
+  "Send downloads from {origin} in Chrome to the agent": "Send nedlastinger fra {origin} i Chrome til agenten",
+  "Upload files to {origin} in Chrome": "Last opp filer til {origin} i Chrome",
+  "Run scripts on {origin} in Chrome": "Kjør skript på {origin} i Chrome",
+  "Allow in this chat": "Tillat i denne chatten",
+  "deny": "avvis"
 }

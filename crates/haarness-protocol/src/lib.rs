@@ -956,6 +956,9 @@ fn default_true() -> bool {
 pub struct PendingPermissionInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_always: Option<bool>,
+    /// Chrome site access that only a person may grant; never auto-approved.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub explicit: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository_scope: Option<String>,
     pub permission_id: String,

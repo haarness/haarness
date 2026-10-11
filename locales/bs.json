@@ -2178,5 +2178,12 @@
   "Approval needed": "Potrebno odobrenje",
   "Answer needed": "Potreban odgovor",
   "Browse and manage durable workflows": "Pregled trajnih radnih tokova i upravljanje njima",
-  "Set or manage a persistent autonomous goal": "Postavi trajni autonomni cilj ili upravljaj njime"
+  "Set or manage a persistent autonomous goal": "Postavi trajni autonomni cilj ili upravljaj njime",
+  "Allow in Chrome": "Dozvoli u Chromeu",
+  "Use {origin} in Chrome": "Koristi {origin} u Chromeu",
+  "Send downloads from {origin} in Chrome to the agent": "Šalji agentu preuzimanja sa {origin} u Chromeu",
+  "Upload files to {origin} in Chrome": "Otpremi datoteke na {origin} u Chromeu",
+  "Run scripts on {origin} in Chrome": "Pokreni skripte na {origin} u Chromeu",
+  "Allow in this chat": "Dozvoli u ovom razgovoru",
+  "deny": "odbij"
 }

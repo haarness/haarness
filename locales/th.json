@@ -2178,5 +2178,12 @@
   "Approval needed": "ต้องการการอนุมัติ",
   "Answer needed": "ต้องการคำตอบ",
   "Browse and manage durable workflows": "เรียกดูและจัดการเวิร์กโฟลว์ที่คงอยู่",
-  "Set or manage a persistent autonomous goal": "ตั้งหรือจัดการเป้าหมายอัตโนมัติที่คงอยู่"
+  "Set or manage a persistent autonomous goal": "ตั้งหรือจัดการเป้าหมายอัตโนมัติที่คงอยู่",
+  "Allow in Chrome": "อนุญาตใน Chrome",
+  "Use {origin} in Chrome": "ใช้ {origin} ใน Chrome",
+  "Send downloads from {origin} in Chrome to the agent": "ส่งไฟล์ที่ดาวน์โหลดจาก {origin} ใน Chrome ให้เอเจนต์",
+  "Upload files to {origin} in Chrome": "อัปโหลดไฟล์ไปยัง {origin} ใน Chrome",
+  "Run scripts on {origin} in Chrome": "เรียกใช้สคริปต์บน {origin} ใน Chrome",
+  "Allow in this chat": "อนุญาตในแชทนี้",
+  "deny": "ปฏิเสธ"
 }

@@ -2178,5 +2178,12 @@
   "Approval needed": "Aprovação necessária",
   "Answer needed": "Resposta necessária",
   "Browse and manage durable workflows": "Navegar e gerenciar fluxos de trabalho duradouros",
-  "Set or manage a persistent autonomous goal": "Definir ou gerenciar uma meta autônoma persistente"
+  "Set or manage a persistent autonomous goal": "Definir ou gerenciar uma meta autônoma persistente",
+  "Allow in Chrome": "Permitir no Chrome",
+  "Use {origin} in Chrome": "Usar {origin} no Chrome",
+  "Send downloads from {origin} in Chrome to the agent": "Enviar ao agente os downloads de {origin} no Chrome",
+  "Upload files to {origin} in Chrome": "Enviar arquivos para {origin} no Chrome",
+  "Run scripts on {origin} in Chrome": "Executar scripts em {origin} no Chrome",
+  "Allow in this chat": "Permitir nesta conversa",
+  "deny": "negar"
 }

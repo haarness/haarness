@@ -2178,5 +2178,12 @@
   "Approval needed": "需要核准",
   "Answer needed": "需要回答",
   "Browse and manage durable workflows": "瀏覽與管理持久工作流程",
-  "Set or manage a persistent autonomous goal": "設定或管理持續性的自主目標"
+  "Set or manage a persistent autonomous goal": "設定或管理持續性的自主目標",
+  "Allow in Chrome": "在 Chrome 中允許",
+  "Use {origin} in Chrome": "在 Chrome 中使用 {origin}",
+  "Send downloads from {origin} in Chrome to the agent": "將 Chrome 中來自 {origin} 的下載內容傳送給代理程式",
+  "Upload files to {origin} in Chrome": "在 Chrome 中將檔案上傳到 {origin}",
+  "Run scripts on {origin} in Chrome": "在 Chrome 中於 {origin} 執行指令碼",
+  "Allow in this chat": "在此對話中允許",
+  "deny": "拒絕"
 }

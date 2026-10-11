@@ -2178,5 +2178,12 @@
   "Approval needed": "承認が必要です",
   "Answer needed": "回答が必要です",
   "Browse and manage durable workflows": "永続ワークフローを閲覧・管理",
-  "Set or manage a persistent autonomous goal": "継続的な自律目標を設定・管理"
+  "Set or manage a persistent autonomous goal": "継続的な自律目標を設定・管理",
+  "Allow in Chrome": "Chrome での許可",
+  "Use {origin} in Chrome": "Chrome で {origin} を使用",
+  "Send downloads from {origin} in Chrome to the agent": "Chrome での {origin} からのダウンロードをエージェントに送信",
+  "Upload files to {origin} in Chrome": "Chrome で {origin} にファイルをアップロード",
+  "Run scripts on {origin} in Chrome": "Chrome で {origin} 上のスクリプトを実行",
+  "Allow in this chat": "このチャットで許可",
+  "deny": "拒否"
 }
