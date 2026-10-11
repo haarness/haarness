@@ -465,6 +465,18 @@ test("with Chrome support, the status follows connected browsers and setup walks
   await expect(setupDialog()).toHaveCount(0);
   await expect(row).toContainText("Connected · Google Chrome");
   await expect(settings().getByRole("button", { name: "Manage…", exact: true })).toBeVisible();
+  // The status sits beside its button, at the weight of other row values,
+  // and leaves the description its full measure.
+  const status = row.locator(".chrome-status");
+  expect(await status.evaluate((element) => getComputedStyle(element).fontWeight)).toBe("400");
+  expect(
+    await row.evaluate((row) => {
+      const status = row.querySelector(".chrome-status")!.getBoundingClientRect();
+      const button = row.querySelector("button")!.getBoundingClientRect();
+      return button.left - status.right;
+    }),
+  ).toBeLessThanOrEqual(24);
+  await expect(status.locator(".chrome-status-text")).toHaveAttribute("title", "Connected · Google Chrome");
   await row.scrollIntoViewIfNeeded();
   await snap("chrome-rows.png", settings());
   await stub({ hosts: [chromeHost(), chromeHost({ name: "Microsoft Edge" })] });
@@ -569,6 +581,10 @@ test("the Chrome section and setup read right to left in Arabic, with paths kept
       .evaluateAll((codes) => codes.map((code) => getComputedStyle(code).direction)),
   ).toEqual(["ltr", "ltr"]);
   expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+  // The setup command's English note keeps its full stop at its own end.
+  expect(
+    await dialog.locator(".chrome-browsers small").evaluate((note) => getComputedStyle(note).unicodeBidi),
+  ).toBe("plaintext");
   await snap("chrome-setup-ar.png", dialog);
   await dialog.getByRole("button", { name: "إغلاق", exact: true }).click();
   await page.evaluate(() => window.haarness.preferences({ language: "en" }));
