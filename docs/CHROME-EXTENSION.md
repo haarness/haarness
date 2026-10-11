@@ -37,6 +37,7 @@ The server never talks to Chrome directly: loopback servers refuse a `chrome-ext
 | Native host name | `ai.haarness.browser` |
 | Extension ID | `accdjhmcgljbadpeanajllmcembhkomn`, pinned by the manifest `key` |
 | Extra allowed extension IDs | `HAARNESS_BROWSER_EXTENSION_IDS` (comma separated), read by `haarness browser setup` |
+| Test manifest folders | `HAARNESS_BROWSER_MANIFEST_DIR` (a path list): `setup`, `status` and `remove` use only these folders instead of the browsers' own, as `--manifest-dir` does for `setup`, so a TUI or Desktop test run never registers with the user's Chrome |
 | Chrome Web Store URL | none yet: the Rust constant `CHROME_WEB_STORE_URL` in the CLI browser module, reported as `webStoreUrl` |
 | Server capability | `browser-extension.v1`, advertised only when the server has both the browser broker and management |
 | Extension host endpoint | `GET /v1/browser/extension/host?version=1` |
