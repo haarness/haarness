@@ -336,6 +336,13 @@ test("a blocked site is refused, and a redirect to a blocked or unapproved site 
   // The tab never shows either site.
   const list = value<{ tabs: Tab[] }>(await stack.tool(thread, "browser_tabs_list", {}));
   expect(list.tabs[0].url).not.toMatch(/other\.test|blocked\.test/);
+  // A frame of an allowed page does not load the blocked site either. The call says so, but
+  // the allowed page stays (only a blocked page of the tab's own is taken away).
+  expect(
+    failed(await stack.tool(thread, "browser_navigate", { tabID: tab.id, url: stack.site.url("shop", "/frame?inner=blocked") })),
+  ).toContain(stack.site.origin("blocked"));
+  expect(stack.site.requests.some((request) => request.host === "blocked.test")).toBe(false);
+  expect(value<{ tabs: Tab[] }>(await stack.tool(thread, "browser_tabs_list", {})).tabs[0].title).toBe("Framed");
 });
 
 test("Chrome's own pages are off limits even in an agent tab", async ({ stack }) => {
