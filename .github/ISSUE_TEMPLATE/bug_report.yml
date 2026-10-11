@@ -28,7 +28,7 @@ body:
     attributes:
       label: Surface
       multiple: true
-      options: [CLI / headless run, TUI, Desktop, Server / API, SDK (TypeScript), SDK (Python), ACP / editor integration, Install / update]
+      options: [CLI / headless run, TUI, Desktop, Chrome extension, Server / API, SDK (TypeScript), SDK (Python), ACP / editor integration, Install / update]
     validations:
       required: true
   - type: input
@@ -54,4 +54,5 @@ body:
     id: logs
     attributes:
       label: Logs and `haarness doctor` output
+      description: For the Chrome extension, also paste `haarness browser status --json` and the Chrome version from chrome://version.
       render: text
