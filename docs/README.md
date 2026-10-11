@@ -11,7 +11,7 @@ and the [build and run skill](../.skills/haarness-build-run/SKILL.md).
 ## Guides
 
 - [Automatic approvals](AUTO-APPROVALS.md): Review and Auto, the per-chat approval mode the server keeps, and how Desktop and the TUI change it.
-- [Browser alongside chat](BROWSER.md): Desktop's built-in browser, agent control, site permissions, local and remote networking.
+- [Browser alongside chat](BROWSER.md): Desktop's built-in browser and the user's Chrome, choosing between them, agent control, site permissions, local and remote networking.
 - [Canvas and file previews](CANVAS-PREVIEW.md): interactive HTML and file previews in Desktop, saved versions, compare and restore.
 - [Haarness Desktop](DESKTOP.md): first run, where things live, how each surface behaves, and Desktop development and packaging.
 - [Desktop notifications](DESKTOP-NOTIFICATIONS.md): notifications that open the chat that finished or needs an answer.
@@ -43,6 +43,7 @@ and the [build and run skill](../.skills/haarness-build-run/SKILL.md).
 
 - [Architecture](ARCHITECTURE.md): crate dependency rules, runtime invariants and the native boundary.
 - [Projects, worktrees and chats](DESKTOP-PROJECT-MODEL.md): Desktop's project model, routing and remote hosts.
+- [Haarness for Chrome](CHROME-EXTENSION.md): the Chrome extension, its native host bridge and protocols, setup and data layout, tests, packaging and Web Store publishing.
 - [Desktop streaming Markdown](STREAMING-MARKDOWN.md): how replies render incrementally without reflowing.
 - [Keeping local builds small](BUILD-STORAGE.md): Rust build settings and safe cache cleanup.
 - [Desktop UX brief](DESKTOP-UX-ENGINEER-BRIEF.md): the brief given to UI/UX passes on Desktop.
