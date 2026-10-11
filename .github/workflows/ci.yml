@@ -81,9 +81,14 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
+          cache-dependency-path: |
+            apps/desktop/package-lock.json
+            packages/browser-driver/package-lock.json
       - run: cargo build --release -p haarness-cli
+      # Installs the browser driver before Desktop, which links it.
       - run: npm run desktop:install
+      - name: Browser driver typecheck, tests and tool catalog
+        run: npm run driver:test
       - run: npm --prefix apps/desktop run build
       - run: npm --prefix apps/desktop test
       - name: Electron end-to-end tests
