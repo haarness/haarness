@@ -41,8 +41,8 @@ export function createConversationControls(props: {
     if (disabled(action))
       throw Error(
         action === "compact" && thread()?.revert
-          ? "Redo or continue the conversation before compacting."
-          : "This conversation action is unavailable while work is running or there is no eligible history.",
+          ? "Redo or continue the chat before compacting."
+          : "This chat action is unavailable while work is running or there is no eligible history.",
       );
     const id = app.state.selected;
     const connection = app.state.connection!.id;

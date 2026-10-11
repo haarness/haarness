@@ -1363,7 +1363,7 @@ function createApp() {
     // Validate before switching so a stale notification cannot open an empty chat.
     if (!state.recent.some((item) => item.id === target.connection))
       throw new Error(
-        "This notification's project is no longer saved. Open the project to find the conversation.",
+        "This notification's project is no longer saved. Open the project to find the chat.",
       );
     const view =
       state.connection?.id === target.connection &&
@@ -1479,16 +1479,16 @@ function createApp() {
     }
     if (connection !== state.connection?.id || targetThread !== state.selected)
       throw new Error(
-        "The project or conversation changed before sending. Your draft is saved.",
+        "The project or chat changed before sending. Your draft is saved.",
       );
     const commands = [...state.commands];
     const turns = [...state.turns];
     const thread = targetThread
       ? state.threads.find((t) => t.id === targetThread)
       : await create(options, onCreated);
-    if (!thread) throw new Error("Session is unavailable");
+    if (!thread) throw new Error("Chat is unavailable");
     if (thread.isSubagent)
-      throw new Error("Continue this task from its parent conversation.");
+      throw new Error("Continue this task from its parent chat.");
     // Keep existing conversations aligned with the connected model displayed
     // by the composer, including a fallback after credentials are removed.
     if (

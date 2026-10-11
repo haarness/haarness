@@ -59,7 +59,7 @@ test("agent switch discloses model and scope; filtered responses stay visible", 
     await expect(permission).toContainText("Agent: reviewer");
     await expect(permission).toContainText("Model: openai/gpt-5.4-mini");
     await expect(permission).toContainText("Previous model: echo/echo-1");
-    await expect(permission).toContainText("only to this agent in this session");
+    await expect(permission).toContainText("only to this agent in this chat");
     await page.screenshot({ path: info.outputPath("agent-switch-consent.png") });
     await permission.getByRole("button", { name: "Allow once", exact: true }).click();
     await expect(page.locator(".transcript")).toContainText("HANDOFF_DESKTOP_READY", { timeout: 30000 });

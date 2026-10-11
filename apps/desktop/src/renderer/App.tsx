@@ -450,7 +450,7 @@ export function App() {
           group: "Chat actions",
           name: t("Rename chat"),
           icon: "edit",
-          detail: current.title,
+          detail: chatTitle(current.title),
           action: () => renameSession(app, current),
         },
         {
@@ -458,7 +458,7 @@ export function App() {
           group: "Chat actions",
           name: t("Fork chat"),
           icon: "fork",
-          detail: current.title,
+          detail: chatTitle(current.title),
           action: async () => {
             const fork = await app.api<{ id: string }>(
               "forkThread",
@@ -474,7 +474,7 @@ export function App() {
           group: "Chat actions",
           name: current.archived ? t("Restore chat") : t("Archive chat"),
           icon: current.archived ? "restore" : "archive",
-          detail: current.title,
+          detail: chatTitle(current.title),
           action: async () => {
             await app.api("updateThread", current.id, {
               archived: !current.archived,
@@ -487,7 +487,7 @@ export function App() {
           group: "Chat actions",
           name: t("Close chat tab"),
           icon: "close",
-          detail: current.title,
+          detail: chatTitle(current.title),
           action: () => app.closeTab(current.id),
         },
       );

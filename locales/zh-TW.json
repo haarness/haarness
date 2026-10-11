@@ -1239,7 +1239,7 @@
   "Open a Cloud session": "開啟雲端工作階段",
   "Open a project to get started": "開啟專案以開始",
   "Start or open a session from your Haarness account.": "從你的 Haarness 帳戶啟動或開啟工作階段。",
-  "Choose project for new chat": "為新聊天選擇專案",
+  "Choose project for new chat": "為新對話選擇專案",
   "No schedules yet": "尚無排程",
   "Run a prompt every morning, every hour, or on any cron schedule.": "每天早上、每小時或依任意 cron 排程執行提示。",
   "Reply, or @ to add files and agents": "回覆，或輸入 @ 加入檔案與代理程式",
