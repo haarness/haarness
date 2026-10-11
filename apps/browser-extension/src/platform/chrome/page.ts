@@ -52,6 +52,7 @@ export function createSurface(transport: ChromeTransport, deps: SurfaceDeps): Pa
   ];
   refresh();
   const entry = (delta: -1 | 1) => history?.entries[history.currentIndex + delta];
+  const index = (delta: -1 | 1) => (history ? history.currentIndex + delta : delta);
 
   const surface: PageSurface & { dispose(): void } = {
     url: () => deps.cache.url,
@@ -59,12 +60,12 @@ export function createSurface(transport: ChromeTransport, deps: SurfaceDeps): Pa
     loading: () => deps.cache.loading,
     canGoBack: () => !!entry(-1),
     canGoForward: () => !!entry(1),
-    historyEntry: (delta) => entry(delta)?.url,
+    historyEntry: (delta) => ({ index: index(delta), url: entry(delta)?.url }),
     navigate: (url, signal) => deps.load(url, signal),
-    back: () => void chrome.tabs.goBack(tabId).catch(() => {}),
-    forward: () => void chrome.tabs.goForward(tabId).catch(() => {}),
-    reload: () => void transport.send("Page.reload").catch(() => {}),
-    stop: () => void transport.send("Page.stopLoading").catch(() => {}),
+    back: () => chrome.tabs.goBack(tabId).catch(() => {}),
+    forward: () => chrome.tabs.goForward(tabId).catch(() => {}),
+    reload: () => transport.send("Page.reload").then(() => {}, () => {}),
+    stop: () => transport.send("Page.stopLoading").then(() => {}, () => {}),
     async viewport() {
       const metrics = await transport.send("Page.getLayoutMetrics");
       return { width: metrics.cssVisualViewport.clientWidth, height: metrics.cssVisualViewport.clientHeight };
@@ -97,6 +98,7 @@ export function createSurface(transport: ChromeTransport, deps: SurfaceDeps): Pa
     supports: (method: Method) => supportedInChrome(method),
     gateTopDocumentOnly: true,
     resourceOrigins: "securityOrigin",
+    wwwTwin: true,
     cursor: {
       async run(code) {
         if (!deps.cursor()) return;

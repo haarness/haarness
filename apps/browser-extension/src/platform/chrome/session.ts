@@ -5,6 +5,7 @@
 import type { CreatePage, Page, PageOptions } from "../../core/driver-contract";
 import type { createAttribution } from "../../core/downloads";
 import { CANCELLED, HostError } from "../../core/errors";
+import { destinationOrigin } from "../../core/policy";
 import { blockedMessage, decideRequest, fetchPatterns, landing, type FetchContext, type FetchDecision } from "../../core/fetch-policy";
 import type { TabSession } from "../../core/platform";
 import type { ChromeTransport } from "./cdp";
@@ -42,7 +43,10 @@ export function createSession(transport: ChromeTransport, deps: SessionDeps): Ch
 
   const offs = [
     transport.on("Page.downloadWillBegin", (event) => {
-      if (command) deps.attribution.began({ url: event.url, tabId, name: event.suggestedFilename, ...command });
+      if (!command) return;
+      const origin = destinationOrigin(event.url);
+      const resources = [...(page?.sources() ?? []), ...(origin ? [origin] : [])];
+      deps.attribution.began({ url: event.url, tabId, name: event.suggestedFilename, resources, ...command });
     }),
     // The driver counts documents: a main-frame navigation to a new document expires its refs.
     transport.on("Page.frameStartedNavigating", (event, session) => {
@@ -165,7 +169,7 @@ export function createSession(transport: ChromeTransport, deps: SessionDeps): Ch
         cursor: deps.cursor,
         mainFrame,
       });
-      page = create(surface, transport, { ...options, files: deps.files, input: createFileInput(transport, deps.uploadsRoot) });
+      page = create(surface, transport, { ...options, files: deps.files, input: createFileInput(deps.uploadsRoot) });
       void mainFrame().catch(() => {});
       return page;
     },

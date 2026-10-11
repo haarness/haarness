@@ -4,7 +4,7 @@
  * the cross-lane contract (§4.1 server ↔ host, §6.4 bridge ↔ extension); the
  * extension never talks to a server except through `to-server`/`from-server`.
  */
-import type { HostCommand, Outcome, State, TabID } from "./browser";
+import type { State, TabID } from "./browser";
 
 export const PROTOCOL = 1;
 export const NATIVE_HOST = "ai.haarness.browser";
@@ -32,13 +32,24 @@ export interface ServerAttached {
   lease: string;
   server: { id: string; workspace: string; pid: number };
 }
+/**
+ * A command as the server sent it. The host decodes it with the driver's codec
+ * (`decodeHostCommand`) before acting on it, so a malformed one still gets a
+ * failure result instead of silence.
+ */
+export interface RawCommand {
+  action: { type: string } & Record<string, unknown>;
+  inspect?: unknown;
+  files: unknown[];
+  [field: string]: unknown;
+}
 export interface ServerCommand {
   type: "command";
   id: string;
   thread: string;
   title: string;
   parent: string | null;
-  command: HostCommand;
+  command: RawCommand;
 }
 export interface ServerCancel {
   type: "cancel";
@@ -48,7 +59,8 @@ export type FromServer = ServerAttached | ServerCommand | ServerCancel | { type:
 
 export type ToServer =
   | { type: "state"; thread: string; state: State; revoked?: TabID[] }
-  | { type: "result"; id: string; outcome: Outcome };
+  /** `outcome` is encoded with the driver's `encodeHostOutcome` (capture bytes as base64). */
+  | { type: "result"; id: string; outcome: unknown };
 
 // --------------------------------------------------------- bridge ↔ extension
 
@@ -181,8 +193,8 @@ function parseFromServer(raw: unknown): FromServer | undefined {
             title: text(raw.title) ? raw.title : "",
             parent: text(raw.parent, 128) ? raw.parent : null,
             command: {
-              ...(raw.command as unknown as HostCommand),
-              files: Array.isArray(raw.command.files) ? (raw.command.files as HostCommand["files"]) : [],
+              ...(raw.command as RawCommand),
+              files: Array.isArray(raw.command.files) ? raw.command.files : [],
             },
           }
         : undefined;

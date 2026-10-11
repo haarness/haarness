@@ -4,70 +4,95 @@
  * reads one only after the extension announces it). Uploads arrive as paths
  * the bridge staged under its uploads root, and only those paths are used.
  */
-import type { FileID, File as WireFile, FileRef } from "../../core/browser";
-import type { FileInput, FileStore, StoredFile } from "../../core/driver-contract";
-import type { ChromeTransport } from "./cdp";
+import { fileID, type FileID, type File as WireFile, type FileRef, type HostFile } from "../../core/browser";
+import type { FileInput, FileListing, FileStore, StoredFile } from "../../core/driver-contract";
 
 const MAX_CAPTURES = 20;
+/** `Browser.MAX_FILE_BYTES`: what one tool result may carry. */
+const MAX_FILE_BYTES = 5 * 1024 * 1024;
 
-interface Entry extends StoredFile {
+interface Entry {
+  id: FileID;
+  name: string;
+  mime: string;
   bytes: number;
+  state: "pending" | "completed" | "failed";
+  /** The origins its bytes came from (the tab's top document, a download's URLs). */
+  resources: readonly string[];
   data?: Uint8Array;
   path?: string;
 }
 
 export interface ChromeFileStore extends FileStore {
-  /** A download the extension attributed to this tab. */
-  download(id: FileID, name: string): void;
+  /** A download the extension attributed to this tab, from the documents and URLs in `resources`. */
+  download(id: FileID, name: string, resources: readonly string[]): void;
   finish(id: FileID, result: { path: string; bytes: number; mime: string } | { failed: true }): void;
 }
 
 export function createFileStore(uuid: () => string): ChromeFileStore {
   const files = new Map<FileID, Entry>();
   const captures: FileID[] = [];
-  const meta = ({ id, name, mime, bytes, state }: Entry): StoredFile => ({ id, name, mime, bytes, state });
+  const unique = (resources: readonly string[]) => [...new Set(resources)].sort();
+  const stored = ({ id, name, mime, bytes, state, resources }: Entry): StoredFile => ({ id, name, mime, bytes, state, resources });
+  const listing = ({ id, name, mime, bytes, state }: Entry): FileListing => ({ id, name, mime, bytes, state });
+  const entry = (id: FileID) => {
+    const file = files.get(id);
+    if (!file)
+      throw new Error(
+        "File ID is not retained in this tab. Call browser_files_list for this tab and use an exact returned fileID from the same tab, not a path or request ID.",
+      );
+    if (file.state === "pending")
+      throw new Error(
+        "File is still being downloaded. Check browser_files_list again and wait for state completed; do not start a duplicate download.",
+      );
+    if (file.state === "failed")
+      throw new Error(
+        "The download failed, so this file cannot be read. Inspect browser_console and browser_network_list for the cause before deciding to start it again.",
+      );
+    return file;
+  };
   return {
     ready: Promise.resolve(),
-    async save(name, mime, data) {
-      const id = `file_${uuid()}` as FileID;
-      files.set(id, { id, name, mime, bytes: data.length, state: "completed", data });
+    async save(name, mime, data, resources) {
+      if (data.byteLength > MAX_FILE_BYTES)
+        throw new Error(
+          "Capture exceeds the 5 MiB transfer limit. Reduce screenshot maxWidth/quality or capture an element. Do not retry an identical capture.",
+        );
+      const id = fileID(uuid());
+      files.set(id, { id, name, mime, bytes: data.byteLength, state: "completed", resources: unique(resources), data });
       captures.push(id);
       // Keep memory bounded: the oldest captures go first.
       while (captures.length > MAX_CAPTURES) files.delete(captures.shift()!);
       return id;
     },
-    get: (id) => {
-      const entry = files.get(id);
-      return entry && meta(entry);
+    get: (id) => stored(entry(id)),
+    list: () => [...files.values()].map(listing),
+    async transfer(id, authorized): Promise<HostFile> {
+      const file = entry(id);
+      if (authorized && file.resources.some((resource) => !authorized.includes(resource)))
+        throw new Error(
+          "File source changed before export. Inspect the tab and request the file again to check its source permissions; no bytes were exported.",
+        );
+      if (file.data) return { id, name: file.name, mime: file.mime, data: file.data } satisfies WireFile;
+      if (file.bytes > MAX_FILE_BYTES)
+        throw new Error(
+          "File exceeds the 5 MiB transfer limit. Choose a smaller completed file; repeating browser_files_get for this file will not help.",
+        );
+      return { id, name: file.name, mime: file.mime, bytes: file.bytes, path: file.path! } satisfies FileRef;
     },
-    list: () => [...files.values()].map(meta),
-    async transfer(id): Promise<WireFile | FileRef> {
-      const entry = files.get(id);
-      if (!entry || entry.state !== "completed")
-        throw new Error("File is not available. Call browser_files_list for this tab and use a completed file ID.");
-      if (entry.data) return { id, name: entry.name, mime: entry.mime, data: base64(entry.data) };
-      return { id, name: entry.name, mime: entry.mime, bytes: entry.bytes, path: entry.path! };
-    },
-    download(id, name) {
-      files.set(id, { id, name, mime: "application/octet-stream", bytes: 0, state: "pending" });
+    download(id, name, resources) {
+      files.set(id, { id, name: name.slice(0, 2_048), mime: "application/octet-stream", bytes: 0, state: "pending", resources: unique(resources) });
     },
     finish(id, result) {
-      const entry = files.get(id);
-      if (!entry) return;
-      if ("failed" in result) entry.state = "failed";
-      else Object.assign(entry, { state: "completed", path: result.path, bytes: result.bytes, mime: result.mime || entry.mime });
+      const file = files.get(id);
+      if (!file) return;
+      if ("failed" in result) file.state = "failed";
+      else Object.assign(file, { state: "completed", path: result.path, bytes: result.bytes, mime: result.mime || file.mime });
     },
     async dispose() {
       files.clear();
     },
   };
-}
-
-function base64(bytes: Uint8Array) {
-  let binary = "";
-  for (let index = 0; index < bytes.length; index += 0x8000)
-    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
-  return btoa(binary);
 }
 
 /** Whether `path` is inside `root` with no way out (`..`) — uploads may only come from there. */
@@ -83,21 +108,18 @@ export function underRoot(path: string, root: string | null): boolean {
     .some((part) => part === ".." || part === "." || part === "");
 }
 
-export function createFileInput(transport: ChromeTransport, uploadsRoot: () => string | null): FileInput {
-  const paths = (files: (WireFile | FileRef)[]) =>
-    files.map((file) => {
-      if (!("path" in file) || !underRoot(file.path, uploadsRoot()))
-        throw new Error("Chrome can upload only files Haarness staged for this command. Try the upload again.");
-      return file.path;
-    });
+/**
+ * Uploads and drops use only files the bridge staged for this command under
+ * its uploads root; the driver hands their paths to Chromium itself.
+ */
+export function createFileInput(uploadsRoot: () => string | null): FileInput {
   return {
-    async upload(target, files) {
-      await transport.send("DOM.setFileInputFiles", { files: paths(files), backendNodeId: target.backendNodeId }, target.sessionID);
-    },
-    async drop(target, files) {
-      const data = { items: [], files: paths(files), dragOperationsMask: 1 };
-      for (const type of ["dragEnter", "dragOver", "drop"] as const)
-        await transport.send("Input.dispatchDragEvent", { type, x: target.x, y: target.y, data }, target.sessionID);
+    async stage(files) {
+      return files.map((file) => {
+        if (!("path" in file) || !underRoot(file.path, uploadsRoot()))
+          throw new Error("Chrome can upload only files Haarness staged for this command. Try the upload again.");
+        return file.path;
+      });
     },
   };
 }
