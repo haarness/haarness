@@ -537,6 +537,10 @@ pub struct Toast {
     pub approval: bool,
 }
 
+/// A context estimate keyed by the shown thread's item count, last sequence
+/// and undo boundary, with the tokens it came to.
+pub type ContextEstimate = ((usize, u64, Option<u64>), u64);
+
 #[allow(clippy::struct_excessive_bools)] // independent UI toggles, not a state machine
 pub struct App {
     pub input_queue: haarness_protocol::InputQueue,
@@ -693,7 +697,7 @@ pub struct App {
     pub last_transcript_len: std::cell::Cell<usize>,
     /// Context estimate of the shown thread, keyed by its item count, last
     /// sequence and undo boundary; the meters read it every frame.
-    pub context_tokens: std::cell::Cell<Option<((usize, u64, Option<u64>), u64)>>,
+    pub context_tokens: std::cell::Cell<Option<ContextEstimate>>,
     /// Server identity (version, workspace, git branch) for the header/home.
     pub server_info: Option<haarness_protocol::ServerInfo>,
     /// Render tick (~5/s) driving the working spinner.

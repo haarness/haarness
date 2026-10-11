@@ -891,7 +891,9 @@ async fn run_with_client(
                         statusline::LogLevel::Warn => {
                             tracing::warn!(%error, "custom status line command failed");
                         }
-                        _ => tracing::debug!(%error, "custom status line command still failing"),
+                        statusline::LogLevel::Debug => {
+                            tracing::debug!(%error, "custom status line command still failing");
+                        }
                     },
                 }
             },
