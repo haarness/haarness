@@ -149,6 +149,16 @@ fn server_is_local(client: &ApiClient) -> bool {
     })
 }
 
+/// Model runtimes Haarness finds on this computer without being told, by the
+/// name people know them by (Desktop keeps the same list).
+fn local_runtime_name(provider: &str) -> Option<&'static str> {
+    match provider {
+        "ollama" => Some("Ollama"),
+        "lmstudio" => Some("LM Studio"),
+        _ => None,
+    }
+}
+
 /// Whether this terminal probably has no browser of its own.
 pub(crate) fn over_ssh() -> bool {
     std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some()
@@ -684,6 +694,20 @@ impl App {
         self.providers
             .iter()
             .any(|provider| provider.authenticated && !provider.models.is_empty())
+    }
+
+    /// The runtime's name when this chat's model comes from a runtime Haarness
+    /// found on this computer by itself (Ollama, LM Studio) and nothing else is
+    /// connected: a fresh install then answers with a small local model
+    /// nobody chose, which is worth saying once on the home screen.
+    pub(crate) fn local_only_runtime(&self) -> Option<&'static str> {
+        let runtime = local_runtime_name(&self.thread.provider)?;
+        let elsewhere = self.providers.iter().any(|provider| {
+            provider.authenticated
+                && !provider.models.is_empty()
+                && local_runtime_name(&provider.id).is_none()
+        });
+        (!elsewhere).then_some(runtime)
     }
 
     /// Hint rows above the API-key prompt: where the key comes from and the

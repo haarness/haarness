@@ -17157,3 +17157,37 @@ fn dialog_chrome_and_command_descriptions_read_from_the_catalog() {
         "Language: en"
     );
 }
+
+#[test]
+fn a_local_model_nobody_chose_is_named_on_the_home_screen() {
+    let mut app = connect_fixture();
+    app.thread.provider = "ollama".into();
+    app.thread.model = "qwen3:0.6b".into();
+    let mut ollama = app.providers[0].clone();
+    ollama.id = "ollama".into();
+    ollama.name = "Ollama".into();
+    ollama.authenticated = true;
+    app.providers.push(ollama);
+    let home = |app: &App| {
+        crate::view::home::masthead(app, 100, false)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let text = home(&app);
+    assert!(
+        text.contains("Replies come from qwen3:0.6b, which Ollama runs on this computer.  ·  /connect"),
+        "{text}"
+    );
+    // Too narrow for the whole sentence: no dangling separator.
+    let narrow = crate::view::home::masthead(&app, 40, false)
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!narrow.contains("/connect"), "{narrow}");
+    // Once a provider of the user's own is connected, the hint goes away.
+    app.providers[1].authenticated = true;
+    assert!(!home(&app).contains("Replies come from"));
+}
