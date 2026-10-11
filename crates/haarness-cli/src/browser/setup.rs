@@ -111,6 +111,10 @@ pub(crate) struct Context<'a> {
     pub(crate) isolated: bool,
     pub(crate) extension_source: Option<PathBuf>,
     pub(crate) extra_ids: Vec<String>,
+    /// `HAARNESS_BROWSER_MANIFEST_DIR`: folders that stand in for every
+    /// browser's own, as `--manifest-dir` does, so a test run (or a Desktop
+    /// started for one) never registers with the user's real Chrome.
+    pub(crate) manifest_dirs: Vec<PathBuf>,
     pub(crate) registry: &'a dyn Registry,
 }
 
@@ -146,6 +150,13 @@ impl Context<'static> {
                 &exe,
             ),
             extra_ids: manifest::extension_ids(var("HAARNESS_BROWSER_EXTENSION_IDS").as_deref()),
+            manifest_dirs: std::env::var_os("HAARNESS_BROWSER_MANIFEST_DIR")
+                .map(|value| {
+                    std::env::split_paths(&value)
+                        .filter(|folder| !folder.as_os_str().is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
             registry: &RegExe,
             exe,
             home,
@@ -301,13 +312,19 @@ pub(crate) struct BrowserEntry {
 
 /// The browsers to register with: the chosen ones, else Google Chrome and
 /// every other one installed here (all of them, for `remove`). Sandboxed
-/// Linux installs are listed as unsupported.
+/// Linux installs are listed as unsupported. Manifest folders, given or from
+/// the environment, replace every browser.
 fn targets(
     context: &Context,
     choices: &[BrowserChoice],
     manifest_dirs: &[PathBuf],
     every: bool,
 ) -> Vec<Target> {
+    let manifest_dirs = if manifest_dirs.is_empty() {
+        &context.manifest_dirs
+    } else {
+        manifest_dirs
+    };
     if !manifest_dirs.is_empty() {
         return manifest_dirs
             .iter()
@@ -589,7 +606,7 @@ pub(crate) fn setup(context: &Context, options: &SetupOptions) -> Result<Report>
     fs::create_dir_all(&files.dir)
         .with_context(|| format!("cannot create {}", files.dir.display()))?;
     let mut warnings = Vec::new();
-    if context.isolated && options.manifest_dirs.is_empty() {
+    if context.isolated && options.manifest_dirs.is_empty() && context.manifest_dirs.is_empty() {
         warnings.push(format!(
             "A separate Haarness data folder is in use ({}), so Chrome will work with that folder's projects only. Run setup without HAARNESS_DATA_DIR or HAARNESS_HOME to use your usual one.",
             context.data.display()
@@ -1014,6 +1031,7 @@ mod tests {
                 forwarded: vec![("HAARNESS_DATA_DIR", self.root.display().to_string())],
                 isolated: false,
                 extra_ids: Vec::new(),
+                manifest_dirs: Vec::new(),
                 registry: &self.registry,
             }
         }
@@ -1285,6 +1303,40 @@ mod tests {
         let report = setup(&context, &options(false)).unwrap();
         assert_eq!(report.warnings.len(), 1);
         assert!(report.warnings[0].contains("separate Haarness data folder"));
+    }
+
+    #[test]
+    fn manifest_folders_from_the_environment_replace_every_browser_for_setup_status_and_remove() {
+        let fixture = Fixture::new("setup-manifest-env");
+        let mut context = fixture.context(Os::Mac);
+        context.isolated = true;
+        fs::create_dir_all(fixture.home("Library/Application Support/Google/Chrome")).unwrap();
+        let profile = fixture.root.join("profile/NativeMessagingHosts");
+        context.manifest_dirs = vec![profile.clone()];
+        let report = setup(&context, &options(false)).unwrap();
+        assert!(report.warnings.is_empty());
+        assert_eq!(report.browsers.len(), 1);
+        assert_eq!(report.browsers[0].browser, "custom");
+        assert!(report.browsers[0].registered);
+        assert!(profile.join("ai.haarness.browser.json").is_file());
+        assert!(
+            !fixture
+                .home("Library/Application Support/Google/Chrome/NativeMessagingHosts")
+                .exists(),
+            "the real Chrome is never registered"
+        );
+        let status = status(&context);
+        assert_eq!(status.browsers.len(), 1);
+        assert!(status.browsers[0].registered);
+        let removed = remove(&context, false).unwrap();
+        assert!(!profile.join("ai.haarness.browser.json").exists());
+        assert!(
+            removed
+                .deleted
+                .unwrap()
+                .iter()
+                .any(|path| Path::new(path).starts_with(&profile))
+        );
     }
 
     #[test]
