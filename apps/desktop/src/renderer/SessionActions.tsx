@@ -66,11 +66,7 @@ export function SessionActions(props: {
             props.connectionId === app.state.connection?.id)
             ? app
                 .searchCommands()
-                .filter(
-                  (entry) =>
-                    entry.key.startsWith("conversation:") &&
-                    entry.key !== "conversation:compact",
-                )
+                .filter((entry) => entry.key.startsWith("conversation:"))
                 .map((entry) => ({
                   label: entry.name,
                   icon: entry.icon,
