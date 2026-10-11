@@ -581,3 +581,33 @@ test("manual browsing works with agent control disabled and clearing data includ
   } as any);
   expect(errors).toEqual([]);
 });
+test("a reconnect while browsing data is clearing cannot reopen the cleared tabs", async () => {
+  await panel()
+    .getByRole("textbox", { name: "Browser address" })
+    .fill(siteURL + "/race-proof");
+  await panel().getByRole("button", { name: "Go", exact: true }).click();
+  await expect
+    .poll(async () => (await inventory()).tabs[0]?.url)
+    .toBe(siteURL + "/race-proof");
+  // Hold the storage wipe so an attach (the panel's retry, a chat switch or a
+  // second window) lands in the middle of the clear.
+  await app.evaluate(({ session }) => {
+    const prototype = Object.getPrototypeOf(session.defaultSession);
+    const original = prototype.clearStorageData;
+    prototype.clearStorageData = async function (...args: unknown[]) {
+      prototype.clearStorageData = original;
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      return original.apply(this, args);
+    };
+  });
+  const clearing = page.evaluate(
+    (id) => window.haarness.browserData(id, { action: "clear", kind: "all" }),
+    connection,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const during = inventory();
+  await clearing;
+  expect((await during).tabs).toHaveLength(0);
+  expect((await inventory()).tabs).toHaveLength(0);
+  expect(errors).toEqual([]);
+});

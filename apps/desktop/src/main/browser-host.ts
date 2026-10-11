@@ -45,6 +45,8 @@ export function createBrowserHost(
   emit: (win: BrowserWindow, event: DesktopEvent) => void,
 ) {
   const entries = new Map<string, Entry>();
+  /** Browsing data being cleared, by connection. */
+  const clearing = new Map<string, Promise<void>>();
   const key = (connection: string, thread: string) =>
     JSON.stringify([connection, thread]);
   const state = (e: Entry): Browser.State => ({
@@ -295,20 +297,30 @@ export function createBrowserHost(
     publish(e);
     return result;
   }
-  async function dispose(e: Entry, reason = "Browser disconnected") {
+  async function dispose(
+    e: Entry,
+    reason = "Browser disconnected",
+    forget = false,
+  ) {
     if (e.disposed) return;
     e.disposed = true;
     clearTimeout(e.save);
-    const inventory = state(e);
-    data().values["browser:" + e.key] = {
-      tabs: inventory.tabs.map((tab) => ({
-        id: tab.id,
-        url: tab.url || e.tabs.get(tab.id)?.url || "about:blank",
-        generation: tab.generation,
-      })),
-      focusedTabID: inventory.focusedTabID,
-    };
-    void persist();
+    // Clearing browsing data closes the tabs for good instead of saving them
+    // for the next attach to reopen.
+    const inventory: Browser.State = forget
+      ? { tabs: [], focusedTabID: null }
+      : state(e);
+    if (!forget) {
+      data().values["browser:" + e.key] = {
+        tabs: inventory.tabs.map((tab) => ({
+          id: tab.id,
+          url: tab.url || e.tabs.get(tab.id)?.url || "about:blank",
+          generation: tab.generation,
+        })),
+        focusedTabID: inventory.focusedTabID,
+      };
+      void persist();
+    }
     e.abort.abort();
     for (const abort of e.requests.values()) abort.abort();
     e.socket.close();
@@ -330,6 +342,9 @@ export function createBrowserHost(
     thread: string,
   ) {
     if (thread.length > 128) throw new Error("Invalid browser owner");
+    // A reconnect while browsing data is being cleared waits for the clear,
+    // so it cannot reopen the tabs being cleared.
+    await clearing.get(connection)?.catch(() => {});
     const owner = connections.get(connection);
     if (!owner) throw new Error("Project disconnected");
     // Verify that this conversation belongs to the routed project before attaching native views.
@@ -636,18 +651,33 @@ export function createBrowserHost(
       return image.isEmpty() ? null : "data:image/jpeg;base64," + image.toJPEG(85).toString("base64");
     },
     async clear(connection: string) {
-      const owned = [...entries.values()].filter((entry) => entry.connection === connection);
-      for (const entry of owned) {
-        await dispose(entry, "Browsing data cleared. Reconnecting…");
-        await session.fromPartition(entry.partition).clearStorageData();
-        await session.fromPartition(entry.partition).clearCache();
-      }
+      // Forget the saved tabs before anything awaits: an attach that reads
+      // them later starts empty, and one already attached is disposed below.
       for (const stored of Object.keys(data().values)) {
         if (!stored.startsWith("browser:")) continue;
         try { if (JSON.parse(stored.slice(8))[0] === connection) delete data().values[stored]; } catch { /* Ignore unrelated or obsolete state. */ }
       }
       delete data().values["browser-draft:" + connection];
-      await persist();
+      const owned = [...entries.values()].filter((entry) => entry.connection === connection);
+      const cleared = (async () => {
+        // Every view stops publishing (and saving) before the first wipe awaits.
+        await Promise.all(
+          owned.map((entry) =>
+            dispose(entry, "Browsing data cleared. Reconnecting…", true),
+          ),
+        );
+        for (const entry of owned) {
+          await session.fromPartition(entry.partition).clearStorageData();
+          await session.fromPartition(entry.partition).clearCache();
+        }
+        await persist();
+      })();
+      clearing.set(connection, cleared);
+      try {
+        await cleared;
+      } finally {
+        if (clearing.get(connection) === cleared) clearing.delete(connection);
+      }
     },
     disconnect(connection: string) {
       for (const e of entries.values())
