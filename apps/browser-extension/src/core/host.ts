@@ -667,19 +667,24 @@ export function createHost(options: HostOptions) {
     debuggerDetached(tabId, reason) {
       pages.get(tabId)?.dispose();
       pages.delete(tabId);
-      if (reason === "canceled_by_user") void setStopped(true);
+      if (reason === "canceled_by_user") void after(() => setStopped(true));
     },
     downloadFinished(download) {
       bridge.send({ type: "download", ...download });
     },
     stopAll() {
-      void stopAll();
+      void after(stopAll);
     },
     alarm(name) {
-      if (name === RECONNECT_ALARM) bridge.retry();
+      if (name === RECONNECT_ALARM) void after(() => bridge.retry());
     },
   };
 
+  /**
+   * Runs an event's work once start() has loaded the stored state. The event
+   * that woke a stopped worker arrives first: a hello sent before then would
+   * carry no browser id, and a Stop recorded then would be overwritten.
+   */
   async function after(work: () => void | Promise<void>) {
     await start();
     await work();
