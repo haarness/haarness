@@ -52,6 +52,7 @@ import {
   load,
   data,
   persist,
+  written,
   preferences,
   serverAuth,
   saveServerAuth,
@@ -74,6 +75,18 @@ app.on("before-quit", () => {
 });
 app.on("will-quit", () => {
   quitting = true;
+});
+// The last saves (open browser tabs, the window size) start as the app quits;
+// let them reach the disk before the process exits, for two seconds at most.
+let saved = false;
+app.on("will-quit", (event) => {
+  if (saved) return;
+  saved = true;
+  event.preventDefault();
+  void Promise.race([
+    written(),
+    new Promise((resolve) => setTimeout(resolve, 2000)),
+  ]).then(() => app.exit());
 });
 app.on("quit", () => {
   quitting = true;

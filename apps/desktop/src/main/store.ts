@@ -68,6 +68,10 @@ export async function load() {
 export function data() {
   return state;
 }
+/** Settles once every write asked for so far has finished. */
+export function written() {
+  return chain.catch(() => {});
+}
 export function persist() {
   chain = chain
     .catch(() => {})
