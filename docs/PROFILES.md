@@ -20,10 +20,13 @@ haarness profile save project-setup --scope local
 Scope defaults to `both`. Global targets use the current OS config/data
 directories; `--data-dir` selects an isolated installation. Project targets are
 relative to the exact `--workspace` directory (current directory by default),
-without automatically selecting a parent Git root. Commands return JSON;
-`--json` selects compact output. Without `--output`, save writes
+without automatically selecting a parent Git root. Commands print a short
+summary; `--json` prints the data as JSON. Without `--output`, save writes
 `<name>.profile.zip` in the current directory. Existing output files and
-restore targets require `--force` to overwrite.
+restore targets require `--force` to overwrite; `restore --dry-run` lists every
+file it would create or overwrite. The usage-statistics choice (`telemetry` in
+the global `haarness.json`) belongs to each computer: save leaves it out and
+restore keeps the target's own.
 
 ## Included content and portability
 
