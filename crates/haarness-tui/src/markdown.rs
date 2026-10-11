@@ -121,7 +121,7 @@ impl Renderer<'_> {
     /// its cells inside their columns rather than clipping them: a table is
     /// read for the words in it, and an ellipsis in every cell hides them.
     fn render_table(&mut self, rows: &[Vec<String>]) {
-        use unicode_width::UnicodeWidthStr as _;
+        use crate::width::DisplayWidth as _;
         if rows.is_empty() {
             return;
         }

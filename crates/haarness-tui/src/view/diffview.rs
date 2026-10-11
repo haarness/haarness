@@ -6,7 +6,7 @@
 //! this module only turns those rows into styled cells.
 
 use haarness_opentui::{Line, Span, attr};
-use unicode_width::UnicodeWidthStr as _;
+use crate::width::DisplayWidth as _;
 
 use crate::diffview::{
     CharRange, DiffFocus, DiffRow, DiffViewer, DisplayRow, RowKind, TreeRow, status_marker,

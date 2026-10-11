@@ -2,11 +2,11 @@ use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use haarness_opentui::{Color, Line, attr};
 use haarness_protocol::{Item, ItemData, ItemId, ProviderInfo, Thread, ThreadId, TurnId};
-use unicode_width::UnicodeWidthStr as _;
 
 use crate::commands::COMMANDS;
 use crate::state::{App, default_connected_model};
 use crate::theme::Theme;
+use crate::width::DisplayWidth as _;
 
 type HitPredicate = fn(&crate::view::frame::HitTarget) -> bool;
 
@@ -10391,6 +10391,40 @@ fn compact_terminal_keeps_the_explicit_dialog_visible() {
     );
 }
 
+/// Arabic dialog hints such as "esc للإغلاق" hold lam-alef pairs, which
+/// `unicode-width` counts as one cell each while the renderer draws two: the
+/// border placed after the hint by that width ate the word's last letters.
+#[test]
+fn arabic_dialog_hints_are_drawn_whole_at_80_and_120_columns() {
+    let mut app = selector_fixture();
+    app.language = crate::locale::Language::Arabic;
+    app.open_overlay(crate::state::Overlay::Agents);
+    let hint = app.language.text("esc close").to_owned();
+    assert!(
+        hint.contains('\u{644}') && hint.contains('\u{627}'),
+        "{hint}"
+    );
+    for width in [80_u32, 120] {
+        let lines = app.lines((width, 30));
+        assert!(
+            lines.iter().any(|line| line.text().contains(&hint)),
+            "{width}: the dialog shows no close hint"
+        );
+        let mut renderer = haarness_opentui::Renderer::new(width, 30, true).unwrap();
+        let drawn = renderer.snapshot_lines(&lines);
+        assert!(drawn.contains(&hint), "{width}:\n{drawn}");
+        for (line, row) in lines.iter().zip(drawn.lines()) {
+            assert!(line.width() <= width as usize, "{width}: {}", line.text());
+            // What the view measured is what the renderer laid out.
+            assert_eq!(
+                row.trim_end().width(),
+                line.text().trim_end().width(),
+                "{width}: {row}"
+            );
+        }
+    }
+}
+
 #[test]
 fn explicit_dialogs_share_a_bordered_padded_card_and_panels_have_no_search() {
     let mut app = selector_fixture();
@@ -14536,7 +14570,11 @@ async fn yolo_answers_its_own_conversation_once_and_leaves_the_rest() {
     let requests = server.await.unwrap();
     assert_eq!(requests.len(), 2, "{requests:#?}");
     assert!(requests[0].contains("/permissions/own"), "{}", requests[0]);
-    assert!(requests[1].contains("/permissions/child"), "{}", requests[1]);
+    assert!(
+        requests[1].contains("/permissions/child"),
+        "{}",
+        requests[1]
+    );
     assert!(
         requests
             .iter()

@@ -429,7 +429,6 @@ impl Renderer {
         String::from_utf8_lossy(&output).into_owned()
     }
     fn fill_lines(&mut self, lines: &[Line]) -> NativeHandle {
-        use unicode_width::UnicodeWidthStr;
         let buffer = unsafe { (self.next_buffer)(self.handle) };
         unsafe {
             (self.clear)(buffer, self.background.as_ptr());
@@ -454,9 +453,7 @@ impl Renderer {
                         span.attributes,
                     );
                 }
-                x = x.saturating_add(
-                    u32::try_from(UnicodeWidthStr::width(span.text.as_str())).unwrap_or(u32::MAX),
-                );
+                x = x.saturating_add(u32::try_from(span.width()).unwrap_or(u32::MAX));
                 if x >= self.width {
                     break;
                 }
@@ -504,12 +501,49 @@ impl Span {
         self.attributes = attributes;
         self
     }
-    /// Display width in terminal cells.
+    /// Display width in terminal cells, as the renderer lays it out.
     #[must_use]
     pub fn width(&self) -> usize {
-        use unicode_width::UnicodeWidthStr;
-        UnicodeWidthStr::width(self.text.as_str())
+        display_width(&self.text)
     }
+}
+
+/// Cells the renderer gives `text`: each grapheme cluster takes the width
+/// `unicode-width` gives that cluster alone.
+///
+/// `unicode-width` measures a whole string with a few ligatures that join
+/// separate clusters, most often an Arabic lam followed by an alef ("لا",
+/// "للإغلاق"), which it counts as one cell. The renderer draws the lam and
+/// the alef in a cell each, so a width taken from the whole string put the
+/// next span on top of the word's last letters. Every other rule (emoji
+/// sequences, combining marks, CJK) applies inside one cluster and gives the
+/// same result either way.
+#[must_use]
+pub fn display_width(text: &str) -> usize {
+    use unicode_segmentation::UnicodeSegmentation as _;
+    use unicode_width::UnicodeWidthStr as _;
+    if !text.chars().any(joins_across_clusters) {
+        return text.width();
+    }
+    text.graphemes(true).map(str::width).sum()
+}
+
+/// Scripts in which `unicode-width` joins characters from separate grapheme
+/// clusters into one cell: Hebrew, Arabic, Khmer, Buginese, Tifinagh, Lisu,
+/// Old Turkic and Kirat Rai.
+fn joins_across_clusters(character: char) -> bool {
+    matches!(
+        u32::from(character),
+        0x0590..=0x08FF
+            | 0x1780..=0x17FF
+            | 0x1A00..=0x1A1F
+            | 0x2D30..=0x2D7F
+            | 0xA4D0..=0xA4FF
+            | 0xFB1D..=0xFDFF
+            | 0xFE70..=0xFEFF
+            | 0x10C00..=0x10C4F
+            | 0x16D40..=0x16D7F
+    )
 }
 
 /// One terminal row composed of styled spans drawn left to right.
@@ -720,6 +754,64 @@ mod tests {
             Span::new("x", white),
         ])];
         assert_eq!(renderer.cell_colors(&lines, 4, 0).unwrap().0, white);
+    }
+
+    /// The renderer gives an Arabic lam and the alef after it a cell each.
+    /// `unicode-width` counts the pair as one (the lam-alef ligature), so a
+    /// span placed after "للإغلاق" by that width covered its last letters.
+    #[test]
+    fn arabic_lam_alef_takes_the_cells_the_renderer_draws() {
+        let mut renderer = Renderer::new(24, 2, true).unwrap();
+        let white = Color::rgb(255, 255, 255);
+        let word = "esc \u{644}\u{644}\u{625}\u{63a}\u{644}\u{627}\u{642}";
+        let lines = [Line::new(vec![
+            Span::new(word, white),
+            Span::new("|", white),
+        ])];
+        let drawn = renderer.snapshot_lines(&lines);
+        assert!(drawn.starts_with(&format!("{word}|")), "{drawn:?}");
+        assert_eq!(Span::new(word, white).width(), 11);
+    }
+
+    /// The width every caller uses is the width the renderer draws, for
+    /// Latin, CJK, emoji sequences, combining marks and right-to-left text.
+    #[test]
+    fn display_width_matches_the_cells_the_renderer_draws() {
+        let mut renderer = Renderer::new(40, 2, true).unwrap();
+        let cyan = Color::rgb(62, 184, 166);
+        let white = Color::rgb(255, 255, 255);
+        for (text, cells) in [
+            ("esc close", 9),
+            ("日本語", 6),
+            ("e\u{301}t\u{e9}", 3),
+            ("👩\u{200d}💻 ok", 5),
+            ("👍🏽", 2),
+            ("🇯🇵", 2),
+            ("\u{644}\u{627}", 2),
+            (
+                "\u{627}\u{644}\u{625}\u{639}\u{62f}\u{627}\u{62f}\u{627}\u{62a}",
+                9,
+            ),
+            ("\u{644}\u{64e}\u{627}", 2),
+            ("\u{5e9}\u{5dc}\u{5d5}\u{5dd}", 4),
+        ] {
+            assert_eq!(display_width(text), cells, "{text}");
+            let lines = [Line::new(vec![
+                Span::new(text, cyan),
+                Span::new("|", white),
+            ])];
+            let at = u32::try_from(cells).unwrap();
+            assert_eq!(
+                renderer.cell_colors(&lines, at, 0).unwrap().0,
+                white,
+                "{text}"
+            );
+            assert_eq!(
+                renderer.cell_colors(&lines, at - 1, 0).unwrap().0,
+                cyan,
+                "{text}"
+            );
+        }
     }
 
     #[test]

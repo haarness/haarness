@@ -12,7 +12,8 @@ pub mod transcript;
 pub mod workflow;
 
 use haarness_opentui::{Line, Span, attr};
-use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
+use crate::width::DisplayWidth as _;
+use unicode_width::UnicodeWidthChar as _;
 
 use crate::state::{App, Overlay, ToastVariant};
 use crate::view::span::{compact_count, short_id, single_line};
@@ -653,12 +654,12 @@ fn apply_toast(
     let longest = toast
         .message
         .lines()
-        .map(unicode_width::UnicodeWidthStr::width)
+        .map(haarness_opentui::display_width)
         .chain(
             toast
                 .title
                 .as_deref()
-                .map(unicode_width::UnicodeWidthStr::width),
+                .map(haarness_opentui::display_width),
         )
         .max()
         .unwrap_or(0);

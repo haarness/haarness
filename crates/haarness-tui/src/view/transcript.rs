@@ -737,7 +737,7 @@ fn mark_reply(lines: &mut [Line], theme: &Theme) {
 /// Files and agents attached with `@` show as the chips they were typed as;
 /// the snapshot or delegation they expand to is for the model.
 fn user_block(text: &str, width: usize, theme: &Theme) -> Vec<Line> {
-    use unicode_width::UnicodeWidthStr as _;
+    use crate::width::DisplayWidth as _;
     let inner = width.saturating_sub(4).max(10);
     let mut paragraphs: Vec<Vec<Span>> = vec![Vec::new()];
     for part in crate::prompt_context::parts(text) {
@@ -962,7 +962,7 @@ fn open_plan(app: &App) -> bool {
 /// The plan in one row: the step in hand, how far along it is, and the key
 /// that shows all of it.
 fn plan_row(app: &App, width: usize) -> Line {
-    use unicode_width::UnicodeWidthStr as _;
+    use crate::width::DisplayWidth as _;
     let theme = &app.theme;
     let current = app
         .todos
