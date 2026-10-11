@@ -39,7 +39,7 @@ source_cli run --provider echo --model echo-1 --title 'Archive root secret' \
     'root transcript secret' >/dev/null
 root_id=$(source_cli sessions list --json | jq -er \
     '.[] | select(.title == "Archive root secret") | .id')
-child_id=$(source_cli sessions fork "$root_id" --title 'Archive child secret' | jq -er '.id')
+child_id=$(source_cli sessions fork "$root_id" --title 'Archive child secret' --json | jq -er '.id')
 source_cli --session "$child_id" run --provider echo --model echo-1 \
     'child transcript secret' >/dev/null
 

@@ -2,8 +2,10 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 #[derive(Args)]
 pub struct UpgradeArgs {
+    /// Release channel: stable or preview.
     #[arg(long, default_value="stable", value_parser=["stable", "preview"])]
     channel: String,
+    /// Version to install.
     #[arg(long, default_value = "latest")]
     version: String,
     /// Release service origin (HTTPS; loopback HTTP for local testing).

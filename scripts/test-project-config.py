@@ -207,10 +207,11 @@ try:
     check("Returning to the default restores project configuration", api("/info")["projectTrusted"] is True and "project-guide" in names("/skills"))
     check("Legacy trust flag remains compatible", "project-guide" in cli("--trust-project", "skill", "list"))
 
-    schedule_args = ("schedule", "add", "--name", "policy proof", "--prompt", "fixture", "--every", "1h", "--model", "echo/echo-1")
-    enabled_schedule = cli(*schedule_args).split()[0]
+    schedule_args = ("schedule", "add", "--prompt", "fixture", "--every", "1h", "--model", "echo/echo-1")
+    enabled_schedule = cli(*schedule_args, "--name", "policy proof").split()[0]
     check("New schedules inherit the default-on project policy", json.loads(cli("schedule", "get", enabled_schedule))["trustProject"] is True)
-    disabled_schedule = cli("--disable-project-config", *schedule_args).split()[0]
+    # Schedule names are unique: they are how commands refer to schedules.
+    disabled_schedule = cli("--disable-project-config", *schedule_args, "--name", "policy opt-out").split()[0]
     cli("schedule", "update", disabled_schedule, "--name", "policy retained")
     check("Schedule updates retain an explicit opt-out", json.loads(cli("schedule", "get", disabled_schedule))["trustProject"] is False)
     cli("--trust-project", "schedule", "update", disabled_schedule, "--name", "policy enabled")

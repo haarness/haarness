@@ -26,6 +26,7 @@ pub struct RemoteArgs {
 enum RemoteCommand {
     /// Connect this machine to Cloud. Keep running under a service supervisor for unattended use.
     Run {
+        /// Name Cloud shows for this computer.
         #[arg(long, default_value = "My computer")]
         name: String,
         /// Publish only this chat and its child chats, instead of host-wide project access.
@@ -34,23 +35,38 @@ enum RemoteCommand {
     },
     /// Start a background connector for this login. Does not install an OS startup service.
     Enable {
+        /// Name Cloud shows for this computer.
         #[arg(long, default_value = "My computer")]
         name: String,
+        /// Publish only this chat and its child chats, instead of host-wide project access.
         #[arg(long = "chat")]
         session: Option<Uuid>,
     },
     /// Show local connector IDs and whether their processes are running.
-    Status,
+    Status {
+        /// Print the connectors as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Stop a local connector without revoking its registration or stopping local work.
-    Disable { id: Uuid },
+    Disable {
+        /// Connector id, as `remote status` shows it.
+        id: Uuid,
+    },
     /// Forget a stopped connector identity so the next enable registers new access.
-    Forget { id: Uuid },
+    Forget {
+        /// Connector id, as `remote status` shows it.
+        id: Uuid,
+    },
     /// List machines connected to the selected Cloud account.
     Hosts,
     /// List explicitly published chats.
     Sessions,
     /// Revoke Cloud access without deleting any local files or conversations.
-    Revoke { id: Uuid },
+    Revoke {
+        /// Connector id, as `remote status` shows it.
+        id: Uuid,
+    },
 }
 // Kept wire-compatible with cloud-contracts::remote::RelayFrame; protocol fixtures test both ends.
 #[derive(Debug, Serialize, Deserialize)]
@@ -133,8 +149,19 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
             );
             return Ok(());
         }
-        RemoteCommand::Status => {
-            println!("{}", json!({"items":local_status(paths)?}));
+        RemoteCommand::Status { json } => {
+            let connectors = local_status(paths)?;
+            if json {
+                println!("{}", json!({"items": connectors}));
+            } else if connectors.is_empty() {
+                println!(
+                    "No remote connectors on this computer. Start one with `haarness remote enable`."
+                );
+            } else {
+                for connector in connectors {
+                    print!("{}", connector_line(&connector));
+                }
+            }
             return Ok(());
         }
         RemoteCommand::Disable { id } => {
@@ -1040,6 +1067,30 @@ fn local_status(paths: &Paths) -> Result<Vec<Value>> {
             Ok(value)
         })
         .collect()
+}
+/// One connector for `remote status`: id, name, state, what it shares, and
+/// why it stopped.
+fn connector_line(connector: &Value) -> String {
+    let text = |key: &str| connector[key].as_str().unwrap_or_default();
+    let state = if connector["running"] == true {
+        "running"
+    } else {
+        "stopped"
+    };
+    let shares = match connector["chatId"].as_str() {
+        Some(chat) => format!("chat {chat}"),
+        None => "this computer".to_owned(),
+    };
+    let mut line = format!("{}  {}  {state}  shares {shares}", text("id"), text("name"));
+    if let Some(error) = connector["error"]
+        .as_str()
+        .filter(|error| !error.is_empty())
+    {
+        line.push_str("\n  ");
+        line.push_str(error);
+    }
+    line.push('\n');
+    line
 }
 fn local_file(paths: &Paths, id: Uuid) -> Result<Option<std::path::PathBuf>> {
     Ok(identities(paths)?
