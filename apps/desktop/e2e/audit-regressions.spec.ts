@@ -447,11 +447,14 @@ test("audit: overlapping canvas previews keep the latest mode and cannot land in
   await hold(app, 'GET', '/v1/files/content');
   await send('preview');
   await expect(page.locator('.preview-banner')).toHaveCount(3);
-  await held(app);
+  // The open tab re-reads the changed file after the turn too, so more than
+  // the preview's own read can be held here.
+  await expect.poll(() => app.evaluate(() => (globalThis as any).held)).toBeGreaterThanOrEqual(1);
   await button(page, 'New chat').click();
   await expect(page.locator('.preview-banner')).toHaveCount(0);
   await release(app);
-  await expect(editor(page)).toContainText('First page');
+  // The open file follows the disk, but stays in the mode the old chat left.
+  await expect(editor(page)).toContainText('Late page');
   await expect(page.locator('.file-preview .html-preview')).toHaveCount(0);
 });
 
