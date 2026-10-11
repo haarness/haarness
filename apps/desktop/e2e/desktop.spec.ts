@@ -1535,6 +1535,45 @@ test("forked conversations appear in the sidebar through rename, archive, projec
   expect(errors).toEqual([]);
 });
 
+test("a fork of an untitled chat reads as one, never as the server's placeholder", async () => {
+  const project = page.getByRole("region", {
+    name: "Project workspace",
+    exact: true,
+  });
+  const untitled = await client.createThread({
+    provider: "echo",
+    model: "echo-1",
+  });
+  // The server's placeholder: "New thread", or "New chat" from a server that
+  // uses the reader's word.
+  expect(untitled.title).toMatch(/^New (thread|chat)$/);
+  // Forked before a title is generated, the fork is named after it.
+  const fork = await client.forkThread(untitled.id, {});
+  expect(fork.title).toMatch(/^Fork of New (thread|chat)$/);
+  const row = project.getByRole("button", {
+    name: "Fork of untitled chat",
+    exact: true,
+  });
+  await expect(row).toBeVisible();
+  await expect(project.getByText(/New thread|Fork of New chat/)).toHaveCount(0);
+  await project.screenshot({ path: test.info().outputPath("fork-of-untitled.png") });
+  await row.click();
+  await expect(page.locator(".session-bar-name, .workspace-tab.active")).toContainText(
+    "Fork of untitled chat",
+  );
+  // A rename starts from the name shown, never from the placeholder.
+  await page.getByRole("button", { name: "Chat actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
+  const rename = page.getByRole("dialog", { name: "Rename chat", exact: true });
+  await expect(rename.getByRole("textbox", { name: "Title", exact: true })).toHaveValue(
+    "Fork of untitled chat",
+  );
+  await rename.getByRole("button", { name: "Cancel", exact: true }).click();
+  await client.updateThread(fork.id, { archived: true });
+  await client.updateThread(untitled.id, { archived: true });
+  expect(errors).toEqual([]);
+});
+
 test("whole rows reorder silently, project titles expand, and sessions have one archive action", async () => {
   const directory = join(temporary, "reorder-project");
   extraWorkspaces.push(directory);
@@ -3365,12 +3404,10 @@ test("Auto approvals allow once, inherit to agents, preserve Review and survive 
     expect
       .poll(() => client.activeTurns().then((items) => items.length))
       .toBe(0);
-  const toggle = page.getByRole("button", {
-    name: "Automatic approvals",
-    exact: true,
-  });
+  // The pill is named after the mode it shows ("Approvals: Review").
+  const toggle = page.getByRole("button", { name: /^Approvals: (Review|Auto)$/ });
   await open(parent.title);
-  await expect(toggle).toHaveAttribute("aria-pressed", "false");
+  await expect(toggle).toHaveAccessibleName("Approvals: Review");
   const command =
     '!tool bash {"command":"printf auto-once-proof > auto-once.txt"}';
   await start(parent.id, command);
@@ -3384,7 +3421,7 @@ test("Auto approvals allow once, inherit to agents, preserve Review and survive 
   expect(await readFile(join(workspace, "auto-once.txt"), "utf8")).toBe(
     "auto-once-proof",
   );
-  await expect(toggle).toHaveAttribute("aria-pressed", "true");
+  await expect(toggle).toHaveAccessibleName("Approvals: Auto");
   await start(parent.id, command);
   await finished();
   expect(await client.listPermissions()).toHaveLength(0);
@@ -3407,7 +3444,7 @@ test("Auto approvals allow once, inherit to agents, preserve Review and survive 
     "data-project-ready",
     "true",
   );
-  await expect(toggle).toHaveAttribute("aria-pressed", "true");
+  await expect(toggle).toHaveAccessibleName("Approvals: Auto");
   await start(parent.id, command);
   await finished();
   const other = await client.createThread({
@@ -3416,7 +3453,7 @@ test("Auto approvals allow once, inherit to agents, preserve Review and survive 
     model: "echo-1",
   });
   await open(other.title);
-  await expect(toggle).toHaveAttribute("aria-pressed", "false");
+  await expect(toggle).toHaveAccessibleName("Approvals: Review");
   // A background root and its child still use the root's Auto setting while another conversation is selected.
   await start(
     parent.id,
@@ -3462,7 +3499,7 @@ test("Auto approvals allow once, inherit to agents, preserve Review and survive 
   ).toBeNull();
   await client.updateThread(parent.id, { agent: "build" });
   await open(parent.title);
-  await expect(toggle).toHaveAttribute("aria-pressed", "true");
+  await expect(toggle).toHaveAccessibleName("Approvals: Auto");
   await page.getByRole("button", { name: "Search", exact: true }).click();
   await page
     .getByRole("combobox", { name: "Search Haarness" })
@@ -3471,7 +3508,7 @@ test("Auto approvals allow once, inherit to agents, preserve Review and survive 
     .getByRole("option")
     .filter({ hasText: "Switch approvals to Review" })
     .click();
-  await expect(toggle).toHaveAttribute("aria-pressed", "false");
+  await expect(toggle).toHaveAccessibleName("Approvals: Review");
   expect(errors).toEqual([]);
 });
 
@@ -3494,8 +3531,8 @@ test("Auto from a child view leaves its parent and siblings in Review", async ()
     page.locator(".session-bar-name, .workspace-tab.active"),
   ).toContainText(parent.title);
   await expect(
-    page.getByRole("button", { name: "Automatic approvals", exact: true }),
-  ).toHaveAttribute("aria-pressed", "false");
+    page.getByRole("button", { name: "Approvals: Review", exact: true }),
+  ).toBeVisible();
   await client.startTurn(parent.id, {
     requestId: crypto.randomUUID(),
     text:
@@ -3576,8 +3613,8 @@ test("Auto from a child view leaves its parent and siblings in Review", async ()
     .getByRole("button", { name: "Back to parent chat", exact: true })
     .click();
   await expect(
-    page.getByRole("button", { name: "Automatic approvals", exact: true }),
-  ).toHaveAttribute("aria-pressed", "false");
+    page.getByRole("button", { name: "Approvals: Review", exact: true }),
+  ).toBeVisible();
   await page.getByRole("button", { name: "Deny", exact: true }).click();
   await expect
     .poll(() => client.activeTurns().then((items) => items.length))
@@ -3589,11 +3626,9 @@ test("workspace Auto stays scoped across collapsed projects and the new composer
   test.setTimeout(120000);
   await showChat();
   await newSession();
-  const toggle = page.getByRole("button", {
-    name: "Automatic approvals",
-    exact: true,
-  });
-  await expect(toggle).toHaveAttribute("aria-pressed", "false");
+  // The pill is named after the mode it shows ("Approvals: Review").
+  const toggle = page.getByRole("button", { name: /^Approvals: (Review|Auto)$/ });
+  await expect(toggle).toHaveAccessibleName("Approvals: Review");
   await toggle.click();
   await send(
     '!tool bash {"command":"printf workspace-auto-proof > workspace-auto.txt"}',
@@ -3650,7 +3685,7 @@ test("workspace Auto stays scoped across collapsed projects and the new composer
       "data-project-ready",
       "true",
     );
-    await expect(toggle).toHaveAttribute("aria-pressed", "false");
+    await expect(toggle).toHaveAccessibleName("Approvals: Review");
     await expect(
       page.getByRole("button", { name: "Allow once", exact: true }),
     ).toBeVisible();
@@ -3684,7 +3719,7 @@ test("workspace Auto stays scoped across collapsed projects and the new composer
     "true",
   );
   await newSession();
-  await expect(toggle).toHaveAttribute("aria-pressed", "false");
+  await expect(toggle).toHaveAccessibleName("Approvals: Review");
   await send('!tool bash {"command":"printf manual-workspace-proof"}');
   await expect(
     page.getByRole("button", { name: "Allow once", exact: true }),
@@ -3770,15 +3805,15 @@ test("workspace Auto stays scoped across collapsed projects and the new composer
   await expect(
     page.locator(".session-bar-name, .workspace-tab.active"),
   ).toHaveCount(0);
-  await expect(toggle).toHaveAttribute("aria-pressed", "true");
+  await expect(toggle).toHaveAccessibleName("Approvals: Auto");
   await toggle.click();
-  await expect(toggle).toHaveAttribute("aria-pressed", "false");
+  await expect(toggle).toHaveAccessibleName("Approvals: Review");
   await page.reload();
   await expect(page.locator(".application")).toHaveAttribute(
     "data-project-ready",
     "true",
   );
-  await expect(toggle).toHaveAttribute("aria-pressed", "false");
+  await expect(toggle).toHaveAccessibleName("Approvals: Review");
   if ((await header.getAttribute("aria-expanded")) === "false")
     await header.click();
   await expect(header).toHaveAttribute("aria-expanded", "true");
@@ -10118,8 +10153,8 @@ test("conversation controls undo and redo real files, preserve drafts, and compa
     await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill(name);
     await page.getByRole("option", { name, exact: true }).click();
   };
-  const approval = page.getByRole("button", { name: "Automatic approvals", exact: true });
-  if (await approval.getAttribute("aria-pressed") !== "true") await approval.click();
+  const approval = page.getByRole("button", { name: /^Approvals: (Review|Auto)$/ });
+  if (await approval.getAttribute("aria-label") !== "Approvals: Auto") await approval.click();
   const path = join(workspace, "history-controls.txt");
   const first = '!tool write {"path":"history-controls.txt","content":"first value"}';
   const second = '!tool write {"path":"history-controls.txt","content":"second value"}';

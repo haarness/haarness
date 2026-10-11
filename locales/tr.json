@@ -358,7 +358,7 @@
   "Always for this folder": "Bu klasör için her zaman",
   "Answer": "Yanıt",
   "Archived chats": "Arşivlenen sohbetler",
-  "Automatic approvals": "Otomatik onaylar",
+  "Approvals: {mode}": "Onaylar: {mode}",
   "Back to list": "Listeye dön",
   "Binary file changed.": "İkili dosya değişti.",
   "Browse and edit project files": "Proje dosyalarına göz atın ve düzenleyin",
@@ -1814,5 +1814,15 @@
   "Choose a project to start a chat": "Sohbet başlatmak için bir proje seçin",
   "Chat text size": "Sohbet metin boyutu",
   "Run a prompt on a schedule in {project}. Chats appear under Scheduled in the sidebar.": "{project} içinde bir istemi zamanlamayla çalıştırın. Sohbetler kenar çubuğunda Zamanlanmış altında görünür.",
-  "Fork chat": "Sohbeti dallandır"
+  "Fork chat": "Sohbeti dallandır",
+  "Fork of untitled chat": "Adsız sohbetten dal",
+  "Haarness could not preview this profile.": "Haarness bu profilin önizlemesini gösteremedi.",
+  "Restoring “{name}” writes {count} file.": "“{name}” geri yüklenince {count} dosya yazılır.",
+  "Restoring “{name}” writes {count} files.": "“{name}” geri yüklenince {count} dosya yazılır.",
+  "No existing file is replaced.": "Var olan hiçbir dosya değiştirilmez.",
+  "{count} file already exists and will be replaced.": "{count} dosya zaten var ve değiştirilecek.",
+  "{count} files already exist and will be replaced.": "{count} dosya zaten var ve değiştirilecek.",
+  "Will be replaced": "Değiştirilecek",
+  "Profile “{name}” restored.": "“{name}” profili geri yüklendi.",
+  "It already exists and will be replaced.": "Bu dosya zaten var ve değiştirilecek."
 }

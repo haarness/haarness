@@ -358,7 +358,7 @@
   "Always for this folder": "دائمًا لهذا المجلد",
   "Answer": "إجابة",
   "Archived chats": "المحادثات المؤرشفة",
-  "Automatic approvals": "الموافقات التلقائية",
+  "Approvals: {mode}": "الموافقات: {mode}",
   "Back to list": "العودة إلى القائمة",
   "Binary file changed.": "تم تغيير ملف ثنائي.",
   "Browse and edit project files": "تصفّح ملفات المشروع وحرّرها",
@@ -1814,5 +1814,15 @@
   "Choose a project to start a chat": "اختر مشروعًا لبدء محادثة",
   "Chat text size": "حجم نص المحادثة",
   "Run a prompt on a schedule in {project}. Chats appear under Scheduled in the sidebar.": "شغّل مطالبة وفق جدول في {project}. تظهر المحادثات ضمن المجدولة في الشريط الجانبي.",
-  "Fork chat": "تفريع المحادثة"
+  "Fork chat": "تفريع المحادثة",
+  "Fork of untitled chat": "تفريع من محادثة بلا عنوان",
+  "Haarness could not preview this profile.": "تعذّر على Haarness معاينة ملف التعريف هذا.",
+  "Restoring “{name}” writes {count} file.": "تكتب استعادة «{name}» {count} ملف.",
+  "Restoring “{name}” writes {count} files.": "تكتب استعادة «{name}» {count} ملفات.",
+  "No existing file is replaced.": "لن يُستبدل أي ملف موجود.",
+  "{count} file already exists and will be replaced.": "{count} ملف موجود بالفعل وسيُستبدل.",
+  "{count} files already exist and will be replaced.": "{count} ملفات موجودة بالفعل وستُستبدل.",
+  "Will be replaced": "سيُستبدل",
+  "Profile “{name}” restored.": "تمت استعادة ملف التعريف «{name}».",
+  "It already exists and will be replaced.": "إنه موجود بالفعل وسيُستبدل."
 }

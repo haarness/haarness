@@ -358,7 +358,7 @@
   "Always for this folder": "Всегда для этой папки",
   "Answer": "Ответ",
   "Archived chats": "Архивные чаты",
-  "Automatic approvals": "Автоматические разрешения",
+  "Approvals: {mode}": "Разрешения: {mode}",
   "Back to list": "Назад к списку",
   "Binary file changed.": "Двоичный файл изменён.",
   "Browse and edit project files": "Просмотр и редактирование файлов проекта",
@@ -1814,5 +1814,15 @@
   "Choose a project to start a chat": "Выберите проект, чтобы начать чат",
   "Chat text size": "Размер текста чата",
   "Run a prompt on a schedule in {project}. Chats appear under Scheduled in the sidebar.": "Запускайте запрос по расписанию в {project}. Чаты появятся в разделе расписаний на боковой панели.",
-  "Fork chat": "Ответвить чат"
+  "Fork chat": "Ответвить чат",
+  "Fork of untitled chat": "Ответвление чата без названия",
+  "Haarness could not preview this profile.": "Haarness не смог показать предпросмотр этого профиля.",
+  "Restoring “{name}” writes {count} file.": "Восстановление «{name}» запишет {count} файл.",
+  "Restoring “{name}” writes {count} files.": "Восстановление «{name}» запишет файлов: {count}.",
+  "No existing file is replaced.": "Существующие файлы не заменяются.",
+  "{count} file already exists and will be replaced.": "{count} файл уже существует и будет заменён.",
+  "{count} files already exist and will be replaced.": "Существующих файлов, которые будут заменены: {count}.",
+  "Will be replaced": "Будет заменён",
+  "Profile “{name}” restored.": "Профиль «{name}» восстановлен.",
+  "It already exists and will be replaced.": "Он уже существует и будет заменён."
 }

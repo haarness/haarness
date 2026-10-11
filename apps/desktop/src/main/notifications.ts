@@ -1,5 +1,6 @@
 import type { EventEnvelope, Thread } from "@haarness/sdk";
 import type { NotificationTarget } from "../shared";
+import { untitledKind } from "../chat-titles";
 
 export interface NativeNotification {
   on(event: "click" | "close" | "failed", callback: () => void): unknown;
@@ -107,13 +108,16 @@ export function createNotifications(input: {
       !permitted()
     )
       return;
-    // "New thread" is the server's placeholder until a title is generated;
-    // Desktop calls that chat untitled.
+    // The server's placeholder until a title is generated ("New thread", or
+    // "New chat") is not a name: Desktop calls that chat untitled.
+    const kind = untitledKind(conversation?.title);
     const name = !conversation
       ? "Chat " + root.slice(0, 8)
-      : conversation.title && conversation.title !== "New thread"
-        ? conversation.title
-        : "Untitled chat";
+      : kind === "chat"
+        ? "Untitled chat"
+        : kind === "fork"
+          ? "Fork of untitled chat"
+          : conversation.title;
     const notification = input.create({
       title: `Haarness — ${title}`,
       body: `${name} · ${label}`,

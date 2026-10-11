@@ -31,12 +31,18 @@ const layers = /^(?:error|tool error|invalid request|storage error|internal erro
 const busyPort = /address already in use|os error (?:48|98)\b|EADDRINUSE/i;
 const offline =
   /error sending request|connection refused|ECONNREFUSED|ECONNRESET|ENOTFOUND|network is unreachable|dns error|failed to lookup address|connect timed? ?out/i;
+/** A lowercase word that starts a sentence, so it can take a capital: not a
+ * model id ("gpt-5"), a path, a file name, a command or an identifier, whose
+ * spelling is the point. Trailing punctuation does not count. */
+const ordinaryWord = /^\p{Ll}[\p{Ll}'’]*[.,:;!?]*$/u;
 
 export function errorText(error: unknown): ErrorText {
   let text = (error instanceof Error ? error.message : String(error ?? "")).trim();
   while (layers.test(text)) text = text.replace(layers, "").trim();
   const sentence = (value: string) =>
-    value.charAt(0).toUpperCase() + value.slice(1);
+    ordinaryWord.test(value.split(/\s/, 1)[0])
+      ? value.charAt(0).toUpperCase() + value.slice(1)
+      : value;
   const known = ([title, message]: readonly [string, string]) => ({
     title,
     message,

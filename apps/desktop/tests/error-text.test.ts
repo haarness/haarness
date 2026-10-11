@@ -37,3 +37,16 @@ test("busy ports and transport failures get plain copy and keep the raw text as 
     [true, "Can't connect", "Check your internet connection and try again."],
   );
 });
+
+test("only an ordinary first word takes a capital", () => {
+  assert.equal(errorText("tool error: gpt-5 is not available for this key").message, "gpt-5 is not available for this key");
+  assert.equal(errorText("invalid request: config.toml has an unknown key").message, "config.toml has an unknown key");
+  assert.equal(errorText("./scripts/setup.sh exited with status 1").message, "./scripts/setup.sh exited with status 1");
+  assert.equal(errorText("v2 of the schema is required").message, "v2 of the schema is required");
+  assert.equal(errorText("apiKey is missing").message, "apiKey is missing");
+  assert.equal(errorText("e.g. a model id").message, "e.g. a model id");
+  assert.equal(errorText("can't reach the server").message, "Can't reach the server");
+  assert.equal(errorText("unknown: model claude-x").message, "Unknown: model claude-x");
+  assert.equal(errorText("échec de la requête").message, "Échec de la requête");
+  assert.equal(errorText("Model sign-in failed: gpt-5.1 needs a paid plan").message, "gpt-5.1 needs a paid plan");
+});

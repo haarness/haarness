@@ -34,7 +34,8 @@ import { themes, themeColors } from "../themes";
 import { useApp } from "./state";
 import { dismissOnBackdrop } from "./ui";
 import { Wordmark } from "./brand";
-import { Button, Icon, ask, confirm, stringify, Empty } from "./ui";
+import { Button, Icon, ask, confirm, Empty } from "./ui";
+import { restoreArgs, restoredMessage, restorePlan, restoreSummary } from "./profile-restore";
 import {
   settingsSections as sections,
   settingsTitles as titles,
@@ -1607,6 +1608,27 @@ function Extensions(props: { cli: Cli }) {
 }
 function Profiles(props: { cli: Cli }) {
   const app = useApp();
+  /**
+   * Restore from a file (`restore <path>`) or the catalog (`cloud-restore
+   * <id> --url …`): preview it, list the files it would replace, and replace
+   * them only once the reader confirms.
+   */
+  async function restore(source: string[]) {
+    const plan = restorePlan(
+      await props.cli(["profile", ...source, "--dry-run", "--json"]),
+    );
+    const summary = restoreSummary(plan);
+    if (
+      !(await confirm(t("Restore profile?"), summary.description, {
+        submit: t("Restore profile"),
+        danger: summary.replaces,
+        list: summary.list,
+      }))
+    )
+      return;
+    await props.cli(restoreArgs(source, plan));
+    app.notify(restoredMessage(plan));
+  }
   return (
     <>
       <p class="muted">
@@ -1648,16 +1670,7 @@ function Profiles(props: { cli: Cli }) {
           onClick={() =>
             app.run(async () => {
               const path = await window.haarness.pick("file");
-              if (!path) return;
-              const preview = await props.cli([
-                "profile",
-                "restore",
-                path,
-                "--dry-run",
-                "--json",
-              ]);
-              if (await confirm(t("Restore profile?"), stringify(preview), { submit: t("Restore profile") }))
-                await props.cli(["profile", "restore", path, "--json"]);
+              if (path) await restore(["restore", path]);
             })
           }
         >
@@ -1721,6 +1734,8 @@ function Profiles(props: { cli: Cli }) {
                 );
                 if (!input) return;
                 await window.haarness.storage("profile-catalog:v1", input.url.trim());
+                if (item.command === "cloud-restore")
+                  return restore(["cloud-restore", input.target, "--url", input.url]);
                 const args = [
                   "profile",
                   item.command,

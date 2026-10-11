@@ -45,9 +45,17 @@ export interface Field {
   required?: boolean;
   readonly?: boolean;
 }
+/** One line of a dialog's list: shown as written (a path, an id), with an
+ * optional short tag that is already translated. */
+export interface ListItem {
+  text: string;
+  tag?: string;
+}
 interface Form {
   title: string;
   description?: string;
+  /** What the action touches, under the description. */
+  list?: ListItem[];
   fields: Field[];
   submit: string;
   /** The submit removes, deletes or discards something: style it as such. */
@@ -64,13 +72,14 @@ const [form, setForm] = createSignal<Form | null>(null);
 export function ask(
   title: string,
   fields: Field[],
-  options: { description?: string; submit?: string; danger?: boolean; onSubmit?: Form["onSubmit"] } = {},
+  options: { description?: string; list?: ListItem[]; submit?: string; danger?: boolean; onSubmit?: Form["onSubmit"] } = {},
 ) {
   return new Promise<Record<string, string> | null>((resolve) =>
     setForm({
       title,
       fields,
       description: options.description,
+      list: options.list,
       onSubmit: options.onSubmit,
       submit: options.submit ?? "Save",
       danger: options.danger,
@@ -86,7 +95,7 @@ export function ask(
 export async function confirm(
   title: string,
   description: string,
-  options: { submit: string; danger?: boolean },
+  options: { submit: string; danger?: boolean; list?: ListItem[] },
 ) {
   return !!(await ask(title, [], { description, ...options }));
 }
@@ -205,6 +214,18 @@ export function Forms() {
               </header>
               <Show when={current.description}>
                 {(description) => <p class="muted">{t(description())}</p>}
+              </Show>
+              <Show when={current.list?.length}>
+                <ul class="dialog-list">
+                  <For each={current.list}>
+                    {(item) => (
+                      <li>
+                        <span dir="auto">{item.text}</span>
+                        <Show when={item.tag}>{(tag) => <span class="badge dialog-list-tag">{tag()}</span>}</Show>
+                      </li>
+                    )}
+                  </For>
+                </ul>
               </Show>
               <fieldset disabled={busy()}>
               <For each={current.fields}>

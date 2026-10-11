@@ -18,7 +18,7 @@ const test = base.extend<{ desktop: Fixture }>({
     await writeFile(join(b, "alpha.txt"), "Other project alpha");
     await writeFile(join(b, "second.txt"), "Second project");
     await writeFile(join(a, "proof.png"), Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6Z9kAAAAASUVORK5CYII=", "base64"));
-    const binary = resolve("../../target/debug/haarness");
+    const binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
     const env: Record<string, string> = { ...process.env, HAARNESS_BIN: binary, HAARNESS_HOME: join(temp, "home"), HAARNESS_DATA_DIR: join(temp, "data"), HAARNESS_DESKTOP_DATA: join(temp, "desktop"), HAARNESS_TEST_PROVIDER: "1", HAARNESS_DESKTOP_TEST: "1" };
     delete env.ELECTRON_RUN_AS_NODE;
     delete env.ELECTRON_RENDERER_URL;
@@ -126,6 +126,22 @@ test("audit: pending saves retain newer edits and reject external conflicts with
   await expect(page.getByRole("alert")).toContainText(/changed|conflict/i);
   await expect(editor(page)).toHaveText("Local edit"); await expect(button(page, "Save")).toBeEnabled();
   expect(await readFile(join(a, "alpha.txt"), "utf8")).toBe("External edit");
+  // Save again while the choice is open: it points at the bar, not nowhere.
+  const changed = page.locator(".file-changed");
+  await editor(page).press("Meta+s");
+  await expect(changed).toBeFocused(); await expect(changed).toHaveClass(/attention/);
+  await expect(changed).not.toHaveClass(/attention/);
+  await button(page, "Save").click();
+  await expect(changed).toBeFocused(); await expect(changed).toHaveClass(/attention/);
+  await changed.screenshot({ path: test.info().outputPath("conflict-bar-attention.png") });
+  expect(await readFile(join(a, "alpha.txt"), "utf8")).toBe("External edit");
+  // Choosing hands the keyboard back to the editor, where Save now replaces the file.
+  await page.keyboard.press("Tab"); await page.keyboard.press("Tab");
+  await expect(changed.getByRole("button", { name: "Keep mine", exact: true })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(changed).toHaveCount(0); await expect(editor(page)).toBeFocused();
+  await editor(page).press("Meta+s");
+  await expect.poll(() => readFile(join(a, "alpha.txt"), "utf8")).toBe("Local edit");
 });
 
 test("audit: duplicate opens share one read and slow reads respect latest selection", async ({ desktop: { app, page } }) => {
@@ -437,4 +453,38 @@ test("audit: overlapping canvas previews keep the latest mode and cannot land in
   await release(app);
   await expect(editor(page)).toContainText('First page');
   await expect(page.locator('.file-preview .html-preview')).toHaveCount(0);
+});
+
+test("audit: restoring a profile previews the files it replaces and replaces them once confirmed", async ({ desktop: { app, page, a } }) => {
+  const config = join(a, ".haarness/config.toml"), archive = join(a, "work.profile.zip");
+  const saved = await readFile(config, "utf8");
+  await button(page, "Settings").click();
+  const settings = page.getByRole("dialog", { name: "Settings", exact: true });
+  await settings.getByRole("button", { name: "Profiles", exact: true }).click();
+  await settings.getByRole("button", { name: "Save profile", exact: true }).click();
+  const save = page.getByRole("dialog", { name: "Save profile", exact: true });
+  await save.getByRole("textbox", { name: "Name", exact: true }).fill("work");
+  await save.getByRole("button", { name: "Save", exact: true }).click();
+  await expect.poll(() => readFile(archive).then(() => true, () => false)).toBe(true);
+  // The project's settings change after the profile was saved.
+  await writeFile(config, saved + "# changed after saving the profile\n");
+  await choose(app, archive);
+  await settings.getByRole("button", { name: "Restore profile", exact: true }).click();
+  const preview = page.getByRole("dialog", { name: "Restore profile?", exact: true });
+  // The name is wrapped in bidi isolates (U+2068/U+2069) for right-to-left languages.
+  await expect(preview).toContainText(/Restoring “\u2068work\u2069” writes (1 file\. It|\d+ files\. 1 file) already exists and will be replaced\./);
+  const replaced = preview.locator(".dialog-list li").first();
+  await expect(replaced).toContainText(config);
+  await expect(replaced.locator(".dialog-list-tag")).toHaveText("Will be replaced");
+  await preview.screenshot({ path: test.info().outputPath("restore-preview.png") });
+  // Cancelling changes nothing.
+  await preview.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(preview).toHaveCount(0);
+  expect(await readFile(config, "utf8")).toContain("# changed after saving");
+  await choose(app, archive);
+  await settings.getByRole("button", { name: "Restore profile", exact: true }).click();
+  await preview.getByRole("button", { name: "Restore profile", exact: true }).click();
+  await expect(page.locator(".toast")).toContainText("Profile “\u2068work\u2069” restored.");
+  await expect(settings.getByRole("alert")).toHaveCount(0);
+  expect(await readFile(config, "utf8")).toBe(saved);
 });

@@ -428,10 +428,9 @@ test("last-turn review and a second repository keep content and comments isolate
   await page.getByRole("button", { name: "New chat", exact: true }).click();
   const message = page.getByRole("textbox", { name: "Message", exact: true });
   const approval = page.getByRole("button", {
-    name: "Automatic approvals",
-    exact: true,
+    name: /^Approvals: (Review|Auto)$/,
   });
-  if ((await approval.getAttribute("aria-pressed")) !== "true")
+  if ((await approval.getAttribute("aria-label")) !== "Approvals: Auto")
     await approval.click();
   await message.fill(
     '!tool write {"path":"snapshot-only.txt","content":"captured review content\\n"}',
