@@ -3727,6 +3727,13 @@ test("workspace Auto stays scoped across collapsed projects and the new composer
     "collapsed-auto-proof",
   );
   await expect(header).toHaveAttribute("aria-expanded", "false");
+  // Earlier scenarios may leave a side panel open, which a narrow window
+  // shows in place of the chat and its composer.
+  const hidePanel = page.getByRole("button", {
+    name: "Hide side panel",
+    exact: true,
+  });
+  if (await hidePanel.isVisible()) await hidePanel.click();
   // Use the actual BrowserWindow dimensions to exercise wrapping with the real controls.
   const size = await app.evaluate(({ BrowserWindow }) => {
     const win = BrowserWindow.getAllWindows()[0];
@@ -6533,6 +6540,9 @@ test("worktree view groups sessions, isolates drafts and terminals, and manages 
   await local
     .getByRole("button", { name: "New chat in Project folder", exact: true })
     .click();
+  // The folder's saved draft loads after the switch; typing before it lands
+  // would be replaced by it.
+  await expect(composer).toHaveValue("Local starter draft");
   await send("Local checkout conversation");
   await expect(page.locator(".transcript")).toContainText(
     "Echo: Local checkout conversation",

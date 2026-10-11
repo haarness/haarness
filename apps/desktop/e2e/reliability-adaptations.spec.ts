@@ -86,7 +86,8 @@ test("review drafts survive navigation, reload and failed delivery; recall prior
     const disk = JSON.parse(await readFile(settings, "utf8"));
     expect(disk.values["draft:" + delivery.draft.target!.connection + ":" + first.id]).toBe(delivery.note);
     await page.getByRole("button", { name: "Send message", exact: true }).click();
-    await expect(page.locator(".transcript")).toContainText("Echo: " + delivery.note);
+    // Replies keep their line breaks as <br>, which only rendered text shows.
+    await expect(page.locator(".transcript")).toContainText("Echo: " + delivery.note, { useInnerText: true });
     await expect.poll(async () => (await client!.activeTurns()).length).toBe(0);
     await choose(second.title);
     await expect(message).toHaveValue("");
