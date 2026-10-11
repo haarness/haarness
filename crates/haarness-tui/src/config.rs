@@ -59,6 +59,13 @@ fn config_dir() -> Option<PathBuf> {
     if let Some(root) = std::env::var_os("HAARNESS_DATA_DIR") {
         return Some(PathBuf::from(root).join("config"));
     }
+    // HAARNESS_HOME keeps everything under one folder.
+    if let Some(root) = std::env::var_os("HAARNESS_HOME")
+        .map(PathBuf::from)
+        .filter(|root| root.is_absolute())
+    {
+        return Some(root.join("config"));
+    }
     directories::ProjectDirs::from("dev", "haarness", "haarness")
         .map(|project| project.config_dir().to_path_buf())
 }

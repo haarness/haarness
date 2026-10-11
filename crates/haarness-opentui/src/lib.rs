@@ -1,6 +1,5 @@
 //! Audited `OpenTUI` FFI boundary and verified one-binary extraction.
 
-use directories::ProjectDirs;
 use fs2::FileExt;
 use libloading::Library;
 use sha2::{Digest, Sha256};
@@ -48,16 +47,36 @@ pub enum OpenTuiError {
     Initialization,
 }
 
+/// Haarness's cache folder, resolved as the CLI resolves it:
+/// `HAARNESS_DATA_DIR` or `HAARNESS_HOME` keep everything under one folder,
+/// then `XDG_CACHE_HOME`, then `~/.cache/haarness`.
+fn cache_root() -> Option<PathBuf> {
+    let absolute = |key| {
+        std::env::var_os(key)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    if let Some(root) = std::env::var_os("HAARNESS_DATA_DIR")
+        .filter(|root| !root.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| absolute("HAARNESS_HOME"))
+    {
+        return Some(root.join("cache"));
+    }
+    if let Some(root) = absolute("XDG_CACHE_HOME") {
+        return Some(root.join("haarness"));
+    }
+    directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".cache/haarness"))
+}
+
 pub fn extracted_library_path() -> Result<PathBuf, OpenTuiError> {
     if hex::encode(Sha256::digest(ARCHIVE)) != ARCHIVE_SHA {
         return Err(OpenTuiError::Integrity(
             "embedded archive checksum mismatch".into(),
         ));
     }
-    let project = ProjectDirs::from("dev", "haarness", "haarness")
-        .ok_or_else(|| OpenTuiError::Integrity("OS cache directory is unavailable".into()))?;
-    let directory = project
-        .cache_dir()
+    let directory = cache_root()
+        .ok_or_else(|| OpenTuiError::Integrity("OS cache directory is unavailable".into()))?
         .join("native")
         .join(env!("CARGO_PKG_VERSION"))
         .join(NATIVE_TARGET)

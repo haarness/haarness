@@ -288,11 +288,17 @@ impl WorkflowCatalog {
             ]);
         }
 
+        let home = std::env::var_os("HAARNESS_HOME")
+            .map(PathBuf::from)
+            .filter(|root| root.is_absolute());
         if let Some(root) = std::env::var_os("HAARNESS_DATA_DIR") {
             roots.push(WorkflowRoot::global(
                 PathBuf::from(root).join("config/workflows"),
                 false,
             ));
+        } else if let Some(root) = home {
+            // HAARNESS_HOME keeps everything under one folder.
+            roots.push(WorkflowRoot::global(root.join("config/workflows"), false));
         } else if let Some(project) = ProjectDirs::from("dev", "haarness", "haarness") {
             roots.push(WorkflowRoot::global(
                 project.config_dir().join("workflows"),
