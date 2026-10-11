@@ -70,6 +70,26 @@ pub fn masthead(app: &App, width: usize, identity_in_panel: bool) -> Vec<Line> {
                 }
             }
             lines.push(Line::new(spans));
+        } else if let Some(runtime) = app.local_only_runtime() {
+            // Nobody chose this model: say where replies come from, and how to
+            // get a larger one, before the first prompt rather than after a
+            // slow, small answer.
+            let sentence = app.language.format(
+                "Replies come from {model}, which {runtime} runs on this computer.",
+                &[("model", &app.thread.model), ("runtime", runtime)],
+            );
+            let mut spans = vec![
+                Span::new(" ".repeat(INSET), theme.muted),
+                Span::new(
+                    single_line(&sentence, width.saturating_sub(INSET)),
+                    theme.muted,
+                ),
+            ];
+            if INSET + sentence.width() + "  ·  /connect".width() <= width {
+                spans.push(Span::new("  ·  ", theme.muted));
+                spans.push(Span::new("/connect", theme.accent).with_attributes(attr::BOLD));
+            }
+            lines.push(Line::new(spans));
         }
         if width >= 56 {
             lines.push(Line::empty());
