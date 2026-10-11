@@ -7,6 +7,7 @@ import {
   Show,
   onMount,
   onCleanup,
+  untrack,
 } from "solid-js";
 import { Icon } from "./ui";
 import { useApp } from "./state";
@@ -109,21 +110,28 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
   });
   let addressTab: string | undefined;
   let addressURL = "";
-  // The tab state an address was submitted over: the field keeps what was
-  // typed until the host reports the navigation, then shows where it landed.
-  let submittedOver: ReturnType<typeof tab>;
+  // The page an address was submitted over. The host keeps reporting that
+  // page while the next one loads, and a tab opened for the address starts
+  // blank, so the field keeps what was typed until the tab leaves that page
+  // or stops loading, then shows where it landed.
+  let submitted: { tab?: string; url: string; loading: boolean } | undefined;
   createEffect(() => {
     const current = tab();
     const url = current?.url ?? "";
-    // Host state and loading events must not overwrite a URL being typed. A
-    // page that moved meanwhile (a redirect, a normalised address) shows its
-    // real URL as soon as the field lets go.
-    if (editingAddress()) return;
-    if (current && current === submittedOver) return;
+    if (submitted) {
+      const same = current?.id === submitted.tab && url === submitted.url;
+      const opening = !submitted.tab && (!url || url === "about:blank");
+      if (same && current?.loading) submitted.loading = true;
+      if (opening || (same && (current?.loading || !submitted.loading)))
+        return;
+    }
+    submitted = undefined;
     if (current?.id === addressTab && url === addressURL) return;
     addressTab = current?.id;
     addressURL = url;
-    setAddress(url);
+    // Host state and loading events must not overwrite a URL being typed,
+    // even for a new tab that arrives while it is typed.
+    if (!untrack(editingAddress)) setAddress(url);
   });
   createEffect(() => {
     props.visible;
@@ -330,7 +338,7 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
           // Like a browser, Enter hands focus to the page and the field then
           // shows wherever it lands, even the same URL written another way.
           addressURL = "";
-          submittedOver = current;
+          submitted = { tab: current?.id, url: current?.url ?? "", loading: false };
           const field = event.currentTarget.querySelector("input");
           if (field && field === document.activeElement) field.blur();
           if (current)
