@@ -701,6 +701,59 @@ async fn yolo_and_auto_leave_chrome_site_requests_to_a_person() {
     assert_eq!(app.pending_permissions[0].permission_id, "hydrated");
 }
 
+/// A browser row says when it ran in the person's own Chrome.
+#[test]
+fn browser_rows_say_when_they_ran_in_chrome() {
+    let thread = fixture_thread();
+    let call = |sequence, id: &str, arguments| {
+        message_item(
+            sequence,
+            &thread,
+            ItemData::ToolCall {
+                call_id: id.into(),
+                name: "browser_navigate".into(),
+                arguments,
+                provider_metadata: serde_json::Value::Null,
+            },
+        )
+    };
+    let result = |sequence, id: &str, browser: &str| {
+        message_item(
+            sequence,
+            &thread,
+            ItemData::ToolResult {
+                call_id: id.into(),
+                name: "browser_navigate".into(),
+                output: "Navigated".into(),
+                is_error: false,
+                metadata: serde_json::json!({"browser": browser}),
+            },
+        )
+    };
+    let items = vec![
+        call(
+            1,
+            "c1",
+            serde_json::json!({"url": "https://mail.google.com"}),
+        ),
+        result(2, "c1", "chrome"),
+        call(3, "c2", serde_json::json!({"url": "https://example.com"})),
+        result(4, "c2", "haarness"),
+    ];
+    let app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    let frame = frame_text(&app, (120, 30));
+    let chrome = frame
+        .lines()
+        .find(|row| row.contains("https://mail.google.com"))
+        .unwrap();
+    assert!(chrome.contains("·  Chrome"), "{frame}");
+    let haarness = frame
+        .lines()
+        .find(|row| row.contains("https://example.com"))
+        .unwrap();
+    assert!(!haarness.contains("Chrome"), "{frame}");
+}
+
 /// `/status` says whether this chat can use Chrome.
 #[tokio::test]
 async fn status_has_a_chrome_line() {
