@@ -3153,6 +3153,7 @@ fn home_is_a_launch_masthead_settled_onto_the_composer() {
         default_model: None,
         default_agent: None,
         project_trusted: Some(false),
+        pid: None,
     });
     let lines = app.lines((100, 30));
     let text: String = lines.iter().map(|line| line_text(line) + "\n").collect();
@@ -3437,6 +3438,7 @@ fn masthead_names_the_session_without_repeating_its_id() {
         default_model: None,
         default_agent: None,
         project_trusted: Some(true),
+        pid: None,
     });
 
     let lines = app.lines((90, 24));
@@ -15908,6 +15910,7 @@ fn home_names_the_missing_provider_and_the_agent_mention() {
         default_model: None,
         default_agent: None,
         project_trusted: Some(false),
+        pid: None,
     });
     let text = app
         .lines((100, 30))

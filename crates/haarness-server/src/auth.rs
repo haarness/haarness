@@ -38,6 +38,11 @@ impl ServerAccess {
     }
 }
 
+/// Set on requests a server admitted without credentials (Open access), for
+/// endpoints that must never be anonymous.
+#[derive(Clone, Copy, Debug)]
+pub struct AnonymousAccess;
+
 #[derive(Clone)]
 pub struct AuthState {
     token_digest: [u8; 32],
@@ -209,7 +214,7 @@ impl RejectionLog {
 
 pub async fn require_auth(
     State(auth): State<AuthState>,
-    request: Request<Body>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
     if auth.loopback_only
@@ -239,6 +244,9 @@ pub async fn require_auth(
             );
         }
         return response;
+    }
+    if auth.anonymous {
+        request.extensions_mut().insert(AnonymousAccess);
     }
     next.run(request).await
 }

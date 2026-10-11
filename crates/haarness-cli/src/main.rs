@@ -6400,11 +6400,15 @@ async fn application_at(
     let scheduler = Scheduler::discover(std::env::current_exe()?, paths.root.clone())?;
     let browser_global = paths.config_dir().to_path_buf();
     let browser_workspace = workspace.to_path_buf();
+    // Both browsers' settings, read live: `browser.policy` for the Haarness
+    // browser and the global `browser.chrome` for the user's Chrome. Chrome's
+    // settings are read leniently, so they never break the Haarness browser.
     let browser = haarness_server::browser::BrowserBroker::with_policy(Arc::new(move || {
         browser_settings::load(trust, &browser_global, &browser_workspace).map_err(|error| {
             haarness_core::CoreError::Tool(format!("Cannot read browser settings: {error}"))
         })
     }));
+    browser.set_chrome_wrapper(browser_settings::chrome_wrapper(&paths.data));
     let tools: Arc<dyn ToolRegistry> = Arc::new(
         NativeToolRegistry::with_workflows_and_scheduler(
             workspace.to_path_buf(),
@@ -6481,6 +6485,21 @@ async fn application_at(
     let runtime = Arc::new(runtime);
     management.attach_runtime(&runtime);
     workflow_host.attach(&runtime);
+    // Chrome groups a conversation's tabs under its title and keeps
+    // scheduled runs out of the user's Chrome. Weak: the runtime owns the
+    // tools that own the broker.
+    let threads = Arc::downgrade(&runtime);
+    browser.set_thread_lookup(Arc::new(move |thread| {
+        let runtime = threads.upgrade();
+        Box::pin(async move {
+            let thread = runtime?.get_thread(thread).await.ok()?;
+            Some(haarness_server::browser::ThreadMeta {
+                title: thread.title,
+                parent: thread.parent_id,
+                scheduled: thread.schedule.is_some(),
+            })
+        })
+    }));
     if recover {
         let recovered = runtime.recover().await?;
         if recovered > 0 {
@@ -10602,6 +10621,7 @@ mod tests {
             default_model: None,
             default_agent: None,
             project_trusted: None,
+            pid: None,
         }
     }
 
