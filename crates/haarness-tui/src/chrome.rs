@@ -439,6 +439,13 @@ impl Chrome {
             .filter(|url| url.starts_with("https://"))
     }
 
+    /// This installation has no Haarness for Chrome to add (a CLI-only
+    /// install before the Web Store listing), so nothing will connect until
+    /// Desktop copies it here.
+    pub(crate) fn nothing_to_add(&self) -> bool {
+        self.web_store_url().is_none() && self.extension_path().is_none()
+    }
+
     fn program(&self) -> Option<PathBuf> {
         if self.program.is_some() {
             return self.program.clone();
@@ -803,6 +810,11 @@ impl App {
             View::Off => self.toggle_chrome(client),
             View::NotSetUp { .. } => self.request_chrome_local(LocalAction::Setup),
             View::LocalFailed(action, _) => self.request_chrome_local(action),
+            View::Waiting(_) if self.chrome.nothing_to_add() => {
+                // Desktop may have copied the extension here since.
+                self.request_chrome_local(LocalAction::Status);
+                self.request_chrome_hosts(client);
+            }
             View::SettingUp | View::LocalChecking | View::Checking => {}
             View::Unavailable(_) | View::Connected(_) | View::Elsewhere | View::Waiting(_) => {
                 self.request_chrome_hosts(client);

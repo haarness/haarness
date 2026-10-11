@@ -548,6 +548,36 @@ async fn chrome_setup_runs_the_local_command_and_shows_the_extension_steps() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// A CLI-only install has no Haarness for Chrome to add: the dialog says so
+/// instead of spinning on "Waiting for Chrome…", and Enter looks again for a
+/// copy Desktop may have made since.
+#[tokio::test]
+async fn without_an_extension_to_add_the_dialog_does_not_wait_for_chrome() {
+    let client = offline_client();
+    let mut app = connect_fixture();
+    app.open_overlay(Overlay::Chrome);
+    app.chrome.here = true;
+    app.chrome.hosts = Some(Ok(Hosts::default()));
+    app.chrome.local = Some(Setup {
+        extension: None,
+        ..registered_setup()
+    });
+    for width in [80, 120] {
+        let rendered = chrome_text(&app, (width, 44));
+        assert!(rendered.contains("○ Not set up"), "{width}\n{rendered}");
+        assert!(
+            flat(&rendered)
+                .contains("This build of Haarness has no Haarness for Chrome extension to load."),
+            "{width}\n{rendered}"
+        );
+        assert!(!rendered.contains("Waiting for Chrome"), "{rendered}");
+        assert!(!rendered.contains("c copy path"), "{rendered}");
+    }
+    app.chrome.program = Some("/nonexistent/haarness".into());
+    app.chrome_primary(&client);
+    assert_eq!(app.chrome.busy_local(), Some(LocalAction::Status));
+}
+
 fn chrome_permission(thread: &Thread, id: &str) -> haarness_protocol::PendingPermissionInfo {
     let mut pending = pending_permission_fixture(thread, id);
     let site = |origin: &str| format!("browser_site:chrome-browsing:{}:{origin}", thread.id);
