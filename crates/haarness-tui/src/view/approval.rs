@@ -12,9 +12,9 @@
 //! the chips swap to confirm/cancel while staged, and the row above them says
 //! exactly what is about to be granted.
 
+use crate::width::DisplayWidth as _;
 use haarness_opentui::{Line, Span, attr};
 use haarness_protocol::PendingPermissionInfo;
-use crate::width::DisplayWidth as _;
 
 use crate::locale::Language;
 use crate::state::{App, PermissionChoice};

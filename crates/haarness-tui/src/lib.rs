@@ -1052,8 +1052,8 @@ fn exit_summary(
     running: bool,
     styled: bool,
 ) -> String {
-    use std::fmt::Write as _;
     use crate::width::DisplayWidth as _;
+    use std::fmt::Write as _;
     let (dim, bold, reset) = if styled {
         ("\x1b[2m", "\x1b[1m", "\x1b[0m")
     } else {

@@ -7,12 +7,12 @@
 //! then a bounded tail of the log. Long collections are summarized with their
 //! true count instead of paging hundreds of rows through a dialog.
 
+use crate::width::DisplayWidth as _;
 use chrono::{DateTime, Utc};
 use haarness_opentui::{Color, Line, Span, attr};
 use haarness_protocol::{
     WorkflowDefinition, WorkflowRun, WorkflowRunAgent, WorkflowRunAgentStatus, WorkflowRunStatus,
 };
-use crate::width::DisplayWidth as _;
 
 use crate::locale::Language;
 use crate::state::{App, workflow_status, workflow_status_marker};

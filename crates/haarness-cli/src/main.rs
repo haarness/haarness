@@ -10288,7 +10288,10 @@ mod tests {
             "Schedule: Nightly dependency audit · Oct 11, 01:31"
         );
         assert_eq!(
-            run_title(None, "Explain what this project does and how its modules fit together"),
+            run_title(
+                None,
+                "Explain what this project does and how its modules fit together"
+            ),
             "Explain what this project does and how its…"
         );
         assert_eq!(run_title(None, "  "), "CLI run");

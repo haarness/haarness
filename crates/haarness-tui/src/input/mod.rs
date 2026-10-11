@@ -71,8 +71,12 @@ pub(crate) async fn answer_permission(
     let Some(pending) = app.first_pending_permission() else {
         return Ok(());
     };
-    if matches!(choice, 'a' | 'w' | 'r' | 'u') && pending.allow_always == Some(false) { return Ok(()); }
-    if choice == 'r' && pending.repository_scope.is_none() { return Ok(()); }
+    if matches!(choice, 'a' | 'w' | 'r' | 'u') && pending.allow_always == Some(false) {
+        return Ok(());
+    }
+    if choice == 'r' && pending.repository_scope.is_none() {
+        return Ok(());
+    }
     let id = pending.permission_id.clone();
     let lead = crate::view::approval::staged_lead(choice, pending);
     // A legacy prompt without patterns stages too: the rule it stores is the
@@ -371,7 +375,8 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
         return handle_overlay_key(app, key, client).await;
     }
     if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('y') {
-        app.change_approval_mode(!app.auto_permissions, client).await;
+        app.change_approval_mode(!app.auto_permissions, client)
+            .await;
         return Ok(AppAction::Continue);
     }
     // Permission keys only fire while the prompt owns focus, and only the

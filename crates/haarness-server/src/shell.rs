@@ -2,7 +2,10 @@
 use haarness_core::{CoreError, CoreResult, ToolOutput};
 use serde_json::json;
 use std::{collections::BTreeMap, path::Path, process::Stdio, time::Duration};
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, process::Command};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    process::Command,
+};
 use tokio_util::sync::CancellationToken;
 
 struct ProcessGroup(u32);
@@ -10,32 +13,64 @@ impl Drop for ProcessGroup {
     fn drop(&mut self) {
         #[cfg(unix)]
         if let Ok(pid) = i32::try_from(self.0) {
-            let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pid), nix::sys::signal::Signal::SIGKILL);
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
         }
         #[cfg(windows)]
-        let _ = std::process::Command::new("taskkill").args(["/F", "/T", "/PID", &self.0.to_string()]).output();
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &self.0.to_string()])
+            .output();
     }
 }
 
 /// `env` adds or overrides variables for this one invocation (`shell.env`
 /// hooks); the parent environment is otherwise inherited, minus the server's
 /// private variables (`haarness_core::private_env_names`).
-pub(crate) async fn run(command: &str, workdir: &Path, timeout_ms: u64, cancel: &CancellationToken, directory: &Path, env: &BTreeMap<String, String>) -> CoreResult<ToolOutput> {
+pub(crate) async fn run(
+    command: &str,
+    workdir: &Path,
+    timeout_ms: u64,
+    cancel: &CancellationToken,
+    directory: &Path,
+    env: &BTreeMap<String, String>,
+) -> CoreResult<ToolOutput> {
     let error = |e: std::io::Error| CoreError::Tool(e.to_string());
     let mut command = haarness_ripgrep::shell_command(command).map_err(error)?;
-    command.current_dir(workdir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    for name in haarness_core::private_env_names() { command.env_remove(name); }
+    command
+        .current_dir(workdir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for name in haarness_core::private_env_names() {
+        command.env_remove(name);
+    }
     // Without a locale (Desktop opened from Finder) a command would read 日本
     // as six characters, as a terminal would; a hook's own LANG still wins.
-    if let Some(locale) = haarness_pty::missing_locale() { command.env("LANG", locale); }
-    command.envs(env.iter().filter(|(key, value)| !key.is_empty() && !key.contains(['=', '\0']) && !value.contains('\0')));
+    if let Some(locale) = haarness_pty::missing_locale() {
+        command.env("LANG", locale);
+    }
+    command.envs(env.iter().filter(|(key, value)| {
+        !key.is_empty() && !key.contains(['=', '\0']) && !value.contains('\0')
+    }));
     #[cfg(unix)]
-    { use std::os::unix::process::CommandExt; command.process_group(0); }
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     tokio::fs::create_dir_all(directory).await.map_err(error)?;
     let path = directory.join(format!("tool_{}.txt", uuid::Uuid::now_v7()));
     let mut file = tokio::fs::File::create(&path).await.map_err(error)?;
-    let mut child = Command::from(command).kill_on_drop(true).spawn().map_err(error)?;
-    let _group = ProcessGroup(child.id().ok_or_else(|| CoreError::Tool("shell process did not start".into()))?);
+    let mut child = Command::from(command)
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(error)?;
+    let _group = ProcessGroup(
+        child
+            .id()
+            .ok_or_else(|| CoreError::Tool("shell process did not start".into()))?,
+    );
     let mut stdout = child.stdout.take().expect("piped stdout");
     let mut stderr = child.stderr.take().expect("piped stderr");
     let mut tail = Vec::new();
@@ -66,14 +101,19 @@ pub(crate) async fn run(command: &str, workdir: &Path, timeout_ms: u64, cancel: 
             lines += bytes.iter().filter(|&&b| b == b'\n').count();
             file.write_all(bytes).await.map_err(error)?;
             tail.extend_from_slice(bytes);
-            if tail.len() > 50 * 1024 { tail.drain(..tail.len() - 50 * 1024); }
+            if tail.len() > 50 * 1024 {
+                tail.drain(..tail.len() - 50 * 1024);
+            }
         }
         file.flush().await.map_err(error)?;
         Ok::<_, CoreError>(status.expect("wait completed").code().unwrap_or(-1))
     };
     let deadline = async {
-        if timeout_ms == 0 { std::future::pending::<()>().await; }
-        else { tokio::time::sleep(Duration::from_millis(timeout_ms)).await; }
+        if timeout_ms == 0 {
+            std::future::pending::<()>().await;
+        } else {
+            tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
+        }
     };
     let result = tokio::select! {
         biased;
@@ -84,9 +124,25 @@ pub(crate) async fn run(command: &str, workdir: &Path, timeout_ms: u64, cancel: 
     let exit = result?;
     let truncated = total > 50 * 1024 || lines > 2000;
     let text = String::from_utf8_lossy(&tail);
-    let preview = text.lines().rev().take(2000).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+    let preview = text
+        .lines()
+        .rev()
+        .take(2000)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
     let stdout_text = String::from_utf8_lossy(&stdout_tail);
-    let stdout_preview = stdout_text.lines().rev().take(2000).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+    let stdout_preview = stdout_text
+        .lines()
+        .rev()
+        .take(2000)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
     let mut metadata = json!({"exit":exit,"truncated":truncated,"stdout": if stdout_text.lines().count() > 2000 { stdout_preview.as_str() } else { stdout_text.as_ref() }});
     let notice = if truncated {
         metadata["outputPath"] = json!(path);
@@ -96,59 +152,147 @@ pub(crate) async fn run(command: &str, workdir: &Path, timeout_ms: u64, cancel: 
         let _ = tokio::fs::remove_file(&path).await;
         String::new()
     };
-    Ok(ToolOutput { text: format!("exit: {exit}\n{notice}{}", if truncated { preview.as_str() } else { text.as_ref() }), metadata })
+    Ok(ToolOutput {
+        text: format!(
+            "exit: {exit}\n{notice}{}",
+            if truncated {
+                preview.as_str()
+            } else {
+                text.as_ref()
+            }
+        ),
+        metadata,
+    })
 }
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     fn fixture() -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!("haarness-shell-parity-{}",uuid::Uuid::now_v7()));
-        std::fs::create_dir_all(&path).unwrap(); path
+        let path =
+            std::env::temp_dir().join(format!("haarness-shell-parity-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&path).unwrap();
+        path
     }
     #[tokio::test]
     async fn streaming_preserves_exit_and_stdout_while_bounding_large_output() {
-        let root=fixture();
-        let output=run("printf stdout; printf stderr >&2; exit 7",&root,0,&CancellationToken::new(),&root,&BTreeMap::new()).await.unwrap();
-        assert_eq!(output.metadata["exit"],7);
-        assert_eq!(output.metadata["stdout"],"stdout");
+        let root = fixture();
+        let output = run(
+            "printf stdout; printf stderr >&2; exit 7",
+            &root,
+            0,
+            &CancellationToken::new(),
+            &root,
+            &BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.metadata["exit"], 7);
+        assert_eq!(output.metadata["stdout"], "stdout");
         assert!(output.text.contains("stderr"));
-        let env=BTreeMap::from([("HOOK_SHELL_VAR".to_owned(),"from-hook".to_owned()),("BAD=KEY".to_owned(),"skipped".to_owned())]);
-        let output=run("printf '%s' \"$HOOK_SHELL_VAR\"",&root,0,&CancellationToken::new(),&root,&env).await.unwrap();
-        assert_eq!(output.metadata["stdout"],"from-hook");
-        let output=run("awk 'BEGIN {for(i=0;i<50000;i++) print i}'",&root,600_001,&CancellationToken::new(),&root,&BTreeMap::new()).await.unwrap();
-        assert_eq!(output.metadata["truncated"],true);
-        assert!(output.text.len()<52*1024);
+        let env = BTreeMap::from([
+            ("HOOK_SHELL_VAR".to_owned(), "from-hook".to_owned()),
+            ("BAD=KEY".to_owned(), "skipped".to_owned()),
+        ]);
+        let output = run(
+            "printf '%s' \"$HOOK_SHELL_VAR\"",
+            &root,
+            0,
+            &CancellationToken::new(),
+            &root,
+            &env,
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.metadata["stdout"], "from-hook");
+        let output = run(
+            "awk 'BEGIN {for(i=0;i<50000;i++) print i}'",
+            &root,
+            600_001,
+            &CancellationToken::new(),
+            &root,
+            &BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.metadata["truncated"], true);
+        assert!(output.text.len() < 52 * 1024);
         assert!(output.text.contains("49999"));
-        let saved=output.metadata["outputPath"].as_str().unwrap();
-        assert_eq!(std::fs::read_to_string(saved).unwrap().lines().count(),50000);
+        let saved = output.metadata["outputPath"].as_str().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(saved).unwrap().lines().count(),
+            50000
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn a_command_reads_multibyte_text_as_characters_without_a_locale() {
-        let root=fixture();
-        let script="x='日本'; printf '%s %s' \"${#x}\" \"$LANG\"";
-        let lang=|output:&ToolOutput| output.metadata["stdout"].as_str().unwrap().to_owned();
+        let root = fixture();
+        let script = "x='日本'; printf '%s %s' \"${#x}\" \"$LANG\"";
+        let lang = |output: &ToolOutput| output.metadata["stdout"].as_str().unwrap().to_owned();
         if haarness_pty::missing_locale().is_some() {
             // This process has no locale, as Desktop opened from Finder has none.
-            let output=run(script,&root,0,&CancellationToken::new(),&root,&BTreeMap::new()).await.unwrap();
-            assert!(lang(&output).starts_with("2 "),"{output:?}");
+            let output = run(
+                script,
+                &root,
+                0,
+                &CancellationToken::new(),
+                &root,
+                &BTreeMap::new(),
+            )
+            .await
+            .unwrap();
+            assert!(lang(&output).starts_with("2 "), "{output:?}");
         }
         // A hook's LANG wins over the default.
-        let env=BTreeMap::from([("LANG".to_owned(),"C".to_owned())]);
-        let output=run("printf '%s' \"$LANG\"",&root,0,&CancellationToken::new(),&root,&env).await.unwrap();
-        assert_eq!(lang(&output),"C");
+        let env = BTreeMap::from([("LANG".to_owned(), "C".to_owned())]);
+        let output = run(
+            "printf '%s' \"$LANG\"",
+            &root,
+            0,
+            &CancellationToken::new(),
+            &root,
+            &env,
+        )
+        .await
+        .unwrap();
+        assert_eq!(lang(&output), "C");
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn zero_deadline_is_cancellable_and_timeout_kills_descendants() {
-        for timeout in [0,3000] {
-            let root=fixture(); let cancel=CancellationToken::new(); let token=cancel.clone();let work=root.clone();
-            let task=tokio::spawn(async move { run("sh -c 'sleep 5; touch escaped' & printf ready > ready; wait",&work,timeout,&token,&work,&BTreeMap::new()).await });
-            tokio::time::timeout(Duration::from_secs(5),async { while !root.join("ready").exists() {tokio::time::sleep(Duration::from_millis(10)).await;} }).await.unwrap();
-            if timeout==0 {cancel.cancel();}
-            let error=task.await.unwrap().unwrap_err();
-            if timeout==0 {assert!(matches!(error,CoreError::Cancelled));} else {assert!(error.to_string().contains("timed out"));}
+        for timeout in [0, 3000] {
+            let root = fixture();
+            let cancel = CancellationToken::new();
+            let token = cancel.clone();
+            let work = root.clone();
+            let task = tokio::spawn(async move {
+                run(
+                    "sh -c 'sleep 5; touch escaped' & printf ready > ready; wait",
+                    &work,
+                    timeout,
+                    &token,
+                    &work,
+                    &BTreeMap::new(),
+                )
+                .await
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !root.join("ready").exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            if timeout == 0 {
+                cancel.cancel();
+            }
+            let error = task.await.unwrap().unwrap_err();
+            if timeout == 0 {
+                assert!(matches!(error, CoreError::Cancelled));
+            } else {
+                assert!(error.to_string().contains("timed out"));
+            }
             tokio::time::sleep(Duration::from_millis(5500)).await;
             assert!(!root.join("escaped").exists());
             std::fs::remove_dir_all(root).unwrap();
