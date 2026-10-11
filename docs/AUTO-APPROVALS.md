@@ -11,7 +11,7 @@ The mode belongs to the chat, on its server, so every client sees and applies th
 
 - A chat without its own setting is in Review. Agents a chat delegates to follow it unless they have their own setting; forks and other chats keep their own.
 - Review wins down the chain: setting a chat to Review makes its agents ask again even if one was switched to Auto on its own, and an agent under a chat set to Review cannot be switched to Auto by itself (409).
-- The server answers eligible requests in an Auto chat without showing a prompt. Requests a tool always asks about, such as starting or deleting Cloud sessions, are never eligible.
+- The server answers eligible requests in an Auto chat without showing a prompt. Requests a tool always asks about, such as starting or deleting Cloud sessions, are never eligible, and neither is a website in the user's Chrome (an explicit request; see [Chrome approvals](PERMISSIONS-AND-EXECUTION.md#chrome-approvals)). Switching a chat to Auto does not release a waiting Chrome request.
 - Turning Auto on also approves, once, the eligible requests already waiting in that chat and the agents that follow it.
 - Every client hears an `approval_mode.changed` event for the chat and for every agent below it, in the order the changes were made.
 - A single turn started with `autoApprove` (a schedule, `haarness run --yolo`, `haarness acp --yolo`, a terminal UI started with `--yolo`) approves its own requests once and teaches no rule to other chats; a shared chat cannot start such a turn.
