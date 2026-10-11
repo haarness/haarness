@@ -1,0 +1,29 @@
+{
+  "name": "@haarness/browser-driver",
+  "version": "0.1.1-preview.1",
+  "private": true,
+  "description": "Chromium page driver shared by Haarness Desktop and Haarness for Chrome",
+  "author": "Haarness",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "contract": "node --import tsx scripts/contract.ts",
+    "contract:check": "node --import tsx scripts/contract.ts --check"
+  },
+  "peerDependencies": {
+    "devtools-protocol": "0.0.1687809",
+    "effect": "4.0.0-rc.112"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "devtools-protocol": "0.0.1687809",
+    "effect": "4.0.0-rc.112",
+    "tsx": "^4.20.5",
+    "typescript": "~5.9.3"
+  }
+}
