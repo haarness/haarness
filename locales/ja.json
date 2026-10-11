@@ -2382,5 +2382,6 @@
   "Versions": "バージョン",
   "Extension folder": "拡張機能のフォルダ",
   "Update ready": "更新の準備完了",
-  "Something went wrong.": "問題が発生しました。"
+  "Something went wrong.": "問題が発生しました。",
+  "This request also needs an approval outside Chrome. Answer it in Haarness.": "このリクエストには Chrome 以外の承認も必要です。Haarness で回答してください。"
 }

@@ -65,6 +65,31 @@ for (const dark of [false, true]) {
     await shoot(popup, `popup-busy-${theme}`);
   });
 
+  test(`popup with an approval only Haarness can answer (${theme})`, async ({ bridge, site, openExtensionPage }) => {
+    await busy(bridge, site);
+    // An upload of a file outside the project: the Chrome site and the file wait in one prompt.
+    bridge.send({
+      type: "activity",
+      server: SERVER,
+      active: [THREAD],
+      approvals: [
+        {
+          id: "0192a5f0-0000-7000-8000-000000000002",
+          thread: THREAD,
+          patterns: [`chrome-uploads:${THREAD}:https://www.figma.com`],
+          explicit: true,
+          answerable: false,
+        },
+      ],
+    });
+    const popup = await openExtensionPage("popup.html", { dark });
+    await expect(popup.getByText("Waiting for you", { exact: true })).toBeVisible();
+    await expect(popup.getByText("This request also needs an approval outside Chrome. Answer it in Haarness.")).toBeVisible();
+    await expect(popup.getByRole("button", { name: "Allow in this chat" })).toHaveCount(0);
+    await expect(popup.getByRole("button", { name: "Deny" })).toHaveCount(0);
+    await shoot(popup, `popup-answer-in-haarness-${theme}`);
+  });
+
   test(`popup empty and stopped (${theme})`, async ({ bridge, worker, openExtensionPage }) => {
     await bridge.wait((message) => message.type === "hello");
     bridge.start();

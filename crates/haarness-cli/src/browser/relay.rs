@@ -148,10 +148,18 @@ async fn run(
             }
             Err(problem) => {
                 tracing::info!(server = %server, problem = %problem.message, "could not open the extension host connection");
+                let lasting = problem.lasting;
                 let _ = events.send(Event::Closed {
                     server: server.clone(),
-                    problem: problem.lasting.then_some(problem.message),
+                    problem: lasting.then_some(problem.message),
                 });
+                if lasting {
+                    // This server answers the same until it changes, which the
+                    // bridge sees as a changed record or a new server instance
+                    // and answers with a new relay.
+                    cancel.cancelled().await;
+                    return;
+                }
                 Link::Failed
             }
         };
@@ -267,7 +275,17 @@ async fn poll_activity(
     }
 }
 
-/// Only the approvals Chrome may answer: explicit Chrome site gates.
+/// A Chrome site gate, `chrome-<category>:<thread>:<origin>`, as a prompt of
+/// its own lists it or as a combined prompt does (`browser_site:chrome-…`).
+fn chrome_gate(pattern: &str) -> Option<&str> {
+    let gate = pattern.strip_prefix("browser_site:").unwrap_or(pattern);
+    gate.starts_with("chrome-").then_some(gate)
+}
+
+/// The explicit approvals waiting on a Chrome site, with only their Chrome
+/// site gates. One that also waits on something else (a file outside the
+/// project, say) is `answerable: false`: Chrome shows it, so people know a
+/// chat is waiting, but only Haarness may answer it.
 pub(crate) fn chrome_approvals(pending: &[Value]) -> Vec<Value> {
     pending
         .iter()
@@ -278,18 +296,19 @@ pub(crate) fn chrome_approvals(pending: &[Value]) -> Vec<Value> {
                 .iter()
                 .filter_map(Value::as_str)
                 .collect();
-            if patterns.is_empty()
-                || !patterns
-                    .iter()
-                    .all(|pattern| pattern.starts_with("chrome-"))
-            {
+            let gates: Vec<&str> = patterns
+                .iter()
+                .filter_map(|pattern| chrome_gate(pattern))
+                .collect();
+            if gates.is_empty() {
                 return None;
             }
             Some(json!({
                 "id": permission["permissionId"].as_str()?,
                 "thread": permission["threadId"].as_str()?,
-                "patterns": patterns,
+                "patterns": gates,
                 "explicit": true,
+                "answerable": gates.len() == patterns.len(),
             }))
         })
         .collect()
@@ -481,13 +500,27 @@ mod tests {
                 "patterns":["chrome-browsing:t1:https://mail.example.com"],"explicit":true,"operation":"browser_site:chrome-browsing:t1:https://mail.example.com"}),
             json!({"permissionId":"b","threadId":"t1","permission":"bash","patterns":["git push"],"explicit":false}),
             json!({"permissionId":"c","threadId":"t1","permission":"browser_site","patterns":["https://example.com"]}),
-            json!({"permissionId":"d","threadId":"t2","permission":"browser_site","patterns":["chrome-scripts:t2:https://a.example", "bash:x"],"explicit":true}),
+            // An upload outside the project: the Chrome gate and a file gate in one prompt.
+            json!({"permissionId":"d","threadId":"t2","permission":"multiple","patterns":[
+                "browser_site:chrome-uploads:t2:https://a.example",
+                "external_directory:/Users/a/Documents/*",
+                "read:/Users/a/Documents/cv.pdf"],"explicit":true}),
+            // Two Chrome gates combined are still Chrome's to answer.
+            json!({"permissionId":"e","threadId":"t2","permission":"multiple","patterns":[
+                "browser_site:chrome-browsing:t2:https://b.example","browser_site:chrome-uploads:t2:https://b.example"],"explicit":true}),
+            json!({"permissionId":"f","threadId":"t2","permission":"bash","patterns":["bash:x"],"explicit":true}),
         ];
         assert_eq!(
             chrome_approvals(&pending),
             [
                 json!({"id":"019a0000-0000-7000-8000-00000000000a","thread":"t1",
-                "patterns":["chrome-browsing:t1:https://mail.example.com"],"explicit":true})
+                    "patterns":["chrome-browsing:t1:https://mail.example.com"],"explicit":true,"answerable":true}),
+                // Only the Chrome site reaches Chrome, never the file paths.
+                json!({"id":"d","thread":"t2","patterns":["chrome-uploads:t2:https://a.example"],
+                    "explicit":true,"answerable":false}),
+                json!({"id":"e","thread":"t2",
+                    "patterns":["chrome-browsing:t2:https://b.example","chrome-uploads:t2:https://b.example"],
+                    "explicit":true,"answerable":true}),
             ]
         );
     }

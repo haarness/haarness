@@ -2382,5 +2382,6 @@
   "Versions": "Версии",
   "Extension folder": "Папка расширения",
   "Update ready": "Обновление готово",
-  "Something went wrong.": "Что-то пошло не так."
+  "Something went wrong.": "Что-то пошло не так.",
+  "This request also needs an approval outside Chrome. Answer it in Haarness.": "Этому запросу нужно ещё одно разрешение вне Chrome. Ответьте в Haarness."
 }

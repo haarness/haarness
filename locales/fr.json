@@ -2382,5 +2382,6 @@
   "Versions": "Versions",
   "Extension folder": "Dossier de l’extension",
   "Update ready": "Mise à jour prête",
-  "Something went wrong.": "Une erreur s’est produite."
+  "Something went wrong.": "Une erreur s’est produite.",
+  "This request also needs an approval outside Chrome. Answer it in Haarness.": "Cette demande nécessite aussi une autorisation en dehors de Chrome. Répondez dans Haarness."
 }

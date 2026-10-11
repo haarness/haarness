@@ -168,15 +168,20 @@ function Approval(props: { approval: UiApproval }) {
           )}
         </For>
       </ul>
-      <div class="actions">
-        <button type="button" class="primary" disabled={action.busy()} onClick={() => answer("always")}>
-          {t("Allow in this chat")}
-        </button>
-        <button type="button" disabled={action.busy()} onClick={() => answer("reject")}>
-          {t("Deny")}
-        </button>
-      </div>
-      <p class="hint">{t("or answer in Haarness")}</p>
+      <Show
+        when={props.approval.answerable}
+        fallback={<p class="hint">{t("This request also needs an approval outside Chrome. Answer it in Haarness.")}</p>}
+      >
+        <div class="actions">
+          <button type="button" class="primary" disabled={action.busy()} onClick={() => answer("always")}>
+            {t("Allow in this chat")}
+          </button>
+          <button type="button" disabled={action.busy()} onClick={() => answer("reject")}>
+            {t("Deny")}
+          </button>
+        </div>
+        <p class="hint">{t("or answer in Haarness")}</p>
+      </Show>
       <Show when={action.error()}>{(message) => <ErrorLine>{message()}</ErrorLine>}</Show>
     </section>
   );

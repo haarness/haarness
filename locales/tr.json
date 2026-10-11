@@ -2382,5 +2382,6 @@
   "Versions": "Sürümler",
   "Extension folder": "Uzantı klasörü",
   "Update ready": "Güncelleme hazır",
-  "Something went wrong.": "Bir şeyler ters gitti."
+  "Something went wrong.": "Bir şeyler ters gitti.",
+  "This request also needs an approval outside Chrome. Answer it in Haarness.": "Bu istek Chrome dışında da bir onay gerektiriyor. Haarness'ta yanıtlayın."
 }
