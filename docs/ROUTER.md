@@ -1,5 +1,7 @@
 # Connect Haarness Router
 
+> **User guide:** [Haarness Router](https://haarness.ai/docs/providers/router). This page has the engineering detail.
+
 Haarness Router connects your model providers through one endpoint. The
 self-hosted integration is available in Desktop, TUI, and CLI.
 
@@ -14,7 +16,7 @@ router access key. Wrong keys and unreachable endpoints leave your
 configuration unchanged.
 
 Use **Advanced** to give the connection a name or limit it to the current
-trusted project. You can add multiple named routers. The model picker loads
+project. You can add multiple named routers. The model picker loads
 current models automatically, including the router's aliases.
 
 When attached to a remote server, the connection is checked and saved on that
@@ -30,7 +32,7 @@ Run on the machine hosting the Haarness server:
 ```sh
 haarness provider connect-router http://localhost:8080
 haarness provider connect-router https://router.example --name "Team router"
-haarness --trust-project provider connect-router http://localhost:8080 --project
+haarness provider connect-router http://localhost:8080 --project
 ```
 
 For a protected router, supply the key through stdin with `--key-stdin`; obtain
@@ -67,13 +69,20 @@ the requirement. Web UI login and upstream provider credentials are separate.
 ## Extension point for Cloud
 
 Connection configuration persists an integration identity independently of the
-API protocol and credentials:
+API protocol and credentials. In `haarness.json` it reads:
 
-```toml
-[providers.router.integration]
-kind = "haarness-router"
-deployment = "self-hosted"
+```json
+{
+  "providers": {
+    "router": {
+      "integration": { "kind": "haarness-router", "deployment": "self-hosted" }
+    }
+  }
+}
 ```
+
+An installation that still keeps its providers in `config.toml` stores the same
+data as `[providers.router.integration]`.
 
 The shared connection operation owns address normalization, reachability/auth
 checks and model discovery validation. Cloud can add a deployment and account

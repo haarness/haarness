@@ -14,7 +14,7 @@ and writes reports locally; it never opens the server's databases directly.
 ## Runtime invariants
 
 - SQLite is the durable source of truth; events are published after persistence.
-- One turn runs per thread. Independent threads and at most four root child agents can run concurrently.
+- One turn runs per thread. Independent threads run concurrently; child agents run up to `execution.subagent_concurrency` at each delegation depth (four by default).
 - Every command, provider stream, tool, question, permission, and child receives cancellation.
 - OpenTelemetry is an optional composition-root adapter: core emits provider-neutral `tracing` spans, the server owns HTTP trace-context extraction, and only the CLI configures and flushes an OTLP exporter. Core and server do not select a collector or sampler.
 - A task child has one runner regardless of foreground/background state.
@@ -77,7 +77,8 @@ the server provides authenticated catalog transport without applying profiles.
 Profiles never depend on or copy the runtime's conversation databases.
 
 The stable extension surfaces are REST/OpenAPI/SSE, ACP v1 over stdio, MCP,
-Agent Skills, agent profiles, and TOML configuration. Workspace Rust crates are
+Agent Skills, agent profiles, and JSON/JSONC configuration (`haarness.json`; an
+existing `config.toml` is still read). Workspace Rust crates are
 private `0.x` implementation details. Haarness deliberately has no Rust
 dynamic-plugin ABI.
 
@@ -86,8 +87,9 @@ network: `attach` and `run --attach` are strict REST/SSE clients, `/v1/info`
 declares the authoritative workspace for that server, and disconnecting a client never
 owns or cancels execution. Multiple workspace servers can share one data root,
 but each owns a distinct database, discovery record, token, and activity lease.
-Explicit network listeners retain bearer auth and
-same-host browser-Origin checks; client-local PDF/image/audio/video media is
+An explicit listener on a network address requires a password (HTTP Basic) or a
+legacy bearer token unless it is started with `--anonymous`, and every listener
+keeps same-host browser-Origin checks; client-local PDF/image/audio/video media is
 uploaded inline rather than interpreted as a server-side path. Binary `read`,
 MCP media, and optional generation results use persisted tool-result attachment
 metadata, which the core replays through the provider-neutral message layer.
