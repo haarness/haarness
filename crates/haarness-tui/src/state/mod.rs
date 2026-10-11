@@ -1127,7 +1127,7 @@ impl App {
     }
 
     /// A launch or `/new` session nobody has written anything in yet. Leaving
-    /// one behind would add another "New thread" to every session list, so
+    /// one behind would add another "New chat" to every session list, so
     /// it is archived on the way out instead.
     pub fn is_untouched_session(&self) -> bool {
         self.items.is_empty()
@@ -1136,7 +1136,7 @@ impl App {
             && self.attachments.is_empty()
             && self.active_turn.is_none()
             && self.goal.is_none()
-            && self.thread.title == "New thread"
+            && haarness_protocol::is_untitled_chat_title(&self.thread.title)
             && !self.thread.is_subagent
             && !self.thread.archived
             && self.thread.parent_id.is_none()

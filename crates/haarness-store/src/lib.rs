@@ -556,7 +556,12 @@ impl ThreadRepository for SqliteStore {
         let thread = Thread {
             schedule: request.schedule,
             id: ThreadId::new(),
-            title: request.title.unwrap_or_else(|| "New thread".into()),
+            // A client may still send the placeholder it knows; store this
+            // server's word for it.
+            title: request
+                .title
+                .filter(|title| !haarness_protocol::is_untitled_chat_title(title))
+                .unwrap_or_else(|| haarness_protocol::UNTITLED_CHAT_TITLE.into()),
             parent_id: request.parent_id,
             is_subagent: request.parent_id.is_some(),
             fork_origin: None,
@@ -639,10 +644,20 @@ impl ThreadRepository for SqliteStore {
         expected: &str,
         title: &str,
     ) -> CoreResult<Option<Thread>> {
+        // Chats created before the placeholder became "New chat" still store
+        // the old one, and expecting either means expecting an untitled chat.
+        let (expected, also) = if haarness_protocol::is_untitled_chat_title(expected) {
+            (
+                haarness_protocol::UNTITLED_CHAT_TITLE,
+                haarness_protocol::LEGACY_UNTITLED_CHAT_TITLE,
+            )
+        } else {
+            (expected, expected)
+        };
         let raw = self.connection.lock().query_row(
-            "UPDATE threads SET title=?2,updated_at=?3 WHERE id=?1 AND title=?4
+            "UPDATE threads SET title=?2,updated_at=?3 WHERE id=?1 AND title IN (?4,?5)
              RETURNING id,title,parent_id,archived,agent,provider,model,created_at,updated_at,revert_sequence,revert_snapshot,revert_base_snapshot,ultracode,is_subagent,fork_origin_json,schedule_json",
-            params![id.to_string(), title, time(Utc::now()), expected], raw_thread,
+            params![id.to_string(), title, time(Utc::now()), expected, also], raw_thread,
         ).optional().map_err(storage)?;
         raw.map(decode_thread).transpose()
     }
@@ -890,7 +905,7 @@ impl ThreadRepository for SqliteStore {
         let mut fork = Thread {
             schedule: None,
             id: ThreadId::new(),
-            title: title.unwrap_or_else(|| format!("Fork of {}", parent.title)),
+            title: title.unwrap_or_else(|| fork_title(&parent.title)),
             parent_id: Some(id),
             is_subagent: false,
             fork_origin: None,
@@ -1405,6 +1420,17 @@ fn raw_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawItem> {
     ))
 }
 
+/// The default name of a fork: "Fork of" its source's name, or of "New chat"
+/// when the source has none (an untitled or blank title).
+fn fork_title(parent: &str) -> String {
+    let parent = parent.trim();
+    if parent.is_empty() || haarness_protocol::is_untitled_chat_title(parent) {
+        format!("Fork of {}", haarness_protocol::UNTITLED_CHAT_TITLE)
+    } else {
+        format!("Fork of {parent}")
+    }
+}
+
 fn decode_thread(raw: RawThread) -> CoreResult<Thread> {
     let revert = match (raw.9, raw.10) {
         (Some(sequence), Some(snapshot_id)) => Some(haarness_protocol::RevertState {
@@ -1423,7 +1449,13 @@ fn decode_thread(raw: RawThread) -> CoreResult<Thread> {
             .transpose()
             .map_err(storage)?,
         id: thread_id(&raw.0)?,
-        title: raw.1,
+        // Older servers stored "New thread" for an untitled chat; every
+        // client sees one placeholder.
+        title: if raw.1 == haarness_protocol::LEGACY_UNTITLED_CHAT_TITLE {
+            haarness_protocol::UNTITLED_CHAT_TITLE.into()
+        } else {
+            raw.1
+        },
         parent_id: raw.2.as_deref().map(thread_id).transpose()?,
         is_subagent: raw.13,
         fork_origin: raw
@@ -1628,7 +1660,11 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .update_generated_title(thread.id, "New thread", "Generated title")
+                .update_generated_title(
+                    thread.id,
+                    haarness_protocol::UNTITLED_CHAT_TITLE,
+                    "Generated title"
+                )
                 .await
                 .unwrap()
                 .is_none()
@@ -1642,7 +1678,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             store
-                .update_generated_title(generated.id, "New thread", "First title")
+                .update_generated_title(
+                    generated.id,
+                    haarness_protocol::UNTITLED_CHAT_TITLE,
+                    "First title"
+                )
                 .await
                 .unwrap()
                 .unwrap()
@@ -1651,10 +1691,82 @@ mod tests {
         );
         assert!(
             store
-                .update_generated_title(generated.id, "New thread", "Late title")
+                .update_generated_title(
+                    generated.id,
+                    haarness_protocol::UNTITLED_CHAT_TITLE,
+                    "Late title"
+                )
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_untitled_chat_is_a_new_chat_even_in_rows_older_servers_wrote() {
+        let store = SqliteStore::in_memory().unwrap();
+        let fresh = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        assert_eq!(fresh.title, "New chat");
+        // An older client still sends the placeholder it knows.
+        let sent = store
+            .create_thread(CreateThreadRequest {
+                title: Some("New thread".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(sent.title, "New chat");
+        let legacy = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let blank = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        {
+            let connection = store.connection.lock();
+            connection
+                .execute(
+                    "UPDATE threads SET title='New thread' WHERE id=?1",
+                    params![legacy.id.to_string()],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE threads SET title='   ' WHERE id=?1",
+                    params![blank.id.to_string()],
+                )
+                .unwrap();
+        }
+        assert_eq!(store.get_thread(legacy.id).await.unwrap().title, "New chat");
+        for parent in [fresh.id, legacy.id, blank.id] {
+            let fork = store.fork_thread(parent, None, None).await.unwrap();
+            assert_eq!(fork.title, "Fork of New chat");
+        }
+        let named = store
+            .create_thread(CreateThreadRequest {
+                title: Some("Fix the login flow".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store.fork_thread(named.id, None, None).await.unwrap().title,
+            "Fork of Fix the login flow"
+        );
+        // A row older servers wrote is still untitled to the title generator.
+        assert_eq!(
+            store
+                .update_generated_title(legacy.id, haarness_protocol::UNTITLED_CHAT_TITLE, "Named")
+                .await
+                .unwrap()
+                .unwrap()
+                .title,
+            "Named"
         );
     }
 
@@ -1982,7 +2094,7 @@ mod tests {
 
         let fork = store.fork_thread(thread.id, None, None).await.unwrap();
         assert_eq!(fork.parent_id, Some(thread.id));
-        assert_eq!(fork.title, "Fork of New thread");
+        assert_eq!(fork.title, "Fork of New chat");
         assert_eq!(fork.provider, thread.provider);
 
         let parent_items = store.list_items(thread.id, None).await.unwrap();

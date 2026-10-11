@@ -5783,7 +5783,7 @@ impl RunnerTask {
             if self.depth == 0
                 && !self.request.synthetic
                 && self.thread.parent_id.is_none()
-                && self.thread.title == "New thread"
+                && haarness_protocol::is_untitled_chat_title(&self.thread.title)
             {
                 let runtime = self.runtime_handle();
                 runtime.schedule_title(&self.thread, &self.turn, &runtime.components());
@@ -9114,7 +9114,7 @@ async fn auto_title(
     small_model: Option<String>,
     fallback: (String, String),
 ) -> CoreResult<()> {
-    if repository.get_thread(thread_id).await?.title != "New thread" {
+    if !haarness_protocol::is_untitled_chat_title(&repository.get_thread(thread_id).await?.title) {
         return Ok(());
     }
     let items = repository.list_items(thread_id, None).await?;
@@ -9161,7 +9161,7 @@ async fn auto_title(
             }
         };
         if let Some(thread) = repository
-            .update_generated_title(thread_id, "New thread", &title)
+            .update_generated_title(thread_id, haarness_protocol::UNTITLED_CHAT_TITLE, &title)
             .await?
         {
             events.publish("thread.updated", Some(thread_id), None, None, json!(thread));

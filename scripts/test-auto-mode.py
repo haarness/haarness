@@ -140,8 +140,8 @@ try:
     launch(thread,'auto')
     check('Auto belongs to the chat: it keeps working after the TUI exits and shows on relaunch')
     command('/new')
-    until(lambda:api('/v1/threads') and any(item['title']=='New thread' for item in api('/v1/threads')),'new chat missing')
-    fresh=[item['id'] for item in api('/v1/threads') if item['title']=='New thread'][-1]
+    until(lambda:api('/v1/threads') and any(item['title'] in ('New chat','New thread') for item in api('/v1/threads')),'new chat missing')
+    fresh=[item['id'] for item in api('/v1/threads') if item['title'] in ('New chat','New thread')][-1]
     until(lambda:api('/v1/threads/'+fresh+'/approval-mode')['mode']=='auto','/new did not start in Auto')
     check('/new starts in the open chat\'s mode')
     print(f'{len(checks)} real-server TUI scenarios passed. Evidence: {root}',flush=True)

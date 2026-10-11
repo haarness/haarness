@@ -4815,7 +4815,7 @@ async fn auto_title_default_threads() {
         })
         .await
         .unwrap();
-    assert_eq!(thread.title, "New thread");
+    assert_eq!(thread.title, "New chat");
     let turn = runtime
         .start_turn(thread.id, turn_request("name this thread"))
         .await
@@ -4825,7 +4825,7 @@ async fn auto_title_default_threads() {
     let mut titled = None;
     for _ in 0..300 {
         let current = runtime.get_thread(thread.id).await.unwrap();
-        if current.title != "New thread" {
+        if current.title != "New chat" {
             titled = Some(current.title);
             break;
         }

@@ -84,6 +84,22 @@ id_type!(TurnId);
 id_type!(ItemId);
 id_type!(RequestId);
 
+/// The title of a chat nobody has named yet. Haarness replaces it with a
+/// generated title after the first prompt; clients may show their own words
+/// for an untitled chat instead.
+pub const UNTITLED_CHAT_TITLE: &str = "New chat";
+
+/// The placeholder servers before 2026-10 stored for an untitled chat. Chats
+/// created then still carry it in their database rows and archives.
+pub const LEGACY_UNTITLED_CHAT_TITLE: &str = "New thread";
+
+/// Whether `title` is the placeholder of a chat nobody has named, from this
+/// server or an older one.
+#[must_use]
+pub fn is_untitled_chat_title(title: &str) -> bool {
+    title == UNTITLED_CHAT_TITLE || title == LEGACY_UNTITLED_CHAT_TITLE
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Thread {
