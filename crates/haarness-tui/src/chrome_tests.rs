@@ -670,6 +670,95 @@ async fn chrome_approval_offers_this_chat_once_or_deny_and_allows_with_one_press
     assert_eq!(app.confirm_always, None);
 }
 
+/// "Allow once" approves one exact call, so the card shows that call: the
+/// address it opens, the script it runs and the files it uploads, wrapped to
+/// the card, without the broker's plumbing or opaque tab ids.
+#[test]
+fn a_chrome_card_shows_the_call_it_approves() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let mut pending = chrome_permission(&thread, "script");
+    pending.patterns = vec![format!(
+        "browser_site:chrome-scripts:{}:https://bank.example",
+        thread.id
+    )];
+    let script = "const response = await fetch('/api/transfer', {method: 'POST', body: JSON.stringify({to: 'DE89370400440532013000', amount: 5000})});\nreturn response.status;";
+    pending.detail = serde_json::json!({
+        "tabID": "tab_0b5f3a52-5c7e-4c43-9a59-4a2b8f6a0d11",
+        "script": script,
+        "__browser": {"lease": "secret-lease", "policy": {"enabled": true}},
+    });
+    app.pending_permissions = vec![pending];
+    app.permission_focus = true;
+    for width in [80, 120] {
+        let frame = frame_text(&app, (width, 40));
+        let card = flat(&frame);
+        assert!(
+            card.contains("Run scripts on https://bank.example in Chrome"),
+            "{width}\n{frame}"
+        );
+        // Wrapped, the script is all there, under its name.
+        assert!(
+            card.contains("script: const response = await fetch('/api/transfer',"),
+            "{width}\n{frame}"
+        );
+        // Rejoined without the card's rail, the script is whole.
+        let squeeze = |text: &str| text.replace('▎', "").split_whitespace().collect::<String>();
+        assert!(
+            squeeze(&card).contains(&squeeze(script)),
+            "{width}\n{frame}"
+        );
+        for absent in ["__browser", "secret-lease", "tab_0b5f3a52", "tabID"] {
+            assert!(!frame.contains(absent), "{width}: {absent}\n{frame}");
+        }
+        for row in frame.lines() {
+            assert!(row.width() <= width as usize, "{width}: {row}");
+        }
+    }
+
+    // A navigation shows the whole address, an upload its files.
+    let mut pending = chrome_permission(&thread, "navigate");
+    pending.detail = serde_json::json!({
+        "tabID": "tab_0b5f3a52-5c7e-4c43-9a59-4a2b8f6a0d11",
+        "url": "https://bank.example/transfer?to=DE89370400440532013000&amount=5000",
+    });
+    app.pending_permissions = vec![pending];
+    let frame = frame_text(&app, (120, 40));
+    assert!(
+        frame.contains("url: https://bank.example/transfer?to=DE89370400440532013000&amount=5000"),
+        "{frame}"
+    );
+    let mut pending = chrome_permission(&thread, "upload");
+    pending.patterns = vec![format!(
+        "browser_site:chrome-uploads:{}:https://bank.example",
+        thread.id
+    )];
+    pending.detail = serde_json::json!({
+        "tabID": "tab_0b5f3a52-5c7e-4c43-9a59-4a2b8f6a0d11", "ref": "e12",
+        "paths": ["statements/2026-09.pdf", "statements/2026-10.pdf"],
+    });
+    app.pending_permissions = vec![pending];
+    let frame = frame_text(&app, (120, 40));
+    assert!(
+        frame.contains("paths: statements/2026-09.pdf, statements/2026-10.pdf"),
+        "{frame}"
+    );
+    assert!(frame.contains("ref: e12"), "{frame}");
+
+    // A script longer than the card ends on an ellipsis row, and the
+    // choices stay on screen.
+    let mut pending = chrome_permission(&thread, "long");
+    pending.detail = serde_json::json!({
+        "script": (1..=40).map(|line| format!("step{line}();")).collect::<Vec<_>>().join("\n"),
+    });
+    app.pending_permissions = vec![pending];
+    let frame = frame_text(&app, (100, 40));
+    assert!(frame.contains("step1();"), "{frame}");
+    assert!(!frame.contains("step40();"), "{frame}");
+    assert!(frame.contains("  …"), "{frame}");
+    assert!(frame.contains("Allow once  y"), "{frame}");
+}
+
 /// Enter on a fresh Chrome card picks the highlighted Allow in this chat.
 #[tokio::test]
 async fn enter_on_a_chrome_card_allows_it_in_this_chat() {
