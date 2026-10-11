@@ -111,6 +111,38 @@ test("hello names this browser once and keeps its id across restarts", async () 
   assert.equal(second.sent[0].browser.id, hello.browser.id);
 });
 
+test("a worker woken by the reconnect alarm or a Stop waits for its stored state before saying hello", async () => {
+  const fake = installChrome();
+  const id = "5b0f2a3c-1d4e-4f6a-8b9c-0d1e2f3a4b5c";
+  fake.stores.local.set("browserId", id);
+  // Chrome reads storage when asked and answers a little later.
+  const session = fake.chrome.storage.session;
+  const read = session.get;
+  session.get = (key: string) => {
+    const value = read(key);
+    return new Promise((resolve) => setTimeout(() => resolve(value), 5));
+  };
+  const { platform, listen } = createChromePlatform();
+  const host = createHost({ platform });
+  hosts.push(host);
+  listen(host.events);
+  // As in background.ts: start() is under way when the event that woke the worker arrives.
+  const starting = host.start();
+  fake.chrome.alarms.onAlarm.emit({ name: "reconnect" });
+  // The user presses Stop all while start() is still reading the stored state.
+  await new Promise((resolve) => setTimeout(resolve, 1));
+  fake.chrome.commands.onCommand.emit("stop-all");
+  await starting;
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(fake.ports.length, 1, "one bridge");
+  const hello = fake.port.sent[0];
+  assert.equal(hello.type, "hello");
+  assert.equal(hello.browser.id, id);
+  // The Stop pressed while the worker started is not undone by the stored state.
+  assert.equal(host.snapshot().stopped, true);
+  assert.equal(fake.stores.session.get("stopped"), true);
+});
+
 test("the extension's own reload keeps the chats' tabs, but a stale hand-over is ignored", async () => {
   const first = await boot();
   first.start();
