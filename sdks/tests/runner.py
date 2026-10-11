@@ -39,6 +39,19 @@ async def main():
                     else:
                         socket.send({"type":"ping"})
                         assert socket.recv(timeout=5)["type"] == "pong"
+                elif name == "connect_browser_extension_host":
+                    # The server speaks first; the extension's hello must follow.
+                    socket = await call(name, [])
+                    browser_sockets.append(socket)
+                    value = await socket.recv() if asynchronous else socket.recv(timeout=5)
+                    if asynchronous:
+                        await socket.send(args[0])
+                        await socket.send({"type":"ping"})
+                        assert (await socket.recv())["type"] == "pong"
+                    else:
+                        socket.send(args[0])
+                        socket.send({"type":"ping"})
+                        assert socket.recv(timeout=5)["type"] == "pong"
                 elif name == "events":
                     events = client.events(after=args[0])
                     value = []

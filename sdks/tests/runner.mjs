@@ -26,6 +26,16 @@ try {
         socket.send({type: "ping"});
         if ((await iterator.next()).value.type !== "pong") throw new Error("Browser ping failed");
       }
+      else if (name === "connect_browser_extension_host") {
+        // The server speaks first; the extension's hello must follow.
+        const socket = await client.connectBrowserExtensionHost();
+        browserSockets.push(socket);
+        const iterator = socket[Symbol.asyncIterator]();
+        value = (await iterator.next()).value;
+        socket.send(args[0]);
+        socket.send({type: "ping"});
+        if ((await iterator.next()).value.type !== "pong") throw new Error("Extension ping failed");
+      }
       else if (name === "events") {
         value = [];
         const abort = new AbortController();

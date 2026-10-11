@@ -172,6 +172,29 @@ def scenario(mode):
                 assert len(browser_calls) == 2
                 assert browser_calls[0]["inspect"] is True
                 c("call_browser_tool", tid, {"name": "bash", "arguments": {}}, error=400)
+            # Haarness for Chrome: one profile serving the chat from the user's Chrome.
+            chrome_tab = "tab_" + str(uuid4())
+            with fixture.extension_host(tid, chrome_tab) as chrome_calls:
+                hosts = c("list_browser_hosts", {"thread": tid})
+                assert hosts["hosts"][0]["name"] == "Google Chrome", hosts
+                assert hosts["hosts"][0]["threadTabs"] == 1, hosts
+                assert hosts["chrome"]["everConnected"] is True, hosts
+                listed = c("call_browser_tool", tid, {
+                    "name": "browser_tabs_list", "arguments": {},
+                })
+                assert listed["isError"] is False, listed
+                assert listed["metadata"]["browser"] == "chrome", listed
+                assert listed["metadata"]["result"]["tabs"][0]["browser"] == "chrome", listed
+                assert len(chrome_calls) == 2
+            extension = c("connect_browser_extension_host", {
+                "type": "hello",
+                "browser": {"id": str(uuid4()), "kind": "chrome", "name": "Google Chrome",
+                            "label": None, "version": "154.0.8037.98"},
+                "extension": {"version": "0.1.1"},
+                "paused": False, "stopped": False, "focusedAt": 2,
+            })
+            assert extension["type"] == "attached" and extension["version"] == 1, extension
+            assert isinstance(extension["server"]["pid"], int), extension
             host = c("connect_browser_host", tid)
             assert host["type"] == "attached"
             # Real TCP tunnel to the fixture server through the browser host API.

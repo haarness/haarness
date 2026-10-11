@@ -478,6 +478,10 @@ export class Api extends Transport {
   adoptBrowserDraft(id: string, body: T.AdoptDraft, options: RequestOptions = {}): Promise<T.JsonValue> {
     return this.request("POST", `/v1/browser/drafts/${this.segment(id)}/adopt`, { body, binaryBody: false, binaryResponse: false, ...options });
   }
+  /** GET /v1/browser/hosts */
+  listBrowserHosts(query: T.BrowserHostsQuery = {}, options: RequestOptions = {}): Promise<T.BrowserHostsResponse> {
+    return this.request("GET", `/v1/browser/hosts`, { query, binaryBody: false, binaryResponse: false, ...options });
+  }
   /** GET /v1/host/projects */
   hostProjects(options: RequestOptions = {}): Promise<T.WorkspaceListResponse> {
     return this.request("GET", `/v1/host/projects`, { binaryBody: false, binaryResponse: false, ...options });
