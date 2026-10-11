@@ -11,8 +11,8 @@ pub mod span;
 pub mod transcript;
 pub mod workflow;
 
-use haarness_opentui::{Line, Span, attr};
 use crate::width::DisplayWidth as _;
+use haarness_opentui::{Line, Span, attr};
 use unicode_width::UnicodeWidthChar as _;
 
 use crate::state::{App, Overlay, ToastVariant};
@@ -240,7 +240,8 @@ impl App {
         let overlay_width = self.sidebar_overlay_width(width);
         let main_width = width - sidebar_width;
         let content = main_width.min(MAX_CONTENT_WIDTH);
-        self.plan_inline.set(sidebar_width == 0 && overlay_width == 0);
+        self.plan_inline
+            .set(sidebar_width == 0 && overlay_width == 0);
         let (mut lines, mut hits) = header_rows(self, width);
         let header_height = lines.len();
         // The masthead opens the transcript rather than pinning itself above
@@ -655,12 +656,7 @@ fn apply_toast(
         .message
         .lines()
         .map(haarness_opentui::display_width)
-        .chain(
-            toast
-                .title
-                .as_deref()
-                .map(haarness_opentui::display_width),
-        )
+        .chain(toast.title.as_deref().map(haarness_opentui::display_width))
         .max()
         .unwrap_or(0);
     let card_width = (longest + 6).clamp(20.min(max_width), max_width);

@@ -1946,8 +1946,8 @@ impl AgentRuntime {
             }
             request.title = Some(title.to_owned());
         }
-        let archiving = request.archived == Some(true)
-            && !self.repository.get_thread(id).await?.archived;
+        let archiving =
+            request.archived == Some(true) && !self.repository.get_thread(id).await?.archived;
         let thread = self.repository.update_thread(id, request).await?;
         let root = self.resolve_root(&thread).await;
         self.events.publish_scoped(

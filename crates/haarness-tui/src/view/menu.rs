@@ -1,8 +1,8 @@
 //! Selector menus (commands, threads, models, agents) and info panels.
 
+use crate::width::DisplayWidth as _;
 use haarness_opentui::{Line, Span, attr};
 use unicode_segmentation::UnicodeSegmentation as _;
-use crate::width::DisplayWidth as _;
 
 use crate::state::{App, Overlay};
 use crate::view::frame::{HitTarget, TaggedLines};

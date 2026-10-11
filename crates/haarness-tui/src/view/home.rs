@@ -8,8 +8,8 @@
 //! Once the panel is on screen the session's identity heads that instead, and
 //! this yields entirely rather than print the same two rows twice.
 
-use haarness_opentui::{Line, Span, attr};
 use crate::width::DisplayWidth as _;
+use haarness_opentui::{Line, Span, attr};
 
 use crate::state::App;
 use crate::view::span::single_line;

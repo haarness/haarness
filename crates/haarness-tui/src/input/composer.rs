@@ -2,8 +2,8 @@
 //! deletion, undo/redo, input history, and collapsed large pastes. Pure state
 //! with no terminal knowledge, so every behavior is unit-testable.
 
-use unicode_segmentation::UnicodeSegmentation as _;
 use crate::width::DisplayWidth as _;
+use unicode_segmentation::UnicodeSegmentation as _;
 
 const PASTE_LINE_THRESHOLD: usize = 8;
 const PASTE_CHAR_THRESHOLD: usize = 1000;

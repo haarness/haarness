@@ -6,9 +6,9 @@
 //! type (which breathes while a turn runs, and goes solid when the turn is
 //! blocked on you) and the band beneath it that holds identity and state.
 
+use crate::width::DisplayWidth as _;
 use haarness_opentui::{Color, Line, Span, attr};
 use haarness_protocol::ItemData;
-use crate::width::DisplayWidth as _;
 use unicode_width::UnicodeWidthChar as _;
 
 use crate::state::{App, InterruptTarget, ServerRestart};
