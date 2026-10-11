@@ -6,6 +6,7 @@ import {
   filterProviders,
   groupProviders,
   keyLabel,
+  keyWarning,
   parseCatalog,
   parseLogin,
   usableMethods,
@@ -95,4 +96,36 @@ test("login views are read by state, never by prose", () => {
   assert.equal(parseLogin({ title: "x", data: { id: "l1", state: "weird" } } as never)?.state, "pending");
   assert.equal(parseLogin({ title: "x", data: { id: "l1", state: "failed", error: "nope" } } as never)?.error, "nope");
   assert.equal(parseLogin({ title: "x" } as never), null);
+});
+
+test("a key saved unchecked keeps the server's reason apart from its advice", () => {
+  const saved = (warning: string) => ({
+    title: "Providers",
+    lines: ["Saved. Runtime configuration changes apply when active work is idle.", warning],
+    data: { providers: [], warning },
+  });
+  assert.deepEqual(
+    keyWarning(saved("Saved, but the key could not be checked: Acme answered HTTP 403 (Missing Authentication Token). If chats then fail to authenticate, replace the key.") as never),
+    {
+      text: "Saved, but the key could not be checked: Acme answered HTTP 403 (Missing Authentication Token). If chats then fail to authenticate, replace the key.",
+      reason: "Acme answered HTTP 403 (Missing Authentication Token)",
+    },
+  );
+  // A provider's own sentence may carry full stops of its own.
+  assert.equal(
+    keyWarning(saved("Saved, but the key could not be checked: Acme answered HTTP 400 (Key invalid. Try again.). If chats then fail to authenticate, replace the key.") as never)?.reason,
+    "Acme answered HTTP 400 (Key invalid. Try again.)",
+  );
+  // An unknown shape is still shown, whole.
+  assert.deepEqual(keyWarning({ title: "x", data: { warning: "Saved, but the gateway is odd." } } as never), {
+    text: "Saved, but the gateway is odd.",
+    reason: "",
+  });
+  // A server that only prints lines still gets its warning through.
+  assert.equal(
+    keyWarning({ title: "x", lines: ["Saved.", "Saved, but the key could not be checked: Haarness could not reach Acme. If chats then fail to authenticate, replace the key."] } as never)?.reason,
+    "Haarness could not reach Acme",
+  );
+  assert.equal(keyWarning({ title: "Providers", lines: ["Saved. Runtime configuration changes apply when active work is idle."], data: {} } as never), null);
+  assert.equal(keyWarning(undefined), null);
 });

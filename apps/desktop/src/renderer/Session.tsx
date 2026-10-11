@@ -149,15 +149,16 @@ export function Session() {
       ? sessionKey(state.connection.id, state.selected)
       : "";
   // What the approval pill's mode does, worded after the server's default
-  // rules: Review does not ask before every edit or command.
+  // rules (permissions/mod.rs): Review does not ask before every edit or
+  // command, and browser sites ask only when Settings → Browser says so.
   const approvalModeHint = () =>
     app.isAutoApproval()
       ? state.selected
         ? t("Auto: permission requests in this chat and its agents are allowed once without asking. Click to switch to Review.")
         : t("Auto: permission requests in new chats here are allowed once without asking. Click to switch to Review.")
       : state.selected
-        ? t("Review: edits and commands inside the project run without asking. By default this chat and its agents ask before working outside the project, reading secrets such as .env, switching agents, generating paid media, opening new browser sites or repeating a failing step. Click to switch to Auto.")
-        : t("Review: edits and commands inside the project run without asking. By default new chats here ask before working outside the project, reading secrets such as .env, switching agents, generating paid media, opening new browser sites or repeating a failing step. Click to switch to Auto.");
+        ? t("Review: edits and commands inside the project run without asking. By default this chat and its agents ask before using files outside the project, reading secrets such as .env, switching agents or generating paid media. Click to switch to Auto.")
+        : t("Review: edits and commands inside the project run without asking. By default new chats here ask before using files outside the project, reading secrets such as .env, switching agents or generating paid media. Click to switch to Auto.");
   // Learn whether the chat that just opened is shared, for the composer chip.
   // The server answers from local state: no Cloud call, nothing to wait for.
   createEffect(

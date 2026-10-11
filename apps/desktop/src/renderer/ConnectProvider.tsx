@@ -22,11 +22,13 @@ import {
   filterProviders,
   groupProviders,
   keyLabel,
+  keyWarning,
   parseCatalog,
   parseLogin,
   usableMethods,
   type ConnectMethod,
   type ConnectProvider as Provider,
+  type KeyWarning,
   type LoginData,
 } from "./connect-provider";
 import "./connect-provider.css";
@@ -35,7 +37,9 @@ type Step =
   | { kind: "pick" }
   | { kind: "method"; provider: Provider }
   | { kind: "key"; provider: Provider }
-  | { kind: "login"; provider: Provider; login: LoginData; opened: boolean };
+  | { kind: "login"; provider: Provider; login: LoginData; opened: boolean }
+  /** The key is saved, but the provider could not be asked about it. */
+  | { kind: "saved"; provider: Provider; warning: KeyWarning };
 
 /** How often the wait screen asks the server whether the sign-in finished. */
 const POLL_MS = 2000;
@@ -65,6 +69,7 @@ export function ConnectProvider(props: {
   let dialog!: HTMLDialogElement;
   let search: HTMLInputElement | undefined;
   let keyInput: HTMLInputElement | undefined;
+  let doneButton: HTMLButtonElement | undefined;
   let poll: ReturnType<typeof setInterval> | undefined;
   let generation = 0;
 
@@ -117,6 +122,7 @@ export function ConnectProvider(props: {
       void manage({ action: "login_cancel", id: current.login.id }).catch(() => {});
     stopPolling();
     if (current.kind === "pick") return close();
+    if (current.kind === "saved") return replaceKey(current.provider);
     if (current.kind === "key" && usableMethods(current.provider, local()).length > 1)
       return setStep({ kind: "method", provider: current.provider });
     if (current.kind === "login")
@@ -136,14 +142,16 @@ export function ConnectProvider(props: {
     setStep({ kind: "method", provider });
   }
 
+  function replaceKey(provider: Provider) {
+    setError("");
+    setKey("");
+    setStep({ kind: "key", provider });
+    queueMicrotask(() => keyInput?.focus());
+  }
+
   async function start(provider: Provider, method: ConnectMethod) {
     setError("");
-    if (method.kind === "api") {
-      setKey("");
-      setStep({ kind: "key", provider });
-      queueMicrotask(() => keyInput?.focus());
-      return;
-    }
+    if (method.kind === "api") return replaceKey(provider);
     const currentGeneration = generation;
     setBusy(true);
     try {
@@ -220,9 +228,11 @@ export function ConnectProvider(props: {
     setBusy(true);
     setError("");
     try {
-      await manage({ action: "credential", name: current.provider.id, key: value });
+      const view = await manage({ action: "credential", name: current.provider.id, key: value });
       setKey("");
-      await finish(current.provider);
+      const warning = keyWarning(view);
+      if (warning) await keptUnchecked(current.provider, warning);
+      else await finish(current.provider);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -241,6 +251,23 @@ export function ConnectProvider(props: {
     }
     app.notify(t("{name} is connected").replace("{name}", provider.name));
     close();
+  }
+
+  /**
+   * The server kept the key without being able to ask the provider about it
+   * (unreachable, or a gateway that guards its model list). Models refresh
+   * as for any connection, but the dialog stays to say so instead of
+   * announcing success, and offers to replace the key.
+   */
+  async function keptUnchecked(provider: Provider, warning: KeyWarning) {
+    try {
+      await app.catalogs(true);
+    } catch {
+      // The credential is saved; a slow catalog refresh must not hide that.
+    }
+    if (!dialog.isConnected || !dialog.open) return;
+    setStep({ kind: "saved", provider, warning });
+    queueMicrotask(() => doneButton?.focus());
   }
 
   const title = createMemo(() => {
@@ -293,13 +320,13 @@ export function ConnectProvider(props: {
       aria-label={title()}
       onCancel={(event) => {
         event.preventDefault();
-        if (step().kind === "pick") close();
+        if (step().kind === "pick" || step().kind === "saved") close();
         else back();
       }}
       {...dismissOnBackdrop(close)}
     >
       <header>
-        <Show when={step().kind !== "pick"}>
+        <Show when={step().kind !== "pick" && step().kind !== "saved"}>
           <Button icon="chevron" class="connect-back" label={t("Back")} onClick={back} />
         </Show>
         <div>
@@ -447,13 +474,13 @@ export function ConnectProvider(props: {
             return (
               <form class="connect-key" onSubmit={(event) => void submitKey(event)}>
                 <label class="field">
-                  <span>{keyLabel(provider())}</span>
+                  <span>{t(keyLabel(provider()))}</span>
                   <input
                     ref={keyInput}
                     type="password"
                     autocomplete="off"
                     autofocus
-                    aria-label={keyLabel(provider())}
+                    aria-label={t(keyLabel(provider()))}
                     placeholder={t("Paste it here")}
                     value={key()}
                     onInput={(event) => setKey(event.currentTarget.value)}
@@ -576,6 +603,36 @@ export function ConnectProvider(props: {
                     </footer>
                   </Match>
                 </Switch>
+              </div>
+            );
+          }}
+        </Match>
+        <Match when={step().kind === "saved" && step()}>
+          {(current) => {
+            const saved = () => current() as Extract<Step, { kind: "saved" }>;
+            return (
+              <div class="connect-saved">
+                <div class="notice-inline connect-warning" role="alert">
+                  <Icon name="alert" size="sm" />
+                  <Show when={saved().warning.reason} fallback={<p>{saved().warning.text}</p>}>
+                    <div>
+                      <strong>{t("Saved, but the key could not be checked")}</strong>
+                      <p>
+                        {/* The reason is the server's own words, often English. */}
+                        <span dir="auto">{saved().warning.reason}.</span>{" "}
+                        {t("If chats then fail to authenticate, replace the key.")}
+                      </p>
+                    </div>
+                  </Show>
+                </div>
+                <footer>
+                  <button type="button" onClick={() => replaceKey(saved().provider)}>
+                    {t("Replace key")}
+                  </button>
+                  <button ref={doneButton} type="button" class="primary" onClick={close}>
+                    {t("Done")}
+                  </button>
+                </footer>
               </div>
             );
           }}

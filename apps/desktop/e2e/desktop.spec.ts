@@ -632,7 +632,7 @@ test("provider failures appear live without leaving chat and survive replay exac
     text: "hi",
   });
   const alert = page.locator(".transcript").getByRole("alert");
-  await expect(alert).toContainText("API key is not configured", {
+  await expect(alert).toContainText("Desktop credential fixture is not connected", {
     timeout: 5000,
   });
   await expect(alert).toHaveCount(1);
@@ -651,7 +651,7 @@ test("provider failures appear live without leaving chat and survive replay exac
     .click();
   await page.reload();
   await page.getByRole("region", { name: "Project workspace", exact: true }).locator(".project-heading").click();
-  await expect(alert).toContainText("API key is not configured");
+  await expect(alert).toContainText("Desktop credential fixture is not connected");
   await expect(alert).toHaveCount(1);
   // Return the session to the deterministic provider; recovery uses the same chat.
   await client.updateThread(thread.id, { provider: "echo", model: "echo-1" });
@@ -1544,8 +1544,8 @@ test("a fork of an untitled chat reads as one, never as the server's placeholder
     provider: "echo",
     model: "echo-1",
   });
-  // The server's placeholder: "New thread", or "New chat" from a server that
-  // uses the reader's word.
+  // The server's placeholder: "New chat" ("New thread" from an older server;
+  // Desktop handles both).
   expect(untitled.title).toMatch(/^New (thread|chat)$/);
   // Forked before a title is generated, the fork is named after it.
   const fork = await client.forkThread(untitled.id, {});
@@ -3382,6 +3382,82 @@ test("signing in with a code connects OpenAI end to end and can be disconnected"
   await settings
     .getByRole("button", { name: "Close settings", exact: true })
     .click();
+  expect(errors).toEqual([]);
+});
+
+test("a key that could not be checked is saved and the connect dialog says so", async () => {
+  test.setTimeout(90000);
+  // The fixture provider's address (port 1) answers nothing, so the server
+  // keeps the key without being able to ask about it.
+  const provider = "desktop-missing-key";
+  const connected = async () =>
+    (await client.providers()).find((row) => row.id === provider)?.authenticated;
+  expect(await connected()).toBe(false);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const settings = page.getByRole("dialog", { name: "Settings", exact: true });
+  await settings.getByRole("button", { name: "Providers", exact: true }).click();
+  try {
+    await settings
+      .getByRole("button", { name: "Connect a provider", exact: true })
+      .click();
+    const picker = page.getByRole("dialog", {
+      name: "Connect a provider",
+      exact: true,
+    });
+    await picker
+      .getByRole("searchbox", { name: "Search providers", exact: true })
+      .fill("credential fixture");
+    await picker
+      .getByRole("button", { name: "Desktop credential fixture", exact: true })
+      .click();
+    const dialog = page.getByRole("dialog", {
+      name: "Connect Desktop credential fixture",
+      exact: true,
+    });
+    const key = dialog.getByLabel("API key", { exact: true });
+    await key.fill("unchecked-fixture-key");
+    await dialog.getByRole("button", { name: "Connect", exact: true }).click();
+    const warning = dialog.getByRole("alert");
+    await expect(warning).toContainText("Saved, but the key could not be checked");
+    await expect(warning).toContainText(
+      "Haarness could not reach Desktop credential fixture. If chats then fail to authenticate, replace the key.",
+    );
+    // Saved, not announced as working.
+    await expect(
+      page.locator(".toast").filter({ hasText: "is connected" }),
+    ).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "Done", exact: true })).toBeFocused();
+    await expect.poll(connected).toBe(true);
+    await dialog.screenshot({
+      path: test.info().outputPath("connect-key-unchecked.png"),
+    });
+    // Replace key goes back to an empty field; a new key is checked again.
+    await dialog.getByRole("button", { name: "Replace key", exact: true }).click();
+    await expect(key).toHaveValue("");
+    await expect(key).toBeFocused();
+    await key.fill("unchecked-fixture-key-2");
+    await key.press("Enter");
+    await expect(warning).toContainText("Saved, but the key could not be checked");
+    expect(await dialog.innerText()).not.toContain("unchecked-fixture-key");
+    await dialog.getByRole("button", { name: "Done", exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(settings).toBeVisible();
+  } finally {
+    // Later tests rely on this provider having no key.
+    await page.evaluate(
+      async ({ id, name }) =>
+        window.haarness.api(id, "manageResource", [
+          "providers",
+          { action: "logout", name },
+        ]),
+      { id: "local:" + workspace, name: provider },
+    );
+    await expect.poll(connected).toBe(false);
+    if (await settings.isVisible())
+      await settings
+        .getByRole("button", { name: "Close settings", exact: true })
+        .click();
+  }
   expect(errors).toEqual([]);
 });
 
