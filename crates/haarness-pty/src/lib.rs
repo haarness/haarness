@@ -416,12 +416,14 @@ fn default_shell() -> String {
     })
 }
 
-/// The locale a terminal gets when Haarness itself has none. Desktop opened
-/// from Finder inherits no `LANG`, `LC_ALL` or `LC_CTYPE`, and a shell started
-/// without them reads each byte of 日本 as a character of its own, so typing
-/// it prints escapes. Like Terminal.app, Haarness then sets `LANG` from the
-/// system's region settings. A locale set in any of the three is left alone.
-fn missing_locale() -> Option<&'static str> {
+/// The `LANG` a terminal or an agent's shell command gets when Haarness
+/// itself has no locale. Desktop opened from Finder inherits no `LANG`,
+/// `LC_ALL` or `LC_CTYPE`, and a shell started without them reads each byte of
+/// 日本 as a character of its own, so typing it prints escapes. Like
+/// Terminal.app, Haarness then sets `LANG` from the system's region settings.
+/// `None` when a locale is set in any of the three: that one is left alone.
+#[must_use]
+pub fn missing_locale() -> Option<&'static str> {
     static LOCALE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     if locale_set(|name| std::env::var_os(name)) {
         return None;

@@ -25,6 +25,9 @@ pub(crate) async fn run(command: &str, workdir: &Path, timeout_ms: u64, cancel: 
     let mut command = haarness_ripgrep::shell_command(command).map_err(error)?;
     command.current_dir(workdir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     for name in haarness_core::private_env_names() { command.env_remove(name); }
+    // Without a locale (Desktop opened from Finder) a command would read 日本
+    // as six characters, as a terminal would; a hook's own LANG still wins.
+    if let Some(locale) = haarness_pty::missing_locale() { command.env("LANG", locale); }
     command.envs(env.iter().filter(|(key, value)| !key.is_empty() && !key.contains(['=', '\0']) && !value.contains('\0')));
     #[cfg(unix)]
     { use std::os::unix::process::CommandExt; command.process_group(0); }
@@ -119,6 +122,22 @@ mod tests {
         assert!(output.text.contains("49999"));
         let saved=output.metadata["outputPath"].as_str().unwrap();
         assert_eq!(std::fs::read_to_string(saved).unwrap().lines().count(),50000);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_command_reads_multibyte_text_as_characters_without_a_locale() {
+        let root=fixture();
+        let script="x='日本'; printf '%s %s' \"${#x}\" \"$LANG\"";
+        let lang=|output:&ToolOutput| output.metadata["stdout"].as_str().unwrap().to_owned();
+        if haarness_pty::missing_locale().is_some() {
+            // This process has no locale, as Desktop opened from Finder has none.
+            let output=run(script,&root,0,&CancellationToken::new(),&root,&BTreeMap::new()).await.unwrap();
+            assert!(lang(&output).starts_with("2 "),"{output:?}");
+        }
+        // A hook's LANG wins over the default.
+        let env=BTreeMap::from([("LANG".to_owned(),"C".to_owned())]);
+        let output=run("printf '%s' \"$LANG\"",&root,0,&CancellationToken::new(),&root,&env).await.unwrap();
+        assert_eq!(lang(&output),"C");
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
