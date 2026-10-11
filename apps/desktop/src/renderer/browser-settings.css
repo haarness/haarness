@@ -21,13 +21,14 @@
   min-width: 180px;
 }
 /* This row states its label in a span rather than the usual strong + p, so
-   match the weight and the measure the neighbouring rows read at. */
-.browser-settings > .setting-row > span {
+   match the weight and the measure the neighbouring rows read at. Only the
+   label row: a span another row uses as a control keeps its own size. */
+.browser-settings > label.setting-row > span {
   flex: 1;
   min-width: 0;
   font-weight: 500;
 }
-.browser-settings > .setting-row > span small {
+.browser-settings > label.setting-row > span small {
   max-width: 420px;
   font-weight: 400;
   margin-block-start: 2px;

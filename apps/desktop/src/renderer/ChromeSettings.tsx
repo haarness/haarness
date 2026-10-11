@@ -71,6 +71,22 @@ export function ChromeSettingsSection(props: {
   const [origin, setOrigin] = createSignal("");
   const status = createMemo(() => chromeConnection(hosts()));
   const linked = () => status().state !== "none";
+  const statusText = () => {
+    const current = status();
+    if (!available()) return t("Not available");
+    switch (current.state) {
+      case "connected":
+        return t("Connected · {name}", { name: current.name });
+      case "several":
+        return t("{count} browsers connected", { count: current.count });
+      case "paused":
+        return t("Paused in Chrome");
+      case "stopped":
+        return t("Stopped in Chrome");
+      case "none":
+        return t("Not connected");
+    }
+  };
   let inFlight = false;
   let polled = 0;
   async function loadHosts() {
@@ -190,26 +206,9 @@ export function ChromeSettingsSection(props: {
           }}
         >
           <span class="remote-dot" aria-hidden="true" />
-          <span class="chrome-status-text">
-            <Switch fallback={t("Not connected")}>
-              <Match when={!available()}>{t("Not available")}</Match>
-              <Match when={status().state === "connected" && status()}>
-                {(current) => t("Connected · {name}", {
-                  name: (current() as { name: string }).name,
-                })}
-              </Match>
-              <Match when={status().state === "several" && status()}>
-                {(current) => t("{count} browsers connected", {
-                  count: (current() as { count: number }).count,
-                })}
-              </Match>
-              <Match when={status().state === "paused"}>
-                {t("Paused in Chrome")}
-              </Match>
-              <Match when={status().state === "stopped"}>
-                {t("Stopped in Chrome")}
-              </Match>
-            </Switch>
+          {/* A long profile label is cut short; hovering shows it whole. */}
+          <span class="chrome-status-text" title={statusText()}>
+            {statusText()}
           </span>
         </span>
         <button disabled={!available()} onClick={() => setSetupOpen(true)}>

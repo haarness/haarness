@@ -21,8 +21,8 @@ import {
   type ElectronApplication,
   type Page,
 } from "@playwright/test";
-import { mkdtemp, mkdir, writeFile, realpath, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdtemp, mkdir, readFile, writeFile, realpath, rm, stat } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
@@ -58,8 +58,17 @@ test.beforeAll(async () => {
     HAARNESS_DESKTOP_DATA: join(temporary, "desktop"),
     HAARNESS_TEST_PROVIDER: "1",
     HAARNESS_DESKTOP_TEST: "1",
+    // Chrome setup registers only with this test profile, and copies a
+    // stand-in extension: the user's own Chrome is never touched.
+    HAARNESS_BROWSER_MANIFEST_DIR: join(temporary, "chrome-profile", "NativeMessagingHosts"),
+    HAARNESS_BROWSER_EXTENSION_DIR: join(temporary, "extension"),
   });
   delete env.ELECTRON_RUN_AS_NODE;
+  await mkdir(env.HAARNESS_BROWSER_EXTENSION_DIR, { recursive: true });
+  await writeFile(
+    join(env.HAARNESS_BROWSER_EXTENSION_DIR, "manifest.json"),
+    JSON.stringify({ manifest_version: 3, name: "Haarness", version: "0.1.1.1", version_name: "0.1.1-preview.1" }),
+  );
   directory = join(temporary, "chrome-project");
   await mkdir(join(directory, ".haarness"), { recursive: true });
   await writeFile(
@@ -155,11 +164,13 @@ async function installBridgeStub() {
     const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, (...args: any[]) => any> })
       ._invokeHandlers;
     const fake = () => (globalThis as any).chromeFake as Fake | undefined;
+    // `strip` also applies to the real server, so a real Chrome host can
+    // meet Desktop's own fallback Auto.
     const info = (value: any) => {
       const current = fake();
-      if (!current?.active || !value?.capabilities) return value;
-      let capabilities = value.capabilities.filter((item: string) => !current.strip.includes(item));
-      if (current.capable && !capabilities.includes("browser-extension.v1"))
+      if (!current || !value?.capabilities) return value;
+      let capabilities = value.capabilities.filter((item: string) => !(current.strip ?? []).includes(item));
+      if (current.active && current.capable && !capabilities.includes("browser-extension.v1"))
         capabilities = [...capabilities, "browser-extension.v1"];
       return { ...value, capabilities };
     };
@@ -172,8 +183,12 @@ async function installBridgeStub() {
     const api = handlers.get("haarness:api")!;
     handlers.set("haarness:api", async (event, raw) => {
       const current = fake();
-      if (!current?.active) return api(event, raw);
       const { method, args } = raw as { method: string; args: any[] };
+      if (!current?.active) {
+        const result = await api(event, raw);
+        if (result.ok && method === "info") result.value = info(result.value);
+        return result;
+      }
       if (method === "listBrowserHosts") {
         const thread = args[0]?.thread as string | undefined;
         return {
@@ -208,14 +223,21 @@ async function installBridgeStub() {
         result.value = { ...result.value, data: { ...result.value.data, chrome: current.view } };
       return result;
     });
-    handlers.set("haarness:chromeSetup", async () => {
-      const current = fake()!;
+    // Without the stub, setup runs the real `haarness browser setup --json`
+    // (into HAARNESS_BROWSER_MANIFEST_DIR, never the user's own Chrome).
+    const setup = handlers.get("haarness:chromeSetup")!;
+    handlers.set("haarness:chromeSetup", async (event, ...args) => {
+      const current = fake();
+      if (!current?.active) return setup(event, ...args);
       current.setupCalls++;
       await new Promise((resolve) => setTimeout(resolve, 300));
       return current.setup;
     });
-    handlers.set("haarness:chromeReveal", async () => {
-      fake()!.reveals++;
+    const reveal = handlers.get("haarness:chromeReveal")!;
+    handlers.set("haarness:chromeReveal", async (event, ...args) => {
+      const current = fake();
+      if (!current?.active) return reveal(event, ...args);
+      current.reveals++;
       return { ok: true, value: undefined };
     });
   });
@@ -282,7 +304,7 @@ async function startStub(change: Partial<Fake> = {}) {
   await reload();
 }
 async function stopStub() {
-  await stub({ active: false });
+  await stub({ active: false, strip: [] });
   await reload();
 }
 /** The renderer reads capabilities when it connects, so a reload applies them. */
@@ -443,6 +465,18 @@ test("with Chrome support, the status follows connected browsers and setup walks
   await expect(setupDialog()).toHaveCount(0);
   await expect(row).toContainText("Connected · Google Chrome");
   await expect(settings().getByRole("button", { name: "Manage…", exact: true })).toBeVisible();
+  // The status sits beside its button, at the weight of other row values,
+  // and leaves the description its full measure.
+  const status = row.locator(".chrome-status");
+  expect(await status.evaluate((element) => getComputedStyle(element).fontWeight)).toBe("400");
+  expect(
+    await row.evaluate((row) => {
+      const status = row.querySelector(".chrome-status")!.getBoundingClientRect();
+      const button = row.querySelector("button")!.getBoundingClientRect();
+      return button.left - status.right;
+    }),
+  ).toBeLessThanOrEqual(24);
+  await expect(status.locator(".chrome-status-text")).toHaveAttribute("title", "Connected · Google Chrome");
   await row.scrollIntoViewIfNeeded();
   await snap("chrome-rows.png", settings());
   await stub({ hosts: [chromeHost(), chromeHost({ name: "Microsoft Edge" })] });
@@ -547,6 +581,10 @@ test("the Chrome section and setup read right to left in Arabic, with paths kept
       .evaluateAll((codes) => codes.map((code) => getComputedStyle(code).direction)),
   ).toEqual(["ltr", "ltr"]);
   expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+  // The setup command's English note keeps its full stop at its own end.
+  expect(
+    await dialog.locator(".chrome-browsers small").evaluate((note) => getComputedStyle(note).unicodeBidi),
+  ).toBe("plaintext");
   await snap("chrome-setup-ar.png", dialog);
   await dialog.getByRole("button", { name: "إغلاق", exact: true }).click();
   await page.evaluate(() => window.haarness.preferences({ language: "en" }));
@@ -646,7 +684,7 @@ async function fakeExtension(name = "Google Chrome") {
   // `ws` sends no Origin header unless asked to, like Chrome's native host.
   const socket = new WebSocket(url, { headers: { Authorization: "Bearer " + endpoint.token } });
   const tabs = new Map<string, { id: string; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; generation: number }[]>();
-  const commands: { thread: string; title?: string; command: { action: { type: string; url?: string; tabID?: string }; inspect?: boolean } }[] = [];
+  const commands: { thread: string; title?: string; command: { action: { type: string; url?: string; tabID?: string; script?: string }; inspect?: boolean } }[] = [];
   const send = (message: unknown) => socket.send(JSON.stringify(message));
   const attached = new Promise<void>((resolve, reject) => {
     socket.once("error", reject);
@@ -670,21 +708,29 @@ async function fakeExtension(name = "Google Chrome") {
       const list = tabs.get(thread) ?? [];
       const current = list.find((tab) => tab.id === action.tabID);
       if (command.inspect) {
+        // Like the extension: document origins, and a new address's www twin.
         const target = action.url ?? current?.url;
+        const resources: string[] = [];
+        if (target && /^https?:/.test(target)) {
+          const url = new URL(target);
+          resources.push(url.origin);
+          if (action.url && /[a-z]\.[a-z]/i.test(url.hostname)) {
+            url.hostname = url.hostname.startsWith("www.") ? url.hostname.slice(4) : "www." + url.hostname;
+            resources.push(url.origin);
+          }
+        }
         send({
           type: "result",
           id,
           outcome: {
             type: "success",
-            result: {
-              value: {
-                key: action.type + ":" + (target ?? "inventory"),
-                resources: target && /^https?:/.test(target) ? [new URL(target).origin] : [],
-              },
-              files: [],
-            },
+            result: { value: { key: action.type + ":" + (target ?? "inventory"), resources }, files: [] },
           },
         });
+        return;
+      }
+      if (action.type === "evaluate" && current) {
+        send({ type: "result", id, outcome: { type: "success", result: { value: current.title, files: [] } } });
         return;
       }
       if (action.type === "tabs.open") {
@@ -716,12 +762,19 @@ async function fakeExtension(name = "Google Chrome") {
     });
   });
   await attached;
-  return { socket, commands, close: () => socket.close() };
+  return {
+    socket,
+    commands,
+    /** Pause or stop it, as the user does from Chrome's toolbar. */
+    status: (change: { paused?: boolean; stopped?: boolean }) =>
+      send({ type: "status", paused: false, stopped: false, focusedAt: Date.now(), ...change }),
+    close: () => socket.close(),
+  };
 }
-async function chromeTool(name: string, args: object) {
+async function chromeTool(name: string, args: object, chat = thread) {
   const sdk = new Haarness({ baseUrl: endpoint.url, token: endpoint.token });
   try {
-    return await sdk.callBrowserTool(thread.id, { name: "browser_" + name, arguments: args as any }, { timeoutMs: 90_000 });
+    return await sdk.callBrowserTool(chat.id, { name: "browser_" + name, arguments: args as any }, { timeoutMs: 90_000 });
   } finally {
     sdk.close();
   }
@@ -766,6 +819,7 @@ test("[Chrome server] a connected Chrome shows in Settings, and Allow in this ch
     await page.keyboard.press("Enter");
     const step = page.locator(".tool-call", { hasText: "Opened a tab" }).last();
     await expect(step.locator(".tool-chip")).toHaveText("Chrome");
+    await snap("chrome-transcript-chip.png");
     // The browser panel counts the chat's Chrome tabs.
     await app.evaluate(({ BrowserWindow }) =>
       BrowserWindow.getAllWindows()[0].webContents.send("haarness:event", { kind: "menu", data: "browser" }),
@@ -773,6 +827,7 @@ test("[Chrome server] a connected Chrome shows in Settings, and Allow in this ch
     await expect(page.getByRole("region", { name: "Web browser", exact: true }).locator(".browser-status")).toContainText(
       "This chat also uses Chrome · 3 tabs",
     );
+    await snap("chrome-browser-panel.png");
     await app.evaluate(({ BrowserWindow }) =>
       BrowserWindow.getAllWindows()[0].webContents.send("haarness:event", { kind: "menu", data: "browser" }),
     );
@@ -810,3 +865,266 @@ test("[Chrome server] the Chrome site table persists globally, even from the pro
   await closeSettings();
   expect(errors).toEqual([]);
 });
+
+test("[Chrome server] the Chrome row follows the real host: paused, stopped, back, and two browsers", async () => {
+  test.skip(!chromeServer, "Needs a server with browser-extension.v1; runs once the server side is integrated.");
+  test.setTimeout(180000);
+  // A connected Chrome is re-read every 10 s.
+  const later = { timeout: 25_000 };
+  await openSettings();
+  const row = settings().locator('[data-setting="Chrome"]');
+  const status = row.locator(".chrome-status");
+  await expect(row).toContainText("Not connected");
+  const extension = await fakeExtension();
+  try {
+    await expect(row).toContainText("Connected · Google Chrome");
+    await expect(status).toHaveClass(/live/);
+    extension.status({ paused: true });
+    await expect(row).toContainText("Paused in Chrome", later);
+    await expect(status).toHaveClass(/paused/);
+    // The server refuses before anything reaches a paused Chrome.
+    const refused = await chromeTool("tabs_open", { url: siteURL + "/paused", browser: "chrome" }).catch(
+      (error: unknown) => ({ isError: true, output: String(error) }),
+    );
+    expect(refused.isError).toBe(true);
+    expect(refused.output).toContain("The user paused Haarness in Chrome.");
+    extension.status({ stopped: true });
+    await expect(row).toContainText("Stopped in Chrome", later);
+    extension.status({});
+    await expect(row).toContainText("Connected · Google Chrome", later);
+    await expect(status).toHaveClass(/live/);
+    const edge = await fakeExtension("Microsoft Edge");
+    try {
+      await expect(row).toContainText("2 browsers connected", later);
+    } finally {
+      edge.close();
+    }
+    await expect(row).toContainText("Connected · Google Chrome", later);
+    expect(extension.commands).toEqual([]);
+  } finally {
+    extension.close();
+  }
+  await expect(row).toContainText("Not connected", later);
+  await expect(settings().getByRole("button", { name: "Set up Chrome…", exact: true })).toBeVisible();
+  await closeSettings();
+  expect(errors).toEqual([]);
+});
+
+test("[Chrome server] Chrome rows write browser.chrome to the global file, and a project can only tighten them", async () => {
+  test.skip(!chromeServer, "Needs a server with browser-extension.v1; runs once the server side is integrated.");
+  const globalFile = join(temporary, "state", "config", "haarness.json");
+  const projectFile = join(directory, ".haarness", "haarness.json");
+  const readGlobal = async () =>
+    JSON.parse(await readFile(globalFile, "utf8").catch(() => "{}")) as { browser?: { chrome?: ChromeSettings } };
+  await openSettings();
+  await expect(settings().getByRole("combobox", { name: "Browser settings scope", exact: true })).toContainText(
+    "This project",
+  );
+  await choose("Browser for new agent tabs", "Chrome");
+  await choose("Chrome default uploads", "Block");
+  await expect.poll(async () => (await readGlobal()).browser?.chrome).toEqual({
+    enabled: true,
+    defaults: { browsing: "ask", downloads: "ask", uploads: "deny", scripts: "ask" },
+    defaultBrowser: "chrome",
+    sites: [],
+  });
+  // Nothing about Chrome lands in the project, whatever scope the pane shows.
+  expect(await readFile(projectFile, "utf8").catch(() => "")).not.toContain("chrome");
+  // A project that turns scripts off says so above the rows, and the rows
+  // keep showing (and saving) the global values.
+  await writeFile(projectFile, JSON.stringify({ browser: { chrome: { defaults: { scripts: "deny" } } } }));
+  try {
+    await closeSettings();
+    await openSettings();
+    const notice = settings().locator(".chrome-note", { hasText: "Restricted by this project’s settings" });
+    await expect(notice).toBeVisible();
+    await expect(notice.locator(".chrome-restriction")).toHaveText(["Scripts: Block by default"]);
+    await expect(settings().getByRole("combobox", { name: "Chrome default scripts", exact: true })).toContainText(
+      "Requires approval",
+    );
+    await settings().locator('[data-setting="Chrome"]').scrollIntoViewIfNeeded();
+    await snap("chrome-settings-restricted.png", settings());
+    const view = (await client.managementView("browser-settings", { action: "get", scope: "project" }))
+      .data as unknown as { chrome: ChromeSettingsView };
+    expect(view.chrome.settings.defaults.scripts).toBe("deny");
+    expect(view.chrome.globalSettings?.defaults.scripts).toBe("ask");
+  } finally {
+    await rm(projectFile, { force: true });
+  }
+  // Put the global layer back for the tests that follow (re-read first: the
+  // project file changed underneath the pane's revision).
+  await closeSettings();
+  await openSettings();
+  await expect(settings().locator(".chrome-note", { hasText: "Restricted" })).toHaveCount(0);
+  await choose("Chrome default uploads", "Requires approval");
+  await choose("Browser for new agent tabs", "Automatic");
+  await expect.poll(async () => (await readGlobal()).browser?.chrome?.defaultBrowser).toBe("auto");
+  await closeSettings();
+  expect(errors).toEqual([]);
+});
+
+test("[Chrome server] a real Chrome gate docks as Allow in Chrome, and neither server Auto nor Desktop's Auto answers it", async () => {
+  test.skip(!chromeServer, "Needs a server with browser-extension.v1; runs once the server side is integrated.");
+  test.setTimeout(180000);
+  const origin = "https://mail.example.test";
+  const chat = await client.createThread({ title: "Chrome Auto chat", provider: "echo", model: "echo-1" });
+  await page.getByRole("button", { name: chat.title, exact: true }).click();
+  await expect
+    .poll(() => page.evaluate((id) => window.haarness.storage("session:" + id), connection))
+    .toBe(chat.id);
+  // The server answers for this chat in Auto, and Desktop's own fallback
+  // would too.
+  await client.setApprovalMode(chat.id, { mode: "auto" });
+  await page.evaluate(
+    ({ connection, chat }) => window.haarness.storage("approval-modes:v1", { [connection]: { [chat]: true } }),
+    { connection, chat: chat.id },
+  );
+  const extension = await fakeExtension();
+  const dock = page.getByRole("alert", { name: "Permission request" });
+  try {
+    const opening = chromeTool("tabs_open", { url: origin + "/inbox", browser: "chrome" }, chat);
+    await expect(dock.locator(".prompt-title")).toHaveText("Allow in Chrome");
+    // The site and its www twin are one line.
+    await expect(dock.locator(".chrome-approval li")).toHaveText([`Use ${origin} in Chrome`]);
+    await expect(dock.getByRole("button")).toHaveText(["Deny", "Allow once", "Allow in this chat"]);
+    await expect(dock.getByRole("button", { name: "Allow in this chat", exact: true })).toHaveClass(/primary/);
+    await page.waitForTimeout(3000);
+    const waiting = await client.listPermissions();
+    expect(waiting).toHaveLength(1);
+    expect((waiting[0] as { explicit?: boolean }).explicit).toBe(true);
+    expect((await client.getApprovalMode(chat.id)).mode).toBe("auto");
+    // Desktop's fallback Auto (for servers that cannot answer for a chat)
+    // leaves it waiting too.
+    await stub({ strip: ["approval-mode.v1"] });
+    await reload();
+    await expect(dock.locator(".prompt-title")).toHaveText("Allow in Chrome");
+    await page.waitForTimeout(3000);
+    expect(await client.listPermissions()).toHaveLength(1);
+    await dock.getByRole("button", { name: "Allow once", exact: true }).click();
+    const opened = await opening;
+    expect(opened.isError).toBe(false);
+    const tab = JSON.parse(opened.output) as { id: string };
+    // Scripts ask on their own, next to a site that was allowed only once.
+    const evaluating = chromeTool("evaluate", { tabID: tab.id, script: "document.title" }, chat);
+    await expect(dock.locator(".chrome-approval li")).toHaveText([
+      `Use ${origin} in Chrome`,
+      `Run scripts on ${origin} in Chrome`,
+    ]);
+    await expect(dock.locator(".prompt-detail")).toContainText("document.title");
+    await expect(dock.locator(".prompt-detail")).not.toContainText("__browser");
+    await snap("chrome-approval-real.png", dock);
+    await dock.getByRole("button", { name: "Allow in this chat", exact: true }).click();
+    expect((await evaluating).isError).toBe(false);
+    // Allowed in this chat: the next script runs without asking.
+    expect((await chromeTool("evaluate", { tabID: tab.id, script: "1 + 1" }, chat)).isError).toBe(false);
+    expect(await client.listPermissions()).toHaveLength(0);
+    expect(extension.commands.filter((item) => !item.command.inspect).map((item) => item.command.action.type)).toEqual([
+      "tabs.open",
+      "evaluate",
+      "evaluate",
+    ]);
+  } finally {
+    extension.close();
+    await client.setApprovalMode(chat.id, { mode: "review" }).catch(() => {});
+    await page.evaluate(() => window.haarness.storage("approval-modes:v1", {}));
+    await stopStub();
+  }
+  await page.getByRole("button", { name: thread.title, exact: true }).click();
+  expect(errors).toEqual([]);
+});
+
+test("[real setup] the setup dialog runs haarness browser setup into a test profile, never the user's Chrome", async () => {
+  test.skip(!chromeServer, "Needs a server with browser-extension.v1; runs once the server side is integrated.");
+  test.setTimeout(180000);
+  const manifestDir = env.HAARNESS_BROWSER_MANIFEST_DIR;
+  const manifest = join(manifestDir, "ai.haarness.browser.json");
+  const before = await realRegistrations();
+  // Reveal records instead of opening Finder.
+  await app.evaluate(({ shell }) => {
+    (globalThis as any).revealed = [];
+    shell.showItemInFolder = (path: string) => void (globalThis as any).revealed.push(path);
+  });
+  // A test run without its own manifest folder refuses to register at all.
+  await app.evaluate(() => {
+    (globalThis as any).manifestDir = process.env.HAARNESS_BROWSER_MANIFEST_DIR;
+    delete process.env.HAARNESS_BROWSER_MANIFEST_DIR;
+  });
+  await openSettings();
+  await settings().getByRole("button", { name: "Set up Chrome…", exact: true }).click();
+  await expect(setupDialog().getByRole("alert")).toContainText("HAARNESS_BROWSER_MANIFEST_DIR");
+  await app.evaluate(() => {
+    process.env.HAARNESS_BROWSER_MANIFEST_DIR = (globalThis as any).manifestDir;
+  });
+  await setupDialog().getByRole("button", { name: "Try again", exact: true }).click();
+  // Step 1 ran the real binary: the test profile is registered.
+  await expect(setupDialog().locator(".chrome-browsers")).toContainText(manifestDir);
+  await expect(setupDialog().locator(".chrome-warning")).toHaveCount(0);
+  const written = JSON.parse(await readFile(manifest, "utf8"));
+  const data = join(temporary, "state", "data", "browser", "chrome");
+  expect(written).toMatchObject({
+    name: "ai.haarness.browser",
+    path: join(data, "haarness-browser-host"),
+    type: "stdio",
+    allowed_origins: ["chrome-extension://accdjhmcgljbadpeanajllmcembhkomn/"],
+  });
+  expect(await readFile(join(data, "haarness-browser-host"), "utf8")).toContain(`'${binary}' browser native-host`);
+  // Step 2 names the copied extension, and reveals only that folder.
+  const folder = join(data, "Haarness for Chrome");
+  await expect(setupDialog().locator(".chrome-substeps code").nth(1)).toHaveText(folder);
+  expect(JSON.parse(await readFile(join(folder, "manifest.json"), "utf8")).version_name).toBe("0.1.1-preview.1");
+  await setupDialog()
+    .getByRole("button", { name: /^(Reveal in Finder|Show in Explorer|Show in file manager)$/ })
+    .click();
+  await expect.poll(() => app.evaluate(() => (globalThis as any).revealed)).toEqual([folder]);
+  await expect(setupDialog().getByRole("alert")).toHaveCount(0);
+  // Step 3: the extension connecting to this project finishes setup.
+  const extension = await fakeExtension();
+  try {
+    await expect(setupDialog()).toContainText("Connected to Google Chrome");
+    await setupDialog().getByRole("button", { name: "Done", exact: true }).click();
+    await expect(settings().locator('[data-setting="Chrome"]')).toContainText("Connected · Google Chrome");
+  } finally {
+    extension.close();
+  }
+  // The CLI agrees, reading the same folder.
+  const status = JSON.parse(
+    execFileSync(binary, ["browser", "status", "--json"], { env, encoding: "utf8", timeout: 30000 }),
+  ) as { browsers: { name: string; registered: boolean }[] };
+  expect(status.browsers).toEqual([expect.objectContaining({ name: manifestDir, registered: true })]);
+  expect(await realRegistrations()).toEqual(before);
+  await closeSettings();
+  expect(errors).toEqual([]);
+});
+
+/** Haarness's host manifest in every real browser profile on this computer:
+ * whether it exists and when it last changed. Tests must leave these alone. */
+async function realRegistrations() {
+  const roots =
+    process.platform === "darwin"
+      ? [
+          "Google/Chrome",
+          "Google/Chrome Beta",
+          "Google/Chrome Canary",
+          "Google/Chrome for Testing",
+          "Chromium",
+          "Microsoft Edge",
+          "BraveSoftware/Brave-Browser",
+          "Vivaldi",
+        ].map((name) => join(homedir(), "Library/Application Support", name))
+      : [
+          "google-chrome",
+          "google-chrome-beta",
+          "google-chrome-unstable",
+          "chromium",
+          "microsoft-edge",
+          "BraveSoftware/Brave-Browser",
+          "vivaldi",
+        ].map((name) => join(homedir(), ".config", name));
+  return Promise.all(
+    roots.map(async (root) => {
+      const file = join(root, "NativeMessagingHosts", "ai.haarness.browser.json");
+      const info = await stat(file).catch(() => undefined);
+      return { file, modified: info?.mtimeMs ?? null };
+    }),
+  );
+}
