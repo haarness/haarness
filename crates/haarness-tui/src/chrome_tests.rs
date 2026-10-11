@@ -754,6 +754,34 @@ fn browser_rows_say_when_they_ran_in_chrome() {
     assert!(!haarness.contains("Chrome"), "{frame}");
 }
 
+/// A long address gives way to the Chrome tag on a narrow screen, however
+/// long the browser tool's name is.
+#[test]
+fn a_long_address_leaves_room_for_the_chrome_tag() {
+    let thread = fixture_thread();
+    let items = vec![message_item(
+        1,
+        &thread,
+        ItemData::ToolCall {
+            call_id: "c1".into(),
+            name: "browser_tabs_open".into(),
+            arguments: serde_json::json!({
+                "browser": "chrome",
+                "url": "https://www.example.com/a/very/long/path/that/keeps/going?with=query&and=more",
+            }),
+            provider_metadata: serde_json::Value::Null,
+        },
+    )];
+    let app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    let frame = frame_text(&app, (80, 30));
+    let row = frame
+        .lines()
+        .find(|row| row.contains("browser_tabs_open https://www.example.com"))
+        .unwrap();
+    assert!(row.trim_end().ends_with("·  Chrome"), "{frame}");
+    assert!(row.trim_end().chars().count() <= 80, "{frame}");
+}
+
 /// `/status` says whether this chat can use Chrome.
 #[tokio::test]
 async fn status_has_a_chrome_line() {
