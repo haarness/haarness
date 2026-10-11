@@ -238,6 +238,9 @@ cargo test -p haarness-cli browser                # setup, manifests, framing, d
 cargo test -p haarness-server browser             # broker routing, policy layering, gates, extension host endpoint
 cargo test -p haarness-core explicit              # explicit approvals in the runtime
 ./scripts/test-sdks.sh                            # connectBrowserExtensionHost and listBrowserHosts coverage
+(cd apps/desktop && HAARNESS_BIN=<copied haarness> npx playwright test e2e/chrome-settings.spec.ts)
+                                                  # Desktop: Settings › Browser › Chrome, approvals, and a real
+                                                  # `browser setup` into HAARNESS_BROWSER_MANIFEST_DIR
 ```
 
 <!-- verify: exact root script names and cargo test filters after integration -->
