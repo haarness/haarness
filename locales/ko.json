@@ -2382,5 +2382,6 @@
   "Versions": "버전",
   "Extension folder": "확장 프로그램 폴더",
   "Update ready": "업데이트 준비됨",
-  "Something went wrong.": "문제가 발생했습니다."
+  "Something went wrong.": "문제가 발생했습니다.",
+  "This request also needs an approval outside Chrome. Answer it in Haarness.": "이 요청에는 Chrome 밖의 승인도 필요합니다. Haarness에서 응답하세요."
 }

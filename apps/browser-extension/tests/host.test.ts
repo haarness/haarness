@@ -408,6 +408,34 @@ test("approvals from the popup reach the bridge, and only explicit Chrome ones a
   assert.deepEqual(await answer, { ok: true });
 });
 
+test("a Chrome site waiting together with another approval is shown, to answer in Haarness", async () => {
+  const h = await boot();
+  h.start();
+  h.attach();
+  h.fake.port.deliver({
+    type: "activity",
+    server: "server-1",
+    active: [THREAD],
+    approvals: [
+      { id: "p3", thread: THREAD, patterns: [`chrome-uploads:${THREAD}:https://a.example`], explicit: true, answerable: false },
+    ],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const [approval] = h.host.snapshot().approvals;
+  assert.equal(approval.answerable, false);
+  assert.deepEqual(approval.lines, [{ category: "uploads", origin: "https://a.example" }]);
+  assert.equal(h.fake.badge, "!");
+  // An approval from a bridge that predates `answerable` is one Chrome may answer.
+  h.fake.port.deliver({
+    type: "activity",
+    server: "server-1",
+    active: [],
+    approvals: [{ id: "p4", thread: THREAD, patterns: [`chrome-browsing:${THREAD}:https://b.example`], explicit: true }],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(h.host.snapshot().approvals[0].answerable, true);
+});
+
 test("a newer copy on disk reloads the extension once, when nothing is running", async () => {
   const h = await boot();
   h.fake.port.deliver({ type: "bridge", protocol: 1, version: "0.1.2", uploadsRoot: "/tmp", extension: { path: "/x", version: "0.1.2" } });

@@ -1,6 +1,7 @@
 use super::*;
 use crate::chrome::{
-    Access, ExtensionCopy, Host, Hosts, LocalAction, Settings, Setup, SetupBrowser, Unavailable,
+    Access, ExtensionCopy, ExtensionSource, Host, Hosts, LocalAction, Settings, Setup,
+    SetupBrowser, Unavailable,
 };
 use crate::state::Overlay;
 use std::sync::{Arc, Mutex};
@@ -212,8 +213,18 @@ fn chrome_dialog_walks_from_setup_to_connected_at_80_and_120_columns() {
         let rendered = chrome_text(&app, size);
         assert!(rendered.contains("Checking this computer…"), "{rendered}");
 
-        app.chrome.local = Some(Setup::default());
+        // A release build carries the extension that setup copies.
+        app.chrome.local = Some(Setup {
+            extension_source: Some(ExtensionSource {
+                kind: "embedded".into(),
+            }),
+            ..Setup::default()
+        });
         let rendered = chrome_text(&app, size);
+        assert!(
+            !rendered.contains("has no Haarness for Chrome"),
+            "{rendered}"
+        );
         for expected in [
             "Chrome",
             "Not set up",
@@ -576,6 +587,35 @@ async fn without_an_extension_to_add_the_dialog_does_not_wait_for_chrome() {
     app.chrome.program = Some("/nonexistent/haarness".into());
     app.chrome_primary(&client);
     assert_eq!(app.chrome.busy_local(), Some(LocalAction::Status));
+}
+
+/// Without an extension to load, setup registers nothing; the dialog says
+/// why and passes on setup's word on what to install, instead of offering a
+/// setup that cannot help.
+#[test]
+fn a_build_without_the_extension_says_what_to_install() {
+    let mut app = connect_fixture();
+    app.open_overlay(Overlay::Chrome);
+    app.chrome.here = true;
+    app.chrome.hosts = Some(Ok(Hosts::default()));
+    app.chrome.local = Some(Setup {
+        warnings: vec!["Install a Haarness release or Haarness Desktop.".into()],
+        ..Setup::default()
+    });
+    for width in [80, 120] {
+        let rendered = chrome_text(&app, (width, 44));
+        assert!(rendered.contains("○ Not set up"), "{width}\n{rendered}");
+        let text = flat(&rendered);
+        assert!(
+            text.contains("This build of Haarness has no Haarness for Chrome extension to load.")
+                && text.contains("Install a Haarness release or Haarness Desktop."),
+            "{width}\n{rendered}"
+        );
+        assert!(
+            !text.contains("Press Enter to let Chrome start Haarness"),
+            "{rendered}"
+        );
+    }
 }
 
 fn chrome_permission(thread: &Thread, id: &str) -> haarness_protocol::PendingPermissionInfo {

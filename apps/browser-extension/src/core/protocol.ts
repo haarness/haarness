@@ -78,6 +78,8 @@ export interface Approval {
   thread: string;
   patterns: string[];
   explicit: boolean;
+  /** False when the same request also waits on an approval outside Chrome, which only Haarness can give. */
+  answerable: boolean;
 }
 
 export type FromBridge =
@@ -152,14 +154,17 @@ export function parseFromBridge(raw: unknown): FromBridge | undefined {
         type: "activity",
         server: raw.server,
         active: raw.active.filter((thread): thread is string => text(thread, 128)),
-        approvals: raw.approvals.filter(
-          (approval): approval is Approval =>
-            record(approval) &&
-            text(approval.id, 128) &&
-            text(approval.thread, 128) &&
-            Array.isArray(approval.patterns) &&
-            approval.patterns.every((pattern) => text(pattern)),
-        ),
+        approvals: raw.approvals
+          .filter(
+            (approval): approval is Omit<Approval, "answerable"> & { answerable?: unknown } =>
+              record(approval) &&
+              text(approval.id, 128) &&
+              text(approval.thread, 128) &&
+              Array.isArray(approval.patterns) &&
+              approval.patterns.every((pattern) => text(pattern)),
+          )
+          // Bridges before `answerable` forwarded only approvals Chrome may answer.
+          .map((approval) => ({ ...approval, answerable: approval.answerable !== false })),
       };
     case "stopped":
     case "answered":

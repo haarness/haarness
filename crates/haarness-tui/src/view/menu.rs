@@ -1678,15 +1678,30 @@ fn chrome_dialog(app: &App, width: usize, max_height: usize) -> TaggedLines {
                 language.text("Not set up").into(),
             ));
             paragraph(&mut body, language.text(ABOUT), theme.text);
-            paragraph(
-                &mut body,
-                language.text(if removed {
-                    "Haarness was removed from Chrome on this computer. Press Enter to set it up again."
-                } else {
-                    "Press Enter to let Chrome start Haarness on this computer."
-                }),
-                theme.muted,
-            );
+            match &chrome.local {
+                // Setup registers nothing then; its warning says what to install.
+                Some(setup) if chrome.nothing_to_add() => {
+                    paragraph(
+                        &mut body,
+                        language.text(
+                            "This build of Haarness has no Haarness for Chrome extension to load.",
+                        ),
+                        theme.danger,
+                    );
+                    for warning in &setup.warnings {
+                        paragraph(&mut body, warning, theme.muted);
+                    }
+                }
+                _ => paragraph(
+                    &mut body,
+                    language.text(if removed {
+                        "Haarness was removed from Chrome on this computer. Press Enter to set it up again."
+                    } else {
+                        "Press Enter to let Chrome start Haarness on this computer."
+                    }),
+                    theme.muted,
+                ),
+            }
             footer.push("enter set up");
         }
         View::Waiting(setup) => {

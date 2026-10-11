@@ -110,6 +110,17 @@ pub(crate) struct Setup {
     pub browsers: Vec<SetupBrowser>,
     /// The unpacked extension copy to load, when this build carries one.
     pub extension: Option<ExtensionCopy>,
+    /// What setup would copy `extension` from; `None` when this installation
+    /// has no Haarness for Chrome of its own.
+    pub extension_source: Option<ExtensionSource>,
+}
+
+/// `extensionSource`: where setup finds Haarness for Chrome to copy.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct ExtensionSource {
+    /// `embedded`, `bundle`, `desktop`, …
+    pub kind: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -439,11 +450,16 @@ impl Chrome {
             .filter(|url| url.starts_with("https://"))
     }
 
-    /// This installation has no Haarness for Chrome to add (a CLI-only
-    /// install before the Web Store listing), so nothing will connect until
-    /// Desktop copies it here.
+    /// This installation has no Haarness for Chrome to add (a build without
+    /// it, before the Web Store listing), so nothing will connect until a
+    /// release or Desktop provides it.
     pub(crate) fn nothing_to_add(&self) -> bool {
-        self.web_store_url().is_none() && self.extension_path().is_none()
+        self.web_store_url().is_none()
+            && self.extension_path().is_none()
+            && self
+                .local
+                .as_ref()
+                .is_none_or(|setup| setup.extension_source.is_none())
     }
 
     fn program(&self) -> Option<PathBuf> {

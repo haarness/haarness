@@ -2382,5 +2382,6 @@
   "Versions": "版本",
   "Extension folder": "擴充功能資料夾",
   "Update ready": "可以更新了",
-  "Something went wrong.": "發生錯誤。"
+  "Something went wrong.": "發生錯誤。",
+  "This request also needs an approval outside Chrome. Answer it in Haarness.": "此請求還需要一項 Chrome 以外的核准。請在 Haarness 中回覆。"
 }
