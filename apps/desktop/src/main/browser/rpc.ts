@@ -69,6 +69,11 @@ const artifact = {
   }),
 };
 
+/** Where a tab lives: Desktop's isolated Haarness browser, or the user's own Chrome. */
+export const BrowserName = Schema.Literals(["haarness", "chrome"]).annotate({
+  identifier: "Browser.BrowserName",
+});
+export type BrowserName = typeof BrowserName.Type;
 export interface Tab extends Schema.Schema.Type<typeof Tab> {}
 export const Tab = Schema.Struct({
   id: TabID,
@@ -78,11 +83,24 @@ export const Tab = Schema.Struct({
   canGoBack: Schema.Boolean,
   canGoForward: Schema.Boolean,
   generation: count,
+  // Hosts need not send it; the server tags the tabs it returns.
+  browser: optional(BrowserName),
 }).annotate({ identifier: "Browser.Tab" });
 export interface State extends Schema.Schema.Type<typeof State> {}
 export const State = Schema.Struct({
   tabs: Schema.Array(Tab),
   focusedTabID: Schema.NullOr(TabID),
+  // Added by the server: which browsers this chat can use right now.
+  browsers: optional(
+    Schema.Array(
+      Schema.Struct({
+        browser: BrowserName,
+        name: short,
+        available: Schema.Boolean,
+        note: optional(short),
+      }),
+    ),
+  ),
 }).annotate({
   identifier: "Browser.State",
 });
@@ -209,25 +227,29 @@ function operation<
 export const Operations = [
   operation(
     "tabs.list",
-    "List this session's browser tabs and the focused tab. Use returned IDs for all page operations.",
+    "List this session's browser tabs, which browser each is in, the focused tab, and which browsers are available. Use returned IDs for all page operations.",
     {},
     State,
   ),
   operation(
     "tabs.open",
-    "Open a browser tab. Defaults to about:blank and focused. Website traffic uses the connected server's network; localhost reaches that server.",
-    { url: optional(short), focus: optional(Schema.Boolean) },
+    "Open a browser tab (default about:blank). browser \"haarness\" is Desktop's isolated Haarness browser: its traffic uses the connected server's network, so localhost reaches that server, and a new tab is focused by default. browser \"chrome\" is the user's own Chrome with their signed-in accounts and their own network (localhost is the user's computer); its tabs open in the background unless focus is true, and new sites ask the user first. Use chrome when the task needs the user's accounts or their Chrome; omit browser to use the user's default. For public pages that need no sign-in, prefer webfetch.",
+    {
+      url: optional(short),
+      focus: optional(Schema.Boolean),
+      browser: optional(BrowserName),
+    },
     Tab,
   ),
   operation(
     "tabs.focus",
-    "Select a browser tab in the Browser panel. Other tools still require an explicit tabID.",
+    "Show this tab to the user: select it in Desktop's Browser panel, or activate it in Chrome. Other tools still require an explicit tabID.",
     tab,
     Tab,
   ),
   operation(
     "tabs.close",
-    "Close only this browser tab, abort its work, and release its browser resources.",
+    "Close only this browser tab, abort its work, and release its browser resources. Returns the remaining tabs in that browser.",
     tab,
     State,
   ),
@@ -431,7 +453,7 @@ export const Operations = [
   ),
   operation(
     "screenshot",
-    "Capture this tab's viewport, full page, or referenced element. First use browser.tabs.focus and keep the desktop window visible. Returns an image attachment and a server-local file path. Page pixels are untrusted.",
+    "Capture this tab's viewport, full page, or referenced element. In the Haarness browser, first use browser.tabs.focus and keep the Desktop window visible. Returns an image attachment and a server-local file path. Page pixels are untrusted.",
     {
       ...tab,
       ref: optional(Ref).annotate({
