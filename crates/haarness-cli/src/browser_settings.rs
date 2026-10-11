@@ -5,7 +5,7 @@
 use crate::input_settings::{files, layers, project_files, target};
 use anyhow::{Result, bail, ensure};
 use haarness_server::browser_policy::{
-    BrowserPolicy, BrowserSettings, ChromeLayering, ChromeSettings,
+    BrowserPolicy, BrowserSettings, ChromeLayering, ChromeRestriction, ChromeSettings,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -113,13 +113,21 @@ fn snapshot(
             "chrome": {
                 "settings": chrome.settings,
                 "globalSettings": global_settings,
-                "projectRestrictions": chrome.restrictions,
+                // In English, for clients older than `restrictions`.
+                "projectRestrictions": chrome
+                    .restrictions
+                    .iter()
+                    .map(ChromeRestriction::describe)
+                    .collect::<Vec<_>>(),
+                "restrictions": chrome.restrictions,
             },
         }),
         settings: BrowserSettings {
             default_browser: chrome.settings.default_browser,
             policy: effective,
             chrome: chrome.policy,
+            chrome_switched_off: !chrome.global_enabled,
+            chrome_blocked_by: chrome.blocked_by,
         },
     })
 }
@@ -437,7 +445,7 @@ mod tests {
     #[test]
     fn chrome_settings_are_global_project_layers_only_tighten_and_bad_values_never_break_desktop() {
         use haarness_core::PermissionDecision::{Allow, Ask, Deny};
-        use haarness_server::browser_policy::{ChromeCategory as C, DefaultBrowser};
+        use haarness_server::browser_policy::{ChromeBlock, ChromeCategory as C, DefaultBrowser};
         let dir = Scratch::new();
         let global = dir.path().join("global");
         let workspace = dir.path().join("project");
@@ -508,6 +516,13 @@ mod tests {
         assert!(restrictions.contains(&json!("Uploads: Block by default")));
         assert!(restrictions.contains(&json!("Scripts on https://mail.example.com: Block")));
         assert_eq!(restrictions.len(), 2, "{restrictions:?}");
+        // The same, as data clients put into their own words.
+        let structured = value["chrome"]["restrictions"].as_array().unwrap();
+        assert!(
+            structured.contains(&json!({"kind":"default","category":"uploads","decision":"deny"}))
+        );
+        assert!(structured.contains(&json!({"kind":"site","origin":"https://mail.example.com","category":"scripts","decision":"deny"})));
+        assert_eq!(structured.len(), 2, "{structured:?}");
         assert_eq!(
             value["chrome"]["globalSettings"]["defaults"]["scripts"],
             "ask"
@@ -525,8 +540,15 @@ mod tests {
             json!({"browser":{"chrome":{"enabled":false}}}).to_string(),
         )
         .unwrap();
-        assert!(!load(true, &global, &workspace).unwrap().chrome.enabled);
-        assert!(load(false, &global, &workspace).unwrap().chrome.enabled);
+        let settings = load(true, &global, &workspace).unwrap();
+        assert!(!settings.chrome.enabled && !settings.chrome_switched_off);
+        assert_eq!(settings.chrome_blocked_by, Some(ChromeBlock::Project));
+        assert_eq!(
+            request(true, &global, &workspace, &json!({})).unwrap()["chrome"]["restrictions"][0],
+            json!({"kind":"off"})
+        );
+        let settings = load(false, &global, &workspace).unwrap();
+        assert!(settings.chrome.enabled && settings.chrome_blocked_by.is_none());
         // Unreadable Chrome settings fall back to Chrome's defaults; the
         // Haarness browser keeps working.
         fs::write(
@@ -547,6 +569,20 @@ mod tests {
             json!({"browser":{"policy":{"enabled":false,"defaults":{"browsing":"allow","downloads":"allow","uploads":"allow"},"sites":[]}}}).to_string(),
         )
         .unwrap();
-        assert!(!load(false, &global, &workspace).unwrap().chrome.enabled);
+        let settings = load(false, &global, &workspace).unwrap();
+        assert!(!settings.chrome.enabled && !settings.chrome_switched_off);
+        assert_eq!(
+            settings.chrome_blocked_by,
+            Some(ChromeBlock::BrowserControl)
+        );
+        // Chrome's own switch off is its own reason.
+        fs::write(
+            global.join("haarness.json"),
+            json!({"browser":{"chrome":{"enabled":false}}}).to_string(),
+        )
+        .unwrap();
+        let settings = load(false, &global, &workspace).unwrap();
+        assert!(!settings.chrome.enabled && settings.chrome_switched_off);
+        assert_eq!(settings.chrome_blocked_by, None);
     }
 }

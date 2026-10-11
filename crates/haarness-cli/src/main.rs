@@ -4821,7 +4821,8 @@ impl RunWatch {
                 );
             }
             let decision = if pending.explicit {
-                self.ask_explicit(&request).await?
+                self.ask_explicit(&request, &permission_arguments(&pending))
+                    .await?
             } else if self.ask(&request).await? {
                 PermissionReplyDecision::Once
             } else {
@@ -4862,9 +4863,19 @@ impl RunWatch {
     }
 
     /// A site in the user's Chrome: allow it for this chat, once, or not.
-    async fn ask_explicit(&self, request: &str) -> Result<PermissionReplyDecision> {
+    /// The call's own arguments follow the request, so "once" approves a call
+    /// the person has seen.
+    async fn ask_explicit(
+        &self,
+        request: &str,
+        arguments: &[String],
+    ) -> Result<PermissionReplyDecision> {
         let _paused = self.activity.as_ref().map(RunActivity::pause);
-        eprint!("The agent asks to {request}.\n[y] allow in this chat / [o] once / [N] ");
+        eprintln!("The agent asks to {request}.");
+        for line in arguments {
+            eprintln!("{line}");
+        }
+        eprint!("[y] allow in this chat / [o] once / [N] ");
         let _ = io::stderr().flush();
         let answer = tokio::task::spawn_blocking(|| {
             let mut line = String::new();
@@ -4969,6 +4980,50 @@ fn chrome_sites(pending: &haarness_protocol::PendingPermissionInfo) -> Vec<Strin
         }
     }
     sites
+}
+
+/// The call behind a Chrome approval, one line per argument as Desktop shows
+/// it (`url`, `script`, `text`, `paths`, …) without the server's own
+/// preparation. Control and direction characters are escaped, so a page
+/// cannot redraw the prompt, and a long value says how much is not shown.
+fn permission_arguments(pending: &haarness_protocol::PendingPermissionInfo) -> Vec<String> {
+    use std::fmt::Write as _;
+    const LIMIT: usize = 2_000;
+    let shown = |text: &str| -> String {
+        let mut out = String::new();
+        for c in text.chars() {
+            if (c.is_control() && c != '\n')
+                || matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+            {
+                out.extend(c.escape_unicode());
+            } else {
+                out.push(c);
+            }
+        }
+        let total = out.chars().count();
+        if total > LIMIT {
+            let mut cut: String = out.chars().take(LIMIT).collect();
+            let _ = write!(cut, "… ({} more characters not shown)", total - LIMIT);
+            cut
+        } else {
+            out
+        }
+    };
+    let Some(arguments) = pending.detail.as_object() else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    for (key, value) in arguments.iter().filter(|(key, _)| *key != "__browser") {
+        let text = match value {
+            serde_json::Value::String(text) => shown(text),
+            other => shown(&other.to_string()),
+        };
+        let key = shown(key);
+        let mut parts = text.split('\n');
+        lines.push(format!("  {key}: {}", parts.next().unwrap_or_default()));
+        lines.extend(parts.map(|part| format!("    {part}")));
+    }
+    lines
 }
 
 /// The terminal a run's approvals are typed into when stdin carries piped
@@ -6603,20 +6658,8 @@ async fn application_at(
     management.attach_runtime(&runtime);
     workflow_host.attach(&runtime);
     // Chrome groups a conversation's tabs under its title and keeps
-    // scheduled runs out of the user's Chrome. Weak: the runtime owns the
-    // tools that own the broker.
-    let threads = Arc::downgrade(&runtime);
-    browser.set_thread_lookup(Arc::new(move |thread| {
-        let runtime = threads.upgrade();
-        Box::pin(async move {
-            let thread = runtime?.get_thread(thread).await.ok()?;
-            Some(haarness_server::browser::ThreadMeta {
-                title: thread.title,
-                parent: thread.parent_id,
-                scheduled: thread.schedule.is_some(),
-            })
-        })
-    }));
+    // scheduled runs, and everything they start, out of the user's Chrome.
+    browser.set_thread_lookup(haarness_server::browser::runtime_threads(&runtime));
     if recover {
         let recovered = runtime.recover().await?;
         if recovered > 0 {
@@ -11739,6 +11782,38 @@ mod tests {
             super::chrome_sites(&pending),
             vec!["https://app.example.test"]
         );
+        // The terminal shows the call itself: here a script, after the lines
+        // above, and never the server's own preparation.
+        pending.detail = serde_json::json!({
+            "tabID": "tab_1",
+            "script": "fetch('/api/transfer', {method: 'POST'})\n  .then(r => r.json())\u{1b}[2K",
+            "__browser": {"lease": "secret"},
+        });
+        assert_eq!(
+            super::permission_arguments(&pending),
+            vec![
+                "  tabID: tab_1",
+                "  script: fetch('/api/transfer', {method: 'POST'})",
+                "      .then(r => r.json())\\u{1b}[2K",
+            ]
+        );
+        pending.detail = serde_json::json!({
+            "url": "https://bank.example/transfer?to=x&amount=9\u{202e}",
+            "paths": ["report.pdf"],
+            "text": "x".repeat(2_005),
+        });
+        let lines = super::permission_arguments(&pending);
+        assert_eq!(
+            lines[0],
+            "  url: https://bank.example/transfer?to=x&amount=9\\u{202e}"
+        );
+        assert_eq!(lines[1], "  paths: [\"report.pdf\"]");
+        assert!(
+            lines[2].ends_with("x… (5 more characters not shown)"),
+            "{}",
+            lines[2]
+        );
+        assert_eq!(lines.len(), 3);
         assert!(matches!(
             super::explicit_answer("y\n"),
             super::PermissionReplyDecision::Always

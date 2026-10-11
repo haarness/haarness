@@ -100,8 +100,8 @@ Desktop's dock and the TUI card read `explicit` and show **Allow in Chrome** wit
 **Who cannot answer.**
 
 - Client auto-repliers skip explicit requests: the TUI's `--yolo` and client-side Auto replies, `haarness run --yolo` and `workflow run --yolo` watchers, ACP, and Desktop's fallback auto-approver for older servers.
-- `haarness run` at a terminal asks `[y] allow in this chat / [o] once / [N]`. Without a terminal it stops with "Stopped: the agent asked to use &lt;origin&gt; in Chrome, which always needs a person. Answer in the TUI or Desktop, or allow the site under Settings → Browser → Chrome."
-- Unattended turns (`request.auto_approve`, schedules) fail immediately: "Chrome needs the user's approval for &lt;origin&gt; and this run cannot ask. Ask the user to allow it in an interactive chat, then retry."
+- `haarness run` at a terminal shows the call's arguments (the URL, script, text or files) and asks `[y] allow in this chat / [o] once / [N]`. Without a terminal it stops with "Stopped: the agent asked to use &lt;origin&gt; in Chrome, which always needs a person. Answer in the TUI or Desktop, or allow the site under Settings → Browser → Chrome."
+- Scheduled runs, and the subagents, workflows and workflow agents they start, fail immediately, in turns and in direct tool calls: "Chrome needs the user's approval for &lt;origin&gt; and this run cannot ask. Ask the user to allow it in an interactive chat, then retry." A turn is unattended only through its root chat's schedule; `--yolo` clients and their workflow agents still ask.
 - Remote-scoped requests (published chats, remote control) answering an explicit prompt get 403 "Answer this on the computer running Chrome."
 
 **API.** `PendingPermissionInfo.explicit` (`#[serde(default)]`) and the `permission.requested` event payload's `explicit: true` let clients tell these requests apart; both are in the OpenAPI document and the generated SDKs. Haarness browser `browser_site:` gates without the `chrome-` prefix behave as before.
