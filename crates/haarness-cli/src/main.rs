@@ -10990,7 +10990,7 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert_eq!(error.to_string(), "invalid request: Unknown agent: nope");
+        assert_eq!(error.to_string(), "Unknown agent: nope");
 
         let thread = client.thread(thread_id).await.unwrap();
         let refused = client

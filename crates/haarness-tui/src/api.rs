@@ -1781,7 +1781,7 @@ pub struct ApiRefusal {
 
 impl std::fmt::Display for ApiRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.message)
+        formatter.write_str(without_category(&self.message))
     }
 }
 
@@ -1817,8 +1817,8 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
     let refusal = match serde_json::from_str::<haarness_protocol::ApiError>(&body) {
         Ok(error) => ApiRefusal {
             status,
-            message: without_category(&error.message).to_owned(),
             code: Some(error.code),
+            message: error.message,
         },
         Err(_) => {
             let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1839,13 +1839,13 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
 
 /// The server prefixes each message with its error category ("tool error:
 /// …"); the category is already in `code`, and people act on the sentence.
+/// "not found:" and "permission denied:" stay: there the category is the news
+/// ("not found: command /nope").
 fn without_category(message: &str) -> &str {
     [
         "tool error: ",
         "invalid request: ",
-        "not found: ",
         "conflict: ",
-        "permission denied: ",
         "provider error: ",
         "storage error: ",
     ]
