@@ -176,6 +176,9 @@ impl SqliteStore {
             .collect::<HashSet<_>>();
         let mut created = Vec::new();
         let mut merged = Vec::new();
+        // Threads an earlier sanitized import left with redaction markers: a
+        // full archive of the same chats brings their real content back.
+        let mut restored = Vec::new();
         for id in &order {
             let entry = entries
                 .get(id)
@@ -198,6 +201,19 @@ impl SqliteStore {
                     )));
                 }
                 merged.push(*id);
+                if !archive.sanitized && haarness_protocol::is_sanitized_thread(&current) {
+                    tx.execute(
+                        "UPDATE threads SET title=?2,fork_origin_json=?3,schedule_json=?4 WHERE id=?1",
+                        params![
+                            id.to_string(),
+                            entry.thread.title,
+                            entry.thread.fork_origin.as_ref().map(serde_json::to_string).transpose().map_err(super::storage)?,
+                            entry.thread.schedule.as_ref().map(serde_json::to_string).transpose().map_err(super::storage)?,
+                        ],
+                    )
+                    .map_err(super::storage)?;
+                    restored.push(*id);
+                }
                 continue;
             }
             tx.execute(
@@ -242,6 +258,13 @@ impl SqliteStore {
                             "turn {} already belongs to another thread",
                             turn.id
                         )));
+                    }
+                    if restored.contains(id) {
+                        tx.execute(
+                            "UPDATE turns SET error=?2 WHERE id=?1",
+                            params![turn.id.to_string(), turn.error],
+                        )
+                        .map_err(super::storage)?;
                     }
                     continue;
                 }
@@ -299,6 +322,16 @@ impl SqliteStore {
                             item.id
                         )));
                     }
+                    if restored.contains(id) {
+                        tx.execute(
+                            "UPDATE items SET data_json=?2 WHERE id=?1",
+                            params![
+                                item.id.to_string(),
+                                serde_json::to_string(&item.data).map_err(super::storage)?,
+                            ],
+                        )
+                        .map_err(super::storage)?;
+                    }
                     continue;
                 }
                 if let Some(existing) = tx
@@ -333,7 +366,7 @@ impl SqliteStore {
                 .map_err(super::storage)?;
             }
 
-            if created.contains(id) {
+            if created.contains(id) || restored.contains(id) {
                 let goal = entry.goal.clone().map(pause_imported_goal);
                 let goal_json = goal
                     .as_ref()
@@ -349,7 +382,9 @@ impl SqliteStore {
                 if goal_json.is_some() || loop_json.is_some() {
                     tx.execute(
                         "INSERT INTO thread_extras(thread_id,goal,goal_json,loop_json)
-                         VALUES(?1,?2,?3,?4)",
+                         VALUES(?1,?2,?3,?4)
+                         ON CONFLICT(thread_id) DO UPDATE SET
+                           goal=excluded.goal,goal_json=excluded.goal_json,loop_json=excluded.loop_json",
                         params![
                             id.to_string(),
                             goal.as_ref().map(|goal| goal.goal.as_str()),
@@ -385,6 +420,7 @@ impl SqliteStore {
             threads,
             created,
             merged,
+            restored,
         })
     }
 }
@@ -603,6 +639,80 @@ mod tests {
         assert!(second.created.is_empty());
         assert_eq!(second.merged.len(), 2);
         assert_eq!(target.list_threads(true).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_full_archive_replaces_the_markers_of_an_earlier_sanitized_import() {
+        let source = SqliteStore::in_memory().unwrap();
+        let root = source
+            .create_thread(CreateThreadRequest {
+                title: Some("Real title".into()),
+                ..CreateThreadRequest::default()
+            })
+            .await
+            .unwrap();
+        let (turn, _, _) = source
+            .start_turn(root.id, turn_request("real question"))
+            .await
+            .unwrap();
+        source
+            .append_item(
+                root.id,
+                Some(turn.id),
+                ItemData::AssistantMessage {
+                    text: "real answer".into(),
+                },
+            )
+            .await
+            .unwrap();
+        source
+            .set_goal(root.id, Some("real goal".into()))
+            .await
+            .unwrap();
+        let full = source.export_session_archive(root.id, false).await.unwrap();
+        let sanitized = source.export_session_archive(root.id, true).await.unwrap();
+
+        let target = SqliteStore::in_memory().unwrap();
+        target
+            .import_session_archive(sanitized.clone())
+            .await
+            .unwrap();
+        assert!(
+            target
+                .get_thread(root.id)
+                .await
+                .unwrap()
+                .title
+                .starts_with("[redacted:")
+        );
+        // A sanitized archive never overwrites anything.
+        let again = target.import_session_archive(sanitized).await.unwrap();
+        assert!(again.restored.is_empty());
+
+        let result = target.import_session_archive(full.clone()).await.unwrap();
+        assert_eq!(result.merged, [root.id]);
+        assert_eq!(result.restored, [root.id]);
+        assert_eq!(result.root.title, "Real title");
+        let texts = target
+            .list_items(root.id, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|item| match item.data {
+                ItemData::UserMessage { text, .. } | ItemData::AssistantMessage { text } => {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(texts, ["real question", "real answer"]);
+        assert_eq!(
+            target.goal_state(root.id).await.unwrap().unwrap().goal,
+            "real goal"
+        );
+        // Real content is never touched again.
+        let last = target.import_session_archive(full).await.unwrap();
+        assert!(last.restored.is_empty());
     }
 
     #[tokio::test]

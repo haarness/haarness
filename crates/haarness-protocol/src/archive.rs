@@ -54,6 +54,10 @@ pub struct SessionArchiveImportResult {
     pub threads: Vec<Thread>,
     pub created: Vec<ThreadId>,
     pub merged: Vec<ThreadId>,
+    /// Merged threads that came from a sanitized archive and now hold this
+    /// archive's real content in place of the redaction markers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restored: Vec<ThreadId>,
 }
 
 impl SessionArchive {
@@ -295,6 +299,13 @@ impl SessionArchive {
         }
         self
     }
+}
+
+/// Whether `thread` came from a sanitized archive: a sanitized export always
+/// replaces the title with its marker.
+#[must_use]
+pub fn is_sanitized_thread(thread: &Thread) -> bool {
+    thread.title == marker("thread-title", thread.id)
 }
 
 fn marker(kind: &str, id: impl std::fmt::Display) -> String {
