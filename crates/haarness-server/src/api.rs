@@ -441,6 +441,11 @@ fn openapi_document() -> Value {
     let reference: Value =
         serde_json::from_str(ROUTE_REFERENCE).expect("sdks/openapi.json is valid JSON");
     // Annotated paths and live schemas win; the reference fills the gaps.
+    // What it filled is listed under `x-haarness-reference`, so
+    // `sdks/tests/server.py` can export the server's own document as
+    // `sdks/schema.json`: generating the SDKs from a document that already
+    // holds their output would keep a removed schema forever.
+    let mut filled = serde_json::Map::new();
     for (section, field) in [("paths", None), ("components", Some("schemas"))] {
         let (Some(source), Some(target)) = (
             reference
@@ -457,10 +462,16 @@ fn openapi_document() -> Value {
         ) else {
             continue;
         };
+        let mut keys = Vec::new();
         for (key, value) in source {
-            target.entry(key.clone()).or_insert_with(|| value.clone());
+            if !target.contains_key(key) {
+                target.insert(key.clone(), value.clone());
+                keys.push(Value::String(key.clone()));
+            }
         }
+        filled.insert(field.unwrap_or(section).to_owned(), Value::Array(keys));
     }
+    document["x-haarness-reference"] = Value::Object(filled);
     document
 }
 
@@ -2343,6 +2354,18 @@ mod openapi_tests {
         }
         let reference: Value = serde_json::from_str(super::ROUTE_REFERENCE).unwrap();
         assert!(paths.len() >= reference["paths"].as_object().unwrap().len());
+        // Fill-ins are listed; annotated routes are the server's own.
+        let filled = |section: &str, key: &str| {
+            document["x-haarness-reference"][section]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == key)
+        };
+        assert!(filled("paths", "/v1/threads"));
+        assert!(!filled("paths", "/v1/profiles"));
+        assert!(filled("schemas", "SessionArchiveImportResult"));
+        assert!(!filled("schemas", "Thread"));
         let schemas = document["components"]["schemas"].as_object().unwrap();
         let text = document.to_string();
         for reference in text.split("\"#/components/schemas/").skip(1) {
