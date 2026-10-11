@@ -17177,7 +17177,9 @@ fn a_local_model_nobody_chose_is_named_on_the_home_screen() {
     };
     let text = home(&app);
     assert!(
-        text.contains("Replies come from qwen3:0.6b, which Ollama runs on this computer.  ·  /connect"),
+        text.contains(
+            "Replies come from qwen3:0.6b, which Ollama runs on this computer.  ·  /connect"
+        ),
         "{text}"
     );
     // Too narrow for the whole sentence: no dangling separator.
