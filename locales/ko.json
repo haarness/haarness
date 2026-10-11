@@ -358,7 +358,7 @@
   "Always for this folder": "이 폴더에서는 항상",
   "Answer": "답변",
   "Archived chats": "보관된 채팅",
-  "Automatic approvals": "자동 승인",
+  "Approvals: {mode}": "승인: {mode}",
   "Back to list": "목록으로 돌아가기",
   "Binary file changed.": "바이너리 파일이 변경되었습니다.",
   "Browse and edit project files": "프로젝트 파일 탐색 및 편집",
@@ -1814,5 +1814,15 @@
   "Choose a project to start a chat": "채팅를 시작할 프로젝트 선택",
   "Chat text size": "채팅 글자 크기",
   "Run a prompt on a schedule in {project}. Chats appear under Scheduled in the sidebar.": "{project}에서 프롬프트를 예약 실행합니다. 채팅는 사이드바의 예약 항목에 표시됩니다.",
-  "Fork chat": "채팅 분기"
+  "Fork chat": "채팅 분기",
+  "Fork of untitled chat": "제목 없는 채팅의 분기",
+  "Haarness could not preview this profile.": "Haarness가 이 프로필을 미리 볼 수 없습니다.",
+  "Restoring “{name}” writes {count} file.": "‘{name}’을(를) 복원하면 파일 {count}개를 씁니다.",
+  "Restoring “{name}” writes {count} files.": "‘{name}’을(를) 복원하면 파일 {count}개를 씁니다.",
+  "No existing file is replaced.": "기존 파일은 교체되지 않습니다.",
+  "{count} file already exists and will be replaced.": "파일 {count}개가 이미 있으며 교체됩니다.",
+  "{count} files already exist and will be replaced.": "파일 {count}개가 이미 있으며 교체됩니다.",
+  "Will be replaced": "교체 예정",
+  "Profile “{name}” restored.": "프로필 ‘{name}’을(를) 복원했습니다.",
+  "It already exists and will be replaced.": "이 파일은 이미 있으며 교체됩니다."
 }

@@ -358,7 +358,7 @@
   "Always for this folder": "Sempre para esta pasta",
   "Answer": "Resposta",
   "Archived chats": "Conversas arquivadas",
-  "Automatic approvals": "Aprovações automáticas",
+  "Approvals: {mode}": "Aprovações: {mode}",
   "Back to list": "Voltar à lista",
   "Binary file changed.": "Arquivo binário alterado.",
   "Browse and edit project files": "Navegue e edite os arquivos do projeto",
@@ -1814,5 +1814,15 @@
   "Choose a project to start a chat": "Escolha um projeto para iniciar uma conversa",
   "Chat text size": "Tamanho do texto da conversa",
   "Run a prompt on a schedule in {project}. Chats appear under Scheduled in the sidebar.": "Execute um prompt agendado em {project}. As conversas aparecem em Agendadas na barra lateral.",
-  "Fork chat": "Bifurcar a conversa"
+  "Fork chat": "Bifurcar a conversa",
+  "Fork of untitled chat": "Bifurcação de conversa sem título",
+  "Haarness could not preview this profile.": "O Haarness não conseguiu pré-visualizar este perfil.",
+  "Restoring “{name}” writes {count} file.": "Restaurar “{name}” grava {count} arquivo.",
+  "Restoring “{name}” writes {count} files.": "Restaurar “{name}” grava {count} arquivos.",
+  "No existing file is replaced.": "Nenhum arquivo existente é substituído.",
+  "{count} file already exists and will be replaced.": "{count} arquivo já existe e será substituído.",
+  "{count} files already exist and will be replaced.": "{count} arquivos já existem e serão substituídos.",
+  "Will be replaced": "Será substituído",
+  "Profile “{name}” restored.": "Perfil “{name}” restaurado.",
+  "It already exists and will be replaced.": "Ele já existe e será substituído."
 }

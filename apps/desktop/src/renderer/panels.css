@@ -622,5 +622,12 @@
 .file-changed > .icon { color: var(--accent); flex: none; }
 .file-changed > span { flex: 1; min-width: 160px; }
 .file-changed button { min-height: var(--control-sm); padding: 0 var(--s2); }
+/* Save while the choice is open moves focus here and flashes the bar once, so
+   the press visibly lands on what is holding the save back. */
+.file-changed:focus { outline: none; box-shadow: inset 0 0 0 1px var(--accent-edge); }
+.file-changed.attention { animation: file-changed-flash 360ms var(--ease) 2; }
+@keyframes file-changed-flash {
+  50% { background: color-mix(in srgb, var(--accent) 24%, var(--surface)); }
+}
 .preview-inline { border-top: 1px solid var(--border); }
 .file-actions { flex-wrap: wrap; }

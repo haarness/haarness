@@ -358,7 +358,7 @@
   "Always for this folder": "เสมอสำหรับโฟลเดอร์นี้",
   "Answer": "คำตอบ",
   "Archived chats": "แชทที่เก็บถาวร",
-  "Automatic approvals": "การอนุมัติอัตโนมัติ",
+  "Approvals: {mode}": "การอนุมัติ: {mode}",
   "Back to list": "กลับไปยังรายการ",
   "Binary file changed.": "ไฟล์ไบนารีมีการเปลี่ยนแปลง",
   "Browse and edit project files": "เรียกดูและแก้ไขไฟล์โปรเจกต์",
@@ -1814,5 +1814,15 @@
   "Choose a project to start a chat": "เลือกโปรเจกต์เพื่อเริ่มแชท",
   "Chat text size": "ขนาดข้อความสนทนา",
   "Run a prompt on a schedule in {project}. Chats appear under Scheduled in the sidebar.": "เรียกใช้พรอมต์ตามกำหนดการใน {project} แชทจะปรากฏในส่วนกำหนดการที่แถบด้านข้าง",
-  "Fork chat": "แยกแชท"
+  "Fork chat": "แยกแชท",
+  "Fork of untitled chat": "แยกจากแชทไม่มีชื่อ",
+  "Haarness could not preview this profile.": "Haarness แสดงตัวอย่างโปรไฟล์นี้ไม่ได้",
+  "Restoring “{name}” writes {count} file.": "การกู้คืน “{name}” จะเขียน {count} ไฟล์",
+  "Restoring “{name}” writes {count} files.": "การกู้คืน “{name}” จะเขียน {count} ไฟล์",
+  "No existing file is replaced.": "ไม่มีไฟล์ที่มีอยู่ถูกแทนที่",
+  "{count} file already exists and will be replaced.": "มี {count} ไฟล์อยู่แล้วและจะถูกแทนที่",
+  "{count} files already exist and will be replaced.": "มี {count} ไฟล์อยู่แล้วและจะถูกแทนที่",
+  "Will be replaced": "จะถูกแทนที่",
+  "Profile “{name}” restored.": "กู้คืนโปรไฟล์ “{name}” แล้ว",
+  "It already exists and will be replaced.": "ไฟล์นี้มีอยู่แล้วและจะถูกแทนที่"
 }

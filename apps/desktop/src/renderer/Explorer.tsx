@@ -255,6 +255,25 @@ export function Explorer() {
     if (generation === workspaceGeneration && intent === selectionGeneration)
       setSelected(path);
   }
+  /** The bar asking whether to reload a file that changed on disk. */
+  let changedBar: HTMLDivElement | undefined;
+  /** Save can't go ahead until the reader chooses Reload or Keep mine, so
+   * point at that choice rather than appear to do nothing. */
+  function pointAtChangedBar() {
+    const bar = changedBar;
+    if (!bar?.isConnected) return;
+    bar.classList.remove("attention");
+    void bar.offsetWidth; // Restart the flash on every press.
+    bar.classList.add("attention");
+    bar.focus();
+  }
+  /** Once the choice is made, the keyboard goes back to the text it was about. */
+  function backToEditor() {
+    const bar = changedBar;
+    const preview = bar?.closest(".file-preview");
+    if (!preview || !bar!.contains(document.activeElement)) return;
+    setTimeout(() => preview.querySelector<HTMLElement>(".cm-content")?.focus());
+  }
   function save(): Promise<void> {
     const value = file();
     const id = app.state.connection?.id;
@@ -262,6 +281,10 @@ export function Explorer() {
     const existing = pendingSaves.get(value.editor);
     if (existing) return existing;
     if (!dirty(value.path)) return Promise.resolve();
+    if (value.changed) {
+      pointAtChangedBar();
+      return Promise.resolve();
+    }
     const generation = workspaceGeneration;
     const content = edits()[value.path] ?? value.content;
     const pending = window.haarness.files<FileContent>(id, "write", {
@@ -459,12 +482,16 @@ export function Explorer() {
     const generation = workspaceGeneration;
     if (!value || !id) return;
     const disk = await window.haarness.files<FileContent>(id, "read", { path: value.path });
-    if (generation === workspaceGeneration) adopt(value.editor, disk);
+    if (generation !== workspaceGeneration) return;
+    backToEditor();
+    adopt(value.editor, disk);
   }
   /** Keep the edits; the next save replaces the file on disk. */
   function keepMine() {
     const value = file();
-    if (value?.changed) adopt(value.editor, value.changed, true);
+    if (!value?.changed) return;
+    backToEditor();
+    adopt(value.editor, value.changed, true);
   }
   async function restorePreview() {
     const value = file(), id = app.state.connection?.id;
@@ -644,7 +671,13 @@ export function Explorer() {
                   <div class="preview-version-strip">{t("Saved preview version")} <button onClick={() => app.run(restorePreview)}>{t("Restore this version")}</button><button onClick={() => app.run(() => open(value().path, { preview: true }))}>{t("Show current")}</button></div>
                 </Show>
                 <Show when={value().changed}>
-                  <div class="file-changed" role="alert">
+                  <div
+                    ref={changedBar}
+                    class="file-changed"
+                    role="alert"
+                    tabindex="-1"
+                    onAnimationEnd={(event) => event.currentTarget.classList.remove("attention")}
+                  >
                     <Icon name="alert" size="sm" />
                     <span>{t("This file changed on disk while you were editing it.")}</span>
                     <button

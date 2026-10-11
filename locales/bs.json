@@ -358,7 +358,7 @@
   "Always for this folder": "Uvijek za ovu mapu",
   "Answer": "Odgovor",
   "Archived chats": "Arhivirani razgovori",
-  "Automatic approvals": "Automatska odobrenja",
+  "Approvals: {mode}": "Odobrenja: {mode}",
   "Back to list": "Natrag na popis",
   "Binary file changed.": "Binarna datoteka je promijenjena.",
   "Browse and edit project files": "Pregledajte i uredite datoteke projekta",
@@ -1814,5 +1814,15 @@
   "Choose a project to start a chat": "Odaberite projekat za početak razgovora",
   "Chat text size": "Veličina teksta razgovora",
   "Run a prompt on a schedule in {project}. Chats appear under Scheduled in the sidebar.": "Pokrenite upit prema rasporedu u {project}. Razgovori se pojavljuju pod Zakazano u bočnoj traci.",
-  "Fork chat": "Razgranaj razgovor"
+  "Fork chat": "Razgranaj razgovor",
+  "Fork of untitled chat": "Grana razgovora bez naslova",
+  "Haarness could not preview this profile.": "Haarness nije mogao pregledati ovaj profil.",
+  "Restoring “{name}” writes {count} file.": "Vraćanje profila „{name}“ upisuje {count} datoteku.",
+  "Restoring “{name}” writes {count} files.": "Vraćanje profila „{name}“ upisuje datoteke: {count}.",
+  "No existing file is replaced.": "Nijedna postojeća datoteka neće biti zamijenjena.",
+  "{count} file already exists and will be replaced.": "{count} datoteka već postoji i bit će zamijenjena.",
+  "{count} files already exist and will be replaced.": "Postojeće datoteke koje će biti zamijenjene: {count}.",
+  "Will be replaced": "Bit će zamijenjena",
+  "Profile “{name}” restored.": "Profil „{name}“ je vraćen.",
+  "It already exists and will be replaced.": "Već postoji i bit će zamijenjena."
 }

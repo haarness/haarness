@@ -358,7 +358,7 @@
   "Always for this folder": "始终允许此文件夹",
   "Answer": "回答",
   "Archived chats": "已归档对话",
-  "Automatic approvals": "自动批准",
+  "Approvals: {mode}": "批准方式：{mode}",
   "Back to list": "返回列表",
   "Binary file changed.": "二进制文件已更改。",
   "Browse and edit project files": "浏览和编辑项目文件",
@@ -1814,5 +1814,15 @@
   "Choose a project to start a chat": "选择项目以开始对话",
   "Chat text size": "对话文字大小",
   "Run a prompt on a schedule in {project}. Chats appear under Scheduled in the sidebar.": "在{project}中定时运行提示词。对话显示在侧边栏的计划分组下。",
-  "Fork chat": "派生对话"
+  "Fork chat": "派生对话",
+  "Fork of untitled chat": "未命名对话的派生",
+  "Haarness could not preview this profile.": "Haarness 无法预览此配置文件。",
+  "Restoring “{name}” writes {count} file.": "恢复“{name}”将写入 {count} 个文件。",
+  "Restoring “{name}” writes {count} files.": "恢复“{name}”将写入 {count} 个文件。",
+  "No existing file is replaced.": "不会替换任何现有文件。",
+  "{count} file already exists and will be replaced.": "{count} 个文件已存在，将被替换。",
+  "{count} files already exist and will be replaced.": "{count} 个文件已存在，将被替换。",
+  "Will be replaced": "将被替换",
+  "Profile “{name}” restored.": "已恢复配置文件“{name}”。",
+  "It already exists and will be replaced.": "该文件已存在，将被替换。"
 }

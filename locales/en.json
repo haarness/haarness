@@ -358,7 +358,7 @@
   "Always for this folder": "Always for this folder",
   "Answer": "Answer",
   "Archived chats": "Archived chats",
-  "Automatic approvals": "Automatic approvals",
+  "Approvals: {mode}": "Approvals: {mode}",
   "Back to list": "Back to list",
   "Binary file changed.": "Binary file changed.",
   "Browse and edit project files": "Browse and edit project files",
@@ -1814,5 +1814,15 @@
   "Choose a project to start a chat": "Choose a project to start a chat",
   "Chat text size": "Chat text size",
   "Run a prompt on a schedule in {project}. Chats appear under Scheduled in the sidebar.": "Run a prompt on a schedule in {project}. Chats appear under Scheduled in the sidebar.",
-  "Fork chat": "Fork chat"
+  "Fork chat": "Fork chat",
+  "Fork of untitled chat": "Fork of untitled chat",
+  "Haarness could not preview this profile.": "Haarness could not preview this profile.",
+  "Restoring “{name}” writes {count} file.": "Restoring “{name}” writes {count} file.",
+  "Restoring “{name}” writes {count} files.": "Restoring “{name}” writes {count} files.",
+  "No existing file is replaced.": "No existing file is replaced.",
+  "{count} file already exists and will be replaced.": "{count} file already exists and will be replaced.",
+  "{count} files already exist and will be replaced.": "{count} files already exist and will be replaced.",
+  "Will be replaced": "Will be replaced",
+  "Profile “{name}” restored.": "Profile “{name}” restored.",
+  "It already exists and will be replaced.": "It already exists and will be replaced."
 }

@@ -358,7 +358,7 @@
   "Always for this folder": "Altid for denne mappe",
   "Answer": "Svar",
   "Archived chats": "Arkiverede chats",
-  "Automatic approvals": "Automatiske godkendelser",
+  "Approvals: {mode}": "Godkendelser: {mode}",
   "Back to list": "Tilbage til listen",
   "Binary file changed.": "Binær fil ændret.",
   "Browse and edit project files": "Gennemse og rediger projektfiler",
@@ -1814,5 +1814,15 @@
   "Choose a project to start a chat": "Vælg et projekt for at starte en chat",
   "Chat text size": "Tekststørrelse i chatten",
   "Run a prompt on a schedule in {project}. Chats appear under Scheduled in the sidebar.": "Kør en prompt efter en tidsplan i {project}. Chats vises under Planlagt i sidepanelet.",
-  "Fork chat": "Forgren chatten"
+  "Fork chat": "Forgren chatten",
+  "Fork of untitled chat": "Forgrening af unavngivet chat",
+  "Haarness could not preview this profile.": "Haarness kunne ikke vise en forhåndsvisning af denne profil.",
+  "Restoring “{name}” writes {count} file.": "Gendannelse af “{name}” skriver {count} fil.",
+  "Restoring “{name}” writes {count} files.": "Gendannelse af “{name}” skriver {count} filer.",
+  "No existing file is replaced.": "Ingen eksisterende fil bliver erstattet.",
+  "{count} file already exists and will be replaced.": "{count} fil findes allerede og bliver erstattet.",
+  "{count} files already exist and will be replaced.": "{count} filer findes allerede og bliver erstattet.",
+  "Will be replaced": "Bliver erstattet",
+  "Profile “{name}” restored.": "Profilen “{name}” er gendannet.",
+  "It already exists and will be replaced.": "Den findes allerede og bliver erstattet."
 }

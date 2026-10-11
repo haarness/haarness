@@ -358,7 +358,7 @@
   "Always for this folder": "Immer für diesen Ordner",
   "Answer": "Antwort",
   "Archived chats": "Archivierte Chats",
-  "Automatic approvals": "Automatische Freigaben",
+  "Approvals: {mode}": "Freigaben: {mode}",
   "Back to list": "Zurück zur Liste",
   "Binary file changed.": "Binärdatei geändert.",
   "Browse and edit project files": "Projektdateien ansehen und bearbeiten",
@@ -1814,5 +1814,15 @@
   "Choose a project to start a chat": "Projekt wählen, um einen Chat zu starten",
   "Chat text size": "Textgröße im Chat",
   "Run a prompt on a schedule in {project}. Chats appear under Scheduled in the sidebar.": "Führt einen Prompt nach Zeitplan in {project} aus. Chats erscheinen unter Geplant in der Seitenleiste.",
-  "Fork chat": "Chat abzweigen"
+  "Fork chat": "Chat abzweigen",
+  "Fork of untitled chat": "Abzweigung eines unbenannten Chats",
+  "Haarness could not preview this profile.": "Haarness konnte für dieses Profil keine Vorschau erstellen.",
+  "Restoring “{name}” writes {count} file.": "Das Wiederherstellen von „{name}“ schreibt {count} Datei.",
+  "Restoring “{name}” writes {count} files.": "Das Wiederherstellen von „{name}“ schreibt {count} Dateien.",
+  "No existing file is replaced.": "Keine vorhandene Datei wird ersetzt.",
+  "{count} file already exists and will be replaced.": "{count} Datei ist bereits vorhanden und wird ersetzt.",
+  "{count} files already exist and will be replaced.": "{count} Dateien sind bereits vorhanden und werden ersetzt.",
+  "Will be replaced": "Wird ersetzt",
+  "Profile “{name}” restored.": "Profil „{name}“ wiederhergestellt.",
+  "It already exists and will be replaced.": "Sie ist bereits vorhanden und wird ersetzt."
 }

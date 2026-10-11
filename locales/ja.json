@@ -358,7 +358,7 @@
   "Always for this folder": "このフォルダーでは常に許可",
   "Answer": "回答",
   "Archived chats": "アーカイブ済みチャット",
-  "Automatic approvals": "自動承認",
+  "Approvals: {mode}": "承認: {mode}",
   "Back to list": "一覧に戻る",
   "Binary file changed.": "バイナリファイルが変更されました。",
   "Browse and edit project files": "プロジェクトのファイルを閲覧・編集",
@@ -1814,5 +1814,15 @@
   "Choose a project to start a chat": "プロジェクトを選んでチャットを開始",
   "Chat text size": "チャットの文字サイズ",
   "Run a prompt on a schedule in {project}. Chats appear under Scheduled in the sidebar.": "{project}でプロンプトを定期実行します。チャットはサイドバーの「スケジュール済み」に表示されます。",
-  "Fork chat": "チャットを分岐"
+  "Fork chat": "チャットを分岐",
+  "Fork of untitled chat": "無題のチャットの分岐",
+  "Haarness could not preview this profile.": "Haarness はこのプロファイルをプレビューできませんでした。",
+  "Restoring “{name}” writes {count} file.": "「{name}」を復元すると {count} 個のファイルを書き込みます。",
+  "Restoring “{name}” writes {count} files.": "「{name}」を復元すると {count} 個のファイルを書き込みます。",
+  "No existing file is replaced.": "既存のファイルは置き換えられません。",
+  "{count} file already exists and will be replaced.": "{count} 個のファイルは既に存在し、置き換えられます。",
+  "{count} files already exist and will be replaced.": "{count} 個のファイルは既に存在し、置き換えられます。",
+  "Will be replaced": "置き換えられます",
+  "Profile “{name}” restored.": "プロファイル「{name}」を復元しました。",
+  "It already exists and will be replaced.": "このファイルは既に存在し、置き換えられます。"
 }

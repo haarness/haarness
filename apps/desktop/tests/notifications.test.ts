@@ -200,6 +200,12 @@ test("a chat without a generated title is named untitled, not by the server's pl
   await tick();
   await pending;
   assert.equal(f.shown[0].body, "Untitled chat · My project");
+  const fork = f.center.receive("a", "My project", 1, event({ eventId: 2 }), async () =>
+    ({ title: "Fork of New thread", id: "conversation" }) as Thread,
+  );
+  await tick();
+  await fork;
+  assert.equal(f.shown[1].body, "Fork of untitled chat · My project");
 });
 
 test("notification controls independently govern completion, approvals and questions", async () => {

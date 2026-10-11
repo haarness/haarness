@@ -1960,12 +1960,16 @@ export function Session() {
                     }
                   />
                   <Show when={state.connection}>
+                    {/* The name carries the mode it shows, so a voice user
+                        can say what they see (WCAG 2.5.3); a name that changes
+                        with its state cannot also be a pressed toggle. */}
                     <button
                       class="pill-select approval-mode"
                       classList={{ enabled: app.isAutoApproval() }}
                       disabled={!!state.openingProject}
-                      aria-label={t("Automatic approvals")}
-                      aria-pressed={app.isAutoApproval()}
+                      aria-label={t("Approvals: {mode}", {
+                        mode: app.isAutoApproval() ? t("Auto") : t("Review"),
+                      })}
                       aria-description={approvalModeHint()}
                       title={approvalModeHint()}
                       onClick={() =>

@@ -358,7 +358,7 @@
   "Always for this folder": "一律允許此資料夾",
   "Answer": "回答",
   "Archived chats": "已封存對話",
-  "Automatic approvals": "自動核准",
+  "Approvals: {mode}": "核准方式：{mode}",
   "Back to list": "返回清單",
   "Binary file changed.": "二進位檔案已變更。",
   "Browse and edit project files": "瀏覽與編輯專案檔案",
@@ -1814,5 +1814,15 @@
   "Choose a project to start a chat": "選擇專案以開始對話",
   "Chat text size": "對話文字大小",
   "Run a prompt on a schedule in {project}. Chats appear under Scheduled in the sidebar.": "在{project}中定時執行提示詞。對話會顯示在側邊欄的排程群組下。",
-  "Fork chat": "分支對話"
+  "Fork chat": "分支對話",
+  "Fork of untitled chat": "未命名對話的分支",
+  "Haarness could not preview this profile.": "Haarness 無法預覽此設定檔。",
+  "Restoring “{name}” writes {count} file.": "還原「{name}」將寫入 {count} 個檔案。",
+  "Restoring “{name}” writes {count} files.": "還原「{name}」將寫入 {count} 個檔案。",
+  "No existing file is replaced.": "不會取代任何現有檔案。",
+  "{count} file already exists and will be replaced.": "{count} 個檔案已存在，將被取代。",
+  "{count} files already exist and will be replaced.": "{count} 個檔案已存在，將被取代。",
+  "Will be replaced": "將被取代",
+  "Profile “{name}” restored.": "已還原設定檔「{name}」。",
+  "It already exists and will be replaced.": "該檔案已存在，將被取代。"
 }

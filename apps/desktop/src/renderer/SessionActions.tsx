@@ -3,7 +3,7 @@ import type { Thread } from "@haarness/sdk";
 import { useApp } from "./state";
 import { ask, Button } from "./ui";
 import { MenuButton } from "./MenuButton";
-import { chatTitle } from "./chat-title";
+import { chatTitle, editableTitle } from "./chat-title";
 
 export function SessionActions(props: {
   thread: Thread;
@@ -95,7 +95,16 @@ export async function renameSession(
 ) {
   const input = await ask(
     t("Rename chat"),
-    [{ name: "title", label: t("Title"), value: thread.title, required: true }],
+    [
+      {
+        name: "title",
+        label: t("Title"),
+        // Never the server's placeholder title ("New thread").
+        value: editableTitle(thread.title),
+        placeholder: t("Untitled chat"),
+        required: true,
+      },
+    ],
     {
       // `required` accepts spaces, which would leave a blank row and header.
       onSubmit: async ({ title }) => {
