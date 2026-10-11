@@ -2218,7 +2218,6 @@
   "Agents may not use Chrome": "Agenter kan ikke bruke Chrome",
   "Agents can use your own Chrome — with your sign-ins — through the Haarness for Chrome extension. Each new site asks first.": "Agenter kan bruke din egen Chrome – med innloggingene dine – gjennom utvidelsen Haarness for Chrome. Hvert nytt nettsted spør først.",
   "You are connected over SSH. Chrome works with projects on the computer where Chrome runs.": "Du er koblet til via SSH. Chrome fungerer med prosjekter på datamaskinen der Chrome kjører.",
-  "This terminal reaches the project from another computer. Chrome works with projects on the computer where Chrome runs.": "Denne terminalen når prosjektet fra en annen datamaskin. Chrome fungerer med prosjekter på datamaskinen der Chrome kjører.",
   "On that computer, run {command}, or open Settings → Browser → Chrome in Haarness Desktop.": "Kjør {command} på den datamaskinen, eller åpne Innstillinger → Nettleser → Chrome i Haarness Desktop.",
   "Checking this computer…": "Sjekker denne datamaskinen…",
   "Could not set up Chrome": "Kunne ikke sette opp Chrome",
@@ -2250,7 +2249,6 @@
   "Open the Haarness for Chrome page in the Chrome Web Store:": "Åpne siden for Haarness for Chrome i Chrome Nettmarked:",
   "Click Add to Chrome": "Klikk «Legg til i Chrome»",
   "Pin Haarness to the toolbar": "Fest Haarness til verktøylinjen",
-  "This build of Haarness has no Haarness for Chrome extension to load.": "Denne versjonen av Haarness har ingen Haarness for Chrome-utvidelse å laste inn.",
   "Open {page} in {browser}": "Åpne {page} i {browser}",
   "or {page} in {browser}": "eller {page} i {browser}",
   "Turn on Developer mode (keep it on)": "Slå på «Utviklermodus» (la den være på)",
@@ -2395,5 +2393,15 @@
   "This project's Haarness server did not answer in time.": "Haarness-serveren for dette prosjektet svarte ikke i tide.",
   "This chat has no tabs here.": "Denne chatten har ingen faner her.",
   "Haarness for Chrome restarted. Try again.": "Haarness for Chrome ble startet på nytt. Prøv igjen.",
-  "Haarness for Chrome is restarting. Try again.": "Haarness for Chrome starter på nytt. Prøv igjen."
+  "Haarness for Chrome is restarting. Try again.": "Haarness for Chrome starter på nytt. Prøv igjen.",
+  "Agent browser control is off": "Agentens nettleserstyring er slått av",
+  "Agents can't use any browser in this project, Chrome included. Turn on Agent browser control in Haarness Desktop (Settings → Browser), or set browser.policy.enabled to true in your Haarness config.": "Agenter kan ikke bruke noen nettleser i dette prosjektet, heller ikke Chrome. Slå på agentens nettleserstyring i Haarness Desktop (Innstillinger → Nettleser), eller sett browser.policy.enabled til true i Haarness-konfigurasjonen.",
+  "This project's settings turn Chrome off": "Innstillingene for dette prosjektet slår av Chrome",
+  "Agents can still use Chrome in your other projects. To use it here, remove browser.chrome.enabled: false from this project's Haarness config.": "Agenter kan fortsatt bruke Chrome i de andre prosjektene dine. For å bruke det her, fjern browser.chrome.enabled: false fra Haarness-konfigurasjonen for dette prosjektet.",
+  "This terminal can't set up Chrome for this project. Chrome works with projects on the computer where Chrome runs.": "Denne terminalen kan ikke sette opp Chrome for dette prosjektet. Chrome fungerer med prosjekter på datamaskinen der Chrome kjører.",
+  "This Haarness installation doesn't include Haarness for Chrome. Set it up from Haarness Desktop (Settings → Browser → Chrome), then press Enter here.": "Denne Haarness-installasjonen inneholder ikke Haarness for Chrome. Sett det opp fra Haarness Desktop (Innstillinger → Nettleser → Chrome), og trykk deretter Enter her.",
+  "Chrome is turned off for this project.": "Chrome er slått av for dette prosjektet.",
+  "{category}: {decision} by default": "{category}: {decision} som standard",
+  "{category} on {origin}: {decision}": "{category} på {origin}: {decision}",
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Agentens nettleserstyring er slått av, så agenter kan ikke bruke Chrome i dette prosjektet. Slå den på øverst på denne siden."
 }

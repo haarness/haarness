@@ -1537,7 +1537,7 @@ fn remote_control_dialog(app: &App, width: usize, max_height: usize) -> TaggedLi
 /// next step while they cannot yet (set it up, add the extension, open
 /// Chrome, resume it there), above the two settings people change here.
 fn chrome_dialog(app: &App, width: usize, max_height: usize) -> TaggedLines {
-    use crate::chrome::{LocalAction, Unavailable, View};
+    use crate::chrome::{LocalAction, Off, Unavailable, View};
     const ABOUT: &str = "Agents can use your own Chrome — with your sign-ins — through the Haarness for Chrome extension. Each new site asks first.";
     let theme = &app.theme;
     let language = app.language;
@@ -1599,7 +1599,7 @@ fn chrome_dialog(app: &App, width: usize, max_height: usize) -> TaggedLines {
             paragraph(&mut body, error, theme.danger);
             footer.push("enter try again");
         }
-        View::Off => {
+        View::Off(Off::Switch) => {
             body.push(heading(
                 "○",
                 theme.muted,
@@ -1607,6 +1607,36 @@ fn chrome_dialog(app: &App, width: usize, max_height: usize) -> TaggedLines {
             ));
             paragraph(&mut body, language.text(ABOUT), theme.text);
             footer.push("enter turn on");
+        }
+        // The switch below is on; what keeps Chrome off is elsewhere, so
+        // Enter only looks again once the person has changed it.
+        View::Off(Off::BrowserControl) => {
+            body.push(heading(
+                "○",
+                theme.muted,
+                language.text("Agent browser control is off").into(),
+            ));
+            paragraph(
+                &mut body,
+                language.text("Agents can't use any browser in this project, Chrome included. Turn on Agent browser control in Haarness Desktop (Settings → Browser), or set browser.policy.enabled to true in your Haarness config."),
+                theme.text,
+            );
+            footer.push("enter check again");
+        }
+        View::Off(Off::Project) => {
+            body.push(heading(
+                "○",
+                theme.muted,
+                language
+                    .text("This project's settings turn Chrome off")
+                    .into(),
+            ));
+            paragraph(
+                &mut body,
+                language.text("Agents can still use Chrome in your other projects. To use it here, remove browser.chrome.enabled: false from this project's Haarness config."),
+                theme.text,
+            );
+            footer.push("enter check again");
         }
         View::Connected(hosts) => {
             chrome_connected(app, hosts, content, &mut body);
@@ -1620,10 +1650,13 @@ fn chrome_dialog(app: &App, width: usize, max_height: usize) -> TaggedLines {
             ));
             paragraph(
                 &mut body,
+                // Chrome on this terminal's computer does not reach the
+                // project, which may run elsewhere or under another data
+                // folder here; either way, setting up here would not help.
                 language.text(if crate::connect::over_ssh() {
                     "You are connected over SSH. Chrome works with projects on the computer where Chrome runs."
                 } else {
-                    "This terminal reaches the project from another computer. Chrome works with projects on the computer where Chrome runs."
+                    "This terminal can't set up Chrome for this project. Chrome works with projects on the computer where Chrome runs."
                 }),
                 theme.text,
             );
@@ -1748,7 +1781,11 @@ fn chrome_dialog(app: &App, width: usize, max_height: usize) -> TaggedLines {
                     theme.muted,
                 );
             }
-            for warning in &setup.warnings {
+            // With nothing to add, the steps above already said so in the
+            // person's language; the CLI's English note would repeat it.
+            for warning in setup.warnings.iter().filter(|warning| {
+                !(chrome.nothing_to_add() && crate::chrome::not_included(warning))
+            }) {
                 paragraph(&mut body, warning, theme.muted);
             }
             if chrome.web_store_url().is_some() {
@@ -1759,11 +1796,21 @@ fn chrome_dialog(app: &App, width: usize, max_height: usize) -> TaggedLines {
             footer.push("enter check again");
         }
     }
-    footer.push("esc close");
     if matches!(chrome.hosts, Some(Ok(_))) {
         chrome_settings_rows(app, content, &mut body);
     }
-    body.truncate(max_height.saturating_sub(6).max(1));
+    // A short terminal scrolls the dialog rather than lose its last rows,
+    // which hold the settings its keys change.
+    let room = max_height.saturating_sub(6).max(1);
+    let max_scroll = body.len().saturating_sub(room);
+    app.max_overlay_scroll.set(max_scroll);
+    if max_scroll > 0 {
+        let start = app.overlay_scroll.min(max_scroll);
+        body.drain(..start);
+        body.truncate(room);
+        footer.push("pgup/pgdn scroll");
+    }
+    footer.push("esc close");
     let mut out = TaggedLines::default();
     out.push(card.top());
     out.push(card.header(language.text("Chrome")));
@@ -1934,7 +1981,7 @@ fn chrome_steps(app: &App, setup: &crate::chrome::Setup, content: usize, body: &
     }
     let Some(path) = chrome.extension_path() else {
         body.extend(wrap_panel_text(
-            language.text("This build of Haarness has no Haarness for Chrome extension to load."),
+            language.text("This Haarness installation doesn't include Haarness for Chrome. Set it up from Haarness Desktop (Settings → Browser → Chrome), then press Enter here."),
             content,
             "",
             theme.danger,
@@ -2101,7 +2148,7 @@ fn chrome_settings_rows(app: &App, content: usize, body: &mut Vec<Line>) {
         ));
         for restriction in &settings.restrictions {
             body.extend(wrap_panel_text(
-                &format!("· {restriction}"),
+                &format!("· {}", chrome_restriction(restriction, language)),
                 content,
                 "  ",
                 theme.muted,
@@ -2123,6 +2170,49 @@ fn chrome_settings_rows(app: &App, content: usize, body: &mut Vec<Line>) {
         "",
         theme.muted,
     ));
+}
+
+/// One way this project tightens Chrome, in the person's language. A
+/// category or decision this client has no words for is shown as sent.
+fn chrome_restriction(
+    restriction: &crate::chrome::Restriction,
+    language: crate::locale::Language,
+) -> String {
+    use crate::chrome::{Restriction, category_label, decision_label};
+    let category = |value: &str| {
+        category_label(value).map_or_else(|| value.to_owned(), |key| language.text(key).to_owned())
+    };
+    let decision = |value: &str| {
+        decision_label(value).map_or_else(|| value.to_owned(), |key| language.text(key).to_owned())
+    };
+    match restriction {
+        Restriction::Off => language
+            .text("Chrome is turned off for this project.")
+            .to_owned(),
+        Restriction::Default {
+            category: kind,
+            decision: verdict,
+        } => language.format(
+            "{category}: {decision} by default",
+            &[
+                ("category", &category(kind)),
+                ("decision", &decision(verdict)),
+            ],
+        ),
+        Restriction::Site {
+            origin,
+            category: kind,
+            decision: verdict,
+        } => language.format(
+            "{category} on {origin}: {decision}",
+            &[
+                ("category", &category(kind)),
+                ("origin", origin),
+                ("decision", &decision(verdict)),
+            ],
+        ),
+        Restriction::Text(text) => text.clone(),
+    }
 }
 
 /// A QR code in half blocks: each cell holds two modules, the upper one in

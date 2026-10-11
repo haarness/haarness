@@ -63,7 +63,14 @@ impl Host {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
 pub(crate) struct Access {
+    /// Whether agents may use Chrome in this project, all things considered.
     pub enabled: bool,
+    /// The "Let agents use Chrome" switch every project shares. Older
+    /// servers leave it out.
+    pub global_enabled: Option<bool>,
+    /// Why Chrome is off although that switch is on: `browser-control`
+    /// (agent browser control is off) or `project`.
+    pub blocked_by: Option<String>,
     /// `auto`, `haarness` or `chrome`.
     pub default_browser: String,
     /// Some browser connected since this server started.
@@ -74,10 +81,24 @@ impl Default for Access {
     fn default() -> Self {
         Self {
             enabled: true,
+            global_enabled: None,
+            blocked_by: None,
             default_browser: "auto".into(),
             ever_connected: false,
         }
     }
+}
+
+/// Why agents may not use Chrome in this project.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Off {
+    /// "Let agents use Chrome" is off; turning it on lets them in.
+    Switch,
+    /// Agent browser control is off, which keeps agents out of every
+    /// browser, Chrome included. The switch here cannot change that.
+    BrowserControl,
+    /// The project's own settings turn Chrome off.
+    Project,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -113,6 +134,8 @@ pub(crate) struct Setup {
     /// What setup would copy `extension` from; `None` when this installation
     /// has no Haarness for Chrome of its own.
     pub extension_source: Option<ExtensionSource>,
+    /// The servers on this computer that Chrome reaches (`status` only).
+    pub connections: Vec<Connection>,
 }
 
 /// `extensionSource`: where setup finds Haarness for Chrome to copy.
@@ -121,6 +144,14 @@ pub(crate) struct Setup {
 pub(crate) struct ExtensionSource {
     /// `embedded`, `bundle`, `desktop`, …
     pub kind: String,
+}
+
+/// A server `haarness browser status` found on this computer.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct Connection {
+    /// Its `serverInstanceId`.
+    pub server_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -170,36 +201,134 @@ impl Setup {
     pub(crate) fn unsupported(&self) -> impl Iterator<Item = &SetupBrowser> {
         self.browsers.iter().filter(|browser| !browser.supported)
     }
+
+    /// Chrome on this computer reaches the server with this instance id.
+    pub(crate) fn reaches(&self, server_id: &str) -> bool {
+        self.connections
+            .iter()
+            .any(|connection| connection.server_id == server_id)
+    }
 }
 
-/// The Chrome settings in force, from `browser-settings`.
+/// The CLI's own English note that this installation has no Haarness for
+/// Chrome to add. The dialog says that itself, translated, and what to do.
+pub(crate) fn not_included(warning: &str) -> bool {
+    warning.contains("not included in this installation")
+}
+
+/// One way this project's settings tighten Chrome, from `browser-settings`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Restriction {
+    /// Chrome is turned off for this project.
+    Off,
+    /// A category's default is stricter here: `browsing` … `scripts`, and
+    /// `ask` or `deny`.
+    Default { category: String, decision: String },
+    /// One site is stricter here.
+    Site {
+        origin: String,
+        category: String,
+        decision: String,
+    },
+    /// An older server's English sentence, shown as it came.
+    Text(String),
+}
+
+impl Restriction {
+    fn read(value: &Value) -> Option<Self> {
+        let text = |key: &str| value[key].as_str().map(str::to_owned);
+        match value["kind"].as_str()? {
+            "off" => Some(Self::Off),
+            "default" => Some(Self::Default {
+                category: text("category")?,
+                decision: text("decision")?,
+            }),
+            "site" => Some(Self::Site {
+                origin: text("origin")?,
+                category: text("category")?,
+                decision: text("decision")?,
+            }),
+            // A kind this client does not know yet says nothing it can word.
+            _ => None,
+        }
+    }
+
+    /// Turns Chrome off for the project, in either form a server sends.
+    fn is_off(&self) -> bool {
+        match self {
+            Self::Off => true,
+            Self::Text(text) => {
+                text.trim_end_matches('.') == "Chrome is turned off for this project"
+            }
+            _ => false,
+        }
+    }
+}
+
+/// A Chrome permission category in words (an English catalog key).
+pub(crate) fn category_label(category: &str) -> Option<&'static str> {
+    Some(match category {
+        "browsing" => "Browsing",
+        "downloads" => "Downloads",
+        "uploads" => "Uploads",
+        "scripts" => "Scripts",
+        _ => return None,
+    })
+}
+
+/// A decision in the words the Chrome site table uses (an English catalog
+/// key).
+pub(crate) fn decision_label(decision: &str) -> Option<&'static str> {
+    Some(match decision {
+        "allow" => "Always allow",
+        "ask" => "Requires approval",
+        "deny" => "Block",
+        _ => return None,
+    })
+}
+
+/// The Chrome settings, from `browser-settings`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Settings {
+    /// The global "Let agents use Chrome" switch, which is what this dialog
+    /// shows and changes. A project can still turn Chrome off under it.
     pub enabled: bool,
     pub default_browser: String,
-    /// What this project's settings tightened, in words.
-    pub restrictions: Vec<String>,
+    /// What this project's settings tightened.
+    pub restrictions: Vec<Restriction>,
 }
 
 impl Settings {
     fn from_view(chrome: &Value) -> Self {
+        // No global layer yet means the defaults, which let agents in.
+        let global = &chrome["globalSettings"];
         let effective = &chrome["settings"];
-        Self {
-            enabled: effective["enabled"].as_bool().unwrap_or(true),
-            default_browser: effective["defaultBrowser"]
-                .as_str()
-                .unwrap_or("auto")
-                .to_owned(),
-            restrictions: chrome["projectRestrictions"]
+        let restrictions = match chrome["restrictions"].as_array() {
+            Some(restrictions) => restrictions.iter().filter_map(Restriction::read).collect(),
+            None => chrome["projectRestrictions"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .filter_map(Value::as_str)
                 .filter(|text| !text.trim().is_empty())
-                .map(str::to_owned)
+                .map(|text| Restriction::Text(text.to_owned()))
                 .collect(),
+        };
+        Self {
+            enabled: global["enabled"].as_bool().unwrap_or(true),
+            default_browser: global["defaultBrowser"]
+                .as_str()
+                .or_else(|| effective["defaultBrowser"].as_str())
+                .unwrap_or("auto")
+                .to_owned(),
+            restrictions,
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn tests_settings_from_view(chrome: &Value) -> Settings {
+    Settings::from_view(chrome)
 }
 
 /// A complete global `browser.chrome`, as a fresh install has it. The server
@@ -297,6 +426,9 @@ fn settle<K: Copy, T: Send + 'static>(
 
 type HostsRequest = (ThreadId, Pending<std::result::Result<Hosts, Unavailable>>);
 type LocalRequest = (LocalAction, Pending<std::result::Result<Setup, String>>);
+/// Whether Chrome here reaches the project's server, with the local status
+/// read that answered it (and, run from `/chrome setup`, whether to set up).
+type LocateRequest = (bool, Pending<(bool, std::result::Result<Setup, String>)>);
 type SettingsRequest = (
     Option<Change>,
     Pending<std::result::Result<Settings, String>>,
@@ -326,8 +458,8 @@ pub(crate) enum View<'a> {
     /// The server has not answered yet.
     Checking,
     Unavailable(&'a Unavailable),
-    /// Agents may not use Chrome.
-    Off,
+    /// Agents may not use Chrome, and why.
+    Off(Off),
     Connected(&'a [Host]),
     /// No browser is connected, and this terminal is not on the computer
     /// that would run Chrome for this project.
@@ -357,9 +489,13 @@ pub(crate) struct Chrome {
     pub settings_error: Option<String>,
     /// This terminal runs on the computer whose Chrome the project would use.
     pub here: bool,
+    /// A saved switch changed what the server will report; until it says,
+    /// the dialog does not guess whether agents can use Chrome now.
+    recheck: bool,
     hosts_request: Option<HostsRequest>,
     local_request: Option<LocalRequest>,
     settings_request: Option<SettingsRequest>,
+    locate_request: Option<LocateRequest>,
     last_refresh: Option<Instant>,
     /// The `haarness` executable that sets Chrome up; the running one unless a
     /// test says otherwise.
@@ -373,6 +509,7 @@ impl Chrome {
         self.hosts_request.is_none()
             && self.local_request.is_none()
             && self.settings_request.is_none()
+            && self.locate_request.is_none()
     }
 
     pub(crate) fn busy_local(&self) -> Option<LocalAction> {
@@ -385,12 +522,50 @@ impl Chrome {
             .and_then(|(change, _)| *change)
     }
 
-    /// The Chrome settings in force, as the server last reported them with
-    /// its hosts (a settings read or write updates that report at once).
+    /// The two settings this dialog changes, as the server last reported
+    /// them (a settings read or write updates that report at once): the
+    /// shared "Let agents use Chrome" switch, which is not whether agents
+    /// may use Chrome in this project, and the browser for new agent tabs.
     pub(crate) fn access(&self) -> Option<(bool, &str)> {
         match &self.hosts {
-            Some(Ok(hosts)) => Some((hosts.chrome.enabled, hosts.chrome.default_browser.as_str())),
+            Some(Ok(hosts)) => Some((
+                hosts
+                    .chrome
+                    .global_enabled
+                    .or_else(|| self.settings.as_ref().map(|settings| settings.enabled))
+                    .unwrap_or(hosts.chrome.enabled),
+                hosts.chrome.default_browser.as_str(),
+            )),
             _ => None,
+        }
+    }
+
+    /// Why agents may not use Chrome in this project, when they may not.
+    pub(crate) fn off(&self) -> Option<Off> {
+        let Some(Ok(hosts)) = &self.hosts else {
+            return None;
+        };
+        if hosts.chrome.enabled {
+            return None;
+        }
+        // Turning the switch on is the first step whatever else is off.
+        if self.access().is_some_and(|(switch, _)| !switch) {
+            return Some(Off::Switch);
+        }
+        match hosts.chrome.blocked_by.as_deref() {
+            Some("browser-control") => Some(Off::BrowserControl),
+            Some("project") => Some(Off::Project),
+            // An older server only says Chrome is off. With the switch on,
+            // either this project turned it off, which its restrictions
+            // say, or agent browser control is off.
+            _ if self
+                .settings
+                .as_ref()
+                .is_some_and(|settings| settings.restrictions.iter().any(Restriction::is_off)) =>
+            {
+                Some(Off::Project)
+            }
+            _ => Some(Off::BrowserControl),
         }
     }
 
@@ -408,15 +583,20 @@ impl Chrome {
         let hosts = match &self.hosts {
             None => return View::Checking,
             Some(Err(problem)) => return View::Unavailable(problem),
+            Some(Ok(_)) if self.recheck => return View::Checking,
             Some(Ok(hosts)) => hosts,
         };
-        if self.access().is_some_and(|(enabled, _)| !enabled) {
-            return View::Off;
+        if let Some(off) = self.off() {
+            return View::Off(off);
         }
         if !hosts.hosts.is_empty() {
             return View::Connected(&hosts.hosts);
         }
         if !self.here {
+            // Asking this computer whether its Chrome reaches the project.
+            if self.locate_request.is_some() {
+                return View::LocalChecking;
+            }
             return View::Elsewhere;
         }
         if self.busy_local() == Some(LocalAction::Setup) {
@@ -638,6 +818,27 @@ async fn local_request(
         }))
 }
 
+/// Whether this computer's Chrome reaches the project's server, for a
+/// terminal attached to it by address: `browser status` lists the servers
+/// Chrome finds on this computer, and the project's own `/v1/info` says
+/// which one it is. A loopback address alone would also match a tunnel to
+/// another computer. The status read comes back too, to show without
+/// running it again.
+async fn locate(client: ApiClient, program: PathBuf) -> (bool, std::result::Result<Setup, String>) {
+    let info = async {
+        tokio::time::timeout(Duration::from_secs(5), client.info())
+            .await
+            .ok()
+            .and_then(Result::ok)
+    };
+    let (info, status) = tokio::join!(info, local_request(program, LocalAction::Status));
+    let here = match (&info, &status) {
+        (Some(info), Ok(setup)) => setup.reaches(&info.server_instance_id.to_string()),
+        _ => false,
+    };
+    (here, status)
+}
+
 /// `/chrome [setup]`.
 pub(crate) fn parse(arguments: &str) -> std::result::Result<bool, String> {
     match arguments.trim().to_ascii_lowercase().as_str() {
@@ -653,8 +854,12 @@ impl App {
     pub(crate) fn chrome_command(&mut self, arguments: &str, client: &ApiClient) -> Result<()> {
         let setup = parse(arguments).map_err(anyhow::Error::msg)?;
         self.open_chrome(client);
-        if setup && self.chrome.here {
-            self.request_chrome_local(LocalAction::Setup);
+        if setup {
+            if self.chrome.here {
+                self.request_chrome_local(LocalAction::Setup);
+            } else if let Some((then_setup, _)) = &mut self.chrome.locate_request {
+                *then_setup = true;
+            }
         }
         Ok(())
     }
@@ -662,13 +867,33 @@ impl App {
     /// Open the dialog and ask everything it shows afresh.
     pub(crate) fn open_chrome(&mut self, client: &ApiClient) {
         self.open_overlay(Overlay::Chrome);
-        self.chrome.here = client.supports_local_workspace_switch() && !crate::connect::over_ssh();
+        let ssh = crate::connect::over_ssh();
+        self.chrome.here = client.supports_local_workspace_switch() && !ssh;
         self.chrome.settings_error = None;
+        self.chrome.recheck = false;
         self.request_chrome_hosts(client);
         self.request_chrome_settings(None, client);
         if self.chrome.here {
             self.request_chrome_local(LocalAction::Status);
+        } else if !ssh {
+            // Attached by address, this terminal may still be on the
+            // computer that runs the project.
+            self.request_chrome_locate(client);
         }
+    }
+
+    fn request_chrome_locate(&mut self, client: &ApiClient) {
+        if let Some((_, previous)) = self.chrome.locate_request.take() {
+            previous.task.abort();
+        }
+        let Some(program) = self.chrome.program() else {
+            return;
+        };
+        let client = client.clone();
+        self.chrome.locate_request = Some((
+            false,
+            Pending::spawn(async move { locate(client, program).await }),
+        ));
     }
 
     fn request_chrome_hosts(&mut self, client: &ApiClient) {
@@ -741,6 +966,7 @@ impl App {
                 Delivery::Done(result) => {
                     self.chrome.thread = Some(thread);
                     self.chrome.hosts = Some(result);
+                    self.chrome.recheck = false;
                 }
                 Delivery::Waiting | Delivery::Lost => {}
             }
@@ -749,13 +975,19 @@ impl App {
             match delivery {
                 Delivery::Done(Ok(settings)) => {
                     // Show what was saved now rather than when the hosts
-                    // are next asked for.
+                    // are next asked for. Whether agents may use Chrome in
+                    // this project is the server's to say: a project or
+                    // agent browser control can keep it off under the
+                    // switch.
                     if let Some(Ok(hosts)) = &mut self.chrome.hosts {
-                        hosts.chrome.enabled = settings.enabled;
+                        hosts.chrome.global_enabled = Some(settings.enabled);
                         hosts
                             .chrome
                             .default_browser
                             .clone_from(&settings.default_browser);
+                        if matches!(change, Some(Change::Enabled(_))) {
+                            self.chrome.recheck = true;
+                        }
                     }
                     self.chrome.settings = Some(settings);
                     if change.is_some() {
@@ -800,6 +1032,19 @@ impl App {
                 Delivery::Waiting | Delivery::Lost => {}
             }
         }
+        // Not reached from here, the dialog stays with "elsewhere".
+        if let Some((then_setup, Delivery::Done((true, status)))) =
+            settle(&mut self.chrome.locate_request)
+        {
+            self.chrome.here = true;
+            match status {
+                Ok(setup) => self.chrome.local = Some(setup),
+                Err(error) => self.chrome.local_error = Some((LocalAction::Status, error)),
+            }
+            if then_setup {
+                self.request_chrome_local(LocalAction::Setup);
+            }
+        }
         if refresh {
             self.request_chrome_hosts(client);
             return;
@@ -823,7 +1068,13 @@ impl App {
     /// Enter in the dialog: the one obvious next step for its state.
     pub(crate) fn chrome_primary(&mut self, client: &ApiClient) {
         match self.chrome.view() {
-            View::Off => self.toggle_chrome(client),
+            View::Off(Off::Switch) => self.toggle_chrome(client),
+            // The switch here cannot help; look again once the person has
+            // changed what keeps Chrome off.
+            View::Off(Off::BrowserControl | Off::Project) => {
+                self.request_chrome_hosts(client);
+                self.request_chrome_settings(None, client);
+            }
             View::NotSetUp { .. } => self.request_chrome_local(LocalAction::Setup),
             View::LocalFailed(action, _) => self.request_chrome_local(action),
             View::Waiting(_) if self.chrome.nothing_to_add() => {
@@ -1003,7 +1254,7 @@ mod tests {
         if let Some(Ok(hosts)) = &mut chrome.hosts {
             hosts.chrome.enabled = false;
         }
-        assert_eq!(chrome.view(), View::Off);
+        assert_eq!(chrome.view(), View::Off(Off::Switch));
     }
 
     #[test]

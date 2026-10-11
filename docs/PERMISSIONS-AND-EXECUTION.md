@@ -95,7 +95,7 @@ An agent in the user's Chrome acts in the user's signed-in accounts, so a site t
 | `always_workspace`, `always_repository` | Downgraded to `always`; never persisted |
 | `reject` | The call fails |
 
-Desktop's dock and the TUI card read `explicit` and show **Allow in Chrome** with humanised lines ("Use https://example.com in Chrome", "Send downloads from … in Chrome to the agent", "Upload files to … in Chrome", "Run scripts on … in Chrome"). Desktop offers **Deny**, **Allow once** and **Allow in this chat** (primary, `always`); the TUI uses `a` (Allow in this chat, a single press), `y` (once) and `n`, with no `w`, `r` or `u`. The popup of the Haarness for Chrome extension can answer the same request through the bridge, which forwards only explicit Chrome approvals.
+Desktop's dock and the TUI card read `explicit` and show **Allow in Chrome** with humanised lines ("Use https://example.com in Chrome", "Send downloads from … in Chrome to the agent", "Upload files to … in Chrome", "Run scripts on … in Chrome"). Desktop offers **Deny**, **Allow once** and **Allow in this chat** (primary, `always`); the TUI uses `a` (Allow in this chat, a single press), `y` (once) and `n`, with no `w`, `r` or `u`. Both show the call's own arguments under those lines (the address, script, text or files), without `__browser`, so Allow once approves a call the person has seen. The popup of the Haarness for Chrome extension can answer the same request through the bridge, which forwards only explicit Chrome approvals.
 
 **Who cannot answer.**
 

@@ -4,15 +4,22 @@ import type { PendingPermissionInfo } from "@haarness/sdk";
 import {
   chromeApproval,
   chromeApprovalLines,
+  chromeBlockedBy,
   chromeConnection,
+  chromeLaunchSetupAllowed,
+  chromeRestrictions,
   chromeThreadTabs,
   defaultChromeSettings,
   editableChromeSettings,
   extensionsPage,
   isExplicitPermission,
+  notIncludedWarning,
   setupBrowsers,
+  turnsChromeOff,
   webStoreLink,
+  type ChromeAccessReport,
   type ChromeHost,
+  type ChromeSettingsView,
   type ChromeSetupInfo,
 } from "../src/chrome";
 import { canAutoApprove, createAutoApprover } from "../src/renderer/approval-mode";
@@ -198,4 +205,89 @@ test("a browser step carries a Chrome chip from its result, or from where it ask
   assert.equal(ranInChrome("browser_tabs_open", { browser: "chrome" }, { output: "{}", is_error: false }), false);
   assert.equal(ranInChrome("browser_tabs_open", { browser: "haarness" }), false);
   assert.equal(ranInChrome("webfetch", { browser: "chrome" }, { output: "", is_error: false, metadata: { browser: "chrome" } }), false);
+});
+
+test("project restrictions come structured, or as an older server's sentences", () => {
+  const view = (extra: Partial<ChromeSettingsView>): ChromeSettingsView => ({
+    settings: defaultChromeSettings(),
+    globalSettings: null,
+    projectRestrictions: ["Scripts: Block by default"],
+    ...extra,
+  });
+  assert.deepEqual(chromeRestrictions(undefined), []);
+  assert.deepEqual(chromeRestrictions(view({})), [{ kind: "text", text: "Scripts: Block by default" }]);
+  assert.deepEqual(
+    chromeRestrictions(
+      view({
+        restrictions: [
+          { kind: "default", category: "scripts", decision: "deny" },
+          { kind: "site", origin: "https://bank.example", category: "downloads", decision: "ask" },
+          { kind: "off" },
+          // A kind this Desktop cannot word yet is left out, not half-shown.
+          { kind: "later" } as never,
+          { kind: "site", category: "scripts", decision: "deny" } as never,
+        ],
+      }),
+    ),
+    [
+      { kind: "default", category: "scripts", decision: "deny" },
+      { kind: "site", origin: "https://bank.example", category: "downloads", decision: "ask" },
+      { kind: "off" },
+    ],
+  );
+  assert.equal(turnsChromeOff({ kind: "off" }), true);
+  assert.equal(turnsChromeOff({ kind: "text", text: "Chrome is turned off for this project." }), true);
+  assert.equal(turnsChromeOff({ kind: "text", text: "Chrome is turned off for this project" }), true);
+  assert.equal(turnsChromeOff({ kind: "default", category: "scripts", decision: "deny" }), false);
+});
+
+test("Chrome off under an on switch is explained only once the server has seen the switch", () => {
+  const report = (extra: Partial<ChromeAccessReport> & { asked?: boolean }) => ({
+    enabled: false,
+    defaultBrowser: "auto" as const,
+    everConnected: false,
+    ...extra,
+  });
+  // Nothing to explain: Chrome is on, the switch is off, or nothing is known.
+  assert.equal(chromeBlockedBy(undefined, true, []), undefined);
+  assert.equal(chromeBlockedBy(report({ enabled: true, globalEnabled: true }), true, []), undefined);
+  assert.equal(chromeBlockedBy(report({ globalEnabled: false }), false, []), undefined);
+  // The server names the cause.
+  assert.equal(
+    chromeBlockedBy(report({ globalEnabled: true, blockedBy: "browser-control" }), true, []),
+    "browser-control",
+  );
+  assert.equal(chromeBlockedBy(report({ globalEnabled: true, blockedBy: "project" }), true, []), "project");
+  // Just switched on, the server still reports the switch off: no guess.
+  assert.equal(chromeBlockedBy(report({ globalEnabled: false }), true, []), undefined);
+  // An older server: the switch as it was asked, and the restrictions.
+  assert.equal(chromeBlockedBy(report({ asked: false }), true, []), undefined);
+  assert.equal(chromeBlockedBy(report({ asked: true }), true, []), "browser-control");
+  assert.equal(
+    chromeBlockedBy(report({ asked: true }), true, [
+      { kind: "text", text: "Chrome is turned off for this project." },
+    ]),
+    "project",
+  );
+});
+
+test("the CLI's not-included note is recognised among its others", () => {
+  assert.equal(
+    notIncludedWarning(
+      "Haarness for Chrome is not included in this installation. Set it up from Haarness Desktop (Settings → Browser → Chrome).",
+    ),
+    true,
+  );
+  assert.equal(notIncludedWarning("A separate Haarness data folder is in use (/tmp/x)."), false);
+});
+
+test("launch setup leaves isolated and test runs alone", () => {
+  assert.equal(chromeLaunchSetupAllowed(true, {}), true);
+  assert.equal(chromeLaunchSetupAllowed(false, {}), false);
+  for (const name of ["HAARNESS_DESKTOP_TEST", "HAARNESS_DATA_DIR", "HAARNESS_DESKTOP_DATA", "HAARNESS_HOME"])
+    assert.equal(chromeLaunchSetupAllowed(true, { [name]: "/tmp/isolated" }), false, name);
+  // An empty variable is unset, as the CLI reads it.
+  assert.equal(chromeLaunchSetupAllowed(true, { HAARNESS_HOME: "" }), true);
+  // Ordinary XDG folders are not an isolated Haarness.
+  assert.equal(chromeLaunchSetupAllowed(true, { XDG_CONFIG_HOME: "/home/a/.config" }), true);
 });

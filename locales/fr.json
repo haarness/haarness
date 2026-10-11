@@ -2218,7 +2218,6 @@
   "Agents may not use Chrome": "Les agents ne peuvent pas utiliser Chrome",
   "Agents can use your own Chrome — with your sign-ins — through the Haarness for Chrome extension. Each new site asks first.": "Les agents peuvent utiliser votre propre Chrome, avec vos connexions, grâce à l’extension Haarness for Chrome. Chaque nouveau site demande d’abord votre accord.",
   "You are connected over SSH. Chrome works with projects on the computer where Chrome runs.": "Vous êtes connecté via SSH. Chrome fonctionne avec les projets de l’ordinateur sur lequel il s’exécute.",
-  "This terminal reaches the project from another computer. Chrome works with projects on the computer where Chrome runs.": "Ce terminal accède au projet depuis un autre ordinateur. Chrome fonctionne avec les projets de l’ordinateur sur lequel il s’exécute.",
   "On that computer, run {command}, or open Settings → Browser → Chrome in Haarness Desktop.": "Sur cet ordinateur, exécutez {command} ou ouvrez Paramètres → Navigateur → Chrome dans Haarness Desktop.",
   "Checking this computer…": "Vérification de cet ordinateur…",
   "Could not set up Chrome": "Impossible de configurer Chrome",
@@ -2250,7 +2249,6 @@
   "Open the Haarness for Chrome page in the Chrome Web Store:": "Ouvrez la page de Haarness for Chrome sur le Chrome Web Store :",
   "Click Add to Chrome": "Cliquez sur « Ajouter à Chrome »",
   "Pin Haarness to the toolbar": "Épinglez Haarness à la barre d’outils",
-  "This build of Haarness has no Haarness for Chrome extension to load.": "Cette version de Haarness ne contient pas d’extension Haarness for Chrome à charger.",
   "Open {page} in {browser}": "Ouvrez {page} dans {browser}",
   "or {page} in {browser}": "ou {page} dans {browser}",
   "Turn on Developer mode (keep it on)": "Activez le « Mode développeur » (laissez-le activé)",
@@ -2395,5 +2393,15 @@
   "This project's Haarness server did not answer in time.": "Le serveur Haarness de ce projet n’a pas répondu à temps.",
   "This chat has no tabs here.": "Cette discussion n’a pas d’onglets ici.",
   "Haarness for Chrome restarted. Try again.": "Haarness for Chrome a redémarré. Réessayez.",
-  "Haarness for Chrome is restarting. Try again.": "Haarness for Chrome redémarre. Réessayez."
+  "Haarness for Chrome is restarting. Try again.": "Haarness for Chrome redémarre. Réessayez.",
+  "Agent browser control is off": "Le contrôle du navigateur par l’agent est désactivé",
+  "Agents can't use any browser in this project, Chrome included. Turn on Agent browser control in Haarness Desktop (Settings → Browser), or set browser.policy.enabled to true in your Haarness config.": "Les agents ne peuvent utiliser aucun navigateur dans ce projet, Chrome compris. Activez le contrôle du navigateur par l’agent dans Haarness Desktop (Paramètres → Navigateur) ou définissez browser.policy.enabled sur true dans votre configuration Haarness.",
+  "This project's settings turn Chrome off": "Les paramètres de ce projet désactivent Chrome",
+  "Agents can still use Chrome in your other projects. To use it here, remove browser.chrome.enabled: false from this project's Haarness config.": "Les agents peuvent toujours utiliser Chrome dans vos autres projets. Pour l’utiliser ici, retirez browser.chrome.enabled: false de la configuration Haarness de ce projet.",
+  "This terminal can't set up Chrome for this project. Chrome works with projects on the computer where Chrome runs.": "Ce terminal ne peut pas configurer Chrome pour ce projet. Chrome fonctionne avec les projets de l’ordinateur sur lequel il s’exécute.",
+  "This Haarness installation doesn't include Haarness for Chrome. Set it up from Haarness Desktop (Settings → Browser → Chrome), then press Enter here.": "Cette installation de Haarness n’inclut pas Haarness for Chrome. Configurez-le depuis Haarness Desktop (Paramètres → Navigateur → Chrome), puis appuyez sur Enter ici.",
+  "Chrome is turned off for this project.": "Chrome est désactivé pour ce projet.",
+  "{category}: {decision} by default": "{category} : {decision} par défaut",
+  "{category} on {origin}: {decision}": "{category} sur {origin} : {decision}",
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Le contrôle du navigateur par l’agent est désactivé : les agents ne peuvent donc pas utiliser Chrome dans ce projet. Activez-le en haut de cette page."
 }

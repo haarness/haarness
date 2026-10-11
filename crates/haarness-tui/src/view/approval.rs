@@ -24,6 +24,12 @@ use crate::view::span::single_line;
 
 /// Context rows the panel gives a long command before eliding.
 const MAX_CONTEXT_ROWS: usize = 4;
+/// A Chrome request is answered for the exact call it shows: its site lines
+/// and then the call's own script, address or text, so it gets more room.
+const MAX_CHROME_ROWS: usize = 10;
+/// An argument longer than this is cut before it is wrapped; the card shows
+/// far less of it anyway.
+const MAX_ARGUMENT_CHARS: usize = 4000;
 /// Rows of a proposed file change shown before eliding the rest.
 const MAX_CHANGE_ROWS: usize = 8;
 /// The same rail glyph user messages carry; here in the accent color.
@@ -95,9 +101,58 @@ fn chrome_access(pattern: &str, language: Language) -> Option<String> {
     Some(language.format(key, &[("origin", origin)]))
 }
 
+/// The call's own arguments, one `name: value` row each: the address it
+/// opens, the script it runs, the text it types, the files it uploads. "Allow
+/// once" approves exactly this call, so it is shown as sent, minus the
+/// broker's `__browser` plumbing and the tab and frame ids, which name
+/// nothing a person can check (the site lines say where).
+fn chrome_arguments(detail: &serde_json::Value) -> Vec<String> {
+    /// What a person reads first, ahead of the rest in the order sent.
+    const FIRST: [&str; 4] = ["url", "script", "text", "paths"];
+    let Some(arguments) = detail.as_object() else {
+        return Vec::new();
+    };
+    let mut names: Vec<&String> = arguments
+        .keys()
+        .filter(|name| !matches!(name.as_str(), "__browser" | "tabID" | "frameID"))
+        .collect();
+    names.sort_by_key(|name| {
+        FIRST
+            .iter()
+            .position(|first| first == name)
+            .unwrap_or(FIRST.len())
+    });
+    let mut rows = Vec::new();
+    for name in names {
+        let value = match &arguments[name] {
+            serde_json::Value::Null => continue,
+            serde_json::Value::String(text) => text.clone(),
+            serde_json::Value::Array(items) if items.iter().all(serde_json::Value::is_string) => {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+            other => other.to_string(),
+        };
+        let mut value = value.trim().to_owned();
+        if let Some((cut, _)) = value.char_indices().nth(MAX_ARGUMENT_CHARS) {
+            value.truncate(cut);
+            value.push_str(" …");
+        }
+        // A script keeps its own lines, under its name; blank ones would
+        // only spend the card's rows.
+        let mut lines = value.lines().filter(|line| !line.trim().is_empty());
+        rows.push(format!("{name}: {}", lines.next().unwrap_or_default()));
+        rows.extend(lines.take(MAX_CHROME_ROWS).map(|line| format!("  {line}")));
+    }
+    rows
+}
+
 /// What a Chrome request lets the agent do, one line per site and kind of
 /// access, followed by anything else it asks alongside (a file it would
-/// upload). The browser action itself is what the site lines describe.
+/// upload) and then the call itself.
 fn chrome_subject(pending: &PendingPermissionInfo, language: Language) -> Option<String> {
     let mut lines = Vec::new();
     let mut other = Vec::new();
@@ -120,6 +175,7 @@ fn chrome_subject(pending: &PendingPermissionInfo, language: Language) -> Option
         return None;
     }
     lines.extend(other);
+    lines.extend(chrome_arguments(&pending.detail));
     Some(lines.join("\n"))
 }
 
@@ -274,6 +330,11 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
 
     let subject = subject(pending, language);
     let rules = always_rules(pending, subject.as_deref(), language);
+    let subject_cap = if pending.explicit {
+        MAX_CHROME_ROWS
+    } else {
+        MAX_CONTEXT_ROWS
+    };
 
     // The thing being approved, verbatim: the command for bash, the path for
     // file operations, the url for fetches. It stays on screen while an
@@ -326,8 +387,8 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
     };
     let rule_count = take(staged_rules.len().min(MAX_CONTEXT_ROWS));
     let show_footer = take(usize::from(!footer.is_empty())) == 1;
-    let wanted_subject = subject_rows.len().min(MAX_CONTEXT_ROWS)
-        + usize::from(subject_rows.len() > MAX_CONTEXT_ROWS);
+    let wanted_subject =
+        subject_rows.len().min(subject_cap) + usize::from(subject_rows.len() > subject_cap);
     let subject_count = (1 + take(wanted_subject.saturating_sub(1))).min(subject_rows.len());
     let show_allows = take(usize::from(allows.is_some())) == 1;
     let show_spacer = take(1) == 1;
@@ -371,13 +432,13 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
 
     if !subject_rows.is_empty() {
         let command = pending.detail.get("command").is_some();
-        let truncated = subject_rows.len() > subject_count.min(MAX_CONTEXT_ROWS);
+        let truncated = subject_rows.len() > subject_count.min(subject_cap);
         // A truncated subject ends on its own "…" row, unless the terminal
         // only has room for one, which then ends in the ellipsis itself.
         let (rows, ellipsis_row) = if !truncated {
             (subject_count, false)
         } else if subject_count >= 2 {
-            ((subject_count - 1).min(MAX_CONTEXT_ROWS), true)
+            ((subject_count - 1).min(subject_cap), true)
         } else {
             (1, false)
         };

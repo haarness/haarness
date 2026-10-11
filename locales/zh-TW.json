@@ -2218,7 +2218,6 @@
   "Agents may not use Chrome": "代理程式不能使用 Chrome",
   "Agents can use your own Chrome — with your sign-ins — through the Haarness for Chrome extension. Each new site asks first.": "代理程式可以透過 Haarness for Chrome 擴充功能使用你自己的 Chrome，包括你的登入狀態。每個新網站都會先詢問你。",
   "You are connected over SSH. Chrome works with projects on the computer where Chrome runs.": "你正透過 SSH 連線。Chrome 只能搭配執行 Chrome 的那台電腦上的專案使用。",
-  "This terminal reaches the project from another computer. Chrome works with projects on the computer where Chrome runs.": "此終端機從另一台電腦存取這個專案。Chrome 只能搭配執行 Chrome 的那台電腦上的專案使用。",
   "On that computer, run {command}, or open Settings → Browser → Chrome in Haarness Desktop.": "在那台電腦上執行 {command}，或在 Haarness Desktop 中開啟 設定 → 瀏覽器 → Chrome。",
   "Checking this computer…": "正在檢查這台電腦…",
   "Could not set up Chrome": "無法設定 Chrome",
@@ -2250,7 +2249,6 @@
   "Open the Haarness for Chrome page in the Chrome Web Store:": "在 Chrome 線上應用程式商店中開啟 Haarness for Chrome 頁面：",
   "Click Add to Chrome": "點按「加到 Chrome」",
   "Pin Haarness to the toolbar": "將 Haarness 固定到工具列",
-  "This build of Haarness has no Haarness for Chrome extension to load.": "此 Haarness 版本沒有可載入的 Haarness for Chrome 擴充功能。",
   "Open {page} in {browser}": "在 {browser} 中開啟 {page}",
   "or {page} in {browser}": "或在 {browser} 中開啟 {page}",
   "Turn on Developer mode (keep it on)": "開啟「開發人員模式」（保持開啟）",
@@ -2395,5 +2393,15 @@
   "This project's Haarness server did not answer in time.": "此專案的 Haarness 伺服器未及時回應。",
   "This chat has no tabs here.": "此對話在這裡沒有分頁。",
   "Haarness for Chrome restarted. Try again.": "Haarness for Chrome 已重新啟動。請再試一次。",
-  "Haarness for Chrome is restarting. Try again.": "Haarness for Chrome 正在重新啟動。請再試一次。"
+  "Haarness for Chrome is restarting. Try again.": "Haarness for Chrome 正在重新啟動。請再試一次。",
+  "Agent browser control is off": "代理程式瀏覽器控制已關閉",
+  "Agents can't use any browser in this project, Chrome included. Turn on Agent browser control in Haarness Desktop (Settings → Browser), or set browser.policy.enabled to true in your Haarness config.": "代理程式在此專案中不能使用任何瀏覽器，包括 Chrome。請在 Haarness Desktop 的 設定 → 瀏覽器 中開啟「代理程式瀏覽器控制」，或在 Haarness 設定檔中將 browser.policy.enabled 設為 true。",
+  "This project's settings turn Chrome off": "此專案的設定關閉了 Chrome",
+  "Agents can still use Chrome in your other projects. To use it here, remove browser.chrome.enabled: false from this project's Haarness config.": "代理程式仍可在你的其他專案中使用 Chrome。若要在這裡使用，請從此專案的 Haarness 設定檔中移除 browser.chrome.enabled: false。",
+  "This terminal can't set up Chrome for this project. Chrome works with projects on the computer where Chrome runs.": "此終端機無法為這個專案設定 Chrome。Chrome 只能搭配執行 Chrome 的那台電腦上的專案使用。",
+  "This Haarness installation doesn't include Haarness for Chrome. Set it up from Haarness Desktop (Settings → Browser → Chrome), then press Enter here.": "此 Haarness 安裝不包含 Haarness for Chrome。請在 Haarness Desktop 的 設定 → 瀏覽器 → Chrome 中完成設定，然後在這裡按 Enter。",
+  "Chrome is turned off for this project.": "此專案已關閉 Chrome。",
+  "{category}: {decision} by default": "{category}：預設{decision}",
+  "{category} on {origin}: {decision}": "{origin} 上的{category}：{decision}",
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "代理程式瀏覽器控制已關閉，因此代理程式不能在此專案中使用 Chrome。請在此頁頂端將其開啟。"
 }
