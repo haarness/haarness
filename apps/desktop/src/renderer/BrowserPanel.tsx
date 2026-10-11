@@ -7,7 +7,6 @@ import {
   Show,
   onMount,
   onCleanup,
-  untrack,
 } from "solid-js";
 import { Icon } from "./ui";
 import { useApp } from "./state";
@@ -110,14 +109,21 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
   });
   let addressTab: string | undefined;
   let addressURL = "";
+  // The tab state an address was submitted over: the field keeps what was
+  // typed until the host reports the navigation, then shows where it landed.
+  let submittedOver: ReturnType<typeof tab>;
   createEffect(() => {
     const current = tab();
     const url = current?.url ?? "";
+    // Host state and loading events must not overwrite a URL being typed. A
+    // page that moved meanwhile (a redirect, a normalised address) shows its
+    // real URL as soon as the field lets go.
+    if (editingAddress()) return;
+    if (current && current === submittedOver) return;
     if (current?.id === addressTab && url === addressURL) return;
     addressTab = current?.id;
     addressURL = url;
-    // Host state and loading events must not overwrite a URL being typed.
-    if (!untrack(editingAddress)) setAddress(url);
+    setAddress(url);
   });
   createEffect(() => {
     props.visible;
@@ -320,13 +326,16 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
         onSubmit={(event) => {
           event.preventDefault();
           const current = tab();
+          const url = address();
+          // Like a browser, Enter hands focus to the page and the field then
+          // shows wherever it lands, even the same URL written another way.
+          addressURL = "";
+          submittedOver = current;
+          const field = event.currentTarget.querySelector("input");
+          if (field && field === document.activeElement) field.blur();
           if (current)
-            void command({
-              type: "navigate",
-              tabID: current.id,
-              url: address(),
-            });
-          else void command({ type: "tabs.open", url: address() });
+            void command({ type: "navigate", tabID: current.id, url });
+          else void command({ type: "tabs.open", url });
         }}
       >
         <button
