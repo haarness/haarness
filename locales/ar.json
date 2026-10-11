@@ -2389,5 +2389,6 @@
   "This Haarness installation doesn't include Haarness for Chrome. Set it up from Haarness Desktop (Settings → Browser → Chrome), then press Enter here.": "لا يتضمن تثبيت Haarness هذا الإضافة Haarness for Chrome. أعدّها من Haarness Desktop (الإعدادات ← المتصفح ← Chrome)، ثم اضغط Enter هنا.",
   "Chrome is turned off for this project.": "Chrome متوقف في هذا المشروع.",
   "{category}: {decision} by default": "{category}: {decision} افتراضيًا",
-  "{category} on {origin}: {decision}": "{category} على {origin}: {decision}"
+  "{category} on {origin}: {decision}": "{category} على {origin}: {decision}",
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "تحكم الوكيل في المتصفح متوقف، لذا لا يمكن للوكلاء استخدام Chrome في هذا المشروع. شغّله من أعلى هذه الصفحة."
 }

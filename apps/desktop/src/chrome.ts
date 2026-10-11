@@ -26,11 +26,46 @@ export interface ChromeSettings {
   defaultBrowser: ChromeDefaultBrowser;
   sites: ChromeSite[];
 }
+/** One way a project tightens Chrome. */
+export type ChromeRestriction =
+  | { kind: "off" }
+  | { kind: "default"; category: ChromeField; decision: BrowserDecision }
+  | { kind: "site"; origin: string; category: ChromeField; decision: BrowserDecision };
 /** The `chrome` part of a `browser-settings` get. */
 export interface ChromeSettingsView {
   settings: ChromeSettings;
   globalSettings: ChromeSettings | null;
+  /** The same list as English sentences, for clients that cannot word it. */
   projectRestrictions: string[];
+  /** Absent from servers that only send `projectRestrictions`. */
+  restrictions?: ChromeRestriction[];
+}
+/** A project restriction to show: worded by the renderer, or an older
+ * server's English sentence as it came. */
+export type ChromeRestrictionLine = ChromeRestriction | { kind: "text"; text: string };
+/** What this project tightened. A kind this Desktop does not know yet is
+ * left out rather than shown half-worded. */
+export function chromeRestrictions(view?: ChromeSettingsView | null): ChromeRestrictionLine[] {
+  if (!view) return [];
+  if (Array.isArray(view.restrictions))
+    return view.restrictions.filter(
+      (item) =>
+        item?.kind === "off" ||
+        ((item?.kind === "default" || (item?.kind === "site" && typeof item.origin === "string")) &&
+          typeof item.category === "string" &&
+          typeof item.decision === "string"),
+    );
+  return (view.projectRestrictions ?? [])
+    .filter((text) => typeof text === "string" && text.trim())
+    .map((text) => ({ kind: "text" as const, text }));
+}
+/** The restriction that turns Chrome off for the whole project, in either
+ * form a server sends. */
+export function turnsChromeOff(line: ChromeRestrictionLine) {
+  return (
+    line.kind === "off" ||
+    (line.kind === "text" && line.text.replace(/\.$/, "") === "Chrome is turned off for this project")
+  );
 }
 export function defaultChromeSettings(): ChromeSettings {
   return {
@@ -67,11 +102,37 @@ export interface ChromeHost {
 }
 export interface ChromeHosts {
   hosts: ChromeHost[];
-  chrome?: {
-    enabled: boolean;
-    defaultBrowser: ChromeDefaultBrowser;
-    everConnected: boolean;
-  };
+  chrome?: ChromeAccessReport;
+}
+/** How agents may use Chrome, as the hosts API reports it. */
+export interface ChromeAccessReport {
+  /** Whether agents may use Chrome in this project, all things considered. */
+  enabled: boolean;
+  /** "Let agents use Chrome", shared by every project. Older servers leave
+   * it out. */
+  globalEnabled?: boolean;
+  /** What keeps Chrome off although that switch is on. */
+  blockedBy?: "browser-control" | "project" | null;
+  defaultBrowser: ChromeDefaultBrowser;
+  everConnected: boolean;
+}
+/**
+ * What keeps Chrome off in this project although "Let agents use Chrome" is
+ * on: agent browser control, or the project's own settings. `asked` is the
+ * switch as it was when the server was asked; until the server has seen the
+ * switch as it is now, there is nothing to explain yet. An older server only
+ * says Chrome is off, so its restrictions tell the two apart.
+ */
+export function chromeBlockedBy(
+  access: (ChromeAccessReport & { asked?: boolean }) | undefined,
+  enabled: boolean,
+  restrictions: readonly ChromeRestrictionLine[],
+): "browser-control" | "project" | undefined {
+  if (!access || access.enabled || !enabled) return undefined;
+  if ((access.globalEnabled ?? access.asked) !== true) return undefined;
+  if (access.blockedBy === "browser-control" || access.blockedBy === "project")
+    return access.blockedBy;
+  return restrictions.some(turnsChromeOff) ? "project" : "browser-control";
 }
 export function chromeHostName(host: Pick<ChromeHost, "name" | "label">) {
   return host.label ? `${host.name} (${host.label})` : host.name;
@@ -141,6 +202,11 @@ export function extensionsPage(info: ChromeSetupInfo) {
   const preferred =
     ready.find((item) => item.browser === "chrome") ?? ready[0];
   return preferred?.extensionsPage || "chrome://extensions";
+}
+/** The CLI's English note that this installation has no Haarness for
+ * Chrome to add. The dialog says that itself, translated. */
+export function notIncludedWarning(warning: string) {
+  return warning.includes("not included in this installation");
 }
 /**
  * Whether Desktop may refresh Chrome's registration at launch. Only an

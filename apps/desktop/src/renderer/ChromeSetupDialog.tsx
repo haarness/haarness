@@ -14,6 +14,7 @@ import { useApp } from "./state";
 import {
   chromeHostName,
   extensionsPage,
+  notIncludedWarning,
   setupBrowsers,
   webStoreLink,
   type ChromeHost,
@@ -95,6 +96,15 @@ export function ChromeSetupDialog(props: { close: () => void }) {
     return info ? setupBrowsers(info) : { ready: [], unsupported: [] };
   });
   const prepared = () => !!setup() && browsers().ready.length > 0;
+  /** The setup command's notes. Once step 2 is reached with nothing to add,
+   * it says so in the reader's language, and the command's English note
+   * would only repeat it. */
+  const warnings = () => {
+    const info = setup();
+    if (!info) return [];
+    const said = (prepared() || linked()) && !webStoreLink(info) && !info.extension;
+    return (info.warnings ?? []).filter((warning) => !(said && notIncludedWarning(warning)));
+  };
   const first = (): StepState =>
     running()
       ? "busy"
@@ -205,7 +215,7 @@ export function ChromeSetupDialog(props: { close: () => void }) {
                     )}
                   </For>
                 </ul>
-                <For each={setup()!.warnings ?? []}>
+                <For each={warnings()}>
                   {(warning) => <p class="chrome-warning">{warning}</p>}
                 </For>
                 <Show when={!browsers().ready.length}>

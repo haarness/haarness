@@ -2389,5 +2389,6 @@
   "This Haarness installation doesn't include Haarness for Chrome. Set it up from Haarness Desktop (Settings → Browser → Chrome), then press Enter here.": "Ta instalacja Haarness nie zawiera Haarness for Chrome. Skonfiguruj je w Haarness Desktop (Ustawienia → Przeglądarka → Chrome), a potem naciśnij tutaj Enter.",
   "Chrome is turned off for this project.": "Chrome jest wyłączony dla tego projektu.",
   "{category}: {decision} by default": "{category}: domyślnie {decision}",
-  "{category} on {origin}: {decision}": "{category} na {origin}: {decision}"
+  "{category} on {origin}: {decision}": "{category} na {origin}: {decision}",
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Sterowanie przeglądarką przez agenta jest wyłączone, więc agenci nie mogą używać Chrome w tym projekcie. Włącz je na górze tej strony."
 }
