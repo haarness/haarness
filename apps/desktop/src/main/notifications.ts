@@ -114,8 +114,9 @@ export function createNotifications(input: {
       !permitted()
     )
       return;
-    // The server's placeholder until a title is generated ("New thread", or
-    // "New chat") is not a name: Desktop calls that chat untitled.
+    // The server's placeholder until a title is generated ("New chat", or
+    // "New thread" from an older server) is not a name: Desktop calls that
+    // chat untitled.
     const kind = untitledKind(conversation?.title);
     const name = !conversation
       ? say("Chat {id}", { id: root.slice(0, 8) })

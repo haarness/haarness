@@ -3,8 +3,8 @@ import { untitledKind } from "../chat-titles";
 
 /**
  * A chat's name as Desktop shows it. Until a title is generated the server
- * stores "New thread", which is its word for a chat, not the reader's; a fork
- * of that chat would otherwise read "Fork of New thread".
+ * stores the placeholder "New chat" ("New thread" on older servers), which is
+ * not a name; a fork of that chat would otherwise read "Fork of New chat".
  */
 export function chatTitle(title: string | null | undefined) {
   const kind = untitledKind(title);
