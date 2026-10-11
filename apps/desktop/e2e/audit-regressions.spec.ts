@@ -308,9 +308,9 @@ test("audit: Tab moves focus everywhere, agent keys stay in the message box and 
   await page.keyboard.press("ControlOrMeta+Period");
   await expect(agent).toHaveAttribute("data-value", "build");
   // Rename opens on its field with the title selected and refuses a blank one.
-  await button(page, "Session actions").click();
+  await button(page, "Chat actions").click();
   await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
-  const rename = page.getByRole("dialog", { name: "Rename session", exact: true });
+  const rename = page.getByRole("dialog", { name: "Rename chat", exact: true });
   const title = rename.getByRole("textbox", { name: "Title", exact: true });
   await expect(title).toBeFocused();
   expect(await title.evaluate((input: HTMLInputElement) => input.selectionEnd! - input.selectionStart!)).toBe((await title.inputValue()).length);
@@ -432,7 +432,7 @@ test("audit: overlapping canvas previews keep the latest mode and cannot land in
   await send('preview');
   await expect(page.locator('.preview-banner')).toHaveCount(3);
   await held(app);
-  await button(page, 'New session').click();
+  await button(page, 'New chat').click();
   await expect(page.locator('.preview-banner')).toHaveCount(0);
   await release(app);
   await expect(editor(page)).toContainText('First page');

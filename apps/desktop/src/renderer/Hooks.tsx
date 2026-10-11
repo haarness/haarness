@@ -80,7 +80,7 @@ export function Hooks() {
     <div class="management-panel">
       <p class="muted">
         {t(
-          "Run commands at key points in a conversation. Changes apply when the runtime is idle.",
+          "Run commands at key points in a chat. Changes apply when the runtime is idle.",
         )}
       </p>
       <Show

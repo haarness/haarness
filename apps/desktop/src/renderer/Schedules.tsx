@@ -57,7 +57,7 @@ export function Schedules(props: {
   return (
     <>
       <p class="muted">
-        {t("Run a prompt on a schedule in {project}. Conversations appear under Scheduled in the sidebar.", { project: app.project()?.label ?? t("this project") })}
+        {t("Run a prompt on a schedule in {project}. Chats appear under Scheduled in the sidebar.", { project: app.project()?.label ?? t("this project") })}
       </p>
       <div class="toolbar">
         <button

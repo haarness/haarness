@@ -88,7 +88,7 @@ test("every renderer t() key is in the shared catalog", async () => {
 test("keys translated through a variable are in the catalog", () => {
   const dynamic = [
     "Chats", "Archived chats", "Projects", "Worktrees", "Files", "Settings",
-    "Commands", "Shortcuts", "Conversation actions", "Project panels",
+    "Commands", "Shortcuts", "Chat actions", "Project panels",
     "Editor actions", "Review actions", "Terminal actions", "Terminals",
     "Open files", "Slash commands", "Window", "Worktree actions",
     // Keyboard shortcut names and notes, from `shortcutTitles` and
@@ -97,7 +97,7 @@ test("keys translated through a variable are in the catalog", () => {
     "Browser", "Review", "Terminal", "Context",
     "Browse and test websites with Haarness", "Browse and edit project files",
     "Inspect changes and compare diffs", "Run commands in this project",
-    "Inspect conversation tokens, cache and context",
+    "Inspect chat tokens, cache and context",
     "Explore code", "Explore and understand code",
     "Explain the architecture of this project",
     "Build a feature", "Build a new feature, app, or tool",
@@ -110,7 +110,7 @@ test("keys translated through a variable are in the catalog", () => {
     // Settings copy for agents, commands and skills, from `assetCopy`.
     "Agents are assistants with their own instructions, model and tools. Switch between them in the composer.",
     "No agents yet", "Create one for a role you repeat, like a reviewer or a release helper.",
-    "Commands are saved prompts you run with / in any conversation.",
+    "Commands are saved prompts you run with / in any chat.",
     "No commands yet", "Save a prompt you use often, then run it with /name.",
     "Skills are instructions and files an agent loads when a task calls for them.",
     "No skills yet", "Teach Haarness a workflow once, and it will use it whenever it fits.",
@@ -141,13 +141,13 @@ test("keys translated through a variable are in the catalog", () => {
     "Agent browser control",
     "Allow Haarness to inspect and control this project’s browser from Desktop or an attached TUI. Manual browsing remains available.",
     "Web link destination",
-    "Where web links in conversations open. Applies to this desktop.",
+    "Where web links in chats open. Applies to this desktop.",
     "Local URL destination",
     "Where localhost and loopback links open. Haarness uses the connected server’s network.",
     "Show full URL",
     "Show paths, queries, and fragments in the address bar. Editing always shows the complete URL.",
     "Browsing data",
-    "Clear this project’s tabs, cookies, site storage, cache, history, and retained downloads on this desktop. Saved files and conversation attachments remain.",
+    "Clear this project’s tabs, cookies, site storage, cache, history, and retained downloads on this desktop. Saved files and chat attachments remain.",
     "Browsing history",
     "View, search, reopen, and remove pages visited in this project’s browser.",
     "Ask where to save downloads",
@@ -186,7 +186,7 @@ test("keys translated through a variable are in the catalog", () => {
     // Plural pairs and side-specific names chosen inside one t() call.
     "{count} file", "{count} files", "Reset {name}", "Remove {name}",
     "Comment on original line {line}", "Comment on updated line {line}",
-    "Archive session {title}", "Restore session {title}",
+    "Archive chat {title}", "Restore chat {title}",
     // Review file status words from the server's diff.
     "added", "deleted", "modified",
     // Reasoning level names from `reasoning.ts`, and the sidebar's waiting badges from state.tsx.
@@ -201,7 +201,7 @@ test("keys translated through a variable are in the catalog", () => {
     // `historyCommands` (conversation-controls.ts imports the app state, so its
     // three descriptions are listed here).
     "Undo the last turn and restore its prompt", "Restore the next undone turn",
-    "Summarize this conversation with its model",
+    "Summarize this chat with its model",
     // Settings navigation and search titles.
     ...Object.values(settingsTitles),
     ...settingsSections.map(([section]) => section),

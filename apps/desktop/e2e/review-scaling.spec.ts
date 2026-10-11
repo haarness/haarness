@@ -425,7 +425,7 @@ test("last-turn review and a second repository keep content and comments isolate
     .getByRole("checkbox", { name: "Show every file at once" })
     .uncheck();
   await page.getByRole("searchbox", { name: "Filter changed files" }).fill("");
-  await page.getByRole("button", { name: "New session", exact: true }).click();
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
   const message = page.getByRole("textbox", { name: "Message", exact: true });
   const approval = page.getByRole("button", {
     name: "Automatic approvals",

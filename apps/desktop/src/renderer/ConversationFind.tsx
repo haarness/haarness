@@ -39,12 +39,12 @@ export function ConversationFind(props: {
     <div
       class="conversation-find"
       role="search"
-      aria-label={t("Find in conversation")}
+      aria-label={t("Find in chat")}
     >
       <div class="conversation-find-controls">
         <input
-          aria-label={t("Find in conversation")}
-          placeholder={t("Find in conversation…")}
+          aria-label={t("Find in chat")}
+          placeholder={t("Find in chat…")}
           type="search"
           ref={(element) => queueMicrotask(() => element.focus())}
           value={query()}
@@ -83,7 +83,7 @@ export function ConversationFind(props: {
         />
         <Button
           icon="close"
-          label={t("Close conversation find")}
+          label={t("Close find in chat")}
           onClick={props.close}
         />
       </div>

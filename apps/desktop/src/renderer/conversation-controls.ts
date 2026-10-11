@@ -10,7 +10,7 @@ export const historyCommands = [
   { name: "redo", description: "Restore the next undone turn" },
   {
     name: "compact",
-    description: "Summarize this conversation with its model",
+    description: "Summarize this chat with its model",
   },
 ];
 export function createConversationControls(props: {
@@ -75,7 +75,7 @@ export function createConversationControls(props: {
       } else if (action === "redo") props.redone();
       app.notify(
         action === "compact"
-          ? t("Conversation compacted")
+          ? t("Chat compacted")
           : action === "undo"
             ? t("Last turn undone")
             : t("Turn restored"),
@@ -90,8 +90,8 @@ export function createConversationControls(props: {
       : [
           {
             key: "conversation:find",
-            group: "Conversation actions",
-            name: t("Find in conversation"),
+            group: "Chat actions",
+            name: t("Find in chat"),
             icon: "search",
             hint: shortcutLabel("Mod+F", app.state.platform),
             action: props.openFind,
@@ -99,13 +99,13 @@ export function createConversationControls(props: {
           ...(!thread()!.isSubagent
             ? historyCommands.map((command) => ({
                 key: "conversation:" + command.name,
-                group: "Conversation actions",
+                group: "Chat actions",
                 name:
                   command.name === "undo"
                     ? t("Undo last turn")
                     : command.name === "redo"
                       ? t("Redo turn")
-                      : t("Compact conversation"),
+                      : t("Compact chat"),
                 detail: t(command.description),
                 keywords: "/" + command.name,
                 icon: (command.name === "undo"

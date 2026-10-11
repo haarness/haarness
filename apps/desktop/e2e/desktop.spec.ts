@@ -116,7 +116,7 @@ async function showChat() {
   if (await restore.isVisible()) await restore.click();
 }
 async function newSession() {
-  await page.getByRole("button", { name: "New session", exact: true }).click();
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
   await expect(
     page.getByRole("textbox", { name: "Message", exact: true }),
   ).toBeVisible();
@@ -545,7 +545,7 @@ test("workspace opening is direct, enables project configuration, and preserves 
     "true",
   );
   await expect(
-    page.getByRole("button", { name: "New session", exact: true }),
+    page.getByRole("button", { name: "New chat", exact: true }),
   ).toBeEnabled();
   // Wait for the requested reconnect, rather than reading the previous ready
   // view while its SDK client is being detached.
@@ -1334,7 +1334,7 @@ test("multiple projects expand independently with live conversations and persist
       model: "echo-1",
     });
     const archive = secondary.getByRole("button", {
-      name: "Archive session Archive without switching",
+      name: "Archive chat Archive without switching",
       exact: true,
     });
     await secondary
@@ -1383,7 +1383,7 @@ test("forked conversations appear in the sidebar through rename, archive, projec
     "Echo: fork-history-proof",
   );
   await page
-    .getByRole("button", { name: "Session actions", exact: true })
+    .getByRole("button", { name: "Chat actions", exact: true })
     .click();
   await page.getByRole("menuitem", { name: "Fork", exact: true }).click();
   const title = "Fork of " + parent.title;
@@ -1422,11 +1422,11 @@ test("forked conversations appear in the sidebar through rename, archive, projec
     project.getByRole("button", { name: nested.title, exact: true }),
   ).toBeVisible();
   await page
-    .getByRole("button", { name: "Session actions", exact: true })
+    .getByRole("button", { name: "Chat actions", exact: true })
     .click();
   await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
   const rename = page.getByRole("dialog", {
-    name: "Rename session",
+    name: "Rename chat",
     exact: true,
   });
   await rename
@@ -1646,7 +1646,7 @@ test("whole rows reorder silently, project titles expand, and sessions have one 
   await row.hover();
   await expect(row.getByRole("button")).toHaveCount(2);
   await row
-    .getByRole("button", { name: "Archive session Menu One", exact: true })
+    .getByRole("button", { name: "Archive chat Menu One", exact: true })
     .click();
   await expect(one).toHaveCount(0);
   await expect(two).toHaveAttribute("aria-current", "true");
@@ -1972,7 +1972,7 @@ test("sidebar sections keep drag and keyboard ordering inside and across groups,
   await expect(flatRow.locator(".session-location")).toHaveText("workspace");
   await page.screenshot({ path: "test-results/sidebar-flat.png" });
   // One archive action per row, without leaving the current project.
-  await flatRow.getByRole("button", { name: "Archive session Flat list row", exact: true }).click();
+  await flatRow.getByRole("button", { name: "Archive chat Flat list row", exact: true }).click();
   await expect(flatRow).toHaveCount(0);
   await expect.poll(() => client.getThread(thread.id).then((value) => value.archived)).toBe(true);
   await layout("By project");
@@ -2101,7 +2101,7 @@ async function fileTransfer(name: string, type = "image/png") {
 
 test("file drops attach across the chat area and preserve text drop behavior", async () => {
   await newSession();
-  const chat = page.getByRole("region", { name: "Conversation", exact: true });
+  const chat = page.getByRole("region", { name: "Chat", exact: true });
   const input = page.getByRole("textbox", { name: "Message", exact: true });
   const emptyFile = await fileTransfer("empty-chat.png");
   await page.locator(".conversation-empty h2").dispatchEvent("dragenter", { dataTransfer: emptyFile });
@@ -2380,7 +2380,7 @@ test("failed attachment sends retain their draft for retry and queued sends clea
   await expect(page.getByRole("region", { name: "Queued messages", exact: true })).toContainText("queued attachment");
   await expect(page.locator(".composer-attachments")).toHaveCount(0);
   await expect(input).toHaveValue("");
-  await page.getByRole("button", { name: "Stop session", exact: true }).click();
+  await page.getByRole("button", { name: "Stop response", exact: true }).click();
 });
 
 test("side-panel launcher opens tools beside chat and supports tab ordering", async () => {
@@ -2650,7 +2650,7 @@ test("closing a session tab returns to the previous active conversation", async 
     await page
       .locator(".workspace-tab")
       .filter({ has: page.getByRole("tab", { name: title, exact: true }) })
-      .getByRole("button", { name: "Close session tab", exact: true })
+      .getByRole("button", { name: "Close chat tab", exact: true })
       .click();
   };
   for (const title of titles.slice(0, 3)) await open(title);
@@ -2677,7 +2677,7 @@ test("closing a session tab returns to the previous active conversation", async 
 });
 
 test("real workspace: conversations, files, review and terminal", async () => {
-  await page.getByRole("button", { name: "New session", exact: true }).click();
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
   await selectValue(page.getByRole("combobox", { name: "Model", exact: true }), "echo/echo-1");
   await expect(page.locator("textarea")).toBeVisible();
   await page.locator("textarea").fill("::mdslow");
@@ -2686,7 +2686,7 @@ test("real workspace: conversations, files, review and terminal", async () => {
   await expect(page.locator(".transcript")).toContainText(
     "streams while working",
   );
-  await expect(page.getByRole("button", { name: "Stop session" })).toHaveCount(
+  await expect(page.getByRole("button", { name: "Stop response" })).toHaveCount(
     0,
   );
   await openProjectPanel("Files");
@@ -3573,7 +3573,7 @@ test("Auto from a child view leaves its parent and siblings in Review", async ()
   ).toHaveAttribute("aria-disabled", "false");
   await page.getByRole("combobox", { name: "Search Haarness" }).press("Escape");
   await page
-    .getByRole("button", { name: "Back to parent conversation", exact: true })
+    .getByRole("button", { name: "Back to parent chat", exact: true })
     .click();
   await expect(
     page.getByRole("button", { name: "Automatic approvals", exact: true }),
@@ -3788,7 +3788,7 @@ test("SSE chat fabric: live streaming, guidance, permissions, questions and inte
   await expect(page.locator(".composer")).toHaveClass(/running/);
   await expect(page.locator(".working-strip, .composer-hint")).toHaveCount(0);
   await expect(
-    page.getByRole("button", { name: "Stop session", exact: true }),
+    page.getByRole("button", { name: "Stop response", exact: true }),
   ).toHaveCount(1);
   await expect(page.locator(".composer")).toHaveCSS(
     "animation-name",
@@ -3803,11 +3803,11 @@ test("SSE chat fabric: live streaming, guidance, permissions, questions and inte
     page.getByRole("button", { name: "Send message", exact: true }),
   ).toBeEnabled();
   await expect(
-    page.getByRole("button", { name: "Stop session", exact: true }),
+    page.getByRole("button", { name: "Stop response", exact: true }),
   ).toHaveCount(0);
   await composer.fill("");
   await expect(
-    page.getByRole("button", { name: "Stop session", exact: true }),
+    page.getByRole("button", { name: "Stop response", exact: true }),
   ).toBeEnabled();
   await send("queued-guidance-proof");
   await expect(
@@ -3847,7 +3847,7 @@ test("SSE chat fabric: live streaming, guidance, permissions, questions and inte
   await expect(page.locator(".assistant-activity")).toHaveText(
     "Running a command",
   );
-  await page.getByRole("button", { name: "Stop session", exact: true }).click();
+  await page.getByRole("button", { name: "Stop response", exact: true }).click();
   await expect.poll(() => client.activeTurns().then((v) => v.length)).toBe(0);
   expect(errors).toEqual([]);
 });
@@ -5446,7 +5446,7 @@ test("schedule pickers, native execution and grouped conversations work end to e
 
     await group
       .getByRole("button", {
-        name: "Archive session A renamed scheduled conversation",
+        name: "Archive chat A renamed scheduled conversation",
         exact: true,
       })
       .click();
@@ -5520,7 +5520,7 @@ test("scheduled sidebar groups paginate and retain expansion through live update
       created.push(thread.id);
     }
     const scheduled = project.getByRole("region", {
-      name: "Scheduled conversations",
+      name: "Scheduled chats",
       exact: true,
     });
     const toggle = scheduled.locator(".scheduled-heading");
@@ -5533,7 +5533,7 @@ test("scheduled sidebar groups paginate and retain expansion through live update
     await group.locator(".schedule-group-heading").click();
     await expect(group.locator(".session-row")).toHaveCount(10);
     await group
-      .getByRole("button", { name: "Show more conversations", exact: true })
+      .getByRole("button", { name: "Show more chats", exact: true })
       .click();
     await expect(group.locator(".session-row")).toHaveCount(12);
     await client.updateThread(created[0], {
@@ -5562,7 +5562,7 @@ test("scheduled sidebar groups paginate and retain expansion through live update
     await expect(group.locator(".session-row")).toHaveCount(12);
     await group
       .getByRole("button", {
-        name: "Archive session Scheduled conversation with a custom name",
+        name: "Archive chat Scheduled conversation with a custom name",
         exact: true,
       })
       .click();
@@ -5826,7 +5826,7 @@ test("minimal navigation and long slash commands stay usable without shifting ch
   // Real assistant output with a long unbroken token must not widen the flex column either.
   await send("Layout proof " + "long-content-".repeat(70));
   await expect(page.locator(".transcript")).toContainText("Echo: Layout proof");
-  await expect(page.getByRole("button", { name: "Stop session" })).toHaveCount(
+  await expect(page.getByRole("button", { name: "Stop response" })).toHaveCount(
     0,
   );
   for (const width of [1420, 1100, 900]) {
@@ -5953,7 +5953,7 @@ test("app rebuilds keep permission-waiting projects usable and upgrade them afte
     );
     await expect(page.locator(".error-banner")).toHaveCount(0);
     await expect(
-      page.getByRole("button", { name: "New session", exact: true }),
+      page.getByRole("button", { name: "New chat", exact: true }),
     ).toBeEnabled();
     // A deliberately selected new-chat draft also survives reopening.
     await newSession();
@@ -6168,7 +6168,7 @@ test("slow project startup preserves the project index, drafts, and independent 
       "true",
     );
     await expect(page.locator(".project-opening")).toHaveCount(0);
-    await page.getByRole("button", { name: "New session", exact: true }).click();
+    await page.getByRole("button", { name: "New chat", exact: true }).click();
     // A pending project shows the loading view, never an editable home composer.
     await expect(page.getByRole("status", { name: "Opening project…" })).toBeVisible();
     await expect(composer).toHaveCount(0);
@@ -7415,7 +7415,7 @@ test("assistant hover icons copy Markdown and fork through exactly that reply", 
     sequence: boundary.sequence,
     itemId: boundary.id,
   });
-  const origin = page.getByRole("note", { name: "Conversation origin" });
+  const origin = page.getByRole("note", { name: "Chat origin" });
   await expect(origin).toHaveText("Continued from " + source.title);
   await expect(origin.getByRole("button")).toBeEnabled();
   await origin.screenshot({ path: "test-results/fork-origin-divider.png" });
@@ -7468,7 +7468,7 @@ test("fork origin survives continuation and reload, and opens the source at its 
     exact: true,
   });
   await project.getByRole("button", { name: fork.title, exact: true }).click();
-  const origin = page.getByRole("note", { name: "Conversation origin" });
+  const origin = page.getByRole("note", { name: "Chat origin" });
   await expect(origin).toHaveText("Continued from " + source.title);
   await send("only in the continuation");
   await expect(page.locator("article.message.assistant").last()).toContainText(
@@ -7820,7 +7820,7 @@ test("delegated agents show one live task row and stay out of the sidebar", asyn
   await page.keyboard.press("Meta+Shift+KeyM");
   // The child offers a direct way back, including when it is absent from the sidebar.
   await page
-    .getByRole("button", { name: "Back to parent conversation", exact: true })
+    .getByRole("button", { name: "Back to parent chat", exact: true })
     .click();
   await expect(composer).toHaveValue("Continue reviewing from the parent");
   expect(
@@ -7841,7 +7841,7 @@ test("delegated agents show one live task row and stay out of the sidebar", asyn
   await page.reload();
   await expect(
     page.getByRole("button", {
-      name: "Back to parent conversation",
+      name: "Back to parent chat",
       exact: true,
     }),
   ).toBeVisible();
@@ -7964,13 +7964,13 @@ test("agent stop controls cancel only their child and remain separate from row n
   await first.click();
   await expect(
     page.getByRole("button", {
-      name: "Back to parent conversation",
+      name: "Back to parent chat",
       exact: true,
     }),
   ).toBeVisible();
   expect((await client.activeTurn(firstId))?.id).toBe(firstTurn.id);
   await page
-    .getByRole("button", { name: "Back to parent conversation", exact: true })
+    .getByRole("button", { name: "Back to parent chat", exact: true })
     .click();
   await second.focus();
   await second.press("Enter");
@@ -7979,7 +7979,7 @@ test("agent stop controls cancel only their child and remain separate from row n
   ).toBeVisible();
   expect((await client.activeTurn(secondId))?.id).toBe(secondTurn.id);
   await page
-    .getByRole("button", { name: "Back to parent conversation", exact: true })
+    .getByRole("button", { name: "Back to parent chat", exact: true })
     .click();
   // Both targets stay usable in a narrow chat, with the activity still visible.
   // Other scenarios may leave Files open; narrow windows show that panel in
@@ -8203,7 +8203,7 @@ test("activity shimmer stays continuous through refreshes, navigation and reduce
   await task.click();
   await expect(activity).toHaveText("Running a command");
   await page
-    .getByRole("button", { name: "Back to parent conversation", exact: true })
+    .getByRole("button", { name: "Back to parent chat", exact: true })
     .click();
   await expect(activity).toHaveText("Working with an agent");
   expect(Math.abs((await phase(activity)) - before.activity)).toBeLessThan(50);
@@ -8694,9 +8694,9 @@ test("universal search opens settings controls, shortcuts, files and commands di
   const original = await shortcut.inputValue();
   await shortcut.fill("Mod+Shift+L");
   await shortcut.press("Tab");
-  await find("new session");
+  await find("new chat");
   await expect(
-    page.getByRole("option", { name: "New session", exact: true }),
+    page.getByRole("option", { name: "New chat", exact: true }),
   ).toContainText(process.platform === "darwin" ? "⌘ ⇧ L" : "Ctrl+Shift+L");
   await page
     .getByRole("combobox", { name: "Search Haarness", exact: true })
@@ -10052,7 +10052,7 @@ test("conversation controls undo and redo real files, preserve drafts, and compa
   await page.getByRole("button", { name: thread.title, exact: true }).click();
   const input = page.getByRole("textbox", { name: "Message", exact: true });
   const menu = async (name: string) => {
-    await page.getByRole("button", { name: "Session actions", exact: true }).click();
+    await page.getByRole("button", { name: "Chat actions", exact: true }).click();
     await page.getByRole("menuitem", { name, exact: true }).click();
   };
   const palette = async (name: string) => {
@@ -10099,7 +10099,7 @@ test("conversation controls undo and redo real files, preserve drafts, and compa
   await expect(input).toHaveValue(second);
   await expect(page.locator(".conversation-history-notice")).toContainText("Turn undone");
   await input.press(process.platform === "darwin" ? "Meta+f" : "Control+f");
-  const find = page.getByRole("searchbox", { name: "Find in conversation", exact: true });
+  const find = page.getByRole("searchbox", { name: "Find in chat", exact: true });
   await find.fill("history-needle");
   await expect(page.locator(".conversation-find [role=status]")).toHaveText("No matches");
   await find.press("Escape");
@@ -10114,7 +10114,7 @@ test("conversation controls undo and redo real files, preserve drafts, and compa
   await expect(input).toHaveValue("Keep my unsent draft\n\nThird prompt with history-needle");
   await menu("Redo turn");
   await expect(input).toHaveValue("Keep my unsent draft");
-  await menu("Compact conversation");
+  await menu("Compact chat");
   await expect.poll(async () => (await client.listItems(thread.id)).filter(item => item.data.type === "compaction").length).toBeGreaterThan(0);
   await expect(page.locator(".conversation-history-notice")).toHaveCount(0);
   await expect(input).toHaveValue("Keep my unsent draft");
@@ -10144,7 +10144,7 @@ test("conversation find reaches virtual history, cycles matches, and respects ke
   const old = archive.threads[0].items[4];
   await expect(page.locator('[data-item-id="' + old.id + '"]')).toHaveCount(0);
   await page.getByRole("textbox", { name: "Message", exact: true }).press(process.platform === "darwin" ? "Meta+f" : "Control+f");
-  const find = page.getByRole("searchbox", { name: "Find in conversation", exact: true });
+  const find = page.getByRole("searchbox", { name: "Find in chat", exact: true });
   await expect(find).toBeFocused();
   await find.fill("find-target [literal]");
   await expect(page.locator(".conversation-find [role=status]")).toHaveText("1 of 2 messages");
@@ -10169,8 +10169,8 @@ test("conversation find reaches virtual history, cycles matches, and respects ke
   await find.press("Escape");
   await expect(find).toHaveCount(0);
   await expect(page.locator(".transcript")).toBeFocused();
-  await page.getByRole("button", { name: "Session actions", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Find in conversation", exact: true }).click();
+  await page.getByRole("button", { name: "Chat actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Find in chat", exact: true }).click();
   await expect(find).toBeFocused();
   await page.getByRole("button", { name: "Search source", exact: true }).click();
   await expect(find).toHaveCount(0);
@@ -10185,7 +10185,7 @@ test("conversation commands guard active turns, preserve failed compaction, and 
   const thread = await client.createThread({ title: "History command guards", provider: "echo", model: "echo-1" });
   await page.getByRole("button", { name: thread.title, exact: true }).click();
   const input = page.getByRole("textbox", { name: "Message", exact: true });
-  const actions = page.getByRole("button", { name: "Session actions", exact: true });
+  const actions = page.getByRole("button", { name: "Chat actions", exact: true });
   await send("before the replacement branch");
   await expect(page.locator(".transcript")).toContainText("Echo: before the replacement branch");
   await expect(page.locator(".composer")).not.toHaveClass(/running/);
@@ -10207,7 +10207,7 @@ test("conversation commands guard active turns, preserve failed compaction, and 
   await client.updateThread(thread.id, { provider: "desktop-missing-key", model: "fixture" });
   await input.fill("Preserved on compaction failure");
   await actions.click();
-  await page.getByRole("menuitem", { name: "Compact conversation", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Compact chat", exact: true }).click();
   await expect(page.locator(".error-banner")).toContainText(/key|credential|auth/i);
   await expect(input).toBeEnabled();
   await expect(input).toHaveValue("Preserved on compaction failure");
@@ -10216,11 +10216,11 @@ test("conversation commands guard active turns, preserve failed compaction, and 
   const active = await client.startTurn(thread.id, { text: '!tool question {"prompt":"History guard question","choices":["Continue"]}', requestId: crypto.randomUUID() });
   await expect(page.locator(".question-prompt").filter({ hasText: /^History guard question$/ })).toBeVisible();
   await actions.click();
-  for (const name of ["Undo last turn", "Redo turn", "Compact conversation"])
+  for (const name of ["Undo last turn", "Redo turn", "Compact chat"])
     await expect(page.getByRole("menuitem", { name, exact: true })).toBeDisabled();
-  await page.getByRole("menuitem", { name: "Find in conversation", exact: true }).click();
-  await expect(page.getByRole("searchbox", { name: "Find in conversation", exact: true })).toBeFocused();
-  await page.getByRole("button", { name: "Close conversation find", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Find in chat", exact: true }).click();
+  await expect(page.getByRole("searchbox", { name: "Find in chat", exact: true })).toBeFocused();
+  await page.getByRole("button", { name: "Close find in chat", exact: true }).click();
   await client.interruptTurn(active.id);
   await expect.poll(async () => (await client.activeTurns()).some(turn => turn.id === active.id)).toBe(false);
   await openProjectPanel("Files");
@@ -10268,14 +10268,14 @@ test("slow manual compaction disables duplicate actions and cannot overwrite a d
     await client.updateThread(thread.id, { provider: "slow-summary", model: "summary-fixture" });
     const other = await client.createThread({ title: "Unaffected conversation", provider: "echo", model: "echo-1" });
     await page.getByRole("button", { name: thread.title, exact: true }).click();
-    await page.getByRole("button", { name: "Session actions", exact: true }).click();
-    await page.getByRole("menuitem", { name: "Compact conversation", exact: true }).click();
+    await page.getByRole("button", { name: "Chat actions", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Compact chat", exact: true }).click();
     await expect.poll(() => requested).toBe(true);
     const input = page.getByRole("textbox", { name: "Message", exact: true });
     await expect(input).toBeDisabled();
     await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeDisabled();
-    await page.getByRole("button", { name: "Session actions", exact: true }).click();
-    await expect(page.getByRole("menuitem", { name: "Compact conversation", exact: true })).toBeDisabled();
+    await page.getByRole("button", { name: "Chat actions", exact: true }).click();
+    await expect(page.getByRole("menuitem", { name: "Compact chat", exact: true })).toBeDisabled();
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: other.title, exact: true }).click();
     await input.fill("Other conversation draft");
@@ -10320,12 +10320,12 @@ test("conversation context inspector shows measured usage, retained estimates an
   archive.threads[0].items = data.map((data,index) => ({id:crypto.randomUUID(),threadId:id,turnId:null,createdAt:now,sequence:index+1,data})) as (typeof archive.threads)[number]["items"];
   await client.importSessionArchive({archive});
   await page.getByRole("button", {name:"Context accounting fixture",exact:true}).click();
-  await expect(page.getByRole("button", {name:"View conversation context",exact:true})).toHaveCount(0);
+  await expect(page.getByRole("button", {name:"View chat context",exact:true})).toHaveCount(0);
   await page.getByRole("button", { name: "Search", exact: true }).click();
-  await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("View conversation context");
-  await page.getByRole("option", { name: "View conversation context", exact: true }).click();
-  const panel = page.getByRole("region", {name:"Conversation context",exact:true});
-  const totals = panel.getByRole("region", {name:"Conversation usage totals",exact:true});
+  await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("View chat context");
+  await page.getByRole("option", { name: "View chat context", exact: true }).click();
+  const panel = page.getByRole("region", {name:"Chat context",exact:true});
+  const totals = panel.getByRole("region", {name:"Chat usage totals",exact:true});
   const latest = panel.getByRole("region", {name:"Latest request usage",exact:true});
   const metric = (region: Locator, label: string) => region.locator("dl > div").filter({has:page.locator("dt",{hasText:new RegExp("^"+label+"$")})}).locator("dd");
   await expect(metric(totals,"Input tokens")).toHaveText("1,700");
@@ -10926,7 +10926,7 @@ test("conversation outline rests as dashes at the top left and opens into a pane
   expect(rest[0] - (await transcriptTop())).toBeLessThan(60);
   // At the end of the conversation the newest prompt is the one being read.
   await expect(outlineDashes().last()).toHaveAttribute("aria-current", "location");
-  await expect(outline()).toHaveAttribute("aria-label", "Conversation outline");
+  await expect(outline()).toHaveAttribute("aria-label", "Chat outline");
 
   // A shorter window shrinks the transcript from the bottom; the stack holds still.
   const dashTop = async () => (await outlineDashes().first().boundingBox())!.y;
@@ -11234,7 +11234,7 @@ test("Stop answers steering the agent has not read yet and leaves the queue paus
   await expect(queue).toContainText("queued until I say so");
   await send("actually, just explain the plan");
   await expect.poll(async () => (await client.listItems(id)).some((item) => item.data.type === "user_message" && item.data.text === "actually, just explain the plan")).toBe(true);
-  await page.getByRole("button", { name: "Stop session", exact: true }).click();
+  await page.getByRole("button", { name: "Stop response", exact: true }).click();
   // A continuation answers the unread steering instead of dropping it.
   await expect.poll(async () => (await client.listItems(id)).some((item) => item.data.type === "assistant_message" && item.data.text.includes("stopped your previous work"))).toBe(true);
   await expect.poll(async () => (await client.activeTurn(id))).toBeNull();
@@ -11672,7 +11672,7 @@ test("canvas preview blocks network and navigation without affecting chat or nor
     // Chromium may replace the blocked frame with its local error document; never reload hostile scripts automatically.
     await expect(page.locator('.file-preview .preview-notice')).toBeVisible();
     await send('chat still works after sandbox attempts');
-    await expect(page.getByRole('region', { name: 'Conversation', exact: true })).toContainText('chat still works after sandbox attempts');
+    await expect(page.getByRole('region', { name: 'Chat', exact: true })).toContainText('chat still works after sandbox attempts');
   } finally { await new Promise<void>(resolve => receiver.close(() => resolve())); }
 });
 

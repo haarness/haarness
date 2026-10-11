@@ -14,6 +14,7 @@ import { useApp } from "./state";
 import { dismissOnBackdrop, Icon } from "./ui";
 import { isWorktree, locationName, primaryLocation, projectKey } from "../projects";
 import { searchEntries, type SearchEntry } from "./search";
+import { chatTitle } from "./chat-title";
 
 
 export function UniversalSearch(props: { close: () => void }) {
@@ -117,7 +118,7 @@ export function UniversalSearch(props: { close: () => void }) {
       ({ thread, location, key }): SearchEntry => ({
         key: "thread:" + key,
         group: thread.archived ? "Archived chats" : "Chats",
-        name: thread.title || t("Untitled session"),
+        name: chatTitle(thread.title),
         detail:
           (app.projects().find((item) => item.id === projectKey(location))
             ?.label ?? location.label) +
@@ -317,7 +318,7 @@ export function UniversalSearch(props: { close: () => void }) {
           </For>
           <Show when={!entries().length}>
             <p class="palette-empty">
-              {t("Nothing matches “{query}”. Try a command, setting, project, conversation, or file name.", { query: query() })}
+              {t("Nothing matches “{query}”. Try a command, setting, project, chat, or file name.", { query: query() })}
             </p>
           </Show>
         </div>

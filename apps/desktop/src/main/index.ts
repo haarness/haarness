@@ -977,7 +977,7 @@ function installHandlers() {
   });
   handle("openArchive", async (win) => {
     const result = await dialog.showOpenDialog(win, {
-      filters: [{ name: say("Session archive"), extensions: ["json"] }],
+      filters: [{ name: say("Chat archive"), extensions: ["json"] }],
       properties: ["openFile"],
     });
     if (result.canceled) return null;
@@ -1252,7 +1252,7 @@ function menu() {
         label: t("File"),
         submenu: [
           {
-            label: t("New session"),
+            label: t("New chat"),
             accelerator: data().preferences.shortcuts.new.replace(
               /\bMod\b/g,
               "CmdOrCtrl",

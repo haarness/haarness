@@ -435,7 +435,7 @@ function General() {
         </div>
       </div>
       <Row
-        title="Conversation text size"
+        title="Chat text size"
         description="Applies to messages and the composer. Use View → Zoom to scale the whole window."
       >
         <input
@@ -535,7 +535,7 @@ function General() {
       </Row>
       <UsageStatisticsSetting />
       <p class="muted">
-        {t("Drafts, appearance and saved projects are saved on this computer. Conversations and tasks are saved separately for each project folder or worktree.")}
+        {t("Drafts, appearance and saved projects are saved on this computer. Chats and tasks are saved separately for each project folder or worktree.")}
       </p>
     </>
   );
@@ -611,7 +611,7 @@ function Servers() {
   return (
     <>
       <p class="muted">
-        {t("Select a server to see its projects and conversations.")}
+        {t("Select a server to see its projects and chats.")}
       </p>
       <For each={app.servers()}>
         {(item) => (
@@ -665,7 +665,7 @@ function Servers() {
                     if (
                       await confirm(
                         t("Remove this server?"),
-                        t("This removes the saved connection and its projects from Desktop. Conversation history and running tasks on the server are preserved."),
+                        t("This removes the saved connection and its projects from Desktop. Chat history and running tasks on the server are preserved."),
                         { submit: t("Remove server"), danger: true },
                       )
                     )
@@ -742,7 +742,7 @@ function Projects() {
                     await confirm(
                       t("Forget this project?"),
                       t(
-                        "Conversation history, running tasks and the saved server connection are preserved.",
+                        "Chat history, running tasks and the saved server connection are preserved.",
                       ),
                       { submit: t("Forget project"), danger: true },
                     )
@@ -976,7 +976,7 @@ const assetCopy = {
     removeAll: "Remove this custom agent from all projects?",
   },
   command: {
-    about: "Commands are saved prompts you run with / in any conversation.",
+    about: "Commands are saved prompts you run with / in any chat.",
     create: "Create command",
     empty: "No commands yet",
     emptyDetail: "Save a prompt you use often, then run it with /name.",
@@ -1605,7 +1605,7 @@ function Profiles(props: { cli: Cli }) {
   return (
     <>
       <p class="muted">
-        {t("Portable profiles contain configuration, skills, agents, commands, and other supported assets. They exclude conversation databases and credential stores.")}
+        {t("Portable profiles contain configuration, skills, agents, commands, and other supported assets. They exclude chat databases and credential stores.")}
       </p>
       <Row title="Save a profile">
         <button
@@ -1749,7 +1749,7 @@ function About() {
     <>
       <Wordmark class="about-mark" />
       <p>Haarness {app.state.version}</p>
-      <p class="muted">{t("A place for your projects and conversations.")}</p>
+      <p class="muted">{t("A place for your projects and chats.")}</p>
       <Row title="Updates">
         <button
           onClick={() =>
@@ -1806,7 +1806,7 @@ function About() {
       <Show when={app.state.connection && !app.state.connection.remote}>
         <Row
           title="Reopen project"
-          description="Reload the current project to bring conversations and files up to date."
+          description="Reload the current project to bring chats and files up to date."
         >
           <button onClick={() => app.run(app.hydrate)}>{t("Refresh")}</button>
         </Row>

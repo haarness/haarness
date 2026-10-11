@@ -111,7 +111,7 @@ export function AssetForm(props: {
         customizing
           ? t("Save your own version. You can reset it to the original later.")
           : props.kind === "command"
-            ? t("Create a reusable prompt you can run from the conversation.")
+            ? t("Create a reusable prompt you can run from the chat.")
             : props.kind === "agent"
               ? t("Define how this agent works and which tools it can use.")
               : t("Give Haarness reusable instructions for a specific task.")
@@ -223,8 +223,8 @@ export function AssetForm(props: {
                   value={form.mode}
                   disabled={busy()}
                   options={[
-                    { value: "all", label: t("Session agent and subagent") },
-                    { value: "primary", label: t("Session agent") },
+                    { value: "all", label: t("Chat agent and subagent") },
+                    { value: "primary", label: t("Chat agent") },
                     { value: "subagent", label: t("Subagent only") },
                   ]}
                   onChange={(value) => setForm("mode", value)}
@@ -278,7 +278,7 @@ export function AssetForm(props: {
                 </span>
               </summary>
               <p class="muted">
-                {t("Overrides apply within the session’s permissions.")}
+                {t("Overrides apply within the chat’s permissions.")}
               </p>
               <For each={form.tools}>
                 {(tool, index) => (

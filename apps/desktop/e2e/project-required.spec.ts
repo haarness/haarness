@@ -102,7 +102,7 @@ test("a fresh desktop shows project home, and canceling never creates a general 
   await expect(
     page.getByRole("button", { name: "Toggle terminal", exact: true }),
   ).toHaveCount(0);
-  await expect(page.getByLabel("Conversation starters")).toHaveCount(0);
+  await expect(page.getByLabel("Chat starters")).toHaveCount(0);
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await expect(
     page.getByRole("dialog", { name: "Settings", exact: true }),
@@ -117,7 +117,7 @@ test("a fresh desktop shows project home, and canceling never creates a general 
       return { canceled: true, filePaths: [] };
     };
   });
-  await page.getByRole("button", { name: "New session", exact: true }).click();
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
   await expect
     .poll(() => app!.evaluate(() => (globalThis as any).projectPickerCalls))
     .toBe(1);
@@ -250,7 +250,7 @@ test("opening from home enables chat, remembers explicit selection, and never se
   await app!.evaluate(({ dialog }) => {
     dialog.showOpenDialog = async () => ({ canceled: true, filePaths: [] });
   });
-  await page.getByRole("button", { name: "New session", exact: true }).click();
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
   await expect(
     home.getByRole("heading", { name: "Choose a project", exact: true }),
   ).toBeVisible();
@@ -390,7 +390,7 @@ test("legacy general chats reopen as a regular project with history and drafts i
     await readFile(join(temporary, "desktop", "desktop.json"), "utf8"),
   );
   expect(stored.recent.some((item: any) => "projectless" in item)).toBe(false);
-  await page.getByRole("button", { name: "New session", exact: true }).click();
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
   await expect(composer).toHaveValue("preserved project draft");
   await expect(page.locator(".composer-project")).toContainText(
     recent.project!.name,

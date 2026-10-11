@@ -3,6 +3,7 @@ import type { Thread } from "@haarness/sdk";
 import { useApp } from "./state";
 import { ask, Button } from "./ui";
 import { MenuButton } from "./MenuButton";
+import { chatTitle } from "./chat-title";
 
 export function SessionActions(props: {
   thread: Thread;
@@ -48,7 +49,7 @@ export function SessionActions(props: {
         icon={props.thread.archived ? "restore" : "archive"}
         size="sm"
         label={
-          t(props.thread.archived ? "Restore session {title}" : "Archive session {title}", { title: props.thread.title })
+          t(props.thread.archived ? "Restore chat {title}" : "Archive chat {title}", { title: chatTitle(props.thread.title) })
         }
         onClick={() =>
           void action(props.thread.archived ? "Unarchive" : "Archive")
@@ -97,7 +98,7 @@ export async function renameSession(
   thread: Thread,
 ) {
   const input = await ask(
-    t("Rename session"),
+    t("Rename chat"),
     [{ name: "title", label: t("Title"), value: thread.title, required: true }],
     {
       // `required` accepts spaces, which would leave a blank row and header.

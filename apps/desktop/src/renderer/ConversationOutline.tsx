@@ -101,7 +101,7 @@ export function ConversationOutline(props: {
       ref={lane}
       class="outline"
       data-state={box() ? "open" : "folded"}
-      aria-label={t("Conversation outline")}
+      aria-label={t("Chat outline")}
     >
       <Index each={starts()}>
         {(start, slot) => {
