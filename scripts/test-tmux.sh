@@ -222,8 +222,10 @@ suspend_shell_pid="$(tmux display-message -p -t "$suspend_target" '#{pane_pid}')
 suspend_launch="$pane_env HAARNESS_DATA_DIR='$test_root/suspend-data' HAARNESS_TEST_PROVIDER=1 HAARNESS_DEFAULT_PROVIDER=echo HAARNESS_DEFAULT_MODEL=echo-1 '$binary' --workspace '$test_root/ws'"
 tmux send-keys -l -t "$suspend_target" "$suspend_launch"
 tmux send-keys -t "$suspend_target" Enter
+# The window runs the caller's own login shell, whose startup files can take
+# many seconds on a loaded machine before the launch line even echoes.
 attempt=0
-while [ "$attempt" -lt 80 ]; do
+while [ "$attempt" -lt 300 ]; do
   suspend_pane="$(tmux capture-pane -p -t "$suspend_target" 2>/dev/null || true)"
   echo "$suspend_pane" | grep -q "/ commands" && break
   attempt=$((attempt + 1))
@@ -2224,10 +2226,13 @@ if ! echo "$pane" | grep -Eq "pdf[[:space:]]+dropped report.pdf"; then
 fi
 tmux send-keys -l -t "$session":0.0 'inspect pdf'
 tmux send-keys -t "$session":0.0 Enter
+# Wait for the turn to end, not only for its answer: a command typed while
+# the turn is still closing is refused, and the next stanza types one.
 attempt=0
 while [ "$attempt" -lt 80 ]; do
   pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
-  echo "$pane" | grep -q "Echo: inspect pdf" && echo "$pane" | grep -q "\[attachments: 1\]" && break
+  echo "$pane" | grep -q "Echo: inspect pdf" && echo "$pane" | grep -q "\[attachments: 1\]" \
+    && echo "$pane" | grep -q "Ready" && break
   attempt=$((attempt + 1))
   sleep 0.1
 done
@@ -2994,6 +2999,20 @@ fi
 if git -C "$test_root/ws" worktree list --porcelain | grep -Fq "worktree $managed_workspace_path"; then
   git -C "$test_root/ws" worktree list --porcelain >&2
   echo "Workspace removal left stale Git worktree metadata" >&2
+  exit 1
+fi
+# The server finishes before the TUI hears back, and Ctrl+C is refused while
+# the TUI still counts the removal as running. Quit once it says it is done.
+attempt=0
+while [ "$attempt" -lt 100 ]; do
+  pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
+  echo "$pane" | grep -q 'Removed worktree' && break
+  attempt=$((attempt + 1))
+  sleep 0.1
+done
+if ! echo "$pane" | grep -q 'Removed worktree'; then
+  echo "$pane" >&2
+  echo "The TUI did not report the finished worktree removal" >&2
   exit 1
 fi
 tmux send-keys -t "$session":0.0 Escape
