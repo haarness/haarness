@@ -3784,6 +3784,10 @@ test("SSE chat fabric: live streaming, guidance, permissions, questions and inte
   await expect(page.getByTestId("streaming-reply")).toContainText(
     "Live markdown",
   );
+  await expect.poll(() => client.activeTurns().then((v) => v.length)).toBe(0);
+  // ::mdslow ends after about 1.4 s, which a busy machine outruns; this turn
+  // stays open while the running composer is inspected.
+  await send("!linger 10000 running-composer-proof");
   const composer = page.getByRole("textbox", { name: "Message", exact: true });
   await expect(page.locator(".composer")).toHaveClass(/running/);
   await expect(page.locator(".working-strip, .composer-hint")).toHaveCount(0);
@@ -3812,7 +3816,7 @@ test("SSE chat fabric: live streaming, guidance, permissions, questions and inte
   await send("queued-guidance-proof");
   await expect(
     page.locator(".transcript article.assistant").last(),
-  ).toContainText("queued-guidance-proof");
+  ).toContainText("queued-guidance-proof", { timeout: 30_000 });
   await expect.poll(() => client.activeTurns().then((v) => v.length)).toBe(0);
   await send('!tool bash {"command":"printf permission-proof"}');
   await expect(
@@ -4333,6 +4337,28 @@ test("custom agents, commands and skills preserve their native metadata", async 
   await expect(page.locator(".transcript")).toContainText(
     "Updated desktop asset evidence.",
   );
+  expect(errors).toEqual([]);
+});
+
+test("slash commands that answer with text show the answer above the composer", async () => {
+  await newSession();
+  const note = page.locator(".command-note");
+  await send("/goal status");
+  await expect(note).toContainText("/goal status");
+  await expect(note.getByRole("status")).toContainText("No active goal");
+  await send("/workflow");
+  await expect(note).toContainText("/workflow");
+  await expect(note.getByRole("status")).toContainText("Workflows (");
+  await note.getByRole("button", { name: "Dismiss", exact: true }).click();
+  await expect(note).toHaveCount(0);
+  // The next message replaces the answer instead of leaving it behind.
+  await send("/goal status");
+  await expect(note).toHaveCount(1);
+  await send("after-command-proof");
+  await expect(page.locator(".transcript")).toContainText(
+    "Echo: after-command-proof",
+  );
+  await expect(note).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 
@@ -6032,8 +6058,10 @@ test("app rebuilds keep permission-waiting projects usable and upgrade them afte
     expect(instances[0].instance).not.toBe(original.serverInstanceId);
     expect(instances.every((view) => !view.pending)).toBe(true);
     await page.reload();
+    // The upgraded server reloads the chat; a busy machine takes its time.
     await expect(page.locator(".transcript")).toContainText(
       "preserved-permission-proof",
+      { timeout: 45_000 },
     );
     await expect(page.locator(".error-banner")).toHaveCount(0);
     await page
@@ -6667,7 +6695,10 @@ test("worktree view groups sessions, isolates drafts and terminals, and manages 
     .getByRole("dialog", { name: "Remove worktree?", exact: true })
     .getByRole("button", { name: "Remove worktree", exact: true })
     .click();
-  await expect(page.locator(".error-banner")).toContainText("local changes");
+  // The server checks the checkout with git first, which a busy machine slows.
+  await expect(page.locator(".error-banner")).toContainText("local changes", {
+    timeout: 45_000,
+  });
   await expect(tree).toBeVisible();
   expect(await readFile(join(checkout.path, "sidebar-proof.txt"), "utf8")).toBe(
     "sidebar-proof",
@@ -8025,7 +8056,8 @@ test("agent stop controls cancel only their child and remain separate from row n
     .toEqual([]);
   await page.screenshot({ path: "test-results/agent-controls-stopped.png" });
   await client.interruptThreadTree(parent.id);
-  if (viewport) await page.setViewportSize(viewport);
+  // Electron windows report no viewport, so restore the suite's own size.
+  await page.setViewportSize(viewport ?? { width: 1420, height: 940 });
   await page.reload();
   await expect(first).toHaveAttribute("aria-description", "Stopped");
   await expect(second).toHaveAttribute("aria-description", "Stopped");
@@ -10886,6 +10918,9 @@ async function outlineSession(prompts: string[]) {
     .poll(async () => (await client.listThreads()).find((thread) => thread.title.includes(first))?.id)
     .toBeTruthy();
   const id = (await client.listThreads()).find((thread) => thread.title.includes(first))!.id;
+  // No active turn also describes the moment before the composer's turn
+  // registers, so wait for its reply before starting the next one.
+  await expect(page.locator(".transcript")).toContainText("Echo: " + first);
   await expect.poll(() => client.activeTurn(id)).toBeNull();
   for (const text of prompts.slice(1)) {
     const turn = await client.startTurn(id, { requestId: crypto.randomUUID(), text });

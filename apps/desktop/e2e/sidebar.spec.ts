@@ -703,6 +703,16 @@ test("sidebar pointer drag scrolls a long list to a section heading", async () =
     const rect = await target.boundingBox();
     return rect!.y + rect!.height <= box!.y + box!.height;
   }).toBe(true);
+  // Leave the auto-scroll edge and let the list come to rest before aiming:
+  // it keeps scrolling while the pointer stays in that zone.
+  await page.mouse.move(box!.x + 80, box!.y + box!.height / 2, { steps: 5 });
+  let resting = -1;
+  await expect.poll(async () => {
+    const top = await list.evaluate(element => element.scrollTop);
+    const still = top === resting;
+    resting = top;
+    return still;
+  }, { intervals: [150] }).toBe(true);
   const destination = await target.boundingBox();
   await page.mouse.move(destination!.x + 80, destination!.y + destination!.height / 2, { steps: 10 });
   await page.mouse.move(destination!.x + 81, destination!.y + destination!.height / 2);

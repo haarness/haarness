@@ -730,7 +730,9 @@ test("parity: remembered site approvals and combined external uploads keep deny 
   await expect.poll(async()=>(await client.listPermissions()).length).toBe(1);
   const approval=(await client.listPermissions())[0];
   expect(approval.permission).toBe("browser_site");
-  await page.getByRole("button",{name:"Always for this folder",exact:true}).click();
+  // The fixture workspace is a git repository, so the rule's scope is a choice.
+  await page.getByRole("button",{name:"Always allow",exact:true}).click();
+  await page.getByRole("menuitem",{name:"Always for this folder",exact:true}).click();
   expect((await first).value.content).toContain("Haarness browser fixture");
   expect(await inspect()).toContain("Haarness browser fixture");
   await savePolicy(policy=>{policy.defaults.browsing="allow";policy.defaults.uploads="ask";});

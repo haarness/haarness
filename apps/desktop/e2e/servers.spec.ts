@@ -1515,7 +1515,7 @@ test("remote tools use standard permissions without an operating system sandbox"
       content: "approved outside proof",
     });
     await permission("external_directory");
-    await expect(page.locator(".approval-head")).toContainText(
+    await expect(page.locator(".approval .prompt-title")).toContainText(
       "Access a folder outside this project",
     );
     expect(await readFile(outside, "utf8").catch(() => null)).toBeNull();
@@ -1529,7 +1529,7 @@ test("remote tools use standard permissions without an operating system sandbox"
     await finished();
     await sendTool("write", { path: outside, content: "must remain denied" });
     await permission("external_directory");
-    await expect(page.locator(".approval-head")).toContainText(
+    await expect(page.locator(".approval .prompt-title")).toContainText(
       "Access a folder outside this project",
     );
     await page.getByRole("button", { name: "Deny", exact: true }).click();
@@ -1611,15 +1611,19 @@ for (const connectionMode of ["local", "remote"] as const) {
           await expect(client.manageResource("assets", { kind: "agent", action, name: internal,
             scope: "global", description: "Blocked", prompt: "Blocked" })).rejects.toThrow(/managed internally/);
       }
-      await page.getByRole("button", { name: "Search", exact: true }).click();
-      const search = page.getByRole("combobox", { name: "Search Haarness", exact: true });
-      await search.fill("editor-kit:helper");
-      await expect(page.getByRole("option", { name: "editor-kit:helper", exact: true })).toBeVisible();
+      // Universal search stays at settings and controls; the Settings filter
+      // is where installed agents are found, and the internal ones never are.
+      const filtering = await settings("Agents");
+      const filter = filtering.getByRole("textbox", { name: "Filter settings", exact: true });
+      const results = filtering.getByRole("navigation", { name: "Settings search results", exact: true });
+      await filter.fill("editor-kit:helper");
+      await expect(results.getByTitle("editor-kit:helper", { exact: true })).toBeVisible();
       for (const internal of ["title", "compaction"]) {
-        await search.fill(internal);
-        await expect(page.getByRole("option", { name: internal, exact: true })).toHaveCount(0);
+        await filter.fill(internal);
+        await expect(results).toBeVisible();
+        await expect(results.getByTitle(internal, { exact: true })).toHaveCount(0);
       }
-      await page.keyboard.press("Escape");
+      await filter.fill("");
       for (const [section, kind, name, bodyLabel] of [
         ["Agents", "agent", "build", "Instructions"],
         ["Agents", "agent", "editor-kit:helper", "Instructions"],
