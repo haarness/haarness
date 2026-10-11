@@ -70,7 +70,8 @@ inside the project run without asking; Haarness asks before using files outside 
 reading secrets such as `.env`, switching agents or generating paid media, plus anything your own
 rules set to ask. Desktop's browser asks about a site only when **Settings → Browser** sets it to
 **Requires approval**. Auto answers those requests itself, except Haarness Cloud actions that
-spend money or delete something, which always ask.
+spend money or delete something, which always ask, and a site set to **Requires approval**, which
+asks unless **Remember site approvals** is on.
 
 In the TUI, answer a request with a key:
 
