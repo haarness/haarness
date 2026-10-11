@@ -178,7 +178,7 @@ async fn real_cli_multi_project_history_matches_api_and_html_without_mutating_hi
         .json::<Value>()
         .await
         .unwrap();
-    assert!(report["summary"].as_str().unwrap().contains("1 projects"));
+    assert!(report["summary"].as_str().unwrap().contains("1 project ·"));
     assert!(report["html"].as_str().unwrap().contains("<!doctype html>"));
     let schema = client
         .get(format!("{base}/openapi.json"))
@@ -274,7 +274,7 @@ fn exercise_tui(fixture: &Fixture, base: &str, token: &str) {
     wait_for_pane(&session, "h a a r n e s s");
     for (command, expected) in [
         ("/stats", "2 projects"),
-        ("/stats --current-project", "1 projects"),
+        ("/stats --current-project", "1 project ·"),
         ("/insights --days 7", "Report:"),
     ] {
         Command::new("tmux")
