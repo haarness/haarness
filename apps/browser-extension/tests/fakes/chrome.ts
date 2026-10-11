@@ -89,6 +89,10 @@ export class FakeChrome {
   paused = new Map<string, Paused>();
   /** URL → where the site redirects it. */
   redirects = new Map<string, string>();
+  /** Page URL → the frames and resources it loads once committed. */
+  subresources = new Map<string, { url: string; resourceType: string; frameId?: string }[]>();
+  /** Subresources the extension failed through Fetch, in order. */
+  refused: string[] = [];
   titles = new Map<string, string>();
   badge = "";
   reloads = 0;
@@ -393,6 +397,20 @@ export class FakeChrome {
       url = next;
     }
     this.commit(tab, url);
+    for (const resource of this.subresources.get(url) ?? []) {
+      if (!this.fetching.has(tab.id)) break;
+      const requestId = `request-${++this.request}`;
+      const decision = await new Promise<"continue" | "fail">((resolve) => {
+        this.paused.set(requestId, { resolve });
+        this.event(tab.id, "Fetch.requestPaused", {
+          requestId,
+          request: { url: resource.url, method: "GET", headers: {} },
+          frameId: resource.frameId ?? `frame-${tab.id}`,
+          resourceType: resource.resourceType,
+        });
+      });
+      if (decision === "fail") this.refused.push(resource.url);
+    }
     queueMicrotask(() => {
       this.event(tab.id, "Page.frameNavigated", { frame: { id: `frame-${tab.id}`, url, loaderId: "l2" }, type: "Navigation" });
       this.event(tab.id, "Page.loadEventFired", { timestamp: 1 });

@@ -8,9 +8,11 @@
  *   - a blocked (Deny) origin is refused for every resource type;
  *   - the tab's own page may only load an Ask origin this chat has approved;
  *   - the tab's own page may not leave the web (file:, chrome:, data:, …).
- * Everything else continues, so ordinary pages are not stalled. After the
- * command (and for main-frame navigations within 2 s of it) a backstop checks
- * where the tab landed with `landing()`.
+ * Everything else continues, so ordinary pages are not stalled. Only a
+ * refused page of the tab's own fails the command; a refused frame or
+ * resource is just not loaded. After the command (and for main-frame
+ * navigations within 2 s of it) a backstop checks where the tab landed with
+ * `landing()`.
  *
  * Not covered: requests from workers and service workers, and requests an
  * out-of-process frame starts before `Fetch.enable` reaches it; the backstop
