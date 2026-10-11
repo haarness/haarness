@@ -819,6 +819,7 @@ test("[Chrome server] a connected Chrome shows in Settings, and Allow in this ch
     await page.keyboard.press("Enter");
     const step = page.locator(".tool-call", { hasText: "Opened a tab" }).last();
     await expect(step.locator(".tool-chip")).toHaveText("Chrome");
+    await snap("chrome-transcript-chip.png");
     // The browser panel counts the chat's Chrome tabs.
     await app.evaluate(({ BrowserWindow }) =>
       BrowserWindow.getAllWindows()[0].webContents.send("haarness:event", { kind: "menu", data: "browser" }),
@@ -826,6 +827,7 @@ test("[Chrome server] a connected Chrome shows in Settings, and Allow in this ch
     await expect(page.getByRole("region", { name: "Web browser", exact: true }).locator(".browser-status")).toContainText(
       "This chat also uses Chrome · 3 tabs",
     );
+    await snap("chrome-browser-panel.png");
     await app.evaluate(({ BrowserWindow }) =>
       BrowserWindow.getAllWindows()[0].webContents.send("haarness:event", { kind: "menu", data: "browser" }),
     );
