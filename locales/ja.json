@@ -2232,5 +2232,12 @@
   "Waiting for Chrome…": "Chrome を待っています…",
   "Connected to {name}": "{name} に接続しました",
   "Try it: ask an agent to open a website in Chrome.": "試してみましょう: エージェントに Chrome でウェブサイトを開くよう頼んでください。",
-  "Haarness connects as soon as Chrome loads the extension.": "Chrome が拡張機能を読み込むとすぐに Haarness が接続します。"
+  "Haarness connects as soon as Chrome loads the extension.": "Chrome が拡張機能を読み込むとすぐに Haarness が接続します。",
+  "Allow in Chrome": "Chrome で許可",
+  "Allow in this chat": "このチャットで許可",
+  "Lasts for this chat until its Haarness server stops.": "このチャットの Haarness サーバーが停止するまで有効です。",
+  "Use {origin} in Chrome": "Chrome で {origin} を使用",
+  "Send downloads from {origin} in Chrome to the agent": "Chrome での {origin} からのダウンロードをエージェントに渡す",
+  "Upload files to {origin} in Chrome": "Chrome で {origin} にファイルをアップロード",
+  "Run scripts on {origin} in Chrome": "Chrome で {origin} 上のスクリプトを実行"
 }

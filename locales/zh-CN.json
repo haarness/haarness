@@ -2232,5 +2232,12 @@
   "Waiting for Chrome…": "正在等待 Chrome…",
   "Connected to {name}": "已连接到 {name}",
   "Try it: ask an agent to open a website in Chrome.": "试试看：让智能体在 Chrome 中打开一个网站。",
-  "Haarness connects as soon as Chrome loads the extension.": "Chrome 加载扩展后，Haarness 会立即连接。"
+  "Haarness connects as soon as Chrome loads the extension.": "Chrome 加载扩展后，Haarness 会立即连接。",
+  "Allow in Chrome": "在 Chrome 中允许",
+  "Allow in this chat": "在此聊天中允许",
+  "Lasts for this chat until its Haarness server stops.": "在此聊天中有效，直到其 Haarness 服务器停止。",
+  "Use {origin} in Chrome": "在 Chrome 中使用 {origin}",
+  "Send downloads from {origin} in Chrome to the agent": "将 Chrome 中来自 {origin} 的下载发送给智能体",
+  "Upload files to {origin} in Chrome": "在 Chrome 中向 {origin} 上传文件",
+  "Run scripts on {origin} in Chrome": "在 Chrome 中对 {origin} 运行脚本"
 }

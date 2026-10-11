@@ -1694,6 +1694,20 @@ html[dir="rtl"] .tool-target {
 .prompt-subject.prompt-detail {
   color: var(--muted);
 }
+/* An explicit Chrome request names each site it asks for, one per line. */
+.prompt-subject.chrome-approval {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0);
+  font-size: var(--ui);
+  white-space: normal;
+}
+.chrome-approval bdi,
+.chrome-approval code {
+  font-family: var(--mono);
+  font-size: var(--ui-sm);
+}
 /* The proposed change under an edit request: short enough to keep the
    composer in view, scrollable when the edit is long. */
 .approval-changes {

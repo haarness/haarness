@@ -1,16 +1,21 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import type { PendingPermissionInfo } from "@haarness/sdk";
 import {
+  chromeApproval,
+  chromeApprovalLines,
   chromeConnection,
   chromeThreadTabs,
   defaultChromeSettings,
   editableChromeSettings,
   extensionsPage,
+  isExplicitPermission,
   setupBrowsers,
   webStoreLink,
   type ChromeHost,
   type ChromeSetupInfo,
 } from "../src/chrome";
+import { canAutoApprove, createAutoApprover } from "../src/renderer/approval-mode";
 
 const host = (overrides: Partial<ChromeHost> = {}): ChromeHost => ({
   kind: "chrome",
@@ -98,4 +103,87 @@ test("the setup report picks Chrome's extensions page and offers only an https W
     webStoreLink({ ...info, webStoreUrl: "https://chromewebstore.google.com/detail/x" }),
     "https://chromewebstore.google.com/detail/x",
   );
+});
+
+const thread = "0199a7a2-7c41-7000-8000-000000000001";
+test("Chrome approvals read as sites per category, with a site and its www twin as one line", () => {
+  assert.deepEqual(chromeApproval(`chrome-browsing:${thread}:https://mail.example.test`), {
+    category: "browsing",
+    thread,
+    origin: "https://mail.example.test",
+  });
+  assert.deepEqual(chromeApproval(`browser_site:chrome-scripts:${thread}:http://127.0.0.1:8443`), {
+    category: "scripts",
+    thread,
+    origin: "http://127.0.0.1:8443",
+  });
+  for (const pattern of [
+    "browsing:https://example.test",
+    "browser_site:browsing:https://example.test",
+    "browser:navigate:https://example.test",
+    `chrome-cookies:${thread}:https://example.test`,
+  ])
+    assert.equal(chromeApproval(pattern), undefined, pattern);
+  assert.deepEqual(
+    chromeApprovalLines([
+      `browser_site:chrome-browsing:${thread}:https://example.test`,
+      `browser_site:chrome-browsing:${thread}:https://www.example.test`,
+      `browser_site:chrome-scripts:${thread}:https://example.test`,
+      `browser_site:chrome-browsing:${thread}:https://example.test`,
+      `chrome-downloads:${thread}:https://files.example.test`,
+      "read:/tmp/upload.txt",
+    ]),
+    [
+      { category: "browsing", origin: "https://example.test" },
+      { category: "scripts", origin: "https://example.test" },
+      { category: "downloads", origin: "https://files.example.test" },
+    ],
+  );
+});
+
+const request = (overrides: Partial<PendingPermissionInfo> & { explicit?: boolean } = {}) =>
+  ({
+    permissionId: crypto.randomUUID(),
+    permission: "browser_site",
+    operation: `browser_site:chrome-browsing:${thread}:https://example.test`,
+    patterns: [`chrome-browsing:${thread}:https://example.test`],
+    alwaysPatterns: [`browser_site:chrome-browsing:${thread}:https://example.test`],
+    threadId: thread,
+    rootThreadId: thread,
+    createdAt: new Date().toISOString(),
+    ...overrides,
+  }) as PendingPermissionInfo & { explicit?: boolean };
+
+test("explicit Chrome requests are never answered by Auto, even before a server marks them", async () => {
+  assert.equal(isExplicitPermission(request()), true);
+  assert.equal(isExplicitPermission(request({ explicit: true, operation: "x", patterns: [] })), true);
+  const desktopSite = request({
+    operation: "browser_site:browsing:https://example.test",
+    patterns: ["browsing:https://example.test"],
+  });
+  assert.equal(isExplicitPermission(desktopSite), false);
+  assert.equal(canAutoApprove(request()), false);
+  assert.equal(canAutoApprove(request({ explicit: true, operation: "bash:ls", permission: "bash", patterns: [] })), false);
+  assert.equal(canAutoApprove(desktopSite), true);
+  const combined = request({
+    permission: "multiple",
+    operation: "browser:navigate:https://example.test",
+    patterns: [
+      "browser:navigate:https://example.test",
+      `browser_site:chrome-browsing:${thread}:https://example.test`,
+    ],
+  });
+  assert.equal(canAutoApprove(combined), false);
+  const replies: string[] = [];
+  const consume = createAutoApprover({
+    enabled: () => true,
+    reply: async (_, id) => {
+      replies.push(id);
+    },
+    failed: () => assert.fail("no reply should fail"),
+  });
+  const chrome = request();
+  consume("a", [chrome, combined, desktopSite], []);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(replies, [desktopSite.permissionId]);
 });

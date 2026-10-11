@@ -2232,5 +2232,12 @@
   "Waiting for Chrome…": "Chrome bekleniyor…",
   "Connected to {name}": "{name} ile bağlantı kuruldu",
   "Try it: ask an agent to open a website in Chrome.": "Deneyin: Bir ajandan Chrome’da bir web sitesi açmasını isteyin.",
-  "Haarness connects as soon as Chrome loads the extension.": "Haarness, Chrome uzantıyı yükler yüklemez bağlanır."
+  "Haarness connects as soon as Chrome loads the extension.": "Haarness, Chrome uzantıyı yükler yüklemez bağlanır.",
+  "Allow in Chrome": "Chrome’da izin ver",
+  "Allow in this chat": "Bu sohbette izin ver",
+  "Lasts for this chat until its Haarness server stops.": "Bu sohbet için, Haarness sunucusu durana kadar geçerlidir.",
+  "Use {origin} in Chrome": "Chrome’da {origin} kullan",
+  "Send downloads from {origin} in Chrome to the agent": "Chrome’da {origin} kaynaklı indirmeleri ajana gönder",
+  "Upload files to {origin} in Chrome": "Chrome’da {origin} adresine dosya yükle",
+  "Run scripts on {origin} in Chrome": "Chrome’da {origin} üzerinde betik çalıştır"
 }
