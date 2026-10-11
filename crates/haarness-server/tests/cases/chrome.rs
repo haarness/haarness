@@ -1052,6 +1052,107 @@ async fn a_chrome_extension_host_serves_tools_through_the_server() {
 }
 
 #[tokio::test]
+async fn automatic_keeps_whatever_a_scheduled_run_starts_out_of_chrome() {
+    let server = chrome_server(haarness_server::auth::ServerAccess::Private).await;
+    let mut socket = extension_socket(&server.base, "1", None).await.unwrap();
+    assert_eq!(receive(&mut socket).await["type"], "attached");
+    send(
+        &mut socket,
+        json!({"type":"hello","browser":{"id":uuid::Uuid::now_v7().to_string(),"kind":"chrome","name":"Google Chrome","label":null,"version":"154.0.8037.98"},"extension":{"version":"0.1.1"},"paused":false,"stopped":false,"focusedAt":1}),
+    )
+    .await;
+    send(&mut socket, json!({"type":"ping"})).await;
+    assert_eq!(receive(&mut socket).await["type"], "pong");
+    let client = reqwest::Client::new();
+    let open = |thread: haarness_protocol::ThreadId| {
+        let client = client.clone();
+        let url = format!("http://{}/v1/threads/{thread}/browser/tool", server.base);
+        tokio::spawn(async move {
+            client
+                .post(url)
+                .bearer_auth("chrome-token")
+                .json(
+                    &json!({"name":"browser_tabs_open","arguments":{"url":"https://example.test"}}),
+                )
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        })
+    };
+    // The run, the subagent it delegates to, a workflow that subagent
+    // starts and the workflow's agent: none lands in the user's Chrome.
+    let run = scheduled_thread(&server.runtime).await;
+    let subagent = child_thread(&server.runtime, run.id).await;
+    let workflow = child_thread(&server.runtime, subagent.id).await;
+    let agent = child_thread(&server.runtime, workflow.id).await;
+    for thread in [run.id, subagent.id, workflow.id, agent.id] {
+        let refused = open(thread).await.unwrap();
+        assert!(
+            refused["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("This scheduled run has no browser it may use unattended."),
+            "{refused}"
+        );
+    }
+    send(&mut socket, json!({"type":"ping"})).await;
+    assert_eq!(receive(&mut socket).await["type"], "pong");
+    // An interactive chat's subagent still goes to Chrome.
+    let chat = echo_thread(&server.runtime).await;
+    let helper = child_thread(&server.runtime, chat.id).await;
+    let call = open(helper.id);
+    let inspect = receive(&mut socket).await;
+    assert_eq!(inspect["type"], "command");
+    assert_eq!(inspect["thread"], json!(helper.id));
+    assert_eq!(inspect["parent"], json!(chat.id));
+    send(
+        &mut socket,
+        json!({"type":"result","id":inspect["id"],"outcome":{"type":"failure","code":"restricted-page","message":"raw"}}),
+    )
+    .await;
+    call.await.unwrap();
+    server.handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn one_conversation_too_many_never_closes_chrome() {
+    let server = chrome_server(haarness_server::auth::ServerAccess::Private).await;
+    let mut socket = extension_socket(&server.base, "1", None).await.unwrap();
+    assert_eq!(receive(&mut socket).await["type"], "attached");
+    send(
+        &mut socket,
+        json!({"type":"hello","browser":{"id":uuid::Uuid::now_v7().to_string(),"kind":"chrome","name":"Google Chrome","label":null,"version":"154.0.8037.98"},"extension":{"version":"0.1.1"},"paused":false,"stopped":false,"focusedAt":1}),
+    )
+    .await;
+    let state = |thread: haarness_protocol::ThreadId| {
+        let tab = format!("tab_{}", uuid::Uuid::now_v7());
+        json!({"type":"state","thread":thread,"state":{"tabs":[{"id":tab,"url":"https://example.test/","title":"Example","loading":false,"canGoBack":false,"canGoForward":false,"generation":1}],"focusedTabID":tab}})
+    };
+    for _ in 0..257 {
+        send(&mut socket, state(haarness_protocol::ThreadId::new())).await;
+    }
+    // The connection every conversation shares is still up.
+    send(&mut socket, json!({"type":"ping"})).await;
+    assert_eq!(receive(&mut socket).await["type"], "pong");
+    let hosts: Value = reqwest::Client::new()
+        .get(format!("http://{}/v1/browser/hosts", server.base))
+        .bearer_auth("chrome-token")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(hosts["hosts"][0]["threads"], 256, "{hosts}");
+    assert_eq!(hosts["chrome"]["globalEnabled"], true);
+    assert_eq!(hosts["chrome"]["blockedBy"], Value::Null);
+    server.handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn chrome_extension_hosts_need_a_hello_and_a_token() {
     let server = chrome_server(haarness_server::auth::ServerAccess::Private).await;
     let mut socket = extension_socket(&server.base, "1", None).await.unwrap();

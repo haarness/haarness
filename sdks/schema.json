@@ -319,22 +319,47 @@
         ],
         "type": "object"
       },
+      "ChromeBlock": {
+        "description": "Why agents may not use Chrome although its own switch is on.",
+        "enum": [
+          "browser-control",
+          "project"
+        ],
+        "type": "string"
+      },
       "ChromeHostSettings": {
         "description": "Chrome's settings, as they apply on this server now.",
         "properties": {
+          "blockedBy": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ChromeBlock",
+                "description": "Why agents may not use Chrome although its own switch is on."
+              }
+            ]
+          },
           "defaultBrowser": {
             "$ref": "#/components/schemas/DefaultBrowser"
           },
           "enabled": {
+            "description": "Agents may use Chrome now: its switch, agent browser control and this\nproject's settings all allow it.",
             "type": "boolean"
           },
           "everConnected": {
             "description": "An extension connected since this server started.",
             "type": "boolean"
+          },
+          "globalEnabled": {
+            "description": "Chrome's own switch, in the global settings.",
+            "type": "boolean"
           }
         },
         "required": [
           "enabled",
+          "globalEnabled",
           "defaultBrowser",
           "everConnected"
         ],
