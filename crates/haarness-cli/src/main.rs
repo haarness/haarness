@@ -32,10 +32,11 @@ use haarness_core::{
 use haarness_mcp::NativeMcpRegistry;
 use haarness_protocol::{
     CreateThreadRequest, GoalActionRequest, GoalState, GoalStatus, ItemData, McpConfigureRequest,
-    PTY_CAPABILITY, QuestionReply, RequestId, SCHEMA_VERSION, SESSION_ARCHIVE_CAPABILITY,
-    ServerInfo, SessionArchive, StartTurnRequest, Thread, ThreadId, TurnId, TurnStatus,
-    UpdateThreadRequest, WORKSPACE_HISTORY_CAPABILITY, WorkflowId, WorkflowRun,
-    WorkflowStartRequest, WorkspaceCreateRequest, WorkspaceRemoveRequest, WorkspaceResetRequest,
+    PTY_CAPABILITY, PermissionReply, PermissionReplyDecision, QuestionReply, RequestId,
+    SCHEMA_VERSION, SESSION_ARCHIVE_CAPABILITY, ServerInfo, SessionArchive, StartTurnRequest,
+    Thread, ThreadId, TurnId, TurnStatus, UpdateThreadRequest, WORKSPACE_HISTORY_CAPABILITY,
+    WorkflowId, WorkflowRun, WorkflowStartRequest, WorkspaceCreateRequest, WorkspaceRemoveRequest,
+    WorkspaceResetRequest,
 };
 use haarness_providers::{
     CopilotOAuthClient, Credential, CredentialStore, NativeProviderRegistry, OpenAiOAuthClient,
@@ -290,7 +291,8 @@ struct PasswordArgs {
 struct ServeArgs {
     #[command(flatten)]
     authentication: PasswordArgs,
-    #[arg(long, default_value = "127.0.0.1")]
+    /// Address to listen on: an IP address, or `localhost`.
+    #[arg(long, default_value = "127.0.0.1", value_parser = parse_listen_host)]
     host: IpAddr,
     #[arg(long, default_value_t = 4096)]
     port: u16,
@@ -352,13 +354,18 @@ struct RunArgs {
     /// Exact media support depends on the selected provider and model.
     #[arg(short = 'f', long = "file", value_name = "PATH")]
     files: Vec<PathBuf>,
-    #[arg(long, default_value = "openai")]
-    provider: String,
-    /// Model id, or a qualified provider/model pair.
-    #[arg(short = 'm', long, default_value = "gpt-5.6")]
-    model: String,
-    #[arg(long, default_value = "build")]
-    agent: String,
+    /// Provider for a model id given without one.
+    #[arg(long)]
+    provider: Option<String>,
+    /// Model as provider/model, or a model id. Without it, a new chat uses
+    /// your default model (the configured one, else a connected provider's)
+    /// and a continued chat keeps its own.
+    #[arg(short = 'm', long)]
+    model: Option<String>,
+    /// Agent profile. Without it, a new chat uses your default agent and a
+    /// continued chat keeps its own.
+    #[arg(long)]
+    agent: Option<String>,
     /// Opt this run into task-based workflow orchestration and the strongest
     /// reasoning effort supported by the selected model.
     #[arg(long)]
@@ -434,6 +441,8 @@ enum AuthCommand {
     /// Store an API key for a provider.
     Set {
         provider: String,
+        /// The key. Without it, the key is read from piped stdin, or asked
+        /// for at the terminal.
         #[arg(long)]
         key: Option<String>,
     },
@@ -1042,7 +1051,21 @@ struct ScheduleUpdateArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse_from(normalize_natural_language_args(std::env::args_os()));
+    quiet_closed_stdout();
+    let args = std::env::args_os().collect::<Vec<_>>();
+    if let Some((typo, command)) = misspelled_subcommand(&args) {
+        use clap::CommandFactory;
+        let prompt = shorthand_words(&args).join(" ");
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::InvalidSubcommand,
+                format!(
+                    "unrecognized subcommand '{typo}'\n\n  tip: a similar subcommand exists: '{command}'\n  tip: to ask the model instead, run: haarness run \"{prompt}\""
+                ),
+            )
+            .exit();
+    }
+    let cli = Cli::parse_from(normalize_natural_language_args(args));
     let project_config = !cli.disable_project_config;
     let project_config_override = if cli.disable_project_config {
         Some(false)
@@ -1191,7 +1214,9 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Some(Command::Auth { command }) => auth_command(&paths, command).await,
+        Some(Command::Auth { command }) => {
+            auth_command(&paths, &workspace, project_config, command).await
+        }
         Some(Command::Mcp { command }) => {
             mcp_command(&paths, &workspace, project_config, cli.yolo, command).await
         }
@@ -1244,7 +1269,8 @@ async fn main() -> Result<()> {
         Some(Command::Marketplace(args)) => marketplace::run(&paths, &workspace, project_config, args).await,
         Some(Command::Capability { request }) => {
             let service=marketplace::service(&paths,&workspace,project_config).await?;
-            println!("{}",serde_json::to_string_pretty(&service.capability_request(&serde_json::from_str(&request)?).await?)?);
+            let request = serde_json::from_str(&request).with_context(|| format!("The capability request must be JSON, such as '{{\"action\":\"list\"}}'; got {request}"))?;
+            println!("{}",serde_json::to_string_pretty(&service.capability_request(&request).await?)?);
             Ok(())
         },
         Some(Command::Plugin { command }) => {
@@ -1346,6 +1372,86 @@ fn normalize_natural_language_args(args: impl IntoIterator<Item = OsString>) -> 
     }
     args.insert(1, OsString::from("run"));
     args
+}
+
+/// `haarness sessions list | head` closes stdout before the list ends. End
+/// quietly then, as other command-line tools do, rather than with the panic
+/// `println!` raises on a broken pipe.
+fn quiet_closed_stdout() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        if message.starts_with("failed printing to stdout") && message.contains("Broken pipe") {
+            std::process::exit(0);
+        }
+        default_hook(info);
+    }));
+}
+
+/// The terminal UI draws on stdout and reads keys from stdin. Without a
+/// terminal on both it would print escape codes and fail with "Device not
+/// configured".
+fn require_terminal() -> Result<()> {
+    if io::stdin().is_terminal() && io::stdout().is_terminal() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "The terminal UI needs an interactive terminal. For scripts, use `haarness run \"…\"`; it reads piped text too, as in `git diff | haarness run \"Review this\"`."
+    )
+}
+
+/// The leading words of a command line, before any option.
+fn shorthand_words(args: &[OsString]) -> Vec<&str> {
+    args.iter()
+        .skip(1)
+        .map_while(|value| value.to_str())
+        .take_while(|value| !value.starts_with('-'))
+        .collect()
+}
+
+/// A first word that misspells a command (`doctr`, `sesions list`), and the
+/// command it most likely means. The `haarness "prompt"` shorthand would
+/// otherwise send the typo to the model. Only a lone word, or one followed
+/// by that command's own subcommand, counts: a sentence stays a prompt.
+fn misspelled_subcommand(args: &[OsString]) -> Option<(String, String)> {
+    use clap::CommandFactory;
+    let words = shorthand_words(args);
+    let typo = *words.first()?;
+    if typo.len() < 3
+        || !typo.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+        || is_cli_subcommand(typo)
+        || Path::new(typo).exists()
+    {
+        return None;
+    }
+    let cli = Cli::command();
+    let (command, _) = cli
+        .get_subcommands()
+        .flat_map(|command| {
+            std::iter::once(command.get_name())
+                .chain(command.get_all_aliases())
+                .map(move |name| (command, name))
+        })
+        .filter_map(|(command, name)| {
+            let distance = strsim::osa_distance(typo, name);
+            // One slip in a short name, two in a long one.
+            (distance <= if name.len() >= 7 { 2 } else { 1 }).then_some((command, distance))
+        })
+        .min_by_key(|(_, distance)| *distance)?;
+    let names = |command: &clap::Command, word: &str| {
+        command.get_name() == word || command.get_all_aliases().any(|alias| alias == word)
+    };
+    let fits = words.get(1).is_none_or(|next| {
+        command
+            .get_subcommands()
+            .any(|subcommand| names(subcommand, next))
+    });
+    fits.then(|| (typo.to_owned(), command.get_name().to_owned()))
 }
 
 /// Whether `name` is a subcommand or alias the parser accepts. Read from
@@ -1763,7 +1869,7 @@ fn agent_manage_command(
             } else {
                 Some(serde_json::to_string(&permissions)?)
             };
-            let body = asset_body(prompt, file, "agent prompt")?;
+            let body = asset_body(prompt, file, "agent prompt", "--prompt")?;
             let target = managed_asset_path(paths, workspace, project, "agents", &name, "md")?;
             let mut metadata = vec![
                 ("name", Some(name.as_str())),
@@ -1780,7 +1886,7 @@ fn agent_manage_command(
         }
         AgentManageCommand::Remove { name, project } => {
             let target = managed_asset_path(paths, workspace, project, "agents", &name, "md")?;
-            remove_managed_asset(&target, false)?;
+            remove_managed_asset(&target, false, &format!("custom agent named '{name}'"))?;
             println!("Removed agent '{name}' from {}.", target.display());
             reload_notice(paths);
             Ok(())
@@ -1825,7 +1931,7 @@ fn command_manage_command(
             if let Some(model) = model.as_deref() {
                 validate_qualified_model(model, "command")?;
             }
-            let body = asset_body(template, file, "command template")?;
+            let body = asset_body(template, file, "command template", "--template")?;
             let target = managed_asset_path(paths, workspace, project, "commands", &name, "md")?;
             let mut metadata = vec![
                 ("description", Some(description.as_str())),
@@ -1840,7 +1946,7 @@ fn command_manage_command(
         }
         CommandManageCommand::Remove { name, project } => {
             let target = managed_asset_path(paths, workspace, project, "commands", &name, "md")?;
-            remove_managed_asset(&target, false)?;
+            remove_managed_asset(&target, false, &format!("custom command named '{name}'"))?;
             println!("Removed command '/{name}' from {}.", target.display());
             reload_notice(paths);
             Ok(())
@@ -1877,7 +1983,7 @@ async fn skill_manage_command(
             force,
         } => {
             validate_asset_name(&name, "skill")?;
-            let body = asset_body(instructions, file, "skill instructions")?;
+            let body = asset_body(instructions, file, "skill instructions", "--instructions")?;
             let root = if project {
                 workspace.join(".haarness/skills")
             } else {
@@ -1901,7 +2007,7 @@ async fn skill_manage_command(
                 paths.skills.clone()
             };
             let target = managed_name_path(&root, &name)?;
-            remove_managed_asset(&target, true)?;
+            remove_managed_asset(&target, true, &format!("custom skill named '{name}'"))?;
             println!("Removed skill '{name}' from {}.", target.display());
             reload_notice(paths);
             Ok(())
@@ -2050,12 +2156,17 @@ fn managed_asset_path(
     Ok(target)
 }
 
-fn asset_body(inline: Option<String>, file: Option<PathBuf>, label: &str) -> Result<String> {
+fn asset_body(
+    inline: Option<String>,
+    file: Option<PathBuf>,
+    label: &str,
+    flag: &str,
+) -> Result<String> {
     let body = match (inline, file) {
         (Some(body), None) => body,
         (None, Some(path)) => fs::read_to_string(&path)
             .with_context(|| format!("read {label} from {}", path.display()))?,
-        (None, None) => anyhow::bail!("provide --file or the inline {label} option"),
+        (None, None) => anyhow::bail!("provide the {label} with {flag} or --file"),
         (Some(_), Some(_)) => unreachable!("clap rejects conflicting body inputs"),
     };
     if body.trim().is_empty() {
@@ -2147,9 +2258,12 @@ fn one_line_metadata(value: &str) -> String {
         .replace(['\r', '\n'], " ")
 }
 
-fn remove_managed_asset(path: &Path, directory: bool) -> Result<()> {
+fn remove_managed_asset(path: &Path, directory: bool, what: &str) -> Result<()> {
     if !path.exists() {
-        anyhow::bail!("managed asset does not exist: {}", path.display());
+        anyhow::bail!(
+            "There is no {what} in {}.",
+            path.parent().unwrap_or(path).display()
+        );
     }
     if directory {
         fs::remove_dir_all(path)?;
@@ -2208,10 +2322,12 @@ async fn session_command(
                 println!("No sessions.");
             } else {
                 for session in sessions {
+                    // One row per chat, whatever the title holds: scripts cut
+                    // this list on tabs and lines.
                     println!(
                         "{}\t{}\t{}/{}\t{}{}",
                         session.id,
-                        session.title,
+                        one_line_metadata(&session.title),
                         session.provider,
                         session.model,
                         session.updated_at.to_rfc3339(),
@@ -2424,15 +2540,17 @@ async fn workspace_command(
             remove_untracked,
             to_ref,
         } => {
-            let response = manager.reset_worktree(
-                &reference,
-                &WorkspaceResetRequest {
-                    confirm,
-                    discard_changes,
-                    remove_untracked,
-                    to_ref,
-                },
-            )?;
+            let response = manager
+                .reset_worktree(
+                    &reference,
+                    &WorkspaceResetRequest {
+                        confirm,
+                        discard_changes,
+                        remove_untracked,
+                        to_ref,
+                    },
+                )
+                .map_err(worktree_flag_words)?;
             println!("{}", response.message);
         }
         WorkspaceCommand::Remove {
@@ -2441,18 +2559,36 @@ async fn workspace_command(
             discard_changes,
             delete_branch,
         } => {
-            let response = manager.remove_worktree(
-                &reference,
-                &WorkspaceRemoveRequest {
-                    confirm,
-                    discard_changes,
-                    delete_branch,
-                },
-            )?;
+            let response = manager
+                .remove_worktree(
+                    &reference,
+                    &WorkspaceRemoveRequest {
+                        confirm,
+                        discard_changes,
+                        delete_branch,
+                    },
+                )
+                .map_err(worktree_flag_words)?;
             println!("{}", response.message);
         }
     }
     Ok(())
+}
+
+/// The worktree manager names the API's fields (`confirm=true`); here they
+/// are command-line flags.
+fn worktree_flag_words(error: haarness_workspaces::WorkspaceError) -> anyhow::Error {
+    let message = match &error {
+        haarness_workspaces::WorkspaceError::Invalid(message) => message.clone(),
+        other => other.to_string(),
+    };
+    anyhow::anyhow!(
+        "{}",
+        message
+            .replace("confirm=true", "--confirm")
+            .replace("discardChanges=true", "--discard-changes")
+            .replace("removeUntracked", "--remove-untracked")
+    )
 }
 
 fn session_archive_request(archived: bool) -> UpdateThreadRequest {
@@ -2874,7 +3010,7 @@ async fn execute_schedule(
             )
             .await?;
         turn_id = Some(turn.id.0);
-        wait_for_turn_client(&client, turn.id).await?;
+        wait_for_turn_client(&client, turn.id, &RunWatch::scheduled()).await?;
         let response =
             assistant_messages_for_turn(client.items(thread.id).await?, turn.id).join("\n");
         Result::<String>::Ok(response)
@@ -3016,6 +3152,7 @@ async fn interactive(
     thread: Option<Uuid>,
     continue_last: bool,
 ) -> Result<()> {
+    require_terminal()?;
     let manager = paths.workspace_manager()?;
     let mut active_paths = paths.clone();
     let mut active_workspace = workspace;
@@ -3096,7 +3233,8 @@ async fn serve_command(
         );
         return Ok(());
     }
-    let _server_lease = acquire_server_lease(paths)?;
+    // A running server is named before the lease it holds is tried, which
+    // could only say that one is "running or starting".
     if let Some(live) = inspect_workspace_server(paths, &workspace).await? {
         let discovery = live.discovery;
         anyhow::bail!(
@@ -3106,6 +3244,7 @@ async fn serve_command(
             workspace.display()
         );
     }
+    let _server_lease = acquire_server_lease(paths)?;
     let token = token.unwrap_or_else(random_token);
     let (listener, state, hot_reload) = application_at(
         paths,
@@ -3204,6 +3343,7 @@ async fn attach_command(
     if args.fork && thread.is_none() && !continue_last {
         anyhow::bail!("--fork requires --session/--thread or --continue");
     }
+    require_terminal()?;
     let (server, token) =
         attached_endpoint(paths, &args.url, args.token, args.authentication).await?;
     haarness_tui::run_attached_with_auth(&server, token, thread, continue_last, args.fork).await?;
@@ -3336,6 +3476,7 @@ async fn tui_command(
     if args.fork && thread.is_none() && !continue_last {
         anyhow::bail!("--fork requires --session/--thread or --continue");
     }
+    require_terminal()?;
     if let Some(server) = args.connect {
         let (server, token) =
             attached_endpoint(paths, &server, args.token, args.authentication).await?;
@@ -3408,191 +3549,370 @@ async fn run_command(
     continue_last: bool,
     args: RunArgs,
 ) -> Result<()> {
-    let show_thinking = args.show_thinking();
-    let mut prompt = args.prompt.join(" ");
-    // Piped context augments the prompt, but an idle pipe (a spawner that
-    // never closes stdin) must not hold a prompted run hostage: with a prompt
-    // on the command line, only stdin that already has data or EOF is read.
-    if !io::stdin().is_terminal() && (args.prompt.is_empty() || stdin_ready_now()) {
-        let mut stdin = String::new();
-        io::stdin().read_to_string(&mut stdin)?;
-        if !stdin.is_empty() {
-            if !args.prompt.is_empty() {
-                prompt.push('\n');
+    let json_output = args.format == RunFormat::Json;
+    let mut chat = None;
+    let result = async {
+        let show_thinking = args.show_thinking();
+        let positional = args.prompt.join(" ");
+        let mut prompt = positional.clone();
+        // Piped context augments the prompt, but an idle pipe (a spawner that
+        // never closes stdin) must not hold a prompted run hostage: with a prompt
+        // on the command line, only stdin that already has data or EOF is read.
+        if !io::stdin().is_terminal() && (args.prompt.is_empty() || stdin_ready_now()) {
+            let mut stdin = String::new();
+            io::stdin().read_to_string(&mut stdin)?;
+            if !stdin.is_empty() {
+                if !args.prompt.is_empty() {
+                    prompt.push('\n');
+                }
+                // Piped context augments positional
+                // instructions instead of being silently discarded.
+                prompt.push_str(&stdin);
             }
-            // Piped context augments positional
-            // instructions instead of being silently discarded.
-            prompt.push_str(&stdin);
         }
+        prompt = prompt.trim().to_owned();
+        if prompt.is_empty() && args.command.is_none() && args.workflow.is_none() {
+            anyhow::bail!("a prompt argument, --command, --workflow, or piped stdin is required");
+        }
+        if args.background_timeout_ms == Some(0) {
+            anyhow::bail!("--background-timeout-ms must be a positive integer");
+        }
+        let attachments = run_attachments(&args.files)?;
+        if args.workflow.is_some() && !attachments.is_empty() {
+            anyhow::bail!(
+                "--file cannot be combined with --workflow; pass paths through workflow arguments"
+            )
+        }
+        let client = if let Some(server) = args.attach.as_deref() {
+            let (server, token) = attached_endpoint(
+                paths,
+                server,
+                args.token.clone(),
+                args.authentication.clone(),
+            )
+            .await?;
+            haarness_tui::api::ApiClient::with_auth(&server, token)?.with_attachment_uploads()
+        } else {
+            let discovery = ensure_workspace_server(paths, &workspace, trust, yolo).await?;
+            haarness_tui::api::ApiClient::new(&discovery.url, &discovery.token)?
+        };
+        // Checked before a chat exists, so a typo leaves no empty chat behind.
+        let requested_model = if args.provider.is_some() || args.model.is_some() {
+            Some(requested_run_model(
+                args.provider.as_deref(),
+                args.model.as_deref(),
+                &client.providers().await?,
+            )?)
+        } else {
+            None
+        };
+        // The request names the chat; piped context (a diff, a log) would only
+        // make the title longer.
+        let title = run_title(
+            args.title.as_deref(),
+            if positional.trim().is_empty() {
+                &prompt
+            } else {
+                &positional
+            },
+        );
+        let (thread, created) =
+            match select_run_thread_client(&client, requested_thread, continue_last, args.fork)
+                .await?
+            {
+                Some(thread) => (thread, args.fork),
+                None => {
+                    let (provider, model) = match requested_model.clone() {
+                        Some(chosen) => (Some(chosen.0), Some(chosen.1)),
+                        None => default_run_model_client(&client).await?.unzip(),
+                    };
+                    let thread = client
+                        .create_thread(CreateThreadRequest {
+                            schedule: None,
+                            title: Some(title),
+                            parent_id: None,
+                            agent: args.agent.clone(),
+                            provider,
+                            model,
+                            ultracode: None,
+                        })
+                        .await?;
+                    (thread, true)
+                }
+            };
+        chat = Some(thread.id);
+        let (provider, model) = requested_model.unzip();
+        let goal = args.goal;
+        stop_on_signal(&client, thread.id, goal, async {
+            let mut watch = RunWatch::new();
+            if let Some(workflow) = args.workflow {
+                let mut values = serde_json::Map::new();
+                if !prompt.trim().is_empty() {
+                    values.insert("input".into(), serde_json::Value::String(prompt));
+                }
+                for argument in args.workflow_args {
+                    let (key, raw) = argument.split_once('=').with_context(|| {
+                        format!("workflow argument must be KEY=VALUE: {argument}")
+                    })?;
+                    if key.trim().is_empty() {
+                        anyhow::bail!("workflow argument key cannot be empty: {argument}");
+                    }
+                    let value = serde_json::from_str(raw)
+                        .unwrap_or_else(|_| serde_json::Value::String(raw.to_owned()));
+                    values.insert(key.trim().to_owned(), value);
+                }
+                let started = client
+                    .start_workflow(WorkflowStartRequest {
+                        name: Some(workflow),
+                        source: None,
+                        path: None,
+                        args: Some(serde_json::Value::Object(values)),
+                        agent: args.agent.clone(),
+                        model: provider
+                            .as_ref()
+                            .zip(model.as_ref())
+                            .map(|(provider, model)| format!("{provider}/{model}")),
+                        variant: args.variant.clone(),
+                        thread_id: Some(thread.id),
+                        wait: false,
+                        timeout_ms: None,
+                    })
+                    .await;
+                let started = discard_refused_chat(&client, &thread, created, started).await?;
+                let run = loop {
+                    watch.answer(&client, thread.id).await?;
+                    let run = client.workflow_run(started.id, None).await?;
+                    if run.status != haarness_protocol::WorkflowRunStatus::Running {
+                        break run;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                };
+                watch.finish();
+                match run.status {
+                    haarness_protocol::WorkflowRunStatus::Completed => {
+                        if let Some(result) = run.result {
+                            match result {
+                                serde_json::Value::String(text)
+                                    if args.format == RunFormat::Default =>
+                                {
+                                    println!("{text}")
+                                }
+                                value if args.format == RunFormat::Default => {
+                                    println!("{}", serde_json::to_string_pretty(&value)?)
+                                }
+                                value => println!(
+                                    "{}",
+                                    json!({"type":"workflow", "runID":run.id, "result":value})
+                                ),
+                            }
+                        }
+                        return Ok(());
+                    }
+                    _ => anyhow::bail!(
+                        "workflow {} ended as {:?}: {}",
+                        run.workflow_name,
+                        run.status,
+                        run.error.unwrap_or_else(|| "no result".into())
+                    ),
+                }
+            }
+            if goal {
+                let set = set_goal_for_run_client(&client, thread.id, prompt.clone()).await;
+                discard_refused_chat(&client, &thread, created, set).await?;
+            }
+            let turn = client
+                .start_turn(
+                    thread.id,
+                    StartTurnRequest {
+                        request_id: RequestId::new(),
+                        text: prompt,
+                        attachments,
+                        synthetic: false,
+                        auto_approve: yolo,
+                        agent: args.agent,
+                        provider,
+                        model,
+                        reasoning_effort: args
+                            .ultracode
+                            .then(|| "ultracode".into())
+                            .or(args.variant),
+                        // Plain text output shows no file previews.
+                        tools: Some(HashMap::from([("preview".into(), false)])),
+                        command: args
+                            .command
+                            .map(|command| command.trim_start_matches('/').to_owned()),
+                    },
+                )
+                .await;
+            let turn = discard_refused_chat(&client, &thread, created, turn).await?;
+            let printed_through = if goal {
+                let result =
+                    wait_for_goal_client(&client, thread.id, goal_idle_timeout(), &watch).await;
+                watch.finish();
+                let printed_through = print_run_output_client(
+                    &client,
+                    thread.id,
+                    turn.id,
+                    args.format,
+                    show_thinking,
+                )
+                .await?;
+                result?;
+                printed_through
+            } else {
+                wait_for_turn_client(&client, turn.id, &watch).await?;
+                watch.finish();
+                print_run_output_client(&client, thread.id, turn.id, args.format, show_thinking)
+                    .await?
+            };
+            let wait_background = args.wait_background || args.background_timeout_ms.is_some();
+            settle_cli_subagents_client(
+                &client,
+                thread.id,
+                wait_background,
+                args.background_timeout_ms,
+                args.format,
+                show_thinking,
+                printed_through,
+                &watch,
+            )
+            .await?;
+            settle_cli_workflows_client(
+                &client,
+                thread.id,
+                wait_background,
+                args.background_timeout_ms,
+                args.format,
+                &watch,
+            )
+            .await
+        })
+        .await
     }
-    prompt = prompt.trim().to_owned();
-    if prompt.is_empty() && args.command.is_none() && args.workflow.is_none() {
-        anyhow::bail!("a prompt argument, --command, --workflow, or piped stdin is required");
+    .await;
+    if json_output && let Err(error) = &result {
+        // A script reads stdout: the failure, and the chat to look into,
+        // belong there as well as on stderr.
+        println!(
+            "{}",
+            json!({"type": "error", "threadID": chat, "message": format!("{error:#}")})
+        );
     }
-    if args.background_timeout_ms == Some(0) {
-        anyhow::bail!("--background-timeout-ms must be a positive integer");
-    }
-    let (provider, model) = qualified_run_model(&args.provider, &args.model)?;
-    let attachments = args
-        .files
+    result
+}
+
+/// `--file` paths as the server reads them. A folder is refused here rather
+/// than by the upload, whose error names neither the path nor the reason.
+fn run_attachments(files: &[PathBuf]) -> Result<Vec<String>> {
+    files
         .iter()
         .map(|path| {
-            path.canonicalize()
-                .with_context(|| format!("cannot read attachment {}", path.display()))
-                .map(|path| path.display().to_string())
+            let resolved = path
+                .canonicalize()
+                .with_context(|| format!("cannot read attachment {}", path.display()))?;
+            if resolved.is_dir() {
+                anyhow::bail!(
+                    "cannot attach {}: it is a folder. Pass files with -f, one per flag",
+                    path.display()
+                );
+            }
+            Ok(resolved.display().to_string())
         })
-        .collect::<Result<Vec<_>>>()?;
-    if args.workflow.is_some() && !attachments.is_empty() {
-        anyhow::bail!(
-            "--file cannot be combined with --workflow; pass paths through workflow arguments"
-        )
+        .collect()
+}
+
+/// A run's start was refused (an unknown command, agent or variant): a chat
+/// this run made for it holds nothing, so it is archived rather than left in
+/// the recent list. A continued chat stays as it was.
+async fn discard_refused_chat<T>(
+    client: &haarness_tui::api::ApiClient,
+    thread: &Thread,
+    created: bool,
+    started: Result<T>,
+) -> Result<T> {
+    if created
+        && let Err(error) = &started
+        && haarness_tui::api::refusal_status(error).is_some_and(|status| status.is_client_error())
+    {
+        let _ = client
+            .update_thread(thread.id, session_archive_request(true))
+            .await;
     }
-    let client = if let Some(server) = args.attach.as_deref() {
-        let (server, token) = attached_endpoint(
-            paths,
-            server,
-            args.token.clone(),
-            args.authentication.clone(),
-        )
-        .await?;
-        haarness_tui::api::ApiClient::with_auth(&server, token)?.with_attachment_uploads()
-    } else {
-        let discovery = ensure_workspace_server(paths, &workspace, trust, yolo).await?;
-        haarness_tui::api::ApiClient::new(&discovery.url, &discovery.token)?
+    started
+}
+
+const NO_MODEL_CONNECTED: &str = "No model is connected yet. Connect one with `haarness auth login openai` (or another provider, or `haarness login` for Haarness Cloud), or pick one with -m provider/model; `haarness models` lists them.";
+
+/// The model a new chat gets when the command line names none, chosen the way
+/// the terminal UI chooses: the configured default (left to the server, so
+/// an agent or command can still bring its own), else the first connected
+/// provider's.
+async fn default_run_model_client(
+    client: &haarness_tui::api::ApiClient,
+) -> Result<Option<(String, String)>> {
+    let info = client.info().await?;
+    if info.default_provider.is_some() && info.default_model.is_some() {
+        return Ok(None);
+    }
+    haarness_tui::default_connected_model(&client.providers().await?)
+        .map(Some)
+        .context(NO_MODEL_CONNECTED)
+}
+
+/// The provider and model `--provider`/`--model` name, checked against the
+/// server's providers. A bare model id belongs to the provider that offers
+/// it (a connected one first); a bare provider id means its first model.
+fn requested_run_model(
+    provider: Option<&str>,
+    model: Option<&str>,
+    providers: &[haarness_protocol::ProviderInfo],
+) -> Result<(String, String)> {
+    let by_connection = || {
+        providers
+            .iter()
+            .filter(|info| info.authenticated)
+            .chain(providers.iter().filter(|info| !info.authenticated))
     };
-    let thread = select_run_thread_client(
-        &client,
-        requested_thread,
-        continue_last,
-        args.fork,
-        CreateThreadRequest {
-            schedule: None,
-            title: Some(run_title(args.title.as_deref(), &prompt)),
-            parent_id: None,
-            agent: Some(args.agent.clone()),
-            provider: Some(provider.clone()),
-            model: Some(model.clone()),
-            ultracode: None,
-        },
-    )
-    .await?;
-    if let Some(workflow) = args.workflow {
-        let mut values = serde_json::Map::new();
-        if !prompt.trim().is_empty() {
-            values.insert("input".into(), serde_json::Value::String(prompt));
-        }
-        for argument in args.workflow_args {
-            let (key, raw) = argument
-                .split_once('=')
-                .with_context(|| format!("workflow argument must be KEY=VALUE: {argument}"))?;
-            if key.trim().is_empty() {
-                anyhow::bail!("workflow argument key cannot be empty: {argument}");
-            }
-            let value = serde_json::from_str(raw)
-                .unwrap_or_else(|_| serde_json::Value::String(raw.to_owned()));
-            values.insert(key.trim().to_owned(), value);
-        }
-        let started = client
-            .start_workflow(WorkflowStartRequest {
-                name: Some(workflow),
-                source: None,
-                path: None,
-                args: Some(serde_json::Value::Object(values)),
-                agent: Some(args.agent.clone()),
-                model: Some(format!("{provider}/{model}")),
-                variant: args.variant.clone(),
-                thread_id: Some(thread.id),
-                wait: false,
-                timeout_ms: None,
-            })
-            .await?;
-        let run = loop {
-            let run = client.workflow_run(started.id, None).await?;
-            if run.status != haarness_protocol::WorkflowRunStatus::Running {
-                break run;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        };
-        match run.status {
-            haarness_protocol::WorkflowRunStatus::Completed => {
-                if let Some(result) = run.result {
-                    match result {
-                        serde_json::Value::String(text) if args.format == RunFormat::Default => {
-                            println!("{text}")
-                        }
-                        value if args.format == RunFormat::Default => {
-                            println!("{}", serde_json::to_string_pretty(&value)?)
-                        }
-                        value => println!(
-                            "{}",
-                            json!({"type":"workflow", "runID":run.id, "result":value})
-                        ),
-                    }
-                }
-                return Ok(());
-            }
-            _ => anyhow::bail!(
-                "workflow {} ended as {:?}: {}",
-                run.workflow_name,
-                run.status,
-                run.error.unwrap_or_else(|| "no result".into())
-            ),
-        }
-    }
-    if args.goal {
-        set_goal_for_run_client(&client, thread.id, prompt.clone()).await?;
-    }
-    let turn = client
-        .start_turn(
-            thread.id,
-            StartTurnRequest {
-                request_id: RequestId::new(),
-                text: prompt,
-                attachments,
-                synthetic: false,
-                auto_approve: yolo,
-                agent: Some(args.agent),
-                provider: Some(provider),
-                model: Some(model),
-                reasoning_effort: args.ultracode.then(|| "ultracode".into()).or(args.variant),
-                // Plain text output shows no file previews.
-                tools: Some(HashMap::from([("preview".into(), false)])),
-                command: args
-                    .command
-                    .map(|command| command.trim_start_matches('/').to_owned()),
-            },
-        )
-        .await?;
-    let printed_through = if args.goal {
-        let result = wait_for_goal_client(&client, thread.id, goal_idle_timeout()).await;
-        let printed_through =
-            print_run_output_client(&client, thread.id, turn.id, args.format, show_thinking)
-                .await?;
-        result?;
-        printed_through
-    } else {
-        wait_for_turn_client(&client, turn.id).await?;
-        print_run_output_client(&client, thread.id, turn.id, args.format, show_thinking).await?
+    let first_model = |id: &str| {
+        let info = providers.iter().find(|info| info.id == id)?;
+        let model = info.models.first()?;
+        Some((info.id.clone(), model.id.clone()))
     };
-    settle_cli_subagents_client(
-        &client,
-        thread.id,
-        args.wait_background || args.background_timeout_ms.is_some(),
-        args.background_timeout_ms,
-        args.format,
-        show_thinking,
-        printed_through,
-    )
-    .await?;
-    settle_cli_workflows_client(
-        &client,
-        thread.id,
-        args.wait_background || args.background_timeout_ms.is_some(),
-        args.background_timeout_ms,
-        args.format,
-    )
-    .await?;
-    Ok(())
+    let chosen = match (provider, model.map(str::trim)) {
+        (_, Some(model)) if model.contains('/') => {
+            qualified_run_model(provider.unwrap_or_default(), model)?
+        }
+        (Some(provider), Some(model)) => qualified_run_model(provider, model)?,
+        (None, Some(model)) => by_connection()
+            .find(|info| info.models.iter().any(|offered| offered.id == model))
+            .map(|info| (info.id.clone(), model.to_owned()))
+            .or_else(|| first_model(haarness_protocol::provider_storage_id(model)))
+            .with_context(|| {
+                format!(
+                    "No provider offers a model called {model}. Pass -m provider/model; `haarness models` lists them."
+                )
+            })?,
+        (Some(provider), None) => {
+            let id = haarness_protocol::provider_storage_id(provider.trim());
+            let info = providers
+                .iter()
+                .find(|info| info.id == id)
+                .with_context(|| unavailable_provider(id))?;
+            let model = info.models.first().with_context(|| {
+                format!("{} lists no models; pass --model as well", info.name)
+            })?;
+            (info.id.clone(), model.id.clone())
+        }
+        (None, None) => anyhow::bail!("pass --model, or --provider"),
+    };
+    if !providers.is_empty() && !providers.iter().any(|info| info.id == chosen.0) {
+        anyhow::bail!(unavailable_provider(&chosen.0));
+    }
+    Ok(chosen)
+}
+
+fn unavailable_provider(id: &str) -> String {
+    format!("Provider {id} is not available. `haarness providers` lists the ones you can use.")
 }
 
 fn qualified_run_model(provider: &str, model: &str) -> Result<(String, String)> {
@@ -3641,21 +3961,22 @@ fn cloud_model_prefix_preserves_the_existing_provider_identity() {
 
 fn run_title(requested: Option<&str>, prompt: &str) -> String {
     if let Some(title) = requested.filter(|title| !title.trim().is_empty()) {
-        return title.trim().to_owned();
+        return one_line_metadata(title);
     }
     if prompt.trim().is_empty() {
         return "CLI run".into();
     }
-    haarness_core::shorten_title(prompt.trim(), 50)
+    haarness_core::shorten_title(&one_line_metadata(prompt), 50)
 }
 
+/// The chat a run continues (`--thread`, `--continue`), forked first with
+/// `--fork`; `None` when the run starts a new one.
 async fn select_run_thread_client(
     client: &haarness_tui::api::ApiClient,
     requested_thread: Option<Uuid>,
     continue_last: bool,
     fork: bool,
-    create: CreateThreadRequest,
-) -> Result<Thread> {
+) -> Result<Option<Thread>> {
     if fork && requested_thread.is_none() && !continue_last {
         anyhow::bail!("--fork requires --session/--thread or --continue");
     }
@@ -3671,9 +3992,8 @@ async fn select_run_thread_client(
         None
     };
     match base {
-        Some(thread) if fork => client.fork_thread(thread.id).await,
-        Some(thread) => Ok(thread),
-        None => client.create_thread(create).await,
+        Some(thread) if fork => client.fork_thread(thread.id).await.map(Some),
+        base => Ok(base),
     }
 }
 
@@ -3699,9 +4019,307 @@ async fn set_goal_for_run_client(
     Ok(())
 }
 
+/// Who answers a permission prompt raised while a run waits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Approver {
+    /// The person at this terminal.
+    Terminal,
+    /// Nobody: the prompt is refused and the run stops, saying how to allow it.
+    Nobody,
+    /// Another client: a scheduled run's prompts wait in the TUI or Desktop.
+    OtherClients,
+}
+
+/// What a run does while it waits on the server: show that it is working,
+/// and answer what its agents ask.
+struct RunWatch {
+    approver: Approver,
+    activity: Option<RunActivity>,
+}
+
+impl RunWatch {
+    /// A `haarness run`. Someone at a terminal sees progress and is asked
+    /// for approvals; a script's or CI job's prompts are refused.
+    fn new() -> Self {
+        let terminal = io::stderr().is_terminal();
+        Self {
+            approver: if terminal && io::stdin().is_terminal() {
+                Approver::Terminal
+            } else {
+                Approver::Nobody
+            },
+            activity: terminal.then(RunActivity::start),
+        }
+    }
+
+    /// A scheduled run: nobody watches, and its approvals wait for the apps.
+    fn scheduled() -> Self {
+        Self {
+            approver: Approver::OtherClients,
+            activity: None,
+        }
+    }
+
+    /// Stop showing progress, before the run prints its output.
+    fn finish(&mut self) {
+        self.activity = None;
+    }
+
+    /// A line on stderr that does not tear the progress line.
+    fn notice(&self, message: &str) {
+        let _paused = self.activity.as_ref().map(RunActivity::pause);
+        eprintln!("{message}");
+    }
+
+    /// Answer what the run's agents are waiting on. Questions get the
+    /// non-interactive fallback. A permission is asked at the terminal; with
+    /// nobody to ask, it is refused and the run stops, saying how to allow it.
+    async fn answer(&self, client: &haarness_tui::api::ApiClient, root: ThreadId) -> Result<()> {
+        resolve_noninteractive_questions_client(client, root, self).await?;
+        if self.approver == Approver::OtherClients {
+            return Ok(());
+        }
+        for pending in client
+            .pending_permissions()
+            .await?
+            .into_iter()
+            .filter(|pending| pending.thread_id == root || pending.root_thread_id == Some(root))
+        {
+            let request = describe_permission(&pending);
+            let reply = |decision| PermissionReply {
+                decision,
+                feedback: None,
+            };
+            if self.approver == Approver::Nobody {
+                // Stop first: refused, the agent would carry on another way,
+                // and a script is better served by a clear stop.
+                let _ = client.interrupt_session(root, false).await;
+                let _ = client
+                    .reply_permission(
+                        &pending.permission_id,
+                        reply(PermissionReplyDecision::Reject),
+                    )
+                    .await;
+                anyhow::bail!(
+                    "Stopped: the agent asked to {request}, and nobody can approve that in this run. Allow it with a permission rule, or run again with --yolo to approve every request."
+                );
+            }
+            let decision = if self.ask(&request).await? {
+                PermissionReplyDecision::Once
+            } else {
+                PermissionReplyDecision::Reject
+            };
+            client
+                .reply_permission(&pending.permission_id, reply(decision))
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn ask(&self, request: &str) -> Result<bool> {
+        let _paused = self.activity.as_ref().map(RunActivity::pause);
+        eprint!("The agent asks to {request}.\nAllow it once? [y/N] ");
+        let _ = io::stderr().flush();
+        let answer = tokio::task::spawn_blocking(|| {
+            let mut line = String::new();
+            io::stdin().read_line(&mut line).map(|_| line)
+        })
+        .await??;
+        Ok(matches!(
+            answer.trim().to_ascii_lowercase().as_str(),
+            "y" | "yes"
+        ))
+    }
+}
+
+/// A permission prompt in a few words: the kind of access, then on what.
+fn describe_permission(pending: &haarness_protocol::PendingPermissionInfo) -> String {
+    let category = if pending.permission.is_empty() {
+        pending
+            .operation
+            .split_once(':')
+            .map_or("", |(kind, _)| kind)
+    } else {
+        &pending.permission
+    };
+    let kind = match category {
+        "bash" => "run a command".to_owned(),
+        "edit" => "edit a file".to_owned(),
+        "read" => "read a file".to_owned(),
+        "external_directory" => "reach outside the project".to_owned(),
+        "webfetch" | "fetch" => "fetch a URL".to_owned(),
+        "browser" | "browser_site" | "multiple" => "use the browser".to_owned(),
+        "workflow" => "run a workflow".to_owned(),
+        "agent_switch" => "switch agents".to_owned(),
+        "doom_loop" => "keep repeating the same action".to_owned(),
+        "" => "use a tool".to_owned(),
+        other => format!("use {other}"),
+    };
+    let subject = ["command", "path", "url"]
+        .into_iter()
+        .find_map(|key| {
+            pending
+                .detail
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned)
+        })
+        .or_else(|| (!pending.patterns.is_empty()).then(|| pending.patterns.join(", ")));
+    match subject {
+        Some(subject) => format!("{kind} ({subject})"),
+        None => kind,
+    }
+}
+
+/// "Working · 12s · Ctrl-C to stop" on stderr while a run waits, so a slow
+/// turn does not look hung. Dropping it clears the line.
+struct RunActivity {
+    shown: Arc<std::sync::Mutex<bool>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// Holds the progress line off stderr until dropped.
+struct PausedActivity<'a>(&'a RunActivity);
+
+impl Drop for PausedActivity<'_> {
+    fn drop(&mut self) {
+        *self
+            .0
+            .shown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+    }
+}
+
+impl RunActivity {
+    fn start() -> Self {
+        const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let shown = Arc::new(std::sync::Mutex::new(true));
+        let started = Instant::now();
+        let styled = std::env::var_os("NO_COLOR").is_none();
+        let task = tokio::spawn({
+            let shown = shown.clone();
+            async move {
+                let mut ticks = tokio::time::interval(Duration::from_millis(120));
+                for frame in FRAMES.iter().cycle() {
+                    ticks.tick().await;
+                    let shown = shown
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if *shown {
+                        let line = format!(
+                            "{frame} Working · {} · Ctrl-C to stop",
+                            elapsed_words(started.elapsed())
+                        );
+                        let mut stderr = io::stderr().lock();
+                        let _ = if styled {
+                            write!(stderr, "\r\x1b[2K\x1b[2m{line}\x1b[0m")
+                        } else {
+                            write!(stderr, "\r\x1b[2K{line}")
+                        };
+                        let _ = stderr.flush();
+                    }
+                }
+            }
+        });
+        Self { shown, task }
+    }
+
+    /// Clear the line until the returned guard drops.
+    fn pause(&self) -> PausedActivity<'_> {
+        let mut shown = self
+            .shown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *shown {
+            let mut stderr = io::stderr().lock();
+            let _ = write!(stderr, "\r\x1b[2K");
+            let _ = stderr.flush();
+        }
+        *shown = false;
+        PausedActivity(self)
+    }
+}
+
+impl Drop for RunActivity {
+    fn drop(&mut self) {
+        self.task.abort();
+        std::mem::forget(self.pause());
+    }
+}
+
+/// `12s`, `3m 05s`.
+fn elapsed_words(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m {:02}s", seconds / 60, seconds % 60)
+    }
+}
+
+/// Wait for `work` unless Ctrl-C or SIGTERM (a cancelled CI job) comes
+/// first. Then the chat's turns, helpers and workflows stop on the server —
+/// a run that exits must not leave them working, and spending, unwatched —
+/// and the process exits as an interrupted one does. A second signal exits
+/// at once.
+async fn stop_on_signal<T>(
+    client: &haarness_tui::api::ApiClient,
+    thread_id: ThreadId,
+    goal: bool,
+    work: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    let status = tokio::select! {
+        result = work => return result,
+        status = run_stop_signal() => status,
+    };
+    eprintln!("Stopping…");
+    let stop = async {
+        if goal {
+            // Otherwise the goal would start its next turn on its own.
+            let _ = client
+                .goal_action(thread_id, &GoalActionRequest::Pause)
+                .await;
+        }
+        client.interrupt_session(thread_id, false).await
+    };
+    tokio::select! {
+        stopped = tokio::time::timeout(Duration::from_secs(10), stop) => match stopped {
+            Ok(Ok(())) => eprintln!("Stopped. The chat keeps what was done so far."),
+            Ok(Err(error)) => eprintln!("Could not stop the chat on the server: {error:#}"),
+            Err(_) => eprintln!("The server did not confirm the stop in time."),
+        },
+        _ = run_stop_signal() => {}
+    }
+    std::process::exit(status)
+}
+
+/// The exit status once Ctrl-C (130) or SIGTERM (143) arrives.
+async fn run_stop_signal() -> i32 {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let Ok(mut terminate) = signal(SignalKind::terminate()) else {
+            let _ = tokio::signal::ctrl_c().await;
+            return 130;
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => 130,
+            _ = terminate.recv() => 143,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        130
+    }
+}
+
 async fn resolve_noninteractive_questions_client(
     client: &haarness_tui::api::ApiClient,
     root_thread_id: ThreadId,
+    watch: &RunWatch,
 ) -> Result<()> {
     for question in client
         .pending_questions()
@@ -3723,9 +4341,8 @@ async fn resolve_noninteractive_questions_client(
                     "Question rejected: this non-interactive run cannot answer questions.".into()
                 })
         };
-        eprintln!(
-            "Question requested by thread {}; applying the non-interactive fallback.",
-            question.thread_id
+        watch.notice(
+            "The agent asked a question that nobody can answer in this run; it was declined.",
         );
         client
             .reply_question(&question.question_id, QuestionReply { answer })
@@ -3737,10 +4354,11 @@ async fn resolve_noninteractive_questions_client(
 async fn wait_for_turn_client(
     client: &haarness_tui::api::ApiClient,
     turn_id: TurnId,
+    watch: &RunWatch,
 ) -> Result<()> {
     loop {
         let current = client.turn(turn_id).await?;
-        resolve_noninteractive_questions_client(client, current.thread_id).await?;
+        watch.answer(client, current.thread_id).await?;
         if !matches!(current.status, TurnStatus::Queued | TurnStatus::Running) {
             if current.status != TurnStatus::Completed {
                 anyhow::bail!(current.error.unwrap_or_else(|| "turn failed".into()));
@@ -3755,11 +4373,12 @@ async fn wait_for_goal_client(
     client: &haarness_tui::api::ApiClient,
     thread_id: ThreadId,
     timeout: Duration,
+    watch: &RunWatch,
 ) -> Result<()> {
     let mut idle_since = None;
     let mut last_updated = None;
     loop {
-        resolve_noninteractive_questions_client(client, thread_id).await?;
+        watch.answer(client, thread_id).await?;
         let state = client
             .goal(thread_id)
             .await?
@@ -3783,6 +4402,16 @@ async fn wait_for_goal_client(
             }
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Reasoning in plain-text output: under a `thinking:` line, dimmed on a
+/// terminal, and followed by a blank line so it does not run into the reply.
+fn print_reasoning(text: &str) {
+    if io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
+        println!("\x1b[2mthinking:\n{text}\x1b[0m\n");
+    } else {
+        println!("thinking:\n{text}\n");
     }
 }
 
@@ -3826,7 +4455,7 @@ async fn print_run_output_client(
                 })
             );
         } else if kind == "reasoning" {
-            println!("thinking:\n{text}");
+            print_reasoning(&text);
         } else {
             println!("{text}");
         }
@@ -3834,6 +4463,7 @@ async fn print_run_output_client(
     Ok(printed_through)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn settle_cli_subagents_client(
     client: &haarness_tui::api::ApiClient,
     thread_id: ThreadId,
@@ -3842,6 +4472,7 @@ async fn settle_cli_subagents_client(
     format: RunFormat,
     thinking: bool,
     printed_through: u64,
+    watch: &RunWatch,
 ) -> Result<()> {
     let active = client.background_tasks(thread_id).await?;
     let parent_turn = client.active_turn(thread_id).await?;
@@ -3871,6 +4502,7 @@ async fn settle_cli_subagents_client(
 
     let deadline = timeout_ms.map(|timeout| Instant::now() + Duration::from_millis(timeout));
     loop {
+        watch.answer(client, thread_id).await?;
         let tasks = client.background_tasks(thread_id).await?;
         let parent_turn = client.active_turn(thread_id).await?;
         if tasks.is_empty() && parent_turn.is_none() {
@@ -3923,7 +4555,7 @@ async fn settle_cli_subagents_client(
                         })
                     );
                 } else {
-                    println!("thinking:\n{text}");
+                    print_reasoning(&text);
                 }
             }
             ItemData::TaskState {
@@ -3948,6 +4580,7 @@ async fn settle_cli_workflows_client(
     wait: bool,
     timeout_ms: Option<u64>,
     format: RunFormat,
+    watch: &RunWatch,
 ) -> Result<()> {
     let active = client
         .workflow_runs(500)
@@ -3982,6 +4615,7 @@ async fn settle_cli_workflows_client(
     let mut failures = Vec::new();
     for run in active {
         let current = loop {
+            watch.answer(client, thread_id).await?;
             let current = client.workflow_run(run.id, None).await?;
             if current.status != haarness_protocol::WorkflowRunStatus::Running {
                 break current;
@@ -4902,7 +5536,16 @@ async fn application_at(
     address: SocketAddr,
     recover: bool,
 ) -> Result<(TcpListener, ServerState, HotReloadController)> {
-    let listener = TcpListener::bind(address).await?;
+    let listener = TcpListener::bind(address)
+        .await
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::AddrInUse => anyhow::anyhow!(
+                "Port {} on {} is already in use. Choose another with --port.",
+                address.port(),
+                address.ip()
+            ),
+            _ => anyhow::Error::new(error).context(format!("cannot listen on {address}")),
+        })?;
     let workspace_manager = Arc::new(paths.workspace_manager()?);
     let registered_workspace = workspace_manager
         .register_local(workspace)
@@ -5202,19 +5845,25 @@ async fn compose_mcp(
     registry
 }
 
-async fn auth_command(paths: &Paths, command: AuthCommand) -> Result<()> {
+async fn auth_command(
+    paths: &Paths,
+    workspace: &Path,
+    trust: bool,
+    command: AuthCommand,
+) -> Result<()> {
     let store = CredentialStore::new(paths.auth.clone());
     match command {
         AuthCommand::Set { provider, key } => {
-            let key = key.map_or_else(
-                || rpassword::prompt_password(format!("{provider} API key: ")),
-                Ok,
-            )?;
+            let provider = known_auth_provider(paths, workspace, trust, &provider)?;
+            let key = read_api_key(&provider, key)?;
             store.set(&provider, &Credential::api(key))?;
             println!("Stored {provider} credential in owner-only auth.json");
         }
         AuthCommand::Login { provider, method } => {
             let provider = provider.trim_end_matches('/').to_ascii_lowercase();
+            if haarness_protocol::provider_storage_id(&provider) != "haarness" {
+                known_auth_provider(paths, workspace, trust, &provider)?;
+            }
             if haarness_protocol::provider_storage_id(&provider) == "haarness" {
                 return account::login(&account::LoginArgs {
                     device: method == Some(AuthLoginMethod::Headless),
@@ -5231,10 +5880,7 @@ async fn auth_command(paths: &Paths, command: AuthCommand) -> Result<()> {
                 },
             );
             let credential = match method {
-                AuthLoginMethod::Api => {
-                    let key = rpassword::prompt_password(format!("{provider} API key: "))?;
-                    Credential::api(key)
-                }
+                AuthLoginMethod::Api => Credential::api(read_api_key(&provider, None)?),
                 AuthLoginMethod::Browser if provider == "openai" => {
                     let login = OpenAiOAuthClient::default().start_browser_login().await?;
                     println!("Open this URL to connect ChatGPT:\n{}", login.url);
@@ -5320,6 +5966,47 @@ async fn auth_command(paths: &Paths, command: AuthCommand) -> Result<()> {
     Ok(())
 }
 
+/// The provider a credential is stored for: one Haarness ships (a preset's
+/// alias becomes its id) or one the configuration adds. A key stored under
+/// any other name would sit unused while the provider stays disconnected.
+fn known_auth_provider(paths: &Paths, workspace: &Path, trust: bool, id: &str) -> Result<String> {
+    let id = id.trim();
+    if let Some(preset) = haarness_providers::compatible_preset(id) {
+        return Ok(preset.id.to_owned());
+    }
+    if haarness_providers::builtin_provider(id)
+        || load_config(paths, workspace, trust)
+            .is_ok_and(|config| config.providers.contains_key(id))
+    {
+        return Ok(id.to_owned());
+    }
+    anyhow::bail!(
+        "Unknown provider {id}. `haarness providers` lists them; add your own endpoint with `haarness provider add`."
+    )
+}
+
+/// An API key from `--key`, from piped stdin (CI, containers), or typed at a
+/// hidden prompt. An empty key is refused: stored, it would show the
+/// provider as connected while every request fails.
+fn read_api_key(provider: &str, key: Option<String>) -> Result<String> {
+    let key = match key {
+        Some(key) => key,
+        None if !io::stdin().is_terminal() => {
+            let mut key = String::new();
+            io::stdin().read_to_string(&mut key)?;
+            key
+        }
+        None => rpassword::prompt_password(format!("{provider} API key: ")).context(
+            "Cannot ask for the key without a terminal; pass --key, or pipe the key on stdin",
+        )?,
+    };
+    let key = key.trim();
+    if key.is_empty() {
+        anyhow::bail!("No key entered; nothing was stored.");
+    }
+    Ok(key.to_owned())
+}
+
 fn open_browser(url: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     let status = ProcessCommand::new("open").arg(url).status()?;
@@ -5372,7 +6059,23 @@ async fn mcp_command(
         McpCommand::Tools { name } => {
             let tools = client.mcp_tools(&name).await?;
             if tools.is_empty() {
-                println!("No tools advertised by '{name}'.");
+                // A server that never connected has no tools to list either.
+                match client
+                    .mcp()
+                    .await?
+                    .into_iter()
+                    .find(|server| server.name == name)
+                {
+                    Some(server) if server.status != "connected" => println!(
+                        "'{name}' is not connected ({}{}).",
+                        server.status,
+                        server
+                            .detail
+                            .map(|detail| format!(": {detail}"))
+                            .unwrap_or_default()
+                    ),
+                    _ => println!("No tools advertised by '{name}'."),
+                }
             }
             for tool in tools {
                 println!(
@@ -5555,12 +6258,24 @@ async fn mcp_command(
             };
             let target = mcp_entry_target(paths, workspace, project, &name);
             write_mcp_entry(&target, &name, Some(&entry))?;
-            let server = client.configure_mcp(&name, &entry).await?;
-            println!(
-                "Added MCP server '{name}' to {} ({}).",
-                target.display(),
-                server.status
-            );
+            // The entry stays saved when the server cannot start: fixing the
+            // program or the URL and reconnecting is the usual next step.
+            match client.configure_mcp(&name, &entry).await {
+                Ok(server) => println!(
+                    "Added MCP server '{name}' to {} ({}).",
+                    target.display(),
+                    server.status
+                ),
+                Err(error) => {
+                    println!(
+                        "Added MCP server '{name}' to {} (failed: {error}).",
+                        target.display()
+                    );
+                    eprintln!(
+                        "Fix it and run `haarness mcp reconnect {name}`, or remove it with `haarness mcp remove {name}`."
+                    );
+                }
+            }
             if project && !trust {
                 println!("Note: project configuration is disabled for this invocation.");
             }
@@ -7852,13 +8567,28 @@ fn acquire_server_lease(paths: &Paths) -> Result<fs::File> {
         .truncate(false)
         .open(&paths.server_lock)
         .with_context(|| format!("cannot open {}", paths.server_lock.display()))?;
-    file.try_lock_exclusive().with_context(|| {
-        format!(
-            "another Haarness server is already running or starting ({})",
-            paths.server_lock.display()
-        )
-    })?;
-    Ok(file)
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(file),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => anyhow::bail!(
+            "Another Haarness server is starting for this project. Wait a moment, or stop it with `haarness serve --stop`."
+        ),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "cannot lock {} for this project's server",
+                paths.server_lock.display()
+            )
+        }),
+    }
+}
+
+/// `--host`: an IP address, or `localhost` for the loopback one.
+fn parse_listen_host(value: &str) -> Result<IpAddr, String> {
+    if value.eq_ignore_ascii_case("localhost") {
+        return Ok(Ipv4Addr::LOCALHOST.into());
+    }
+    value
+        .parse()
+        .map_err(|_| "use an IP address such as 127.0.0.1 or 0.0.0.0, or localhost".into())
 }
 
 async fn wait_for_shutdown(shutdown: tokio_util::sync::CancellationToken) -> Result<()> {
@@ -8084,10 +8814,15 @@ mod tests {
         current_executable_fingerprint, finish_goal_run, goal_idle_timeout_from, load_output_style,
         local_server_compatibility_error, mcp_config_for_display,
         migrate_legacy_workspace_database, normalize_natural_language_args, parse_mcp_key_values,
-        qualified_run_model, read_mcp_entry, replace_incompatible_workspace_server,
-        resolved_credentials, select_run_thread_client, server_compatibility_error,
-        set_goal_for_run_client, valid_provider_url, wait_for_goal_client, write_mcp_entry,
-        write_provider_entry, write_runtime,
+        read_mcp_entry, replace_incompatible_workspace_server, resolved_credentials,
+        select_run_thread_client, server_compatibility_error, set_goal_for_run_client,
+        valid_provider_url, wait_for_goal_client, write_mcp_entry, write_provider_entry,
+        write_runtime,
+    };
+    use super::{
+        Approver, NO_MODEL_CONNECTED, RunWatch, TurnStatus, default_run_model_client,
+        describe_permission, discard_refused_chat, requested_run_model, run_attachments,
+        wait_for_turn_client,
     };
     use super::{
         IpAddr, check_network_access, jsonconfig, run_title, schedule_run_title,
@@ -8357,11 +9092,44 @@ mod tests {
             panic!("expected implicit run command");
         };
         assert_eq!(run_args.prompt.join(" "), "audit the workspace");
-        assert_eq!(run_args.model, "openai/gpt-5.6-sol");
+        assert_eq!(run_args.model.as_deref(), Some("openai/gpt-5.6-sol"));
         assert_eq!(
-            qualified_run_model(&run_args.provider, &run_args.model).unwrap(),
+            requested_run_model(run_args.provider.as_deref(), run_args.model.as_deref(), &[])
+                .unwrap(),
             ("openai".into(), "gpt-5.6-sol".into())
         );
+    }
+
+    #[test]
+    fn misspelled_commands_are_reported_and_sentences_stay_prompts() {
+        let typo = |argv: &[&str]| {
+            super::misspelled_subcommand(&argv.iter().map(OsString::from).collect::<Vec<_>>())
+        };
+        for (argv, command) in [
+            (&["haarness", "sesions", "list"][..], "sessions"),
+            (&["haarness", "sesions", "get", "0199"], "sessions"),
+            (&["haarness", "doctr"], "doctor"),
+            (&["haarness", "providres"], "providers"),
+            (&["haarness", "modles", "--verbose"], "models"),
+            (&["haarness", "stauts"], "stats"),
+        ] {
+            assert_eq!(
+                typo(argv),
+                Some((argv[1].to_owned(), command.to_owned())),
+                "{argv:?}"
+            );
+        }
+        for argv in [
+            &["haarness", "sessions", "list"][..],
+            &["haarness", "explain", "this", "repository"],
+            &["haarness", "server", "is", "down,", "why?"],
+            &["haarness", "add", "tests", "for", "the", "parser"],
+            &["haarness", "could you explain the build"],
+            &["haarness", "fix"],
+            &["haarness", "Doctr"],
+        ] {
+            assert_eq!(typo(argv), None, "{argv:?}");
+        }
     }
 
     #[test]
@@ -9095,8 +9863,8 @@ mod tests {
             panic!("expected run command");
         };
         assert!(args.goal);
-        assert_eq!(args.provider, "anthropic");
-        assert_eq!(args.model, "claude-sonnet-4-6");
+        assert_eq!(args.provider.as_deref(), Some("anthropic"));
+        assert_eq!(args.model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(args.prompt.join(" "), "finish the migration");
     }
 
@@ -9191,9 +9959,14 @@ mod tests {
                 .unwrap();
         });
 
-        wait_for_goal_client(&client, thread_id, Duration::from_millis(250))
-            .await
-            .unwrap();
+        wait_for_goal_client(
+            &client,
+            thread_id,
+            Duration::from_millis(250),
+            &RunWatch::scheduled(),
+        )
+        .await
+        .unwrap();
         task.await.unwrap();
         server.shutdown().await.unwrap();
         drop(runtime);
@@ -9215,9 +9988,14 @@ mod tests {
             .await
             .unwrap();
 
-        let error = wait_for_goal_client(&client, thread_id, Duration::from_millis(20))
-            .await
-            .unwrap_err();
+        let error = wait_for_goal_client(
+            &client,
+            thread_id,
+            Duration::from_millis(20),
+            &RunWatch::scheduled(),
+        )
+        .await
+        .unwrap_err();
         assert!(
             error.to_string().contains("without a goal update"),
             "{error}"
@@ -9265,7 +10043,12 @@ mod tests {
         // see the goal complete. Hanging would mean waiting for a person.
         tokio::time::timeout(
             Duration::from_secs(5),
-            wait_for_goal_client(&client, thread_id, Duration::from_millis(100)),
+            wait_for_goal_client(
+                &client,
+                thread_id,
+                Duration::from_millis(100),
+                &RunWatch::scheduled(),
+            ),
         )
         .await
         .expect("the goal watcher hung on an interactive question")
@@ -9370,40 +10153,409 @@ mod tests {
     async fn run_thread_selection_honors_session_continue_and_fork() {
         let (runtime, thread_id, root) = goal_test_runtime().await;
         let (client, server) = run_client(&runtime, &root).await;
-        let request = || CreateThreadRequest {
-            schedule: None,
-            title: Some("new CLI run".into()),
-            parent_id: None,
-            agent: Some("build".into()),
-            provider: Some("test".into()),
-            model: Some("test".into()),
-            ultracode: None,
-        };
 
-        let explicit =
-            select_run_thread_client(&client, Some(thread_id.0), false, false, request())
-                .await
-                .unwrap();
-        assert_eq!(explicit.id, thread_id);
-
-        let continued = select_run_thread_client(&client, None, true, false, request())
+        let explicit = select_run_thread_client(&client, Some(thread_id.0), false, false)
             .await
             .unwrap();
-        assert_eq!(continued.id, thread_id);
+        assert_eq!(explicit.map(|thread| thread.id), Some(thread_id));
 
-        let forked = select_run_thread_client(&client, Some(thread_id.0), false, true, request())
+        let continued = select_run_thread_client(&client, None, true, false)
             .await
+            .unwrap();
+        assert_eq!(continued.map(|thread| thread.id), Some(thread_id));
+
+        let forked = select_run_thread_client(&client, Some(thread_id.0), false, true)
+            .await
+            .unwrap()
             .unwrap();
         assert_ne!(forked.id, thread_id);
         assert_eq!(forked.parent_id, Some(thread_id));
 
-        let error = select_run_thread_client(&client, None, false, true, request())
+        // A run with neither starts a chat of its own.
+        let fresh = select_run_thread_client(&client, None, false, false)
+            .await
+            .unwrap();
+        assert!(fresh.is_none());
+
+        let error = select_run_thread_client(&client, None, false, true)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("--fork requires"));
         server.shutdown().await.unwrap();
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn provider(id: &str, authenticated: bool, models: &[&str]) -> ProviderInfo {
+        ProviderInfo {
+            id: id.into(),
+            name: id.into(),
+            authenticated,
+            models: models
+                .iter()
+                .map(|model| ModelInfo {
+                    id: (*model).into(),
+                    display_name: (*model).into(),
+                    reasoning: false,
+                    reasoning_efforts: Vec::new(),
+                    images: false,
+                    video: false,
+                    tools: true,
+                    context_window: None,
+                    max_output_tokens: None,
+                    pricing: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn run_models_resolve_against_the_providers_the_server_offers() {
+        let providers = [
+            provider("openai", false, &["gpt-5.6"]),
+            provider("echo", true, &["echo-1", "echo-2"]),
+            provider("haarness", false, &["openai/gpt-6-sol"]),
+        ];
+        let chosen = |provider: Option<&str>, model: Option<&str>| {
+            requested_run_model(provider, model, &providers).map_err(|error| error.to_string())
+        };
+        assert_eq!(
+            chosen(None, Some("echo/echo-2")),
+            Ok(("echo".into(), "echo-2".into()))
+        );
+        assert_eq!(
+            chosen(None, Some("gpt-5.6")),
+            Ok(("openai".into(), "gpt-5.6".into()))
+        );
+        // A provider's name alone is its first model, not `openai/echo`.
+        assert_eq!(
+            chosen(None, Some("echo")),
+            Ok(("echo".into(), "echo-1".into()))
+        );
+        assert_eq!(
+            chosen(Some("echo"), None),
+            Ok(("echo".into(), "echo-1".into()))
+        );
+        assert_eq!(
+            chosen(Some("echo"), Some("echo-2")),
+            Ok(("echo".into(), "echo-2".into()))
+        );
+        assert_eq!(
+            chosen(Some("haarness-cloud"), Some("openai/gpt-6-sol")),
+            Ok(("haarness".into(), "openai/gpt-6-sol".into()))
+        );
+        assert_eq!(
+            chosen(None, Some("nope/x")),
+            Err(
+                "Provider nope is not available. `haarness providers` lists the ones you can use."
+                    .into()
+            )
+        );
+        assert!(
+            chosen(Some("nope"), None)
+                .unwrap_err()
+                .starts_with("Provider nope is not")
+        );
+        assert!(
+            chosen(None, Some("mystery"))
+                .unwrap_err()
+                .starts_with("No provider offers a model called mystery.")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_run_uses_a_connected_model_or_says_how_to_connect_one() {
+        let (runtime, _, root) = question_test_runtime().await;
+        let (client, server) = run_client(&runtime, &root).await;
+        assert_eq!(
+            default_run_model_client(&client).await.unwrap(),
+            Some(("question-test".into(), "question-test-1".into()))
+        );
+        server.shutdown().await.unwrap();
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+
+        // Nothing connected: no chat, and the next step in words.
+        let (runtime, _, root) = goal_test_runtime().await;
+        let (client, server) = run_client(&runtime, &root).await;
+        let error = default_run_model_client(&client).await.unwrap_err();
+        assert_eq!(error.to_string(), NO_MODEL_CONNECTED);
+        server.shutdown().await.unwrap();
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn run_titles_stay_on_one_line_and_folders_are_not_attachments() {
+        assert_eq!(
+            run_title(None, "Review this\npiped\tcontext"),
+            "Review this piped context"
+        );
+        assert_eq!(run_title(Some(" Nightly\naudit "), "x"), "Nightly audit");
+        let folder = std::env::temp_dir();
+        let error = run_attachments(&[folder]).unwrap_err().to_string();
+        assert!(error.contains("it is a folder"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn refused_runs_read_as_the_server_says_and_leave_no_empty_chat() {
+        let (runtime, thread_id, root) = goal_test_runtime().await;
+        let (client, server) = run_client(&runtime, &root).await;
+        let error = client
+            .create_thread(CreateThreadRequest {
+                agent: Some("nope".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "invalid request: Unknown agent: nope");
+
+        let thread = client.thread(thread_id).await.unwrap();
+        let refused = client
+            .start_turn(
+                thread_id,
+                StartTurnRequest {
+                    request_id: RequestId::new(),
+                    text: "x".into(),
+                    attachments: Vec::new(),
+                    synthetic: false,
+                    auto_approve: false,
+                    agent: None,
+                    provider: None,
+                    model: None,
+                    reasoning_effort: None,
+                    tools: None,
+                    command: Some("nope".into()),
+                },
+            )
+            .await;
+        let error = discard_refused_chat(&client, &thread, true, refused)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "not found: command /nope");
+        assert!(client.thread(thread_id).await.unwrap().archived);
+        server.shutdown().await.unwrap();
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Asks to write outside its workspace, then answers whatever came back.
+    struct OutsideWriteProvider(PathBuf);
+
+    #[async_trait]
+    impl ModelProvider for OutsideWriteProvider {
+        fn id(&self) -> &str {
+            "outside-test"
+        }
+
+        fn info(&self) -> ProviderInfo {
+            provider("outside-test", true, &["outside-test-1"])
+        }
+
+        async fn stream(
+            &self,
+            request: ProviderRequest,
+            _cancel: CancellationToken,
+        ) -> CoreResult<ProviderStream> {
+            let answered = request
+                .messages
+                .iter()
+                .any(|message| matches!(message, ProviderMessage::ToolResult { .. }));
+            let events = if answered {
+                vec![
+                    Ok(ProviderEvent::TextDelta("carried on".into())),
+                    Ok(ProviderEvent::Finished {
+                        reason: "done".into(),
+                    }),
+                ]
+            } else {
+                vec![
+                    Ok(ProviderEvent::ToolCall {
+                        call_id: "write-1".into(),
+                        name: "write".into(),
+                        arguments: serde_json::json!({
+                            "path": self.0.display().to_string(),
+                            "content": "x",
+                        }),
+                        provider_metadata: serde_json::Value::Null,
+                    }),
+                    Ok(ProviderEvent::Finished {
+                        reason: "tool_calls".into(),
+                    }),
+                ]
+            };
+            Ok(Box::pin(stream::iter(events)))
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unattended_run_refuses_a_permission_prompt_and_stops() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-cli-run-perm-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let outside = root.join("outside.txt");
+        let store = Arc::new(haarness_store::SqliteStore::open(root.join("haarness.db")).unwrap());
+        let provider: Arc<dyn ModelProvider> = Arc::new(OutsideWriteProvider(outside.clone()));
+        let runtime = Arc::new(AgentRuntime::new(
+            store,
+            Arc::new(haarness_core::StaticProviderRegistry::new(vec![provider])),
+            Arc::new(haarness_server::NativeToolRegistry::new(workspace.clone())),
+            haarness_core::EventBus::new(32),
+        ));
+        let (client, server) = run_client(&runtime, &workspace).await;
+        let thread = client
+            .create_thread(CreateThreadRequest {
+                provider: Some("outside-test".into()),
+                model: Some("outside-test-1".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let turn = client
+            .start_turn(
+                thread.id,
+                StartTurnRequest {
+                    request_id: RequestId::new(),
+                    text: "write outside".into(),
+                    attachments: Vec::new(),
+                    synthetic: false,
+                    auto_approve: false,
+                    agent: None,
+                    provider: None,
+                    model: None,
+                    reasoning_effort: None,
+                    tools: None,
+                    command: None,
+                },
+            )
+            .await
+            .unwrap();
+        let watch = RunWatch {
+            approver: Approver::Nobody,
+            activity: None,
+        };
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            wait_for_turn_client(&client, turn.id, &watch),
+        )
+        .await
+        .expect("the run waited for an approval nobody can give")
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.starts_with("Stopped: the agent asked to reach outside the project ("),
+            "{error}"
+        );
+        assert!(error.contains("--yolo"), "{error}");
+        assert!(!outside.exists());
+        assert!(client.pending_permissions().await.unwrap().is_empty());
+        let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let turn = client.turn(turn.id).await.unwrap();
+                if !matches!(turn.status, TurnStatus::Queued | TurnStatus::Running) {
+                    break turn.status;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_ne!(stopped, TurnStatus::Completed);
+        server.shutdown().await.unwrap();
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_errors_name_the_flag_or_value_at_fault() {
+        assert_eq!(
+            super::parse_listen_host("localhost"),
+            Ok(IpAddr::from([127, 0, 0, 1]))
+        );
+        assert_eq!(super::parse_listen_host("::1"), Ok("::1".parse().unwrap()));
+        assert!(super::parse_listen_host("example.test").is_err());
+        assert_eq!(
+            super::worktree_flag_words(haarness_workspaces::WorkspaceError::Invalid(
+                "reset requires confirm=true because it moves the worktree branch".into()
+            ))
+            .to_string(),
+            "reset requires --confirm because it moves the worktree branch"
+        );
+        let error = super::asset_body(None, None, "agent prompt", "--prompt").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "provide the agent prompt with --prompt or --file"
+        );
+        let missing =
+            std::env::temp_dir().join(format!("haarness-missing-{}", uuid::Uuid::now_v7()));
+        let error =
+            super::remove_managed_asset(&missing.join("x.md"), false, "custom agent named 'x'")
+                .unwrap_err()
+                .to_string();
+        assert!(
+            error.starts_with("There is no custom agent named 'x' in "),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn auth_keys_are_trimmed_refused_when_empty_and_tied_to_a_known_provider() {
+        assert_eq!(
+            super::read_api_key("openai", Some(" sk-test \n".into())).unwrap(),
+            "sk-test"
+        );
+        assert_eq!(
+            super::read_api_key("openai", Some("  ".into()))
+                .unwrap_err()
+                .to_string(),
+            "No key entered; nothing was stored."
+        );
+        let root = std::env::temp_dir().join(format!("haarness-auth-ids-{}", uuid::Uuid::now_v7()));
+        let paths = Paths::new(Some(&root)).unwrap();
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let known = |id: &str| {
+            super::known_auth_provider(&paths, &workspace, false, id)
+                .map_err(|error| error.to_string())
+        };
+        assert_eq!(known("openai"), Ok("openai".into()));
+        assert_eq!(known("together"), Ok("togetherai".into()));
+        assert!(
+            known("nopeprovider")
+                .unwrap_err()
+                .starts_with("Unknown provider nopeprovider.")
+        );
+        std::fs::create_dir_all(paths.config_dir()).unwrap();
+        std::fs::write(
+            paths.config_dir().join("haarness.json"),
+            r#"{"providers":{"company":{"protocol":"anthropic-messages","base_url":"https://models.example.test/v1"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(known("company"), Ok("company".into()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn permission_prompts_read_as_what_the_agent_wants() {
+        let mut pending: haarness_protocol::PendingPermissionInfo =
+            serde_json::from_value(serde_json::json!({
+                "permissionId": "p",
+                "operation": "external_directory:/tmp/x/*",
+                "permission": "external_directory",
+                "patterns": ["/tmp/x/*"],
+                "detail": {"path": "/tmp/x/outside.txt", "content": "secret"},
+                "threadId": uuid::Uuid::now_v7(),
+                "createdAt": "2026-10-11T00:00:00Z",
+            }))
+            .unwrap();
+        assert_eq!(
+            describe_permission(&pending),
+            "reach outside the project (/tmp/x/outside.txt)"
+        );
+        pending.permission = "bash".into();
+        pending.detail = serde_json::json!({"command": "git push"});
+        assert_eq!(describe_permission(&pending), "run a command (git push)");
     }
 
     #[tokio::test]
