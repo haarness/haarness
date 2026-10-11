@@ -198,8 +198,31 @@
   margin-inline-end: auto;
   gap: var(--s1);
 }
+/* A key saved without a check: the notice reads as a caution, not an
+   error, with the reason on its own line under the title. */
+.notice-inline.connect-warning {
+  align-items: flex-start;
+  line-height: 1.5;
+}
+.connect-warning > svg {
+  flex: none;
+  margin-top: 3px;
+  color: var(--accent);
+}
+.connect-warning strong {
+  display: block;
+  font-weight: 600;
+}
+.connect-warning p {
+  margin: var(--s1) 0 0;
+  overflow-wrap: anywhere;
+}
+.connect-warning > p {
+  margin: 0;
+}
 .connect-key footer,
 .connect-login footer,
+.connect-saved footer,
 .connect-dialog > footer {
   display: flex;
   gap: var(--s2);

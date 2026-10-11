@@ -156,3 +156,31 @@ export function parseLogin(view: ManagementView | undefined): LoginData | null {
     error: text(data.error) || null,
   };
 }
+
+/** A key the server saved without being able to ask the provider about it. */
+export interface KeyWarning {
+  /** The server's sentence, shown as it is when it has an unknown shape. */
+  text: string;
+  /** Why the check could not run, in the server's words ("Haarness could
+   * not reach Acme"), when the sentence has its usual shape; else "". */
+  reason: string;
+}
+
+const uncheckedKey =
+  /^Saved, but the key could not be checked: (.+?)\.\s+If chats then fail to authenticate, replace the key\.$/s;
+
+/**
+ * The non-fatal warning a saved key can carry (`data.warning` of the
+ * credential view, also its second line). Taking the reason out lets the
+ * dialog say the rest in the reader's language.
+ */
+export function keyWarning(view: ManagementView | undefined): KeyWarning | null {
+  const data = view?.data as { warning?: unknown } | undefined;
+  const text = (
+    typeof data?.warning === "string"
+      ? data.warning
+      : (view?.lines ?? []).find((line) => line.startsWith("Saved, but ")) ?? ""
+  ).trim();
+  if (!text) return null;
+  return { text, reason: uncheckedKey.exec(text)?.[1].trim() ?? "" };
+}
