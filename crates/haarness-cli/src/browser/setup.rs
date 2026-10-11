@@ -111,6 +111,10 @@ pub(crate) struct Context<'a> {
     pub(crate) isolated: bool,
     pub(crate) extension_source: Option<PathBuf>,
     pub(crate) extra_ids: Vec<String>,
+    /// For tests: `HAARNESS_BROWSER_MANIFEST_DIR` (a path list) stands in for
+    /// every browser's own folder in setup, status and remove, as
+    /// `--manifest-dir` does for setup, so a test never touches a real Chrome.
+    pub(crate) manifest_dirs: Vec<PathBuf>,
     pub(crate) registry: &'a dyn Registry,
 }
 
@@ -146,6 +150,13 @@ impl Context<'static> {
                 &exe,
             ),
             extra_ids: manifest::extension_ids(var("HAARNESS_BROWSER_EXTENSION_IDS").as_deref()),
+            manifest_dirs: std::env::var_os("HAARNESS_BROWSER_MANIFEST_DIR")
+                .map(|dirs| {
+                    std::env::split_paths(&dirs)
+                        .filter(|dir| !dir.as_os_str().is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
             registry: &RegExe,
             exe,
             home,
@@ -588,14 +599,19 @@ pub(crate) fn setup(context: &Context, options: &SetupOptions) -> Result<Report>
     let files = ChromeFiles::new(&context.data, context.os);
     fs::create_dir_all(&files.dir)
         .with_context(|| format!("cannot create {}", files.dir.display()))?;
+    let manifest_dirs = if options.manifest_dirs.is_empty() {
+        context.manifest_dirs.as_slice()
+    } else {
+        options.manifest_dirs
+    };
     let mut warnings = Vec::new();
-    if context.isolated && options.manifest_dirs.is_empty() {
+    if context.isolated && manifest_dirs.is_empty() {
         warnings.push(format!(
             "A separate Haarness data folder is in use ({}), so Chrome will work with that folder's projects only. Run setup without HAARNESS_DATA_DIR or HAARNESS_HOME to use your usual one.",
             context.data.display()
         ));
     }
-    let targets = targets(context, options.browsers, options.manifest_dirs, false);
+    let targets = targets(context, options.browsers, manifest_dirs, false);
     if options.if_missing && files.removed().exists() {
         return Ok(report(context, &files, &targets, warnings));
     }
@@ -664,7 +680,7 @@ pub(crate) fn status(context: &Context) -> Report {
     report(
         context,
         &files,
-        &targets(context, &[], &[], false),
+        &targets(context, &[], &context.manifest_dirs, false),
         Vec::new(),
     )
 }
@@ -675,7 +691,7 @@ pub(crate) fn remove(context: &Context, all: bool) -> Result<Report> {
     let files = ChromeFiles::new(&context.data, context.os);
     let wrapper = files.wrapper();
     let mut deleted = Vec::new();
-    for target in targets(context, &[], &[], true) {
+    for target in targets(context, &[], &context.manifest_dirs, true) {
         match &target.place {
             Place::File { manifest, .. } if manifest_points_at(manifest, &wrapper) => {
                 fs::remove_file(manifest)
@@ -717,7 +733,7 @@ pub(crate) fn remove(context: &Context, all: bool) -> Result<Report> {
     let mut report = report(
         context,
         &files,
-        &targets(context, &[], &[], false),
+        &targets(context, &[], &context.manifest_dirs, false),
         Vec::new(),
     );
     report.deleted = Some(deleted);
@@ -1014,6 +1030,7 @@ mod tests {
                 forwarded: vec![("HAARNESS_DATA_DIR", self.root.display().to_string())],
                 isolated: false,
                 extra_ids: Vec::new(),
+                manifest_dirs: Vec::new(),
                 registry: &self.registry,
             }
         }
@@ -1285,6 +1302,45 @@ mod tests {
         let report = setup(&context, &options(false)).unwrap();
         assert_eq!(report.warnings.len(), 1);
         assert!(report.warnings[0].contains("separate Haarness data folder"));
+    }
+
+    #[test]
+    fn the_test_manifest_folders_stand_in_for_every_browser_in_setup_status_and_remove() {
+        // As the TUI's /chrome and Desktop's setup dialog run it: no
+        // --manifest-dir, only HAARNESS_BROWSER_MANIFEST_DIR.
+        let fixture = Fixture::new("setup-env-manifest-dir");
+        fs::create_dir_all(fixture.home("Library/Application Support/Google/Chrome")).unwrap();
+        let mut context = fixture.context(Os::Mac);
+        context.isolated = true;
+        let profiles = [
+            fixture.root.join("a/NativeMessagingHosts"),
+            fixture.root.join("b/NativeMessagingHosts"),
+        ];
+        context.manifest_dirs = profiles.to_vec();
+        let report = setup(&context, &options(false)).unwrap();
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(report.browsers.len(), 2);
+        assert!(report.browsers.iter().all(|browser| browser.registered));
+        let real = fixture.home("Library/Application Support/Google/Chrome/NativeMessagingHosts");
+        assert!(!real.exists(), "nothing written for the real browsers");
+        let report = status(&context);
+        assert!(
+            report
+                .browsers
+                .iter()
+                .all(|browser| browser.browser == "custom" && browser.registered)
+        );
+        let report = remove(&context, false).unwrap();
+        for profile in &profiles {
+            assert!(!profile.join("ai.haarness.browser.json").exists());
+        }
+        assert_eq!(
+            report.deleted.unwrap().len(),
+            3,
+            "two manifests and the wrapper"
+        );
+        assert!(report.browsers.iter().all(|browser| !browser.registered));
+        assert!(!real.exists());
     }
 
     #[test]
