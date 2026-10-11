@@ -1516,6 +1516,21 @@ async fn handle_overlay_key(app: &mut App, key: KeyEvent, client: &ApiClient) ->
         }
         return Ok(AppAction::Continue);
     }
+    if matches!(app.overlay, Overlay::Chrome) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Ok(AppAction::Continue);
+        }
+        match key.code {
+            KeyCode::Esc => app.close_overlay(),
+            KeyCode::Enter => app.chrome_primary(client),
+            KeyCode::Char('e') => app.toggle_chrome(client),
+            KeyCode::Char('d') => app.cycle_chrome_browser(client),
+            KeyCode::Char('c') => app.copy_chrome_detail(),
+            KeyCode::Char('o') => app.open_chrome_store(),
+            _ => {}
+        }
+        return Ok(AppAction::Continue);
+    }
     if matches!(app.overlay, Overlay::ProviderLogin) {
         let failed = app
             .connect

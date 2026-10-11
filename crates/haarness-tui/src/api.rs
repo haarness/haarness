@@ -521,6 +521,28 @@ impl ApiClient {
         self.get("/v1/info").await
     }
 
+    /// `GET /v1/browser/hosts`: the browsers connected to this server through
+    /// Haarness for Chrome, with each one's tab count for `thread`, and how
+    /// agents may use Chrome. Polled, so it gives up quickly.
+    pub(crate) async fn browser_hosts(
+        &self,
+        thread: Option<haarness_protocol::ThreadId>,
+    ) -> Result<crate::chrome::Hosts> {
+        let path = thread.map_or_else(
+            || "/v1/browser/hosts".to_owned(),
+            |thread| format!("/v1/browser/hosts?thread={thread}"),
+        );
+        Ok(checked_response(
+            self.request(reqwest::Method::GET, &path)
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await?,
+        )
+        .await?
+        .json()
+        .await?)
+    }
+
     pub async fn input_delivery(&self) -> Result<haarness_protocol::InputDelivery> {
         if !self
             .info()
