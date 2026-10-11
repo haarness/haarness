@@ -458,6 +458,9 @@ async fn prepare(client: ApiClient, previous: &App) -> Result<Connection> {
     };
     let items = client.items(thread.id).await?;
     let mut app = App::new(thread, threads, items, providers, agents);
+    // `--yolo` stays with the client it was given to: back on the original
+    // server this TUI approves again, and says so; elsewhere it asks.
+    app.yolo = client.auto_approves();
     app.original_client = previous.original_client.clone();
     app.workspace_local_switching = client.supports_local_workspace_switch();
     app.server_info = Some(info);
