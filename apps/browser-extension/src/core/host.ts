@@ -908,6 +908,7 @@ export function createHost(options: HostOptions) {
           title: registry.get(threadKey(workspace, approval.thread))?.title ?? "",
           project: projectName(workspace),
           lines: approvalLines(approval.patterns),
+          answerable: approval.answerable,
         }))
         .filter((approval) => approval.lines.length);
     });

@@ -2382,5 +2382,6 @@
   "Versions": "Versjoner",
   "Extension folder": "Utvidelsesmappe",
   "Update ready": "Oppdatering klar",
-  "Something went wrong.": "Noe gikk galt."
+  "Something went wrong.": "Noe gikk galt.",
+  "This request also needs an approval outside Chrome. Answer it in Haarness.": "Denne forespørselen trenger også en godkjenning utenfor Chrome. Svar i Haarness."
 }

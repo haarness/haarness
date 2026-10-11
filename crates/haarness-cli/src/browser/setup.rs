@@ -8,7 +8,7 @@
 //! registry names) and `removed` (people removed it; Desktop must not undo that).
 use super::{
     BrowserChoice, CHROME_WEB_STORE_URL, EXTENSION_FOLDER, EXTENSION_ID, HOST_NAME, SetupArgs,
-    discovery,
+    discovery, embedded,
     manifest::{self, BROWSERS, Os, Place},
     relay,
 };
@@ -19,6 +19,7 @@ use std::{
     fmt::Write as _,
     fs, io,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 /// The files setup owns.
@@ -99,17 +100,20 @@ pub(crate) struct Context<'a> {
     pub(crate) os: Os,
     pub(crate) home: PathBuf,
     pub(crate) local_app_data: Option<PathBuf>,
+    /// Where Chromium keeps its profiles on Linux when not `~/.config`.
+    pub(crate) config_home: Option<PathBuf>,
+    /// Absolute: Chrome needs an absolute wrapper path in the host manifest.
     pub(crate) data: PathBuf,
     /// This executable, canonical.
     pub(crate) exe: PathBuf,
     pub(crate) version: String,
-    /// Running as a Linux AppImage, whose files vanish when it exits.
+    /// Running from inside a Linux AppImage, whose files vanish when it exits.
     pub(crate) appimage: bool,
     /// The variables the wrapper passes on.
     pub(crate) forwarded: Vec<(&'static str, String)>,
     /// A data folder other than the default was chosen.
     pub(crate) isolated: bool,
-    pub(crate) extension_source: Option<PathBuf>,
+    pub(crate) extension_source: Option<ExtensionSource>,
     pub(crate) extra_ids: Vec<String>,
     /// `HAARNESS_BROWSER_MANIFEST_DIR`: folders that stand in for every
     /// browser's own, as `--manifest-dir` does, so a test run (or a Desktop
@@ -124,8 +128,20 @@ impl Context<'static> {
         let exe = discovery::canonical(&exe);
         let home = discovery::home_dir().context("home directory unavailable")?;
         let var = |key: &str| std::env::var(key).ok().filter(|value| !value.is_empty());
-        let data_dir =
-            data_dir.map(|root| std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf()));
+        let absolute =
+            |path: &Path| std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        // A relative `--data-dir` would put a relative wrapper path in the
+        // host manifest, which Chrome refuses.
+        let data = absolute(data);
+        let data_dir = data_dir.map(absolute);
+        let local_app_data = var("LOCALAPPDATA").map(PathBuf::from);
+        let os = Os::current();
+        let desktops = desktop_extensions(
+            os,
+            &home,
+            local_app_data.as_deref(),
+            var("ProgramFiles").map(PathBuf::from).as_deref(),
+        );
         let forwarded = manifest::FORWARDED
             .iter()
             .filter_map(|key| {
@@ -138,16 +154,22 @@ impl Context<'static> {
             })
             .collect();
         Ok(Self {
-            os: Os::current(),
-            local_app_data: var("LOCALAPPDATA").map(PathBuf::from),
-            data: data.to_path_buf(),
+            os,
+            local_app_data,
+            config_home: manifest::config_home(
+                var("CHROME_CONFIG_HOME").as_deref(),
+                var("XDG_CONFIG_HOME").as_deref(),
+            ),
+            data,
             version: env!("CARGO_PKG_VERSION").to_owned(),
-            appimage: var("APPIMAGE").is_some(),
+            appimage: inside_appimage(&exe, var("APPDIR").map(PathBuf::from).as_deref()),
             forwarded,
             isolated: data_dir.is_some() || var("HAARNESS_HOME").is_some(),
             extension_source: extension_source(
                 var("HAARNESS_BROWSER_EXTENSION_DIR").map(PathBuf::from),
                 &exe,
+                embedded::files(),
+                &desktops,
             ),
             extra_ids: manifest::extension_ids(var("HAARNESS_BROWSER_EXTENSION_IDS").as_deref()),
             manifest_dirs: std::env::var_os("HAARNESS_BROWSER_MANIFEST_DIR")
@@ -164,18 +186,166 @@ impl Context<'static> {
     }
 }
 
-/// Where the extension files to copy are: an explicit folder, Desktop's
-/// bundle next to its `bin/`, or a development build of this repository.
-pub(crate) fn extension_source(explicit: Option<PathBuf>, exe: &Path) -> Option<PathBuf> {
-    let folder = exe.parent()?;
+/// Whether `exe` runs from inside a mounted AppImage, whose files vanish when
+/// it exits. Everything an AppImage starts (a terminal in an editor shipped as
+/// one, say) inherits its `APPIMAGE` and `APPDIR`, so only an executable
+/// inside that mount counts.
+pub(crate) fn inside_appimage(exe: &Path, appdir: Option<&Path>) -> bool {
+    appdir
+        .is_some_and(|appdir| appdir.is_absolute() && exe.starts_with(discovery::canonical(appdir)))
+}
+
+/// Where setup found the extension it copies, as `extensionSource.kind` says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum SourceKind {
+    /// `$HAARNESS_BROWSER_EXTENSION_DIR`.
+    Environment,
+    /// Desktop's bundle, next to the running executable's `bin/`.
+    Bundle,
+    /// A development build in this repository.
+    Development,
+    /// Built into this executable (release builds).
+    Embedded,
+    /// An installed Haarness Desktop, for a CLI installed beside it.
+    Desktop,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SourceFiles {
+    Folder(PathBuf),
+    Embedded(embedded::Table),
+}
+
+/// The extension files setup copies into the data folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ExtensionSource {
+    pub(crate) kind: SourceKind,
+    pub(crate) files: SourceFiles,
+}
+
+/// `extensionSource` in the JSON report.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct SourceReport {
+    pub(crate) kind: SourceKind,
+    /// The folder, unless the files are built in.
+    pub(crate) path: Option<String>,
+    pub(crate) version: Option<String>,
+}
+
+impl ExtensionSource {
+    fn version(&self) -> Option<String> {
+        match &self.files {
+            SourceFiles::Folder(folder) => extension_version(folder),
+            SourceFiles::Embedded(table) => embedded::version(table),
+        }
+    }
+
+    /// Writes the files into `target`, a folder that does not exist yet.
+    fn write(&self, target: &Path) -> Result<()> {
+        match &self.files {
+            SourceFiles::Folder(folder) => copy_tree(folder, target).with_context(|| {
+                format!("cannot copy Haarness for Chrome to {}", target.display())
+            }),
+            SourceFiles::Embedded(table) => embedded::write(table, target),
+        }
+    }
+
+    fn report(&self) -> SourceReport {
+        SourceReport {
+            kind: self.kind,
+            path: match &self.files {
+                SourceFiles::Folder(folder) => Some(folder.display().to_string()),
+                SourceFiles::Embedded(_) => None,
+            },
+            version: self.version(),
+        }
+    }
+}
+
+/// Where the extension files to copy are, first found: an explicit folder,
+/// Desktop's bundle next to its `bin/`, a development build of this
+/// repository, the copy built into this executable (`embedded`), then an
+/// installed Haarness Desktop (`desktops`, see [`desktop_extensions`]).
+pub(crate) fn extension_source(
+    explicit: Option<PathBuf>,
+    exe: &Path,
+    embedded: embedded::Table,
+    desktops: &[PathBuf],
+) -> Option<ExtensionSource> {
+    let folder = |kind, candidate: PathBuf| {
+        candidate
+            .join("manifest.json")
+            .is_file()
+            .then(|| ExtensionSource {
+                kind,
+                files: SourceFiles::Folder(discovery::canonical(&candidate)),
+            })
+    };
+    let beside = exe.parent();
     explicit
+        .and_then(|candidate| folder(SourceKind::Environment, candidate))
+        .or_else(|| {
+            folder(
+                SourceKind::Bundle,
+                beside?.join("../browser-extension/chrome"),
+            )
+        })
+        .or_else(|| {
+            folder(
+                SourceKind::Development,
+                beside?.join("../../apps/browser-extension/dist/chrome"),
+            )
+        })
+        .or_else(|| {
+            embedded::version(embedded)
+                .is_some()
+                .then_some(ExtensionSource {
+                    kind: SourceKind::Embedded,
+                    files: SourceFiles::Embedded(embedded),
+                })
+        })
+        .or_else(|| {
+            desktops
+                .iter()
+                .find_map(|candidate| folder(SourceKind::Desktop, candidate.clone()))
+        })
+}
+
+/// Haarness for Chrome inside an installed Haarness Desktop, where its
+/// installers put the app.
+pub(crate) fn desktop_extensions(
+    os: Os,
+    home: &Path,
+    local_app_data: Option<&Path>,
+    program_files: Option<&Path>,
+) -> Vec<PathBuf> {
+    let resources: Vec<PathBuf> = match os {
+        Os::Mac => [PathBuf::from("/Applications"), home.join("Applications")]
+            .into_iter()
+            .map(|folder| {
+                folder
+                    .join("Haarness.app")
+                    .join("Contents")
+                    .join("Resources")
+            })
+            .collect(),
+        // Installed for this user, or for everyone.
+        Os::Windows => [
+            local_app_data.map(|folder| folder.join("Programs")),
+            program_files.map(Path::to_path_buf),
+        ]
         .into_iter()
-        .chain([
-            folder.join("../browser-extension/chrome"),
-            folder.join("../../apps/browser-extension/dist/chrome"),
-        ])
-        .find(|candidate| candidate.join("manifest.json").is_file())
-        .map(|candidate| discovery::canonical(&candidate))
+        .flatten()
+        .map(|folder| folder.join("Haarness").join("resources"))
+        .collect(),
+        // The .deb; an AppImage has no lasting place.
+        Os::Linux => vec![PathBuf::from("/opt/Haarness/resources")],
+    };
+    resources
+        .into_iter()
+        .map(|folder| folder.join("browser-extension").join("chrome"))
+        .collect()
 }
 
 /// The extension's `version_name` (its workspace version), else `version`.
@@ -277,7 +447,7 @@ pub(crate) fn wrapper_needs_rewrite(
 
 /// The executable a wrapper on disk runs.
 pub(crate) fn wrapper_exe(wrapper: &Path) -> Option<PathBuf> {
-    manifest::wrapper_target(&fs::read_to_string(wrapper).ok()?)
+    manifest::wrapper_target(&fs::read_to_string(wrapper).ok()?, wrapper.parent()?)
 }
 
 fn manifest_points_at(manifest: &Path, wrapper: &Path) -> bool {
@@ -346,6 +516,7 @@ fn targets(
             context.os,
             &context.home,
             context.local_app_data.as_deref(),
+            context.config_home.as_deref(),
         );
         let detected = match &place {
             Place::File { profile, .. } | Place::Registry { profile, .. } => profile.exists(),
@@ -448,6 +619,9 @@ pub(crate) struct Report {
     pub(crate) warnings: Vec<String>,
     pub(crate) browsers: Vec<BrowserEntry>,
     pub(crate) extension: Option<ExtensionCopy>,
+    /// What setup copies `extension` from; `null` when this installation has
+    /// no Haarness for Chrome of its own.
+    pub(crate) extension_source: Option<SourceReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) connections: Option<Vec<Value>>,
     /// What `remove` deleted.
@@ -488,6 +662,10 @@ fn report(
             .map(|target| target.entry(files, context.registry))
             .collect(),
         extension: extension_copy(&files.extension()),
+        extension_source: context
+            .extension_source
+            .as_ref()
+            .map(ExtensionSource::report),
         connections: None,
         deleted: None,
     }
@@ -497,6 +675,9 @@ pub(crate) struct SetupOptions<'a> {
     pub(crate) browsers: &'a [BrowserChoice],
     pub(crate) manifest_dirs: &'a [PathBuf],
     pub(crate) if_missing: bool,
+    /// `--use-isolated-data-for-chrome`: register a separate data folder with
+    /// the user's own browsers anyway.
+    pub(crate) use_isolated_data: bool,
 }
 
 /// Writes `contents` to `path` unless it already holds them, replacing it
@@ -563,11 +744,11 @@ fn copy_tree(source: &Path, target: &Path) -> io::Result<()> {
 
 /// Copies the extension when the copy is missing or another version, then
 /// swaps it in whole.
-pub(crate) fn sync_extension(source: Option<&Path>, target: &Path) -> Result<()> {
+pub(crate) fn sync_extension(source: Option<&ExtensionSource>, target: &Path) -> Result<()> {
     let Some(source) = source else {
         return Ok(());
     };
-    let wanted = extension_version(source);
+    let wanted = source.version();
     if wanted.is_some() && extension_version(target) == wanted {
         return Ok(());
     }
@@ -576,8 +757,10 @@ pub(crate) fn sync_extension(source: Option<&Path>, target: &Path) -> Result<()>
     let staging = parent.join(format!(".{EXTENSION_FOLDER}.new-{pid}"));
     let old = parent.join(format!(".{EXTENSION_FOLDER}.old-{pid}"));
     let _ = fs::remove_dir_all(&staging);
-    copy_tree(source, &staging)
-        .with_context(|| format!("cannot copy Haarness for Chrome to {}", parent.display()))?;
+    if let Err(error) = source.write(&staging) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
     let _ = fs::remove_dir_all(&old);
     let had = target.exists();
     if had {
@@ -594,36 +777,91 @@ pub(crate) fn sync_extension(source: Option<&Path>, target: &Path) -> Result<()>
     Ok(())
 }
 
-const NOT_INCLUDED: &str = "Haarness for Chrome is not included in this installation. Set it up from Haarness Desktop (Settings → Browser → Chrome).";
+/// Setup found no Haarness for Chrome to offer: a build from source without
+/// the extension, and no Haarness Desktop installed.
+const NOT_INCLUDED: &str = "This Haarness build does not include Haarness for Chrome. Install a Haarness release (https://haarness.ai/docs/start/install) or Haarness Desktop, which include it, then run `haarness browser setup` again. In a development checkout, run `npm run extension:build` first.";
 /// After `remove`, the extension may still be in Chrome; what is gone is
 /// Chrome's way to start Haarness.
 const REMOVED: &str = "Chrome cannot start Haarness: `haarness browser remove` turned that off. Run `haarness browser setup` to use Chrome again.";
 
+/// The separate data folder people chose (`--data-dir`, `HAARNESS_DATA_DIR`
+/// or `HAARNESS_HOME`), as they named it.
+fn isolated_folder(context: &Context) -> PathBuf {
+    ["HAARNESS_DATA_DIR", "HAARNESS_HOME"]
+        .iter()
+        .find_map(|name| {
+            context
+                .forwarded
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| PathBuf::from(value))
+        })
+        .unwrap_or_else(|| context.data.clone())
+}
+
+/// Why setup leaves the user's browsers alone for a separate data folder.
+fn isolated_refusal(folder: &Path) -> String {
+    format!(
+        "Haarness is using a separate data folder ({}), so setup did not register it with your browsers: your own Chrome would start Haarness from that folder, and could no longer start it once the folder is deleted. For a test browser profile, pass --manifest-dir <profile>/NativeMessagingHosts (or set HAARNESS_BROWSER_MANIFEST_DIR). To use this folder with your own Chrome anyway, pass --use-isolated-data-for-chrome. To set up your usual Haarness, run setup without --data-dir, HAARNESS_DATA_DIR or HAARNESS_HOME.",
+        folder.display()
+    )
+}
+
+/// What `--use-isolated-data-for-chrome` does to the user's own Chrome.
+fn isolated_warning(folder: &Path) -> String {
+    format!(
+        "Your Chrome now starts Haarness from a separate data folder ({}). It still reaches the projects of your usual Haarness data folder too. If you delete this folder, Chrome cannot start Haarness until you run `haarness browser setup` again.",
+        folder.display()
+    )
+}
+
+/// Chrome would have nothing to load: no extension copy, nothing to copy one
+/// from, and no Web Store listing.
+fn nothing_to_load(context: &Context, files: &ChromeFiles) -> bool {
+    context.extension_source.is_none()
+        && extension_copy(&files.extension()).is_none()
+        && CHROME_WEB_STORE_URL.is_none()
+}
+
 pub(crate) fn setup(context: &Context, options: &SetupOptions) -> Result<Report> {
     let files = ChromeFiles::new(&context.data, context.os);
-    fs::create_dir_all(&files.dir)
-        .with_context(|| format!("cannot create {}", files.dir.display()))?;
     let manifest_dirs = if options.manifest_dirs.is_empty() {
         context.manifest_dirs.as_slice()
     } else {
         options.manifest_dirs
     };
-    let mut warnings = Vec::new();
-    if context.isolated && manifest_dirs.is_empty() {
-        warnings.push(format!(
-            "A separate Haarness data folder is in use ({}), so Chrome will work with that folder's projects only. Run setup without HAARNESS_DATA_DIR or HAARNESS_HOME to use your usual one.",
-            context.data.display()
-        ));
-    }
     let targets = targets(context, options.browsers, manifest_dirs, false);
+    let mut warnings = Vec::new();
+    // Said once the user's own browsers point at the separate folder.
+    let mut isolated = None;
+    if context.isolated && manifest_dirs.is_empty() {
+        let folder = isolated_folder(context);
+        if !options.use_isolated_data {
+            // Desktop's launch-time check reports instead of failing.
+            if options.if_missing {
+                warnings.push(isolated_refusal(&folder));
+                return Ok(report(context, &files, &targets, warnings));
+            }
+            bail!(isolated_refusal(&folder));
+        }
+        isolated = Some(isolated_warning(&folder));
+    }
     if options.if_missing && files.removed().exists() {
         return Ok(report(context, &files, &targets, warnings));
     }
+    fs::create_dir_all(&files.dir)
+        .with_context(|| format!("cannot create {}", files.dir.display()))?;
     if !options.if_missing {
         match fs::remove_file(files.removed()) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
             _ => {}
         }
+    }
+    // Registering a host for an extension nobody can load only sends people
+    // to a Chrome that waits forever.
+    if nothing_to_load(context, &files) {
+        warnings.push(NOT_INCLUDED.into());
+        return Ok(report(context, &files, &targets, warnings));
     }
     let plan = plan_executable(
         &context.exe,
@@ -644,7 +882,7 @@ pub(crate) fn setup(context: &Context, options: &SetupOptions) -> Result<Report>
         if let Some(source) = &plan.copy_from {
             copy_executable(source, &plan.run)?;
         }
-        let script = manifest::wrapper(context.os, &plan.run, &context.forwarded)?;
+        let script = manifest::wrapper(context.os, &plan.run, &context.forwarded, &files.dir)?;
         write_if_changed(&wrapper, script.as_bytes(), true)?;
     }
     let contents = serde_json::to_vec_pretty(&manifest::manifest(&wrapper, &context.extra_ids))?;
@@ -672,20 +910,15 @@ pub(crate) fn setup(context: &Context, options: &SetupOptions) -> Result<Report>
             Place::Unsupported => {}
         }
     }
-    sync_extension(context.extension_source.as_deref(), &files.extension())?;
-    if extension_copy(&files.extension()).is_none() && CHROME_WEB_STORE_URL.is_none() {
-        warnings.push(NOT_INCLUDED.into());
-    }
+    sync_extension(context.extension_source.as_ref(), &files.extension())?;
+    warnings.extend(isolated);
     Ok(report(context, &files, &targets, warnings))
 }
 
 pub(crate) fn status(context: &Context) -> Report {
     let files = ChromeFiles::new(&context.data, context.os);
     // Setup could not add one either, so say what setup would.
-    let warnings = if extension_copy(&files.extension()).is_none()
-        && context.extension_source.is_none()
-        && CHROME_WEB_STORE_URL.is_none()
-    {
+    let warnings = if nothing_to_load(context, &files) {
         vec![NOT_INCLUDED.to_owned()]
     } else {
         Vec::new()
@@ -698,11 +931,38 @@ pub(crate) fn status(context: &Context) -> Report {
     )
 }
 
+/// Deletes `folder`, retrying for up to `patience`: on Windows a bridge still
+/// running from `bin/` locks its executable until it notices its wrapper is
+/// gone, within a few seconds.
+fn remove_folder(folder: &Path, patience: Duration) -> io::Result<()> {
+    let started = Instant::now();
+    loop {
+        match fs::remove_dir_all(folder) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                if started.elapsed() >= patience {
+                    return Err(error);
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            _ => return Ok(()),
+        }
+    }
+}
+
 /// Removes the registrations and wrapper this data folder owns, and marks
 /// Chrome as removed so Desktop's launch-time setup leaves it alone.
 pub(crate) fn remove(context: &Context, all: bool) -> Result<Report> {
     let files = ChromeFiles::new(&context.data, context.os);
     let wrapper = files.wrapper();
+    // First: whatever cannot be deleted below, Desktop must not register
+    // Chrome again by itself.
+    fs::create_dir_all(&files.dir)
+        .with_context(|| format!("cannot create {}", files.dir.display()))?;
+    fs::write(
+        files.removed(),
+        "Removed with `haarness browser remove`. Run `haarness browser setup` to use Chrome again.\n",
+    )
+    .with_context(|| format!("cannot write {}", files.removed().display()))?;
     let mut deleted = Vec::new();
     for target in targets(context, &[], &context.manifest_dirs, true) {
         match &target.place {
@@ -721,33 +981,43 @@ pub(crate) fn remove(context: &Context, all: bool) -> Result<Report> {
             _ => {}
         }
     }
-    for file in [files.windows_manifest(), wrapper] {
+    let mut wrapper_gone = false;
+    for file in [files.windows_manifest(), wrapper.clone()] {
         if file.exists() {
             fs::remove_file(&file).with_context(|| format!("cannot remove {}", file.display()))?;
             deleted.push(file.display().to_string());
+            wrapper_gone |= file == wrapper;
         }
     }
+    let mut warnings = Vec::new();
     let mut folders = vec![files.bin()];
     if all {
         folders.push(files.extension());
     }
     for folder in folders {
-        if folder.exists() {
-            fs::remove_dir_all(&folder)
-                .with_context(|| format!("cannot remove {}", folder.display()))?;
-            deleted.push(folder.display().to_string());
+        if !folder.exists() {
+            continue;
+        }
+        let patience = if context.os == Os::Windows && wrapper_gone && folder == files.bin() {
+            Duration::from_secs(5)
+        } else {
+            Duration::ZERO
+        };
+        match remove_folder(&folder, patience) {
+            Ok(()) => deleted.push(folder.display().to_string()),
+            // Chrome cannot start Haarness any more; what is left is files.
+            Err(error) => warnings.push(format!(
+                "Could not remove {}: {error}. Close Chrome, then run `haarness browser remove{}` again.",
+                folder.display(),
+                if all { " --all" } else { "" }
+            )),
         }
     }
-    fs::create_dir_all(&files.dir)?;
-    fs::write(
-        files.removed(),
-        "Removed with `haarness browser remove`. Run `haarness browser setup` to use Chrome again.\n",
-    )?;
     let mut report = report(
         context,
         &files,
         &targets(context, &[], &context.manifest_dirs, false),
-        Vec::new(),
+        warnings,
     );
     report.deleted = Some(deleted);
     Ok(report)
@@ -798,6 +1068,7 @@ pub(crate) fn setup_command(data: &Path, data_dir: Option<&Path>, args: &SetupAr
             browsers: &args.browsers,
             manifest_dirs: &args.manifest_dirs,
             if_missing: args.if_missing,
+            use_isolated_data: args.use_isolated_data_for_chrome,
         },
     )?;
     if args.json {
@@ -806,12 +1077,15 @@ pub(crate) fn setup_command(data: &Path, data_dir: Option<&Path>, args: &SetupAr
     if args.quiet || args.json {
         return Ok(());
     }
-    // The next step says this one.
-    for warning in report
+    if report
         .warnings
         .iter()
-        .filter(|warning| *warning != NOT_INCLUDED)
+        .any(|warning| warning == NOT_INCLUDED)
     {
+        println!("Chrome was not set up. {NOT_INCLUDED}");
+        return Ok(());
+    }
+    for warning in &report.warnings {
         eprintln!("Warning: {warning}");
     }
     if report.removed {
@@ -954,6 +1228,9 @@ pub(crate) fn remove_command(data: &Path, all: bool, json: bool) -> Result<()> {
     if json {
         return print_json(&report);
     }
+    for warning in &report.warnings {
+        eprintln!("Warning: {warning}");
+    }
     let deleted = report.deleted.as_deref().unwrap_or_default();
     if deleted.is_empty() {
         println!("Chrome was not set up to start Haarness here.");
@@ -1057,8 +1334,9 @@ mod tests {
                 os,
                 home: self.root.join("home"),
                 local_app_data: Some(self.root.join("home/AppData/Local")),
+                config_home: None,
                 data: self.root.join("data"),
-                extension_source: extension_source(None, &exe),
+                extension_source: extension_source(None, &exe, &[], &[]),
                 exe,
                 version: "0.1.1".into(),
                 appimage: false,
@@ -1093,6 +1371,7 @@ mod tests {
             browsers: &[],
             manifest_dirs: &[],
             if_missing,
+            use_isolated_data: false,
         }
     }
 
@@ -1247,8 +1526,14 @@ mod tests {
                 "removed",
                 "warnings",
                 "browsers",
-                "extension"
+                "extension",
+                "extensionSource"
             ]
+        );
+        let source = fixture.root.join("install/browser-extension/chrome");
+        assert_eq!(
+            json["extensionSource"],
+            json!({"kind": "bundle", "path": source.display().to_string(), "version": "0.1.1-preview.1"})
         );
         // Joined as `manifest::place` joins them, so the strings match on Windows too.
         let host_manifest = |folder: &str| {
@@ -1295,7 +1580,6 @@ mod tests {
         assert_eq!(status(&context).browsers.len(), 2);
 
         // A new extension version replaces the copy; an equal one is left alone.
-        let source = fixture.root.join("install/browser-extension/chrome");
         fs::write(extension.join("stale.js"), b"old").unwrap();
         setup(&context, &options(true)).unwrap();
         assert!(extension.join("stale.js").exists());
@@ -1310,7 +1594,7 @@ mod tests {
     }
 
     #[test]
-    fn a_manifest_dir_gets_the_only_manifest_and_an_isolated_root_warns_without_one() {
+    fn a_manifest_dir_gets_the_only_manifest_and_an_isolated_root_never_touches_real_browsers() {
         let fixture = Fixture::new("setup-manifest-dir");
         let mut context = fixture.context(Os::Mac);
         context.isolated = true;
@@ -1322,6 +1606,7 @@ mod tests {
                 browsers: &[],
                 manifest_dirs: &dirs,
                 if_missing: false,
+                use_isolated_data: false,
             },
         )
         .unwrap();
@@ -1330,13 +1615,44 @@ mod tests {
         assert_eq!(report.browsers[0].browser, "custom");
         assert!(report.browsers[0].registered);
         assert!(profile.join("ai.haarness.browser.json").is_file());
+        let real = fixture.home("Library");
+        assert!(!real.exists(), "nothing written for the real browsers");
+
+        // Without a manifest folder, setup refuses rather than point the
+        // user's own Chrome at a folder that may be deleted.
+        let wrapper = ChromeFiles::new(&context.data, context.os).wrapper();
+        fs::remove_file(&wrapper).unwrap();
+        let Err(error) = setup(&context, &options(false)) else {
+            panic!("an isolated root without a manifest folder must be refused")
+        };
+        let error = error.to_string();
+        assert!(error.contains("separate data folder"), "{error}");
         assert!(
-            !fixture.home("Library").exists(),
-            "nothing written for the real browsers"
+            error.contains("--manifest-dir") && error.contains("--use-isolated-data-for-chrome")
         );
-        let report = setup(&context, &options(false)).unwrap();
+        // Desktop's launch-time check is told the same, without failing.
+        let report = setup(&context, &options(true)).unwrap();
+        assert_eq!(report.warnings, [isolated_refusal(&fixture.root)]);
+        assert!(!real.exists() && !wrapper.exists(), "nothing written");
+
+        // Asked for explicitly, it registers, and says what that means.
+        let report = setup(
+            &context,
+            &SetupOptions {
+                use_isolated_data: true,
+                ..options(false)
+            },
+        )
+        .unwrap();
+        assert!(report.browsers[0].registered && real.exists());
         assert_eq!(report.warnings.len(), 1);
-        assert!(report.warnings[0].contains("separate Haarness data folder"));
+        let warning = &report.warnings[0];
+        assert!(
+            warning.contains("Your Chrome now starts Haarness from a separate data folder")
+                && warning.contains("usual Haarness data folder too")
+                && warning.contains("If you delete this folder"),
+            "{warning}"
+        );
     }
 
     #[test]
@@ -1505,7 +1821,10 @@ mod tests {
         );
         let script = fs::read_to_string(&report.wrapper).unwrap();
         assert!(script.starts_with("@echo off\r\n"), "{script}");
-        assert_eq!(manifest::wrapper_target(&script), Some(copy.clone()));
+        assert_eq!(
+            manifest::wrapper_target(&script, &chrome_dir),
+            Some(copy.clone())
+        );
         let names: Vec<_> = report
             .browsers
             .iter()
@@ -1542,12 +1861,289 @@ mod tests {
         assert_eq!(status(&context).warnings, [NOT_INCLUDED]);
         // A copy Desktop left in the data folder is enough.
         let files = ChromeFiles::new(&context.data, context.os);
-        sync_extension(
-            Some(&fixture.root.join("install/browser-extension/chrome")),
-            &files.extension(),
-        )
-        .unwrap();
+        let bundle = extension_source(None, &context.exe, &[], &[]);
+        sync_extension(bundle.as_ref(), &files.extension()).unwrap();
         assert!(status(&context).warnings.is_empty());
+    }
+
+    #[test]
+    fn without_any_extension_setup_registers_nothing_and_says_what_to_install() {
+        let fixture = Fixture::new("setup-nothing-to-load");
+        let mut context = fixture.context(Os::Mac);
+        context.extension_source = None;
+        let report = setup(&context, &options(false)).unwrap();
+        assert_eq!(report.warnings, [NOT_INCLUDED]);
+        assert!(
+            NOT_INCLUDED.contains("Install a Haarness release")
+                && NOT_INCLUDED.contains("Haarness Desktop")
+        );
+        assert!(report.extension.is_none() && report.extension_source.is_none());
+        assert!(report.browsers.iter().all(|browser| !browser.registered));
+        assert!(
+            !fixture.home("Library").exists(),
+            "no browser was told about a host"
+        );
+        assert!(!Path::new(&report.wrapper).exists());
+        // Once Desktop has left a copy in the data folder, there is something to load.
+        let files = ChromeFiles::new(&context.data, context.os);
+        let bundle = extension_source(None, &context.exe, &[], &[]);
+        sync_extension(bundle.as_ref(), &files.extension()).unwrap();
+        let report = setup(&context, &options(false)).unwrap();
+        assert!(report.warnings.is_empty());
+        assert!(report.browsers[0].registered);
+    }
+
+    static EMBEDDED: &[(&str, &[u8])] = &[
+        ("background.js", b"// worker"),
+        ("icons/16.png", b"png"),
+        (
+            "manifest.json",
+            br#"{"version":"0.1.1.1","version_name":"0.1.1-preview.1"}"#,
+        ),
+    ];
+
+    static NEWER_EMBEDDED: &[(&str, &[u8])] = &[(
+        "manifest.json",
+        br#"{"version":"0.1.2.1000","version_name":"0.1.2"}"#,
+    )];
+
+    #[test]
+    fn a_cli_on_its_own_copies_the_extension_built_into_it() {
+        let fixture = Fixture::new("setup-embedded");
+        // A CLI installed alone: nothing beside it, no checkout around it.
+        let alone = fixture.root.join("alone/bin/haarness");
+        fs::create_dir_all(alone.parent().unwrap()).unwrap();
+        fs::write(&alone, b"#!/bin/sh\n").unwrap();
+        let desktop = fixture
+            .root
+            .join("Applications/Haarness.app/browser-extension/chrome");
+        let mut context = fixture.context(Os::Mac);
+        context.extension_source = extension_source(None, &alone, EMBEDDED, &[desktop]);
+        let report = setup(&context, &options(false)).unwrap();
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["extensionSource"],
+            json!({"kind": "embedded", "path": null, "version": "0.1.1-preview.1"})
+        );
+        assert!(report.warnings.is_empty());
+        assert!(report.browsers[0].registered);
+        let copy = ChromeFiles::new(&context.data, context.os).extension();
+        assert_eq!(report.extension.unwrap().version, "0.1.1-preview.1");
+        assert_eq!(fs::read(copy.join("icons/16.png")).unwrap(), b"png");
+        assert_eq!(fs::read(copy.join("background.js")).unwrap(), b"// worker");
+        // The same version is left alone; another one replaces the copy whole.
+        fs::write(copy.join("stale.js"), b"old").unwrap();
+        setup(&context, &options(true)).unwrap();
+        assert!(copy.join("stale.js").exists());
+        context.extension_source = extension_source(None, &alone, NEWER_EMBEDDED, &[]);
+        let report = setup(&context, &options(true)).unwrap();
+        assert_eq!(report.extension.unwrap().version, "0.1.2");
+        assert!(!copy.join("stale.js").exists() && !copy.join("background.js").exists());
+    }
+
+    #[test]
+    fn extension_sources_are_tried_in_order() {
+        let fixture = Fixture::new("extension-sources");
+        let folder = |path: &str| {
+            let folder = fixture.root.join(path);
+            fs::create_dir_all(&folder).unwrap();
+            fs::write(folder.join("manifest.json"), br#"{"version":"1.0.0"}"#).unwrap();
+            discovery::canonical(&folder)
+        };
+        let explicit = folder("explicit");
+        let exe = folder("w/target/debug").join("haarness");
+        let bundle = folder("w/target/browser-extension/chrome");
+        let development = folder("w/apps/browser-extension/dist/chrome");
+        let desktop =
+            folder("Applications/Haarness.app/Contents/Resources/browser-extension/chrome");
+        let missing = fixture.root.join("nowhere");
+        let found = |explicit: Option<&Path>, embedded: embedded::Table| {
+            let source = extension_source(
+                explicit.map(Path::to_path_buf),
+                &exe,
+                embedded,
+                &[missing.clone(), desktop.clone()],
+            )?;
+            Some((source.kind, source.report().path))
+        };
+        let at = |path: &Path| Some(path.display().to_string());
+        assert_eq!(
+            found(Some(&explicit), EMBEDDED),
+            Some((SourceKind::Environment, at(&explicit)))
+        );
+        // A folder without a manifest is not an extension.
+        assert_eq!(
+            found(Some(&missing), EMBEDDED).unwrap().0,
+            SourceKind::Bundle
+        );
+        fs::remove_dir_all(&bundle).unwrap();
+        assert_eq!(
+            found(None, EMBEDDED),
+            Some((SourceKind::Development, at(&development)))
+        );
+        fs::remove_dir_all(&development).unwrap();
+        assert_eq!(found(None, EMBEDDED), Some((SourceKind::Embedded, None)));
+        assert_eq!(found(None, &[]), Some((SourceKind::Desktop, at(&desktop))));
+        fs::remove_dir_all(&desktop).unwrap();
+        assert_eq!(found(None, &[]), None);
+    }
+
+    #[test]
+    fn installed_desktop_apps_are_found_where_their_installers_put_them() {
+        let home = Path::new("/Users/a");
+        let resources = |base: PathBuf| base.join("browser-extension").join("chrome");
+        assert_eq!(
+            desktop_extensions(Os::Mac, home, None, None),
+            [
+                resources(
+                    Path::new("/Applications")
+                        .join("Haarness.app")
+                        .join("Contents")
+                        .join("Resources")
+                ),
+                resources(
+                    home.join("Applications")
+                        .join("Haarness.app")
+                        .join("Contents")
+                        .join("Resources")
+                ),
+            ]
+        );
+        let local = Path::new("C:\\Users\\a\\AppData\\Local");
+        let program_files = Path::new("C:\\Program Files");
+        assert_eq!(
+            desktop_extensions(Os::Windows, home, Some(local), Some(program_files)),
+            [
+                resources(local.join("Programs").join("Haarness").join("resources")),
+                resources(program_files.join("Haarness").join("resources")),
+            ]
+        );
+        assert_eq!(
+            desktop_extensions(Os::Linux, home, None, None),
+            [resources(PathBuf::from("/opt/Haarness/resources"))]
+        );
+    }
+
+    #[test]
+    fn a_relative_data_folder_still_gives_chrome_absolute_paths() {
+        let context =
+            Context::from_environment(Path::new("rel/data"), Some(Path::new("rel"))).unwrap();
+        assert!(context.data.is_absolute() && context.data.ends_with("rel/data"));
+        let wrapper = ChromeFiles::new(&context.data, context.os).wrapper();
+        assert!(wrapper.is_absolute());
+        assert_eq!(
+            manifest::manifest(&wrapper, &[])["path"],
+            wrapper.display().to_string()
+        );
+        let forwarded = context
+            .forwarded
+            .iter()
+            .find(|(key, _)| *key == "HAARNESS_DATA_DIR")
+            .unwrap();
+        assert!(Path::new(&forwarded.1).is_absolute());
+    }
+
+    #[test]
+    fn only_an_executable_inside_the_appimage_mount_is_copied() {
+        let mount = temp("appimage-mount");
+        let inside = mount.join("usr/bin/haarness");
+        // A terminal started by an editor AppImage passes its APPDIR on.
+        assert!(inside_appimage(&inside, Some(&mount)));
+        assert!(!inside_appimage(
+            Path::new("/home/a/.local/bin/haarness"),
+            Some(&mount)
+        ));
+        assert!(!inside_appimage(&inside, None));
+        assert!(!inside_appimage(&inside, Some(Path::new("relative"))));
+        fs::remove_dir_all(mount).unwrap();
+    }
+
+    #[test]
+    fn linux_registers_where_chrome_reads_with_a_custom_config_home() {
+        let fixture = Fixture::new("setup-xdg");
+        let xdg = fixture.root.join("xdg");
+        fs::create_dir_all(xdg.join("chromium")).unwrap();
+        // A profile in the default place is not where this Chrome looks.
+        fs::create_dir_all(fixture.home(".config/microsoft-edge")).unwrap();
+        let mut context = fixture.context(Os::Linux);
+        context.config_home = Some(xdg.clone());
+        let report = setup(&context, &options(false)).unwrap();
+        let registered: Vec<_> = report
+            .browsers
+            .iter()
+            .map(|browser| {
+                (
+                    browser.browser.as_str(),
+                    browser.detected,
+                    browser.registered,
+                )
+            })
+            .collect();
+        assert_eq!(
+            registered,
+            [("chrome", false, true), ("chromium", true, true)]
+        );
+        for folder in ["google-chrome", "chromium"] {
+            assert!(
+                under(
+                    &xdg,
+                    &[folder, "NativeMessagingHosts", "ai.haarness.browser.json"]
+                )
+                .is_file()
+            );
+        }
+        assert!(!fixture.home(".config/google-chrome").exists());
+        let report = remove(&context, false).unwrap();
+        assert!(report.browsers.iter().all(|browser| !browser.registered));
+        assert!(
+            !under(
+                &xdg,
+                &[
+                    "chromium",
+                    "NativeMessagingHosts",
+                    "ai.haarness.browser.json"
+                ]
+            )
+            .exists()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_is_remembered_even_when_a_running_bridge_keeps_its_copy() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fixture = Fixture::new("remove-locked");
+        let mut context = fixture.context(Os::Linux);
+        // An AppImage's bridge runs from a copy in `bin/`, as on Windows.
+        context.appimage = true;
+        setup(&context, &options(false)).unwrap();
+        let bin = ChromeFiles::new(&context.data, context.os).bin();
+        assert!(bin.join("haarness").is_file());
+        // A file in use cannot be deleted on Windows; a read-only folder stands in.
+        let lock = |mode| fs::set_permissions(&bin, fs::Permissions::from_mode(mode)).unwrap();
+        lock(0o555);
+        let report = remove(&context, false).unwrap();
+        assert!(report.removed, "the marker is written first");
+        assert!(report.browsers.iter().all(|browser| !browser.registered));
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        assert!(report.warnings[0].starts_with(&format!("Could not remove {}", bin.display())));
+        assert!(
+            report.warnings[0].contains("Close Chrome, then run `haarness browser remove` again.")
+        );
+        assert!(!report.deleted.unwrap().contains(&bin.display().to_string()));
+        // Desktop's launch-time setup leaves the removal alone.
+        assert!(setup(&context, &options(true)).unwrap().removed);
+        // Once the bridge exits, a patient retry gets the folder.
+        let unlock = std::thread::spawn({
+            let bin = bin.clone();
+            move || {
+                std::thread::sleep(Duration::from_millis(300));
+                fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        });
+        remove_folder(&bin, Duration::from_secs(5)).unwrap();
+        unlock.join().unwrap();
+        assert!(!bin.exists());
     }
 
     #[test]

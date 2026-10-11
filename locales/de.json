@@ -2382,5 +2382,6 @@
   "Versions": "Versionen",
   "Extension folder": "Erweiterungsordner",
   "Update ready": "Update bereit",
-  "Something went wrong.": "Etwas ist schiefgelaufen."
+  "Something went wrong.": "Etwas ist schiefgelaufen.",
+  "This request also needs an approval outside Chrome. Answer it in Haarness.": "Diese Anfrage braucht außerdem eine Freigabe außerhalb von Chrome. Antworte in Haarness."
 }

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Run the CLI and bundled Bun from the actual Desktop package on its native runner."""
-import json, platform, subprocess
+"""Run the CLI and bundled Bun from the actual Desktop package on its native runner, and
+check that the standalone CLI carries Haarness for Chrome."""
+import json, os, platform, shutil, subprocess, tempfile
 from pathlib import Path
 root=Path(__file__).resolve().parents[1]
 name='haarness.exe' if platform.system()=='Windows' else 'haarness'
@@ -20,4 +21,22 @@ assert manifest['version_name']==versions['version'],manifest['version_name']
 assert manifest['version']==f'{release}.{preview}',manifest['version']
 assert manifest['key'] and 'nativeMessaging' in manifest['permissions']
 assert (binary.parent.parent/'browser-extension'/'chrome'/'background.js').is_file()
-print('Packaged backend, bundled JavaScript runtime and Chrome extension check out')
+# The standalone CLI (what release.py collect publishes) carries Haarness for Chrome
+# itself: copied away from the checkout and any Desktop bundle, setup must find the
+# built-in copy and write it out, touching only throwaway folders.
+cli=root/'target'/'release'/name
+with tempfile.TemporaryDirectory(prefix='haarness-cli-chrome-') as scratch:
+    scratch=Path(scratch)
+    alone=scratch/'bin'/name;alone.parent.mkdir();shutil.copy2(cli,alone)
+    env={k:v for k,v in os.environ.items() if not k.startswith(('HAARNESS_','XDG_'))}
+    env.update(HOME=str(scratch/'home'),USERPROFILE=str(scratch/'home'),HAARNESS_DATA_DIR=str(scratch/'data'),HAARNESS_BROWSER_MANIFEST_DIR=str(scratch/'profile'/'NativeMessagingHosts'))
+    (scratch/'home').mkdir()
+    status=json.loads(subprocess.check_output([str(alone),'browser','status','--json'],env=env,text=True))
+    assert status['extensionSource']=={'kind':'embedded','path':None,'version':versions['version']},status['extensionSource']
+    report=json.loads(subprocess.check_output([str(alone),'browser','setup','--json'],env=env,text=True))
+    assert report['extension'] and report['extension']['version']==versions['version'],report
+    copy=Path(report['extension']['path'])
+    assert copy.is_relative_to(scratch/'data') and (copy/'background.js').is_file(),copy
+    assert json.loads((copy/'manifest.json').read_text())==manifest
+    assert all(browser['registered'] for browser in report['browsers']) and report['warnings']==[],report
+print('Packaged backend, bundled JavaScript runtime and Chrome extension check out, and the CLI carries the extension')
