@@ -1,8 +1,63 @@
 # Haarness Desktop
 
+> **User guides:** [Install and first run](https://haarness.ai/docs/desktop/install), [Work in a conversation](https://haarness.ai/docs/desktop/the-conversation), [Settings](https://haarness.ai/docs/desktop/settings). This page has the engineering detail.
+
 Haarness Desktop is an Electron application in `apps/desktop`. Its SolidJS interface uses Haarness's directory-scoped server for every conversation, turn, tool, approval, workflow, and terminal. The server remains the durable owner of work and can be shared with the CLI and TUI.
 
 Normal Send steers active work; **Queue** or **Alt+Enter** saves a follow-up until that work finishes. Queued messages wait in a tray above the composer. Each can be edited in the composer, sent now, reordered or removed, and each runs as its own turn. Stop answers steering the agent has not read yet and pauses the queue. See [Steer and Queue](INPUT-QUEUE.md).
+
+## First run
+
+1. **Open a project.** A new install opens on **Open a project to get started**. Choose **Open
+   project** and pick a folder. Every chat belongs to a project folder or one of its Git
+   worktrees, so the message box waits until a project is open. Project configuration, MCP
+   servers, hooks and extensions load automatically; launch with
+   `HAARNESS_DISABLE_PROJECT_CONFIG=1` to use only global configuration.
+2. **Connect a model.** When the project's server has no model it can use, the **Welcome to
+   Haarness** dialog opens. On this computer it starts with **Use Haarness Cloud** (Cloud models
+   through your Haarness account, with no API keys), then **Popular** providers, **More
+   providers**, and under **Something else** a **Custom endpoint** or a self-hosted **Haarness
+   Router**. Type to filter the list; connected providers show a check. If Ollama or LM Studio is
+   already running with a model, Desktop picks that model and skips the dialog: a line above the
+   first chat names the local model and offers **Connect a provider for larger models**.
+3. **Sign in or paste a key.** A provider with more than one way in asks **How do you want to
+   connect?**
+   - **Use Haarness Cloud** opens your browser to sign in to your Haarness account and closes
+     the dialog when you come back.
+   - **Sign in with ChatGPT** opens the sign-in page in your browser; there is no code to type.
+     **Sign in with GitHub** (Copilot) and **Sign in with xAI** also show a code to enter, with
+     **Copy code**. **Sign in with a code**, or **Use a code instead** while a browser sign-in
+     waits, is for SSH sessions and remote servers; a remote server offers only the code sign-in. The
+     dialog shows **Waiting for you to finish in the browser…** and closes itself when sign-in
+     completes.
+   - **Use an API key** shows a masked field, a **Create a key** link and, under **Other ways to
+     connect**, the environment variable that works instead. **Connect** checks the key with the
+     provider first: a key the provider refuses is not saved, and the dialog shows the provider's
+     reason. Keys are stored by the Haarness server in its owner-only `auth.json`, never in the
+     project.
+4. **Send your first message.** Desktop confirms the connection (for example **OpenAI is
+   connected**) and the composer picks one of that provider's models. Type in the message box and press Enter (**Settings → General → Send
+   message with** can make it Cmd/Ctrl+Enter). The chat is named from your first message;
+   **Rename chat** in the chat's menu changes the name.
+5. **Answer approvals, or switch to Auto.** The shield pill at the left of the composer reads
+   **Review** (the default) or **Auto**, and applies to the open chat on its server, so the TUI
+   and other windows see the same mode. In Review, edits and commands inside the project run
+   without asking; Haarness asks before working outside the project, reading secrets such as
+   `.env`, switching agents, generating paid media, opening new browser sites or repeating a
+   failing step. A request card offers **Allow once**, **Allow once + Auto**, **Always for this
+   folder** (in a Git repository, **Always allow** offers the folder or the whole repository)
+   and **Deny**. Auto answers those requests once by itself for the chat and its agents; Cloud
+   actions that spend money or delete something still ask. See
+   [Automatic approvals](AUTO-APPROVALS.md).
+
+**Cmd+.** (Ctrl+. on Windows and Linux) switches the message box to the next agent and
+**Cmd+Shift+.** to the previous one; change them in **Settings → Keyboard shortcuts**.
+
+To connect another provider later, use **Settings → Providers**: **Connect a provider** opens the
+same dialog, and each provider row has **Connect** or **Reconnect** and **Disconnect**, next to
+**Refresh models**, custom endpoints and the Router. While no model is available, the composer's
+model pill reads **Connect a provider** and opens the dialog. The e2e suite drives the key path and
+the code sign-in path against a fixture issuer (`HAARNESS_OPENAI_OAUTH_ISSUER`).
 
 ## Development
 
@@ -24,12 +79,6 @@ npm run desktop:package
 ```
 
 Packaging builds the Rust executable, SDK, renderer and Electron main/preload, then bundles the Rust executable and Bun 1.3.14 into the application. Extensions and workflows therefore work without a separate Bun installation. The Rust executable also embeds ripgrep 15.2.0, available as `rg` in agent shell calls and integrated terminals without a separate install or download. Installers appear in `apps/desktop/release`. `npm --prefix apps/desktop run package:dir` produces an unpacked application for local testing. Build on the target platform for macOS DMG/ZIP, Windows NSIS, and Linux AppImage/DEB.
-
-Conversations require a selected project. With no saved project, choose a folder
-before typing or sending. Both project pickers offer existing projects and New
-project. Older general chats remain accessible as ordinary projects in their
-existing folders, with history, drafts and trust settings preserved.
-
 
 Signing and notarization use standard electron-builder credentials supplied by release CI. Local packaging uses an ad hoc signature. For distribution, explicitly override `mac.identity` with the release signing identity and supply notarization credentials. An optional HTTPS `HAARNESS_UPDATE_URL` points to an electron-updater generic feed. Do not point production clients at unsigned or development artifacts.
 
@@ -61,10 +110,6 @@ Enter **`/memory`** in the composer, or search for **Manage memory**, to manage 
 
 These editors use the existing local host management service. For remote projects, manage configuration on the remote host. Runtime changes apply when idle. If a file changes outside an editor, saving reports a conflict and retains your draft so you can reopen the current file before applying your changes.
 
-## First run and providers
-
-Opening a project whose server has no connected provider opens the connect dialog ("Welcome to Haarness") before anything else; the composer's model pill reads "Connect a provider" until one is. The dialog is a single flow: pick a provider (popular ones first, search for the rest, a check on the ones already connected), choose how to connect when there is more than one way, then either paste a key or sign in. Keys are masked, saved through the server's management API into owner-only `auth.json`, and the dialog shows where to create one and which environment variable also works. Sign-in (ChatGPT, xAI, GitHub Copilot) opens the system browser, shows the device code with a copy button, polls the server every two seconds and closes itself when the browser comes back; "Use a code instead" switches a browser sign-in to the device code, and on a remote server only the code method is offered. Success refreshes the catalogs, notifies "{provider} is connected", and the composer picks a model from that provider. Settings → Providers keeps the same dialog behind "Connect a provider" and per-provider Connect/Reconnect buttons, plus Disconnect, Refresh models, custom endpoints and the Router. The e2e suite drives both the key path and the device-code path against a fixture issuer (`HAARNESS_OPENAI_OAUTH_ISSUER`).
-
 ## Project tools
 
 Projects keep their position when selected. Drag anywhere on a project or conversation row to reorder it. There are no dedicated grips, move menus, or reorder notifications. Alt+arrow keys and Alt+Home/End provide keyboard ordering while retaining focus. Conversation, side-panel, and terminal tabs use the same controls. Ordering is remembered per project and collection and survives activity, renaming, filtering, and relaunching. Newly opened projects are appended; new conversations appear at the top without disturbing existing saved positions.
@@ -73,13 +118,13 @@ Saved projects remain in navigation while their local runtimes start or recover,
 
 Projects expand independently. Use the chevron to show or hide a project’s conversations without switching the active chat; click its name to toggle its conversations and activate it, or select any visible conversation to open that exact chat. Several projects can remain expanded, with independent ordering. Expansion choices, including an explicitly collapsed active project, survive relaunches. Conversation titles and activity indicators update live in expanded inactive projects.
 
-The side-panel button opens a launcher when no panel is selected. Its Files, Review, and Terminal entries include descriptions and the configured shortcuts. The plus button in the side-panel tab bar returns to this launcher; closing the last tab also returns there. Files and review stay alongside the conversation, and terminals open below it.
+The side-panel button opens a launcher when no panel is selected. Its Browser, Files, Review, Terminal and Context entries include descriptions and the configured shortcuts. The plus button in the side-panel tab bar returns to this launcher; closing the last tab also returns there. Files and review stay alongside the conversation, and terminals open below it.
 
 Expanding the terminal starts the first shell automatically and focuses its input. Existing terminals are reused when reopening the panel. Hiding the panel keeps its processes running; closing a terminal tab stops that terminal immediately without a confirmation dialog. Closing the last terminal hides the panel, and reopening it starts a fresh shell.
 
 Opening a project goes directly to the native folder picker. Project configuration, MCP servers, hooks, and extensions are enabled by default. Explicit per-folder settings are remembered when reopening recent projects and can be changed in Settings → Projects. When the requested setting differs from an existing local daemon, the desktop applies it by restarting the idle daemon; running work must finish first, and session history is retained.
 
-The desktop keeps the conversation in the center, projects and sessions in a collapsible sidebar, and files or diffs in a tabbed panel on the right. The sidebar contains New chat, Projects, and Settings. Chat has no secondary toolbar for compacting, undoing, or exporting; its title stays in the window header and controls stay with the composer. Workflows, Goals, Schedules, and Plugins are available from the Haarness menu; file review and terminal controls stay in the workspace toolbar. Usage diagnostics are available through the command palette. The terminal opens below the workspace. Drag the dividers to resize the sidebar, side panel or terminal; focused dividers also support arrow keys, Shift for larger steps, and Home or double-click to reset. Panel sizes and sidebar visibility are saved between launches. The side panel can expand to fill the workspace; smaller windows show one pane at a time.
+The desktop keeps the conversation in the center, projects and sessions in a collapsible sidebar, and files or diffs in a tabbed panel on the right. The sidebar contains New chat, Projects, and Settings. Chat has no secondary toolbar for compacting, undoing, or exporting; its title stays in the window header and controls stay with the composer. Schedules and plugins are managed in **Settings → Schedules** and **Settings → Plugins**. Workflows and goals run from the message box with `/workflow` and `/goal`; their answers appear in a tray above it (see [Conversation controls](#conversation-controls)). **Search** reaches every command, setting and chat. The terminal opens below the workspace. Drag the dividers to resize the sidebar, side panel or terminal; focused dividers also support arrow keys, Shift for larger steps, and Home or double-click to reset. Panel sizes and sidebar visibility are saved between launches. The side panel can expand to fill the workspace; smaller windows show one pane at a time.
 
 Sidebar conversation rows expose one Archive/Restore action. Renaming and forking remain in the conversation header. Archiving in another expanded project leaves the current conversation open. An archived chat opened from Search (or archived while open) shows a quiet line at the top of the conversation, **This chat is archived. Sending a message restores it.**, with a **Restore** button that returns it to the sidebar. Opening it alone leaves it archived; sending a message restores it first, as resuming an archived session does in the TUI.
 
@@ -146,7 +191,7 @@ The desktop suite launches real Electron against private temporary Git workspace
 
 On macOS 26+, the dictation E2E also transcribes synthetic speech through the real native helper into the composer. After building, `python3 apps/desktop/tests/native/voice.py` checks native recognition with AIFF and 16 kHz WAV input and cancellation during preparation. Add `--microphone` to check live capture, conversion, stopping, and finalization; this briefly opens the microphone without saving audio or printing microphone transcripts.
 
-The implementation validation record and tested feature matrix are in [DESKTOP-VERIFICATION.md](DESKTOP-VERIFICATION.md).
+The implementation validation record and tested feature matrix are in the [Desktop verification record](records/2026-09-07-desktop-verification.md).
 
 ## Presentation ordering
 
@@ -182,7 +227,7 @@ The sidebar lists independent conversations, including forks. Delegated agent se
 
 ### Approval mode and composer
 
-The rounded composer has attachment and approval controls on the left, with agent/model/effort, dictation and the circular send/stop control on the right. Controls wrap in narrower windows. The shield switches **Auto approvals** / **Review** for the current conversation, or the workspace default before creating one. Auto answers requests once, including child agents, and can be turned off without leaving learned permission rules. See [Automatic approvals](AUTO-APPROVALS.md) for scope, persistence and TUI controls.
+The rounded composer has attachment and approval controls on the left, with agent/model/effort, dictation and the circular send/stop control on the right. Controls wrap in narrower windows. The shield pill reads **Review** or **Auto** and switches the open chat's mode on its server, or the default for new chats in this checkout before one exists. Auto answers requests once, including child agents, and can be turned off without leaving learned permission rules. See [Automatic approvals](AUTO-APPROVALS.md) for scope, persistence and TUI controls.
 
 ## Editing commands, agents and other resources
 
@@ -190,7 +235,7 @@ Commands, agents and skills use dedicated editors with a large prompt area and a
 
 Model pickers list connected providers using friendly names. **Use chat model** and **Use chat agent** let reusable definitions inherit the conversation's choices; an existing unavailable selection is preserved until explicitly changed. Custom-provider setup separates API format, authentication and model discovery. API keys stay masked and use the credential store. Explicit model lists use removable rows.
 
-Workflow inputs are populated from declared metadata with text, number and yes/no controls, plus optional named inputs and execution pickers. Complex custom values remain available through the explicit Structured input type. Plugin, marketplace and extension installers ask for a source type first, then show only the relevant folder, repository, marketplace or package fields; local sources support the native file/folder picker.
+Plugin, marketplace and extension installers ask for a source type first, then show only the relevant folder, repository, marketplace or package fields; local sources support the native file/folder picker.
 
 These editors retain drafts and show an inline error if validation or saving fails. Escape, Cancel and clicking the backdrop dismiss without saving; closing a child editor returns focus to its opener in Settings.
 
