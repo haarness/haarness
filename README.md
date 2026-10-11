@@ -101,8 +101,9 @@ haarness                               # first run: the connect picker is the we
 haarness auth login openai             # ChatGPT Plus/Pro browser OAuth (same flow as /connect)
 haarness auth login openai --method headless
 haarness auth login xai                # SuperGrok device OAuth
-haarness auth set openai
+haarness auth set openai                # asks for the key; a piped key works too
 haarness auth logout openai
+haarness run "Inspect this repository"  # your default model, else a connected provider's
 haarness "Inspect this repository" -m openai/gpt-5.6-sol
 haarness run --provider openai --model gpt-5.6 "Inspect this repository"
 git diff | haarness run "Review this change"  # piped stdin is appended to the prompt; an idle pipe is ignored when a prompt is given
@@ -157,7 +158,12 @@ switching sessions, `/new`, closing the terminal, or losing an SSE connection
 only detaches that client and does not cancel turns, child agents, or workflows.
 Reopening Haarness hydrates an authoritative process-wide activity snapshot and
 continues streaming. Use `/cancel` for one turn or `haarness serve --stop` for
-an explicit server-wide shutdown. After an ungraceful server/process failure,
+an explicit server-wide shutdown. `haarness run` is the exception: Ctrl-C (or
+SIGTERM from a cancelled CI job) stops its chat's turns, helpers and workflows
+on the server before it exits with status 130 (143). A permission prompt during
+`haarness run` is asked at the terminal; without one (a script, CI), the run
+refuses it and stops, naming what was asked: allow it with a permission rule,
+or pass `--yolo`. After an ungraceful server/process failure,
 Haarness preserves recorded transcript work and marks orphaned effects
 interrupted; it never blindly replays shell, edit, or other side-effecting tools.
 Any active goal is restored as paused—not falsely pursuing—until new user input

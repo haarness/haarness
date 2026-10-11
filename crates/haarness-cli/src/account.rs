@@ -46,13 +46,14 @@ pub struct CloudArgs {
 }
 #[derive(Subcommand)]
 pub enum CloudCommand {
+    /// Sign in to Haarness Cloud (the same as `haarness login`).
     Login(LoginArgs),
     /// Manage reusable cloud-agent templates.
     Agent {
         #[command(subcommand)]
         command: AgentCommand,
     },
-    /// Start and attach to independent sessions from agent templates.
+    /// Start, list and attach to cloud sessions, blank or from a cloud agent.
     Session {
         #[command(subcommand)]
         command: SessionCommand,
@@ -65,46 +66,56 @@ pub enum CloudCommand {
 }
 #[derive(Subcommand)]
 pub enum AgentCommand {
+    /// List your cloud agents.
     List {
+        /// Print JSON.
         #[arg(long)]
         json: bool,
     },
-    Show {
-        id: String,
-    },
-    /// JSON file with name, configuration, and optional write-only environment values.
+    /// Show one cloud agent.
+    Show { id: String },
+    /// Create a cloud agent from a JSON file with its name, configuration and
+    /// optional write-only environment values.
     Create {
         #[arg(long)]
         file: std::path::PathBuf,
     },
-    /// JSON file with version and the full updated configuration.
+    /// Replace a cloud agent's configuration from a JSON file with its
+    /// version and the full updated configuration.
     Update {
         id: String,
         #[arg(long)]
         file: std::path::PathBuf,
     },
-    Delete {
-        id: String,
-    },
+    /// Delete a cloud agent.
+    Delete { id: String },
 }
 #[derive(Subcommand)]
 pub enum SessionCommand {
+    /// List your cloud sessions.
     List {
+        /// Print JSON.
         #[arg(long)]
         json: bool,
+        /// Only sessions started from this cloud agent (its id).
         #[arg(long)]
         agent: Option<String>,
     },
+    /// Start a cloud session: a blank one, or one from a cloud agent.
     Create {
+        /// Start from this cloud agent (its id).
         #[arg(long)]
         agent: Option<String>,
+        /// The session's title.
         #[arg(long)]
         title: Option<String>,
         /// JSON creation body with configuration and optional encrypted environment values.
         #[arg(long)]
         file: Option<std::path::PathBuf>,
+        /// Create the session without starting it.
         #[arg(long)]
         stopped: bool,
+        /// Print JSON.
         #[arg(long)]
         json: bool,
     },
@@ -124,41 +135,39 @@ pub enum SessionCommand {
         #[arg(long)]
         include_environment: bool,
     },
-    Show {
-        id: String,
-    },
-    Start {
-        id: String,
-    },
-    Stop {
-        id: String,
-    },
-    Attach {
-        id: String,
-    },
+    /// Show one cloud session as JSON.
+    Show { id: String },
+    /// Start a stopped session.
+    Start { id: String },
+    /// Stop a running session.
+    Stop { id: String },
+    /// Open a session in the terminal UI.
+    Attach { id: String },
 }
 #[derive(Subcommand)]
 pub enum WorkspaceCommand {
+    /// List existing Cloud workspaces.
     List {
+        /// Print JSON.
         #[arg(long)]
         json: bool,
     },
+    /// Create a Cloud workspace. New work belongs in `cloud session create`.
     Create {
         name: String,
+        /// Git repository to clone into it.
         #[arg(long)]
         repo: Option<String>,
+        /// Print JSON.
         #[arg(long)]
         json: bool,
     },
-    Start {
-        id: String,
-    },
-    Stop {
-        id: String,
-    },
-    Attach {
-        id: String,
-    },
+    /// Start a stopped workspace.
+    Start { id: String },
+    /// Stop a running workspace.
+    Stop { id: String },
+    /// Open a workspace in the terminal UI.
+    Attach { id: String },
 }
 pub fn client() -> Result<Client> {
     Ok(Client::new(Config::from_env()?)?)
@@ -269,8 +278,17 @@ pub async fn account(args: &AccountArgs) -> Result<()> {
     Ok(())
 }
 pub async fn logout() -> Result<()> {
-    client()?.logout().await?;
-    println!("Signed out of Haarness.");
+    let client = client()?;
+    let signed_in = client.config.signed_in();
+    client.logout().await?;
+    println!(
+        "{}",
+        if signed_in {
+            "Signed out of Haarness."
+        } else {
+            "You were not signed in to Haarness."
+        }
+    );
     Ok(())
 }
 fn id(input: &Value) -> Result<&str> {
@@ -469,7 +487,12 @@ pub async fn cloud(args: &CloudArgs) -> Result<()> {
                 }
             };
             if matches!(command, AgentCommand::List { json: false }) {
-                print_list(&value, "name", false);
+                print_list(
+                    &value,
+                    "name",
+                    false,
+                    "No cloud agents yet. Save one from a session with `haarness cloud session save-agent`, or create one with `haarness cloud agent create --file agent.json`.",
+                );
             } else {
                 println!("{value}");
             }
@@ -494,7 +517,12 @@ pub async fn cloud(args: &CloudArgs) -> Result<()> {
                 if *as_json {
                     println!("{value}");
                 } else {
-                    print_list(&value, "title", true);
+                    print_list(
+                        &value,
+                        "title",
+                        true,
+                        &no_sessions_hint(client.config.web_origin().ok()),
+                    );
                 }
             }
             SessionCommand::Create {
@@ -580,7 +608,7 @@ pub async fn cloud(args: &CloudArgs) -> Result<()> {
                 } else if let Some(items) = v["items"].as_array() {
                     if items.is_empty() {
                         println!(
-                            "No Cloud workspaces yet. Run `haarness cloud workspace create <name>`."
+                            "No Cloud workspaces. New work runs in sessions: start one with `haarness cloud session create`."
                         );
                     }
                     for w in items {
@@ -625,6 +653,7 @@ pub async fn cloud(args: &CloudArgs) -> Result<()> {
 }
 
 async fn attach(client: Client, id: &str, action: &'static str) -> Result<()> {
+    super::require_terminal()?;
     let value = rpc(&client, json!({"action":action,"id":id})).await?;
     let url = value["gatewayUrl"]
         .as_str()
@@ -671,7 +700,16 @@ async fn attach(client: Client, id: &str, action: &'static str) -> Result<()> {
     Ok(())
 }
 
-fn print_list(value: &Value, label: &str, session: bool) {
+/// Blank sessions need no agent, and Home starts one from a prompt.
+fn no_sessions_hint(web_origin: Option<reqwest::Url>) -> String {
+    let home = web_origin
+        .and_then(|origin| origin.join("app").ok())
+        .map(|home| format!(", or from Home at {home}"))
+        .unwrap_or_default();
+    format!("No cloud sessions yet. Start one with `haarness cloud session create`{home}.")
+}
+
+fn print_list(value: &Value, label: &str, session: bool, empty: &str) {
     if let Some(items) = value["items"].as_array() {
         for item in items {
             println!(
@@ -686,7 +724,7 @@ fn print_list(value: &Value, label: &str, session: bool) {
             );
         }
         if items.is_empty() {
-            println!("None yet. Create a cloud agent, then start a session from it.");
+            println!("{empty}");
         }
     }
 }
@@ -807,6 +845,14 @@ mod tests {
             .is_ok()
         );
         assert!(crate::Cli::try_parse_from(["haarness", "cloud", "workspace", "list"]).is_ok());
+    }
+    #[test]
+    fn an_empty_session_list_points_at_starting_one() {
+        assert_eq!(
+            no_sessions_hint(Some("https://cloud.example.test/".parse().unwrap())),
+            "No cloud sessions yet. Start one with `haarness cloud session create`, or from Home at https://cloud.example.test/app."
+        );
+        assert!(!no_sessions_hint(None).contains("agent"));
     }
     #[test]
     fn identifiers_cannot_change_the_cloud_api_path() {

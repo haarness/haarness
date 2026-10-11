@@ -154,7 +154,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
             let status = client.status().await?;
             let account = status["selectedAccountId"]
                 .as_str()
-                .context("Sign in first")?;
+                .context("Sign in to Haarness to continue. Run `haarness login`.")?;
             let file = identity_file(paths, &client, account, workspace, session);
             if running(&file)? {
                 println!("Connector is already running");
