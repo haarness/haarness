@@ -285,6 +285,38 @@ async fn slow_title_never_delays_turns_or_overwrites_manual_renames() {
 }
 
 #[tokio::test]
+async fn renames_are_trimmed_and_a_blank_title_is_refused() {
+    let provider = Provider::new(true, true);
+    let (runtime, _) = runtime(provider, None);
+    let thread = thread(&runtime).await;
+    let rename = |title: &str| UpdateThreadRequest {
+        title: Some(title.into()),
+        archived: None,
+        agent: None,
+        provider: None,
+        model: None,
+        ultracode: None,
+    };
+    let renamed = runtime
+        .update_thread(thread.id, rename("  Release notes \n"))
+        .await
+        .unwrap();
+    assert_eq!(renamed.title, "Release notes");
+    for blank in ["", "   ", "\t\n"] {
+        let error = runtime
+            .update_thread(thread.id, rename(blank))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CoreError::Invalid(_)), "{error}");
+        assert!(error.to_string().contains("cannot be empty"), "{error}");
+    }
+    assert_eq!(
+        runtime.get_thread(thread.id).await.unwrap().title,
+        "Release notes"
+    );
+}
+
+#[tokio::test]
 async fn broken_small_model_falls_back_to_session_model_without_waiting_for_main() {
     let provider = Provider::new(true, false);
     let (runtime, events) = runtime(provider.clone(), Some("fixture/broken-small"));

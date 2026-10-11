@@ -1933,8 +1933,19 @@ impl AgentRuntime {
     pub async fn update_thread(
         &self,
         id: ThreadId,
-        request: UpdateThreadRequest,
+        mut request: UpdateThreadRequest,
     ) -> CoreResult<Thread> {
+        // Every client gets the rule Desktop's rename enforces: a title is
+        // trimmed, and a blank one would leave a chat with no name to find.
+        if let Some(title) = request.title.take() {
+            let title = title.trim();
+            if title.is_empty() {
+                return Err(CoreError::Invalid(
+                    "a chat title cannot be empty or only spaces".into(),
+                ));
+            }
+            request.title = Some(title.to_owned());
+        }
         let archiving = request.archived == Some(true)
             && !self.repository.get_thread(id).await?.archived;
         let thread = self.repository.update_thread(id, request).await?;
