@@ -6,8 +6,7 @@
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import { createHost } from "../src/core/host";
-import type { CreatePage, PageSurface } from "../src/core/driver-contract";
-import { DRIVER_NOT_WIRED } from "../src/core/driver";
+import type { CreatePage, PageOptions, PageSurface } from "../src/core/driver-contract";
 import { createChromePlatform } from "../src/platform/chrome/index";
 import { installChrome, type FakeChrome } from "./fakes/chrome";
 
@@ -26,7 +25,7 @@ async function boot(options: { prepare?(fake: FakeChrome): void; createPage?: Cr
   if (options.reuse) (globalThis as unknown as { chrome: unknown }).chrome = fake.chrome;
   options.prepare?.(fake);
   const { platform, listen } = createChromePlatform();
-  const host = createHost({ platform, createPage: options.createPage, driverWired: !!options.createPage });
+  const host = createHost({ platform, createPage: options.createPage });
   hosts.push(host);
   listen(host.events);
   await host.start();
@@ -110,6 +109,37 @@ test("hello names this browser once and keeps its id across restarts", async () 
   first.host.dispose();
   const second = await boot({ reuse: first.fake });
   assert.equal(second.sent[0].browser.id, hello.browser.id);
+});
+
+test("the extension's own reload keeps the chats' tabs, but a stale hand-over is ignored", async () => {
+  const first = await boot();
+  first.start();
+  first.attach();
+  const { tab } = await first.open("about:blank");
+  assert.deepEqual(await first.host.request({ type: "reload" }), { ok: true });
+  assert.equal(first.fake.reloads, 1);
+  first.host.dispose();
+  // Chrome clears session storage when the extension reloads.
+  first.fake.stores.session.clear();
+  const second = await boot({ reuse: first.fake });
+  assert.deepEqual(
+    second.host.debug.registry.all().flatMap((entry) => entry.tabs.map((record) => record.id)),
+    [tab.id],
+  );
+  second.start();
+  second.attach();
+  // The next server connection gets the chat's inventory again.
+  await second.until((message) => message.type === "to-server" && message.message.state?.tabs[0]?.id === tab.id);
+  assert.equal(first.fake.stores.local.get("handoff"), null, "a hand-over is used once");
+
+  // A hand-over older than a minute (the browser restarted meanwhile) is not taken.
+  await second.host.request({ type: "reload" });
+  second.host.dispose();
+  first.fake.stores.session.clear();
+  const handoff = first.fake.stores.local.get("handoff") as { at: number };
+  first.fake.stores.local.set("handoff", { ...handoff, at: handoff.at - 61_000 });
+  const third = await boot({ reuse: first.fake });
+  assert.deepEqual(third.host.debug.registry.all(), []);
 });
 
 test("new tabs open in the background, in one group per chat named after it; a subagent gets its own", async () => {
@@ -242,6 +272,24 @@ test("a popup from an agent tab joins its chat; one bound for a blocked site is 
   assert.equal(h.fake.tabsById.has(blocked.id), false);
 });
 
+test("a tab a background agent tab opens joins its chat, whatever Chrome names as its opener", async () => {
+  const h = await boot();
+  h.start();
+  h.attach();
+  const { live } = await h.open("https://a.example/");
+  const mine = h.fake.createTab({ url: "https://mine.example/", active: true });
+  // Chrome names the active tab as opener, but groups the new tab with the tab that opened it.
+  const popup = h.fake.createTab({ url: "", openerTabId: mine.id, source: live.id });
+  await h.until((message) => message.type === "to-server" && message.message.state?.tabs.length === 2);
+  assert.equal(h.host.debug.registry.owner(popup.id)?.entry.thread, THREAD);
+  assert.equal(h.host.debug.registry.owner(mine.id), undefined);
+  // A browser page opened in the group (the user's "New tab in group") is not the agent's.
+  const page = h.fake.createTab({ url: "chrome://newtab/", source: live.id });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(h.host.debug.registry.owner(page.id), undefined);
+  assert.equal(h.fake.tabsById.get(page.id)!.groupId, -1);
+});
+
 test("the page may not follow a redirect to a site this chat was not allowed", async () => {
   const h = await boot();
   h.start();
@@ -266,8 +314,27 @@ test("the page may not follow a redirect to a site this chat was not allowed", a
   assert.equal(twin.outcome.result.value.url, "https://www.a.example/home");
 });
 
+/** A driver page that answers every command with `{ok:true}` and records it. */
+function recordingPage(calls: string[]): CreatePage {
+  return (surface, _cdp, options) => ({
+    ready: Promise.resolve(),
+    state: () => ({ id: options.id, url: surface.url(), title: "", loading: false, canGoBack: false, canGoForward: false, generation: 0 }),
+    sources: () => [],
+    async inspect() {
+      return { resources: [], key: "k" };
+    },
+    async execute(command) {
+      calls.push(command.action.type);
+      return { value: { ok: true }, files: [] };
+    },
+    navigationStarted() {},
+    dispose() {},
+  });
+}
+
 test("pages Haarness may not control, opaque pages and Chrome-less tools are refused", async () => {
-  const h = await boot();
+  const calls: string[] = [];
+  const h = await boot({ createPage: recordingPage(calls) });
   h.start();
   h.attach();
   const web = await h.open("https://a.example/");
@@ -279,9 +346,10 @@ test("pages Haarness may not control, opaque pages and Chrome-less tools are ref
   assert.equal(evaluate.outcome.code, "unsupported");
   const lighthouse = await h.command({ action: { type: "lighthouse", tabID: blank.tab.id } });
   assert.equal(lighthouse.outcome.code, "unsupported");
+  // A blank page still has a snapshot.
   const snapshot = await h.command({ action: { type: "snapshot", tabID: blank.tab.id } });
-  assert.equal(snapshot.outcome.code, "operation_failed");
-  assert.ok(snapshot.outcome.message.includes(DRIVER_NOT_WIRED));
+  assert.equal(snapshot.outcome.type, "success");
+  assert.deepEqual(calls, ["snapshot"]);
 });
 
 test("pause and stop fail commands with their own codes and tell every server", async () => {
@@ -392,12 +460,16 @@ test("tabs that closed while the worker was stopped are revoked when it starts a
 test("the shared page driver plugs in through createPage and runs inside the site guard", async () => {
   const calls: string[] = [];
   let surface: PageSurface | undefined;
+  let pageOptions: PageOptions | undefined;
   let generation = 0;
   const createPage: CreatePage = (pageSurface, cdp, options) => {
     surface = pageSurface;
+    pageOptions = options as PageOptions;
+    generation = options.generation ?? 0;
     return {
       ready: Promise.resolve(),
       state: () => ({ id: options.id, url: pageSurface.url(), title: "", loading: false, canGoBack: false, canGoForward: false, generation }),
+      sources: () => [],
       async inspect() {
         return { resources: [], key: "k" };
       },
@@ -418,6 +490,8 @@ test("the shared page driver plugs in through createPage and runs inside the sit
   h.start();
   h.attach();
   const { tab } = await h.open("https://a.example/");
+  // As on Desktop, the page exists before the tab's first load, so it saw that navigation.
+  assert.equal(pageOptions?.generation, 0);
   const state = h.states().at(-1)!.message.state.tabs[0];
   const result = await h.command({
     action: { type: "click", tabID: tab.id, ref: "@e1" },
@@ -426,9 +500,14 @@ test("the shared page driver plugs in through createPage and runs inside the sit
     generation: state.generation,
   });
   assert.deepEqual(result.outcome, { type: "success", result: { value: { ok: true }, files: [] } });
-  // The page counts its own documents from zero; the server's generation is translated.
-  assert.deepEqual(calls, ["click@0"]);
+  // The page counts the tab's generation itself; nothing is translated.
+  assert.equal(state.generation, 1, "loading the URL moved the generation");
+  assert.deepEqual(calls, [`click@${state.generation}`]);
+  // Request bodies and session headers stay out of network.get in the user's own browser.
+  assert.equal(pageOptions?.diagnostics?.requestBodies, false);
+  assert.equal(pageOptions?.diagnostics?.redactHeader?.("x-csrf-token"), true);
   assert.equal(surface?.resourceOrigins, "securityOrigin");
+  assert.equal(surface?.wwwTwin, true);
   assert.equal(surface?.gateTopDocumentOnly, true);
   assert.deepEqual(surface?.selectAll, { commands: ["selectAll"] });
   assert.equal(surface?.supports("heap.snapshot"), false);

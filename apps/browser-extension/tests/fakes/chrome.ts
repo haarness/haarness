@@ -275,7 +275,12 @@ export class FakeChrome {
     };
   }
 
-  createTab(options: { windowId?: number; url?: string; active?: boolean; openerTabId?: number }) {
+  /**
+   * `openerTabId` is what Chrome reports; `source` is the tab that really
+   * opened it (whose group it joins) when that differs, as for a page in a
+   * background tab, where Chrome names the window's active tab as opener.
+   */
+  createTab(options: { windowId?: number; url?: string; active?: boolean; openerTabId?: number; source?: number }) {
     const windowId = options.windowId ?? this.focused;
     const tab: FakeTab = {
       id: this.nextTab++,
@@ -298,7 +303,8 @@ export class FakeChrome {
     this.tabsById.set(tab.id, tab);
     if (options.active) this.activate(tab);
     // An opener's group adopts the new tab, as Chrome does for links opened from a grouped tab.
-    const opener = options.openerTabId === undefined ? undefined : this.tabsById.get(options.openerTabId);
+    const from = options.source ?? options.openerTabId;
+    const opener = from === undefined ? undefined : this.tabsById.get(from);
     if (opener && opener.groupId >= 0) tab.groupId = opener.groupId;
     this.chrome.tabs.onCreated.emit({ ...tab });
     return tab;
@@ -352,6 +358,8 @@ export class FakeChrome {
       }
       case "Page.navigate":
         return this.navigate(tab, params.url);
+      case "Page.getNavigationHistory":
+        return { currentIndex: 0, entries: [{ id: 1, url: tab.url, userTypedURL: tab.url, title: tab.title, transitionType: "typed" }] };
       default:
         return {};
     }

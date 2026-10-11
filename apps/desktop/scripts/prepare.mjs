@@ -32,11 +32,14 @@ await access(binary);
 run(npm, ["run", "build"], join(root, "sdks/typescript"));
 // Haarness for Chrome ships inside the app (resources/browser-extension/chrome),
 // where `haarness browser setup` finds it next to the bundled binary.
+// It links the shared browser driver, whose own dependencies must be installed first.
 const extension = join(root, "apps/browser-extension");
-try {
-  await access(join(extension, "node_modules"));
-} catch {
-  run(npm, ["ci"], extension);
+for (const directory of [join(root, "packages/browser-driver"), extension]) {
+  try {
+    await access(join(directory, "node_modules"));
+  } catch {
+    run(npm, ["ci"], directory);
+  }
 }
 run(npm, ["run", "build"], extension);
 run(npm, ["run", "build"], directory);

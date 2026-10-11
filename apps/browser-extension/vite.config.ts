@@ -24,6 +24,12 @@ function extensionAssets(): Plugin {
         this.emitFile({ type: "asset", fileName: `icons/icon-${size}.png`, source: encode(resize(artwork, size)) });
       // The welcome page shows the mark at 48 px on high-density screens.
       this.emitFile({ type: "asset", fileName: "icons/icon-96.png", source: encode(resize(artwork, 96)) });
+      // The bundled browser driver includes MIT-licensed code; its notices ship with it.
+      this.emitFile({
+        type: "asset",
+        fileName: "THIRD-PARTY-NOTICES.md",
+        source: readFileSync(resolve(root, "packages/browser-driver/THIRD-PARTY-NOTICES.md")),
+      });
       const subsets = localeSubsets(resolve(root, "locales"), usedKeys(resolve(here, "src")));
       for (const [code, subset] of Object.entries(subsets))
         this.emitFile({ type: "asset", fileName: `locales/${code}.json`, source: JSON.stringify(subset) });
