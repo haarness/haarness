@@ -128,6 +128,9 @@ impl PtyManager {
         builder.env("TERM", "xterm-256color");
         builder.env("COLORTERM", "truecolor");
         builder.env("HAARNESS_TERMINAL", "1");
+        if let Some(locale) = missing_locale() {
+            builder.env("LANG", locale);
+        }
         let child = pair.slave.spawn_command(builder).map_err(pty_error)?;
         let pid = child.process_id();
         let killer = child.clone_killer();
@@ -413,6 +416,73 @@ fn default_shell() -> String {
     })
 }
 
+/// The locale a terminal gets when Haarness itself has none. Desktop opened
+/// from Finder inherits no `LANG`, `LC_ALL` or `LC_CTYPE`, and a shell started
+/// without them reads each byte of 日本 as a character of its own, so typing
+/// it prints escapes. Like Terminal.app, Haarness then sets `LANG` from the
+/// system's region settings. A locale set in any of the three is left alone.
+fn missing_locale() -> Option<&'static str> {
+    static LOCALE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if locale_set(|name| std::env::var_os(name)) {
+        return None;
+    }
+    Some(LOCALE.get_or_init(|| {
+        utf8_locale(system_locale().as_deref(), |name| {
+            Path::new("/usr/share/locale").join(name).is_dir()
+        })
+    }))
+}
+
+/// Whether the environment names a locale for character handling. An empty
+/// value counts as unset, as it does for the C library.
+fn locale_set(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> bool {
+    ["LC_ALL", "LC_CTYPE", "LANG"]
+        .into_iter()
+        .any(|name| env(name).is_some_and(|value| !value.is_empty()))
+}
+
+/// The region setting macOS keeps for the user (`en_US`, `ja_JP`,
+/// `zh-Hans_CN`, `en_GB@rg=…`). Other systems have none to offer.
+fn system_locale() -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let output = std::process::Command::new("/usr/bin/defaults")
+        .args(["read", "-g", "AppleLocale"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// A UTF-8 locale for `preferred` (a macOS region setting) when the system
+/// has one by that name, else the platform's default: `en_US.UTF-8` on
+/// macOS, which has no `C.UTF-8`, and `C.UTF-8` elsewhere.
+fn utf8_locale(preferred: Option<&str>, installed: impl Fn(&str) -> bool) -> String {
+    let fallback = if cfg!(target_os = "macos") {
+        "en_US.UTF-8"
+    } else {
+        "C.UTF-8"
+    };
+    preferred
+        .and_then(|value| {
+            let value = value.split('@').next()?;
+            let (language, region) = value.split_once('_')?;
+            let language = language.split('-').next()?;
+            let letters = |text: &str, lengths: std::ops::RangeInclusive<usize>| {
+                lengths.contains(&text.len()) && text.bytes().all(|byte| byte.is_ascii_alphabetic())
+            };
+            (letters(language, 2..=3) && letters(region, 2..=2))
+                .then(|| format!("{language}_{region}.UTF-8"))
+        })
+        .filter(|name| installed(name))
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
 fn pty_error(error: impl std::fmt::Display) -> CoreError {
     CoreError::Tool(format!("PTY: {error}"))
 }
@@ -439,6 +509,78 @@ mod tests {
                 .collect::<Vec<_>>(),
             b"liat"
         );
+    }
+
+    #[test]
+    fn a_terminal_gets_a_utf8_locale_only_when_none_is_set() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| std::ffi::OsString::from(value))
+            }
+        };
+        assert!(!locale_set(env(&[])));
+        assert!(!locale_set(env(&[
+            ("LANG", ""),
+            ("LC_MESSAGES", "fr_FR.UTF-8")
+        ])));
+        assert!(locale_set(env(&[("LANG", "C")])));
+        assert!(locale_set(env(&[("LC_CTYPE", "UTF-8")])));
+        assert!(locale_set(env(&[("LC_ALL", "de_DE.UTF-8")])));
+
+        let installed = |name: &str| ["ja_JP.UTF-8", "zh_CN.UTF-8", "en_GB.UTF-8"].contains(&name);
+        let fallback = if cfg!(target_os = "macos") {
+            "en_US.UTF-8"
+        } else {
+            "C.UTF-8"
+        };
+        assert_eq!(utf8_locale(Some("ja_JP"), installed), "ja_JP.UTF-8");
+        assert_eq!(utf8_locale(Some("zh-Hans_CN"), installed), "zh_CN.UTF-8");
+        assert_eq!(
+            utf8_locale(Some("en_GB@rg=gbzzzz"), installed),
+            "en_GB.UTF-8"
+        );
+        // English in Japan has no locale of its own.
+        assert_eq!(utf8_locale(Some("en_JP"), installed), fallback);
+        assert_eq!(utf8_locale(Some("es_419"), installed), fallback);
+        assert_eq!(utf8_locale(Some("en"), installed), fallback);
+        assert_eq!(utf8_locale(None, installed), fallback);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_terminal_reads_multibyte_input_as_characters() {
+        if locale_set(|name| std::env::var_os(name)) {
+            // A locale is already set here; terminals simply inherit it.
+            return;
+        }
+        let manager = PtyManager::new(std::env::current_dir().unwrap(), EventBus::new(64));
+        // The shell reports the locale it got and how many characters it read.
+        let info = manager
+            .create(PtyCreateRequest {
+                command: Some("/bin/sh".into()),
+                args: vec![
+                    "-c".into(),
+                    "read line; printf 'chars=%s ctype=%s\\n' \"${#line}\" \"$(locale | sed -n 's/^LC_CTYPE=//p')\"".into(),
+                ],
+                ..PtyCreateRequest::default()
+            })
+            .unwrap();
+        let mut subscription = manager.subscribe(info.id, None).unwrap();
+        manager.write(info.id, "日本\r".as_bytes()).unwrap();
+        let mut output = String::from_utf8_lossy(&subscription.replay).into_owned();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !output.contains("ctype=") || !output.ends_with('\n') {
+            let chunk = tokio::time::timeout_at(deadline, subscription.receiver.recv())
+                .await
+                .expect("the shell answers")
+                .unwrap();
+            output.push_str(&String::from_utf8_lossy(&chunk));
+        }
+        assert!(output.contains("chars=2 "), "{output:?}");
+        assert!(output.contains("UTF-8"), "{output:?}");
     }
 
     #[cfg(unix)]
