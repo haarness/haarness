@@ -95,18 +95,30 @@ pub struct RuntimeConfig {
 impl RuntimeConfig {
     /// Baseline exceptions are applied before explicit user/agent rules.
     pub fn permission_defaults(&self, agent: &str, tool: &str) -> crate::PermissionEngine {
-        let mut engine = if agent == "plan" { crate::PermissionEngine::plan_defaults() } else { crate::PermissionEngine::build_defaults() };
+        let mut engine = if agent == "plan" {
+            crate::PermissionEngine::plan_defaults()
+        } else {
+            crate::PermissionEngine::build_defaults()
+        };
         if agent == "plan" {
             for name in &self.execution.plan_read_tools {
-                engine.add_ceiling(crate::PermissionRule { pattern: format!("{name}:*"), decision: crate::PermissionDecision::Allow });
+                engine.add_ceiling(crate::PermissionRule {
+                    pattern: format!("{name}:*"),
+                    decision: crate::PermissionDecision::Allow,
+                });
             }
         }
         if matches!(tool, "read" | "list" | "glob" | "grep") {
             for root in &self.read_roots {
                 // Permission patterns use wildcards; ambiguous literal directory
                 // names must retain the ordinary prompt instead of widening access.
-                if root.to_string_lossy().contains(['*', '?']) { continue; }
-                engine.add_rule(crate::PermissionRule { pattern: format!("external_directory:{}/*", root.display()), decision: crate::PermissionDecision::Allow });
+                if root.to_string_lossy().contains(['*', '?']) {
+                    continue;
+                }
+                engine.add_rule(crate::PermissionRule {
+                    pattern: format!("external_directory:{}/*", root.display()),
+                    decision: crate::PermissionDecision::Allow,
+                });
             }
         }
         engine

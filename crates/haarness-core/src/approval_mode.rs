@@ -89,7 +89,11 @@ impl ApprovalModes {
                 Some(ApprovalMode::Auto) if auto.is_none() => auto = Some(thread_id),
                 _ => {}
             }
-            current = if thread.is_subagent { thread.parent_id } else { None };
+            current = if thread.is_subagent {
+                thread.parent_id
+            } else {
+                None
+            };
         }
         Ok(match auto {
             Some(source) => info(id, ApprovalMode::Auto, source, true, &versions),
@@ -157,7 +161,8 @@ impl ApprovalModes {
             },
             revision,
         };
-        let value = serde_json::to_value(stored).map_err(|error| CoreError::Storage(error.to_string()))?;
+        let value =
+            serde_json::to_value(stored).map_err(|error| CoreError::Storage(error.to_string()))?;
         self.repository
             .save_runtime_setting(&self.workspace, &Self::key(id), Some(value))
             .await?;

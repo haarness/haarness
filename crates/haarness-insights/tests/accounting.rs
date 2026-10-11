@@ -303,13 +303,30 @@ async fn daily_usage_groups_days_models_tools_and_subagents_without_names() {
     assert_eq!(today.total.input_tokens, 157);
     assert_eq!(today.subagent_turns, 1);
     assert_eq!(today.scheduled_turns, 0);
-    let model_a = today.models.iter().find(|row| row.model == "model-a").unwrap();
-    assert_eq!((model_a.provider.as_str(), model_a.metrics.turns), ("test", 3));
+    let model_a = today
+        .models
+        .iter()
+        .find(|row| row.model == "model-a")
+        .unwrap();
+    assert_eq!(
+        (model_a.provider.as_str(), model_a.metrics.turns),
+        ("test", 3)
+    );
     assert!(!today.tools.is_empty());
     let serialized = serde_json::to_string(&days).unwrap();
-    for private in ["Private title", "Child title", "SECRET PROMPT", "Alpha", "/alpha"] {
+    for private in [
+        "Private title",
+        "Child title",
+        "SECRET PROMPT",
+        "Alpha",
+        "/alpha",
+    ] {
         assert!(!serialized.contains(private), "{private} leaked");
     }
     // Older days fall outside the window.
-    assert!(haarness_insights::daily_usage(&fixture.0, 1, Utc::now() + Duration::days(2)).unwrap().is_empty());
+    assert!(
+        haarness_insights::daily_usage(&fixture.0, 1, Utc::now() + Duration::days(2))
+            .unwrap()
+            .is_empty()
+    );
 }

@@ -53,11 +53,22 @@ struct Tunnel {
     write: AsyncMutex<OwnedWriteHalf>,
 }
 impl Default for BrowserBroker {
-    fn default() -> Self { Self { hosts: Mutex::new(HashMap::new()), drafts: Mutex::new(HashMap::new()), policy: Arc::new(|| Ok(crate::browser_policy::BrowserPolicy::default())) } }
+    fn default() -> Self {
+        Self {
+            hosts: Mutex::new(HashMap::new()),
+            drafts: Mutex::new(HashMap::new()),
+            policy: Arc::new(|| Ok(crate::browser_policy::BrowserPolicy::default())),
+        }
+    }
 }
 impl BrowserBroker {
-    pub fn with_policy(policy: Arc<dyn Fn() -> CoreResult<crate::browser_policy::BrowserPolicy> + Send + Sync>) -> Arc<Self> {
-        Arc::new(Self { policy, ..Self::default() })
+    pub fn with_policy(
+        policy: Arc<dyn Fn() -> CoreResult<crate::browser_policy::BrowserPolicy> + Send + Sync>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            policy,
+            ..Self::default()
+        })
     }
 
     pub fn new() -> Arc<Self> {
@@ -72,17 +83,29 @@ impl BrowserBroker {
             .ok_or_else(|| error(RECOVERY))
     }
     fn draft(&self, id: uuid::Uuid, lease: &str) -> CoreResult<Arc<Host>> {
-        self.drafts.lock().get(&id)
+        self.drafts
+            .lock()
+            .get(&id)
             .filter(|host| !host.closed.is_cancelled() && host.lease == lease)
-            .cloned().ok_or_else(|| error(RECOVERY))
+            .cloned()
+            .ok_or_else(|| error(RECOVERY))
     }
     fn adopt(&self, id: uuid::Uuid, lease: &str, thread: ThreadId) -> CoreResult<()> {
         let host = self.draft(id, lease)?;
         let mut hosts = self.hosts.lock();
         if let Some((owner, _)) = hosts.iter().find(|(_, value)| Arc::ptr_eq(value, &host)) {
-            return if *owner == thread { Ok(()) } else { Err(error("This browser already belongs to another conversation")) };
+            return if *owner == thread {
+                Ok(())
+            } else {
+                Err(error(
+                    "This browser already belongs to another conversation",
+                ))
+            };
         }
-        if hosts.get(&thread).is_some_and(|value| !value.closed.is_cancelled()) {
+        if hosts
+            .get(&thread)
+            .is_some_and(|value| !value.closed.is_cancelled())
+        {
             return Err(error("This conversation already has a browser"));
         }
         hosts.insert(thread, host);
@@ -137,7 +160,9 @@ impl BrowserBroker {
         policy.ensure_enabled()?;
         let host = self.host(thread, None)?;
         if !host.policy_supported && policy != crate::browser_policy::BrowserPolicy::default() {
-            return Err(error("Update Desktop and reconnect this conversation to enforce browser site settings."));
+            return Err(error(
+                "Update Desktop and reconnect this conversation to enforce browser site settings.",
+            ));
         }
         let mut action = args.clone();
         action["type"] = json!(method);
@@ -157,18 +182,34 @@ impl BrowserBroker {
         if !target["resources"].is_array() || !target["key"].is_string() {
             return Err(error("Invalid browser target metadata"));
         }
-        let category = match method { "files.upload" | "files.drop" => "uploads", "files.get" => "downloads", _ => "browsing" };
+        let category = match method {
+            "files.upload" | "files.drop" => "uploads",
+            "files.get" => "downloads",
+            _ => "browsing",
+        };
         let mut remember = Vec::new();
         if policy.remember_approvals {
-            for resource in target["resources"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            for resource in target["resources"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
                 if policy.decision(method, resource) == haarness_core::PermissionDecision::Ask {
-                    let origin = url::Url::parse(resource).ok().map(|url| url.origin().ascii_serialization()).unwrap_or_else(|| resource.into());
+                    let origin = url::Url::parse(resource)
+                        .ok()
+                        .map(|url| url.origin().ascii_serialization())
+                        .unwrap_or_else(|| resource.into());
                     remember.push(format!("{category}:{origin}"));
                 }
             }
             // Inventory has no site; it still needs an explicit, rememberable grant.
-            if remember.is_empty() && target["resources"].as_array().is_some_and(Vec::is_empty)
-                && policy.decision(method, "inventory") == haarness_core::PermissionDecision::Ask { remember.push(format!("{category}:inventory")); }
+            if remember.is_empty()
+                && target["resources"].as_array().is_some_and(Vec::is_empty)
+                && policy.decision(method, "inventory") == haarness_core::PermissionDecision::Ask
+            {
+                remember.push(format!("{category}:inventory"));
+            }
         }
         args["__browser"] = json!({"lease":host.lease,"generation":generation,"target":target,"policy":policy,"remember":remember});
         Ok(args)
@@ -194,26 +235,52 @@ async fn attach_draft(
     let Some(broker) = state.browser else {
         return (StatusCode::NOT_IMPLEMENTED, "Browser unavailable").into_response();
     };
-    upgrade.max_message_size(MAX_HOST_MESSAGE)
+    upgrade
+        .max_message_size(MAX_HOST_MESSAGE)
         .on_upgrade(move |socket| serve_host(broker, None, Some(id), socket, shutdown, true))
         .into_response()
 }
 #[derive(serde::Deserialize)]
-struct AdoptDraft { thread: ThreadId, lease: String }
+struct AdoptDraft {
+    thread: ThreadId,
+    lease: String,
+}
 async fn adopt_draft(
-    State(state): State<ServerState>, Path(id): Path<uuid::Uuid>, Json(input): Json<AdoptDraft>,
+    State(state): State<ServerState>,
+    Path(id): Path<uuid::Uuid>,
+    Json(input): Json<AdoptDraft>,
 ) -> crate::api::ApiResult<Json<Value>> {
     state.runtime.get_thread(input.thread).await?;
-    state.browser.ok_or_else(|| error("Browser unavailable"))?.adopt(id, &input.lease, input.thread)?;
+    state
+        .browser
+        .ok_or_else(|| error("Browser unavailable"))?
+        .adopt(id, &input.lease, input.thread)?;
     Ok(Json(json!({"adopted":true})))
 }
 async fn draft_tunnel(
-    State(state): State<ServerState>, Path((id, action)): Path<(uuid::Uuid, String)>, Json(input): Json<Value>,
+    State(state): State<ServerState>,
+    Path((id, action)): Path<(uuid::Uuid, String)>,
+    Json(input): Json<Value>,
 ) -> Response {
-    let host = state.browser.ok_or_else(|| error("Browser unavailable"))
-        .and_then(|broker| broker.draft(id, input["lease"].as_str().ok_or_else(|| error("Missing browser lease"))?));
-    let result = match host { Ok(host) => host_tunnel(host, &action, input).await, Err(error) => Err(error) };
-    match result { Ok(value) => Json(value).into_response(), Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response() }
+    let host = state
+        .browser
+        .ok_or_else(|| error("Browser unavailable"))
+        .and_then(|broker| {
+            broker.draft(
+                id,
+                input["lease"]
+                    .as_str()
+                    .ok_or_else(|| error("Missing browser lease"))?,
+            )
+        });
+    let result = match host {
+        Ok(host) => host_tunnel(host, &action, input).await,
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    }
 }
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 pub struct BrowserToolRequest {
@@ -256,7 +323,9 @@ async fn call_browser_tool(
 }
 
 #[derive(serde::Deserialize)]
-struct HostOptions { version: Option<u8> }
+struct HostOptions {
+    version: Option<u8>,
+}
 async fn attach(
     State(state): State<ServerState>,
     Query(options): Query<HostOptions>,
@@ -275,7 +344,16 @@ async fn attach(
     };
     upgrade
         .max_message_size(MAX_HOST_MESSAGE)
-        .on_upgrade(move |socket| serve_host(broker, Some(thread), None, socket, shutdown, options.version == Some(2)))
+        .on_upgrade(move |socket| {
+            serve_host(
+                broker,
+                Some(thread),
+                None,
+                socket,
+                shutdown,
+                options.version == Some(2),
+            )
+        })
         .into_response()
 }
 async fn serve_host(
@@ -297,11 +375,17 @@ async fn serve_host(
         tunnels: Mutex::new(HashMap::new()),
     });
     if let Some(thread) = thread {
-        if let Some(old) = broker.hosts.lock().insert(thread, host.clone()) { old.closed.cancel(); }
+        if let Some(old) = broker.hosts.lock().insert(thread, host.clone()) {
+            old.closed.cancel();
+        }
     } else if let Some(id) = draft {
         let mut drafts = broker.drafts.lock();
-        if drafts.len() >= 64 && !drafts.contains_key(&id) { return; }
-        if let Some(old) = drafts.insert(id, host.clone()) { old.closed.cancel(); }
+        if drafts.len() >= 64 && !drafts.contains_key(&id) {
+            return;
+        }
+        if let Some(old) = drafts.insert(id, host.clone()) {
+            old.closed.cancel();
+        }
     }
     let (mut writer, mut reader) = socket.split();
     if writer
@@ -340,7 +424,10 @@ async fn serve_host(
         let mut hosts = broker.hosts.lock();
         hosts.retain(|_, value| !Arc::ptr_eq(value, &host));
     }
-    broker.drafts.lock().retain(|_, value| !Arc::ptr_eq(value, &host));
+    broker
+        .drafts
+        .lock()
+        .retain(|_, value| !Arc::ptr_eq(value, &host));
     let _ = writer.close().await;
 }
 fn valid_state(state: &Value) -> bool {
@@ -472,11 +559,20 @@ impl Tool for BrowserTool {
             .prepare(thread, &self.method, args, &cancel)
             .await
     }
-    fn permission_constraint(&self, args: &Value, operation: &str) -> Option<haarness_core::PermissionDecision> {
+    fn permission_constraint(
+        &self,
+        args: &Value,
+        operation: &str,
+    ) -> Option<haarness_core::PermissionDecision> {
         let resource = operation.strip_prefix("browser:")?.split_once(':')?.1;
-        let policy: crate::browser_policy::BrowserPolicy = serde_json::from_value(args["__browser"]["policy"].clone()).ok()?;
+        let policy: crate::browser_policy::BrowserPolicy =
+            serde_json::from_value(args["__browser"]["policy"].clone()).ok()?;
         let decision = policy.decision(&self.method, resource);
-        if policy.remember_approvals && decision == haarness_core::PermissionDecision::Ask { None } else { Some(decision) }
+        if policy.remember_approvals && decision == haarness_core::PermissionDecision::Ask {
+            None
+        } else {
+            Some(decision)
+        }
     }
     async fn execute(&self, mut args: Value, context: ToolContext) -> CoreResult<ToolOutput> {
         let prepared = args
@@ -487,7 +583,9 @@ impl Tool for BrowserTool {
             let current = (self.broker.policy)()?;
             current.ensure_enabled()?;
             if serde_json::to_value(current).map_err(error)? != prepared["policy"] {
-                return Err(error("Browser settings changed while this operation was pending. Inspect the page and request fresh authorization."));
+                return Err(error(
+                    "Browser settings changed while this operation was pending. Inspect the page and request fresh authorization.",
+                ));
             }
             Ok(())
         };
@@ -667,12 +765,22 @@ mod tests {
         let broker = BrowserBroker::with_policy(Arc::new(move || Ok(policy.clone())));
         let thread = ThreadId::new();
         let (tx, mut rx) = mpsc::channel(8);
-        broker.hosts.lock().insert(thread, Arc::new(Host {
-            policy_supported: false,
-            lease: "legacy".into(), outbound: tx, pending: Mutex::new(HashMap::new()),
-            state: Mutex::new(json!({"tabs":[],"focusedTabID":null})), closed: CancellationToken::new(), tunnels: Mutex::new(HashMap::new()),
-        }));
-        let error = broker.prepare(thread, "tabs.list", json!({}), &CancellationToken::new()).await.unwrap_err();
+        broker.hosts.lock().insert(
+            thread,
+            Arc::new(Host {
+                policy_supported: false,
+                lease: "legacy".into(),
+                outbound: tx,
+                pending: Mutex::new(HashMap::new()),
+                state: Mutex::new(json!({"tabs":[],"focusedTabID":null})),
+                closed: CancellationToken::new(),
+                tunnels: Mutex::new(HashMap::new()),
+            }),
+        );
+        let error = broker
+            .prepare(thread, "tabs.list", json!({}), &CancellationToken::new())
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("Update Desktop"));
         assert!(rx.try_recv().is_err());
     }
@@ -693,7 +801,10 @@ mod tests {
         broker.adopt(draft, &host.lease, target).unwrap();
         broker.adopt(draft, &host.lease, target).unwrap();
         assert!(Arc::ptr_eq(&host, &broker.host(target, None).unwrap()));
-        assert!(Arc::ptr_eq(&host, &broker.draft(draft, &host.lease).unwrap()));
+        assert!(Arc::ptr_eq(
+            &host,
+            &broker.draft(draft, &host.lease).unwrap()
+        ));
         assert!(broker.adopt(draft, &host.lease, ThreadId::new()).is_err());
         host.closed.cancel();
         assert!(broker.draft(draft, &host.lease).is_err());

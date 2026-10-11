@@ -187,12 +187,20 @@ fn usage_statistics_view(status: Value, input: &Value) -> View {
     let mut entries = Vec::new();
     if setting["editable"].as_bool().unwrap_or(false) {
         entries.push(entry(
-            if enabled { "Stop sharing usage statistics" } else { "Share usage statistics" },
+            if enabled {
+                "Stop sharing usage statistics"
+            } else {
+                "Share usage statistics"
+            },
             "Applies to every project on this computer",
             json!({"action":"set","enabled":!enabled}),
         ));
     }
-    entries.push(entry("Show what is shared", "The report exactly as it would be sent", json!({"action":"preview"})));
+    entries.push(entry(
+        "Show what is shared",
+        "The report exactly as it would be sent",
+        json!({"action":"preview"}),
+    ));
     View {
         title: "Usage statistics".into(),
         lines,
@@ -204,8 +212,12 @@ fn usage_statistics_view(status: Value, input: &Value) -> View {
 
 impl ManagementService {
     pub(super) async fn ui_request(&self, resource: &str, input: &Value) -> Result<Value> {
-        if resource == "marketplace-ui" { return output(self.marketplace_view(input).await?); }
-        if resource == "capabilities-ui" { return output(self.capabilities_view(input).await?); }
+        if resource == "marketplace-ui" {
+            return output(self.marketplace_view(input).await?);
+        }
+        if resource == "capabilities-ui" {
+            return output(self.capabilities_view(input).await?);
+        }
         if resource == "browser-settings" {
             let result = crate::browser_settings::request(
                 self.trust_project,
@@ -576,13 +588,24 @@ impl ManagementService {
     }
 
     async fn capabilities_view(&self, input: &Value) -> Result<View> {
-        let action=text(input,"action");
-        if action!="view" { self.capability_request(input).await?; }
-        let catalog=self.capability_request(&json!({"action":"list"})).await?;
+        let action = text(input, "action");
+        if action != "view" {
+            self.capability_request(input).await?;
+        }
+        let catalog = self.capability_request(&json!({"action":"list"})).await?;
         let mut view=View {title:"Runtime capabilities".into(),lines:vec!["Changes persist and apply when active work is idle. Installed files are kept when disabled.".into()],..View::default()};
-        for (group,kind) in [("skills","skill"),("agents","agent"),("plugins","plugin"),("mcp","mcp"),("extensions","extension")] {
+        for (group, kind) in [
+            ("skills", "skill"),
+            ("agents", "agent"),
+            ("plugins", "plugin"),
+            ("mcp", "mcp"),
+            ("extensions", "extension"),
+        ] {
             for row in catalog[group].as_array().into_iter().flatten() {
-                let enabled=row["enabled"].as_bool().or_else(||row["config"]["enabled"].as_bool()).unwrap_or(true);
+                let enabled = row["enabled"]
+                    .as_bool()
+                    .or_else(|| row["config"]["enabled"].as_bool())
+                    .unwrap_or(true);
                 view.entries.push(entry(format!("{} {} · {}",if enabled {"Disable"} else {"Enable"},text(row,"name"),kind),text(row,"description"),json!({"action":if enabled {"disable"} else {"enable"},"kind":kind,"name":row["name"],"scope":row.get("scope").cloned().unwrap_or(json!("local"))})));
             }
         }
@@ -590,27 +613,69 @@ impl ManagementService {
     }
 
     async fn marketplace_view(&self, input: &Value) -> Result<View> {
-        let action=text(input,"action");
-        if action=="inspect" {
-            let manifest=self.marketplace_request(&json!({"action":"manifest","id":input["id"],"version":input["version"]})).await?;
-            return Ok(View {title:format!("Install {}",text(&manifest["resource"],"name")),lines:vec![format!("Version {}",manifest["version"]["number"]),serde_json::to_string_pretty(&manifest["capabilities"])?],fields:vec![choice("scope","Installation scope","local",&["local","global"]),field("valuesText","MCP configuration values (JSON)","{}",false)],submit:Some(json!({"action":"install","id":input["id"],"version":manifest["version"]["number"]})),..View::default()});
+        let action = text(input, "action");
+        if action == "inspect" {
+            let manifest = self
+                .marketplace_request(
+                    &json!({"action":"manifest","id":input["id"],"version":input["version"]}),
+                )
+                .await?;
+            return Ok(View {
+                title: format!("Install {}", text(&manifest["resource"], "name")),
+                lines: vec![
+                    format!("Version {}", manifest["version"]["number"]),
+                    serde_json::to_string_pretty(&manifest["capabilities"])?,
+                ],
+                fields: vec![
+                    choice("scope", "Installation scope", "local", &["local", "global"]),
+                    field("valuesText", "MCP configuration values (JSON)", "{}", false),
+                ],
+                submit: Some(
+                    json!({"action":"install","id":input["id"],"version":manifest["version"]["number"]}),
+                ),
+                ..View::default()
+            });
         }
-        let mut notice=None;
-        if matches!(action,"install"|"update"|"enable"|"disable"|"remove") {
-            let mut request=input.clone();
-            if let Some(values)=input["valuesText"].as_str() {request["values"]=serde_json::from_str(values)?;}
+        let mut notice = None;
+        if matches!(
+            action,
+            "install" | "update" | "enable" | "disable" | "remove"
+        ) {
+            let mut request = input.clone();
+            if let Some(values) = input["valuesText"].as_str() {
+                request["values"] = serde_json::from_str(values)?;
+            }
             self.marketplace_request(&request).await?;
-            notice=Some("Saved. Changes apply when active work is idle.".into());
+            notice = Some("Saved. Changes apply when active work is idle.".into());
         }
         let mut view=View {title:"Marketplace".into(),fields:vec![field("q","Search marketplace",text(input,"q"),false),choice("kind","Resource type",input["kind"].as_str().unwrap_or("skill"),&["skill","agent","mcp","plugin","extension"])],submit:Some(json!({"action":"search"})),lines:vec!["Public resources are visible to everyone. Private resources belong to your Haarness account and its members.".into()],..View::default()};
-        if let Some(notice)=notice {view.lines.insert(0,notice);}
-        view.entries.push(entry("Installed resources","Manage versions and availability",json!({"action":"installed"})));
-        if action=="installed" {
-            let installed=self.marketplace_request(&json!({"action":"installed"})).await?;
+        if let Some(notice) = notice {
+            view.lines.insert(0, notice);
+        }
+        view.entries.push(entry(
+            "Installed resources",
+            "Manage versions and availability",
+            json!({"action":"installed"}),
+        ));
+        if action == "installed" {
+            let installed = self
+                .marketplace_request(&json!({"action":"installed"}))
+                .await?;
             for row in installed.as_array().into_iter().flatten() {
-                for action in ["enable","disable","update","remove"] {
-                    let mut e=entry(format!("{action} {}",text(row,"name")),format!("{} · {} · version {}",text(row,"kind"),text(row,"scope"),row["version"]["number"]),json!({"action":action,"id":row["id"],"scope":row["scope"],"name":row["name"]}));
-                    if action=="remove" {e.confirm=Some(format!("Remove {}?",text(row,"name")));}
+                for action in ["enable", "disable", "update", "remove"] {
+                    let mut e = entry(
+                        format!("{action} {}", text(row, "name")),
+                        format!(
+                            "{} · {} · version {}",
+                            text(row, "kind"),
+                            text(row, "scope"),
+                            row["version"]["number"]
+                        ),
+                        json!({"action":action,"id":row["id"],"scope":row["scope"],"name":row["name"]}),
+                    );
+                    if action == "remove" {
+                        e.confirm = Some(format!("Remove {}?", text(row, "name")));
+                    }
                     view.entries.push(e);
                 }
             }

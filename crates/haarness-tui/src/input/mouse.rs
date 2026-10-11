@@ -165,7 +165,9 @@ async fn click(app: &mut App, row: usize, column: usize, client: &ApiClient) -> 
                         app.permission_selection = 0;
                         app.update_permission_notice();
                     }
-                } else if let Some(choice) = crate::state::PermissionChoice::available(app).get(index).copied()
+                } else if let Some(choice) = crate::state::PermissionChoice::available(app)
+                    .get(index)
+                    .copied()
                 {
                     app.permission_selection = index;
                     crate::input::answer_permission(app, client, choice.key()).await?;

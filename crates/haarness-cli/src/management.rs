@@ -28,8 +28,8 @@ use std::{
 };
 use tokio::net::TcpListener;
 
-mod ui;
 mod capabilities;
+mod ui;
 
 #[derive(Clone)]
 pub struct ManagementService {
@@ -269,8 +269,15 @@ impl ManagementService {
 
     fn refresh_runtime_assets(&self, runtime: &AgentRuntime) {
         let mut layers = asset_layers(&self.paths, &self.workspace, self.trust_project);
-        if let Ok(disabled)=crate::capability_state::disabled(&self.paths,&self.workspace,self.trust_project,"skill") {
-            layers.commands.retain(|command| !disabled.contains(&command.name));
+        if let Ok(disabled) = crate::capability_state::disabled(
+            &self.paths,
+            &self.workspace,
+            self.trust_project,
+            "skill",
+        ) {
+            layers
+                .commands
+                .retain(|command| !disabled.contains(&command.name));
         }
         runtime.replace_commands(layers.commands);
         runtime.replace_custom_agents(layers.agents);
@@ -1363,12 +1370,21 @@ impl ManagementService {
     async fn switch_details(&self, input: &Value, thread: ThreadId) -> Result<Value> {
         let runtime = self.runtime()?;
         let current = runtime.get_thread(thread).await.map_err(core_error)?;
-        anyhow::ensure!(current.parent_id.is_none(), "agent_switch is available only in root sessions");
+        anyhow::ensure!(
+            current.parent_id.is_none(),
+            "agent_switch is available only in root sessions"
+        );
         let target = required_string(input, "agent")?;
         ensure_user_agent(target)?;
-        let profile = runtime.agent_profiles().into_iter().find(|profile| profile.id == target)
+        let profile = runtime
+            .agent_profiles()
+            .into_iter()
+            .find(|profile| profile.id == target)
             .with_context(|| format!("unknown agent '{target}'"))?;
-        anyhow::ensure!(profile.mode.as_deref() != Some("subagent"), "agent '{target}' is subagent-only");
+        anyhow::ensure!(
+            profile.mode.as_deref() != Some("subagent"),
+            "agent '{target}' is subagent-only"
+        );
         let previous = format!("{}/{}", current.provider, current.model);
         Ok(json!({
             "threadId": thread, "agent": target, "previousAgent": current.agent,
@@ -1378,8 +1394,11 @@ impl ManagementService {
 
     async fn agent_switch(&self, input: &Value, context: &ToolContext) -> Result<Value> {
         // Approval binds the exact destination and model resolved before the prompt.
-        anyhow::ensure!(input.get("__agentSwitch") == Some(&self.switch_details(input, context.thread_id).await?),
-            "Agent or model changed while awaiting approval. Request the switch again.");
+        anyhow::ensure!(
+            input.get("__agentSwitch")
+                == Some(&self.switch_details(input, context.thread_id).await?),
+            "Agent or model changed while awaiting approval. Request the switch again."
+        );
         let runtime = self.runtime()?;
         let current = runtime
             .get_thread(context.thread_id)
@@ -1657,17 +1676,34 @@ pub(super) fn memory_root_for(paths: &Paths, workspace: &Path) -> PathBuf {
 
 #[async_trait]
 impl ManagementRegistry for ManagementService {
-    async fn prepare(&self, resource: &str, mut arguments: Value, thread: ThreadId) -> CoreResult<Value> {
+    async fn prepare(
+        &self,
+        resource: &str,
+        mut arguments: Value,
+        thread: ThreadId,
+    ) -> CoreResult<Value> {
         if resource == "agent_switch" {
-            arguments["__agentSwitch"] = self.switch_details(&arguments, thread).await
+            arguments["__agentSwitch"] = self
+                .switch_details(&arguments, thread)
+                .await
                 .map_err(|error| CoreError::Tool(error.to_string()))?;
         }
         Ok(arguments)
     }
 
     async fn user_request(&self, resource: &str, input: Value) -> CoreResult<Value> {
-        if resource == "capabilities" { return self.capability_request(&input).await.map_err(|e| CoreError::Tool(e.to_string())); }
-        if resource == "marketplace" { return self.marketplace_request(&input).await.map_err(|e| CoreError::Tool(e.to_string())); }
+        if resource == "capabilities" {
+            return self
+                .capability_request(&input)
+                .await
+                .map_err(|e| CoreError::Tool(e.to_string()));
+        }
+        if resource == "marketplace" {
+            return self
+                .marketplace_request(&input)
+                .await
+                .map_err(|e| CoreError::Tool(e.to_string()));
+        }
         if matches!(
             resource,
             "cloud_agent_manage" | "cloud_agent_session" | "cloud_chat" | "cloud_schedule"
@@ -1709,9 +1745,11 @@ impl ManagementRegistry for ManagementService {
         }
         let mut result = match resource {
             "marketplace" => {
-                if arguments.get("manifest").is_some() { return Err(CoreError::Invalid("Use a marketplace resource id".into())); }
+                if arguments.get("manifest").is_some() {
+                    return Err(CoreError::Invalid("Use a marketplace resource id".into()));
+                }
                 self.marketplace_request(&arguments).await
-            },
+            }
             "capabilities" => self.capability_request(&arguments).await,
             "skill" => self.skill(&arguments).await,
             "agent" => self.agent(&arguments),
@@ -1730,7 +1768,8 @@ impl ManagementRegistry for ManagementService {
             "session_wait" => self.session_wait(&arguments, &context).await,
             "agent_switch" => self.agent_switch(&arguments, &context).await,
             "cloud_agent_manage" | "cloud_agent_session" | "cloud_chat" | "cloud_schedule" => {
-                let client = super::account::client().map_err(|e| CoreError::Tool(e.to_string()))?;
+                let client =
+                    super::account::client().map_err(|e| CoreError::Tool(e.to_string()))?;
                 let cloud = haarness_account::cloud::Cloud::new(client, context.cancel.clone())
                     .await
                     .map_err(|e| CoreError::Tool(e.to_string()))?;
@@ -2352,7 +2391,14 @@ fn mcp_entry_from_add(input: &Value) -> Result<McpConfigureRequest> {
             transport: "stdio".into(),
             command: Some(required_string(input, "command")?.into()),
             args: string_array(input, "args")?,
-            env: string_map(input, if input.get("environment").is_some() {"environment"} else {"env"})?,
+            env: string_map(
+                input,
+                if input.get("environment").is_some() {
+                    "environment"
+                } else {
+                    "env"
+                },
+            )?,
             cwd: None,
             url: None,
             headers: BTreeMap::new(),
@@ -2391,7 +2437,11 @@ fn apply_mcp_edit(entry: &mut McpConfigureRequest, input: &Value) -> Result<()> 
     if input.get("args").is_some() {
         entry.args = string_array(input, "args")?;
     }
-    let environment=if input.get("environment").is_some() {"environment"} else {"env"};
+    let environment = if input.get("environment").is_some() {
+        "environment"
+    } else {
+        "env"
+    };
     if input.get(environment).is_some() {
         entry.env = edited_secret_map(&entry.env, string_map(input, environment)?)?;
     }
@@ -2415,9 +2465,17 @@ fn apply_mcp_edit(entry: &mut McpConfigureRequest, input: &Value) -> Result<()> 
 
 // Management GET redacts credentials. Saving an unchanged editor must preserve
 // their values rather than replace them with the display placeholder.
-fn edited_secret_map(existing: &BTreeMap<String,String>, mut next: BTreeMap<String,String>) -> Result<BTreeMap<String,String>> {
-    for (name,value) in &mut next {
-        if value=="<redacted>" {*value=existing.get(name).with_context(||format!("Provide a value for {name}"))?.clone();}
+fn edited_secret_map(
+    existing: &BTreeMap<String, String>,
+    mut next: BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    for (name, value) in &mut next {
+        if value == "<redacted>" {
+            *value = existing
+                .get(name)
+                .with_context(|| format!("Provide a value for {name}"))?
+                .clone();
+        }
     }
     Ok(next)
 }
@@ -2558,7 +2616,10 @@ mod tests {
 
     #[tokio::test]
     async fn extension_management_defaults_to_local_and_requires_project_trust() {
-        let root = std::env::temp_dir().join(format!("haarness-untrusted-extension-{}", uuid::Uuid::now_v7()));
+        let root = std::env::temp_dir().join(format!(
+            "haarness-untrusted-extension-{}",
+            uuid::Uuid::now_v7()
+        ));
         fs::create_dir_all(&root).unwrap();
         let service = ManagementService::new(
             Paths::new(Some(&root.join("home"))).unwrap(),
@@ -2568,15 +2629,41 @@ mod tests {
             Arc::new(NativeMcpRegistry::default()),
         );
         for scope in [Value::Null, json!("local")] {
-            let error = service.capability_request(&json!({"action":"disable", "kind":"extension", "name":"proof", "scope":scope})).await.unwrap_err();
-            assert!(error.to_string().contains("Project configuration is disabled"));
+            let error = service
+                .capability_request(
+                    &json!({"action":"disable", "kind":"extension", "name":"proof", "scope":scope}),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("Project configuration is disabled")
+            );
         }
         assert!(!root.join(".haarness").exists());
         fs::create_dir_all(root.join(".haarness/extensions")).unwrap();
-        fs::write(root.join(".haarness/extensions/proof.ts"), "export default {};").unwrap();
-        fs::write(root.join(".haarness/extensions.json"), r#"{"enabled":true,"entries":[]}"#).unwrap();
-        let error = service.capability_request(&json!({"action":"disable", "kind":"extension", "name":"proof", "scope":"global"})).await.unwrap_err();
-        assert!(error.to_string().contains("Select a unique installed extension"));
+        fs::write(
+            root.join(".haarness/extensions/proof.ts"),
+            "export default {};",
+        )
+        .unwrap();
+        fs::write(
+            root.join(".haarness/extensions.json"),
+            r#"{"enabled":true,"entries":[]}"#,
+        )
+        .unwrap();
+        let error = service
+            .capability_request(
+                &json!({"action":"disable", "kind":"extension", "name":"proof", "scope":"global"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Select a unique installed extension")
+        );
         assert!(!service.paths.config_dir().join("extensions.json").exists());
         fs::remove_dir_all(root).unwrap();
     }
@@ -3031,10 +3118,17 @@ mod tests {
             read_mcp_entry(&mcp_config_target(&paths, &workspace, true), "fixture-mcp").unwrap();
         assert_eq!(mcp_add["config"]["headers"]["Authorization"], "<redacted>");
         assert_eq!(persisted.headers["Authorization"], "Bearer fixture-secret");
-        let mut edit=mcp_detail["config"].clone();
-        edit["action"]=json!("edit");edit["name"]=json!("fixture-mcp");edit["scope"]=json!("local");
+        let mut edit = mcp_detail["config"].clone();
+        edit["action"] = json!("edit");
+        edit["name"] = json!("fixture-mcp");
+        edit["scope"] = json!("local");
         service.mcp(&edit).await.unwrap();
-        assert_eq!(read_mcp_entry(&mcp_config_target(&paths,&workspace,true),"fixture-mcp").unwrap().headers["Authorization"],"Bearer fixture-secret");
+        assert_eq!(
+            read_mcp_entry(&mcp_config_target(&paths, &workspace, true), "fixture-mcp")
+                .unwrap()
+                .headers["Authorization"],
+            "Bearer fixture-secret"
+        );
         assert_eq!(persisted.oauth, Some(true));
         assert_eq!(persisted.oauth_client_id.as_deref(), Some("fixture-client"));
         assert_eq!(persisted.oauth_scopes, ["read", "write"]);
@@ -3200,7 +3294,10 @@ mod tests {
         let (issuer, polls) = fixture_issuer().await;
         let service = login_service(&root, &issuer, 0);
         let started = service
-            .ui_request("providers", &json!({"action":"login","name":"openai","method":"device"}))
+            .ui_request(
+                "providers",
+                &json!({"action":"login","name":"openai","method":"device"}),
+            )
             .await
             .unwrap();
         assert_eq!(started["title"], "Sign in to openai");
@@ -3210,16 +3307,28 @@ mod tests {
         assert_eq!(data["code"], "ABCD-EFGH");
         assert_eq!(data["url"], format!("{issuer}/codex/device"));
         let lines = started["lines"].as_array().unwrap();
-        assert!(lines.iter().any(|line| line.as_str().unwrap().starts_with("Code  ABCD-EFGH")), "{lines:?}");
         assert!(
-            started["entries"].as_array().unwrap().iter().any(|entry| entry["label"] == "Cancel sign-in"),
+            lines
+                .iter()
+                .any(|line| line.as_str().unwrap().starts_with("Code  ABCD-EFGH")),
+            "{lines:?}"
+        );
+        assert!(
+            started["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["label"] == "Cancel sign-in"),
             "{started}"
         );
         let id = data["id"].as_str().unwrap().to_owned();
         let done = wait_for_login(&service, &id).await;
         assert_eq!(done["data"]["state"], "connected", "{done}");
         assert_eq!(done["title"], "Connected openai");
-        assert!(polls.load(std::sync::atomic::Ordering::SeqCst) >= 2, "the first poll is refused");
+        assert!(
+            polls.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "the first poll is refused"
+        );
         let stored = CredentialStore::new(service.paths.auth.clone())
             .get("openai")
             .unwrap()
@@ -3246,7 +3355,10 @@ mod tests {
         drop(probe);
         let service = login_service(&root, &issuer, port);
         let started = service
-            .ui_request("providers", &json!({"action":"login","name":"openai","method":"browser"}))
+            .ui_request(
+                "providers",
+                &json!({"action":"login","name":"openai","method":"browser"}),
+            )
             .await
             .unwrap();
         let data = &started["data"];
@@ -3287,7 +3399,10 @@ mod tests {
         let (issuer, _) = fixture_issuer().await;
         let service = login_service(&root, &issuer, 0);
         let started = service
-            .ui_request("providers", &json!({"action":"login","name":"openai","method":"device"}))
+            .ui_request(
+                "providers",
+                &json!({"action":"login","name":"openai","method":"device"}),
+            )
             .await
             .unwrap();
         let id = started["data"]["id"].as_str().unwrap().to_owned();
@@ -3303,10 +3418,18 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(CredentialStore::new(service.paths.auth.clone()).get("openai").unwrap().is_none());
+        assert!(
+            CredentialStore::new(service.paths.auth.clone())
+                .get("openai")
+                .unwrap()
+                .is_none()
+        );
         assert!(
             service
-                .ui_request("providers", &json!({"action":"login","name":"anthropic","method":"browser"}))
+                .ui_request(
+                    "providers",
+                    &json!({"action":"login","name":"anthropic","method":"browser"})
+                )
                 .await
                 .unwrap_err()
                 .to_string()

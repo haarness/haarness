@@ -489,7 +489,9 @@ pub struct ToolOutput {
 
 #[async_trait]
 pub trait ToolInvoker: Send + Sync {
-    fn parallel_safe(&self, _name: &str, _arguments: &Value) -> bool { false }
+    fn parallel_safe(&self, _name: &str, _arguments: &Value) -> bool {
+        false
+    }
     fn activate_skill_permissions(&self, _execution: &haarness_protocol::DefinitionExecution) {}
     fn workspace(&self) -> Option<String> {
         None
@@ -515,7 +517,9 @@ pub trait ToolInvoker: Send + Sync {
 pub trait Tool: Send + Sync {
     /// Opt-in for observations that can run beside other observations. Local
     /// snapshot classification alone is insufficient (MCP may mutate remotely).
-    fn parallel_safe(&self, _arguments: &Value) -> bool { false }
+    fn parallel_safe(&self, _arguments: &Value) -> bool {
+        false
+    }
     fn definition(&self) -> ToolDefinition;
     /// Execution contract. A native tool may retain documented legacy inputs
     /// while advertising only the preferred shape to new model calls.
@@ -538,12 +542,23 @@ pub trait Tool: Send + Sync {
     }
     /// Resolve live resource identities before permission evaluation. Implementations must
     /// only inspect metadata here, and bind execution to the captured identity afterwards.
-    async fn prepare_arguments(&self, arguments: Value, _thread: ThreadId, _cancel: CancellationToken) -> CoreResult<Value> {
+    async fn prepare_arguments(
+        &self,
+        arguments: Value,
+        _thread: ThreadId,
+        _cancel: CancellationToken,
+    ) -> CoreResult<Value> {
         Ok(arguments)
     }
     /// A live, tool-owned policy may tighten normal permissions but never loosen them.
     /// Ask constraints must still prompt when hooks or session rules pre-approve a tool.
-    fn permission_constraint(&self, _arguments: &Value, _operation: &str) -> Option<crate::PermissionDecision> { None }
+    fn permission_constraint(
+        &self,
+        _arguments: &Value,
+        _operation: &str,
+    ) -> Option<crate::PermissionDecision> {
+        None
+    }
     async fn execute(&self, arguments: Value, context: ToolContext) -> CoreResult<ToolOutput>;
 }
 

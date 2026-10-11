@@ -42,14 +42,23 @@ pub fn load_all(sources: &[String]) -> CoreResult<Vec<LoadedMedia>> {
     load_all_with_limit(sources, MAX_INLINE_MEDIA_BYTES)
 }
 
-pub(crate) fn load_all_with_limit(sources: &[String], limit: usize) -> CoreResult<Vec<LoadedMedia>> {
+pub(crate) fn load_all_with_limit(
+    sources: &[String],
+    limit: usize,
+) -> CoreResult<Vec<LoadedMedia>> {
     let mut total = 0_usize;
     sources
         .iter()
         .map(|source| {
             let loaded = load(source)?;
-            let decoded = (loaded.base64.len() / 4 * 3)
-                .saturating_sub(loaded.base64.bytes().rev().take_while(|&byte| byte == b'=').count());
+            let decoded = (loaded.base64.len() / 4 * 3).saturating_sub(
+                loaded
+                    .base64
+                    .bytes()
+                    .rev()
+                    .take_while(|&byte| byte == b'=')
+                    .count(),
+            );
             total = total.saturating_add(decoded);
             if total > limit {
                 return Err(CoreError::Provider(format!(
@@ -218,11 +227,27 @@ mod tests {
 
     #[test]
     fn larger_media_reaches_the_adapter_but_provider_budgets_and_aggregate_caps_remain() {
-        let large = format!("data:image/png;base64,{}", STANDARD.encode(vec![0; 11 * 1024 * 1024]));
+        let large = format!(
+            "data:image/png;base64,{}",
+            STANDARD.encode(vec![0; 11 * 1024 * 1024])
+        );
         assert!(load_all(std::slice::from_ref(&large)).is_ok());
-        assert!(load_all_with_limit(std::slice::from_ref(&large), 10 * 1024 * 1024).unwrap_err().to_string().contains("10 MiB"));
-        assert!(load_all(&[large.clone(), large]).unwrap_err().to_string().contains("20 MiB"));
-        let boundary = format!("data:image/png;base64,{}", STANDARD.encode(vec![0; MAX_INLINE_MEDIA_BYTES]));
+        assert!(
+            load_all_with_limit(std::slice::from_ref(&large), 10 * 1024 * 1024)
+                .unwrap_err()
+                .to_string()
+                .contains("10 MiB")
+        );
+        assert!(
+            load_all(&[large.clone(), large])
+                .unwrap_err()
+                .to_string()
+                .contains("20 MiB")
+        );
+        let boundary = format!(
+            "data:image/png;base64,{}",
+            STANDARD.encode(vec![0; MAX_INLINE_MEDIA_BYTES])
+        );
         assert!(load_all(&[boundary]).is_ok());
     }
 

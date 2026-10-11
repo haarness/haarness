@@ -535,7 +535,11 @@ fn read_source(
             |r| r.get::<_, i64>(0),
         )? > 0)
     };
-    let subagent = if has_column("is_subagent")? { "h.is_subagent" } else { "0" };
+    let subagent = if has_column("is_subagent")? {
+        "h.is_subagent"
+    } else {
+        "0"
+    };
     let scheduled = if has_column("schedule_json")? {
         "h.schedule_json IS NOT NULL"
     } else {

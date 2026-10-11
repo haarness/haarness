@@ -90,7 +90,9 @@ async fn output(mut command: Command) -> (bool, String) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn usage_statistics_are_sent_from_real_history_and_never_when_off() {
     let cloud = Cloud::default();
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock cloud");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock cloud");
     let address = listener.local_addr().expect("mock cloud address");
     let router = Router::new()
         .route("/api/v1/telemetry/usage", post(ingest))
@@ -99,16 +101,23 @@ async fn usage_statistics_are_sent_from_real_history_and_never_when_off() {
         let _ = axum::serve(listener, router).await;
     });
 
-    let directory = TestDirectory(
-        std::env::temp_dir().join(format!("haarness-usage-e2e-{}", Uuid::now_v7())),
-    );
+    let directory =
+        TestDirectory(std::env::temp_dir().join(format!("haarness-usage-e2e-{}", Uuid::now_v7())));
     let workspace = directory.0.join("SENTINEL_PROJECT");
     std::fs::create_dir_all(&workspace).expect("create workspace");
     std::fs::write(workspace.join("README.md"), "# readme\n").expect("write readme");
     let prompt = r#"!multi [{"name":"read","arguments":{"path":"README.md"}},{"name":"read","arguments":{"path":"SENTINEL_MISSING.txt"}}]"#;
     let (ok, text) = output({
         let mut command = haarness(&directory.0, &workspace, address);
-        command.args(["--yolo", "run", "--provider", "echo", "--model", "echo-1", prompt]);
+        command.args([
+            "--yolo",
+            "run",
+            "--provider",
+            "echo",
+            "--model",
+            "echo-1",
+            prompt,
+        ]);
         command
     })
     .await;
@@ -126,7 +135,10 @@ async fn usage_statistics_are_sent_from_real_history_and_never_when_off() {
     )
     .expect("parse runtime.json");
     let view: Value = reqwest::Client::new()
-        .post(format!("{}/v1/manage/usage-statistics", runtime["url"].as_str().unwrap()))
+        .post(format!(
+            "{}/v1/manage/usage-statistics",
+            runtime["url"].as_str().unwrap()
+        ))
         .bearer_auth(runtime["token"].as_str().unwrap())
         .json(&json!({"action": "preview"}))
         .send()
@@ -137,7 +149,10 @@ async fn usage_statistics_are_sent_from_real_history_and_never_when_off() {
         .expect("view");
     assert_eq!(view["data"]["setting"]["enabled"], true, "{view}");
     assert_eq!(view["data"]["report"]["days"][0]["turns"], 1, "{view}");
-    assert!(cloud.reports.lock().unwrap().is_empty(), "a preview sends nothing");
+    assert!(
+        cloud.reports.lock().unwrap().is_empty(),
+        "a preview sends nothing"
+    );
 
     let (ok, text) = output({
         let mut command = haarness(&directory.0, &workspace, address);
@@ -160,7 +175,13 @@ async fn usage_statistics_are_sent_from_real_history_and_never_when_off() {
     assert_eq!(day["models"][0]["model"], "custom");
     assert_eq!(day["tools"][0]["name"], "read");
     let sent = report.to_string();
-    for private in ["SENTINEL_PROJECT", "SENTINEL_MISSING", "README", "!multi", "echo-1"] {
+    for private in [
+        "SENTINEL_PROJECT",
+        "SENTINEL_MISSING",
+        "README",
+        "!multi",
+        "echo-1",
+    ] {
         assert!(!sent.contains(private), "{private} was sent: {sent}");
     }
 
@@ -200,7 +221,11 @@ async fn usage_statistics_are_sent_from_real_history_and_never_when_off() {
     })
     .await;
     assert!(text.contains("off; nothing was sent"), "{text}");
-    assert_eq!(cloud.reports.lock().unwrap().len(), 1, "only the one report");
+    assert_eq!(
+        cloud.reports.lock().unwrap().len(),
+        1,
+        "only the one report"
+    );
 
     let _ = output({
         let mut command = haarness(&directory.0, &workspace, address);
@@ -215,7 +240,11 @@ fn walk(root: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
-        for entry in std::fs::read_dir(&directory).into_iter().flatten().flatten() {
+        for entry in std::fs::read_dir(&directory)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
             let path = entry.path();
             if path.is_dir() {
                 pending.push(path);

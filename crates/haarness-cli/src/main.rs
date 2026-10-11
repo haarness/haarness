@@ -1,9 +1,7 @@
 mod account;
-mod upgrade;
-mod capability_state;
-mod marketplace;
 mod acp;
 mod browser_settings;
+mod capability_state;
 mod config_specs;
 mod desktop;
 mod desktop_hooks;
@@ -13,14 +11,16 @@ mod insights;
 mod jsonconfig;
 mod layout;
 mod management;
+mod marketplace;
 mod memory_settings;
 mod otel;
-mod usage_stats;
 mod plugins;
 mod profile;
 mod remote;
 mod remote_cloud;
 mod router_connection;
+mod upgrade;
+mod usage_stats;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -4584,13 +4584,26 @@ fn cloud_model_prefix_preserves_the_existing_provider_identity() {
             qualified_run_model(prefix, "gpt-6-sol").unwrap().0,
             "haarness"
         );
-        for model in ["openai/gpt-5-nano", "anthropic/claude-haiku-4.5", "google/gemini-3.5-flash-lite"] {
-            assert_eq!(qualified_run_model(prefix, model).unwrap(), ("haarness".into(), model.into()));
-            assert_eq!(qualified_run_model(prefix, &format!("{prefix}/{model}")).unwrap(), ("haarness".into(), model.into()));
+        for model in [
+            "openai/gpt-5-nano",
+            "anthropic/claude-haiku-4.5",
+            "google/gemini-3.5-flash-lite",
+        ] {
+            assert_eq!(
+                qualified_run_model(prefix, model).unwrap(),
+                ("haarness".into(), model.into())
+            );
+            assert_eq!(
+                qualified_run_model(prefix, &format!("{prefix}/{model}")).unwrap(),
+                ("haarness".into(), model.into())
+            );
         }
         assert!(qualified_run_model(prefix, "openai/").is_err());
     }
-    assert_eq!(qualified_run_model("openai", "openai/gpt-5-nano").unwrap(), ("openai".into(), "gpt-5-nano".into()));
+    assert_eq!(
+        qualified_run_model("openai", "openai/gpt-5-nano").unwrap(),
+        ("openai".into(), "gpt-5-nano".into())
+    );
 }
 
 fn run_title(requested: Option<&str>, prompt: &str) -> String {
@@ -5515,7 +5528,11 @@ fn compose_runtime_sources(
     }
     file_config.mcp.extend(json_layers.mcp.clone());
     if let Some(overrides) = capability_state::load(paths, workspace, trust)?.get("mcp") {
-        for (name, enabled) in overrides { if let Some(entry) = file_config.mcp.get_mut(name) { entry.enabled = *enabled; } }
+        for (name, enabled) in overrides {
+            if let Some(entry) = file_config.mcp.get_mut(name) {
+                entry.enabled = *enabled;
+            }
+        }
     }
 
     let skill_roots = skill_roots(paths, workspace, trust, &file_config);
@@ -5545,7 +5562,9 @@ fn compose_runtime_sources(
         yolo,
     )?;
     runtime_config.disabled_agents = capability_state::disabled(paths, workspace, trust, "agent")?;
-    runtime_config.disabled_agents.extend(json_layers.disabled_agents.clone());
+    runtime_config
+        .disabled_agents
+        .extend(json_layers.disabled_agents.clone());
     runtime_config.output_style = load_output_style(
         &config_dir,
         workspace,
@@ -5582,7 +5601,9 @@ fn compose_runtime_sources(
     runtime_config.read_roots.dedup();
     runtime_config.commands.clone_from(&json_layers.commands);
     let disabled_skills = capability_state::disabled(paths, workspace, trust, "skill")?;
-    runtime_config.commands.retain(|command| !disabled_skills.contains(&command.name));
+    runtime_config
+        .commands
+        .retain(|command| !disabled_skills.contains(&command.name));
     memory_settings::load(&management::memory_root_for(paths, workspace))?
         .apply(&mut runtime_config);
     runtime_config.custom_agents.clone_from(&json_layers.agents);
@@ -5731,7 +5752,8 @@ impl HotReloadController {
         );
         let candidate_mcp = compose_mcp(&self.paths, &sources.file_config, Some(&self.mcp)).await;
         let candidate_skills = FilesystemSkillRegistry::new_scoped(sources.skill_roots.clone());
-        let disabled_skills = capability_state::disabled(&self.paths, &self.workspace, self.trust, "skill")?;
+        let disabled_skills =
+            capability_state::disabled(&self.paths, &self.workspace, self.trust, "skill")?;
         candidate_skills.set_disabled(disabled_skills.clone());
         let skill_infos = candidate_skills.discover().await.unwrap_or_default();
         let tools: Arc<dyn ToolRegistry> = Arc::new(
@@ -6348,7 +6370,9 @@ async fn application_at(
     );
     let mcp = mcp_from_config(paths, &file_config).await;
     let skills = Arc::new(FilesystemSkillRegistry::new_scoped(skill_roots));
-    skills.set_disabled(capability_state::disabled(paths, workspace, trust, "skill")?);
+    skills.set_disabled(capability_state::disabled(
+        paths, workspace, trust, "skill",
+    )?);
     let events = EventBus::new(2048);
     let workflow_host = WorkflowRuntimeAdapter::new();
     let workflows = Arc::new(WorkflowCoordinator::new(

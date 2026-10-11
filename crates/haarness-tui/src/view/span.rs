@@ -299,7 +299,10 @@ mod truncation_tests {
     fn narrow_labels_preserve_complete_graphemes() {
         for grapheme in ["👩‍💻", "👍🏽", "🇯🇵", "e\u{301}"] {
             let width = unicode_width::UnicodeWidthStr::width(grapheme);
-            assert_eq!(single_line(&format!("{grapheme}abcd"), width + 1), format!("{grapheme}…"));
+            assert_eq!(
+                single_line(&format!("{grapheme}abcd"), width + 1),
+                format!("{grapheme}…")
+            );
             assert_eq!(single_line(&format!("{grapheme}abcd"), width), "…");
         }
         assert_eq!(single_line("日本語", 3), "日…");
@@ -319,7 +322,12 @@ mod selection_grapheme_tests {
         let mut line = Line::plain(&label, theme.text);
         selected_row(&mut line, 54, &theme);
         assert_eq!(line.width(), 54);
-        assert!(line.spans.iter().all(|span| !span.text.replace("👩‍💻", "").contains(['👩', '\u{200d}', '💻'])));
+        assert!(line.spans.iter().all(|span| {
+            !span
+                .text
+                .replace("👩‍💻", "")
+                .contains(['👩', '\u{200d}', '💻'])
+        }));
         let mut renderer = haarness_opentui::Renderer::new(60, 4, true).unwrap();
         assert!(renderer.snapshot_lines(&[line]).contains(&label));
         for paint in [highlight_range, interactive_region, dialog_item_region] {

@@ -754,13 +754,35 @@ impl ThreadRepository for SqliteStore {
         decode_turn(raw)
     }
 
-    async fn prepare_command_input(&self, thread: ThreadId, turn: TurnId, text: String) -> CoreResult<Item> {
-        let mut item = self.list_items(thread, None).await?.into_iter()
-            .find(|i|i.turn_id == Some(turn) && matches!(i.data, ItemData::UserMessage { queued:false, .. }))
-            .ok_or_else(||CoreError::NotFound("command input".into()))?;
-        if let ItemData::UserMessage {text:current, ..} = &mut item.data { *current = text; }
-        self.connection.lock().execute("UPDATE items SET data_json=?2 WHERE id=?1 AND turn_id=?3",
-            params![item.id.to_string(),serde_json::to_string(&item.data).map_err(storage)?,turn.to_string()]).map_err(storage)?;
+    async fn prepare_command_input(
+        &self,
+        thread: ThreadId,
+        turn: TurnId,
+        text: String,
+    ) -> CoreResult<Item> {
+        let mut item = self
+            .list_items(thread, None)
+            .await?
+            .into_iter()
+            .find(|i| {
+                i.turn_id == Some(turn)
+                    && matches!(i.data, ItemData::UserMessage { queued: false, .. })
+            })
+            .ok_or_else(|| CoreError::NotFound("command input".into()))?;
+        if let ItemData::UserMessage { text: current, .. } = &mut item.data {
+            *current = text;
+        }
+        self.connection
+            .lock()
+            .execute(
+                "UPDATE items SET data_json=?2 WHERE id=?1 AND turn_id=?3",
+                params![
+                    item.id.to_string(),
+                    serde_json::to_string(&item.data).map_err(storage)?,
+                    turn.to_string()
+                ],
+            )
+            .map_err(storage)?;
         Ok(item)
     }
 

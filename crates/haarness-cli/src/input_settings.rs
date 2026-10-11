@@ -74,7 +74,10 @@ fn snapshot(project_config: bool, global: &Path, workspace: &Path, scope: &str) 
     let mut source = "default";
     let mut source_file = None;
     let mut hash = Sha256::new();
-    for path in layers(global, workspace).into_iter().filter(|path| project_config || files(global).contains(path)) {
+    for path in layers(global, workspace)
+        .into_iter()
+        .filter(|path| project_config || files(global).contains(path))
+    {
         hash.update(path.to_string_lossy().as_bytes());
         match fs::read(&path) {
             Ok(bytes) => hash.update(bytes),
@@ -106,7 +109,12 @@ fn snapshot(project_config: bool, global: &Path, workspace: &Path, scope: &str) 
     )
 }
 
-pub(super) fn request(project_config: bool, global: &Path, workspace: &Path, input: &Value) -> Result<Value> {
+pub(super) fn request(
+    project_config: bool,
+    global: &Path,
+    workspace: &Path,
+    input: &Value,
+) -> Result<Value> {
     let scope = input["scope"].as_str().unwrap_or("project");
     ensure!(
         matches!(scope, "project" | "global"),
@@ -161,8 +169,10 @@ pub(super) fn request(project_config: bool, global: &Path, workspace: &Path, inp
         fs2::FileExt::lock_exclusive(&lock)?;
         Some(lock)
     };
-    ensure!(project_config || scope == "global" || matches!(command, "get" | "view"),
-        "Project configuration is disabled for this server. Choose Global scope to change this setting.");
+    ensure!(
+        project_config || scope == "global" || matches!(command, "get" | "view"),
+        "Project configuration is disabled for this server. Choose Global scope to change this setting."
+    );
     let before = snapshot(project_config, global, workspace, scope)?;
     let mut message = None;
     if !matches!(command, "get" | "view") {
@@ -364,7 +374,8 @@ mod tests {
         let changed = f.request(json!({"action":"set","scope":"global","delivery":"steer"}));
         assert_eq!(changed["delivery"], "steer");
         assert!(
-            request(true,
+            request(
+                true,
                 &f.global,
                 &f.project,
                 &json!({"action":"set","delivery":"queue","revision":old["revision"]})
@@ -382,7 +393,8 @@ mod tests {
         assert_eq!(reset["delivery"], "steer");
         for args in ["bad", "queue extra", "input-mode", "get", "view", "set"] {
             assert!(
-                request(true,
+                request(
+                    true,
                     &f.global,
                     &f.project,
                     &json!({"action":"command","arguments":args})

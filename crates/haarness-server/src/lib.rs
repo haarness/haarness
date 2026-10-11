@@ -2,21 +2,21 @@
 //! composition retains bearer authentication; every mode validates Host/Origin.
 
 pub mod api;
+pub mod auth;
 pub mod browser;
 pub mod browser_policy;
-pub mod auth;
+mod cloud_tools;
 mod command;
 pub mod files;
-pub mod preview;
 pub mod hooks;
 pub mod plugins;
+pub mod preview;
 mod profiles;
 pub mod remote;
 mod remote_scope;
 pub mod sharing;
 pub mod skills;
 pub mod tools;
-mod cloud_tools;
 pub mod vcs;
 pub mod workflow;
 

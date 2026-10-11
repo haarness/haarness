@@ -1,14 +1,13 @@
 //! MCP configuration, transport lifecycle, capability discovery, and tool calls.
 
+mod credentials;
 mod executable;
 mod process;
 #[cfg(all(test, unix))]
 mod process_tests;
-mod credentials;
 use credentials::FileCredentialStore;
 
 use async_trait::async_trait;
-use sha2::{Digest, Sha256};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::StreamExt;
 use haarness_core::{CoreError, CoreResult, McpRegistry, ToolDefinition, ToolOutput};
@@ -23,12 +22,12 @@ use rmcp::{
     },
     transport::{
         AuthClient, AuthorizationManager, AuthorizationRequest,
-        CredentialStore as OAuthCredentialStore, IntoTransport,
-        StreamableHttpClientTransport, Transport, auth::OAuthState,
-        streamable_http_client::StreamableHttpClientTransportConfig,
+        CredentialStore as OAuthCredentialStore, IntoTransport, StreamableHttpClientTransport,
+        Transport, auth::OAuthState, streamable_http_client::StreamableHttpClientTransportConfig,
     },
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap},
     fmt,
@@ -373,8 +372,9 @@ impl NativeMcpRegistry {
                 (entry.config.clone(), entry.generation)
             };
             let identity = schema_identity(name, &config, self.auth_dir.as_deref());
-            let credential = (config.transport == "streamable_http" && oauth_enabled(&config, &config.headers))
-                .then(|| manager_store(name, self.auth_dir.as_deref()));
+            let credential = (config.transport == "streamable_http"
+                && oauth_enabled(&config, &config.headers))
+            .then(|| manager_store(name, self.auth_dir.as_deref()));
             let home: Home = Arc::new(RwLock::new(Arc::downgrade(&self.servers)));
             let handler = CatalogClient {
                 home: home.clone(),
@@ -425,8 +425,7 @@ impl NativeMcpRegistry {
                         result.map_err(ActivationError::Core)
                     }
                     "streamable_http" => {
-                        activate_remote(name, &config, credential.clone(), handler.clone())
-                            .await
+                        activate_remote(name, &config, credential.clone(), handler.clone()).await
                     }
                     "sse" => activate_legacy_sse(name, &config, handler.clone())
                         .await
@@ -480,7 +479,9 @@ impl NativeMcpRegistry {
             let (mut definitions, worker, credential) = activated;
             if !credential_valid(credential.as_ref()) {
                 revoke_entry(entry);
-                return Err(CoreError::Conflict(format!("MCP server {name} credentials changed while connecting")));
+                return Err(CoreError::Conflict(format!(
+                    "MCP server {name} credentials changed while connecting"
+                )));
             }
             for tool in &mut definitions {
                 tool.name = format!("mcp__{name}__{}", tool.name);
@@ -598,7 +599,8 @@ impl NativeMcpRegistry {
             .url
             .as_deref()
             .ok_or_else(|| CoreError::Invalid("Streamable HTTP MCP requires url".into()))?;
-        let (manager, _) = authorization_manager(url, manager_store(name, self.auth_dir.as_deref())).await?;
+        let (manager, _) =
+            authorization_manager(url, manager_store(name, self.auth_dir.as_deref())).await?;
         let mut request = AuthorizationRequest::new(redirect_uri).with_client_name("Haarness");
         if let Some(client_id) = config.oauth_client_id {
             request = request.with_preregistered_client(client_id);
@@ -766,7 +768,12 @@ fn revoke_entry(entry: &mut Entry) {
     entry.identity = None;
     entry.credential = None;
     entry.auth_challenge = None;
-    entry.info.status = if entry.config.enabled { "needs_auth" } else { "disabled" }.into();
+    entry.info.status = if entry.config.enabled {
+        "needs_auth"
+    } else {
+        "disabled"
+    }
+    .into();
     entry.info.detail = Some("OAuth credentials cleared in another workspace".into());
 }
 /// The configuration a connection actually uses: the same `${VAR}` text can
@@ -886,7 +893,14 @@ async fn activate_remote(
     config: &McpConfigureRequest,
     credential: Option<FileCredentialStore>,
     handler: CatalogClient,
-) -> Result<(Vec<ToolDefinition>, mpsc::Sender<WorkerCommand>, Option<FileCredentialStore>), ActivationError> {
+) -> Result<
+    (
+        Vec<ToolDefinition>,
+        mpsc::Sender<WorkerCommand>,
+        Option<FileCredentialStore>,
+    ),
+    ActivationError,
+> {
     let url = config
         .url
         .as_deref()
@@ -904,10 +918,21 @@ async fn activate_remote(
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(mcp_error)?;
-        let credential = credential.clone().filter(|_| oauth_enabled(config, &headers));
-        let handler = CatalogClient { credential: credential.clone(), ..handler.clone() };
+        let credential = credential
+            .clone()
+            .filter(|_| oauth_enabled(config, &headers));
+        let handler = CatalogClient {
+            credential: credential.clone(),
+            ..handler.clone()
+        };
         let result = if oauth_enabled(config, &headers) {
-            let (manager, authorized) = authorization_manager(url, credential.clone().ok_or_else(|| CoreError::Invalid("missing OAuth identity".into()))?).await?;
+            let (manager, authorized) = authorization_manager(
+                url,
+                credential
+                    .clone()
+                    .ok_or_else(|| CoreError::Invalid("missing OAuth identity".into()))?,
+            )
+            .await?;
             if authorized {
                 activate_streamable(
                     handler.clone(),
@@ -990,7 +1015,9 @@ fn spawn_worker(
                 command = rx.recv() => match command { Some(command) => command, None => break },
             };
             // A queued operation must not escape through an old authenticated client.
-            if !credential_valid(credential.as_ref()) { break; }
+            if !credential_valid(credential.as_ref()) {
+                break;
+            }
             match command {
                 WorkerCommand::Call {
                     tool,
@@ -1085,7 +1112,12 @@ fn json_value(value: impl serde::Serialize) -> CoreResult<Value> {
 }
 
 fn oauth_enabled(config: &McpConfigureRequest, headers: &BTreeMap<String, String>) -> bool {
-    if headers.keys().any(|name| name.eq_ignore_ascii_case("authorization")) { return false; }
+    if headers
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case("authorization"))
+    {
+        return false;
+    }
     match config.oauth {
         Some(enabled) => enabled,
         None => {
@@ -1883,7 +1915,10 @@ mod tests {
     #[tokio::test]
     async fn oauth_logout_process() {
         if let Some(root) = std::env::var_os("HAARNESS_LOGOUT_FIXTURE") {
-            manager_store("secure", Some(Path::new(&root))).clear().await.unwrap();
+            manager_store("secure", Some(Path::new(&root)))
+                .clear()
+                .await
+                .unwrap();
         }
     }
 
@@ -1939,7 +1974,9 @@ mod tests {
         sibling.configure("secure", config.clone()).await.unwrap();
         let independent = NativeMcpRegistry::with_auth_dir(&auth_dir);
         let mut explicit = config.clone();
-        explicit.headers.insert("Authorization".into(), "Bearer fixture-access-token".into());
+        explicit
+            .headers
+            .insert("Authorization".into(), "Bearer fixture-access-token".into());
         independent.configure("secure", explicit).await.unwrap();
         let previous = manager_store("secure", Some(&auth_dir));
         let credentials = previous.load().await.unwrap().unwrap();
@@ -1947,15 +1984,30 @@ mod tests {
         let result = tokio::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "tests::oauth_logout_process"])
             .env("HAARNESS_LOGOUT_FIXTURE", &auth_dir)
-            .output().await.unwrap();
+            .output()
+            .await
+            .unwrap();
         assert!(result.status.success(), "logout subprocess failed");
-        assert!(previous.save(credentials).await.is_err(), "late token refresh restored cleared credentials");
+        assert!(
+            previous.save(credentials).await.is_err(),
+            "late token refresh restored cleared credentials"
+        );
         assert!(sibling.tool_snapshot().is_empty());
         assert!(sibling.tools("secure").await.unwrap().is_empty());
-        assert!(sibling.call("secure", "secure_echo", json!({})).await.is_err());
+        assert!(
+            sibling
+                .call("secure", "secure_echo", json!({}))
+                .await
+                .is_err()
+        );
         assert_eq!(sibling.list().await.unwrap()[0].status, "needs_auth");
         assert_eq!(independent.tool_snapshot().len(), 1);
-        assert!(independent.call("secure", "secure_echo", json!({})).await.is_ok());
+        assert!(
+            independent
+                .call("secure", "secure_echo", json!({}))
+                .await
+                .is_ok()
+        );
 
         registry.clear_oauth("secure").await.unwrap();
         assert!(!manager_store("secure", Some(&auth_dir)).path.exists());

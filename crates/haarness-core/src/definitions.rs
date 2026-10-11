@@ -502,7 +502,9 @@ fn expand_references(text: &str, invoker: &dyn crate::ToolInvoker) -> String {
             blocks.push(directory_listing(&name, &target));
             continue;
         }
-        let size = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(u64::MAX);
+        let size = std::fs::metadata(&target)
+            .map(|m| m.len())
+            .unwrap_or(u64::MAX);
         if size > REFERENCE_FILE_BYTES as u64 {
             blocks.push(format!("[File context omitted: {name} exceeds 128 KiB]"));
             continue;
@@ -567,7 +569,11 @@ fn directory_listing(label: &str, directory: &Path) -> String {
     entries.truncate(REFERENCE_DIR_ENTRIES);
     let mut listing = entries.join("\n");
     if total > REFERENCE_DIR_ENTRIES {
-        let _ = write!(listing, "\n… {} more entries", total - REFERENCE_DIR_ENTRIES);
+        let _ = write!(
+            listing,
+            "\n… {} more entries",
+            total - REFERENCE_DIR_ENTRIES
+        );
     }
     format!(
         "<details>\n<summary>Directory listing: {}</summary>\n\n{listing}\n\n</details>",
@@ -780,9 +786,15 @@ mod tests {
         assert_eq!(text.matches("File context:").count(), 1);
 
         // User arguments participate after substitution; unknown names are inert.
-        let text = prepare("Look at $ARGUMENTS", "@notes.md @nobody", &execution, "s", &invoker)
-            .await
-            .unwrap();
+        let text = prepare(
+            "Look at $ARGUMENTS",
+            "@notes.md @nobody",
+            &execution,
+            "s",
+            &invoker,
+        )
+        .await
+        .unwrap();
         assert!(text.contains("note body"));
         assert!(!text.contains("task tool"));
         std::fs::remove_dir_all(root).unwrap();

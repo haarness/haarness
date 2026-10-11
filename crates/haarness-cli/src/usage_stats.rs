@@ -410,7 +410,11 @@ pub(crate) async fn upload(data: &Path, config_dir: &Path, force: bool) -> Resul
     }
     let state = read_state(data);
     let now = Utc::now();
-    if !force && state.last_upload_at.is_some_and(|last| now - last < UPLOAD_EVERY) {
+    if !force
+        && state
+            .last_upload_at
+            .is_some_and(|last| now - last < UPLOAD_EVERY)
+    {
         return Ok(Outcome::NotDue);
     }
     fs::create_dir_all(directory(data))?;
@@ -477,7 +481,9 @@ pub(crate) fn spawn_uploader(data: PathBuf, config_dir: PathBuf) {
                     tracing::info!(days, linked, "usage statistics sent");
                 }
                 Ok(_) => {}
-                Err(error) => tracing::debug!(error = %format!("{error:#}"), "usage statistics not sent"),
+                Err(error) => {
+                    tracing::debug!(error = %format!("{error:#}"), "usage statistics not sent")
+                }
             }
             tokio::time::sleep(CHECK_EVERY).await;
         }
@@ -568,22 +574,35 @@ pub(crate) async fn run(data: &Path, config_dir: &Path, args: &TelemetryArgs) ->
                 println!(
                     "Saved. Usage statistics stay {} in this shell: {}.",
                     describe(now),
-                    if now.source == Source::DoNotTrack { "DO_NOT_TRACK" } else { ENV }
+                    if now.source == Source::DoNotTrack {
+                        "DO_NOT_TRACK"
+                    } else {
+                        ENV
+                    }
                 );
             }
         }
         TelemetryCommand::Preview => {
-            println!("{}", serde_json::to_string_pretty(&report(data, Utc::now())?)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report(data, Utc::now())?)?
+            );
         }
         TelemetryCommand::Send => match upload(data, config_dir, true).await? {
             Outcome::Sent { days, linked } => println!(
                 "Sent {days} day{} of usage statistics{}.",
                 if days == 1 { "" } else { "s" },
-                if linked { ", linked to your Haarness account" } else { "" }
+                if linked {
+                    ", linked to your Haarness account"
+                } else {
+                    ""
+                }
             ),
             Outcome::Off => println!("Usage statistics are off; nothing was sent."),
             Outcome::Busy => println!("Another Haarness process is sending right now."),
-            Outcome::Nothing => println!("No activity in the last {WINDOW_DAYS} days; nothing to send."),
+            Outcome::Nothing => {
+                println!("No activity in the last {WINDOW_DAYS} days; nothing to send.")
+            }
             Outcome::NotDue => {}
         },
     }
@@ -663,7 +682,8 @@ mod tests {
 
     #[test]
     fn settings_live_in_the_global_configuration() {
-        let directory = std::env::temp_dir().join(format!("haarness-usage-{}", uuid::Uuid::now_v7()));
+        let directory =
+            std::env::temp_dir().join(format!("haarness-usage-{}", uuid::Uuid::now_v7()));
         fs::create_dir_all(&directory).unwrap();
         assert_eq!(configured(&directory), None);
         set_enabled(&directory, false).unwrap();

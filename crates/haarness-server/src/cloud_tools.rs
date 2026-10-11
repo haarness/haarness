@@ -284,15 +284,20 @@ mod tests {
                 .unwrap();
             for action in actions.iter().filter_map(Value::as_str) {
                 let operation = format!("{name}:{action}:target");
-                let constraint =
-                    tool.permission_constraint(&json!({"action": action}), &operation);
+                let constraint = tool.permission_constraint(&json!({"action": action}), &operation);
                 // Every plan-readable action is quiet; nothing else is a read.
                 if plan.evaluate(&operation) == PermissionDecision::Allow {
                     assert_eq!(constraint, None, "{operation}");
                 }
                 let spends = matches!(
                     action,
-                    "create" | "start" | "ask" | "delete" | "update" | "save_agent" | "run"
+                    "create"
+                        | "start"
+                        | "ask"
+                        | "delete"
+                        | "update"
+                        | "save_agent"
+                        | "run"
                         | "resume"
                 ) && !(name == "cloud_chat" && action == "create");
                 assert_eq!(

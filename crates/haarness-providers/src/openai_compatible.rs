@@ -1342,7 +1342,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .post(&self.endpoint)
             .headers(headers)
             .json(&body);
-        let mut events = json_stream(builder.send().await.map_err(crate::sse::transport_error)?, cancel);
+        let mut events = json_stream(
+            builder.send().await.map_err(crate::sse::transport_error)?,
+            cancel,
+        );
         // A Cloud session's own router (the Haarness Cloud provider translates its errors itself).
         if self.server_output_limit && self.id != "haarness" {
             events = Box::pin(futures::StreamExt::map(events, |event| {

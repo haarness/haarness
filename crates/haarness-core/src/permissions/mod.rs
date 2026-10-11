@@ -102,7 +102,9 @@ impl PermissionEngine {
     pub fn add_rule(&mut self, rule: PermissionRule) {
         self.rules.push(normalize_rule_aliases(rule));
     }
-    pub fn add_repository_grant(&mut self, rule: PermissionRule) { self.repository_grants.push(normalize_rule_aliases(rule)); }
+    pub fn add_repository_grant(&mut self, rule: PermissionRule) {
+        self.repository_grants.push(normalize_rule_aliases(rule));
+    }
     /// An "always" answer (this session or this workspace). It settles what
     /// the configured rules leave as a question and never reopens their deny.
     pub fn add_grant(&mut self, rule: PermissionRule) {
@@ -163,7 +165,10 @@ impl PermissionEngine {
             .session_rules
             .iter()
             .rfind(|rule| wildcard_match(&rule.pattern, operation.as_ref()));
-        let repository = self.repository_grants.iter().rfind(|rule| wildcard_match(&rule.pattern, operation.as_ref()));
+        let repository = self
+            .repository_grants
+            .iter()
+            .rfind(|rule| wildcard_match(&rule.pattern, operation.as_ref()));
         // An "always" answer or sharing consent never reopens a configured
         // deny: `always` on `git push origin` must not allow a denied
         // `git push --force`.
@@ -197,14 +202,25 @@ impl PermissionEngine {
     }
 }
 
-fn ruleset_disables_browser<'a>(rules: impl DoubleEndedIterator<Item = &'a PermissionRule>, method: &str) -> bool {
-    rules.rev().find_map(|rule| {
-        let (permission, target) = rule.pattern.split_once(':').unwrap_or((&rule.pattern, "*"));
-        if !wildcard_match(permission, "browser") { return None; }
-        if target == "*" { return Some(rule.decision == PermissionDecision::Deny); }
-        let (operation, resource) = target.split_once(':').unwrap_or((target, "*"));
-        wildcard_match(operation, method).then_some(resource == "*" && rule.decision == PermissionDecision::Deny)
-    }).unwrap_or(false)
+fn ruleset_disables_browser<'a>(
+    rules: impl DoubleEndedIterator<Item = &'a PermissionRule>,
+    method: &str,
+) -> bool {
+    rules
+        .rev()
+        .find_map(|rule| {
+            let (permission, target) = rule.pattern.split_once(':').unwrap_or((&rule.pattern, "*"));
+            if !wildcard_match(permission, "browser") {
+                return None;
+            }
+            if target == "*" {
+                return Some(rule.decision == PermissionDecision::Deny);
+            }
+            let (operation, resource) = target.split_once(':').unwrap_or((target, "*"));
+            wildcard_match(operation, method)
+                .then_some(resource == "*" && rule.decision == PermissionDecision::Deny)
+        })
+        .unwrap_or(false)
 }
 
 fn ruleset_disables_tool<'a>(
@@ -370,7 +386,10 @@ pub fn plan_ceiling() -> Vec<PermissionRule> {
         rule("cloud_agent_manage:list:*", PermissionDecision::Allow),
         rule("cloud_agent_manage:get:*", PermissionDecision::Allow),
         rule("cloud_agent_manage:models:*", PermissionDecision::Allow),
-        rule("cloud_agent_manage:ssh_public_key:*", PermissionDecision::Allow),
+        rule(
+            "cloud_agent_manage:ssh_public_key:*",
+            PermissionDecision::Allow,
+        ),
         rule("cloud_schedule:*", PermissionDecision::Deny),
         rule("cloud_schedule:list:*", PermissionDecision::Allow),
         rule("cloud_schedule:get:*", PermissionDecision::Allow),
@@ -383,7 +402,10 @@ pub fn plan_ceiling() -> Vec<PermissionRule> {
         rule("cloud_agent_session:*", PermissionDecision::Deny),
         rule("cloud_agent_session:list:*", PermissionDecision::Allow),
         rule("cloud_agent_session:get:*", PermissionDecision::Allow),
-        rule("cloud_agent_session:ssh_public_key:*", PermissionDecision::Allow),
+        rule(
+            "cloud_agent_session:ssh_public_key:*",
+            PermissionDecision::Allow,
+        ),
         rule("cloud_agent_session:messages:*", PermissionDecision::Allow),
         rule("cloud_agent_session:wait:*", PermissionDecision::Allow),
     ]
@@ -530,16 +552,30 @@ mod tests {
         engine.approve_always("cloud_agent_session:*");
         engine.add_rule(rule("cloud_agent_manage:*", PermissionDecision::Allow));
         for action in ["list", "get", "messages", "wait"] {
-            assert_eq!(engine.evaluate(&format!("cloud_agent_session:{action}:session-id")), PermissionDecision::Allow);
+            assert_eq!(
+                engine.evaluate(&format!("cloud_agent_session:{action}:session-id")),
+                PermissionDecision::Allow
+            );
         }
-        for action in ["create", "start", "ask", "stop", "abort", "rename", "archive", "delete"] {
-            assert_eq!(engine.evaluate(&format!("cloud_agent_session:{action}:session-id")), PermissionDecision::Deny);
+        for action in [
+            "create", "start", "ask", "stop", "abort", "rename", "archive", "delete",
+        ] {
+            assert_eq!(
+                engine.evaluate(&format!("cloud_agent_session:{action}:session-id")),
+                PermissionDecision::Deny
+            );
         }
         for action in ["list", "get", "ssh_public_key", "models"] {
-            assert_eq!(engine.evaluate(&format!("cloud_agent_manage:{action}:agent-id")), PermissionDecision::Allow);
+            assert_eq!(
+                engine.evaluate(&format!("cloud_agent_manage:{action}:agent-id")),
+                PermissionDecision::Allow
+            );
         }
         for action in ["create", "update", "delete"] {
-            assert_eq!(engine.evaluate(&format!("cloud_agent_manage:{action}:agent-id")), PermissionDecision::Deny);
+            assert_eq!(
+                engine.evaluate(&format!("cloud_agent_manage:{action}:agent-id")),
+                PermissionDecision::Deny
+            );
         }
         for (tool, reads, writes) in [
             (
@@ -569,7 +605,10 @@ mod tests {
         }
         let mut build = PermissionEngine::build_defaults();
         build.add_rule(rule("cloud_agent_session:*", PermissionDecision::Deny));
-        assert_eq!(build.evaluate("cloud_agent_session:ask:session-id"), PermissionDecision::Deny);
+        assert_eq!(
+            build.evaluate("cloud_agent_session:ask:session-id"),
+            PermissionDecision::Deny
+        );
     }
 
     #[test]

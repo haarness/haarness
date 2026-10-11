@@ -14,43 +14,104 @@ const TOKEN: &str = "hot-reload-e2e-token";
 
 #[tokio::test]
 async fn capability_management_disables_execution_and_survives_restart() {
-    let root=TestDirectory::new();
-    let root_path=root.0.canonicalize().unwrap();
-    let workspace=root_path.join("workspace");let data=root_path.join("data");let home=root_path.join("home");
-    for path in [&workspace,&data,&home] {std::fs::create_dir_all(path).unwrap();}
-    let address=unused_address().await;
-    let mut process=server_command(&workspace,&data,&home,address).spawn().unwrap();
+    let root = TestDirectory::new();
+    let root_path = root.0.canonicalize().unwrap();
+    let workspace = root_path.join("workspace");
+    let data = root_path.join("data");
+    let home = root_path.join("home");
+    for path in [&workspace, &data, &home] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    let address = unused_address().await;
+    let mut process = server_command(&workspace, &data, &home, address)
+        .spawn()
+        .unwrap();
     wait_until_listening(address).await;
-    let client=Client::new();
-    let manage=|input: Value| client.post(format!("http://{address}/v1/manage/capabilities")).bearer_auth(TOKEN).json(&input).send();
-    for input in [json!({"action":"create","kind":"skill","name":"live-proof","scope":"local","description":"Proof","instructions":"Return proof."}),json!({"action":"create","kind":"agent","name":"live-agent","scope":"local","description":"Verifier","prompt":"Verify proof."})] {
-        let response=manage(input).await.unwrap();let status=response.status();let body=response.text().await.unwrap();assert!(status.is_success(),"{body}");
+    let client = Client::new();
+    let manage = |input: Value| {
+        client
+            .post(format!("http://{address}/v1/manage/capabilities"))
+            .bearer_auth(TOKEN)
+            .json(&input)
+            .send()
+    };
+    for input in [
+        json!({"action":"create","kind":"skill","name":"live-proof","scope":"local","description":"Proof","instructions":"Return proof."}),
+        json!({"action":"create","kind":"agent","name":"live-agent","scope":"local","description":"Verifier","prompt":"Verify proof."}),
+    ] {
+        let response = manage(input).await.unwrap();
+        let status = response.status();
+        let body = response.text().await.unwrap();
+        assert!(status.is_success(), "{body}");
     }
-    wait_for_array_entry(&client,address,"/skills","name","live-proof",true).await;
-    wait_for_array_entry(&client,address,"/agents","id","live-agent",true).await;
-    wait_for_array_entry(&client,address,"/commands","name","live-proof",true).await;
-    for (kind,name) in [("skill","live-proof"),("agent","live-agent")] {
-        manage(json!({"action":"disable","kind":kind,"name":name,"scope":"local"})).await.unwrap().error_for_status().unwrap();
+    wait_for_array_entry(&client, address, "/skills", "name", "live-proof", true).await;
+    wait_for_array_entry(&client, address, "/agents", "id", "live-agent", true).await;
+    wait_for_array_entry(&client, address, "/commands", "name", "live-proof", true).await;
+    for (kind, name) in [("skill", "live-proof"), ("agent", "live-agent")] {
+        manage(json!({"action":"disable","kind":kind,"name":name,"scope":"local"}))
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
     }
-    wait_for_array_entry(&client,address,"/skills","name","live-proof",false).await;
-    wait_for_array_entry(&client,address,"/agents","id","live-agent",false).await;
-    wait_for_array_entry(&client,address,"/commands","name","live-proof",false).await;
-    let response=client.get(format!("http://{address}/v1/skills/live-proof")).bearer_auth(TOKEN).send().await.unwrap();
-    assert!(!response.status().is_success(),"Disabled skills must reject direct loading");
-    assert!(workspace.join(".haarness/skills/live-proof/SKILL.md").exists());
-    let catalog: Value=manage(json!({"action":"list"})).await.unwrap().json().await.unwrap();
-    assert!(catalog["skills"].as_array().unwrap().iter().any(|s|s["name"]=="live-proof" && s["enabled"]==false));
-    process.kill().await.unwrap();process.wait().await.unwrap();
-    let mut process=server_command(&workspace,&data,&home,address).spawn().unwrap();
+    wait_for_array_entry(&client, address, "/skills", "name", "live-proof", false).await;
+    wait_for_array_entry(&client, address, "/agents", "id", "live-agent", false).await;
+    wait_for_array_entry(&client, address, "/commands", "name", "live-proof", false).await;
+    let response = client
+        .get(format!("http://{address}/v1/skills/live-proof"))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        !response.status().is_success(),
+        "Disabled skills must reject direct loading"
+    );
+    assert!(
+        workspace
+            .join(".haarness/skills/live-proof/SKILL.md")
+            .exists()
+    );
+    let catalog: Value = manage(json!({"action":"list"}))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        catalog["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["name"] == "live-proof" && s["enabled"] == false)
+    );
+    process.kill().await.unwrap();
+    process.wait().await.unwrap();
+    let mut process = server_command(&workspace, &data, &home, address)
+        .spawn()
+        .unwrap();
     wait_until_listening(address).await;
-    assert!(!array_has(&get_json(&client,address,"/skills").await,"name","live-proof"));
-    assert!(!array_has(&get_json(&client,address,"/agents").await,"id","live-agent"));
-    for (kind,name) in [("skill","live-proof"),("agent","live-agent")] {
-        manage(json!({"action":"enable","kind":kind,"name":name,"scope":"local"})).await.unwrap().error_for_status().unwrap();
+    assert!(!array_has(
+        &get_json(&client, address, "/skills").await,
+        "name",
+        "live-proof"
+    ));
+    assert!(!array_has(
+        &get_json(&client, address, "/agents").await,
+        "id",
+        "live-agent"
+    ));
+    for (kind, name) in [("skill", "live-proof"), ("agent", "live-agent")] {
+        manage(json!({"action":"enable","kind":kind,"name":name,"scope":"local"}))
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
     }
-    wait_for_array_entry(&client,address,"/skills","name","live-proof",true).await;
-    wait_for_array_entry(&client,address,"/agents","id","live-agent",true).await;
-    process.kill().await.unwrap();process.wait().await.unwrap();
+    wait_for_array_entry(&client, address, "/skills", "name", "live-proof", true).await;
+    wait_for_array_entry(&client, address, "/agents", "id", "live-agent", true).await;
+    process.kill().await.unwrap();
+    process.wait().await.unwrap();
 }
 
 struct TestDirectory(PathBuf);
@@ -342,7 +403,15 @@ async fn reloads_runtime_assets_atomically_and_defers_while_a_turn_is_active() {
         "plugin generation one",
     )
     .await;
-    wait_for_array_entry(&client, address, "/skills", "name", "reload-fixture:reload-skill", true).await;
+    wait_for_array_entry(
+        &client,
+        address,
+        "/skills",
+        "name",
+        "reload-fixture:reload-skill",
+        true,
+    )
+    .await;
     wait_for_array_entry(&client, address, "/mcp", "name", "fixture-mcp", true).await;
     let workflows = get_json(&client, address, "/workflows").await;
     assert!(
@@ -490,7 +559,15 @@ async fn reloads_runtime_assets_atomically_and_defers_while_a_turn_is_active() {
         false,
     )
     .await;
-    wait_for_array_entry(&client, address, "/skills", "name", "reload-fixture:reload-skill", false).await;
+    wait_for_array_entry(
+        &client,
+        address,
+        "/skills",
+        "name",
+        "reload-fixture:reload-skill",
+        false,
+    )
+    .await;
     wait_for_array_entry(&client, address, "/mcp", "name", "fixture-mcp", false).await;
     wait_for_array_entry(&client, address, "/mcp", "name", "during-turn-mcp", false).await;
     let mut workflow_removed = false;

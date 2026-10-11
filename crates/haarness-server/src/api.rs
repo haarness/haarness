@@ -740,19 +740,13 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
                 .into_iter()
                 .flat_map(|_| ["browser.v1".into(), "browser-drafts.v1".into()]),
         )
-        .chain(
-            state
-                .management
-                .as_ref()
-                .into_iter()
-                .flat_map(|_| {
-                    [
-                        "input-settings.v1".into(),
-                        "browser-settings.v1".into(),
-                        "usage-statistics.v1".into(),
-                    ]
-                }),
-        )
+        .chain(state.management.as_ref().into_iter().flat_map(|_| {
+            [
+                "input-settings.v1".into(),
+                "browser-settings.v1".into(),
+                "usage-statistics.v1".into(),
+            ]
+        }))
         .collect(),
         workspace: Some(state.workspace.display().to_string()),
         git_branch: git_branch(&state.workspace),

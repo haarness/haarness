@@ -8,9 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use haarness_protocol::{PermissionReply, PermissionReplyDecision, QuestionReply};
 
 use crate::api::ApiClient;
-use crate::state::{
-    App, InterruptTarget, Overlay, PermissionChoice, PhaseInfo, selected,
-};
+use crate::state::{App, InterruptTarget, Overlay, PermissionChoice, PhaseInfo, selected};
 
 const CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
 
