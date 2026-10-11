@@ -46,7 +46,7 @@ import { PROTOCOL, type Approval, type FromBridge, type RawCommand, type ServerC
 import { createQueues } from "./queue";
 import { createRegistry, threadKey, wireState, wireTab, type Snapshot, type TabRecord, type ThreadRecord } from "./registry";
 import { pill, type Connection } from "./status";
-import type { UiRequest, UiResponse, UiSettings, UiSnapshot } from "./ui";
+import { failure as uiFailure, haarnessFailure, projectProblem, type UiRequest, type UiResponse, type UiSettings, type UiSnapshot } from "./ui";
 import { compareVersions } from "./version";
 
 interface Server extends ServerEntry {
@@ -76,6 +76,8 @@ export interface HostOptions {
   translate?(key: string): string;
   /** The user's interface language, at start and whenever it changes. */
   language?(code: string): void;
+  /** How long a chat's tabs stay attached after its last command (tests shorten it). */
+  idleMs?: number;
 }
 
 export function createHost(options: HostOptions) {
@@ -187,9 +189,12 @@ export function createHost(options: HostOptions) {
     const handoff = await platform.local.get<Handoff | null>("handoff");
     if (!handoff) return;
     await platform.local.set("handoff", null);
-    const fresh = platform.now() - handoff.at < HANDOFF_MS;
-    if (!fresh || !handoff.registry || (await platform.session.get("registry")) !== undefined) return;
-    await platform.session.set("registry", handoff.registry);
+    if (platform.now() - handoff.at >= HANDOFF_MS) return;
+    // Session storage that survived is newer than any hand-over.
+    const kept = await Promise.all(["registry", "refSeed", "stopped"].map((name) => platform.session.get(name)));
+    if (kept.some((value) => value !== undefined)) return;
+    // The Stop and ref seed are handed over even when the registry could not be saved.
+    if (handoff.registry) await platform.session.set("registry", handoff.registry);
     await platform.session.set("refSeed", handoff.refSeed);
     await platform.session.set("stopped", handoff.stopped);
   }
@@ -341,13 +346,14 @@ export function createHost(options: HostOptions) {
     rename(entry, message.title);
     const key = threadKey(workspace, message.thread);
     clearTimeout(idle.get(key));
+    idle.delete(key);
     const outcome = await queues.run(key, message.id, (signal) => run(serverId, entry, message, signal));
     if (message.command.inspect !== true) sendState(serverId, entry);
     bridge.send({ type: "to-server", server: serverId, message: { type: "result", id: message.id, outcome: encode(message.command, outcome) } });
-    idle.set(
-      key,
-      setTimeout(() => void release(entry), IDLE_DETACH_MS),
-    );
+    // One idle timer per chat, armed by the last of its commands to finish.
+    clearTimeout(idle.get(key));
+    idle.delete(key);
+    if (!queues.pending(key)) idle.set(key, setTimeout(() => void release(key, entry), options.idleMs ?? IDLE_DETACH_MS));
     if (restartWhenIdle && !queues.pending()) {
       restartWhenIdle = false;
       bridge.restart();
@@ -356,14 +362,17 @@ export function createHost(options: HostOptions) {
     refresh();
   }
 
-  /** No command for this chat in 30 s: let go of its tabs so Chrome's debugging bar can go away. */
-  async function release(entry: ThreadRecord) {
-    if (queues.pending(threadKey(entry.workspace, entry.thread))) return;
-    for (const tab of entry.tabs) {
-      // The driver assumes a live debugger: the next command attaches again with a new page.
-      pages.get(tab.tabId)?.dispose();
-      pages.delete(tab.tabId);
-      await platform.debugger.detach(tab.tabId).catch(() => {});
+  /**
+   * No command for this chat in 30 s: let go of its tabs so Chrome's debugging
+   * bar can go away. Their driver pages stay, so the refs of the model's last
+   * snapshot still work when its next command attaches again, however long it
+   * thought. A command that arrives meanwhile keeps the tabs not yet let go.
+   */
+  async function release(key: string, entry: ThreadRecord) {
+    idle.delete(key);
+    for (const tab of [...entry.tabs]) {
+      if (queues.pending(key) || idle.has(key)) return;
+      await platform.debugger.park(tab.tabId).catch(() => {});
     }
   }
 
@@ -652,6 +661,7 @@ export function createHost(options: HostOptions) {
       void after(() => {
         pages.get(removed)?.dispose();
         pages.delete(removed);
+        void platform.debugger.detach(removed).catch(() => {});
         registry.replaceTab(removed, added);
       });
     },
@@ -667,19 +677,24 @@ export function createHost(options: HostOptions) {
     debuggerDetached(tabId, reason) {
       pages.get(tabId)?.dispose();
       pages.delete(tabId);
-      if (reason === "canceled_by_user") void setStopped(true);
+      if (reason === "canceled_by_user") void after(() => setStopped(true));
     },
     downloadFinished(download) {
       bridge.send({ type: "download", ...download });
     },
     stopAll() {
-      void stopAll();
+      void after(stopAll);
     },
     alarm(name) {
-      if (name === RECONNECT_ALARM) bridge.retry();
+      if (name === RECONNECT_ALARM) void after(() => bridge.retry());
     },
   };
 
+  /**
+   * Runs an event's work once start() has loaded the stored state. The event
+   * that woke a stopped worker arrives first: a hello sent before then would
+   * carry no browser id, and a Stop recorded then would be overwritten.
+   */
   async function after(work: () => void | Promise<void>) {
     await start();
     await work();
@@ -743,8 +758,9 @@ export function createHost(options: HostOptions) {
       if (change.groupId >= 0) await share(tab, change.groupId);
       return;
     }
-    if (change.url !== undefined) {
+    if (change.url !== undefined && change.url !== record.url) {
       // Without a page watching navigations, any new URL may be a new document.
+      // (A new tab first reports the about:blank it was created with: not a navigation.)
       if (!pages.has(tabId)) record.generation++;
       record.url = change.url;
     }
@@ -836,13 +852,13 @@ export function createHost(options: HostOptions) {
 
   async function stopChat(entry: ThreadRecord): Promise<UiResponse> {
     const server = serverFor(entry.workspace);
-    if (!server) return { ok: false, error: "This project is not connected." };
+    if (!server) return uiFailure(key("This project is not connected."));
     const reply = await ask<Extract<FromBridge, { type: "stopped" }>>(`stopped:${server.id}:${entry.thread}`, {
       type: "stop",
       server: server.id,
       thread: entry.thread,
     });
-    return reply?.ok ? { ok: true } : { ok: false, error: reply?.error ?? "Haarness did not answer." };
+    return reply?.ok ? { ok: true } : haarnessFailure(reply?.error);
   }
 
   /**
@@ -925,7 +941,7 @@ export function createHost(options: HostOptions) {
         workspace: server.workspace,
         version: server.version,
         state: server.state,
-        error: server.error,
+        error: server.error === undefined ? undefined : projectProblem(server.error),
       })),
       chats: list.map(({ entry, working }) => ({
         key: threadKey(entry.workspace, entry.thread),
@@ -973,7 +989,7 @@ export function createHost(options: HostOptions) {
           `answered:${message.server}:${message.permission}`,
           { type: "answer", server: message.server, permission: message.permission, decision: message.decision },
         );
-        return reply?.ok ? { ok: true } : { ok: false, error: reply?.error ?? "Haarness did not answer." };
+        return reply?.ok ? { ok: true } : haarnessFailure(reply?.error);
       }
       case "resume":
         await setStopped(false);
@@ -982,11 +998,11 @@ export function createHost(options: HostOptions) {
         await setPaused(message.paused);
         return { ok: true };
       case "stop-chat":
-        return entry ? stopChat(entry) : { ok: false, error: "This chat has no tabs here." };
+        return entry ? stopChat(entry) : uiFailure(key("This chat has no tabs here."));
       case "show-tabs": {
         const record = entry?.tabs.find((tab) => tab.id === entry.focusedTabID) ?? entry?.tabs[0];
         const live = record && (await platform.tabs.get(record.tabId));
-        if (!entry || !live) return { ok: false, error: "This chat has no tabs here." };
+        if (!entry || !live) return uiFailure(key("This chat has no tabs here."));
         if (platform.groups && entry.groupId !== null)
           await platform.groups.update(entry.groupId, { collapsed: false }).catch(() => {});
         await platform.tabs.activate(live.id);
@@ -1058,7 +1074,21 @@ export function createHost(options: HostOptions) {
       bridge.close();
     },
     /** For tests and the e2e harness. */
-    debug: { registry, control, pages, servers, queues, settings: () => settings },
+    debug: {
+      registry,
+      control,
+      pages,
+      servers,
+      queues,
+      settings: () => settings,
+      attached: (tabId: number) => platform.debugger.attached(tabId),
+      /** Lets go of a chat's tabs now, as its idle timer would. */
+      release(key: string) {
+        const entry = registry.get(key);
+        clearTimeout(idle.get(key));
+        return entry ? release(key, entry) : Promise.resolve();
+      },
+    },
   };
 }
 

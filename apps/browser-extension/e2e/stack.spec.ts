@@ -44,7 +44,8 @@ test("opens a Chrome tab in a group named after the chat once the site and its w
   const response = await call.done;
   expect(response.metadata).toMatchObject({ browser: "chrome" });
   const tab = value<Tab>(response);
-  expect(tab).toMatchObject({ url, title: "Home of shop.test", browser: "chrome" });
+  // Loading the first page is one navigation: the tab's about:blank does not count.
+  expect(tab).toMatchObject({ url, title: "Home of shop.test", browser: "chrome", generation: 1 });
 
   const groups = await stack.worker.evaluate(() => chrome.tabGroups.query({}));
   expect(groups.map((group) => group.title)).toEqual(["Research trip"]);
@@ -65,6 +66,7 @@ test("opens a Chrome tab in a group named after the chat once the site and its w
   // The twin rode along with the first answer; another site asks again.
   const twin = value<Tab>(await stack.tool(thread, "browser_navigate", { tabID: tab.id, url: stack.site.url("www.shop", "/") }));
   expect(twin.title).toBe("Home of www.shop.test");
+  expect(twin.generation).toBe(2);
   const other = stack.call(thread, "browser_navigate", { tabID: tab.id, url: stack.site.url("other", "/") });
   const asked = await stack.answer(thread, "once");
   expect(asked.patterns).toEqual([
@@ -336,13 +338,14 @@ test("a blocked site is refused, and a redirect to a blocked or unapproved site 
   // The tab never shows either site.
   const list = value<{ tabs: Tab[] }>(await stack.tool(thread, "browser_tabs_list", {}));
   expect(list.tabs[0].url).not.toMatch(/other\.test|blocked\.test/);
-  // A frame of an allowed page does not load the blocked site either. The call says so, but
-  // the allowed page stays (only a blocked page of the tab's own is taken away).
-  expect(
-    failed(await stack.tool(thread, "browser_navigate", { tabID: tab.id, url: stack.site.url("shop", "/frame?inner=blocked") })),
-  ).toContain(stack.site.origin("blocked"));
+  // A frame or an image from the blocked site is not loaded either, but the allowed page and
+  // the call stand (only a blocked page of the tab's own fails the call and is taken away).
+  const framed = value<Tab>(await stack.tool(thread, "browser_navigate", { tabID: tab.id, url: stack.site.url("shop", "/frame?inner=blocked") }));
+  expect(framed.title).toBe("Framed");
+  const pixel = value<Tab>(await stack.tool(thread, "browser_navigate", { tabID: tab.id, url: stack.site.url("shop", "/pixel?from=blocked") }));
+  expect(pixel.title).toBe("Tracked");
   expect(stack.site.requests.some((request) => request.host === "blocked.test")).toBe(false);
-  expect(value<{ tabs: Tab[] }>(await stack.tool(thread, "browser_tabs_list", {})).tabs[0].title).toBe("Framed");
+  expect(value<{ tabs: Tab[] }>(await stack.tool(thread, "browser_tabs_list", {})).tabs[0].title).toBe("Tracked");
 });
 
 test("Chrome's own pages are off limits even in an agent tab", async ({ stack }) => {
@@ -403,6 +406,32 @@ test("a download the agent started is listed for its tab and handed over once al
   await mine.click("#report");
   await new Promise((resolve) => setTimeout(resolve, 1_500));
   expect(value<{ files: unknown[] }>(await stack.tool(thread, "browser_files_list", { tabID: tab.id })).files).toHaveLength(1);
+});
+
+test("a download the page starts only after the click returned is still the agent's", async ({ stack }) => {
+  const thread = await stack.thread("Export the data");
+  const tab = await open(stack, thread, stack.site.url("shop", "/downloads"));
+  const snapshot = value<{ content: string }>(await stack.tool(thread, "browser_snapshot", { tabID: tab.id }));
+  value(await stack.tool(thread, "browser_click", { tabID: tab.id, ref: ref(snapshot, "Export") }));
+  // The page waits 2 s for the server to build the file: the click came back first.
+  expect(stack.site.requests.some((request) => request.path === "/export.csv")).toBe(false);
+  let files: { id: string; name: string; state: string }[] = [];
+  await expect
+    .poll(
+      async () => {
+        const listed = await stack.tool(thread, "browser_files_list", { tabID: tab.id });
+        // The download's navigation starting between the call's check and its run asks for a new call.
+        if (listed.isError && /target changed/.test(listed.output)) return [];
+        files = value<{ files: typeof files }>(listed).files;
+        return files.map((file) => [file.name, file.state]);
+      },
+      { timeout: 20_000 },
+    )
+    .toEqual([["export.csv", "completed"]]);
+  const call = stack.call(thread, "browser_files_get", { tabID: tab.id, fileID: files[0].id });
+  expect((await stack.answer(thread, "once")).patterns).toEqual([`chrome-downloads:${thread.id}:${stack.site.origin("shop")}`]);
+  const [file] = value<{ files: { path: string }[] }>(await call.done).files;
+  expect(readFileSync(file.path, "utf8")).toBe("id,total\n1,42\n");
 });
 
 test("a window the agent's page opens joins the chat's group", async ({ stack }) => {
@@ -598,18 +627,24 @@ test("a call in flight when the user quits Chrome fails with the recovery advice
   expect(list.browsers.find((entry) => entry.browser === "chrome")?.available).toBe(false);
 });
 
-test("after 30 s without commands the tab is let go, and the next command attaches a fresh page", async ({ stack }) => {
-  test.setTimeout(150_000);
+test("after 30 s without commands the tab is let go; the model's refs still work after, unless the user moved on", async ({ stack }) => {
+  test.setTimeout(180_000);
   const thread = await stack.thread("Idle for a while");
   const tab = await open(stack, thread, stack.site.url("shop", "/form"));
+  const page = await stack.page(tab.id);
   const first = value<{ content: string }>(await stack.tool(thread, "browser_snapshot", { tabID: tab.id }));
   const tabId = await chromeTab(stack, tab.id);
   // (chrome.debugger.getTargets would count Playwright's own attachment.)
-  const attached = () => stack.host((host, id) => host.debug.pages.has(id), tabId);
+  const attached = () => stack.host((host, id) => host.debug.attached(id), tabId);
   expect(await attached()).toBe(true);
   await expect.poll(attached, { timeout: 45_000, intervals: [1_000] }).toBe(false);
-  // The user moves on in that tab while Haarness is detached.
-  const page = await stack.page(tab.id);
+  // The model took its time: the refs of its last snapshot still work once Haarness attaches again.
+  value(await stack.tool(thread, "browser_fill", { tabID: tab.id, ref: ref(first, "Name"), text: "After a pause" }));
+  await expect.poll(() => page.locator("#name").inputValue()).toBe("After a pause");
+  expect(await attached()).toBe(true);
+
+  // Let go again; the user moves on in that tab meanwhile.
+  await expect.poll(attached, { timeout: 45_000, intervals: [1_000] }).toBe(false);
   await page.goto(stack.site.url("shop", "/"));
   await expect.poll(async () => value<{ tabs: Tab[] }>(await stack.tool(thread, "browser_tabs_list", {})).tabs[0].url).toBe(stack.site.url("shop", "/"));
   // A ref from before is stale; a new snapshot works on the new page.
@@ -618,6 +653,40 @@ test("after 30 s without commands the tab is let go, and the next command attach
   expect(snapshot.content).toContain("Welcome to shop.test.");
   value(await stack.tool(thread, "browser_click", { tabID: tab.id, ref: ref(snapshot, "Form") }));
   await expect.poll(() => page.url()).toBe(stack.site.url("shop", "/form"));
+});
+
+test("refs in a cross-site frame and the network log outlast the debugger letting go; a reload does not", async ({ stack }) => {
+  const thread = await stack.thread("Pause in a frame");
+  const tab = await open(stack, thread, stack.site.url("shop", "/frame"));
+  const page = await stack.page(tab.id);
+  await expect.poll(() => page.frames().length).toBe(2);
+  const inner = value<{ frames: { id: string; parentID?: string }[] }>(await stack.tool(thread, "browser_frames", { tabID: tab.id })).frames.find(
+    (frame) => frame.parentID,
+  )!;
+  const read = stack.call(thread, "browser_snapshot", { tabID: tab.id, frameID: inner.id });
+  await stack.answer(thread, "always");
+  const snapshot = value<{ content: string }>(await read.done);
+  const tabId = await chromeTab(stack, tab.id);
+  const key = await stack.host((host) => host.snapshot().chats[0].key);
+  const release = () => stack.host((host, chat) => host.debug.release(chat), key);
+  const attached = () => stack.host((host, id) => host.debug.attached(id), tabId);
+
+  await release();
+  expect(await attached()).toBe(false);
+  value(await stack.tool(thread, "browser_fill", { tabID: tab.id, ref: ref(snapshot, "Inner field"), text: "Still mine" }));
+  await expect.poll(() => page.frames()[1].locator("#inner-field").inputValue()).toBe("Still mine");
+  expect(await attached()).toBe(true);
+  const requests = value<{ requests: { url: string }[] }>(await stack.tool(thread, "browser_network_list", { tabID: tab.id })).requests;
+  expect(requests.map((request) => request.url)).toContain(stack.site.url("shop", "/frame"));
+
+  // The user reloads the page while Haarness is away: same URL, new document, no old refs.
+  await release();
+  await page.reload();
+  await expect.poll(() => page.frames().length).toBe(2);
+  expect(failed(await stack.tool(thread, "browser_fill", { tabID: tab.id, ref: ref(snapshot, "Inner field"), text: "Too late" }))).toMatch(
+    /stale|changed|snapshot/i,
+  );
+  expect(await page.frames()[1].locator("#inner-field").inputValue()).toBe("");
 });
 
 test("two Chrome profiles: a chat sticks to the profile holding its tabs, and each call reaches it", async ({ stack }) => {

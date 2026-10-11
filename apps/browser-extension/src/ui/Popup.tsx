@@ -4,7 +4,7 @@ import { approvalLineKeys, type ApprovalLine } from "../core/approvals";
 import type { UiApproval, UiChat, UiSnapshot } from "../core/ui";
 import { Tile } from "./brand";
 import { openWelcome, request, snapshot } from "./client";
-import { CopyField, ErrorLine, Spinner, StatusPill, Switch, useAction } from "./components";
+import { CopyField, ErrorLine, Spinner, StatusPill, Switch, useAction, useActions, type Action } from "./components";
 import { around, t } from "./i18n";
 import { Icon } from "./icons";
 
@@ -28,6 +28,7 @@ export function Popup() {
 
 function Body(props: { snapshot: UiSnapshot }) {
   const s = () => props.snapshot;
+  const answers = useActions();
   return (
     <>
       <main class="body">
@@ -65,7 +66,9 @@ function Body(props: { snapshot: UiSnapshot }) {
                 <span class="grow">{t("Paused. Agents can't use this browser until you turn it back on.")}</span>
               </div>
             </Show>
-            <For each={s().approvals}>{(approval) => <Approval approval={approval} />}</For>
+            <For each={s().approvals}>
+              {(approval) => <Approval approval={approval} action={answers(`${approval.server} ${approval.id}`)} />}
+            </For>
             <Show when={s().chats.length} fallback={<Empty projects={s().projects.length} />}>
               <Chats chats={s().chats} />
             </Show>
@@ -144,8 +147,8 @@ export function ApprovalText(props: { line: ApprovalLine }): JSX.Element {
   ));
 }
 
-function Approval(props: { approval: UiApproval }) {
-  const action = useAction();
+function Approval(props: { approval: UiApproval; action: Action }) {
+  const action = props.action;
   const answer = (decision: "always" | "reject") =>
     void action.run(() => request({ type: "answer", server: props.approval.server, permission: props.approval.id, decision }));
   return (
@@ -189,13 +192,14 @@ function Approval(props: { approval: UiApproval }) {
 
 function Chats(props: { chats: UiChat[] }) {
   const closeAll = useAction();
+  const actions = useActions();
   return (
     <section class="chats" aria-labelledby="chats-title">
       <h2 class="section-label" id="chats-title">
         {t("Chats using Chrome")}
       </h2>
       <ul class="chat-list">
-        <For each={props.chats}>{(chat) => <Chat chat={chat} />}</For>
+        <For each={props.chats}>{(chat) => <Chat chat={chat} action={actions(chat.key)} />}</For>
       </ul>
       <button
         type="button"
@@ -210,8 +214,8 @@ function Chats(props: { chats: UiChat[] }) {
   );
 }
 
-function Chat(props: { chat: UiChat }) {
-  const action = useAction();
+function Chat(props: { chat: UiChat; action: Action }) {
+  const action = props.action;
   const c = () => props.chat;
   return (
     <li class="chat" classList={{ working: c().working }}>

@@ -23,3 +23,20 @@ export function abortable<T>(promise: Promise<T>, signal: AbortSignal, timeoutMs
     );
   });
 }
+
+/** Settles with `promise`'s value, or with undefined once `ms` pass or it rejects. */
+export function within<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(undefined), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(undefined);
+      },
+    );
+  });
+}

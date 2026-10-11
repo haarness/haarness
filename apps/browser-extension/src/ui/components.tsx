@@ -2,6 +2,7 @@
 import { createSignal, onCleanup, type JSX } from "solid-js";
 import { key } from "../core/i18n";
 import type { Pill } from "../core/status";
+import type { UiResponse } from "../core/ui";
 import { Icon } from "./icons";
 import { t } from "./i18n";
 
@@ -76,21 +77,41 @@ export function Spinner() {
   return <span class="spinner" aria-hidden="true" />;
 }
 
-/** Runs an async action with the control busy until it finishes; reports a failure under it. */
-export function useAction() {
-  const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal("");
-  const run = async (work: () => Promise<{ ok: boolean; error?: string }>) => {
-    setBusy(true);
-    setError("");
-    try {
-      const result = await work();
-      if (!result.ok) setError(result.error ?? t("Something went wrong."));
-    } finally {
-      setBusy(false);
-    }
-  };
-  return { busy, error, run };
+type Failure = Extract<UiResponse, { ok: false }>;
+
+/**
+ * Actions for the rows of a list, each run with its control busy until it
+ * finishes and its failure reported under it. Every snapshot gives the
+ * popup's lists new rows, so this state lives with the list, by row id.
+ */
+export function useActions() {
+  const [states, setStates] = createSignal<Record<string, { busy: boolean; failed?: Failure }>>({});
+  const update = (id: string, state: { busy: boolean; failed?: Failure }) => setStates((all) => ({ ...all, [id]: state }));
+  return (id: string) => ({
+    busy: () => states()[id]?.busy ?? false,
+    /** The failure in the page's language (translated as it renders, so it follows a language change), or "". */
+    error: () => {
+      const failed = states()[id]?.failed;
+      return failed ? t(failed.error, failed.values) : "";
+    },
+    async run(work: () => Promise<UiResponse>) {
+      update(id, { busy: true });
+      let failed: Failure | undefined;
+      try {
+        const result = await work();
+        if (!result.ok) failed = result.error ? result : { ok: false, error: key("Something went wrong.") };
+      } finally {
+        update(id, { busy: false, failed });
+      }
+    },
+  });
+}
+
+export type Action = ReturnType<ReturnType<typeof useActions>>;
+
+/** One action, for a control that is not in a list. */
+export function useAction(): Action {
+  return useActions()("");
 }
 
 export function ErrorLine(props: { children: JSX.Element }) {

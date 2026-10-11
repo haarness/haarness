@@ -2383,5 +2383,17 @@
   "Extension folder": "مجلد الامتداد",
   "Update ready": "التحديث جاهز",
   "Something went wrong.": "حدث خطأ ما.",
-  "This request also needs an approval outside Chrome. Answer it in Haarness.": "يحتاج هذا الطلب أيضًا إلى موافقة خارج Chrome. أجب في Haarness."
+  "This request also needs an approval outside Chrome. Answer it in Haarness.": "يحتاج هذا الطلب أيضًا إلى موافقة خارج Chrome. أجب في Haarness.",
+  "This project is not connected.": "هذا المشروع غير متصل.",
+  "This approval is no longer waiting.": "لم تعد هذه الموافقة بانتظار الرد.",
+  "Haarness did not answer.": "لم يستجب Haarness.",
+  "Haarness is not reachable.": "يتعذّر الوصول إلى Haarness.",
+  "Haarness could not do that: {reason}": "تعذّر على Haarness تنفيذ ذلك: {reason}",
+  "Restart this project's Haarness server.": "أعد تشغيل خادم Haarness لهذا المشروع.",
+  "This project's Haarness server does not accept Chrome. Restart it without --anonymous.": "خادم Haarness لهذا المشروع لا يقبل Chrome. أعد تشغيله دون --anonymous.",
+  "This project's Haarness server is not reachable.": "يتعذّر الوصول إلى خادم Haarness لهذا المشروع.",
+  "This project's Haarness server did not answer in time.": "لم يستجب خادم Haarness لهذا المشروع في الوقت المحدد.",
+  "This chat has no tabs here.": "لا توجد علامات تبويب لهذه المحادثة هنا.",
+  "Haarness for Chrome restarted. Try again.": "أُعيد تشغيل Haarness for Chrome. حاول مرة أخرى.",
+  "Haarness for Chrome is restarting. Try again.": "يُعاد تشغيل Haarness for Chrome. حاول مرة أخرى."
 }
