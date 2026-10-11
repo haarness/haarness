@@ -4366,6 +4366,17 @@ test("slash commands that answer with text show the answer above the composer", 
     "Echo: after-command-proof",
   );
   await expect(note).toHaveCount(0);
+  // A workflow run's answer follows the run instead of staying "running".
+  await expect.poll(() => client.activeTurns().then((v) => v.length)).toBe(0);
+  await send("/workflow run fixture");
+  await expect(note.getByRole("status")).toContainText(
+    "Workflow fixture finished.",
+  );
+  await expect(note.getByRole("status")).toContainText("Run ID: ");
+  await expect(page.locator(".transcript")).toContainText(
+    "Background workflow completed: fixture",
+  );
+  await expect.poll(() => client.activeTurns().then((v) => v.length)).toBe(0);
   expect(errors).toEqual([]);
 });
 

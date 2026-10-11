@@ -1,8 +1,11 @@
 import type { CommandExecutionResponse, WorkflowRun } from "@haarness/sdk";
 import { t } from "./i18n";
 
-/** A command's answer, shown above the composer of its chat until dismissed. */
-export type CommandNote = { title: string; text: string };
+/**
+ * A command's answer, shown above the composer of its chat until dismissed.
+ * A workflow command's answer names the run it follows.
+ */
+export type CommandNote = { title: string; text: string; run?: string };
 
 /**
  * A prompt command answers in the transcript as a turn. Management commands
@@ -17,8 +20,30 @@ export function commandNote(
   if (response.kind === "text")
     return response.text.trim() ? { title, text: response.text.trim() } : null;
   if (response.kind === "workflow_run")
-    return { title, text: workflowRunText(response.run) };
+    return {
+      title,
+      text: workflowRunText(response.run),
+      run: response.run.id,
+    };
   return null;
+}
+
+/**
+ * The same answer once its run moved on, so it never says a workflow is
+ * running beside the transcript's "Background workflow completed".
+ */
+export function followRun(note: CommandNote, run: WorkflowRun): CommandNote {
+  return { ...note, text: workflowRunText(run) };
+}
+
+/**
+ * The newer of a command's run and the last update seen for it, which a
+ * quick workflow can send before the command answers.
+ */
+export function latestRun(run: WorkflowRun, seen?: WorkflowRun) {
+  return seen && Date.parse(seen.time.updated) > Date.parse(run.time.updated)
+    ? seen
+    : run;
 }
 
 function workflowRunText(run: WorkflowRun) {
