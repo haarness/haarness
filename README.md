@@ -66,10 +66,11 @@ connects Haarness Cloud or a provider; then type in the message box and press En
 **Approvals.** Each chat is in **Review** (the default) or **Auto**, stored on the server and
 shared by every client attached to it: **Ctrl+Y** in the TUI or the shield pill in Desktop's
 composer changes the open chat, and the choice survives quitting. In Review, edits and commands
-inside the project run without asking; Haarness asks before leaving the project, reading secrets
-such as `.env`, switching agents, generating paid media, opening a new site in Desktop's browser
-or repeating a failing step, plus anything your own rules set to ask. Auto answers those requests
-itself, except Haarness Cloud actions that spend money or delete something, which always ask.
+inside the project run without asking; Haarness asks before using files outside the project,
+reading secrets such as `.env`, switching agents or generating paid media, plus anything your own
+rules set to ask. Desktop's browser asks about a site only when **Settings → Browser** sets it to
+**Requires approval**. Auto answers those requests itself, except Haarness Cloud actions that
+spend money or delete something, which always ask.
 
 In the TUI, answer a request with a key:
 
@@ -489,7 +490,7 @@ timeout_ms = 5000
 [permissions]
 # Decisions are allow|ask|deny; later rules override earlier ones.
 # The defaults allow tools, while external directories, secret
-# `.env` reads, and doom-loop protection ask. `edit` governs write, edit, and
+# `.env` reads, agent switches and generated media ask. `edit` governs write, edit, and
 # apply_patch together; legacy write/apply_patch spellings remain aliases.
 edit = "ask"
 [permissions.external_directory]
