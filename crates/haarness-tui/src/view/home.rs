@@ -42,7 +42,7 @@ pub fn masthead(app: &App, width: usize, identity_in_panel: bool) -> Vec<Line> {
     if home {
         lines.push(indented(
             single_line(
-                "durable harness for coding agents",
+                app.language.text("durable harness for coding agents"),
                 width.saturating_sub(INSET),
             ),
             theme.muted,
@@ -50,16 +50,23 @@ pub fn masthead(app: &App, width: usize, identity_in_panel: bool) -> Vec<Line> {
         if !app.any_provider_connected() {
             // The one thing standing between a fresh install and a first
             // prompt, said where the eye lands first.
+            let language = app.language;
+            let missing = language.text("no provider connected");
             let mut spans = vec![Span::new(" ".repeat(INSET), theme.muted)];
-            spans
-                .push(Span::new("no provider connected", theme.accent).with_attributes(attr::BOLD));
-            let room = width.saturating_sub(INSET + "no provider connected".width());
+            spans.push(Span::new(missing, theme.accent).with_attributes(attr::BOLD));
+            let room = width.saturating_sub(INSET + missing.width());
             if room >= "  ·  /connect".width() {
+                // The command is drawn highlighted wherever the sentence
+                // puts it.
+                let template = language.text("/connect to sign in or add an API key");
+                let (before, rest) = template.split_once("/connect").unwrap_or(("", template));
                 spans.push(Span::new("  ·  ", theme.muted));
+                if room >= "  ·  /connect".width() + before.width() + rest.width() {
+                    spans.push(Span::new(before.to_owned(), theme.muted));
+                }
                 spans.push(Span::new("/connect", theme.accent).with_attributes(attr::BOLD));
-                let rest = " to sign in or add an API key";
-                if room >= "  ·  /connect".width() + rest.width() {
-                    spans.push(Span::new(rest, theme.muted));
+                if room >= "  ·  /connect".width() + before.width() + rest.width() {
+                    spans.push(Span::new(rest.to_owned(), theme.muted));
                 }
             }
             lines.push(Line::new(spans));

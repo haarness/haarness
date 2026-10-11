@@ -14,6 +14,7 @@ use haarness_protocol::{
 };
 use unicode_width::UnicodeWidthStr as _;
 
+use crate::locale::Language;
 use crate::state::{App, workflow_status, workflow_status_marker};
 use crate::theme::Theme;
 use crate::view::span::{line, single_line, wrap_spans};
@@ -318,12 +319,29 @@ pub fn run_body(app: &App, run: &WorkflowRun, width: usize) -> Vec<Line> {
 
 /// Footer hint for the inspector: what the keys do, plus the scroll position
 /// when there is more report than panel.
-pub fn run_footer(shown: usize, total: usize) -> String {
+pub fn run_footer(language: Language, shown: usize, total: usize) -> String {
     if total > shown {
-        format!("{shown} of {total} rows  ·  pgup/pgdn scroll  ·  enter actions")
+        rows_footer(
+            language,
+            shown,
+            total,
+            &["pgup/pgdn scroll", "enter actions"],
+        )
     } else {
-        "enter actions  ·  esc close".to_owned()
+        language.hints(&["enter actions", "esc close"])
     }
+}
+
+/// "12 of 40 rows" ahead of the keys that scroll and act on a long report.
+fn rows_footer(language: Language, shown: usize, total: usize, keys: &[&str]) -> String {
+    format!(
+        "{}  \u{00b7}  {}",
+        language.format(
+            "{shown} of {total} rows",
+            &[("shown", &shown.to_string()), ("total", &total.to_string())],
+        ),
+        language.hints(keys)
+    )
 }
 
 /// A definition you have not started yet. Its arguments are the reason this
@@ -473,11 +491,16 @@ pub fn definition_body(app: &App, definition: &WorkflowDefinition, width: usize)
 }
 
 /// Footer hint for the definition view.
-pub fn definition_footer(shown: usize, total: usize) -> String {
+pub fn definition_footer(language: Language, shown: usize, total: usize) -> String {
     if total > shown {
-        format!("{shown} of {total} rows  ·  pgup/pgdn scroll  ·  enter starts it")
+        rows_footer(
+            language,
+            shown,
+            total,
+            &["pgup/pgdn scroll", "enter starts it"],
+        )
     } else {
-        "enter starts this workflow  ·  esc close".to_owned()
+        language.hints(&["enter starts this workflow", "esc close"])
     }
 }
 
@@ -520,10 +543,10 @@ pub fn invalid_body(
 }
 
 /// Footer hint for an unloadable definition: nothing to launch, only to fix.
-pub fn invalid_footer(shown: usize, total: usize) -> String {
+pub fn invalid_footer(language: Language, shown: usize, total: usize) -> String {
     if total > shown {
-        format!("{shown} of {total} rows  ·  pgup/pgdn scroll  ·  esc close")
+        rows_footer(language, shown, total, &["pgup/pgdn scroll", "esc close"])
     } else {
-        "fix the file and reopen /workflow  ·  esc close".to_owned()
+        language.hints(&["fix the file and reopen /workflow", "esc close"])
     }
 }

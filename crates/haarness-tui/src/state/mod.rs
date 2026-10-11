@@ -2244,10 +2244,17 @@ impl App {
                     || entry.name.starts_with(&query)
                     || entry.aliases.iter().any(|alias| alias.starts_with(&query))
                     || entry.description.to_ascii_lowercase().contains(&query)
+                    || self
+                        .language
+                        .text(entry.description)
+                        .to_lowercase()
+                        .contains(&query)
             })
             .map(|entry| SlashEntry {
                 name: entry.name.to_owned(),
-                description: entry.description.to_owned(),
+                // Read at render time, keyed by the English text, so a
+                // language switch reaches an open menu.
+                description: self.language.text(entry.description).to_owned(),
             })
             .collect();
         for command in &self.server_commands {
@@ -2295,7 +2302,7 @@ impl App {
                     .meta
                     .description
                     .as_deref()
-                    .unwrap_or("Run reusable workflow");
+                    .unwrap_or_else(|| self.language.text("Run reusable workflow"));
                 let arguments = if workflow.meta.arguments.is_empty() {
                     String::new()
                 } else {
@@ -2312,7 +2319,10 @@ impl App {
                 };
                 entries.push(SlashEntry {
                     name: workflow.invocation.clone(),
-                    description: format!("Workflow · {description}{arguments}"),
+                    description: format!(
+                        "{} · {description}{arguments}",
+                        self.language.text("Workflow")
+                    ),
                 });
             }
         }
@@ -2373,29 +2383,31 @@ impl App {
             || (!self.parent_stack.is_empty() && thread.id == self.root_thread_id);
         let working =
             (current && self.active_turn.is_some()) || self.active_tree_turn_count(thread.id) > 0;
+        let language = self.language;
         let mut detail = Vec::new();
         if current {
-            detail.push("current".to_owned());
+            detail.push(language.text("current").to_owned());
         }
         if working {
-            detail.push("working".to_owned());
+            detail.push(language.text("working").to_owned());
         }
         if thread.archived {
-            detail.push("archived".to_owned());
+            detail.push(language.text("archived").to_owned());
         }
         detail.push(thread.agent.clone());
         detail.push(self.model_label(&format!("{}/{}", thread.provider, thread.model)));
         let age = (chrono::Utc::now() - thread.updated_at)
             .num_seconds()
             .max(0);
+        let ago = |key: &str, count: i64| language.format(key, &[("count", &count.to_string())]);
         detail.push(if age < 60 {
-            "updated now".to_owned()
+            language.text("updated now").to_owned()
         } else if age < 3_600 {
-            format!("updated {}m ago", age / 60)
+            ago("updated {count}m ago", age / 60)
         } else if age < 86_400 {
-            format!("updated {}h ago", age / 3_600)
+            ago("updated {count}h ago", age / 3_600)
         } else {
-            format!("updated {}d ago", age / 86_400)
+            ago("updated {count}d ago", age / 86_400)
         });
         let id = thread.id.to_string();
         detail.push(crate::view::span::short_id(&id).to_owned());
@@ -2415,41 +2427,43 @@ impl App {
             return;
         };
         let id = thread.id.to_string();
+        let language = self.language;
+        let text = |key: &str| language.text(key).to_owned();
         let mut entries = Vec::new();
         if thread.id != self.thread.id {
             entries.push(OptionEntry {
                 label: if thread.archived {
-                    "Restore and resume".into()
+                    text("Restore and resume")
                 } else {
-                    "Resume".into()
+                    text("Resume")
                 },
-                description: "Open this session and restore its draft".into(),
+                description: text("Open this session and restore its draft"),
                 value: format!("resume:{id}"),
             });
         }
         entries.extend([
             OptionEntry {
-                label: "Fork and resume".into(),
-                description: "Create a new session from this history".into(),
+                label: text("Fork and resume"),
+                description: text("Create a new session from this history"),
                 value: format!("fork:{id}"),
             },
             OptionEntry {
-                label: "Rename".into(),
-                description: "Prefill a rename command for this session".into(),
+                label: text("Rename"),
+                description: text("Prefill a rename command for this session"),
                 value: format!("rename:{id}"),
             },
             OptionEntry {
                 label: if thread.archived {
-                    "Unarchive".into()
+                    text("Unarchive")
                 } else {
-                    "Archive".into()
+                    text("Archive")
                 },
                 description: if thread.id == self.thread.id {
-                    "Hide this session and open a fresh one".into()
+                    text("Hide this session and open a fresh one")
                 } else if thread.archived {
-                    "Return this session to the normal switcher".into()
+                    text("Return this session to the normal switcher")
                 } else {
-                    "Hide this session without deleting it".into()
+                    text("Hide this session without deleting it")
                 },
                 value: format!(
                     "{}:{id}",
@@ -2461,7 +2475,7 @@ impl App {
                 ),
             },
             OptionEntry {
-                label: "Copy session ID".into(),
+                label: text("Copy session ID"),
                 description: id.clone(),
                 value: format!("copy:{id}"),
             },

@@ -2300,7 +2300,10 @@ impl App {
             "permissions-mode" => match arguments.trim() {
                 "auto" => self.change_approval_mode(true, client).await,
                 "review" | "normal" => self.change_approval_mode(false, client).await,
-                "" => self.change_approval_mode(!self.auto_permissions, client).await,
+                "" => {
+                    self.change_approval_mode(!self.auto_permissions, client)
+                        .await
+                }
                 _ => self.notice = "Usage: /permissions-mode [review|auto]".into(),
             },
             "new" if self.is_untouched_session() => {
@@ -2723,7 +2726,7 @@ impl App {
                 } else if let Some(language) = crate::locale::Language::parse(arguments) {
                     self.language = language;
                     crate::config::save_language(language);
-                    self.notice = format!("{}: {}", language.text("language"), language.code());
+                    self.notice = language_notice(language);
                 } else {
                     self.notice = self
                         .language
@@ -3236,7 +3239,7 @@ impl App {
                 if let Some(language) = crate::locale::Language::parse(value) {
                     self.language = language;
                     crate::config::save_language(language);
-                    self.notice = format!("{}: {}", language.text("language"), language.code());
+                    self.notice = language_notice(language);
                 }
             }
             OptionsKind::ReasoningEffort => match value {
@@ -4074,8 +4077,13 @@ impl App {
             .unwrap_or(0);
         self.thread = thread;
         if let Some(id) = abandoned {
-            archive_untouched(&mut self.threads, id, client, std::time::Duration::from_secs(1))
-                .await;
+            archive_untouched(
+                &mut self.threads,
+                id,
+                client,
+                std::time::Duration::from_secs(1),
+            )
+            .await;
         }
         self.input_queue = client.input_queue(self.thread.id).await.unwrap_or_default();
         self.input_queue_edit = None;
@@ -4920,22 +4928,21 @@ pub(crate) fn default_goal_completion() -> haarness_protocol::GoalCompletion {
 
 /// Choices for the /reasoning modal, with the active state annotated.
 fn reasoning_entries(app: &App) -> Vec<OptionEntry> {
-    let active = |value: &str| {
-        if !app.thread.ultracode && app.reasoning_effort.as_deref() == Some(value) {
-            " · active"
+    let language = app.language;
+    // The levels themselves (low, high, max, ultracode) are values typed after
+    // /reasoning, so they stay as typed; what they mean is translated.
+    let describe = |key: &str, active: bool| {
+        if active {
+            format!("{} · {}", language.text(key), language.text("active"))
         } else {
-            ""
+            language.text(key).to_owned()
         }
     };
     let mut entries = vec![OptionEntry {
-        label: "provider default".into(),
-        description: format!(
-            "Let the model decide{}",
-            if app.reasoning_effort.is_none() && !app.thread.ultracode {
-                " · active"
-            } else {
-                ""
-            }
+        label: language.text("provider default").into(),
+        description: describe(
+            "Let the model decide",
+            app.reasoning_effort.is_none() && !app.thread.ultracode,
         ),
         value: "off".into(),
     }];
@@ -4951,30 +4958,31 @@ fn reasoning_entries(app: &App) -> Vec<OptionEntry> {
             _ => "Model-supported thinking level",
         };
         entries.push(OptionEntry {
-            label: effort.into(),
-            description: format!("{description}{}", active(effort)),
+            label: effort.clone(),
+            description: describe(
+                description,
+                !app.thread.ultracode && app.reasoning_effort.as_deref() == Some(effort.as_str()),
+            ),
             value: effort.into(),
         });
     }
     entries.push(OptionEntry {
         label: "ultracode".into(),
-        description: format!(
-            "Workflow orchestration · strongest compatible reasoning{}",
-            if app.thread.ultracode {
-                " · active"
-            } else {
-                ""
-            }
+        description: describe(
+            "Workflow orchestration · strongest compatible reasoning",
+            app.thread.ultracode,
         ),
         value: "ultracode".into(),
     });
     entries.push(OptionEntry {
         label: if app.reasoning {
-            "hide reasoning text".into()
+            language.text("hide reasoning text").into()
         } else {
-            "show reasoning text".into()
+            language.text("show reasoning text").into()
         },
-        description: "Toggle the thinking display in the transcript".into(),
+        description: language
+            .text("Toggle the thinking display in the transcript")
+            .into(),
         value: "display".into(),
     });
     entries
@@ -4986,13 +4994,18 @@ fn language_entries(app: &App) -> Vec<OptionEntry> {
         .map(|(language, code, label)| OptionEntry {
             label: label.into(),
             description: if app.language == language {
-                "active".into()
+                app.language.text("active").into()
             } else {
                 code.into()
             },
             value: code.into(),
         })
         .collect()
+}
+
+/// What `/language` says once it switches, in the language just chosen.
+pub(crate) fn language_notice(language: crate::locale::Language) -> String {
+    format!("{}: {}", language.text("Language"), language.code())
 }
 
 /// Archive an untouched session the user has moved on from, so launches and
@@ -5013,10 +5026,7 @@ pub(crate) async fn archive_untouched(
         ultracode: None,
     };
     let archive = client.update_thread(id, request);
-    if matches!(
-        tokio::time::timeout(patience, archive).await,
-        Ok(Ok(_))
-    ) {
+    if matches!(tokio::time::timeout(patience, archive).await, Ok(Ok(_))) {
         threads.retain(|thread| thread.id != id);
     }
 }
