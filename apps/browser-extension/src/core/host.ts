@@ -645,12 +645,24 @@ export function createHost(options: HostOptions) {
     await work();
   }
 
-  /** A tab opened from an agent tab (a popup, a link in a new tab) belongs to the same chat. */
+  /**
+   * A tab opened from an agent tab (a popup, a link in a new tab) belongs to
+   * the same chat. Chrome puts such a tab in the group of the tab that opened
+   * it, so a tab created inside a chat's group is that chat's. `openerTabId`
+   * is only a fallback (no tab groups): when the opening page is in the
+   * background, as agent tabs usually are, Chrome names the window's active
+   * tab instead.
+   */
   async function adopt(tab: LiveTab) {
-    if (tab.openerTabId === undefined || registry.owner(tab.id)) return;
-    const opener = registry.owner(tab.openerTabId);
-    if (!opener) return;
-    const { entry } = opener;
+    if (registry.owner(tab.id)) return;
+    const grouped = platform.groups && tab.groupId >= 0 ? registry.byGroup(tab.groupId) : undefined;
+    const entry = grouped ?? (tab.openerTabId === undefined ? undefined : registry.owner(tab.openerTabId)?.entry);
+    if (!entry) return;
+    // A browser page (the user's "New tab in group") is never the agent's.
+    if (restricted(tab.url)) {
+      if (grouped) await share(tab, tab.groupId);
+      return;
+    }
     const origin = destinationOrigin(tab.url);
     if (origin && entry.policy && (!entry.policy.enabled || siteAccess(entry.policy, origin).browsing === "deny")) {
       closing.add(tab.id);
@@ -673,7 +685,7 @@ export function createHost(options: HostOptions) {
     };
     registry.addTab(entry, record);
     await join(entry, [tab.id]).catch(() => {});
-    if (platform.debugger.attached(opener.tab.tabId))
+    if (entry.tabs.some((other) => other.tabId !== tab.id && platform.debugger.attached(other.tabId)))
       await platform.debugger.session(tab.id, record.id).catch(() => undefined);
     publish(entry);
   }
