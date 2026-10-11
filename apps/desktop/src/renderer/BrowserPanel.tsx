@@ -13,6 +13,7 @@ import { Icon } from "./ui";
 import { useApp } from "./state";
 import type { BrowserState } from "../shared";
 import { setNativeArea } from "./native-area";
+import { CHROME_CAPABILITY, chromeThreadTabs, type ChromeHosts } from "../chrome";
 import "./browser.css";
 const empty = (): BrowserState => ({ tabs: [], focusedTabID: null });
 /** Everything that floats above the page: menus, pickers, popovers, dialogs, toasts. */
@@ -58,6 +59,8 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
   const [address, setAddress] = createSignal("");
   const [error, setError] = createSignal("");
   const [connected, setConnected] = createSignal(false);
+  // Tabs this chat holds in the user's Chrome, which this panel cannot show.
+  const [chromeTabs, setChromeTabs] = createSignal(0);
   // The native page draws above the DOM, so a layer that must cover it gets
   // a still frame of the page to paint over instead of a blank hole.
   const [still, setStill] = createSignal<string>();
@@ -107,6 +110,32 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
     setConnected(false);
     setError("");
     void attach(connection, thread, version);
+  });
+  // While the panel shows, ask now and then whether the chat also works in
+  // Chrome. Servers without Chrome support are never asked.
+  createEffect(() => {
+    const { connection, thread } = owner();
+    setChromeTabs(0);
+    if (
+      !props.visible ||
+      !thread ||
+      !state.connection?.info.capabilities.includes(CHROME_CAPABILITY)
+    )
+      return;
+    let alive = true;
+    const load = () =>
+      void window.haarness
+        .api<ChromeHosts>(connection, "listBrowserHosts", [{ thread }])
+        .then((value) => {
+          if (alive) setChromeTabs(chromeThreadTabs(value.hosts ?? []));
+        })
+        .catch(() => {});
+    load();
+    const timer = setInterval(load, 5000);
+    onCleanup(() => {
+      alive = false;
+      clearInterval(timer);
+    });
   });
   let addressTab: string | undefined;
   let addressURL = "";
@@ -422,13 +451,27 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
           </div>
         </Show>
       </div>
-      {/* Only what changes how browsing behaves: a lost connection, or a
-          remote server whose network (and localhost) the pages use. */}
-      <Show when={!connected() || state.connection?.remote}>
+      {/* Only what changes how browsing behaves: a lost connection, a
+          remote server whose network (and localhost) the pages use, or tabs
+          this chat keeps in the user's Chrome. */}
+      <Show when={!connected() || state.connection?.remote || chromeTabs()}>
         <div class="browser-status" role="status">
-          {!connected()
-            ? t("Browser disconnected. It reconnects automatically.")
-            : t("Pages load through the remote server, so localhost is that machine.")}
+          <Show when={!connected() || state.connection?.remote}>
+            <p>
+              {!connected()
+                ? t("Browser disconnected. It reconnects automatically.")
+                : t("Pages load through the remote server, so localhost is that machine.")}
+            </p>
+          </Show>
+          <Show when={chromeTabs()}>
+            <p>
+              {chromeTabs() === 1
+                ? t("This chat also uses Chrome · 1 tab")
+                : t("This chat also uses Chrome · {count} tabs", {
+                    count: chromeTabs(),
+                  })}
+            </p>
+          </Show>
         </div>
       </Show>
     </section>

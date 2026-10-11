@@ -2239,5 +2239,7 @@
   "Use {origin} in Chrome": "ใช้ {origin} ใน Chrome",
   "Send downloads from {origin} in Chrome to the agent": "ส่งไฟล์ที่ดาวน์โหลดจาก {origin} ใน Chrome ให้เอเจนต์",
   "Upload files to {origin} in Chrome": "อัปโหลดไฟล์ไปยัง {origin} ใน Chrome",
-  "Run scripts on {origin} in Chrome": "รันสคริปต์บน {origin} ใน Chrome"
+  "Run scripts on {origin} in Chrome": "รันสคริปต์บน {origin} ใน Chrome",
+  "This chat also uses Chrome · 1 tab": "แชตนี้ใช้ Chrome ด้วย · 1 แท็บ",
+  "This chat also uses Chrome · {count} tabs": "แชตนี้ใช้ Chrome ด้วย · {count} แท็บ"
 }

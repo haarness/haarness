@@ -21,6 +21,7 @@ import {
   toolOutput,
   toolFailed,
   toolVerb,
+  ranInChrome,
   routineEditOutput,
   changeRows,
   changeStats,
@@ -132,6 +133,9 @@ export function ToolActivity(props: {
             )}
           </Show>
         </Shimmer>
+        <Show when={ranInChrome(props.name, props.args, props.result)}>
+          <span class="tool-chip">{t("Chrome")}</span>
+        </Show>
         <Show when={live()}>
           <span class="sr-only">
             {status() === "running" ? t("Running") : t("Waiting for result")}

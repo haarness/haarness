@@ -2239,5 +2239,7 @@
   "Use {origin} in Chrome": "استخدام {origin} في Chrome",
   "Send downloads from {origin} in Chrome to the agent": "إرسال التنزيلات من {origin} في Chrome إلى الوكيل",
   "Upload files to {origin} in Chrome": "رفع الملفات إلى {origin} في Chrome",
-  "Run scripts on {origin} in Chrome": "تشغيل النصوص البرمجية على {origin} في Chrome"
+  "Run scripts on {origin} in Chrome": "تشغيل النصوص البرمجية على {origin} في Chrome",
+  "This chat also uses Chrome · 1 tab": "تستخدم هذه الدردشة Chrome أيضًا · علامة تبويب واحدة",
+  "This chat also uses Chrome · {count} tabs": "تستخدم هذه الدردشة Chrome أيضًا · عدد علامات التبويب: {count}"
 }

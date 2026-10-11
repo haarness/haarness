@@ -2239,5 +2239,7 @@
   "Use {origin} in Chrome": "{origin} in Chrome verwenden",
   "Send downloads from {origin} in Chrome to the agent": "Downloads von {origin} in Chrome an den Agenten senden",
   "Upload files to {origin} in Chrome": "Dateien in Chrome zu {origin} hochladen",
-  "Run scripts on {origin} in Chrome": "Skripte auf {origin} in Chrome ausführen"
+  "Run scripts on {origin} in Chrome": "Skripte auf {origin} in Chrome ausführen",
+  "This chat also uses Chrome · 1 tab": "Dieser Chat nutzt auch Chrome · 1 Tab",
+  "This chat also uses Chrome · {count} tabs": "Dieser Chat nutzt auch Chrome · {count} Tabs"
 }

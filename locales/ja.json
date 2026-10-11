@@ -2239,5 +2239,7 @@
   "Use {origin} in Chrome": "Chrome で {origin} を使用",
   "Send downloads from {origin} in Chrome to the agent": "Chrome での {origin} からのダウンロードをエージェントに渡す",
   "Upload files to {origin} in Chrome": "Chrome で {origin} にファイルをアップロード",
-  "Run scripts on {origin} in Chrome": "Chrome で {origin} 上のスクリプトを実行"
+  "Run scripts on {origin} in Chrome": "Chrome で {origin} 上のスクリプトを実行",
+  "This chat also uses Chrome · 1 tab": "このチャットは Chrome も使用中 · 1 個のタブ",
+  "This chat also uses Chrome · {count} tabs": "このチャットは Chrome も使用中 · {count} 個のタブ"
 }

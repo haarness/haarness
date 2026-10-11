@@ -2239,5 +2239,7 @@
   "Use {origin} in Chrome": "在 Chrome 中使用 {origin}",
   "Send downloads from {origin} in Chrome to the agent": "将 Chrome 中来自 {origin} 的下载发送给智能体",
   "Upload files to {origin} in Chrome": "在 Chrome 中向 {origin} 上传文件",
-  "Run scripts on {origin} in Chrome": "在 Chrome 中对 {origin} 运行脚本"
+  "Run scripts on {origin} in Chrome": "在 Chrome 中对 {origin} 运行脚本",
+  "This chat also uses Chrome · 1 tab": "此聊天也在使用 Chrome · 1 个标签页",
+  "This chat also uses Chrome · {count} tabs": "此聊天也在使用 Chrome · {count} 个标签页"
 }
