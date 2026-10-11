@@ -73,8 +73,9 @@ export interface TabSession {
   readonly cdp: CdpTransport;
   /**
    * Runs `work` with the chat's site rules enforced inside the page, then
-   * checks where the tab landed. A blocked request or landing fails with
-   * `site-blocked`.
+   * checks where the tab landed. A blocked page of the tab's own, or a
+   * landing on a site the chat may not use, fails with `site-blocked`; a
+   * blocked frame or resource is only not loaded.
    */
   guard<T>(context: FetchContext, signal: AbortSignal, work: () => Promise<T>): Promise<T>;
   /** Loads a URL and waits for its document (used by `tabs.open`). */

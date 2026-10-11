@@ -370,6 +370,26 @@ test("the page may not follow a redirect to a site this chat was not allowed", a
   assert.equal(twin.outcome.result.value.url, "https://www.a.example/home");
 });
 
+test("a frame or resource from a blocked site is not loaded, and the allowed page and the command stand", async () => {
+  const h = await boot();
+  h.start();
+  h.attach();
+  h.fake.subresources.set("https://shop.example/", [
+    { url: "https://tracker.example/pixel.gif", resourceType: "Image" },
+    { url: "https://cdn.example/app.js", resourceType: "Script" },
+    { url: "https://tracker.example/frame", resourceType: "Document", frameId: "child-frame" },
+  ]);
+  const policy = { ...ask, sites: [{ origin: "https://tracker.example", browsing: "deny", downloads: "deny", uploads: "deny" }] };
+  const opened = await h.command({
+    action: { type: "tabs.open", url: "https://shop.example/" },
+    policy,
+    target: { resources: ["https://shop.example/"], key: "open" },
+  });
+  assert.equal(opened.outcome.type, "success", JSON.stringify(opened.outcome));
+  assert.equal([...h.fake.tabsById.values()].at(-1)!.url, "https://shop.example/");
+  assert.deepEqual(h.fake.refused, ["https://tracker.example/pixel.gif", "https://tracker.example/frame"]);
+});
+
 /** A driver page that answers every command with `{ok:true}` and records it. */
 function recordingPage(calls: string[]): CreatePage {
   return (surface, _cdp, options) => ({

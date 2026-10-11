@@ -102,7 +102,7 @@ Chrome pages are signed in as the user, so Chrome has stricter rules, all enforc
 - Unattended turns (schedules, `request.auto_approve`) fail at once instead of waiting: "Chrome needs the user's approval for &lt;origin&gt; and this run cannot ask. Ask the user to allow it in an interactive chat, then retry."
 - A **Block** in any layer's `browser.policy` (Agent site permissions) also blocks Chrome; its Allow and Ask rules do not apply to Chrome.
 - Inspect reports each document's security origin. Navigation and new tabs gate the URL's origin together with its `www.` twin, so one answer covers both. Screenshots and downloads are gated on the top-level document's origin (plus the download's redirect chain), not on every iframe; actions on an element use that frame's origin.
-- While a command runs, the extension refuses a main-frame load of a blocked origin, of a non-HTTP(S) URL, or of an origin needing approval that this conversation has not approved, and the model is told to navigate there directly to ask. Requests that workers and service workers make are not filtered.
+- While a command runs, the extension refuses a main-frame load of a blocked origin, of a non-HTTP(S) URL, or of an origin needing approval that this conversation has not approved, and the model is told to navigate there directly to ask. Frames and resources from a blocked origin are not loaded either, without failing the command. Requests that workers and service workers make are not filtered.
 
 Prompt patterns, client behaviour and API fields are in [Chrome approvals](PERMISSIONS-AND-EXECUTION.md#chrome-approvals).
 
