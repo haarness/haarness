@@ -680,11 +680,20 @@ pub(crate) fn setup(context: &Context, options: &SetupOptions) -> Result<Report>
 
 pub(crate) fn status(context: &Context) -> Report {
     let files = ChromeFiles::new(&context.data, context.os);
+    // Setup could not add one either, so say what setup would.
+    let warnings = if extension_copy(&files.extension()).is_none()
+        && context.extension_source.is_none()
+        && CHROME_WEB_STORE_URL.is_none()
+    {
+        vec![NOT_INCLUDED.to_owned()]
+    } else {
+        Vec::new()
+    };
     report(
         context,
         &files,
         &targets(context, &[], &context.manifest_dirs, false),
-        Vec::new(),
+        warnings,
     )
 }
 
@@ -893,7 +902,16 @@ pub(crate) async fn status_command(data: &Path, cache: &Path, json: bool) -> Res
             "Haarness for Chrome {}: {}",
             extension.version, extension.path
         ),
-        None => println!("Haarness for Chrome is not copied here yet."),
+        None if report
+            .warnings
+            .iter()
+            .any(|warning| warning == NOT_INCLUDED) =>
+        {
+            println!("{NOT_INCLUDED}");
+        }
+        None => {
+            println!("Haarness for Chrome is not copied here yet. Run `haarness browser setup`.")
+        }
     }
     println!("{}", connected_summary(&connections));
     Ok(())
@@ -1512,6 +1530,23 @@ mod tests {
                 .iter()
                 .any(|key| key.starts_with("HKCU\\Software\\Google\\Chrome"))
         );
+    }
+
+    #[test]
+    fn status_says_when_this_installation_has_no_extension_to_add() {
+        let fixture = Fixture::new("status-no-extension");
+        let mut context = fixture.context(Os::Mac);
+        assert!(status(&context).warnings.is_empty(), "setup can copy it");
+        context.extension_source = None;
+        assert_eq!(status(&context).warnings, [NOT_INCLUDED]);
+        // A copy Desktop left in the data folder is enough.
+        let files = ChromeFiles::new(&context.data, context.os);
+        sync_extension(
+            Some(&fixture.root.join("install/browser-extension/chrome")),
+            &files.extension(),
+        )
+        .unwrap();
+        assert!(status(&context).warnings.is_empty());
     }
 
     #[test]
