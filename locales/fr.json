@@ -2382,5 +2382,17 @@
   "Versions": "Versions",
   "Extension folder": "Dossier de l’extension",
   "Update ready": "Mise à jour prête",
-  "Something went wrong.": "Une erreur s’est produite."
+  "Something went wrong.": "Une erreur s’est produite.",
+  "This project is not connected.": "Ce projet n’est pas connecté.",
+  "This approval is no longer waiting.": "Cette approbation n’est plus en attente.",
+  "Haarness did not answer.": "Haarness n’a pas répondu.",
+  "Haarness is not reachable.": "Haarness est injoignable.",
+  "Haarness could not do that: {reason}": "Haarness n’a pas pu effectuer cette action : {reason}",
+  "Restart this project's Haarness server.": "Redémarrez le serveur Haarness de ce projet.",
+  "This project's Haarness server does not accept Chrome. Restart it without --anonymous.": "Le serveur Haarness de ce projet n’accepte pas Chrome. Redémarrez-le sans --anonymous.",
+  "This project's Haarness server is not reachable.": "Le serveur Haarness de ce projet est injoignable.",
+  "This project's Haarness server did not answer in time.": "Le serveur Haarness de ce projet n’a pas répondu à temps.",
+  "This chat has no tabs here.": "Cette discussion n’a pas d’onglets ici.",
+  "Haarness for Chrome restarted. Try again.": "Haarness for Chrome a redémarré. Réessayez.",
+  "Haarness for Chrome is restarting. Try again.": "Haarness for Chrome redémarre. Réessayez."
 }

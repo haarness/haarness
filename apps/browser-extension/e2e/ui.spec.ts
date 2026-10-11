@@ -4,7 +4,7 @@
  */
 import type { Page } from "@playwright/test";
 import { join } from "node:path";
-import { askPolicy, SERVER, THREAD, type FakeBridge } from "./fixtures/bridge";
+import { askPolicy, SERVER, THREAD, WORKSPACE, type FakeBridge } from "./fixtures/bridge";
 import { expect, test, type Site } from "./fixtures/extension";
 
 const SECOND = "0192a5f0-7c1e-7d3a-9b1e-4f2a9c3d5e63";
@@ -113,4 +113,28 @@ test("the welcome page switches language, and Arabic runs right to left", async 
   await shoot(popup, "popup-ar");
   await welcome.locator("#language").selectOption("en");
   await expect(welcome.locator("html")).toHaveAttribute("dir", "ltr");
+});
+
+test("popup and welcome errors show in the chosen language, and follow a change of it", async ({ bridge, site, worker, openExtensionPage }) => {
+  await busy(bridge, site);
+  const popup = await openExtensionPage("popup.html");
+  await popup.getByRole("button", { name: "Stop", exact: true }).click();
+  // The bridge cannot reach the chat's server any more.
+  const stop = await bridge.wait((message) => message.type === "stop");
+  bridge.send({ type: "stopped", server: SERVER, thread: stop.message.thread, ok: false, error: "This Haarness server is not connected." });
+  await expect(popup.getByRole("alert")).toHaveText("This project is not connected.");
+  await worker.evaluate(() =>
+    (globalThis as unknown as { haarness: { request(message: unknown): Promise<unknown> } }).haarness.request({ type: "settings", settings: { language: "ja" } }),
+  );
+  await expect(popup.getByRole("alert")).toHaveText("このプロジェクトは接続されていません。");
+  await shoot(popup, "popup-error-ja");
+
+  // A project the bridge cannot reach says why, in the same language.
+  bridge.send({
+    type: "servers",
+    servers: [{ id: SERVER, workspace: WORKSPACE, name: "acme", version: "0.1.1-preview.1", state: "error", error: "restart this project's Haarness server" }],
+  });
+  const welcome = await openExtensionPage("welcome.html", { width: 1200, height: 900 });
+  await expect(welcome.locator(".project-error")).toHaveText("このプロジェクトの Haarness サーバーを再起動してください。");
+  await shoot(welcome, "welcome-project-error-ja");
 });

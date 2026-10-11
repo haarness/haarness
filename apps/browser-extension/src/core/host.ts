@@ -46,7 +46,7 @@ import { PROTOCOL, type Approval, type FromBridge, type RawCommand, type ServerC
 import { createQueues } from "./queue";
 import { createRegistry, threadKey, wireState, wireTab, type Snapshot, type TabRecord, type ThreadRecord } from "./registry";
 import { pill, type Connection } from "./status";
-import type { UiRequest, UiResponse, UiSettings, UiSnapshot } from "./ui";
+import { failure as uiFailure, haarnessFailure, projectProblem, type UiRequest, type UiResponse, type UiSettings, type UiSnapshot } from "./ui";
 import { compareVersions } from "./version";
 
 interface Server extends ServerEntry {
@@ -852,13 +852,13 @@ export function createHost(options: HostOptions) {
 
   async function stopChat(entry: ThreadRecord): Promise<UiResponse> {
     const server = serverFor(entry.workspace);
-    if (!server) return { ok: false, error: "This project is not connected." };
+    if (!server) return uiFailure(key("This project is not connected."));
     const reply = await ask<Extract<FromBridge, { type: "stopped" }>>(`stopped:${server.id}:${entry.thread}`, {
       type: "stop",
       server: server.id,
       thread: entry.thread,
     });
-    return reply?.ok ? { ok: true } : { ok: false, error: reply?.error ?? "Haarness did not answer." };
+    return reply?.ok ? { ok: true } : haarnessFailure(reply?.error);
   }
 
   /**
@@ -940,7 +940,7 @@ export function createHost(options: HostOptions) {
         workspace: server.workspace,
         version: server.version,
         state: server.state,
-        error: server.error,
+        error: server.error === undefined ? undefined : projectProblem(server.error),
       })),
       chats: list.map(({ entry, working }) => ({
         key: threadKey(entry.workspace, entry.thread),
@@ -988,7 +988,7 @@ export function createHost(options: HostOptions) {
           `answered:${message.server}:${message.permission}`,
           { type: "answer", server: message.server, permission: message.permission, decision: message.decision },
         );
-        return reply?.ok ? { ok: true } : { ok: false, error: reply?.error ?? "Haarness did not answer." };
+        return reply?.ok ? { ok: true } : haarnessFailure(reply?.error);
       }
       case "resume":
         await setStopped(false);
@@ -997,11 +997,11 @@ export function createHost(options: HostOptions) {
         await setPaused(message.paused);
         return { ok: true };
       case "stop-chat":
-        return entry ? stopChat(entry) : { ok: false, error: "This chat has no tabs here." };
+        return entry ? stopChat(entry) : uiFailure(key("This chat has no tabs here."));
       case "show-tabs": {
         const record = entry?.tabs.find((tab) => tab.id === entry.focusedTabID) ?? entry?.tabs[0];
         const live = record && (await platform.tabs.get(record.tabId));
-        if (!entry || !live) return { ok: false, error: "This chat has no tabs here." };
+        if (!entry || !live) return uiFailure(key("This chat has no tabs here."));
         if (platform.groups && entry.groupId !== null)
           await platform.groups.update(entry.groupId, { collapsed: false }).catch(() => {});
         await platform.tabs.activate(live.id);

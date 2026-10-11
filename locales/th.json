@@ -2382,5 +2382,17 @@
   "Versions": "เวอร์ชัน",
   "Extension folder": "โฟลเดอร์ส่วนขยาย",
   "Update ready": "พร้อมอัปเดต",
-  "Something went wrong.": "เกิดข้อผิดพลาด"
+  "Something went wrong.": "เกิดข้อผิดพลาด",
+  "This project is not connected.": "โปรเจกต์นี้ไม่ได้เชื่อมต่ออยู่",
+  "This approval is no longer waiting.": "การอนุมัตินี้ไม่ได้รออยู่แล้ว",
+  "Haarness did not answer.": "Haarness ไม่ตอบสนอง",
+  "Haarness is not reachable.": "ไม่สามารถติดต่อ Haarness ได้",
+  "Haarness could not do that: {reason}": "Haarness ทำสิ่งนี้ไม่ได้: {reason}",
+  "Restart this project's Haarness server.": "รีสตาร์ทเซิร์ฟเวอร์ Haarness ของโปรเจกต์นี้",
+  "This project's Haarness server does not accept Chrome. Restart it without --anonymous.": "เซิร์ฟเวอร์ Haarness ของโปรเจกต์นี้ไม่รับ Chrome รีสตาร์ทโดยไม่ใช้ --anonymous",
+  "This project's Haarness server is not reachable.": "ไม่สามารถติดต่อเซิร์ฟเวอร์ Haarness ของโปรเจกต์นี้ได้",
+  "This project's Haarness server did not answer in time.": "เซิร์ฟเวอร์ Haarness ของโปรเจกต์นี้ไม่ตอบสนองภายในเวลาที่กำหนด",
+  "This chat has no tabs here.": "แชทนี้ไม่มีแท็บที่นี่",
+  "Haarness for Chrome restarted. Try again.": "Haarness for Chrome รีสตาร์ทแล้ว โปรดลองอีกครั้ง",
+  "Haarness for Chrome is restarting. Try again.": "Haarness for Chrome กำลังรีสตาร์ท โปรดลองอีกครั้ง"
 }

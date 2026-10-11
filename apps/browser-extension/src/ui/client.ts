@@ -4,7 +4,8 @@
  * worker someone is watching, so it retries a lost connection every 2 s.
  */
 import { createSignal } from "solid-js";
-import type { UiRequest, UiResponse, UiSnapshot } from "../core/ui";
+import { key } from "../core/i18n";
+import { failure, type UiRequest, type UiResponse, type UiSnapshot } from "../core/ui";
 import { applyLanguage } from "./i18n";
 
 const [snapshot, setSnapshot] = createSignal<UiSnapshot>();
@@ -22,14 +23,14 @@ export function connect() {
       void applyLanguage(message.snapshot.settings.language);
     }
     if (message.type === "response" && message.id !== undefined) {
-      pending.get(message.id)?.(message.response ?? { ok: false, error: "No answer" });
+      pending.get(message.id)?.(message.response ?? failure(key("Haarness did not answer.")));
       pending.delete(message.id);
     }
   });
   port.onDisconnect.addListener(() => {
     // The worker restarted (an update, or Chrome stopped it); find the new one.
     port = undefined;
-    for (const resolve of pending.values()) resolve({ ok: false, error: "Haarness for Chrome restarted. Try again." });
+    for (const resolve of pending.values()) resolve(failure(key("Haarness for Chrome restarted. Try again.")));
     pending.clear();
     setTimeout(connect, 300);
   });
@@ -37,7 +38,7 @@ export function connect() {
 
 export function request(message: UiRequest): Promise<UiResponse> {
   return new Promise((resolve) => {
-    if (!port) return resolve({ ok: false, error: "Haarness for Chrome is restarting. Try again." });
+    if (!port) return resolve(failure(key("Haarness for Chrome is restarting. Try again.")));
     const id = ++next;
     pending.set(id, resolve);
     port.postMessage({ id, request: message });
