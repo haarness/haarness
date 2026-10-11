@@ -59,7 +59,7 @@ export function SessionActions(props: {
   return (
     <MenuButton
         icon="more"
-        label={props.label ?? "Actions for " + props.thread.title}
+        label={props.label ?? t("Chat actions")}
         items={[
           ...(props.thread.id === app.state.selected &&
           (!props.connectionId ||

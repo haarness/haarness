@@ -190,7 +190,16 @@ test("a failed title lookup still offers a scoped notification", async () => {
   await tick();
   await pending;
   assert.equal(f.shown.length, 1);
-  assert.match(f.shown[0].body, /Conversation conversa/);
+  assert.match(f.shown[0].body, /Chat conversa/);
+});
+test("a chat without a generated title is named untitled, not by the server's placeholder", async () => {
+  const f = fixture();
+  const pending = f.center.receive("a", "My project", 1, event(), async () =>
+    ({ title: "New thread", id: "conversation" }) as Thread,
+  );
+  await tick();
+  await pending;
+  assert.equal(f.shown[0].body, "Untitled chat · My project");
 });
 
 test("notification controls independently govern completion, approvals and questions", async () => {

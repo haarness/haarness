@@ -515,7 +515,7 @@ function installHandlers() {
       const source = JSON.parse(request.scope) as unknown;
       if (!destination || !Array.isArray(source) || source[0] !== destination.connection
         || (source[1] && source[1] !== destination.thread))
-        throw new Error("The review belongs to another project or conversation");
+        throw new Error("The review belongs to another project or chat");
       await connection(destination.connection).client.getThread(destination.thread);
     }
     return reviewStorage(request);

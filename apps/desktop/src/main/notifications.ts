@@ -107,9 +107,16 @@ export function createNotifications(input: {
       !permitted()
     )
       return;
+    // "New thread" is the server's placeholder until a title is generated;
+    // Desktop calls that chat untitled.
+    const name = !conversation
+      ? "Chat " + root.slice(0, 8)
+      : conversation.title && conversation.title !== "New thread"
+        ? conversation.title
+        : "Untitled chat";
     const notification = input.create({
       title: `Haarness — ${title}`,
-      body: `${conversation?.title || "Conversation " + root.slice(0, 8)} · ${label}`,
+      body: `${name} · ${label}`,
     });
     const target = { connection, thread: root };
     visible.set(notification, connection);

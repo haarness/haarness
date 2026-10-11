@@ -14,6 +14,7 @@ import { Button } from "./ui";
 import { ProviderLabel } from "./ProviderIcon";
 import { modelName } from "../model-names";
 import { contextUsage, tokenNumber } from "./context-usage";
+import { chatTitle } from "./chat-title";
 import "./conversation-context.css";
 
 export function ConversationContext() {
@@ -122,7 +123,7 @@ export function ConversationContext() {
           <p>{t("Select a chat to inspect its context and usage.")}</p>
         }
       >
-        <p class="context-title">{thread()!.title}</p>
+        <p class="context-title">{chatTitle(thread()!.title)}</p>
         <ProviderLabel provider={thread()!.provider}>
           {modelName(
             thread()!.provider,

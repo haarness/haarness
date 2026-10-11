@@ -1718,7 +1718,7 @@
   "No chats yet.": "Henüz sohbet yok.",
   "Chat history, running tasks and the saved server connection are preserved.": "Sohbet geçmişi, çalışan görevler ve kaydedilmiş sunucu bağlantısı korunur.",
   "Commands are saved prompts you run with / in any chat.": "Komutlar, herhangi bir sohbette / ile çalıştırdığınız kayıtlı istemlerdir.",
-  "Chat outline": "Konuşma ana hatları",
+  "Chat outline": "Sohbet ana hatları",
   "Chat compacted": "Sohbet sıkıştırıldı",
   "Drafts, appearance and saved projects are saved on this computer. Chats and tasks are saved separately for each project folder or worktree.": "Taslaklar, görünüm ve kayıtlı projeler bu bilgisayarda saklanır. Sohbetler ve görevler her proje klasörü veya çalışma ağacı için ayrı saklanır.",
   "Each chat has its own browser.": "Her sohbetin kendi tarayıcısı vardır.",
@@ -1728,10 +1728,10 @@
   "Remove the missing checkout's registration. Chat history is retained.": "Eksik çalışma kopyasının kaydını kaldırır. Sohbet geçmişi korunur.",
   "Summarize this chat with its model": "Bu sohbeti modeliyle özetle",
   "This removes the saved connection and its projects from Desktop. Chat history and running tasks on the server are preserved.": "Bu işlem, kayıtlı bağlantıyı ve projelerini Desktop’tan kaldırır. Sunucudaki sohbet geçmişi ve çalışan görevler korunur.",
-  "Compact chat": "Konuşmayı sıkıştır",
+  "Compact chat": "Sohbeti sıkıştır",
   "Share the chat that started this agent; its agents come with it.": "Bu ajanı başlatan sohbeti paylaşın; ajanları da onunla birlikte gelir.",
   "Choose a project to start a chat": "Sohbet başlatmak için bir proje seçin",
   "Chat text size": "Sohbet metin boyutu",
-  "Run a prompt on a schedule in {project}. Chats appear under Scheduled in the sidebar.": "{project} içinde bir istemi zamanlamayla çalıştırın. Konuşmalar kenar çubuğunda Zamanlanmış altında görünür.",
+  "Run a prompt on a schedule in {project}. Chats appear under Scheduled in the sidebar.": "{project} içinde bir istemi zamanlamayla çalıştırın. Sohbetler kenar çubuğunda Zamanlanmış altında görünür.",
   "Fork chat": "Sohbeti dallandır"
 }

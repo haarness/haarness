@@ -31,6 +31,7 @@ import { agentColor } from "./agent-colors";
 import { conversationAgents, selectConversationAgent } from "./agent-selection";
 import { providerModelOptions } from "./provider-model-options";
 import { canAutoApprove, describeAlwaysRule } from "./approval-mode";
+import { chatTitle } from "./chat-title";
 import { parseModel, selectModel } from "./model-selection";
 import { AgentTask } from "./AgentTask";
 import { Shimmer } from "./Shimmer";
@@ -177,7 +178,7 @@ export function Session() {
   const forkSource = () =>
     state.threads.find((t) => t.id === thread()?.parentId);
   const forkSourceTitle = () =>
-    forkSource()?.title || thread()?.forkOrigin?.title || "chat";
+    chatTitle(forkSource()?.title || thread()?.forkOrigin?.title);
   // A missing snapshot must not briefly expose a composer for a child.
   const editable = () =>
     !state.selected || (!!thread() && !thread()!.isSubagent);
@@ -1013,7 +1014,7 @@ export function Session() {
         title={
           forkSource()
             ? `Open ${forkSourceTitle()}`
-            : `Source conversation unavailable · ${forkSourceTitle()}`
+            : `Source chat unavailable · ${forkSourceTitle()}`
         }
         onClick={() => app.run(openForkSource)}
       >
@@ -2349,7 +2350,7 @@ function Permission(props: {
           `Model: ${switcher.model}`,
           switcher.previousModel !== switcher.model ? `Previous model: ${switcher.previousModel}` : undefined,
           typeof value.reason === "string" ? `Reason: ${value.reason}` : undefined,
-          "Always allow applies only to this agent in this session.",
+          "Always allow applies only to this agent in this chat.",
         ].filter(Boolean).join("\n");
       }
     }
