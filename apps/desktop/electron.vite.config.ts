@@ -3,6 +3,9 @@ import solid from "vite-plugin-solid";
 import { resolve } from "node:path";
 export default defineConfig({
   main: {
+    // The browser driver is linked TypeScript source with its own node_modules;
+    // its effect imports must resolve to Desktop's copy, as Desktop's own do.
+    resolve: { dedupe: ["effect"] },
     build: {
       rollupOptions: {
         input: resolve("src/main/index.ts"),

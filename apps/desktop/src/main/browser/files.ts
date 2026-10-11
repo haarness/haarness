@@ -1,5 +1,5 @@
 // Includes MIT-licensed code; see THIRD-PARTY-NOTICES.md.
-import { Browser } from "./rpc";
+import { Browser } from "@haarness/browser-driver/rpc";
 import { mkdir, readFile, stat, writeFile, rm } from "node:fs/promises";
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";

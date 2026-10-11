@@ -16,14 +16,14 @@
  *     page CSPs allow;
  *   - screenshots hide it first, so the agent never sees its own cursor.
  * A new document starts a new world, so every call re-installs on demand.
+ *
+ * The host runs the script (`CursorHost` in types.ts): Desktop in an Electron
+ * isolated world, Chrome in a DevTools isolated world.
  */
-import type { WebContents } from "electron";
-
-/** Any stable id outside Electron's own worlds; one per page document. */
-const WORLD = 1_779;
+import type { CursorHost } from "./types";
 
 /** Installs the overlay in the current document once and returns its API. */
-const INSTALL = String.raw`globalThis.__haarnessCursor ??= (() => {
+export const cursorScript = String.raw`globalThis.__haarnessCursor ??= (() => {
   const doc = document;
   const host = doc.createElement("haarness-agent-cursor");
   host.setAttribute("aria-hidden", "true");
@@ -231,22 +231,18 @@ export function cursorLabel(
   return translate(named).replace("{name}", brief(text));
 }
 
-export function createAgentCursor(
-  contents: WebContents,
-  enabled: () => boolean,
-): AgentCursor {
+/** The cursor for one tab; without a host it draws nothing and only runs captures. */
+export function createAgentCursor(host: CursorHost | undefined): AgentCursor {
   // Input coordinates are in view pixels; the overlay draws in CSS pixels.
   let last: { x: number; y: number } | undefined;
   const css = (point: { x: number; y: number }) => {
-    const zoom = contents.isDestroyed() ? 1 : contents.getZoomFactor() || 1;
+    const zoom = host?.zoom() || 1;
     return { x: point.x / zoom, y: point.y / zoom };
   };
   const run = async (expression: string) => {
-    if (contents.isDestroyed() || !enabled()) return;
+    if (!host) return;
     try {
-      await contents.executeJavaScriptInIsolatedWorld(WORLD, [
-        { code: `${INSTALL};${expression}` },
-      ]);
+      await host.run(`${cursorScript};${expression}`);
     } catch {
       // A page mid-navigation or a closed tab: the cursor is decoration and
       // must never fail the action it accompanies.

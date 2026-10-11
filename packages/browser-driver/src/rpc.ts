@@ -120,6 +120,25 @@ export const File = Schema.Struct({
   mime: short,
   data: Schema.Uint8ArrayFromBase64.check(Schema.isMaxLength(MAX_FILE_BYTES)),
 }).annotate({ identifier: "Browser.File" });
+/**
+ * A file that stays on disk on the computer running the browser: the Chrome
+ * bridge stages uploads under its uploads root and reads announced downloads,
+ * so the extension (which has no filesystem) passes paths, never bytes. Only
+ * the bridge ↔ extension leg carries it; the server always sees `File`.
+ */
+export interface FileRef extends Schema.Schema.Type<typeof FileRef> {}
+export const FileRef = Schema.Struct({
+  id: FileID,
+  name: short,
+  mime: short,
+  bytes: count,
+  path: Schema.String,
+}).annotate({ identifier: "Browser.FileRef" });
+/** A transferred file as a host sees it: bytes (`File`) or a local path (`FileRef`). */
+export const HostFile = Schema.Union([File, FileRef]).annotate({
+  identifier: "Browser.HostFile",
+});
+export type HostFile = File | FileRef;
 const files = { files: Schema.Array(FileInfo) };
 const page = { tab: Tab };
 const saved = Schema.Struct({ ...page, ...files });
@@ -151,7 +170,8 @@ export const Body = Schema.Union([
   }),
   Schema.Struct({
     state: Schema.Literal("unavailable"),
-    reason: Schema.Literals(["binary", "notCaptured", "backendUnavailable"]),
+    // omitted: the host never returns request bodies (Chrome, where they can carry the user's credentials).
+    reason: Schema.Literals(["binary", "notCaptured", "backendUnavailable", "omitted"]),
   }),
 ]).annotate({ identifier: "Browser.Body" });
 export type Body = typeof Body.Type;
@@ -770,6 +790,29 @@ export const Outcome = Schema.Union([
   .pipe(Schema.toTaggedUnion("type"))
   .annotate({ identifier: "Browser.Outcome" });
 export type Outcome = typeof Outcome.Type;
+/** `Command` as the Chrome bridge relays it to the extension: uploads may be staged `FileRef`s. */
+export const HostCommand = Schema.Struct({
+  ...Command.fields,
+  files: Schema.Array(HostFile),
+}).annotate({ identifier: "Browser.HostCommand" });
+export interface HostCommand extends Schema.Schema.Type<typeof HostCommand> {}
+/** `Result` as the extension returns it to the bridge: downloads may be `FileRef`s the bridge reads. */
+export const HostResult = Schema.Struct({
+  value: Schema.Json,
+  files: Schema.Array(HostFile),
+}).annotate({ identifier: "Browser.HostResult" });
+export interface HostResult extends Schema.Schema.Type<typeof HostResult> {}
+export const HostOutcome = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("success"), result: HostResult }),
+  Schema.Struct({
+    type: Schema.Literal("failure"),
+    code: short,
+    message: short,
+  }),
+])
+  .pipe(Schema.toTaggedUnion("type"))
+  .annotate({ identifier: "Browser.HostOutcome" });
+export type HostOutcome = typeof HostOutcome.Type;
 export const TunnelTarget = Schema.Struct({
   host: Schema.String.check(
     Schema.isMinLength(1),
@@ -784,3 +827,27 @@ export const TunnelRead = Schema.Struct({
   eof: Schema.Boolean,
 });
 export type TunnelRead = typeof TunnelRead.Type;
+
+// Codecs bound to this package's own `effect`. A consumer with its own copy of
+// effect must call these rather than pass a schema above to its own `Schema.*`:
+// schemas from two effect instances fail to decode each other's values.
+/** Server → Desktop host: one command, with uploads as base64 `File`s. */
+export const decodeCommand = Schema.decodeUnknownSync(Command);
+/** Bridge → extension: one command, with uploads as `File` or staged `FileRef`. */
+export const decodeHostCommand = Schema.decodeUnknownSync(HostCommand);
+/** Desktop host → server: a command's outcome as JSON (file bytes as base64). */
+export const encodeOutcome = Schema.encodeSync(Outcome);
+export const decodeOutcome = Schema.decodeUnknownSync(Outcome);
+/** Extension → bridge: a command's outcome as JSON; downloads may be `FileRef`s. */
+export const encodeHostOutcome = Schema.encodeSync(HostOutcome);
+export const decodeHostOutcome = Schema.decodeUnknownSync(HostOutcome);
+/** A tool action, as the Desktop UI sends one to its own host. */
+export const decodeAction = Schema.decodeUnknownSync(Action);
+/** A host's tab inventory, as published to the server. */
+export const decodeState = Schema.decodeUnknownSync(State);
+export const encodeState = Schema.encodeSync(State);
+export const decodeTab = Schema.decodeUnknownSync(Tab);
+/** The tunnel endpoint's answer to a read (Desktop's proxy only). */
+export const decodeTunnelRead = Schema.decodeUnknownSync(TunnelRead);
+/** A CONNECT target the Desktop proxy accepts. */
+export const decodeTunnelTarget = Schema.decodeUnknownSync(TunnelTarget);

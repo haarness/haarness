@@ -77,18 +77,5 @@ export function browserAddress(url: string, full: boolean) {
   }
 }
 
-/** Exact origins take priority; otherwise the most specific subdomain rule wins. */
-export function browserSiteAccess(policy: BrowserPolicy, origin: string): BrowserAccess {
-  const match = (pattern: string) => {
-    if (pattern === origin) return true;
-    const index = pattern.indexOf("*.");
-    if (index < 0 || !origin.startsWith(pattern.slice(0, index))) return false;
-    const host = origin.slice(index), suffix = pattern.slice(index + 2);
-    if (!host.endsWith(suffix)) return false;
-    const subdomain = host.slice(0, -suffix.length);
-    return subdomain.length > 1 && subdomain.endsWith(".");
-  };
-  return policy.sites.filter(site => match(site.origin)).sort((a,b) =>
-    Number(a.origin.includes("*")) - Number(b.origin.includes("*")) || b.origin.length - a.origin.length
-  )[0] ?? policy.defaults;
-}
+/** Exact origins take priority; otherwise the most specific subdomain rule wins. Shared with the browser driver. */
+export { browserSiteAccess } from "@haarness/browser-driver/policy";

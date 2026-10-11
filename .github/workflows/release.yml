@@ -61,6 +61,8 @@ jobs:
       - run: npm --prefix sdks/typescript ci
       - run: npm --prefix sdks/typescript run build
       - run: npm --prefix sdks/typescript test
+      - run: npm --prefix packages/browser-driver ci
+      - run: npm run driver:test
       - run: npm --prefix apps/desktop ci
       - run: npm --prefix apps/desktop test
       - name: Installer verification
