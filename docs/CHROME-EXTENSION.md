@@ -37,6 +37,7 @@ The server never talks to Chrome directly: loopback servers refuse a `chrome-ext
 | Native host name | `ai.haarness.browser` |
 | Extension ID | `accdjhmcgljbadpeanajllmcembhkomn`, pinned by the manifest `key` |
 | Extra allowed extension IDs | `HAARNESS_BROWSER_EXTENSION_IDS` (comma separated), read by `haarness browser setup` |
+| Test manifest folders | `HAARNESS_BROWSER_MANIFEST_DIR` (a path list): `setup`, `status` and `remove` use only these folders instead of the browsers' own, as `--manifest-dir` does for `setup`, so a TUI or Desktop test run never registers with the user's Chrome |
 | Chrome Web Store URL | none yet: the Rust constant `CHROME_WEB_STORE_URL` in the CLI browser module, reported as `webStoreUrl` |
 | Server capability | `browser-extension.v1`, advertised only when the server has both the browser broker and management |
 | Extension host endpoint | `GET /v1/browser/extension/host?version=1` |
@@ -111,7 +112,7 @@ Setup proceeds as follows:
  "connections":[{"workspace":"/abs/project","serverId":"…","hosts":[…]}]}
 ```
 
-`registered` means the manifest exists, its `path` is the current wrapper, and the wrapper's executable exists. `extension` is `null` when no extension source was found. <!-- verify --> `extensionsPage` is `chrome://extensions` for Chrome variants and Chromium, `edge://extensions`, `brave://extensions` and `vivaldi://extensions` for the others. Human output is short and ends with the next step: "Open chrome://extensions, turn on Developer mode (keep it on), click Load unpacked, press ⌘⇧G (Ctrl+L on Linux) and paste: &lt;path&gt;. Then pin Haarness to the toolbar."
+`registered` means the manifest exists, its `path` is the current wrapper, and the wrapper's executable exists. `extension` is `null` when no extension source was found; then, with no Web Store URL either, `warnings[]` (from `setup`, and from `status` when setup could not add one either) says the extension is not included in this installation and to set it up from Desktop, and the TUI's `/chrome` shows that instead of waiting for Chrome. `extensionsPage` is `chrome://extensions` for Chrome variants and Chromium, `edge://extensions`, `brave://extensions` and `vivaldi://extensions` for the others. Human output is short and ends with the next step: "Open chrome://extensions, turn on Developer mode (keep it on), click Load unpacked, press ⌘⇧G (Ctrl+L on Linux) and paste: &lt;path&gt;. Then pin Haarness to the toolbar."
 
 `remove` deletes the manifests and registry keys it owns, the wrapper and `bin/`, keeps the extension copy unless `--all`, and writes the `removed` marker so Desktop does not register again by itself. `haarness doctor` prints one informational line about the Chrome registration and never fails because of it.
 

@@ -1706,6 +1706,14 @@ fn chrome_dialog(app: &App, width: usize, max_height: usize) -> TaggedLines {
                     language.text("Open Chrome; Haarness connects within a few seconds."),
                     theme.text,
                 );
+            } else if chrome.nothing_to_add() {
+                // Nothing will connect, so nothing spins.
+                body.push(heading(
+                    "○",
+                    theme.muted,
+                    language.text("Not set up").into(),
+                ));
+                chrome_steps(app, setup, content, &mut body);
             } else {
                 body.push(heading(
                     &spin,
