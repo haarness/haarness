@@ -492,6 +492,18 @@ html[dir="rtl"] .tool-target {
   font-size: var(--ui-xs);
   font-variant-numeric: tabular-nums;
 }
+/* A browser step in the user's own Chrome says so; it sits outside the
+   sweep, so it rests while the step runs. */
+.tool-chip {
+  flex: none;
+  padding: 0 var(--s1);
+  border-radius: var(--r-sm);
+  background: var(--hover);
+  color: var(--muted);
+  font-size: var(--ui-xs);
+  font-weight: 500;
+  line-height: 18px;
+}
 .tool-stat-add {
   color: var(--green);
 }

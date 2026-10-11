@@ -16,6 +16,7 @@ import {
   type ChromeSetupInfo,
 } from "../src/chrome";
 import { canAutoApprove, createAutoApprover } from "../src/renderer/approval-mode";
+import { ranInChrome } from "../src/renderer/transcript";
 
 const host = (overrides: Partial<ChromeHost> = {}): ChromeHost => ({
   kind: "chrome",
@@ -186,4 +187,15 @@ test("explicit Chrome requests are never answered by Auto, even before a server 
   consume("a", [chrome, combined, desktopSite], []);
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(replies, [desktopSite.permissionId]);
+});
+
+test("a browser step carries a Chrome chip from its result, or from where it asked to open", () => {
+  assert.equal(ranInChrome("browser_click", { tabID: "tab_1" }, { output: "{}", is_error: false, metadata: { browser: "chrome" } }), true);
+  assert.equal(ranInChrome("browser_click", {}, { output: "{}", is_error: false, metadata: { browser: "haarness" } }), false);
+  assert.equal(ranInChrome("browser_tabs_open", { browser: "chrome" }), true);
+  assert.equal(ranInChrome("browser_tabs_open", { browser: "chrome" }, { output: "{}", is_error: false, metadata: { browser: "haarness" } }), false);
+  assert.equal(ranInChrome("browser_tabs_open", { browser: "chrome" }, { output: "Chrome is not connected.", is_error: true }), true);
+  assert.equal(ranInChrome("browser_tabs_open", { browser: "chrome" }, { output: "{}", is_error: false }), false);
+  assert.equal(ranInChrome("browser_tabs_open", { browser: "haarness" }), false);
+  assert.equal(ranInChrome("webfetch", { browser: "chrome" }, { output: "", is_error: false, metadata: { browser: "chrome" } }), false);
 });

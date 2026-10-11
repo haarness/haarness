@@ -2239,5 +2239,7 @@
   "Use {origin} in Chrome": "Chrome에서 {origin} 사용",
   "Send downloads from {origin} in Chrome to the agent": "Chrome에서 {origin}의 다운로드를 에이전트에게 보내기",
   "Upload files to {origin} in Chrome": "Chrome에서 {origin}에 파일 업로드",
-  "Run scripts on {origin} in Chrome": "Chrome에서 {origin}에 스크립트 실행"
+  "Run scripts on {origin} in Chrome": "Chrome에서 {origin}에 스크립트 실행",
+  "This chat also uses Chrome · 1 tab": "이 채팅은 Chrome도 사용 중 · 탭 1개",
+  "This chat also uses Chrome · {count} tabs": "이 채팅은 Chrome도 사용 중 · 탭 {count}개"
 }

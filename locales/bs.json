@@ -2239,5 +2239,7 @@
   "Use {origin} in Chrome": "Koristi {origin} u Chromeu",
   "Send downloads from {origin} in Chrome to the agent": "Pošalji agentu preuzimanja sa {origin} u Chromeu",
   "Upload files to {origin} in Chrome": "Otpremi datoteke na {origin} u Chromeu",
-  "Run scripts on {origin} in Chrome": "Pokreni skripte na {origin} u Chromeu"
+  "Run scripts on {origin} in Chrome": "Pokreni skripte na {origin} u Chromeu",
+  "This chat also uses Chrome · 1 tab": "Ovaj razgovor koristi i Chrome · 1 kartica",
+  "This chat also uses Chrome · {count} tabs": "Ovaj razgovor koristi i Chrome · kartica: {count}"
 }

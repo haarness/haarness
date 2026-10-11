@@ -205,3 +205,6 @@
   padding: var(--s1) var(--s2);
   border-top: 1px solid var(--hairline);
 }
+.browser-status p {
+  margin: 0;
+}

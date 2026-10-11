@@ -2239,5 +2239,7 @@
   "Use {origin} in Chrome": "Chrome’da {origin} kullan",
   "Send downloads from {origin} in Chrome to the agent": "Chrome’da {origin} kaynaklı indirmeleri ajana gönder",
   "Upload files to {origin} in Chrome": "Chrome’da {origin} adresine dosya yükle",
-  "Run scripts on {origin} in Chrome": "Chrome’da {origin} üzerinde betik çalıştır"
+  "Run scripts on {origin} in Chrome": "Chrome’da {origin} üzerinde betik çalıştır",
+  "This chat also uses Chrome · 1 tab": "Bu sohbet Chrome’u da kullanıyor · 1 sekme",
+  "This chat also uses Chrome · {count} tabs": "Bu sohbet Chrome’u da kullanıyor · {count} sekme"
 }
