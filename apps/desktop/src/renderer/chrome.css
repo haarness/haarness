@@ -31,6 +31,13 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* The setup command's notes and the server's restrictions are English
+   sentences: in Arabic they keep their own direction, so a full stop stays
+   at their end, while still lining up with the Arabic text around them. */
+html[dir="rtl"] :is(.chrome-browsers small, .chrome-warning, .chrome-restriction) {
+  unicode-bidi: plaintext;
+  text-align: right;
+}
 .chrome-note {
   margin: var(--s3) 0 0;
   line-height: 1.5;

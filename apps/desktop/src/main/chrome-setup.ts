@@ -87,6 +87,16 @@ export async function chromeSetup(
   action: "setup" | "status",
   options: string[] = [],
 ): Promise<ChromeSetupInfo> {
+  // A test run registers only with a test profile's folder
+  // (HAARNESS_BROWSER_MANIFEST_DIR), never with the user's own Chrome.
+  if (
+    action === "setup" &&
+    process.env.HAARNESS_DESKTOP_TEST &&
+    !process.env.HAARNESS_BROWSER_MANIFEST_DIR
+  )
+    throw new Error(
+      "Test runs set HAARNESS_BROWSER_MANIFEST_DIR before setting up Chrome.",
+    );
   const output = await run([action, "--json", ...options]);
   let parsed: unknown;
   try {
