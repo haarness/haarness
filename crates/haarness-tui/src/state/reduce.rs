@@ -437,6 +437,7 @@ impl App {
                     {
                         self.pending_permissions.push(PendingPermissionInfo {
                             allow_always: event.payload["allowAlways"].as_bool(),
+                            explicit: event.payload["explicit"].as_bool().unwrap_or(false),
                             repository_scope: event.payload["repositoryScope"]
                                 .as_str()
                                 .map(str::to_owned),

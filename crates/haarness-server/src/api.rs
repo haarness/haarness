@@ -740,6 +740,11 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
                 .into_iter()
                 .flat_map(|_| ["browser.v1".into(), "browser-drafts.v1".into()]),
         )
+        // Chrome needs both the broker and its settings.
+        .chain(
+            (state.browser.is_some() && state.management.is_some())
+                .then(|| "browser-extension.v1".into()),
+        )
         .chain(state.management.as_ref().into_iter().flat_map(|_| {
             [
                 "input-settings.v1".into(),
@@ -753,6 +758,7 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
         project_trusted: Some(state.project_trusted),
         default_provider,
         default_model,
+        pid: Some(std::process::id()),
     })
 }
 
@@ -2181,8 +2187,22 @@ async fn change_input_queue(
 async fn reply_permission(
     State(state): State<ServerState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(reply): Json<PermissionReply>,
 ) -> ApiResult<StatusCode> {
+    // A published chat's viewers may not let agents into the owner's Chrome.
+    if crate::remote_scope::root(&headers).is_some()
+        && state
+            .runtime
+            .pending_permissions()
+            .iter()
+            .any(|pending| pending.permission_id == id && pending.explicit)
+    {
+        return Err(ApiFailure(
+            CoreError::PermissionDenied("explicit approval".into()),
+            Some("Answer this on the computer running Chrome.".into()),
+        ));
+    }
     state.runtime.reply_permission(&id, reply).await?;
     Ok(StatusCode::NO_CONTENT)
 }

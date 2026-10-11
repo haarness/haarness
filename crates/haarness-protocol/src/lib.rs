@@ -654,6 +654,10 @@ pub struct ServerInfo {
     pub default_provider: Option<String>,
     #[serde(default)]
     pub default_model: Option<String>,
+    /// The server's process id, so a local client that found this server in a
+    /// runtime record can tell it from another process on a reused port.
+    #[serde(default)]
+    pub pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -956,6 +960,11 @@ fn default_true() -> bool {
 pub struct PendingPermissionInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_always: Option<bool>,
+    /// Only a person may answer: Auto mode, `--yolo`, hooks and configured
+    /// rules never do, so clients must not answer it automatically. Its
+    /// "always" lasts for this chat only (a Chrome site approval).
+    #[serde(default)]
+    pub explicit: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository_scope: Option<String>,
     pub permission_id: String,

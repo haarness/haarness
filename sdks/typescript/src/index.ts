@@ -71,6 +71,10 @@ export class Haarness extends Api {
   async connectBrowserHost(id: string, query: {version?: 1 | 2} = {version: 2}, options: RequestOptions = {}): Promise<JsonSocket> {
     return JsonSocket.connect(this.url(`/v1/threads/${this.segment(id)}/browser/host`, query).replace(/^http/, "ws"), {...await this.headers(), ...options.headers}, this.signal(options.signal), options.timeoutMs ?? this.timeoutMs);
   }
+  /** Haarness for Chrome's bridge: one Chrome profile serving every chat on this server. Send `hello` first. */
+  async connectBrowserExtensionHost(query: {version?: 1} = {version: 1}, options: RequestOptions = {}): Promise<JsonSocket> {
+    return JsonSocket.connect(this.url("/v1/browser/extension/host", {version: 1, ...query}).replace(/^http/, "ws"), {...await this.headers(), ...options.headers}, this.signal(options.signal), options.timeoutMs ?? this.timeoutMs);
+  }
   async connectDraftBrowserHost(id: string, options: RequestOptions = {}): Promise<JsonSocket> {
     return JsonSocket.connect(this.url(`/v1/browser/drafts/${this.segment(id)}/host`).replace(/^http/, "ws"), {...await this.headers(), ...options.headers}, this.signal(options.signal), options.timeoutMs ?? this.timeoutMs);
   }

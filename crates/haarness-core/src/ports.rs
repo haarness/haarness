@@ -559,6 +559,13 @@ pub trait Tool: Send + Sync {
     ) -> Option<crate::PermissionDecision> {
         None
     }
+    /// An operation only a person may approve, such as a site in the user's
+    /// own Chrome. Configured rules may deny it but never allow it; only an
+    /// answer given in this chat satisfies it, and Auto mode, `--yolo` and
+    /// hooks never answer it.
+    fn explicit_approval(&self, _arguments: &Value, _operation: &str) -> bool {
+        false
+    }
     async fn execute(&self, arguments: Value, context: ToolContext) -> CoreResult<ToolOutput>;
 }
 

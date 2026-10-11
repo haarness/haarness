@@ -39,7 +39,7 @@ def routes():
                 if filename == "remote.rs":
                     name = {"catalog":"host_projects","browse":"host_directories","open":"host_open","close_project":"host_close"}[handler]
                 if filename == "browser.rs":
-                    name = {"attach": "connect_browser_host", "attach_draft": "connect_draft_browser_host", "tunnel": "browser_tunnel", "draft_tunnel": "draft_browser_tunnel", "adopt_draft": "adopt_browser_draft"}.get(handler, handler)
+                    name = {"attach": "connect_browser_host", "attach_draft": "connect_draft_browser_host", "tunnel": "browser_tunnel", "draft_tunnel": "draft_browser_tunnel", "adopt_draft": "adopt_browser_draft", "attach_extension": "connect_browser_extension_host"}.get(handler, handler)
                 if filename == "sharing.rs": name = "read_shared_session"
                 fn = re.search(r"async fn " + handler + r"\b([\s\S]*?)\{", text[text.index("fn failure"): ] if filename == "remote.rs" else text)
                 result.append((name, method.upper(), path, fn[1], filename))

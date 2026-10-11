@@ -479,6 +479,10 @@ class Api(Transport):
         """POST /v1/browser/drafts/{id}/adopt."""
         return cast("T.JsonValue", self.request('POST', f'/v1/browser/drafts/{self.segment(id)}/adopt', body=body, binary_body=False, binary_response=False, options=options))
 
+    def list_browser_hosts(self, query: T.BrowserHostsQuery | None = None, *, options: RequestOptions | None = None) -> T.BrowserHostsResponse:
+        """GET /v1/browser/hosts."""
+        return cast("T.BrowserHostsResponse", self.request('GET', f'/v1/browser/hosts', query=query, binary_body=False, binary_response=False, options=options))
+
     def host_projects(self, *, options: RequestOptions | None = None) -> T.WorkspaceListResponse:
         """GET /v1/host/projects."""
         return cast("T.WorkspaceListResponse", self.request('GET', f'/v1/host/projects', binary_body=False, binary_response=False, options=options))
@@ -975,6 +979,10 @@ class AsyncApi(AsyncTransport):
     async def adopt_browser_draft(self, id: str, body: T.AdoptDraft, *, options: RequestOptions | None = None) -> T.JsonValue:
         """POST /v1/browser/drafts/{id}/adopt."""
         return cast("T.JsonValue", await self.request('POST', f'/v1/browser/drafts/{self.segment(id)}/adopt', body=body, binary_body=False, binary_response=False, options=options))
+
+    async def list_browser_hosts(self, query: T.BrowserHostsQuery | None = None, *, options: RequestOptions | None = None) -> T.BrowserHostsResponse:
+        """GET /v1/browser/hosts."""
+        return cast("T.BrowserHostsResponse", await self.request('GET', f'/v1/browser/hosts', query=query, binary_body=False, binary_response=False, options=options))
 
     async def host_projects(self, *, options: RequestOptions | None = None) -> T.WorkspaceListResponse:
         """GET /v1/host/projects."""

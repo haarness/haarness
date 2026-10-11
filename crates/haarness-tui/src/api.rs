@@ -2079,6 +2079,7 @@ mod tests {
             default_model: None,
             default_agent: None,
             project_trusted: Some(true),
+            pid: None,
         }
     }
 

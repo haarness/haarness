@@ -10100,6 +10100,9 @@ async fn concurrent_task_resumptions_recheck_the_child_after_waiting_for_capacit
 #[path = "cases/permission_parity.rs"]
 mod permission_parity;
 
+#[path = "cases/chrome.rs"]
+mod chrome;
+
 #[tokio::test]
 async fn published_remote_chat_cannot_read_or_control_other_conversations() {
     let workspace =

@@ -2201,6 +2201,7 @@ fn new_item_kinds_render_in_the_transcript() {
     app.pending_permissions
         .push(haarness_protocol::PendingPermissionInfo {
             allow_always: None,
+            explicit: false,
             repository_scope: None,
             permission_id: "p1".into(),
             operation: "bash:rm -rf target".into(),
@@ -3152,6 +3153,7 @@ fn home_is_a_launch_masthead_settled_onto_the_composer() {
         default_model: None,
         default_agent: None,
         project_trusted: Some(false),
+        pid: None,
     });
     let lines = app.lines((100, 30));
     let text: String = lines.iter().map(|line| line_text(line) + "\n").collect();
@@ -3436,6 +3438,7 @@ fn masthead_names_the_session_without_repeating_its_id() {
         default_model: None,
         default_agent: None,
         project_trusted: Some(true),
+        pid: None,
     });
 
     let lines = app.lines((90, 24));
@@ -7726,6 +7729,7 @@ fn pending_permission_fixture(
 ) -> haarness_protocol::PendingPermissionInfo {
     haarness_protocol::PendingPermissionInfo {
         allow_always: None,
+        explicit: false,
         repository_scope: None,
         permission_id: id.into(),
         operation: "bash:git push origin main".into(),
@@ -7873,6 +7877,7 @@ fn an_always_rule_identical_to_the_subject_is_not_repeated() {
     app.pending_permissions
         .push(haarness_protocol::PendingPermissionInfo {
             allow_always: None,
+            explicit: false,
             repository_scope: None,
             permission_id: "perm-external".into(),
             operation: format!("external_directory:{path}"),
@@ -9187,6 +9192,7 @@ async fn mouse_hover_paints_chrome_but_keeps_transcript_rows_quiet() {
     app.pending_permissions
         .push(haarness_protocol::PendingPermissionInfo {
             allow_always: None,
+            explicit: false,
             repository_scope: None,
             permission_id: "permission-hover".into(),
             operation: "bash:echo hover".into(),
@@ -14594,6 +14600,7 @@ async fn yolo_answers_its_own_conversation_once_and_leaves_the_rest() {
         workspace_http_status_client(vec![(200, "{}".into()), (200, "{}".into())], false).await;
     let waiting = |id: &str, thread_id, root| haarness_protocol::PendingPermissionInfo {
         allow_always: None,
+        explicit: false,
         repository_scope: None,
         permission_id: id.into(),
         operation: "external_directory:/tmp/x".into(),
@@ -15903,6 +15910,7 @@ fn home_names_the_missing_provider_and_the_agent_mention() {
         default_model: None,
         default_agent: None,
         project_trusted: Some(false),
+        pid: None,
     });
     let text = app
         .lines((100, 30))

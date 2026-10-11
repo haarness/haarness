@@ -641,6 +641,9 @@ impl Tool for RedefinedTool {
     ) -> Option<PermissionDecision> {
         self.inner.permission_constraint(arguments, operation)
     }
+    fn explicit_approval(&self, arguments: &Value, operation: &str) -> bool {
+        self.inner.explicit_approval(arguments, operation)
+    }
     async fn execute(&self, arguments: Value, context: ToolContext) -> CoreResult<ToolOutput> {
         self.inner.execute(arguments, context).await
     }

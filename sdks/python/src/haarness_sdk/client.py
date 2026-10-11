@@ -69,6 +69,10 @@ class Haarness(Api):
     def connect_browser_host(self, id: str, *, version: int = 2, timeout: float | None = None) -> JsonSocket:
         return JsonSocket(self.base_url.replace("http", "ws", 1) + "/v1/threads/" + self.segment(id) + "/browser/host?version=" + str(version), self._headers(), timeout or self._timeout)
 
+    def connect_browser_extension_host(self, *, version: int = 1, timeout: float | None = None) -> JsonSocket:
+        """Haarness for Chrome's bridge: one Chrome profile serving every chat. Send ``hello`` first."""
+        return JsonSocket(self.base_url.replace("http", "ws", 1) + "/v1/browser/extension/host?version=" + str(version), self._headers(), timeout or self._timeout)
+
     def connect_draft_browser_host(self, id: str, *, timeout: float | None = None) -> JsonSocket:
         return JsonSocket(self.base_url.replace("http", "ws", 1) + "/v1/browser/drafts/" + self.segment(id) + "/host", self._headers(), timeout or self._timeout)
 
@@ -121,6 +125,10 @@ class AsyncHaarness(AsyncApi):
 
     async def connect_browser_host(self, id: str, *, version: int = 2, timeout: float | None = None) -> AsyncJsonSocket:
         return await AsyncJsonSocket.connect(self.base_url.replace("http", "ws", 1) + "/v1/threads/" + self.segment(id) + "/browser/host?version=" + str(version), self._headers(), timeout or self._timeout)
+
+    async def connect_browser_extension_host(self, *, version: int = 1, timeout: float | None = None) -> AsyncJsonSocket:
+        """Haarness for Chrome's bridge: one Chrome profile serving every chat. Send ``hello`` first."""
+        return await AsyncJsonSocket.connect(self.base_url.replace("http", "ws", 1) + "/v1/browser/extension/host?version=" + str(version), self._headers(), timeout or self._timeout)
 
     async def connect_draft_browser_host(self, id: str, *, timeout: float | None = None) -> AsyncJsonSocket:
         return await AsyncJsonSocket.connect(self.base_url.replace("http", "ws", 1) + "/v1/browser/drafts/" + self.segment(id) + "/host", self._headers(), timeout or self._timeout)
