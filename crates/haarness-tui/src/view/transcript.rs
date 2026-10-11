@@ -1317,9 +1317,11 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 };
                 // The status suffix must survive truncation: a row that ends
                 // in a lone "f" instead of "failed" reads as a rendering bug.
+                // Long tool names (`browser_tabs_open`) take their own width.
+                let lead = (marker.chars().count() + name.chars().count() + 1).max(12);
                 let argument_budget = width
                     .saturating_sub(
-                        12 + progress.chars().count()
+                        lead + progress.chars().count()
                             + suffix.chars().count()
                             + browser.chars().count(),
                     )

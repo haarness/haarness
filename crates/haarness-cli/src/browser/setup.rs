@@ -312,19 +312,14 @@ pub(crate) struct BrowserEntry {
 
 /// The browsers to register with: the chosen ones, else Google Chrome and
 /// every other one installed here (all of them, for `remove`). Sandboxed
-/// Linux installs are listed as unsupported. Manifest folders, given or from
-/// the environment, replace every browser.
+/// Linux installs are listed as unsupported. Manifest folders (callers pass
+/// `--manifest-dir` or `HAARNESS_BROWSER_MANIFEST_DIR`) replace every browser.
 fn targets(
     context: &Context,
     choices: &[BrowserChoice],
     manifest_dirs: &[PathBuf],
     every: bool,
 ) -> Vec<Target> {
-    let manifest_dirs = if manifest_dirs.is_empty() {
-        &context.manifest_dirs
-    } else {
-        manifest_dirs
-    };
     if !manifest_dirs.is_empty() {
         return manifest_dirs
             .iter()
@@ -600,19 +595,27 @@ pub(crate) fn sync_extension(source: Option<&Path>, target: &Path) -> Result<()>
 }
 
 const NOT_INCLUDED: &str = "Haarness for Chrome is not included in this installation. Set it up from Haarness Desktop (Settings → Browser → Chrome).";
+/// After `remove`, the extension may still be in Chrome; what is gone is
+/// Chrome's way to start Haarness.
+const REMOVED: &str = "Chrome cannot start Haarness: `haarness browser remove` turned that off. Run `haarness browser setup` to use Chrome again.";
 
 pub(crate) fn setup(context: &Context, options: &SetupOptions) -> Result<Report> {
     let files = ChromeFiles::new(&context.data, context.os);
     fs::create_dir_all(&files.dir)
         .with_context(|| format!("cannot create {}", files.dir.display()))?;
+    let manifest_dirs = if options.manifest_dirs.is_empty() {
+        context.manifest_dirs.as_slice()
+    } else {
+        options.manifest_dirs
+    };
     let mut warnings = Vec::new();
-    if context.isolated && options.manifest_dirs.is_empty() && context.manifest_dirs.is_empty() {
+    if context.isolated && manifest_dirs.is_empty() {
         warnings.push(format!(
             "A separate Haarness data folder is in use ({}), so Chrome will work with that folder's projects only. Run setup without HAARNESS_DATA_DIR or HAARNESS_HOME to use your usual one.",
             context.data.display()
         ));
     }
-    let targets = targets(context, options.browsers, options.manifest_dirs, false);
+    let targets = targets(context, options.browsers, manifest_dirs, false);
     if options.if_missing && files.removed().exists() {
         return Ok(report(context, &files, &targets, warnings));
     }
@@ -678,11 +681,20 @@ pub(crate) fn setup(context: &Context, options: &SetupOptions) -> Result<Report>
 
 pub(crate) fn status(context: &Context) -> Report {
     let files = ChromeFiles::new(&context.data, context.os);
+    // Setup could not add one either, so say what setup would.
+    let warnings = if extension_copy(&files.extension()).is_none()
+        && context.extension_source.is_none()
+        && CHROME_WEB_STORE_URL.is_none()
+    {
+        vec![NOT_INCLUDED.to_owned()]
+    } else {
+        Vec::new()
+    };
     report(
         context,
         &files,
-        &targets(context, &[], &[], false),
-        Vec::new(),
+        &targets(context, &[], &context.manifest_dirs, false),
+        warnings,
     )
 }
 
@@ -692,7 +704,7 @@ pub(crate) fn remove(context: &Context, all: bool) -> Result<Report> {
     let files = ChromeFiles::new(&context.data, context.os);
     let wrapper = files.wrapper();
     let mut deleted = Vec::new();
-    for target in targets(context, &[], &[], true) {
+    for target in targets(context, &[], &context.manifest_dirs, true) {
         match &target.place {
             Place::File { manifest, .. } if manifest_points_at(manifest, &wrapper) => {
                 fs::remove_file(manifest)
@@ -734,7 +746,7 @@ pub(crate) fn remove(context: &Context, all: bool) -> Result<Report> {
     let mut report = report(
         context,
         &files,
-        &targets(context, &[], &[], false),
+        &targets(context, &[], &context.manifest_dirs, false),
         Vec::new(),
     );
     report.deleted = Some(deleted);
@@ -803,9 +815,7 @@ pub(crate) fn setup_command(data: &Path, data_dir: Option<&Path>, args: &SetupAr
         eprintln!("Warning: {warning}");
     }
     if report.removed {
-        println!(
-            "Haarness for Chrome was removed with `haarness browser remove`. Run `haarness browser setup` to set it up again."
-        );
+        println!("{REMOVED}");
         return Ok(());
     }
     let registered: Vec<&str> = report
@@ -869,9 +879,7 @@ pub(crate) async fn status_command(data: &Path, cache: &Path, json: bool) -> Res
         return print_json(&report);
     }
     if report.removed {
-        println!(
-            "Haarness for Chrome was removed. Run `haarness browser setup` to use Chrome again."
-        );
+        println!("{REMOVED}");
         return Ok(());
     }
     let registered: Vec<&str> = report
@@ -885,15 +893,36 @@ pub(crate) async fn status_command(data: &Path, cache: &Path, json: bool) -> Res
     } else {
         println!("Chrome can start Haarness ({}).", list(&registered));
     }
+    for browser in report.browsers.iter().filter(|browser| !browser.supported) {
+        if let Some(note) = &browser.note {
+            println!("{}: {note}", browser.name);
+        }
+    }
     match &report.extension {
         Some(extension) => println!(
             "Haarness for Chrome {}: {}",
             extension.version, extension.path
         ),
-        None => println!("Haarness for Chrome is not copied here yet."),
+        None if report
+            .warnings
+            .iter()
+            .any(|warning| warning == NOT_INCLUDED) =>
+        {
+            println!("{NOT_INCLUDED}");
+        }
+        None => {
+            println!("Haarness for Chrome is not copied here yet. Run `haarness browser setup`.")
+        }
     }
+    println!("{}", connected_summary(&connections));
+    Ok(())
+}
+
+/// `status`'s line on the browsers connected to live servers, saying which
+/// the person paused or stopped (agents cannot use those).
+fn connected_summary(connections: &[Value]) -> String {
     let mut connected = Vec::new();
-    for connection in &connections {
+    for connection in connections {
         let project = connection["workspace"]
             .as_str()
             .and_then(|workspace| Path::new(workspace).file_name())
@@ -903,15 +932,20 @@ pub(crate) async fn status_command(data: &Path, cache: &Path, json: bool) -> Res
             if let Some(label) = host["label"].as_str() {
                 let _ = write!(name, " ({label})");
             }
-            connected.push(format!("{name} · {project}"));
+            let _ = write!(name, " · {project}");
+            if host["stopped"] == true {
+                name.push_str(" · stopped in Chrome");
+            } else if host["paused"] == true {
+                name.push_str(" · paused in Chrome");
+            }
+            connected.push(name);
         }
     }
     if connected.is_empty() {
-        println!("No Chrome is connected to a project right now.");
+        "No Chrome is connected to a project right now.".into()
     } else {
-        println!("Connected: {}", connected.join(", "));
+        format!("Connected: {}", connected.join(", "))
     }
-    Ok(())
 }
 
 pub(crate) fn remove_command(data: &Path, all: bool, json: bool) -> Result<()> {
@@ -1306,37 +1340,42 @@ mod tests {
     }
 
     #[test]
-    fn manifest_folders_from_the_environment_replace_every_browser_for_setup_status_and_remove() {
-        let fixture = Fixture::new("setup-manifest-env");
+    fn the_test_manifest_folders_stand_in_for_every_browser_in_setup_status_and_remove() {
+        // As the TUI's /chrome and Desktop's setup dialog run it: no
+        // --manifest-dir, only HAARNESS_BROWSER_MANIFEST_DIR.
+        let fixture = Fixture::new("setup-env-manifest-dir");
+        fs::create_dir_all(fixture.home("Library/Application Support/Google/Chrome")).unwrap();
         let mut context = fixture.context(Os::Mac);
         context.isolated = true;
-        fs::create_dir_all(fixture.home("Library/Application Support/Google/Chrome")).unwrap();
-        let profile = fixture.root.join("profile/NativeMessagingHosts");
-        context.manifest_dirs = vec![profile.clone()];
+        let profiles = [
+            fixture.root.join("a/NativeMessagingHosts"),
+            fixture.root.join("b/NativeMessagingHosts"),
+        ];
+        context.manifest_dirs = profiles.to_vec();
         let report = setup(&context, &options(false)).unwrap();
-        assert!(report.warnings.is_empty());
-        assert_eq!(report.browsers.len(), 1);
-        assert_eq!(report.browsers[0].browser, "custom");
-        assert!(report.browsers[0].registered);
-        assert!(profile.join("ai.haarness.browser.json").is_file());
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(report.browsers.len(), 2);
+        assert!(report.browsers.iter().all(|browser| browser.registered));
+        let real = fixture.home("Library/Application Support/Google/Chrome/NativeMessagingHosts");
+        assert!(!real.exists(), "nothing written for the real browsers");
+        let report = status(&context);
         assert!(
-            !fixture
-                .home("Library/Application Support/Google/Chrome/NativeMessagingHosts")
-                .exists(),
-            "the real Chrome is never registered"
-        );
-        let status = status(&context);
-        assert_eq!(status.browsers.len(), 1);
-        assert!(status.browsers[0].registered);
-        let removed = remove(&context, false).unwrap();
-        assert!(!profile.join("ai.haarness.browser.json").exists());
-        assert!(
-            removed
-                .deleted
-                .unwrap()
+            report
+                .browsers
                 .iter()
-                .any(|path| Path::new(path).starts_with(&profile))
+                .all(|browser| browser.browser == "custom" && browser.registered)
         );
+        let report = remove(&context, false).unwrap();
+        for profile in &profiles {
+            assert!(!profile.join("ai.haarness.browser.json").exists());
+        }
+        assert_eq!(
+            report.deleted.unwrap().len(),
+            3,
+            "two manifests and the wrapper"
+        );
+        assert!(report.browsers.iter().all(|browser| !browser.registered));
+        assert!(!real.exists());
     }
 
     #[test]
@@ -1492,6 +1531,42 @@ mod tests {
                 .iter()
                 .any(|key| key.starts_with("HKCU\\Software\\Google\\Chrome"))
         );
+    }
+
+    #[test]
+    fn status_says_when_this_installation_has_no_extension_to_add() {
+        let fixture = Fixture::new("status-no-extension");
+        let mut context = fixture.context(Os::Mac);
+        assert!(status(&context).warnings.is_empty(), "setup can copy it");
+        context.extension_source = None;
+        assert_eq!(status(&context).warnings, [NOT_INCLUDED]);
+        // A copy Desktop left in the data folder is enough.
+        let files = ChromeFiles::new(&context.data, context.os);
+        sync_extension(
+            Some(&fixture.root.join("install/browser-extension/chrome")),
+            &files.extension(),
+        )
+        .unwrap();
+        assert!(status(&context).warnings.is_empty());
+    }
+
+    #[test]
+    fn status_says_which_connected_browsers_agents_cannot_use() {
+        let host = |label: &str, paused: bool, stopped: bool| json!({"name":"Google Chrome","label":label,"paused":paused,"stopped":stopped});
+        let connections = [json!({
+            "workspace": "/work/shop",
+            "hosts": [host("Work", false, false), host("Home", true, false), host("Test", true, true)],
+        })];
+        assert_eq!(
+            connected_summary(&connections),
+            "Connected: Google Chrome (Work) · shop, Google Chrome (Home) · shop · paused in Chrome, Google Chrome (Test) · shop · stopped in Chrome"
+        );
+        assert_eq!(
+            connected_summary(&[]),
+            "No Chrome is connected to a project right now."
+        );
+        // The extension outlives `remove`; only Chrome's way in is gone.
+        assert!(REMOVED.starts_with("Chrome cannot start Haarness"));
     }
 
     #[test]
