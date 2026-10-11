@@ -28,6 +28,13 @@ fn failure(error: Failure) -> CoreError {
 fn directory(workspace: &Path) -> Result<PathBuf, Failure> {
     let root = std::env::var_os("HAARNESS_DATA_DIR")
         .map(|root| PathBuf::from(root).join("data"))
+        // HAARNESS_HOME keeps everything under one folder.
+        .or_else(|| {
+            std::env::var_os("HAARNESS_HOME")
+                .map(PathBuf::from)
+                .filter(|root| root.is_absolute())
+                .map(|root| root.join("data"))
+        })
         .or_else(|| {
             directories::ProjectDirs::from("dev", "haarness", "haarness")
                 .map(|p| p.data_local_dir().to_owned())

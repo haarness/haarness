@@ -30,6 +30,10 @@ pub fn binary_path() -> io::Result<PathBuf> {
 }
 
 fn cache_root() -> io::Result<PathBuf> {
+    // An isolated `--data-dir` root keeps its cache too, as the CLI does.
+    if let Some(root) = env::var_os("HAARNESS_DATA_DIR").filter(|root| !root.is_empty()) {
+        return Ok(PathBuf::from(root).join("cache"));
+    }
     if let Some(root) = env::var_os("HAARNESS_HOME") {
         let root = PathBuf::from(root);
         if !root.is_absolute() {
