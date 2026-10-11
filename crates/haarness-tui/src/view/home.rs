@@ -9,7 +9,7 @@
 //! this yields entirely rather than print the same two rows twice.
 
 use haarness_opentui::{Line, Span, attr};
-use unicode_width::UnicodeWidthStr as _;
+use crate::width::DisplayWidth as _;
 
 use crate::state::App;
 use crate::view::span::single_line;

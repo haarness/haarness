@@ -12,7 +12,7 @@ use haarness_opentui::{Color, Line, Span, attr};
 use haarness_protocol::{
     WorkflowDefinition, WorkflowRun, WorkflowRunAgent, WorkflowRunAgentStatus, WorkflowRunStatus,
 };
-use unicode_width::UnicodeWidthStr as _;
+use crate::width::DisplayWidth as _;
 
 use crate::locale::Language;
 use crate::state::{App, workflow_status, workflow_status_marker};

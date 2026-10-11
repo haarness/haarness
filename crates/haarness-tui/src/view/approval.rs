@@ -14,7 +14,7 @@
 
 use haarness_opentui::{Line, Span, attr};
 use haarness_protocol::PendingPermissionInfo;
-use unicode_width::UnicodeWidthStr as _;
+use crate::width::DisplayWidth as _;
 
 use crate::locale::Language;
 use crate::state::{App, PermissionChoice};

@@ -3,8 +3,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use haarness_opentui::{Color, Line, Span, attr};
 use haarness_protocol::{PtyId, PtyInfo, PtyStatus, PtyUpdateRequest};
-use unicode_width::UnicodeWidthStr as _;
 
+use crate::width::DisplayWidth as _;
 use crate::{api::PtyClientEvent, locale::Language, theme::Theme};
 
 const SCROLLBACK_LINES: usize = 10_000;

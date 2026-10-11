@@ -3,9 +3,9 @@
 use haarness_opentui::{Color, Line, Span, attr};
 use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::UnicodeWidthChar as _;
-use unicode_width::UnicodeWidthStr as _;
 
 use crate::theme::Theme;
+use crate::width::DisplayWidth as _;
 
 pub fn line(text: impl Into<String>, foreground: Color) -> Line {
     Line::plain(text, foreground)

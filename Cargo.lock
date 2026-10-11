@@ -1563,6 +1563,7 @@ dependencies = [
  "libloading",
  "sha2",
  "thiserror 2.0.20",
+ "unicode-segmentation",
  "unicode-width",
  "zip",
 ]

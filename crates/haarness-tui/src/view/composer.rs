@@ -8,7 +8,8 @@
 
 use haarness_opentui::{Color, Line, Span, attr};
 use haarness_protocol::ItemData;
-use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
+use crate::width::DisplayWidth as _;
+use unicode_width::UnicodeWidthChar as _;
 
 use crate::state::{App, InterruptTarget, ServerRestart};
 use crate::theme::Theme;

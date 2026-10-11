@@ -26,6 +26,7 @@ mod terminal;
 mod theme;
 mod theme_embedded;
 mod view;
+mod width;
 
 #[cfg(test)]
 mod tests;
@@ -1052,7 +1053,7 @@ fn exit_summary(
     styled: bool,
 ) -> String {
     use std::fmt::Write as _;
-    use unicode_width::UnicodeWidthStr as _;
+    use crate::width::DisplayWidth as _;
     let (dim, bold, reset) = if styled {
         ("\x1b[2m", "\x1b[1m", "\x1b[0m")
     } else {
