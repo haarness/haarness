@@ -212,23 +212,14 @@ export function createPage<F extends Browser.HostFile = Browser.HostFile>(
     dialog = null;
     publish();
   });
-  const ready = Promise.all([
-    files.ready,
-    ...(options.start ? [options.start()] : []),
-    diagnostics.enable(),
-    cdp.send("Page.enable"),
-    cdp.send("DOM.enable"),
-    cdp.send("Target.setAutoAttach", {
-      autoAttach: true,
-      waitForDebuggerOnStart: false,
-      flatten: true,
-      filter: [{ type: "iframe", exclude: false }, { exclude: true }],
-    }),
-  ]).then(() => undefined);
-
-  return {
+  // The page exists before its first load starts: a browser can report that
+  // navigation's start synchronously, and the host's handler needs the page.
+  let ready = Promise.resolve();
+  const page: Page<F> = {
     state,
-    ready,
+    get ready() {
+      return ready;
+    },
     sources,
     inspect,
     navigationStarted() {
@@ -334,6 +325,20 @@ export function createPage<F extends Browser.HostFile = Browser.HostFile>(
       refs.clear();
     },
   };
+  ready = Promise.all([
+    files.ready,
+    ...(options.start ? [options.start(page)] : []),
+    diagnostics.enable(),
+    cdp.send("Page.enable"),
+    cdp.send("DOM.enable"),
+    cdp.send("Target.setAutoAttach", {
+      autoAttach: true,
+      waitForDebuggerOnStart: false,
+      flatten: true,
+      filter: [{ type: "iframe", exclude: false }, { exclude: true }],
+    }),
+  ]).then(() => undefined);
+  return page;
 
   async function execute(
     action: Browser.Action,

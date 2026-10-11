@@ -1,37 +1,21 @@
 // Includes MIT-licensed code; see THIRD-PARTY-NOTICES.md.
 import type { WebContents } from "electron";
 import type { ProtocolMapping } from "devtools-protocol/types/protocol-mapping.js";
-import { protocolError } from "./errors";
+import { createCdpEvents } from "@haarness/browser-driver/cdp";
+import { protocolError } from "@haarness/browser-driver/errors";
+import type { CdpTransport } from "@haarness/browser-driver/types";
 
-export type Cdp = ReturnType<typeof createCdp>;
+export type Cdp = CdpTransport;
 
-export function createCdp(contents: WebContents) {
-  const listeners = new Map<
-    string,
-    Set<(params: unknown, sessionID?: string) => void>
-  >();
-  const sessions = new Set([""]);
+/** The driver's DevTools transport over a view's Electron debugger, attached on first use. */
+export function createCdp(contents: WebContents): CdpTransport {
+  const events = createCdpEvents();
   const receive = (
     _event: Electron.Event,
     name: string,
     params: unknown,
     sessionID?: string,
-  ) => {
-    if (!sessions.has(sessionID ?? "")) return;
-    if (name === "Target.attachedToTarget") {
-      const event =
-        params as ProtocolMapping.Events["Target.attachedToTarget"][0];
-      if (event.targetInfo.type === "iframe") sessions.add(event.sessionId);
-    }
-    if (name === "Target.detachedFromTarget")
-      sessions.delete(
-        (params as ProtocolMapping.Events["Target.detachedFromTarget"][0])
-          .sessionId,
-      );
-    listeners
-      .get(name)
-      ?.forEach((callback) => callback(params, sessionID || undefined));
-  };
+  ) => events.receive(name, params, sessionID);
   contents.debugger.on("message", receive);
   return {
     async send<Method extends keyof ProtocolMapping.Commands>(
@@ -51,58 +35,10 @@ export function createCdp(contents: WebContents) {
         throw protocolError(method, error);
       }
     },
-    on<Method extends keyof ProtocolMapping.Events>(
-      method: Method,
-      callback: (
-        params: ProtocolMapping.Events[Method][0],
-        sessionID?: string,
-      ) => void,
-    ) {
-      const handler = (params: unknown, sessionID?: string) =>
-        callback(params as ProtocolMapping.Events[Method][0], sessionID);
-      const handlers = listeners.get(method) ?? new Set();
-      handlers.add(handler);
-      listeners.set(method, handlers);
-      return () => {
-        handlers.delete(handler);
-        if (!handlers.size) listeners.delete(method);
-      };
-    },
+    on: events.on,
     dispose() {
       contents.debugger.off("message", receive);
-      listeners.clear();
+      events.clear();
     },
   };
-}
-
-export function abortError(signal: AbortSignal) {
-  if (signal.aborted)
-    throw new Error(
-      "Browser operation was cancelled. Inspect the tab before deciding to repeat an action; cancellation does not undo changes already made.",
-    );
-}
-
-export async function waitFor(
-  check: () => boolean | Promise<boolean>,
-  signal: AbortSignal,
-  timeoutMs = 10_000,
-) {
-  const deadline = Date.now() + timeoutMs;
-  const timeout = () =>
-    new Error(`Condition was not met within ${timeoutMs} ms.`);
-  // A busy renderer can hold one check past the deadline, so each check races the remaining time.
-  while (true) {
-    abortError(signal);
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) throw timeout();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const expired = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(timeout()), remaining);
-    });
-    if (
-      await Promise.race([check(), expired]).finally(() => clearTimeout(timer))
-    )
-      return;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
 }

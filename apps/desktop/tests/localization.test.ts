@@ -1,5 +1,5 @@
 import test from "node:test";
-import { cursorLabelKeys } from "../src/main/browser/agent-cursor";
+import { cursorLabelKeys } from "@haarness/browser-driver/agent-cursor";
 import { errorTextKeys } from "../src/renderer/error-text";
 import { activityKeys, toolVerbKey, toolVerbKeys } from "../src/renderer/transcript";
 import assert from "node:assert/strict";

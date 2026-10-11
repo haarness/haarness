@@ -74,6 +74,26 @@ test("ready enables the DevTools domains in Desktop's order, after the host's fi
   ]);
 });
 
+test("a navigation the browser reports while the first load starts moves the generation", async () => {
+  const cdp = fakeCdp();
+  const order: string[] = [];
+  const created = createPage(fakeSurface(), cdp, {
+    id: tabID,
+    publish() {},
+    generation: 4,
+    files: memoryFiles(),
+    input: pathInput(),
+    start: async (page) => {
+      // Electron emits did-start-navigation inside loadURL, before createPage returns.
+      page.navigationStarted();
+      order.push("start:" + page.state().generation);
+    },
+  });
+  assert.equal(created.state().generation, 5);
+  await created.ready;
+  assert.deepEqual(order, ["start:5"]);
+});
+
 test("snapshots mint process-wide refs from the seed, and a navigation expires them", async () => {
   const { page: tab, published } = page({ refSeed: lastRef() + 1_000 });
   await tab.ready;

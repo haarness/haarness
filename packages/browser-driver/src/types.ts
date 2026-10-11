@@ -267,9 +267,11 @@ export interface PageOptions<F extends Browser.HostFile = Browser.HostFile> {
   /**
    * Started inside `ready`, after `files.ready` and before the DevTools
    * domains are enabled. Desktop loads the tab's first URL here; a rejection
-   * fails `ready`.
+   * fails `ready`. It receives the page because a browser can report the
+   * load's navigation start synchronously, before `createPage` returns: the
+   * host's handler must already reach `navigationStarted`.
    */
-  start?(): Promise<void>;
+  start?(page: Page<F>): Promise<void>;
   diagnostics?: DiagnosticsOptions;
   extension?: PageExtension<F>;
 }
@@ -283,7 +285,7 @@ export interface PageResult<F extends Browser.HostFile = Browser.HostFile> {
 export interface Page<F extends Browser.HostFile = Browser.HostFile> {
   /** The tab as the server sees it; synchronous, from the surface and the generation. */
   state(): Browser.Tab;
-  /** Resolves once the DevTools domains are enabled (and `options.start` settled). */
+  /** Resolves once the DevTools domains are enabled (and `options.start` settled); set when `options.start` returns. */
   readonly ready: Promise<void>;
   /**
    * Runs one command: `inspect:true` returns the permission target; otherwise
