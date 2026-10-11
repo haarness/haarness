@@ -30,6 +30,15 @@ if (!binary) {
 }
 await access(binary);
 run(npm, ["run", "build"], join(root, "sdks/typescript"));
+// Haarness for Chrome ships inside the app (resources/browser-extension/chrome),
+// where `haarness browser setup` finds it next to the bundled binary.
+const extension = join(root, "apps/browser-extension");
+try {
+  await access(join(extension, "node_modules"));
+} catch {
+  run(npm, ["ci"], extension);
+}
+run(npm, ["run", "build"], extension);
 run(npm, ["run", "build"], directory);
 await mkdir(join(directory, "resources"), { recursive: true });
 await copyFile(resolve(binary), join(directory, "resources", name));
