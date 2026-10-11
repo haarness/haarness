@@ -352,6 +352,8 @@ export class FakeChrome {
       }
       case "Page.navigate":
         return this.navigate(tab, params.url);
+      case "Page.getNavigationHistory":
+        return { currentIndex: 0, entries: [{ id: 1, url: tab.url, userTypedURL: tab.url, title: tab.title, transitionType: "typed" }] };
       default:
         return {};
     }

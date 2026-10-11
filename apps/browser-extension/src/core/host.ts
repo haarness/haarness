@@ -428,6 +428,9 @@ export function createHost(options: HostOptions) {
     publish(entry);
     if (url !== "about:blank") {
       const session = await platform.debugger.session(live.id, record.id);
+      // As on Desktop, the page exists before its first load: it sees every
+      // frame the document attaches, and its console and requests, from the start.
+      await pageFor(entry, record, session).ready;
       session.begin({ server: serverId, thread: entry.thread, command: id });
       try {
         if (context) await session.guard(context, signal, () => session.load(url, signal));

@@ -441,6 +441,8 @@ test("the shared page driver plugs in through createPage and runs inside the sit
   h.start();
   h.attach();
   const { tab } = await h.open("https://a.example/");
+  // As on Desktop, the page exists before the tab's first load, so it saw that navigation.
+  assert.equal(pageOptions?.generation, 0);
   const state = h.states().at(-1)!.message.state.tabs[0];
   const result = await h.command({
     action: { type: "click", tabID: tab.id, ref: "@e1" },
@@ -449,9 +451,8 @@ test("the shared page driver plugs in through createPage and runs inside the sit
     generation: state.generation,
   });
   assert.deepEqual(result.outcome, { type: "success", result: { value: { ok: true }, files: [] } });
-  // The page goes on from the generation the server last saw; nothing is translated.
-  assert.ok(state.generation > 0, "loading the URL moved the generation");
-  assert.equal(pageOptions?.generation, state.generation);
+  // The page counts the tab's generation itself; nothing is translated.
+  assert.equal(state.generation, 1, "loading the URL moved the generation");
   assert.deepEqual(calls, [`click@${state.generation}`]);
   // Request bodies and session headers stay out of network.get in the user's own browser.
   assert.equal(pageOptions?.diagnostics?.requestBodies, false);
