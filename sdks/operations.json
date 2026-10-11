@@ -1528,6 +1528,31 @@
     }
   },
   {
+    "name": "connect_browser_extension_host",
+    "method": "GET",
+    "path": "/v1/browser/extension/host",
+    "pathParams": [],
+    "response": {
+      "type": "null"
+    },
+    "query": {
+      "$ref": "#/components/schemas/ExtensionHostOptions"
+    },
+    "stream": "websocket"
+  },
+  {
+    "name": "list_browser_hosts",
+    "method": "GET",
+    "path": "/v1/browser/hosts",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/BrowserHostsResponse"
+    },
+    "query": {
+      "$ref": "#/components/schemas/BrowserHostsQuery"
+    }
+  },
+  {
     "name": "host_projects",
     "method": "GET",
     "path": "/v1/host/projects",

@@ -232,6 +232,98 @@
         "required": [],
         "type": "object"
       },
+      "BrowserHostInfo": {
+        "description": "One Chrome profile connected to this server, for the hosts API.",
+        "properties": {
+          "browserId": {
+            "type": "string"
+          },
+          "connectedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "extensionVersion": {
+            "type": "string"
+          },
+          "kind": {
+            "description": "Always `chrome` for Chromium browsers; `name` says which.",
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "paused": {
+            "type": "boolean"
+          },
+          "stopped": {
+            "type": "boolean"
+          },
+          "tabs": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "threadTabs": {
+            "description": "Tabs of the conversation named by `thread`.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "threads": {
+            "description": "Conversations with tabs in this profile.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "browserId",
+          "name",
+          "version",
+          "extensionVersion",
+          "paused",
+          "stopped",
+          "connectedAt",
+          "threads",
+          "tabs",
+          "threadTabs"
+        ],
+        "type": "object"
+      },
+      "BrowserHostsQuery": {
+        "properties": {
+          "thread": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "BrowserHostsResponse": {
+        "properties": {
+          "chrome": {
+            "$ref": "#/components/schemas/ChromeHostSettings"
+          },
+          "hosts": {
+            "items": {
+              "$ref": "#/components/schemas/BrowserHostInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "hosts",
+          "chrome"
+        ],
+        "type": "object"
+      },
       "BrowserToolRequest": {
         "properties": {
           "arguments": {},
@@ -365,6 +457,27 @@
           }
         },
         "required": [],
+        "type": "object"
+      },
+      "ChromeHostSettings": {
+        "description": "Chrome's settings, as they apply on this server now.",
+        "properties": {
+          "defaultBrowser": {
+            "$ref": "#/components/schemas/DefaultBrowser"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "everConnected": {
+            "description": "An extension connected since this server started.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled",
+          "defaultBrowser",
+          "everConnected"
+        ],
         "type": "object"
       },
       "CloudAgentAction": {
@@ -1047,6 +1160,15 @@
         },
         "type": "object"
       },
+      "DefaultBrowser": {
+        "description": "Which browser `browser_tabs_open` uses when the model names none.",
+        "enum": [
+          "auto",
+          "haarness",
+          "chrome"
+        ],
+        "type": "string"
+      },
       "DefinitionExecution": {
         "description": "Execution semantics shared by discovered commands and skills.",
         "properties": {
@@ -1340,6 +1462,20 @@
         },
         "required": [
           "name"
+        ],
+        "type": "object"
+      },
+      "ExtensionHostOptions": {
+        "properties": {
+          "version": {
+            "enum": [
+              1
+            ],
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version"
         ],
         "type": "object"
       },
@@ -3706,6 +3842,10 @@
             "type": "string"
           },
           "detail": {},
+          "explicit": {
+            "description": "Only a person may answer: Auto mode, `--yolo`, hooks and configured\nrules never do, so clients must not answer it automatically. Its\n\"always\" lasts for this chat only (a Chrome site approval).",
+            "type": "boolean"
+          },
           "operation": {
             "type": "string"
           },
@@ -4647,6 +4787,15 @@
           },
           "name": {
             "type": "string"
+          },
+          "pid": {
+            "description": "The server's process id, so a local client that found this server in a\nruntime record can tell it from another process on a reused port.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "projectTrusted": {
             "type": [
@@ -6637,6 +6786,72 @@
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            },
+            "description": "Success"
+          },
+          "401": {
+            "description": "Bearer authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/browser/extension/host": {
+      "get": {
+        "operationId": "connect_browser_extension_host",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "version",
+            "required": true,
+            "schema": {
+              "enum": [
+                1
+              ],
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "websocket stream"
+          },
+          "401": {
+            "description": "Bearer authentication required"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/browser/hosts": {
+      "get": {
+        "operationId": "list_browser_hosts",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "thread",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowserHostsResponse"
+                }
               }
             },
             "description": "Success"

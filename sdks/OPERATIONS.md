@@ -125,6 +125,8 @@
 | `connect_draft_browser_host` | `connectDraftBrowserHost` | `GET /v1/browser/drafts/{id}/host` |
 | `draft_browser_tunnel` | `draftBrowserTunnel` | `POST /v1/browser/drafts/{id}/tunnel/{action}` |
 | `adopt_browser_draft` | `adoptBrowserDraft` | `POST /v1/browser/drafts/{id}/adopt` |
+| `connect_browser_extension_host` | `connectBrowserExtensionHost` | `GET /v1/browser/extension/host` |
+| `list_browser_hosts` | `listBrowserHosts` | `GET /v1/browser/hosts` |
 | `host_projects` | `hostProjects` | `GET /v1/host/projects` |
 | `host_directories` | `hostDirectories` | `GET /v1/host/directories` |
 | `host_open` | `hostOpen` | `POST /v1/host/open` |
