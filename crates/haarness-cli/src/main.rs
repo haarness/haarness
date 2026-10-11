@@ -4717,18 +4717,25 @@ impl RunWatch {
     /// nobody to ask, it is refused and the run stops, saying how to allow it.
     async fn answer(&self, client: &haarness_tui::api::ApiClient, root: ThreadId) -> Result<()> {
         resolve_noninteractive_questions_client(client, root, self).await?;
-        if self.yolo {
-            approve_run_requests_once(client, root).await?;
-        }
-        if self.approver == Approver::OtherClients {
+        if self.approver == Approver::OtherClients && !self.yolo {
             return Ok(());
         }
+        // One listing for both: a request that arrives after a separate
+        // --yolo pass would otherwise reach the refusal below and stop a run
+        // that was told to approve it.
         for pending in client
             .pending_permissions()
             .await?
             .into_iter()
             .filter(|pending| pending.thread_id == root || pending.root_thread_id == Some(root))
         {
+            if self.yolo && yolo_answers(&pending) {
+                approve_once(client, &pending).await?;
+                continue;
+            }
+            if self.approver == Approver::OtherClients {
+                continue;
+            }
             let request = describe_permission(&pending);
             let reply = |decision| PermissionReply {
                 decision,
@@ -4819,16 +4826,25 @@ async fn approve_run_requests_once(
                 && yolo_answers(pending)
         })
     {
-        let reply = PermissionReply {
-            decision: PermissionReplyDecision::Once,
-            feedback: None,
-        };
-        // Already answered elsewhere, or its turn stopped: nothing to do.
-        if let Err(error) = client.reply_permission(&pending.permission_id, reply).await
-            && haarness_tui::api::refusal_status(&error) != Some(reqwest::StatusCode::NOT_FOUND)
-        {
-            return Err(error);
-        }
+        approve_once(client, &pending).await?;
+    }
+    Ok(())
+}
+
+/// Answer one request **Allow once** for `--yolo`.
+async fn approve_once(
+    client: &haarness_tui::api::ApiClient,
+    pending: &haarness_protocol::PendingPermissionInfo,
+) -> Result<()> {
+    let reply = PermissionReply {
+        decision: PermissionReplyDecision::Once,
+        feedback: None,
+    };
+    // Already answered elsewhere, or its turn stopped: nothing to do.
+    if let Err(error) = client.reply_permission(&pending.permission_id, reply).await
+        && haarness_tui::api::refusal_status(&error) != Some(reqwest::StatusCode::NOT_FOUND)
+    {
+        return Err(error);
     }
     Ok(())
 }
@@ -11506,6 +11522,87 @@ mod tests {
         assert!(super::yolo_answers(&pending(None)));
         assert!(super::yolo_answers(&pending(Some(true))));
         assert!(!super::yolo_answers(&pending(Some(false))));
+    }
+
+    /// A workflow's agents ask at any moment. A request that shows up while
+    /// a `--yolo` run with nobody at the terminal is answering must be
+    /// approved, never refused with "run again with --yolo".
+    #[tokio::test]
+    async fn a_yolo_run_approves_a_request_that_arrives_while_it_answers() {
+        use axum::{Json, Router, extract::Path, routing::get};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = ThreadId::new();
+        let request = haarness_protocol::PendingPermissionInfo {
+            allow_always: None,
+            repository_scope: None,
+            permission_id: "late".into(),
+            operation: "external_directory:/outside".into(),
+            detail: serde_json::Value::Null,
+            permission: "external_directory".into(),
+            patterns: vec!["/outside".into()],
+            always_patterns: vec!["/outside".into()],
+            thread_id: ThreadId::new(),
+            root_thread_id: Some(root),
+            turn_id: None,
+            agent: Some("w1".into()),
+            created_at: chrono::Utc::now(),
+        };
+        // The first listing is empty; the agent's request lands right after.
+        let listings = Arc::new(AtomicUsize::new(0));
+        let replies = Arc::new(std::sync::Mutex::new(
+            Vec::<(String, serde_json::Value)>::new(),
+        ));
+        let app = Router::new()
+            .route(
+                "/v1/questions",
+                get(|| async { Json(serde_json::json!([])) }),
+            )
+            .route(
+                "/v1/permissions",
+                get({
+                    let listings = listings.clone();
+                    move || async move {
+                        let first = listings.fetch_add(1, Ordering::SeqCst) == 0;
+                        Json(if first {
+                            Vec::new()
+                        } else {
+                            vec![request.clone()]
+                        })
+                    }
+                }),
+            )
+            .route(
+                "/v1/permissions/{id}",
+                axum::routing::post({
+                    let replies = replies.clone();
+                    move |Path(id): Path<String>, Json(body): Json<serde_json::Value>| async move {
+                        replies.lock().unwrap().push((id, body));
+                        axum::http::StatusCode::NO_CONTENT
+                    }
+                }),
+            )
+            .fallback(|| async { axum::http::StatusCode::NO_CONTENT });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = haarness_tui::api::ApiClient::new(&url, "token").unwrap();
+        let watch = RunWatch {
+            approver: Approver::Nobody,
+            yolo: true,
+            activity: None,
+        };
+
+        watch.answer(&client, root).await.unwrap();
+        watch.answer(&client, root).await.unwrap();
+        let replies = replies.lock().unwrap().clone();
+        assert_eq!(replies.len(), 1, "{replies:?}");
+        assert_eq!(replies[0].0, "late");
+        assert_eq!(
+            replies[0].1["decision"],
+            serde_json::to_value(haarness_protocol::PermissionReplyDecision::Once).unwrap()
+        );
+        server.abort();
     }
 
     #[test]
