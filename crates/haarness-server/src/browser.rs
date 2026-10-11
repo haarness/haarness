@@ -5,7 +5,8 @@
 //! request lifetimes, file paths and network sockets.
 use crate::api::ServerState;
 use crate::browser_policy::{
-    BrowserPolicy, BrowserSettings, ChromeCategory, ChromePolicy, DefaultBrowser, web_origin,
+    BrowserPolicy, BrowserSettings, ChromeBlock, ChromeCategory, ChromePolicy, DefaultBrowser,
+    web_origin,
 };
 use async_trait::async_trait;
 use axum::{
@@ -60,6 +61,8 @@ const NOT_OWNED: &str =
 const NO_HAARNESS: &str = "The Haarness browser is available only while this chat is open in Haarness Desktop. Use browser \"chrome\" to work in the user's Chrome, or ask the user to open this chat in Desktop.";
 const NO_CHROME: &str = "Chrome is not connected. If the user has not set up Haarness for Chrome, ask them to (Settings → Browser → Chrome, /chrome in the TUI, or `haarness browser setup`); otherwise ask them to open Chrome. Then retry.";
 const CHROME_OFF: &str = "Agents may not use Chrome: it is turned off in Settings → Browser → Chrome (or /chrome in the TUI). Ask the user; do not retry.";
+const CHROME_OFF_BROWSER_CONTROL: &str = "Agents may not use Chrome: agent browser control is off in Settings → Browser. Ask the user; do not retry.";
+const CHROME_OFF_PROJECT: &str = "Agents may not use Chrome: this project's settings turn Chrome off. Ask the user; do not retry.";
 const CHROME_PAUSED: &str = "The user paused Haarness in Chrome. Ask them to resume it from the Haarness button in Chrome's toolbar; do not retry until they do.";
 const CHROME_STOPPED: &str = "The user stopped Haarness in Chrome (they cancelled the debugging bar or pressed Stop). Ask before trying again; they can click Resume on the Haarness button in Chrome's toolbar.";
 const NO_BROWSER: &str = "No browser is available to this chat. Open it in Haarness Desktop to use the Haarness browser, or set up Haarness for Chrome (/chrome in the TUI or `haarness browser setup`) to use Chrome.";
@@ -72,6 +75,56 @@ const SETTINGS_CHANGED: &str = "Browser settings changed while this operation wa
 const CHROME_NOT_SET_UP: &str = "not set up; mention only if the user asks for their Chrome";
 fn error(message: impl ToString) -> CoreError {
     CoreError::Tool(message.to_string())
+}
+
+/// Why agents may not use Chrome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChromeOff {
+    /// Chrome's own switch is off.
+    Switch,
+    /// Something else turns it off while its switch is on.
+    Blocked(ChromeBlock),
+}
+impl ChromeOff {
+    /// Why agents may not use Chrome now, or `None` when they may.
+    fn of(settings: &BrowserSettings) -> Option<Self> {
+        if settings.policy.enabled && settings.chrome.enabled {
+            None
+        } else if settings.chrome_switched_off {
+            Some(Self::Switch)
+        } else if !settings.policy.enabled {
+            Some(Self::Blocked(ChromeBlock::BrowserControl))
+        } else {
+            Some(
+                settings
+                    .chrome_blocked_by
+                    .map_or(Self::Switch, Self::Blocked),
+            )
+        }
+    }
+    /// What the model reads, naming the setting to change: only Chrome's own
+    /// switch is in /chrome.
+    fn text(self) -> &'static str {
+        match self {
+            Self::Switch => CHROME_OFF,
+            Self::Blocked(ChromeBlock::BrowserControl) => CHROME_OFF_BROWSER_CONTROL,
+            Self::Blocked(ChromeBlock::Project) => CHROME_OFF_PROJECT,
+        }
+    }
+    /// The same, as a note in a tab list's `browsers`.
+    fn note(self) -> &'static str {
+        match self {
+            Self::Switch => "turned off in Settings → Browser → Chrome",
+            Self::Blocked(ChromeBlock::BrowserControl) => {
+                "agent browser control is off in Settings → Browser"
+            }
+            Self::Blocked(ChromeBlock::Project) => "turned off by this project's settings",
+        }
+    }
+}
+/// The model's text when agents may not use Chrome now.
+fn chrome_off(settings: &BrowserSettings) -> Option<&'static str> {
+    ChromeOff::of(settings).map(ChromeOff::text)
 }
 
 /// The server owns what the model reads for each failure an extension
@@ -312,7 +365,9 @@ impl ExtensionHost {
             status.focused_at = focused_at;
         }
     }
-    /// Replace one conversation's tabs. Anything invalid closes the host.
+    /// Replace one conversation's tabs. Anything invalid closes the host;
+    /// a conversation beyond the cap is ignored (and logged), since closing
+    /// would take Chrome from every conversation.
     fn apply_state(&self, message: &Value) -> bool {
         let Some(thread) = message["thread"]
             .as_str()
@@ -349,7 +404,13 @@ impl ExtensionHost {
                 threads.remove(&thread);
             } else {
                 if threads.len() >= MAX_EXTENSION_THREADS && !threads.contains_key(&thread) {
-                    return false;
+                    tracing::warn!(
+                        %thread,
+                        browser = self.browser_id,
+                        limit = MAX_EXTENSION_THREADS,
+                        "ignoring Chrome tabs of one conversation too many"
+                    );
+                    return true;
                 }
                 threads.insert(thread, message["state"].clone());
             }
@@ -445,7 +506,13 @@ pub struct BrowserHostInfo {
 #[derive(serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ChromeHostSettings {
+    /// Agents may use Chrome now: its switch, agent browser control and this
+    /// project's settings all allow it.
     pub enabled: bool,
+    /// Chrome's own switch, in the global settings.
+    pub global_enabled: bool,
+    /// Why agents may not use Chrome although its own switch is on.
+    pub blocked_by: Option<ChromeBlock>,
     pub default_browser: DefaultBrowser,
     /// An extension connected since this server started.
     pub ever_connected: bool,
@@ -634,8 +701,8 @@ impl BrowserBroker {
         thread: ThreadId,
         settings: &BrowserSettings,
     ) -> Result<Arc<Host>, &'static str> {
-        if !settings.chrome.enabled {
-            return Err(CHROME_OFF);
+        if let Some(off) = chrome_off(settings) {
+            return Err(off);
         }
         let hosts = self.extension_hosts();
         let extension = |host: &Arc<Host>| {
@@ -697,6 +764,10 @@ impl BrowserBroker {
                 {
                     return Err(error(NO_BROWSER_UNATTENDED));
                 }
+                // Turned off is the most specific reason, connected or not.
+                if let Some(off) = chrome_off(settings) {
+                    return Err(error(off));
+                }
                 if self.extension_hosts().is_empty() {
                     return Err(error(NO_BROWSER));
                 }
@@ -732,8 +803,8 @@ impl BrowserBroker {
                 continue;
             };
             if let Some(tab) = extension.tab(thread, id) {
-                if !settings.chrome.enabled {
-                    return Err(error(CHROME_OFF));
+                if let Some(off) = chrome_off(settings) {
+                    return Err(error(off));
                 }
                 extension.ready().map_err(error)?;
                 return Ok((host.clone(), tab["generation"].clone()));
@@ -813,8 +884,10 @@ impl BrowserBroker {
     }
     /// Which browsers this conversation can use now, one entry per host.
     fn browsers(&self, thread: ThreadId) -> Value {
-        let enabled = (self.policy)()
-            .is_ok_and(|settings| settings.policy.enabled && settings.chrome.enabled);
+        // Why Chrome is off, when it is; unreadable settings count as off.
+        let off = (self.policy)()
+            .map_or(Some(ChromeOff::Switch), |settings| ChromeOff::of(&settings))
+            .map(ChromeOff::note);
         let desktop = self.desktop(thread).is_some();
         let mut browsers = vec![if desktop {
             json!({"browser":"haarness","name":"Haarness browser","available":true})
@@ -826,8 +899,8 @@ impl BrowserBroker {
             let Some(extension) = &host.extension else {
                 continue;
             };
-            let note = if !enabled {
-                Some("turned off in Settings → Browser → Chrome")
+            let note = if off.is_some() {
+                off
             } else if extension.status().stopped {
                 Some("stopped by the user")
             } else if extension.status().paused {
@@ -844,12 +917,10 @@ impl BrowserBroker {
         if hosts.is_empty() {
             let set_up = self.ever_connected.load(Ordering::Relaxed)
                 || self.chrome_wrapper.get().is_some_and(|path| path.exists());
-            let note = if !set_up {
-                CHROME_NOT_SET_UP
-            } else if !enabled {
-                "turned off in Settings → Browser → Chrome"
+            let note = if set_up {
+                off.unwrap_or("not connected; ask the user to open Chrome")
             } else {
-                "not connected; ask the user to open Chrome"
+                CHROME_NOT_SET_UP
             };
             browsers
                 .push(json!({"browser":"chrome","name":"Chrome","available":false,"note":note}));
@@ -887,14 +958,11 @@ impl BrowserBroker {
     }
     /// The Chrome profiles connected to this server, for Settings and the TUI.
     pub fn hosts(&self, thread: Option<ThreadId>) -> BrowserHostsResponse {
-        let (enabled, default_browser) = match (self.policy)() {
-            Ok(settings) => (
-                settings.policy.enabled && settings.chrome.enabled,
-                settings.default_browser,
-            ),
+        let (off, default_browser) = match (self.policy)() {
+            Ok(settings) => (ChromeOff::of(&settings), settings.default_browser),
             Err(error) => {
                 tracing::warn!(%error, "cannot read browser settings");
-                (false, DefaultBrowser::Auto)
+                (Some(ChromeOff::Switch), DefaultBrowser::Auto)
             }
         };
         BrowserHostsResponse {
@@ -925,7 +993,12 @@ impl BrowserBroker {
                 })
                 .collect(),
             chrome: ChromeHostSettings {
-                enabled,
+                enabled: off.is_none(),
+                global_enabled: off != Some(ChromeOff::Switch),
+                blocked_by: match off {
+                    Some(ChromeOff::Blocked(block)) => Some(block),
+                    _ => None,
+                },
                 default_browser,
                 ever_connected: self.ever_connected.load(Ordering::Relaxed),
             },
@@ -1714,8 +1787,8 @@ impl Tool for BrowserTool {
                     (serde_json::to_value(&current.policy), &prepared["policy"])
                 }
                 Some(Kind::Chrome) => {
-                    if !current.chrome.enabled {
-                        return Err(error(CHROME_OFF));
+                    if let Some(off) = chrome_off(&current) {
+                        return Err(error(off));
                     }
                     (serde_json::to_value(&current.chrome), &prepared["chrome"])
                 }
@@ -2408,12 +2481,213 @@ mod tests {
         // An empty list releases the conversation.
         share(&host, thread, &[]);
         assert!(!extension.holds(thread));
-        for _ in 0..MAX_EXTENSION_THREADS {
-            share(&host, ThreadId::new(), &[&tab_id()]);
+        let held: Vec<ThreadId> = (0..MAX_EXTENSION_THREADS)
+            .map(|_| ThreadId::new())
+            .collect();
+        for thread in &held {
+            share(&host, *thread, &[&tab_id()]);
         }
-        assert!(!extension.apply_state(
-            &json!({"thread":ThreadId::new(),"state":{"tabs":[tab(&tab_id())],"focusedTabID":null}})
+        // One conversation too many is ignored, never a reason to close the
+        // connection every conversation shares.
+        let extra = ThreadId::new();
+        assert!(extension.apply_state(
+            &json!({"thread":extra,"state":{"tabs":[tab(&tab_id())],"focusedTabID":null}})
         ));
+        assert!(!extension.holds(extra));
+        assert_eq!(extension.threads.lock().len(), MAX_EXTENSION_THREADS);
+        // Conversations it holds still update, and a released one makes room.
+        let moved = tab_id();
+        share(&host, held[0], &[&moved]);
+        assert!(extension.tab(held[0], &moved).is_some());
+        share(&host, held[1], &[]);
+        share(&host, extra, &[&tab_id()]);
+        assert!(extension.holds(extra));
+    }
+
+    #[tokio::test]
+    async fn chrome_off_names_its_cause_first_and_in_the_hosts_api() {
+        let settings = Arc::new(Mutex::new(BrowserSettings::default()));
+        let broker = live(&settings);
+        let thread = ThreadId::new();
+        let scheduled = ThreadId::new();
+        lookup(&broker, scheduled, ThreadId::new());
+        let open = |thread| {
+            let broker = broker.clone();
+            let settings = settings.lock().clone();
+            async move {
+                broker
+                    .open_host(thread, None, &settings)
+                    .await
+                    .map_err(message)
+            }
+        };
+        let chrome_settings =
+            |broker: &BrowserBroker| serde_json::to_value(broker.hosts(None).chrome).unwrap();
+        let note = |broker: &BrowserBroker| {
+            broker.browsers(thread)[1]["note"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let on = chrome_settings(&broker);
+        assert_eq!(on["enabled"], true);
+        assert_eq!(on["globalEnabled"], true);
+        assert_eq!(on["blockedBy"], Value::Null);
+        // Turned off and never connected: Automatic says it is off, not
+        // that Chrome needs setting up.
+        {
+            let mut settings = settings.lock();
+            settings.chrome.enabled = false;
+            settings.chrome_switched_off = true;
+        }
+        assert_eq!(open(thread).await.err().unwrap(), CHROME_OFF);
+        assert_eq!(open(scheduled).await.err().unwrap(), NO_BROWSER_UNATTENDED);
+        let off = chrome_settings(&broker);
+        assert_eq!(off["enabled"], false);
+        assert_eq!(off["globalEnabled"], false);
+        assert_eq!(off["blockedBy"], Value::Null);
+        // A project turned it off: /chrome cannot help, so the text says so.
+        {
+            let mut settings = settings.lock();
+            settings.chrome_switched_off = false;
+            settings.chrome_blocked_by = Some(ChromeBlock::Project);
+        }
+        assert_eq!(open(thread).await.err().unwrap(), CHROME_OFF_PROJECT);
+        let blocked = chrome_settings(&broker);
+        assert_eq!(blocked["enabled"], false);
+        assert_eq!(blocked["globalEnabled"], true);
+        assert_eq!(blocked["blockedBy"], "project");
+        // So did agent browser control, even with Chrome connected.
+        settings.lock().chrome_blocked_by = Some(ChromeBlock::BrowserControl);
+        let (profile, mut messages) = chrome(&broker, 1, None);
+        let id = tab_id();
+        share(&profile, thread, &[&id]);
+        assert_eq!(
+            open(thread).await.err().unwrap(),
+            CHROME_OFF_BROWSER_CONTROL
+        );
+        assert_eq!(chrome_settings(&broker)["blockedBy"], "browser-control");
+        assert_eq!(
+            note(&broker),
+            "agent browser control is off in Settings → Browser"
+        );
+        let error = broker
+            .prepare(
+                thread,
+                "snapshot",
+                json!({"tabID":id}),
+                &CancellationToken::new(),
+            )
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(message(error), CHROME_OFF_BROWSER_CONTROL);
+        assert!(messages.try_recv().is_err());
+        // A connected profile's entry in the tab list says why, too.
+        settings.lock().chrome_blocked_by = Some(ChromeBlock::Project);
+        assert_eq!(note(&broker), "turned off by this project's settings");
+        settings.lock().chrome_switched_off = true;
+        assert_eq!(note(&broker), "turned off in Settings → Browser → Chrome");
+        for text in [CHROME_OFF_PROJECT, CHROME_OFF_BROWSER_CONTROL] {
+            assert!(!text.contains("/chrome"), "{text}");
+        }
+        // Back on: the connected profile serves the chat again.
+        *settings.lock() = BrowserSettings::default();
+        assert!(Arc::ptr_eq(&open(thread).await.unwrap(), &profile));
+    }
+
+    #[tokio::test]
+    async fn haarness_browser_rules_leave_pending_chrome_calls_alone() {
+        use crate::browser_policy::ChromeLayering;
+        let shared = |sites: Value| -> BrowserPolicy {
+            serde_json::from_value(json!({"enabled":true,"defaults":{"browsing":"allow","downloads":"allow","uploads":"allow"},"sites":sites})).unwrap()
+        };
+        let layered = |policy: BrowserPolicy| {
+            let chrome = ChromeLayering::new(None, &[], std::slice::from_ref(&policy));
+            BrowserSettings {
+                policy,
+                chrome: chrome.policy,
+                ..BrowserSettings::default()
+            }
+        };
+        let settings = Arc::new(Mutex::new(layered(shared(json!([])))));
+        let broker = live(&settings);
+        let thread = ThreadId::new();
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-browser-rules-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (profile, mut messages) = chrome(&broker, 1, None);
+        let id = tab_id();
+        share(&profile, thread, &[&id]);
+        let snapshot = tool(&broker, "browser_snapshot");
+        let run = || {
+            let snapshot = snapshot.clone();
+            let context = context(thread, &workspace);
+            let id = id.clone();
+            let settings = settings.clone();
+            async move {
+                let prepared = snapshot
+                    .prepare_arguments(json!({"tabID":id}), thread, CancellationToken::new())
+                    .await?;
+                // The user edits the Haarness browser's sites while this
+                // call waits for approval.
+                let edited = layered(shared(json!([
+                    {"origin":"https://docs.example.org","browsing":"allow","downloads":"allow","uploads":"allow"},
+                    {"origin":"https://news.example.org","browsing":"ask","downloads":"ask","uploads":"allow"},
+                ])));
+                *settings.lock() = edited;
+                snapshot.execute(prepared, context).await
+            }
+        };
+        let mut task = tokio::spawn(run());
+        answer(
+            &profile,
+            &mut messages,
+            json!({"resources":["https://example.test"],"key":"k"}),
+        )
+        .await;
+        // The call still runs: it reaches Chrome rather than failing.
+        let command = tokio::select! {
+            command = messages.recv() => command.unwrap(),
+            result = &mut task => panic!("the call ended before reaching Chrome: {result:?}"),
+        };
+        profile
+            .pending
+            .lock()
+            .remove(command["id"].as_str().unwrap())
+            .unwrap()
+            .send(json!({"type":"success","result":{"value":{"content":"page"},"files":[]}}))
+            .unwrap();
+        let output = task.await.unwrap().unwrap();
+        assert_eq!(output.metadata["result"]["content"], "page");
+        // A block does change Chrome: the waiting call must ask again.
+        let task = tokio::spawn({
+            let snapshot = snapshot.clone();
+            let context = context(thread, &workspace);
+            let id = id.clone();
+            let settings = settings.clone();
+            async move {
+                let prepared = snapshot
+                    .prepare_arguments(json!({"tabID":id}), thread, CancellationToken::new())
+                    .await?;
+                *settings.lock() = layered(shared(json!([
+                    {"origin":"https://example.test","browsing":"deny","downloads":"allow","uploads":"allow"},
+                ])));
+                snapshot.execute(prepared, context).await
+            }
+        });
+        answer(
+            &profile,
+            &mut messages,
+            json!({"resources":["https://example.test"],"key":"k"}),
+        )
+        .await;
+        assert_eq!(
+            message(task.await.unwrap().err().unwrap()),
+            SETTINGS_CHANGED
+        );
+        assert!(messages.try_recv().is_err());
+        std::fs::remove_dir_all(workspace).unwrap();
     }
 
     #[test]
