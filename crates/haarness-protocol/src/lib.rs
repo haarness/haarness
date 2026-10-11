@@ -654,6 +654,10 @@ pub struct ServerInfo {
     pub default_provider: Option<String>,
     #[serde(default)]
     pub default_model: Option<String>,
+    /// The server's process id, so a local client that found this server in a
+    /// runtime record can tell it from another process on a reused port.
+    #[serde(default)]
+    pub pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

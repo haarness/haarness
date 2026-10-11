@@ -740,6 +740,11 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
                 .into_iter()
                 .flat_map(|_| ["browser.v1".into(), "browser-drafts.v1".into()]),
         )
+        // Chrome needs both the broker and its settings.
+        .chain(
+            (state.browser.is_some() && state.management.is_some())
+                .then(|| "browser-extension.v1".into()),
+        )
         .chain(state.management.as_ref().into_iter().flat_map(|_| {
             [
                 "input-settings.v1".into(),
@@ -753,6 +758,7 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
         project_trusted: Some(state.project_trusted),
         default_provider,
         default_model,
+        pid: Some(std::process::id()),
     })
 }
 
