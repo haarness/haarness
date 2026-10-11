@@ -1,0 +1,107 @@
+/*
+ * Design tokens, copied from Haarness Desktop (apps/desktop/src/renderer/theme.css
+ * and the default "Haarness" palette in src/themes.ts) so the extension reads as
+ * part of the same product. Type, space, radius and motion are fixed; colour roles
+ * follow the browser's light or dark appearance.
+ */
+:root {
+  --sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI",
+    Inter, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono",
+    monospace;
+
+  --ui-xs: 10.5px;
+  --ui-sm: 11.5px;
+  --ui: 12.5px;
+  --ui-lg: 13.5px;
+  --title-sm: 15px;
+  --title: 19px;
+  --title-lg: 25px;
+  --display: 32px;
+
+  --lh-tight: 1.25;
+  --lh-ui: 1.45;
+  --lh-read: 1.6;
+  --track-tight: -0.012em;
+  --track-caps: 0.06em;
+
+  --s0: 4px;
+  --s1: 6px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s7: 32px;
+  --s8: 44px;
+  --s9: 64px;
+
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 9px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+  --r-2xl: 22px;
+  --r-pill: 999px;
+
+  --control: 30px;
+  --control-sm: 26px;
+  --control-lg: 36px;
+  --icon-button: 28px;
+
+  --ease: cubic-bezier(0.2, 0.6, 0.25, 1);
+  --fast: 110ms;
+  --slow: 220ms;
+
+  /* Haarness palette, light. */
+  --page: #fdfcfa;
+  --sidebar: #f4f1ec;
+  --surface: #f1eee8;
+  --raised: #e6e2d9;
+  --hover: #0000000a;
+  --line: #00000016;
+  --text: #232120;
+  --muted: #635c53;
+  --primary: #232120;
+  --primary-hover: #000000;
+  --accent: #8a5729;
+  --selected: #00000010;
+  --danger: #b3382f;
+  --green: #2c7442;
+  color-scheme: light;
+
+  --hairline: color-mix(in srgb, var(--line) 70%, transparent);
+  --faint: color-mix(in srgb, var(--muted) 62%, transparent);
+  --primary-soft: color-mix(in srgb, var(--primary) 14%, transparent);
+  --accent-soft: color-mix(in srgb, var(--accent) 13%, transparent);
+  --accent-edge: color-mix(in srgb, var(--accent) 42%, transparent);
+  --danger-soft: color-mix(in srgb, var(--danger) 13%, transparent);
+  --danger-edge: color-mix(in srgb, var(--danger) 45%, transparent);
+  --green-soft: color-mix(in srgb, var(--green) 14%, transparent);
+
+  --shadow-1: 0 1px 2px #0000000f, 0 6px 18px -8px #00000021;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Haarness palette, dark. */
+    --page: #151413;
+    --sidebar: #1c1a19;
+    --surface: #232120;
+    --raised: #2c2a27;
+    --hover: #ffffff0d;
+    --line: #ffffff16;
+    --text: #eae5dd;
+    --muted: #a9a298;
+    --primary: #eae5dd;
+    --primary-hover: #ffffff;
+    --accent: #dba273;
+    --selected: #ffffff12;
+    --danger: #ef8078;
+    --green: #82c78f;
+    color-scheme: dark;
+    --shadow-1: 0 1px 2px #00000026, 0 6px 20px -6px #0000003d;
+  }
+}

@@ -1,0 +1,207 @@
+/**
+ * One agent tab under the debugger: site rules enforced while a command runs,
+ * page loads, the driver page, and downloads the page starts.
+ */
+import type { CreatePage, Page, PageOptions } from "../../core/driver-contract";
+import type { createAttribution } from "../../core/downloads";
+import { CANCELLED, HostError } from "../../core/errors";
+import { blockedMessage, decideRequest, fetchPatterns, landing, type FetchContext, type FetchDecision } from "../../core/fetch-policy";
+import type { TabSession } from "../../core/platform";
+import type { ChromeTransport } from "./cdp";
+import { createFileInput, type ChromeFileStore } from "./files";
+import { createSurface, type TabCache } from "./page";
+import { abortable } from "./wait";
+
+export interface SessionDeps {
+  cache: TabCache;
+  files: ChromeFileStore;
+  attribution: ReturnType<typeof createAttribution>;
+  uploadsRoot(): string | null;
+  cursor(): boolean;
+}
+
+/** How long a main-frame navigation right after a command is still checked against the chat's rules. */
+const BACKSTOP_MS = 2_000;
+const LOAD_TIMEOUT_MS = 30_000;
+const IFRAMES_ONLY = [{ type: "iframe", exclude: false }, { exclude: true }];
+
+export type ChromeTabSession = TabSession & { dispose(): void };
+
+export function createSession(transport: ChromeTransport, deps: SessionDeps): ChromeTabSession {
+  const tabId = transport.tabId;
+  let command: { server: string; thread: string; command: string } | undefined;
+  let after: (() => Promise<void>)[] = [];
+  let page: Page | undefined;
+  let surface: ReturnType<typeof createSurface> | undefined;
+  let main: string | undefined;
+  let started: string | undefined;
+  let backstop: (() => void) | undefined;
+
+  const enabled = transport.send("Page.enable").catch(() => {});
+  const mainFrame = async () => (main ??= (await transport.send("Page.getFrameTree")).frameTree.frame.id);
+
+  const offs = [
+    transport.on("Page.downloadWillBegin", (event) => {
+      if (command) deps.attribution.began({ url: event.url, tabId, name: event.suggestedFilename, ...command });
+    }),
+    // The driver counts documents: a main-frame navigation to a new document expires its refs.
+    transport.on("Page.frameStartedNavigating", (event, session) => {
+      if (session || event.frameId !== main || /sameDocument/i.test(event.navigationType)) return;
+      started = event.loaderId;
+      page?.navigationStarted();
+    }),
+    transport.on("Page.frameNavigated", (event, session) => {
+      if (session || event.frame.parentId) return;
+      main = event.frame.id;
+      // Chrome before 133 has no frameStartedNavigating; count the commit instead.
+      if (event.frame.loaderId !== started) page?.navigationStarted();
+      started = undefined;
+    }),
+  ];
+
+  async function blank() {
+    await transport.send("Page.stopLoading").catch(() => {});
+    await transport.send("Page.navigate", { url: "about:blank" }).catch(() => {});
+  }
+
+  async function landed() {
+    try {
+      const tree = await transport.send("Page.getFrameTree");
+      return tree.frameTree.frame.url + (tree.frameTree.frame.urlFragment ?? "");
+    } catch {
+      return deps.cache.url;
+    }
+  }
+
+  async function load(url: string, signal: AbortSignal) {
+    await enabled;
+    let done!: () => void;
+    const loaded = new Promise<void>((resolve) => (done = resolve));
+    const off = transport.on("Page.loadEventFired", () => done());
+    try {
+      const result = await abortable(transport.send("Page.navigate", { url }), signal);
+      if (result.errorText) throw new Error(`Chrome could not load ${url}: ${result.errorText}`);
+      // A same-document navigation has no loader and fires no load event.
+      if (!result.loaderId) return;
+      await abortable(loaded, signal, LOAD_TIMEOUT_MS).catch((error) => {
+        if (error instanceof Error && error.message === CANCELLED) throw error;
+        // A page that never finishes loading is still usable; the tab reports loading.
+      });
+    } catch (error) {
+      if (signal.aborted) await transport.send("Page.stopLoading").catch(() => {});
+      throw error;
+    } finally {
+      off();
+    }
+  }
+
+  return {
+    cdp: transport,
+    load,
+    async guard(context: FetchContext, signal: AbortSignal, work) {
+      if (signal.aborted) throw new Error(CANCELLED);
+      backstop?.();
+      await enabled;
+      const patterns = fetchPatterns(context.policy);
+      const frame = await mainFrame();
+      let blocked: Extract<FetchDecision, { action: "block" }> | undefined;
+      const sessions = new Set<string | undefined>([undefined]);
+      const enable = (session: string | undefined) =>
+        transport.send("Fetch.enable", { patterns }, session).then(() => {
+          sessions.add(session);
+        });
+      const offPaused = transport.on("Fetch.requestPaused", (event, session) => {
+        const decision = decideRequest(context, {
+          url: event.request.url + (event.request.urlFragment ?? ""),
+          resourceType: event.resourceType,
+          mainFrame: !session && event.frameId === frame,
+        });
+        if (decision.action === "block") {
+          blocked ??= decision;
+          void transport.send("Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" }, session).catch(() => {});
+        } else void transport.send("Fetch.continueRequest", { requestId: event.requestId }, session).catch(() => {});
+      });
+      const offChild = transport.on("Target.attachedToTarget", (event) => {
+        if (event.targetInfo.type === "iframe") void enable(event.sessionId).catch(() => {});
+      });
+      let result: Awaited<ReturnType<typeof work>> | undefined;
+      let failure: unknown;
+      try {
+        // Await every enable before the command's first input.
+        await enable(undefined);
+        await Promise.all(transport.children().map((child) => enable(child).catch(() => {})));
+        if (!page)
+          await transport
+            .send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true, filter: IFRAMES_ONLY })
+            .catch(() => {});
+        await transport.send("Network.setBypassServiceWorker", { bypass: true }).catch(() => {});
+        await transport.send("Page.setPrerenderingAllowed", { isAllowed: false }).catch(() => {});
+        result = await work();
+      } catch (error) {
+        failure = error;
+      } finally {
+        offPaused();
+        offChild();
+        await Promise.all([...sessions].map((session) => transport.send("Fetch.disable", {}, session).catch(() => {})));
+      }
+      if (!blocked) {
+        const decision = landing(context, await landed());
+        if (decision.action === "block") blocked = decision;
+      }
+      if (blocked) {
+        await blank();
+        throw new HostError("site-blocked", blockedMessage(blocked));
+      }
+      watch(context);
+      if (failure !== undefined) throw failure;
+      return result as Awaited<ReturnType<typeof work>>;
+    },
+    page(create: CreatePage, options: Omit<PageOptions, "files" | "input">) {
+      if (page) return page;
+      surface = createSurface(transport, {
+        cache: deps.cache,
+        load,
+        after: (work) => void after.push(work),
+        cursor: deps.cursor,
+        mainFrame,
+      });
+      page = create(surface, transport, { ...options, files: deps.files, input: createFileInput(transport, deps.uploadsRoot) });
+      void mainFrame().catch(() => {});
+      return page;
+    },
+    begin(current) {
+      command = current;
+    },
+    async end() {
+      command = undefined;
+      const pending = after;
+      after = [];
+      for (const work of pending) await work().catch(() => {});
+    },
+    dispose() {
+      backstop?.();
+      for (const off of offs) off();
+      surface?.dispose();
+      page = undefined;
+    },
+  };
+
+  /**
+   * For two seconds after a command, a main-frame navigation the command
+   * set off (a timer, a late redirect) is still checked; one that lands
+   * somewhere the chat may not be is sent back to a blank page.
+   */
+  function watch(context: FetchContext) {
+    const off = transport.on("Page.frameNavigated", (event, session) => {
+      if (session || event.frame.parentId) return;
+      if (landing(context, event.frame.url).action === "block") void blank();
+    });
+    const timer = setTimeout(stop, BACKSTOP_MS);
+    function stop() {
+      clearTimeout(timer);
+      off();
+      if (backstop === stop) backstop = undefined;
+    }
+    backstop = stop;
+  }
+}

@@ -73,6 +73,10 @@
       {
         "from": "resources/",
         "to": "bin/"
+      },
+      {
+        "from": "../browser-extension/dist/chrome",
+        "to": "browser-extension/chrome"
       }
     ],
     "asar": true,

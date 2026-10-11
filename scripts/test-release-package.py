@@ -12,4 +12,12 @@ assert subprocess.check_output([str(binary),'--version'],text=True).strip()=='ha
 bun=binary.parent/('bun.exe' if platform.system()=='Windows' else 'bun')
 assert subprocess.check_output([str(bun),'--version'],text=True).strip()=='1.3.14'
 subprocess.run([str(binary),'--help'],check=True,stdout=subprocess.DEVNULL)
-print('Packaged backend and bundled JavaScript runtime execute successfully')
+# Haarness for Chrome sits beside bin/, where `haarness browser setup` looks for it.
+manifest=json.loads((binary.parent.parent/'browser-extension'/'chrome'/'manifest.json').read_text())
+release=versions['version'].split('-')[0]
+preview=versions['version'].split('.')[-1] if '-' in versions['version'] else '1000'
+assert manifest['version_name']==versions['version'],manifest['version_name']
+assert manifest['version']==f'{release}.{preview}',manifest['version']
+assert manifest['key'] and 'nativeMessaging' in manifest['permissions']
+assert (binary.parent.parent/'browser-extension'/'chrome'/'background.js').is_file()
+print('Packaged backend, bundled JavaScript runtime and Chrome extension check out')

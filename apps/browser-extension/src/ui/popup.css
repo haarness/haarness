@@ -1,0 +1,351 @@
+/* The toolbar popup, 360 px wide. Logical properties only: it runs right to left in Arabic. */
+@import url("./base.css");
+
+body {
+  width: 360px;
+  min-height: 120px;
+  background: var(--page);
+}
+.popup {
+  display: flex;
+  flex-direction: column;
+}
+.grow {
+  flex: 1;
+  min-width: 0;
+}
+.small {
+  font-size: var(--ui-sm);
+}
+
+/* ------------------------------------------------------------------ header */
+.bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s3) var(--s4);
+  border-block-end: 1px solid var(--hairline);
+}
+.brand {
+  font-size: var(--ui-lg);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.brand-tile {
+  display: block;
+  flex: none;
+}
+.loading {
+  display: grid;
+  place-items: center;
+  padding: var(--s8) 0;
+}
+
+/* -------------------------------------------------------------------- body */
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  padding: var(--s3) var(--s4) var(--s4);
+}
+.body > * {
+  animation: rise var(--slow) var(--ease);
+}
+.actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
+.hint {
+  font-size: var(--ui-sm);
+  color: var(--muted);
+}
+.sep {
+  color: var(--faint);
+}
+
+/* A whole-popup state: setup, connecting, stopped. */
+.state {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--s2);
+  padding: var(--s2) 0 var(--s1);
+}
+.state h2 {
+  margin-block-start: var(--s1);
+}
+.state p {
+  color: var(--muted);
+  font-size: var(--ui);
+  line-height: var(--lh-read);
+}
+.state .actions {
+  margin-block-start: var(--s1);
+}
+.state-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--r-lg);
+  display: grid;
+  place-items: center;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+}
+.state-icon.danger {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: transparent;
+}
+.state .hint {
+  margin-block-start: var(--s1);
+  padding-block-start: var(--s2);
+  border-block-start: 1px solid var(--hairline);
+  line-height: var(--lh-read);
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  border-radius: var(--r-md);
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: var(--ui);
+  line-height: 1.4;
+}
+.banner > .icon {
+  color: var(--accent);
+}
+
+/* ---------------------------------------------------------------- approval */
+.approval {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s3);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  border: 1px solid var(--accent-edge);
+  box-shadow: var(--shadow-1);
+}
+.eyebrow {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  font-size: var(--ui-xs);
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: var(--track-caps);
+  color: var(--accent);
+}
+.approval-lines {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0);
+  font-size: var(--ui-lg);
+  line-height: 1.4;
+}
+.origin {
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.approval-chat {
+  display: flex;
+  gap: var(--s1);
+  min-width: 0;
+  font-size: var(--ui-sm);
+  color: var(--muted);
+}
+.approval-chat .chat-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.approval .actions {
+  margin-block-start: var(--s1);
+}
+.approval .actions button {
+  flex: 1;
+}
+.approval .actions button.primary {
+  flex: 1.6;
+}
+.approval > .hint {
+  text-align: center;
+}
+.error-line {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s1);
+  color: var(--danger);
+  font-size: var(--ui-sm);
+}
+.error-line .icon {
+  margin-block-start: 1px;
+}
+
+/* ------------------------------------------------------------------- chats */
+.chats {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.section-label {
+  font-size: var(--ui-xs);
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: var(--track-caps);
+  color: var(--muted);
+  margin-block-start: var(--s1);
+}
+.chat-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.chat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  padding: var(--s3);
+  border-radius: var(--r-lg);
+  border: 1px solid var(--hairline);
+  background: var(--surface);
+}
+.chat-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+.chat-title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  font-size: var(--ui-lg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pill.small {
+  height: 20px;
+  padding: 0 var(--s1);
+  font-size: var(--ui-xs);
+  gap: 5px;
+}
+.pill.small .dot {
+  width: 6px;
+  height: 6px;
+}
+.chat-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--ui-sm);
+}
+.chat-meta .project {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.chat .note {
+  font-size: var(--ui-sm);
+  color: var(--muted);
+  line-height: 1.45;
+}
+.chat-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  margin-block-start: var(--s1);
+}
+.close-all {
+  align-self: flex-start;
+  margin-inline-start: calc(-1 * var(--s2));
+  font-size: var(--ui-sm);
+}
+
+/* ------------------------------------------------------------------- empty */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--s1);
+  padding: var(--s5) var(--s4) var(--s4);
+}
+.empty-art {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--r-xl);
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  margin-block-end: var(--s2);
+}
+.empty p {
+  color: var(--muted);
+  font-size: var(--ui);
+  max-width: 260px;
+}
+
+/* ------------------------------------------------------------------ footer */
+.foot {
+  display: flex;
+  flex-direction: column;
+  border-block-start: 1px solid var(--hairline);
+  background: var(--sidebar);
+}
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  font-size: var(--ui);
+  font-weight: 500;
+  cursor: pointer;
+}
+.links {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 0 var(--s2) var(--s2);
+}
+.switch-row + .links {
+  padding-block-start: 0;
+}
+.links:first-child {
+  padding-block-start: var(--s2);
+}
+.links button {
+  font-size: var(--ui-sm);
+}
+.shortcut {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  font-size: var(--ui-sm);
+  color: var(--muted);
+  padding-inline-end: var(--s2);
+}
+
+/* Capitals mean nothing in Arabic and only shout the Latin brand names inside it. */
+:root:lang(ar) :is(.eyebrow, .section-label) {
+  text-transform: none;
+}
