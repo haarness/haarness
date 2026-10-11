@@ -710,6 +710,7 @@
   "Saved, but the key could not be checked": "Kaydedildi ama anahtar doğrulanamadı",
   "If chats then fail to authenticate, replace the key.": "Sohbetler daha sonra kimlik doğrulamada başarısız olursa anahtarı değiştirin.",
   "Replace key": "Anahtarı değiştir",
+  "Saved the {name} key, but it could not be checked": "{name} anahtarı kaydedildi ama doğrulanamadı",
   "A key is already saved · paste a new one to replace it": "Kayıtlı bir anahtar zaten var · değiştirmek için yenisini yapıştırın",
   "Connect a provider to send your message": "Mesajınızı göndermek için bir sağlayıcı bağlayın",
   "Sign in to Haarness Cloud to choose a router": "Bir yönlendirici seçmek için Haarness Cloud’a giriş yapın",

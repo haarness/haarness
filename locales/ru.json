@@ -710,6 +710,7 @@
   "Saved, but the key could not be checked": "Сохранено, но проверить ключ не удалось",
   "If chats then fail to authenticate, replace the key.": "Если затем чаты не смогут пройти аутентификацию, замените ключ.",
   "Replace key": "Заменить ключ",
+  "Saved the {name} key, but it could not be checked": "Ключ {name} сохранён, но проверить его не удалось",
   "A key is already saved · paste a new one to replace it": "Ключ уже сохранён · вставьте новый, чтобы заменить его",
   "Connect a provider to send your message": "Подключите провайдера, чтобы отправить сообщение",
   "Sign in to Haarness Cloud to choose a router": "Войдите в Haarness Cloud, чтобы выбрать маршрутизатор",

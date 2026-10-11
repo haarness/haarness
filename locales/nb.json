@@ -710,6 +710,7 @@
   "Saved, but the key could not be checked": "Lagret, men nøkkelen kunne ikke kontrolleres",
   "If chats then fail to authenticate, replace the key.": "Hvis chatter senere ikke klarer å autentisere seg, bytt ut nøkkelen.",
   "Replace key": "Bytt nøkkel",
+  "Saved the {name} key, but it could not be checked": "Nøkkelen for {name} er lagret, men den kunne ikke kontrolleres",
   "A key is already saved · paste a new one to replace it": "En nøkkel er allerede lagret · lim inn en ny for å erstatte den",
   "Connect a provider to send your message": "Koble til en leverandør for å sende meldingen din",
   "Sign in to Haarness Cloud to choose a router": "Logg inn på Haarness Cloud for å velge en ruter",

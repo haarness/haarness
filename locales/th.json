@@ -710,6 +710,7 @@
   "Saved, but the key could not be checked": "บันทึกแล้ว แต่ตรวจสอบคีย์ไม่ได้",
   "If chats then fail to authenticate, replace the key.": "หากแชทยืนยันตัวตนไม่สำเร็จในภายหลัง ให้เปลี่ยนคีย์",
   "Replace key": "เปลี่ยนคีย์",
+  "Saved the {name} key, but it could not be checked": "บันทึกคีย์ {name} แล้ว แต่ตรวจสอบคีย์ไม่ได้",
   "A key is already saved · paste a new one to replace it": "บันทึกคีย์ไว้แล้ว · วางคีย์ใหม่เพื่อแทนที่",
   "Connect a provider to send your message": "เชื่อมต่อผู้ให้บริการเพื่อส่งข้อความของคุณ",
   "Sign in to Haarness Cloud to choose a router": "เข้าสู่ระบบ Haarness Cloud เพื่อเลือกเราเตอร์",

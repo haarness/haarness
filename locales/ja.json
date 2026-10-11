@@ -710,6 +710,7 @@
   "Saved, but the key could not be checked": "保存しましたが、キーを確認できませんでした",
   "If chats then fail to authenticate, replace the key.": "その後チャットの認証に失敗する場合は、キーを置き換えてください。",
   "Replace key": "キーを置き換える",
+  "Saved the {name} key, but it could not be checked": "{name} のキーを保存しましたが、確認できませんでした",
   "A key is already saved · paste a new one to replace it": "キーは保存済みです · 新しいキーを貼り付けると置き換わります",
   "Connect a provider to send your message": "メッセージを送信するにはプロバイダーを接続してください",
   "Sign in to Haarness Cloud to choose a router": "ルーターを選ぶには Haarness Cloud にサインインしてください",
