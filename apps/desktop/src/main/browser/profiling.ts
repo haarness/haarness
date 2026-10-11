@@ -1,11 +1,11 @@
 // Includes MIT-licensed code; see THIRD-PARTY-NOTICES.md.
 import type { WebContents } from "electron";
-import { Browser } from "./rpc";
+import { Browser } from "@haarness/browser-driver/rpc";
 import { gzipSync, gunzipSync } from "node:zlib";
 import { Schema } from "effect";
 import type { Cdp } from "./cdp";
 import type { BrowserFiles } from "./files";
-import { analyzeCpu, analyzeTrace, parseHeap } from "./analysis";
+import { analyzeCpu, analyzeTrace, parseHeap } from "@haarness/browser-driver/analysis";
 
 let recording:
   | {

@@ -1,7 +1,6 @@
 import { session, type WebContents } from "electron";
 import { BrowserProxy } from "./proxy";
-import { Browser } from "./rpc";
-import { Schema } from "effect";
+import { decodeTunnelRead } from "@haarness/browser-driver/rpc";
 export type BrowserNetwork = Awaited<ReturnType<typeof createBrowserNetwork>>;
 export async function createBrowserNetwork(
   partition: string,
@@ -10,10 +9,7 @@ export async function createBrowserNetwork(
 ) {
   const proxy = await BrowserProxy.make({
     open: (target, signal) => rpc("open", { target }, signal),
-    read: async (id, signal) =>
-      Schema.decodeUnknownSync(Browser.TunnelRead)(
-        await rpc("read", { id }, signal),
-      ),
+    read: async (id, signal) => decodeTunnelRead(await rpc("read", { id }, signal)),
     write: (id, data, end, signal) =>
       rpc(
         "write",

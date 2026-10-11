@@ -10,8 +10,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { Duplex } from "node:stream";
-import { Schema } from "effect";
-import { Browser } from "./rpc.js";
+import { Browser, decodeTunnelTarget } from "@haarness/browser-driver/rpc";
 
 type Transport = {
   open(target: Browser.TunnelTarget, signal: AbortSignal): Promise<string>;
@@ -292,7 +291,7 @@ function parseURL(value: string | undefined) {
 }
 
 function target(url: URL) {
-  return Schema.decodeUnknownSync(Browser.TunnelTarget)({
+  return decodeTunnelTarget({
     host: url.hostname.replace(/^\[|\]$/g, ""),
     port: url.port
       ? Number(url.port)

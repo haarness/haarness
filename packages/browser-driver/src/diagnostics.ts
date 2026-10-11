@@ -1,7 +1,8 @@
 // Includes MIT-licensed code; see THIRD-PARTY-NOTICES.md.
 import { Browser } from "./rpc";
 import type { Protocol } from "devtools-protocol";
-import type { Cdp } from "./cdp";
+import { Encoding, Result } from "effect";
+import type { CdpTransport, DiagnosticsOptions } from "./types";
 
 type Request = {
   info: Browser.NetworkRequest;
@@ -30,7 +31,21 @@ const redacted = new Set([
   "proxy-authorization",
 ]);
 
-export function createDiagnostics(cdp: Cdp) {
+/**
+ * Headers Chrome also redacts: in the user's own browser they carry the
+ * user's sessions. Names are lower case.
+ */
+export function isSensitiveHeader(name: string) {
+  return /^x-.+-token$|^x-api-key$|^x-(?:csrf|xsrf)|cookie/.test(name);
+}
+
+export function createDiagnostics(
+  cdp: CdpTransport,
+  options: DiagnosticsOptions = {},
+) {
+  const requestBodies = options.requestBodies ?? true;
+  const trimHeaders = (headers: Protocol.Network.Headers) =>
+    trim(headers, options.redactHeader);
   const messages: Browser.ConsoleEntry[] = [];
   const requests = new Map<string, Request>();
   // Chromium reuses one request ID across a redirect chain; every hop is retained in order.
@@ -143,10 +158,10 @@ export function createDiagnostics(cdp: Cdp) {
       request: {
         ...request,
         headers: headers.headers,
-        postData: request.postData?.slice(0, 20_000),
+        postData: requestBodies ? request.postData?.slice(0, 20_000) : undefined,
       },
       headersTruncated: headers.truncated,
-      postDataTruncated: (request.postData?.length ?? 0) > 20_000,
+      postDataTruncated: requestBodies && (request.postData?.length ?? 0) > 20_000,
       wire: { request: false, response: false },
       info: {
         id: `${scope}:${++sequence}`,
@@ -440,23 +455,29 @@ export function createDiagnostics(cdp: Cdp) {
         if (!body)
           return { state: "unavailable", reason: "backendUnavailable" };
         const value = body.base64Encoded
-          ? Buffer.from(body.body, "base64").toString("utf8")
+          ? Result.getOrUndefined(Encoding.decodeBase64String(body.body))
           : body.body;
+        if (value === undefined)
+          return { state: "unavailable", reason: "backendUnavailable" };
         return value.length ? text(value) : { state: "empty" };
       };
       const requestBody: Browser.Body = !input.includeBody
         ? { state: "notRequested" }
-        : request.request.postData !== undefined
-          ? {
-              state: "text",
-              text: request.request.postData.slice(0, max),
-              truncated:
-                request.postDataTruncated ||
-                request.request.postData.length > max,
-            }
-          : request.request.hasPostData
-            ? { state: "unavailable", reason: "notCaptured" }
-            : { state: "empty" };
+        : !requestBodies
+          ? request.request.hasPostData
+            ? { state: "unavailable", reason: "omitted" }
+            : { state: "empty" }
+          : request.request.postData !== undefined
+            ? {
+                state: "text",
+                text: request.request.postData.slice(0, max),
+                truncated:
+                  request.postDataTruncated ||
+                  request.request.postData.length > max,
+              }
+            : request.request.hasPostData
+              ? { state: "unavailable", reason: "notCaptured" }
+              : { state: "empty" };
       return {
         request: request.info,
         requestHeaders: headerEntries(request.request.headers),
@@ -488,7 +509,10 @@ function resourceType(type: string): Browser.ResourceType {
   }
 }
 
-function trimHeaders(headers: Protocol.Network.Headers) {
+function trim(
+  headers: Protocol.Network.Headers,
+  redact: (name: string) => boolean = () => false,
+) {
   const entries = Object.entries(headers);
   const kept: [string, string][] = [];
   let size = 0;
@@ -496,7 +520,8 @@ function trimHeaders(headers: Protocol.Network.Headers) {
   for (const [key, value] of entries.slice(0, 100)) {
     // Lower-case names so renderer and wire copies of one header merge instead of duplicating.
     const name = key.toLowerCase().slice(0, 2_048);
-    const text = redacted.has(name) ? "<redacted>" : String(value);
+    const text =
+      redacted.has(name) || redact(name) ? "<redacted>" : String(value);
     const remaining = Math.max(0, 16_000 - size - name.length);
     if (!remaining) {
       truncated = true;

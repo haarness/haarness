@@ -7,6 +7,8 @@ if [ -z "${HAARNESS_BIN:-}" ]; then
 fi
 npm --prefix sdks/typescript ci --ignore-scripts
 npm --prefix sdks/typescript run build
+npm --prefix packages/browser-driver ci
+npm run driver:test
 npm --prefix apps/desktop ci
 npm --prefix apps/desktop run build
 npm --prefix apps/desktop test

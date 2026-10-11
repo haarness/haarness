@@ -10,7 +10,10 @@ The upstream notices are kept beside the code they cover:
 - ripgrep executables (vendor/ripgrep) — dual MIT / Unlicense,
   see vendor/ripgrep/COPYING, vendor/ripgrep/LICENSE-MIT and vendor/ripgrep/UNLICENSE
 - Translated common terms (locales) — MIT License, see locales/THIRD-PARTY-NOTICES.md
-- Desktop browser control, diagnostics, profiling and proxy code
+- Browser page driver, diagnostics and tool schemas shared by Desktop and
+  Haarness for Chrome (packages/browser-driver) — MIT License,
+  see packages/browser-driver/THIRD-PARTY-NOTICES.md
+- Desktop browser control, profiling and proxy code
   (apps/desktop/src/main/browser) — MIT License,
   see apps/desktop/src/main/browser/THIRD-PARTY-NOTICES.md
 

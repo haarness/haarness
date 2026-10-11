@@ -1,4 +1,5 @@
-Browser Chromium, CDP, diagnostics, profiling, schema and proxy code adapted from OpenCode v2, commit 7c5a4d01aa.
+Desktop browser Chromium view, CDP transport, file, profiling, Lighthouse and proxy code adapted from OpenCode v2, commit 7c5a4d01aa.
+The shared page driver, diagnostics and schemas moved to packages/browser-driver, which carries the same notice.
 Source: https://github.com/anomalyco/opencode
 
 MIT License

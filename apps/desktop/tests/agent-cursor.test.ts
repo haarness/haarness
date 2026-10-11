@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { cursorLabel, cursorLabelKeys } from "../src/main/browser/agent-cursor";
+import { cursorLabel, cursorLabelKeys } from "@haarness/browser-driver/agent-cursor";
 
 test("the agent cursor names its target, briefly, in the interface language", () => {
   assert.equal(cursorLabel("click", "Place order"), "Clicking “Place order”");
