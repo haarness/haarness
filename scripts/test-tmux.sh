@@ -3,6 +3,14 @@ set -eu
 
 binary=${HAARNESS_BIN:-"$PWD/target/debug/haarness"}
 session="haarness-e2e-$$"
+# The gate checks what a local truecolor UTF-8 terminal renders, so it sets
+# that environment instead of inheriting the caller's: without COLORTERM
+# OpenTUI reports no RGB support, and in an SSH session it skips terminal
+# detection, so the warm page background never renders. Panes get it
+# explicitly because a running tmux server keeps its own environment.
+export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 COLORTERM=truecolor
+unset SSH_TTY SSH_CONNECTION SSH_CLIENT
+pane_env="env -u SSH_TTY -u SSH_CONNECTION -u SSH_CLIENT COLORTERM=truecolor LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8"
 test_root="$(mktemp -d)"
 clipboard_saved=0
 managed_workspace_path=''
@@ -134,7 +142,7 @@ if [ "$(git -C "$test_root/ws" branch --show-current)" = "$workspace_base_ref" ]
   exit 1
 fi
 
-tmux new-session -d -x 100 -y 30 -s "$session" "env HAARNESS_DATA_DIR='$test_root' HAARNESS_TEST_PROVIDER=1 HAARNESS_DEFAULT_PROVIDER=echo HAARNESS_DEFAULT_MODEL=echo-1 '$binary' --workspace '$test_root/ws'"
+tmux new-session -d -x 100 -y 30 -s "$session" "$pane_env HAARNESS_DATA_DIR='$test_root' HAARNESS_TEST_PROVIDER=1 HAARNESS_DEFAULT_PROVIDER=echo HAARNESS_DEFAULT_MODEL=echo-1 '$binary' --workspace '$test_root/ws'"
 
 attempt=0
 while [ "$attempt" -lt 80 ]; do
@@ -211,7 +219,7 @@ mkdir -p "$test_root/suspend-data"
 tmux new-window -d -t "$session" -n suspend
 suspend_target="$session:suspend.0"
 suspend_shell_pid="$(tmux display-message -p -t "$suspend_target" '#{pane_pid}')"
-suspend_launch="env HAARNESS_DATA_DIR='$test_root/suspend-data' HAARNESS_TEST_PROVIDER=1 HAARNESS_DEFAULT_PROVIDER=echo HAARNESS_DEFAULT_MODEL=echo-1 '$binary' --workspace '$test_root/ws'"
+suspend_launch="$pane_env HAARNESS_DATA_DIR='$test_root/suspend-data' HAARNESS_TEST_PROVIDER=1 HAARNESS_DEFAULT_PROVIDER=echo HAARNESS_DEFAULT_MODEL=echo-1 '$binary' --workspace '$test_root/ws'"
 tmux send-keys -l -t "$suspend_target" "$suspend_launch"
 tmux send-keys -t "$suspend_target" Enter
 attempt=0
@@ -2311,7 +2319,7 @@ fi
 # Launch contract: a plain reopen creates a fresh home session. Explicit
 # --continue restores the last meaningful root conversation, never a child.
 # ---------------------------------------------------------------------------
-tmux new-session -d -x 100 -y 30 -s "$session" "env HAARNESS_DATA_DIR='$test_root' HAARNESS_TEST_PROVIDER=1 HAARNESS_DEFAULT_PROVIDER=echo HAARNESS_DEFAULT_MODEL=echo-1 '$binary' --workspace '$test_root/ws'"
+tmux new-session -d -x 100 -y 30 -s "$session" "$pane_env HAARNESS_DATA_DIR='$test_root' HAARNESS_TEST_PROVIDER=1 HAARNESS_DEFAULT_PROVIDER=echo HAARNESS_DEFAULT_MODEL=echo-1 '$binary' --workspace '$test_root/ws'"
 attempt=0
 while [ "$attempt" -lt 100 ]; do
   pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
@@ -2332,7 +2340,7 @@ fi
 tmux send-keys -t "$session":0.0 C-c C-c
 sleep 0.5
 
-tmux new-session -d -x 100 -y 30 -s "$session" "env HAARNESS_DATA_DIR='$test_root' HAARNESS_TEST_PROVIDER=1 HAARNESS_DEFAULT_PROVIDER=echo HAARNESS_DEFAULT_MODEL=echo-1 '$binary' --continue --workspace '$test_root/ws'"
+tmux new-session -d -x 100 -y 30 -s "$session" "$pane_env HAARNESS_DATA_DIR='$test_root' HAARNESS_TEST_PROVIDER=1 HAARNESS_DEFAULT_PROVIDER=echo HAARNESS_DEFAULT_MODEL=echo-1 '$binary' --continue --workspace '$test_root/ws'"
 attempt=0
 while [ "$attempt" -lt 100 ]; do
   pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
@@ -2405,7 +2413,7 @@ fi
 # No client remains attached here. Reopen only after the slow fixture's full
 # duration and prove both the durable tail and an idle composer are restored.
 sleep 1.8
-tmux new-session -d -x 100 -y 30 -s "$session" "env HAARNESS_DATA_DIR='$test_root' HAARNESS_TEST_PROVIDER=1 HAARNESS_DEFAULT_PROVIDER=echo HAARNESS_DEFAULT_MODEL=echo-1 '$binary' --continue --workspace '$test_root/ws'"
+tmux new-session -d -x 100 -y 30 -s "$session" "$pane_env HAARNESS_DATA_DIR='$test_root' HAARNESS_TEST_PROVIDER=1 HAARNESS_DEFAULT_PROVIDER=echo HAARNESS_DEFAULT_MODEL=echo-1 '$binary' --continue --workspace '$test_root/ws'"
 attempt=0
 while [ "$attempt" -lt 100 ]; do
   pane="$(tmux capture-pane -p -t "$session":0.0 2>/dev/null || true)"
@@ -3008,7 +3016,13 @@ tmux send-keys -t "$session":0.0 Escape
 tmux send-keys -t "$session":0.0 C-c
 sleep 0.2
 tmux send-keys -t "$session":0.0 C-c
-sleep 0.5
+# Wait for the exit as the first double Ctrl+C check does: a loaded machine
+# can take longer than half a second to tear the TUI down.
+attempt=0
+while tmux has-session -t "$session" 2>/dev/null && [ "$attempt" -lt 50 ]; do
+  attempt=$((attempt + 1))
+  sleep 0.1
+done
 if tmux has-session -t "$session" 2>/dev/null; then
   echo "Resumed TUI did not exit after double Ctrl+C" >&2
   exit 1
