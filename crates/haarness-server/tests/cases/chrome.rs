@@ -410,30 +410,168 @@ async fn allow_in_this_chat_covers_that_chat_only_and_is_never_saved() {
     assert_eq!(fixture.executions.load(Ordering::SeqCst), 2);
 }
 
+/// A scheduled run's chat, as the scheduler creates it.
+async fn scheduled_thread(runtime: &AgentRuntime) -> Thread {
+    runtime
+        .create_thread(CreateThreadRequest {
+            schedule: Some(haarness_protocol::ScheduleOrigin {
+                id: uuid::Uuid::now_v7(),
+                name: "Morning inbox".into(),
+            }),
+            title: Some("Fixture".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+}
+/// A chat started inside another: a subagent, a workflow's thread or one of
+/// its agents.
+async fn child_thread(runtime: &AgentRuntime, parent: haarness_protocol::ThreadId) -> Thread {
+    runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Fixture child".into()),
+            parent_id: Some(parent),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+}
+const CANNOT_ASK: &str = "Chrome needs the user's approval for https://mail.example.test and this run cannot ask. Ask the user to allow it in an interactive chat, then retry.";
+async fn failed_at_once(runtime: &AgentRuntime, thread: haarness_protocol::ThreadId) -> bool {
+    runtime
+        .items(thread, None)
+        .await
+        .unwrap()
+        .iter()
+        .any(|item| {
+            matches!(&item.data, ItemData::ToolResult { output, is_error: true, .. }
+                if output.contains(CANNOT_ASK))
+        })
+}
+
 #[tokio::test]
-async fn an_unattended_run_fails_at_once_instead_of_waiting() {
+async fn a_scheduled_run_and_everything_it_starts_fail_at_once_instead_of_waiting() {
     let fixture = chrome(RuntimeConfig::default(), false);
     let runtime = &fixture.runtime;
-    let thread = echo_thread(runtime).await;
+    let root = scheduled_thread(runtime).await;
+    // The run itself, as the scheduler starts it.
     let mut request = turn_request(NAVIGATE);
     request.auto_approve = true;
     request.tools = Some(std::collections::HashMap::from([(
         "question".into(),
         false,
     )]));
-    let turn = runtime.start_turn(thread.id, request).await.unwrap();
+    let turn = runtime.start_turn(root.id, request).await.unwrap();
     assert_eq!(
         wait_done(runtime, &turn).await.status,
         TurnStatus::Completed
     );
+    assert!(failed_at_once(runtime, root.id).await);
+    // A subagent it delegates to through the task tool, whatever its turn's
+    // own flags say.
+    let task = json!({"prompt": NAVIGATE, "agent": "general", "description": "open the inbox"});
+    let turn = runtime
+        .start_turn(root.id, turn_request(&format!("!tool task {task}")))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let mut subagents = Vec::new();
+    for id in runtime.thread_tree_ids(root.id).await.unwrap() {
+        if id != root.id {
+            subagents.push(id);
+        }
+    }
+    assert_eq!(subagents.len(), 1, "{subagents:?}");
+    assert!(failed_at_once(runtime, subagents[0]).await);
+    // A workflow it starts: the run's thread and an agent under it.
+    let workflow = child_thread(runtime, subagents[0]).await;
+    let agent = child_thread(runtime, workflow.id).await;
+    let turn = runtime
+        .start_turn(agent.id, turn_request(NAVIGATE))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert!(failed_at_once(runtime, agent.id).await);
+    // The workflow's own tool calls (ctx.tool, the browser tool API) take
+    // the direct path, and fail the same way.
+    let direct = runtime
+        .run_direct_tool(
+            workflow.id,
+            "browser_navigate",
+            json!({"url":SITE}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(direct.is_error);
+    assert!(
+        direct.output.text.contains(CANNOT_ASK),
+        "{}",
+        direct.output.text
+    );
     assert!(runtime.pending_permissions().is_empty());
     assert_eq!(fixture.executions.load(Ordering::SeqCst), 0);
-    let items = runtime.items(thread.id, None).await.unwrap();
-    assert!(items.iter().any(|item| matches!(
-        &item.data,
-        ItemData::ToolResult { output, is_error: true, .. }
-            if output.contains("Chrome needs the user's approval for https://mail.example.test and this run cannot ask.")
-    )), "{items:?}");
+    for thread in [root.id, subagents[0], workflow.id, agent.id] {
+        assert!(runtime.scheduled_run(thread).await);
+    }
+    assert!(!runtime.scheduled_run(echo_thread(runtime).await.id).await);
+}
+
+#[tokio::test]
+async fn yolo_clients_and_their_workflow_agents_still_ask() {
+    // ACP --yolo, and the agents a --yolo chat's workflow starts, approve
+    // their own requests with the question tool off; a person still answers.
+    let fixture = chrome(RuntimeConfig::default(), false);
+    let runtime = &fixture.runtime;
+    let chat = echo_thread(runtime).await;
+    let workflow = child_thread(runtime, chat.id).await;
+    let agent = child_thread(runtime, workflow.id).await;
+    for thread in [chat.id, agent.id] {
+        let mut request = turn_request(NAVIGATE);
+        request.auto_approve = true;
+        request.tools = Some(std::collections::HashMap::from([(
+            "question".into(),
+            false,
+        )]));
+        let turn = runtime.start_turn(thread, request).await.unwrap();
+        let pending = explicit_prompt(runtime, thread).await;
+        assert!(pending.explicit);
+        answer(runtime, &pending.permission_id, Reply::Once).await;
+        assert_eq!(
+            wait_done(runtime, &turn).await.status,
+            TurnStatus::Completed
+        );
+    }
+    assert_eq!(fixture.executions.load(Ordering::SeqCst), 2);
+    // So does the workflow's own call.
+    let direct = tokio::spawn({
+        let runtime = runtime.clone();
+        let workflow = workflow.id;
+        async move {
+            runtime
+                .run_direct_tool(
+                    workflow,
+                    "browser_navigate",
+                    json!({"url":SITE}),
+                    CancellationToken::new(),
+                )
+                .await
+        }
+    });
+    let pending = explicit_prompt(runtime, workflow.id).await;
+    answer(runtime, &pending.permission_id, Reply::Once).await;
+    assert!(!direct.await.unwrap().unwrap().is_error);
+    assert_eq!(fixture.executions.load(Ordering::SeqCst), 3);
 }
 
 #[tokio::test]
@@ -633,18 +771,7 @@ async fn chrome_server(access: haarness_server::auth::ServerAccess) -> Server {
     )
     .await
     .unwrap();
-    let threads = Arc::downgrade(&runtime);
-    broker.set_thread_lookup(Arc::new(move |thread| {
-        let runtime = threads.upgrade();
-        Box::pin(async move {
-            let thread = runtime?.get_thread(thread).await.ok()?;
-            Some(haarness_server::browser::ThreadMeta {
-                title: thread.title,
-                parent: thread.parent_id,
-                scheduled: thread.schedule.is_some(),
-            })
-        })
-    }));
+    broker.set_thread_lookup(haarness_server::browser::runtime_threads(&runtime));
     let base = format!("{}", handle.address);
     Server {
         handle,

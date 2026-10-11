@@ -123,11 +123,32 @@ impl Kind {
 pub struct ThreadMeta {
     pub title: String,
     pub parent: Option<ThreadId>,
-    /// Created by a schedule: Automatic never picks the user's Chrome for it.
+    /// Part of a scheduled run (its own schedule or an ancestor's):
+    /// Automatic never picks the user's Chrome for it.
     pub scheduled: bool,
 }
 pub type ThreadLookup =
     Arc<dyn Fn(ThreadId) -> BoxFuture<'static, Option<ThreadMeta>> + Send + Sync>;
+/// The daemon's lookup: a conversation's title and parent from the runtime,
+/// and whether it belongs to a scheduled run, including the subagents,
+/// workflows and workflow agents such a run starts. Weak: the runtime owns
+/// the tools that own the broker.
+#[must_use]
+pub fn runtime_threads(runtime: &Arc<haarness_core::AgentRuntime>) -> ThreadLookup {
+    let runtime = Arc::downgrade(runtime);
+    Arc::new(move |thread| {
+        let runtime = runtime.upgrade();
+        Box::pin(async move {
+            let runtime = runtime?;
+            let meta = runtime.get_thread(thread).await.ok()?;
+            Some(ThreadMeta {
+                title: meta.title,
+                parent: meta.parent_id,
+                scheduled: runtime.scheduled_run(thread).await,
+            })
+        })
+    })
+}
 /// Live browser settings, read for every decision.
 pub type SettingsSource = Arc<dyn Fn() -> CoreResult<BrowserSettings> + Send + Sync>;
 

@@ -1409,6 +1409,14 @@ impl AgentRuntime {
         Ok(recovered)
     }
 
+    /// Whether a chat belongs to a scheduled run: the run's own chat or
+    /// anything it started (subagents, workflow threads and their agents).
+    /// Nobody watches those, so Chrome is never chosen for them and its site
+    /// approvals fail at once instead of waiting.
+    pub async fn scheduled_run(&self, thread_id: ThreadId) -> bool {
+        scheduled_lineage(self.repository.as_ref(), thread_id).await
+    }
+
     /// Topmost ancestor of a thread: itself for root threads, the root of the
     /// parent chain for child-agent threads. Bounded walk; a broken chain
     /// resolves to the deepest reachable ancestor.
@@ -3341,6 +3349,12 @@ impl AgentRuntime {
                 .filter(|operation| tool.explicit_approval(&arguments, operation))
                 .collect();
             let explicit = !explicit_operations.is_empty();
+            // Same rule as model calls: a scheduled run's workflow or tool
+            // call cannot get a person's answer, so it fails now.
+            if explicit && scheduled_lineage(self.repository.as_ref(), thread_id).await {
+                allowed = Err(cannot_ask(&explicit_operations));
+                break;
+            }
             let operation = if asked.len() == 1 {
                 format!("{}:{}", plan.permission, asked[0])
             } else {
@@ -7902,16 +7916,11 @@ impl RunnerTask {
         Ok(output)
     }
 
-    /// A turn nobody can answer: it approves its own requests and may not ask
-    /// questions (a schedule, or a workflow agent it started). A `--yolo`
-    /// terminal UI or `haarness run --yolo` still has a person to ask.
-    fn unattended(&self) -> bool {
-        self.request.auto_approve
-            && self
-                .request
-                .tools
-                .as_ref()
-                .is_some_and(|tools| tools.get("question") == Some(&false))
+    /// A turn nobody can answer: part of a scheduled run. A `--yolo` client
+    /// (the terminal UI, `haarness run`, ACP) and the agents and workflows it
+    /// starts still have a person to ask, however their tools are masked.
+    async fn unattended(&self) -> bool {
+        scheduled_lineage(self.repository.as_ref(), self.thread.id).await
     }
 
     /// The effective permission engine for this turn: agent defaults →
@@ -7984,10 +7993,9 @@ impl RunnerTask {
         let explicit = !explicit_operations.is_empty();
         // A run nobody watches (a schedule) cannot get a person's answer:
         // fail now instead of waiting forever.
-        if explicit && self.unattended() {
-            return Err(CoreError::PermissionDenied(format!(
-                "Chrome needs the user's approval for {} and this run cannot ask. Ask the user to allow it in an interactive chat, then retry.",
-                explicit_origins(&explicit_operations)
+        if explicit && self.unattended().await {
+            return Err(CoreError::PermissionDenied(cannot_ask(
+                &explicit_operations,
             )));
         }
         let automatic = self.config.auto_approve || self.request.auto_approve;
@@ -10012,6 +10020,28 @@ impl AskPlan {
             .map(|pattern| self.operation(pattern))
             .collect()
     }
+}
+
+/// Why a scheduled run's Chrome site gate failed instead of waiting.
+fn cannot_ask(operations: &[String]) -> String {
+    format!(
+        "Chrome needs the user's approval for {} and this run cannot ask. Ask the user to allow it in an interactive chat, then retry.",
+        explicit_origins(operations)
+    )
+}
+
+/// Whether a chat or any chat above it was started by a schedule.
+async fn scheduled_lineage(repository: &dyn ThreadRepository, thread_id: ThreadId) -> bool {
+    let mut seen = HashSet::new();
+    let mut current = Some(thread_id);
+    while let Some(id) = current.filter(|id| seen.insert(*id)) {
+        match repository.get_thread(id).await {
+            Ok(thread) if thread.schedule.is_some() => return true,
+            Ok(thread) => current = thread.parent_id,
+            Err(_) => return false,
+        }
+    }
+    false
 }
 
 /// The sites named by explicit Chrome operations

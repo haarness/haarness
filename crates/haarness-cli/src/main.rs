@@ -6603,20 +6603,8 @@ async fn application_at(
     management.attach_runtime(&runtime);
     workflow_host.attach(&runtime);
     // Chrome groups a conversation's tabs under its title and keeps
-    // scheduled runs out of the user's Chrome. Weak: the runtime owns the
-    // tools that own the broker.
-    let threads = Arc::downgrade(&runtime);
-    browser.set_thread_lookup(Arc::new(move |thread| {
-        let runtime = threads.upgrade();
-        Box::pin(async move {
-            let thread = runtime?.get_thread(thread).await.ok()?;
-            Some(haarness_server::browser::ThreadMeta {
-                title: thread.title,
-                parent: thread.parent_id,
-                scheduled: thread.schedule.is_some(),
-            })
-        })
-    }));
+    // scheduled runs, and everything they start, out of the user's Chrome.
+    browser.set_thread_lookup(haarness_server::browser::runtime_threads(&runtime));
     if recover {
         let recovered = runtime.recover().await?;
         if recovered > 0 {
