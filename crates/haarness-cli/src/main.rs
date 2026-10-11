@@ -81,13 +81,14 @@ use uuid::Uuid;
 #[command(
     name = "haarness",
     version,
-    about = "Local-first Rust agentic harness",
-    long_about = "A modular Rust agent server and OpenTUI client with application-level permissions."
+    about = "A coding agent for your terminal, editor and desktop",
+    long_about = "Haarness is a coding agent that works in your project folder. Run it with no command to open the terminal UI here, or `haarness run \"...\"` to ask once without it."
 )]
 #[allow(clippy::struct_excessive_bools)] // independent global CLI switches, not state flags
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+    /// Project folder to work in (default: the current folder).
     #[arg(long, global = true, default_value = ".")]
     workspace: PathBuf,
     /// Override Haarness's data/config/cache root. Primarily used by isolated
@@ -114,10 +115,10 @@ struct Cli {
     /// answer would persist).
     #[arg(long, global = true, visible_alias = "dangerously-skip-permissions")]
     yolo: bool,
-    /// Open a specific thread. `--session` is an alias.
+    /// Open a specific chat by id. `--session` is an alias.
     #[arg(short = 's', long, global = true, visible_alias = "session")]
     thread: Option<Uuid>,
-    /// Resume the last root session. A plain launch starts a fresh session.
+    /// Continue the last chat. A plain launch starts a new chat.
     #[arg(
         short = 'c',
         long = "continue",
@@ -154,29 +155,38 @@ enum Command {
     Telemetry(usage_stats::TelemetryArgs),
     /// Serve the Agent Client Protocol over stdin/stdout for editor integrations.
     Acp(AcpArgs),
+    /// Run the Haarness server for this folder (--daemon in the background,
+    /// --stop to end it).
     Serve(ServeArgs),
     /// Attach the terminal client to an already-running Haarness server.
     Attach(AttachArgs),
+    /// Open the terminal UI (the same as running haarness with no command).
     Tui(TuiArgs),
+    /// Send one prompt without the terminal UI and print the answer.
     Run(RunArgs),
+    /// Store or remove provider credentials.
     Auth {
         #[command(subcommand)]
         command: AuthCommand,
     },
+    /// Add and manage MCP servers.
     Mcp {
         #[command(subcommand)]
         command: McpCommand,
     },
-    /// Browse and manage durable local sessions.
+    /// Browse, export and import this folder's chats.
     #[command(alias = "session")]
     Sessions {
         #[command(subcommand)]
         command: SessionCommand,
     },
-    /// Ask an isolated, tool-free side question without changing a session transcript.
+    /// Ask a quick side question about a chat without adding it to the chat.
     Btw {
+        /// Chat id.
         id: Uuid,
+        /// The side question.
         question: String,
+        /// Print the answer as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -188,6 +198,7 @@ enum Command {
     },
     /// List configured/discovered providers and connection state.
     Providers {
+        /// Print every provider's full details as JSON.
         #[arg(long)]
         verbose: bool,
     },
@@ -198,8 +209,10 @@ enum Command {
     },
     /// List built-in and configured agent profiles.
     Agents {
+        /// Include hidden agents.
         #[arg(long)]
         all: bool,
+        /// Print the agents as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -225,6 +238,7 @@ enum Command {
     Marketplace(marketplace::Args),
     /// Manage runtime capability availability as JSON.
     Capability {
+        /// JSON request, such as '{"action":"list"}'.
         #[arg(default_value = "{\"action\":\"list\"}")]
         request: String,
     },
@@ -238,7 +252,7 @@ enum Command {
         #[command(subcommand)]
         command: WorkflowCommand,
     },
-    /// Manage durable native scheduled runs.
+    /// Run a prompt on a timetable, such as every morning or once tomorrow.
     Schedule {
         #[command(subcommand)]
         command: ScheduleCommand,
@@ -252,6 +266,7 @@ enum Command {
         #[arg(long)]
         verbose: bool,
     },
+    /// Check the install and show where its files are.
     Doctor,
     /// Show where logs live, or tail the newest log file.
     Logs {
@@ -294,8 +309,11 @@ struct ServeArgs {
     /// Address to listen on: an IP address, or `localhost`.
     #[arg(long, default_value = "127.0.0.1", value_parser = parse_listen_host)]
     host: IpAddr,
-    #[arg(long, default_value_t = 4096)]
-    port: u16,
+    /// Port to listen on (default: 4096; 0 picks a free port).
+    #[arg(long)]
+    port: Option<u16>,
+    /// Bearer token clients must send. Without one, a local server makes a
+    /// private token for its own clients.
     #[arg(long, env = "HAARNESS_SERVER_TOKEN", hide_env_values = true)]
     token: Option<String>,
     /// Start (or reuse) the workspace server in the background and return.
@@ -323,7 +341,7 @@ struct AttachArgs {
     /// matching private local runtime discovery record.
     #[arg(long, env = "HAARNESS_SERVER_TOKEN", hide_env_values = true)]
     token: Option<String>,
-    /// Fork the selected/continued session before opening it.
+    /// Open a copy of the selected or continued chat.
     #[arg(long)]
     fork: bool,
 }
@@ -331,11 +349,13 @@ struct AttachArgs {
 struct TuiArgs {
     #[command(flatten)]
     authentication: PasswordArgs,
-    #[arg(long, visible_alias = "attach")]
+    /// URL of a running Haarness server to use instead of this folder's own.
+    #[arg(long, visible_alias = "attach", value_name = "URL")]
     connect: Option<String>,
+    /// Bearer token for --connect.
     #[arg(long, env = "HAARNESS_SERVER_TOKEN", hide_env_values = true)]
     token: Option<String>,
-    /// Fork the selected/continued session before opening it.
+    /// Open a copy of the selected or continued chat.
     #[arg(long)]
     fork: bool,
 }
@@ -390,7 +410,7 @@ struct RunArgs {
     /// passed as its arguments.
     #[arg(long, value_name = "NAME", conflicts_with_all = ["workflow", "goal", "ultracode"])]
     command: Option<String>,
-    /// Title for a newly created CLI session.
+    /// Title for a new chat.
     #[arg(long)]
     title: Option<String>,
     /// Output plain assistant text or newline-delimited JSON records.
@@ -410,7 +430,7 @@ struct RunArgs {
     /// Hide completed reasoning blocks from CLI output.
     #[arg(long, conflicts_with = "thinking")]
     no_thinking: bool,
-    /// Fork the selected/continued session before running. Requires
+    /// Run in a copy of the selected or continued chat. Requires
     /// `--session`/`--thread` or `--continue`.
     #[arg(long)]
     fork: bool,
@@ -440,6 +460,7 @@ enum RunFormat {
 enum AuthCommand {
     /// Store an API key for a provider.
     Set {
+        /// Provider id, such as openai or anthropic.
         provider: String,
         /// The key. Without it, the key is read from piped stdin, or asked
         /// for at the terminal.
@@ -448,6 +469,7 @@ enum AuthCommand {
     },
     /// Add a provider credential (ChatGPT OAuth or an API key).
     Login {
+        /// Provider id, such as openai or anthropic.
         provider: String,
         /// OpenAI supports browser and headless ChatGPT login; xAI and GitHub
         /// Copilot support browser-assisted and headless device login. Other
@@ -458,8 +480,10 @@ enum AuthCommand {
     /// Log out from a provider and remove its stored credential.
     #[command(visible_alias = "remove")]
     Logout {
+        /// Provider id.
         provider: String,
     },
+    /// List providers with stored credentials.
     List,
 }
 
@@ -467,24 +491,33 @@ enum AuthCommand {
 enum ProviderCommand {
     /// Connect a self-hosted Haarness Router and discover its models.
     ConnectRouter {
+        /// The router's URL.
         url: String,
+        /// Name shown for the router (default: Haarness Router).
         #[arg(long)]
         name: Option<String>,
         /// Read an optional router access key from stdin, never process arguments.
         #[arg(long)]
         key_stdin: bool,
-        #[arg(long)]
+        /// Save the router in this project's configuration instead of the
+        /// global one.
+        #[arg(long, visible_alias = "local")]
         project: bool,
     },
+    /// List configured and discovered providers.
     List {
+        /// Print every provider's full details as JSON.
         #[arg(long)]
         verbose: bool,
     },
     /// Add or replace a custom provider definition.
     Add {
+        /// Provider id: lowercase letters, digits, hyphens and underscores.
         id: String,
+        /// Name shown for the provider (default: its id).
         #[arg(long)]
         name: Option<String>,
+        /// API base URL: https, or http on a loopback address.
         #[arg(long)]
         url: String,
         /// Native wire transport (for example azure-openai, google-vertex,
@@ -504,13 +537,17 @@ enum ProviderCommand {
         /// Mark the endpoint usable without a stored API key.
         #[arg(long)]
         no_auth: bool,
-        /// Write to .haarness/config.toml instead of global config.
+        /// Write to this project's configuration (haarness.json) instead of
+        /// the global one.
         #[arg(long, visible_alias = "local")]
         project: bool,
     },
     /// Remove a custom provider definition. Stored credentials are retained.
     Remove {
+        /// Provider id.
         id: String,
+        /// Remove it from this project's configuration instead of the global
+        /// one.
         #[arg(long, visible_alias = "local")]
         project: bool,
     },
@@ -524,55 +561,74 @@ enum AuthLoginMethod {
 }
 #[derive(Subcommand)]
 enum McpCommand {
+    /// List configured MCP servers and whether each is connected.
     #[command(alias = "ls")]
     List,
+    /// Connect one MCP server again.
     Reconnect {
+        /// MCP server name.
         name: String,
     },
     /// Close one live connection without changing its configuration.
     Disconnect {
+        /// MCP server name.
         name: String,
     },
     /// List the tools currently advertised by one connected MCP server.
     Tools {
+        /// MCP server name.
         name: String,
     },
     /// Invoke one advertised MCP tool with a JSON object.
     Call {
+        /// MCP server name.
         name: String,
+        /// Tool name.
         tool: String,
+        /// Tool arguments as a JSON object.
         #[arg(long, default_value = "{}")]
         arguments: String,
     },
     /// List resources advertised by one connected MCP server.
     Resources {
+        /// MCP server name.
         name: String,
     },
     /// List parameterized resource templates advertised by a server.
     ResourceTemplates {
+        /// MCP server name.
         name: String,
     },
     /// Read one MCP resource by URI.
     Read {
+        /// MCP server name.
         name: String,
+        /// Resource URI.
         uri: String,
     },
     /// List prompts advertised by one connected MCP server.
     Prompts {
+        /// MCP server name.
         name: String,
     },
     /// Resolve one MCP prompt with a JSON argument object.
     Prompt {
+        /// MCP server name.
         name: String,
+        /// Prompt name.
         prompt: String,
+        /// Prompt arguments as a JSON object.
         #[arg(long, default_value = "{}")]
         arguments: String,
     },
     /// Authorize a remote MCP server using public OAuth 2.1 + PKCE.
     Auth {
+        /// MCP server name.
         name: String,
+        /// Use this project's configuration instead of the global one.
         #[arg(long, visible_alias = "local")]
         project: bool,
+        /// Print the sign-in link instead of opening a browser.
         #[arg(long)]
         no_browser: bool,
         /// Loopback callback port; use 0 to request an ephemeral port.
@@ -581,16 +637,21 @@ enum McpCommand {
     },
     /// Remove the locally stored OAuth grant for one remote MCP server.
     Logout {
+        /// MCP server name.
         name: String,
+        /// Use this project's configuration instead of the global one.
         #[arg(long, visible_alias = "local")]
         project: bool,
     },
     /// Show one MCP configuration. Environment and header values are redacted
     /// unless --show-secrets is explicitly supplied.
     Get {
+        /// MCP server name.
         name: String,
+        /// Use this project's configuration instead of the global one.
         #[arg(long, visible_alias = "local")]
         project: bool,
+        /// Show environment and header values instead of hiding them.
         #[arg(long)]
         show_secrets: bool,
     },
@@ -598,15 +659,21 @@ enum McpCommand {
     /// Stdio: --command with optional --arg (repeatable) and --env KEY=VALUE.
     /// Remote: --url with optional --header KEY=VALUE (Streamable HTTP).
     Add {
+        /// MCP server name.
         name: String,
+        /// Program that runs a local (stdio) server.
         #[arg(long)]
         command: Option<String>,
+        /// Argument for --command (repeatable).
         #[arg(long = "arg", allow_hyphen_values = true)]
         args: Vec<String>,
+        /// Environment variable for --command as KEY=VALUE (repeatable).
         #[arg(long = "env", value_name = "KEY=VALUE")]
         env: Vec<String>,
+        /// URL of a remote (Streamable HTTP) server.
         #[arg(long)]
         url: Option<String>,
+        /// Request header for --url as KEY=VALUE (repeatable).
         #[arg(long = "header", value_name = "KEY=VALUE")]
         headers: Vec<String>,
         /// Force generic MCP OAuth discovery for this remote server.
@@ -624,26 +691,33 @@ enum McpCommand {
         /// Add the entry without connecting it.
         #[arg(long)]
         disabled: bool,
-        /// Write to the project's .haarness/config.toml instead of global.
+        /// Write to this project's configuration (haarness.json) instead of
+        /// the global one.
         #[arg(long, visible_alias = "local")]
         project: bool,
     },
     /// Enable one configured MCP server.
     Enable {
+        /// MCP server name.
         name: String,
+        /// Use this project's configuration instead of the global one.
         #[arg(long, visible_alias = "local")]
         project: bool,
     },
     /// Disable one configured MCP server without deleting its configuration.
     Disable {
+        /// MCP server name.
         name: String,
+        /// Use this project's configuration instead of the global one.
         #[arg(long, visible_alias = "local")]
         project: bool,
     },
     /// Remove an MCP server from the global (or --project) config.
     #[command(alias = "rm")]
     Remove {
+        /// MCP server name.
         name: String,
+        /// Use this project's configuration instead of the global one.
         #[arg(long, visible_alias = "local")]
         project: bool,
     },
@@ -651,26 +725,38 @@ enum McpCommand {
 
 #[derive(Subcommand)]
 enum AgentManageCommand {
+    /// List built-in and custom agents.
     #[command(alias = "ls")]
     List {
+        /// Include hidden agents.
         #[arg(long)]
         all: bool,
+        /// Print the agents as JSON.
         #[arg(long)]
         json: bool,
     },
+    /// Show one custom agent as JSON.
     Get {
+        /// Agent name.
         name: String,
     },
+    /// Create a custom agent.
     Create {
+        /// Agent name.
         name: String,
+        /// When to use the agent, in one line.
         #[arg(long)]
         description: String,
+        /// The agent's instructions.
         #[arg(long, conflicts_with = "file")]
         prompt: Option<String>,
+        /// Read the instructions from a file.
         #[arg(long, value_name = "PATH", conflicts_with = "prompt")]
         file: Option<PathBuf>,
+        /// primary (choose it for a chat), subagent (delegate to it) or all.
         #[arg(long)]
         mode: Option<String>,
+        /// Model as provider/model (default: the chat's).
         #[arg(long)]
         model: Option<String>,
         /// Per-agent tool ceiling, repeatable (for example: --tool bash=false).
@@ -679,14 +765,19 @@ enum AgentManageCommand {
         /// Per-agent permission rule, repeatable (for example: --permission 'edit:*=deny').
         #[arg(long = "permission", value_name = "PATTERN=allow|ask|deny")]
         permissions: Vec<String>,
+        /// Save it in this project instead of for all projects.
         #[arg(long, visible_alias = "local")]
         project: bool,
+        /// Replace an agent with the same name.
         #[arg(long)]
         force: bool,
     },
+    /// Delete a custom agent.
     #[command(alias = "rm", alias = "delete")]
     Remove {
+        /// Agent name.
         name: String,
+        /// Remove it from this project instead of from all projects.
         #[arg(long, visible_alias = "local")]
         project: bool,
     },
@@ -694,33 +785,50 @@ enum AgentManageCommand {
 
 #[derive(Subcommand)]
 enum CommandManageCommand {
+    /// List slash commands.
     #[command(alias = "ls")]
     List,
+    /// Show one command as JSON.
     Get {
+        /// Command name, without the slash.
         name: String,
     },
+    /// Create a slash command.
     Create {
+        /// Command name, without the slash.
         name: String,
+        /// What the command does, in one line.
         #[arg(long, default_value = "")]
         description: String,
+        /// The prompt it sends; $ARGUMENTS is replaced by what follows the
+        /// command.
         #[arg(long, conflicts_with = "file")]
         template: Option<String>,
+        /// Read the prompt from a file.
         #[arg(long, value_name = "PATH", conflicts_with = "template")]
         file: Option<PathBuf>,
+        /// Agent that runs it.
         #[arg(long)]
         agent: Option<String>,
+        /// Model as provider/model.
         #[arg(long)]
         model: Option<String>,
+        /// Hint shown for its arguments, such as "[file]".
         #[arg(long)]
         argument_hint: Option<String>,
+        /// Save it in this project instead of for all projects.
         #[arg(long, visible_alias = "local")]
         project: bool,
+        /// Replace a command with the same name.
         #[arg(long)]
         force: bool,
     },
+    /// Delete a slash command.
     #[command(alias = "rm", alias = "delete")]
     Remove {
+        /// Command name, without the slash.
         name: String,
+        /// Remove it from this project instead of from all projects.
         #[arg(long, visible_alias = "local")]
         project: bool,
     },
@@ -728,27 +836,40 @@ enum CommandManageCommand {
 
 #[derive(Subcommand)]
 enum SkillManageCommand {
+    /// List Agent Skills.
     #[command(alias = "ls")]
     List,
+    /// Print one skill's instructions.
     Get {
+        /// Skill name.
         name: String,
     },
+    /// Create an Agent Skill.
     Create {
+        /// Skill name.
         name: String,
+        /// When the agent should use the skill, in one line.
         #[arg(long)]
         description: String,
+        /// The skill's instructions.
         #[arg(long, conflicts_with = "file")]
         instructions: Option<String>,
+        /// Read the instructions from a file.
         #[arg(long, value_name = "PATH", conflicts_with = "instructions")]
         file: Option<PathBuf>,
+        /// Save it in this project instead of for all projects.
         #[arg(long, visible_alias = "local")]
         project: bool,
+        /// Replace a skill with the same name.
         #[arg(long)]
         force: bool,
     },
+    /// Delete an Agent Skill.
     #[command(alias = "rm", alias = "delete")]
     Remove {
+        /// Skill name.
         name: String,
+        /// Remove it from this project instead of from all projects.
         #[arg(long, visible_alias = "local")]
         project: bool,
     },
@@ -756,36 +877,51 @@ enum SkillManageCommand {
 
 #[derive(Subcommand)]
 enum SessionCommand {
+    /// List this folder's chats, newest first.
     #[command(alias = "ls")]
     List {
-        /// Include archived sessions.
+        /// Include archived chats.
         #[arg(long)]
         all: bool,
+        /// Print the chats as JSON.
         #[arg(long)]
         json: bool,
     },
+    /// Show one chat as JSON.
     Get {
+        /// Chat id.
         id: Uuid,
         /// Include the complete transcript item stream.
         #[arg(long)]
         transcript: bool,
     },
+    /// Hide a chat from lists without deleting it.
     Archive {
+        /// Chat id.
         id: Uuid,
     },
+    /// Show an archived chat in lists again.
     Unarchive {
+        /// Chat id.
         id: Uuid,
     },
+    /// Copy a chat into a new one you can take elsewhere.
     Fork {
+        /// Chat id.
         id: Uuid,
+        /// Title for the copy.
         #[arg(long)]
         title: Option<String>,
         /// Fork only through this transcript sequence.
         #[arg(long)]
         at: Option<u64>,
+        /// Print the new chat as JSON.
+        #[arg(long)]
+        json: bool,
     },
-    /// Export a session and its complete descendant tree as portable JSON.
+    /// Export a chat and the chats it started as portable JSON.
     Export {
+        /// Chat id.
         id: Uuid,
         /// Replace transcript content and other potentially sensitive text
         /// with stable redaction markers.
@@ -798,8 +934,9 @@ enum SessionCommand {
         #[arg(long, requires = "output")]
         force: bool,
     },
-    /// Restore or idempotently merge a portable session archive.
+    /// Import an exported chat, or merge it into the copy already here.
     Import {
+        /// Session archive (.json) made by `sessions export`.
         #[arg(value_name = "FILE")]
         file: PathBuf,
         /// Print the complete machine-readable import result.
@@ -813,21 +950,27 @@ enum WorkspaceCommand {
     /// List registered projects, their main folders, and worktrees.
     #[command(alias = "ls")]
     List {
+        /// Print the folders as JSON.
         #[arg(long)]
         json: bool,
     },
     /// Create a linked Git worktree with a unique branch.
     Create {
+        /// Worktree name.
         name: String,
-        #[arg(long = "from")]
+        /// Branch or commit to start from (default: the current one).
+        #[arg(long = "from", value_name = "REF")]
         from_ref: Option<String>,
+        /// Name for the new branch (default: from the worktree name).
         #[arg(long)]
         branch: Option<String>,
+        /// Folder for the checkout (default: inside Haarness's data folder).
         #[arg(long)]
         path: Option<PathBuf>,
     },
     /// Open a project folder or worktree in the TUI.
     Open {
+        /// Worktree name, path or id.
         reference: String,
         /// Resolve and print the path without launching a TUI.
         #[arg(long)]
@@ -835,6 +978,7 @@ enum WorkspaceCommand {
     },
     /// Move a managed worktree branch back to its recorded (or supplied) ref.
     Reset {
+        /// Worktree name, path or id.
         reference: String,
         /// Required acknowledgement that commits may be discarded.
         #[arg(long)]
@@ -845,12 +989,15 @@ enum WorkspaceCommand {
         /// Also delete untracked files. Ignored files are always preserved.
         #[arg(long, requires = "discard_changes")]
         remove_untracked: bool,
-        #[arg(long = "to")]
+        /// Branch or commit to move it to (default: the one it started
+        /// from).
+        #[arg(long = "to", value_name = "REF")]
         to_ref: Option<String>,
     },
     /// Remove a Haarness-managed worktree. Local workspaces are never removed.
     #[command(alias = "rm")]
     Remove {
+        /// Worktree name, path or id.
         reference: String,
         /// Required acknowledgement that the checkout directory is deleted.
         #[arg(long)]
@@ -869,27 +1016,36 @@ enum PluginCommand {
     /// Register a marketplace: a git URL, owner/repo, or local directory
     /// holding .claude-plugin/marketplace.json.
     Marketplace {
+        /// Git URL, owner/repo, or local folder.
         source: String,
         /// Compatibility positional for `plugin marketplace add <source>`.
         compatibility_source: Option<String>,
     },
     /// Install a plugin: name@marketplace, or a local plugin directory/plugin.json.
     Install {
+        /// name@marketplace, or a local plugin folder or plugin.json.
         spec: String,
     },
     /// Refresh an installed marketplace plugin from its source.
     Update {
+        /// Plugin name.
         name: String,
     },
     /// Installed plugins and registered marketplaces.
     List,
+    /// Turn an installed plugin on.
     Enable {
+        /// Plugin name.
         name: String,
     },
+    /// Turn an installed plugin off without removing it.
     Disable {
+        /// Plugin name.
         name: String,
     },
+    /// Uninstall a plugin.
     Remove {
+        /// Plugin name.
         name: String,
     },
 }
@@ -900,15 +1056,18 @@ enum WorkflowCommand {
     List,
     /// Print one discovered workflow's source.
     Source {
+        /// Workflow name.
         name: String,
     },
     /// List recent durable runs.
     Runs {
+        /// Show at most this many runs (1-500).
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
     /// Start a named workflow. By default this waits for completion.
     Run {
+        /// Workflow name, as `workflow list` shows it.
         name: String,
         /// JSON value passed to the workflow.
         #[arg(long)]
@@ -925,60 +1084,122 @@ enum WorkflowCommand {
         /// Return immediately after the durable run is created.
         #[arg(long)]
         detach: bool,
-        #[arg(long)]
+        /// Stop waiting after this many milliseconds; the run continues on
+        /// the server.
+        #[arg(long, value_name = "MS")]
         timeout_ms: Option<u64>,
+        /// Print the whole run record as JSON.
+        #[arg(long)]
+        json: bool,
     },
+    /// Show one run's status, phase and result.
     Inspect {
+        /// Run id, as `workflow runs` shows it.
         run_id: Uuid,
+        /// Print the whole run record as JSON.
+        #[arg(long)]
+        json: bool,
     },
+    /// Stop a running workflow.
     Cancel {
+        /// Run id, as `workflow runs` shows it.
         run_id: Uuid,
+        /// Print the whole run record as JSON.
+        #[arg(long)]
+        json: bool,
     },
+    /// Pause a running workflow.
     Pause {
+        /// Run id, as `workflow runs` shows it.
         run_id: Uuid,
+        /// Print the whole run record as JSON.
+        #[arg(long)]
+        json: bool,
     },
+    /// Continue a paused workflow.
     Resume {
+        /// Run id, as `workflow runs` shows it.
         run_id: Uuid,
+        /// Print the whole run record as JSON.
+        #[arg(long)]
+        json: bool,
     },
+    /// Delete a run's record.
     Delete {
+        /// Run id, as `workflow runs` shows it.
         run_id: Uuid,
     },
 }
 
 #[derive(Subcommand)]
 enum ScheduleCommand {
+    /// List schedules.
     #[command(alias = "ls")]
     List {
+        /// Print the schedules as JSON.
         #[arg(long)]
         json: bool,
     },
+    /// Show one schedule as JSON.
     Get {
+        /// Schedule name or id.
         reference: String,
     },
+    /// Create a schedule: a prompt that runs on a timetable.
     Add(ScheduleAddArgs),
+    /// Change a schedule.
     Update(ScheduleUpdateArgs),
+    /// Delete a schedule and stop the system from starting it.
     #[command(alias = "rm")]
     Remove {
+        /// Schedule name or id.
         reference: String,
     },
+    /// Turn a schedule on.
     Enable {
+        /// Schedule name or id.
         reference: String,
     },
+    /// Turn a schedule off without deleting it.
     Disable {
+        /// Schedule name or id.
         reference: String,
     },
+    /// Run a schedule now and wait for its answer.
     Run {
+        /// Schedule name or id.
         reference: String,
-    },
-    History {
-        reference: String,
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
+        /// Print the run record as JSON.
         #[arg(long)]
         json: bool,
     },
+    /// Show a schedule's recent runs, newest first.
+    History {
+        /// Schedule name or id.
+        reference: String,
+        /// Show at most this many runs (1-500).
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Print the runs as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print where a schedule's log file is, or the folder holding every
+    /// schedule's log.
     Logs {
+        /// Schedule name or id.
         reference: Option<String>,
+        /// Print the last N lines of the schedule's log instead of its path.
+        #[arg(
+            long,
+            value_name = "N",
+            requires = "reference",
+            conflicts_with = "open"
+        )]
+        tail: Option<usize>,
+        /// Also show the log in the file manager (Finder on macOS).
+        #[arg(long)]
+        open: bool,
     },
     /// Internal native-service entry point.
     #[command(hide = true)]
@@ -991,61 +1212,91 @@ enum ScheduleCommand {
 
 #[derive(Args)]
 struct ScheduleAddArgs {
+    /// Name to run, change or remove the schedule by (default: from the prompt).
     #[arg(long)]
     name: Option<String>,
-    #[arg(long)]
+    /// What the scheduled chat is asked to do.
+    #[arg(long, conflicts_with = "natural")]
     prompt: Option<String>,
-    #[arg(long)]
+    /// Timing and prompt in one phrase, such as "every day at 8am to
+    /// summarize the repo", "every Monday at 9am to ...", "in 10 minutes to
+    /// ..." or "on 2026-12-01 to ...".
+    #[arg(long, value_name = "PHRASE", conflicts_with_all = ["every", "cron", "at"])]
     natural: Option<String>,
+    /// Project folder the chat runs in (default: the current one).
     #[arg(long)]
     directory: Option<PathBuf>,
-    /// Provider-qualified model, for example openai/gpt-5.6.
+    /// Provider-qualified model, for example openai/gpt-5.6 (default: your
+    /// default model).
     #[arg(long)]
     model: Option<String>,
+    /// Agent profile for the chat.
     #[arg(long)]
     agent: Option<String>,
+    /// Reasoning or model variant, such as high.
     #[arg(long)]
     variant: Option<String>,
+    /// IANA time zone for cron times on Linux, such as Europe/Paris (default:
+    /// this computer's).
     #[arg(long)]
     timezone: Option<String>,
+    /// Save the schedule without turning it on.
     #[arg(long)]
     disabled: bool,
-    #[arg(long, conflicts_with_all = ["cron", "at"])]
+    /// Repeat at a fixed interval: 30m, 2h or 1d (at least one minute).
+    #[arg(long, value_name = "INTERVAL", conflicts_with_all = ["cron", "at"])]
     every: Option<String>,
-    #[arg(long, conflicts_with_all = ["every", "at"])]
+    /// Five-field cron expression in numbers (no day or month names): minute
+    /// hour day month weekday, where Sunday is 0, such as "0 8 * * 1-5".
+    #[arg(long, value_name = "EXPRESSION", conflicts_with_all = ["every", "at"])]
     cron: Option<String>,
-    #[arg(long, conflicts_with_all = ["every", "cron"])]
+    /// Run once at an RFC 3339 time, such as 2026-12-01T09:00:00+01:00.
+    #[arg(long, value_name = "TIME", conflicts_with_all = ["every", "cron"])]
     at: Option<String>,
 }
 
 #[derive(Args)]
 struct ScheduleUpdateArgs {
+    /// Schedule name or id.
     reference: String,
+    /// New name.
     #[arg(long)]
     name: Option<String>,
-    #[arg(long)]
+    /// New prompt.
+    #[arg(long, conflicts_with = "natural")]
     prompt: Option<String>,
-    #[arg(long)]
+    /// New timing and prompt in one phrase, as for `schedule add --natural`.
+    #[arg(long, value_name = "PHRASE", conflicts_with_all = ["every", "cron", "at"])]
     natural: Option<String>,
+    /// New project folder.
     #[arg(long)]
     directory: Option<PathBuf>,
+    /// New provider-qualified model, for example openai/gpt-5.6.
     #[arg(long)]
     model: Option<String>,
+    /// New agent profile.
     #[arg(long)]
     agent: Option<String>,
+    /// New reasoning or model variant.
     #[arg(long)]
     variant: Option<String>,
+    /// New IANA time zone for cron times on Linux, such as Europe/Paris.
     #[arg(long)]
     timezone: Option<String>,
+    /// Turn the schedule on.
     #[arg(long, conflicts_with = "disable")]
     enable: bool,
+    /// Turn the schedule off.
     #[arg(long, conflicts_with = "enable")]
     disable: bool,
-    #[arg(long, conflicts_with_all = ["cron", "at"])]
+    /// Repeat at a fixed interval: 30m, 2h or 1d.
+    #[arg(long, value_name = "INTERVAL", conflicts_with_all = ["cron", "at"])]
     every: Option<String>,
-    #[arg(long, conflicts_with_all = ["every", "at"])]
+    /// Five-field cron expression: minute hour day month weekday.
+    #[arg(long, value_name = "EXPRESSION", conflicts_with_all = ["every", "at"])]
     cron: Option<String>,
-    #[arg(long, conflicts_with_all = ["every", "cron"])]
+    /// Run once at an RFC 3339 time.
+    #[arg(long, value_name = "TIME", conflicts_with_all = ["every", "cron"])]
     at: Option<String>,
 }
 
@@ -1065,7 +1316,11 @@ async fn main() -> Result<()> {
             )
             .exit();
     }
-    let cli = Cli::parse_from(normalize_natural_language_args(args));
+    let cli = {
+        use clap::FromArgMatches as _;
+        let matches = cli_command().get_matches_from(normalize_natural_language_args(args));
+        Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
+    };
     let project_config = !cli.disable_project_config;
     let project_config_override = if cli.disable_project_config {
         Some(false)
@@ -1096,7 +1351,12 @@ async fn main() -> Result<()> {
     // Logs always land in <data>/logs (rotated daily) so problems seen in
     // the TUI can be run down afterwards; stderr is opt-in because the TUI
     // owns the terminal. `serve` streams to stderr by default.
-    let stderr_logs = cli.print_logs || matches!(cli.command, Some(Command::Serve(_)));
+    // `serve --stop` and the `--daemon` launcher are control commands: they
+    // print their result, not the server's log. A detached server's stderr
+    // goes nowhere.
+    let stderr_logs = cli.print_logs
+        || matches!(&cli.command, Some(Command::Serve(args))
+            if !args.stop && !args.daemon && !args.background_child);
     // Read-only commands stay out of the log files they inspect.
     let file_logs = !matches!(cli.command, Some(Command::Logs { .. } | Command::Doctor));
     // Processes that live as long as a window or a server get no command span:
@@ -1454,6 +1714,112 @@ fn misspelled_subcommand(args: &[OsString]) -> Option<(String, String)> {
     fits.then(|| (typo.to_owned(), command.get_name().to_owned()))
 }
 
+/// Where a global option means something: only in these commands, or in
+/// every command but these.
+enum GlobalScope {
+    Only(&'static [&'static str]),
+    Except(&'static [&'static str]),
+}
+
+/// Global options and the commands they apply to. Elsewhere they are still
+/// accepted, so scripts that pass them everywhere keep working, but a
+/// command's help lists only what it uses: `serve --help` offers no chat to
+/// continue.
+const GLOBAL_SCOPES: &[(&str, GlobalScope)] = &[
+    (
+        "thread",
+        GlobalScope::Only(&["tui", "run", "attach", "worktree"]),
+    ),
+    (
+        "continue_last",
+        GlobalScope::Only(&["tui", "run", "attach", "worktree"]),
+    ),
+    (
+        "yolo",
+        GlobalScope::Only(&[
+            "acp", "serve", "tui", "run", "mcp", "sessions", "btw", "worktree", "workflow",
+            "schedule",
+        ]),
+    ),
+    (
+        "workspace",
+        GlobalScope::Except(&[
+            "login",
+            "logout",
+            "account",
+            "cloud",
+            "telemetry",
+            "upgrade",
+            "doctor",
+            "logs",
+        ]),
+    ),
+    (
+        "disable_project_config",
+        GlobalScope::Except(&[
+            "login",
+            "logout",
+            "account",
+            "cloud",
+            "telemetry",
+            "upgrade",
+            "doctor",
+            "logs",
+            "profile",
+            "stats",
+            "insights",
+        ]),
+    ),
+    ("log_level", GlobalScope::Except(STANDALONE_AND_REPORTS)),
+    ("print_logs", GlobalScope::Except(STANDALONE_AND_REPORTS)),
+];
+
+/// Commands that return before logging starts.
+const STANDALONE_AND_REPORTS: &[&str] = &[
+    "login",
+    "logout",
+    "account",
+    "cloud",
+    "telemetry",
+    "profile",
+    "stats",
+    "insights",
+];
+
+/// The parser, with each command's help limited to the global options it
+/// uses (see `GLOBAL_SCOPES`).
+fn cli_command() -> clap::Command {
+    use clap::CommandFactory;
+    fn hide(command: &mut clap::Command, ignored: &[&str]) {
+        *command = std::mem::take(command).mut_args(|argument| {
+            if argument.is_global_set() && ignored.contains(&argument.get_id().as_str()) {
+                argument.hide(true)
+            } else {
+                argument
+            }
+        });
+        for subcommand in command.get_subcommands_mut() {
+            hide(subcommand, ignored);
+        }
+    }
+    let mut command = Cli::command();
+    // Build first: that copies global options into every subcommand.
+    command.build();
+    for subcommand in command.get_subcommands_mut() {
+        let name = subcommand.get_name().to_owned();
+        let ignored: Vec<&str> = GLOBAL_SCOPES
+            .iter()
+            .filter(|(_, scope)| match scope {
+                GlobalScope::Only(commands) => !commands.contains(&name.as_str()),
+                GlobalScope::Except(commands) => commands.contains(&name.as_str()),
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        hide(subcommand, &ignored);
+    }
+    command
+}
+
 /// Whether `name` is a subcommand or alias the parser accepts. Read from
 /// the clap definition rather than a hand-kept list, which fell behind when
 /// `remote`, `extension`, `marketplace` and `capability` were added and
@@ -1547,10 +1913,10 @@ async fn providers_command(
             println!("{}", serde_json::to_string_pretty(&provider)?);
         } else {
             println!(
-                "{}\t{}\t{} models\t{}",
+                "{}\t{}\t{}\t{}",
                 provider.id,
                 provider.name,
-                provider.models.len(),
+                plural(provider.models.len(), "model", "models"),
                 if provider.authenticated {
                     "connected"
                 } else {
@@ -1596,7 +1962,10 @@ async fn provider_command(
                     "This router requires an access key. Supply it through --key-stdin."
                 ),
                 router_connection::ConnectResult::Connected { id, models, .. } => {
-                    println!("Connected {id} · {models} models available")
+                    println!(
+                        "Connected {id} · {} available",
+                        plural(models, "model", "models")
+                    );
                 }
             }
             Ok(())
@@ -1649,7 +2018,7 @@ async fn provider_command(
             if project && !trust {
                 println!("Note: project configuration is disabled for this invocation.");
             }
-            println!("Restart the workspace server to load provider definition changes.");
+            reload_notice(paths);
             Ok(())
         }
         ProviderCommand::Remove { id, project } => {
@@ -1660,7 +2029,7 @@ async fn provider_command(
             println!(
                 "Stored credentials were retained; use `haarness auth logout {id}` to remove them."
             );
-            println!("Restart the workspace server to unload the provider definition.");
+            reload_notice(paths);
             Ok(())
         }
     }
@@ -1902,7 +2271,11 @@ fn command_manage_command(
 ) -> Result<()> {
     match command {
         CommandManageCommand::List => {
-            for command in asset_layers(paths, workspace, trust).commands {
+            let commands = asset_layers(paths, workspace, trust).commands;
+            if commands.is_empty() {
+                println!("No commands. Create one with `haarness command create <name>`.");
+            }
+            for command in commands {
                 println!("{}\t{}", command.name, command.description);
             }
             Ok(())
@@ -1965,7 +2338,11 @@ async fn skill_manage_command(
         FilesystemSkillRegistry::new_scoped(skill_roots(paths, workspace, trust, &file_config));
     match command {
         SkillManageCommand::List => {
-            for skill in registry.discover().await? {
+            let skills = registry.discover().await?;
+            if skills.is_empty() {
+                println!("No skills. Create one with `haarness skill create <name>`.");
+            }
+            for skill in skills {
                 println!("{}\t{}\t{}", skill.name, skill.description, skill.path);
             }
             Ok(())
@@ -2273,9 +2650,11 @@ fn remove_managed_asset(path: &Path, directory: bool, what: &str) -> Result<()> 
     Ok(())
 }
 
+/// Running workspace servers hot-reload configuration and assets, so a change
+/// needs no restart (and a restart would cancel a running turn).
 fn reload_notice(paths: &Paths) {
     if read_runtime(paths).is_ok() {
-        println!("Restart the workspace server to reload asset changes.");
+        println!("The running Haarness server picks this up once no turn is running.");
     }
 }
 
@@ -2319,7 +2698,7 @@ async fn session_command(
             if json {
                 println!("{}", serde_json::to_string_pretty(&sessions)?);
             } else if sessions.is_empty() {
-                println!("No sessions.");
+                println!("No chats in this folder yet.");
             } else {
                 for session in sessions {
                     // One row per chat, whatever the title holds: scripts cut
@@ -2330,7 +2709,10 @@ async fn session_command(
                         one_line_metadata(&session.title),
                         session.provider,
                         session.model,
-                        session.updated_at.to_rfc3339(),
+                        session
+                            .updated_at
+                            .with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d %H:%M"),
                         if session.archived { "\tarchived" } else { "" }
                     );
                 }
@@ -2361,7 +2743,12 @@ async fn session_command(
                 .await?;
             println!("Unarchived {} ({})", session.title, session.id);
         }
-        SessionCommand::Fork { id, title, at } => {
+        SessionCommand::Fork {
+            id,
+            title,
+            at,
+            json,
+        } => {
             let session = client
                 .fork_thread_with(
                     ThreadId(id),
@@ -2372,7 +2759,11 @@ async fn session_command(
                     },
                 )
                 .await?;
-            println!("{}", serde_json::to_string_pretty(&session)?);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&session)?);
+            } else {
+                println!("Forked into {} ({})", session.title, session.id);
+            }
         }
         SessionCommand::Export {
             id,
@@ -2400,9 +2791,8 @@ async fn session_command(
                     format!("failed to create session archive {}", path.display())
                 })?;
                 println!(
-                    "Exported {} session{} to {}{}",
-                    archive.threads.len(),
-                    if archive.threads.len() == 1 { "" } else { "s" },
+                    "Exported {} to {}{}",
+                    plural(archive.threads.len(), "chat", "chats"),
                     path.display(),
                     if archive.sanitized {
                         " (sanitized)"
@@ -2429,16 +2819,27 @@ async fn session_command(
                 .with_context(|| format!("failed to read session archive {}", file.display()))?;
             let archive: SessionArchive = serde_json::from_slice(&payload)
                 .with_context(|| format!("invalid session archive JSON in {}", file.display()))?;
+            let sanitized = archive.sanitized;
             let result = client.import_session_archive(archive).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
                 println!(
-                    "Imported root {}: {} created, {} merged",
+                    "Imported chat {}: {} created, {} already here",
                     result.root.id,
                     result.created.len(),
                     result.merged.len()
                 );
+                if !result.restored.is_empty() {
+                    println!(
+                        "Replaced the redacted content of {} with this archive's.",
+                        plural(result.restored.len(), "chat", "chats")
+                    );
+                } else if sanitized && !result.merged.is_empty() {
+                    println!(
+                        "This archive is sanitized, so chats already here kept their content."
+                    );
+                }
             }
         }
     }
@@ -2618,6 +3019,11 @@ async fn workflow_command(
     match command {
         WorkflowCommand::List => {
             let catalog = client.workflows().await?;
+            if catalog.workflows.is_empty() {
+                println!(
+                    "No workflows. Save one in .haarness/workflows/ in this project, for example .haarness/workflows/audit.ts."
+                );
+            }
             for definition in catalog.workflows {
                 let description = definition.meta.description.as_deref().unwrap_or("");
                 if description.is_empty() {
@@ -2637,7 +3043,11 @@ async fn workflow_command(
             print!("{}", client.workflow_source(&name).await?.source);
         }
         WorkflowCommand::Runs { limit } => {
-            for run in client.workflow_runs(limit.clamp(1, 500)).await? {
+            let runs = client.workflow_runs(limit.clamp(1, 500)).await?;
+            if runs.is_empty() {
+                println!("No workflow runs yet. Start one with `haarness workflow run <name>`.");
+            }
+            for run in runs {
                 println!(
                     "{}\t{}\t{}\t{}",
                     run.id,
@@ -2655,6 +3065,7 @@ async fn workflow_command(
             variant,
             detach,
             timeout_ms,
+            json,
         } => {
             let args = args
                 .as_deref()
@@ -2677,7 +3088,7 @@ async fn workflow_command(
                 })
                 .await?;
             if detach {
-                print_workflow_run(&started)?;
+                print_workflow_run(&started, json)?;
             } else {
                 let deadline =
                     timeout_ms.map(|timeout| Instant::now() + Duration::from_millis(timeout));
@@ -2695,20 +3106,20 @@ async fn workflow_command(
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 };
-                print_workflow_run(&run)?;
+                print_workflow_run(&run, json)?;
             }
         }
-        WorkflowCommand::Inspect { run_id } => {
-            print_workflow_run(&client.workflow_run(WorkflowId(run_id), None).await?)?;
+        WorkflowCommand::Inspect { run_id, json } => {
+            print_workflow_run(&client.workflow_run(WorkflowId(run_id), None).await?, json)?;
         }
-        WorkflowCommand::Cancel { run_id } => {
-            print_workflow_run(&client.cancel_workflow(WorkflowId(run_id)).await?)?;
+        WorkflowCommand::Cancel { run_id, json } => {
+            print_workflow_run(&client.cancel_workflow(WorkflowId(run_id)).await?, json)?;
         }
-        WorkflowCommand::Pause { run_id } => {
-            print_workflow_run(&client.pause_workflow(WorkflowId(run_id)).await?)?;
+        WorkflowCommand::Pause { run_id, json } => {
+            print_workflow_run(&client.pause_workflow(WorkflowId(run_id)).await?, json)?;
         }
-        WorkflowCommand::Resume { run_id } => {
-            print_workflow_run(&client.resume_workflow(WorkflowId(run_id)).await?)?;
+        WorkflowCommand::Resume { run_id, json } => {
+            print_workflow_run(&client.resume_workflow(WorkflowId(run_id)).await?, json)?;
         }
         WorkflowCommand::Delete { run_id } => {
             client.delete_workflow(WorkflowId(run_id)).await?;
@@ -2747,11 +3158,15 @@ async fn schedule_command(
             );
         }
         ScheduleCommand::Add(args) => {
+            let directory = args.directory.unwrap_or_else(|| workspace.to_path_buf());
+            if let Some(model) = &args.model {
+                check_schedule_model(paths, &directory, trust, model).await?;
+            }
             let schedule = scheduler.create(CreateSchedule {
                 name: args.name,
                 prompt: args.prompt,
                 request: args.natural,
-                workspace: args.directory.unwrap_or_else(|| workspace.to_path_buf()),
+                workspace: directory,
                 model: args.model,
                 agent: args.agent,
                 variant: args.variant,
@@ -2763,6 +3178,17 @@ async fn schedule_command(
             println!("{} {}", schedule.id, Scheduler::summary(&schedule));
         }
         ScheduleCommand::Update(args) => {
+            if let Some(model) = args
+                .model
+                .as_deref()
+                .filter(|model| !model.trim().is_empty())
+            {
+                let directory = match &args.directory {
+                    Some(directory) => directory.clone(),
+                    None => scheduler.require(&args.reference)?.workspace,
+                };
+                check_schedule_model(paths, &directory, trust, model).await?;
+            }
             let enabled = args
                 .enable
                 .then_some(true)
@@ -2795,10 +3221,30 @@ async fn schedule_command(
         ScheduleCommand::Disable { reference } => {
             println!("Disabled {}", scheduler.toggle(&reference, false)?.name);
         }
-        ScheduleCommand::Run { reference } => {
+        ScheduleCommand::Run { reference, json } => {
+            let schedule = scheduler.require(&reference)?;
             let scheduler = scheduler.clone();
             let run = tokio::task::spawn_blocking(move || scheduler.run_now(&reference)).await??;
-            println!("{}", serde_json::to_string_pretty(&run)?);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&run)?);
+            } else if run.status == ScheduleRunStatus::Skipped {
+                println!(
+                    "{}: {}",
+                    schedule.name,
+                    run.error.as_deref().unwrap_or("skipped")
+                );
+            } else if run.status == ScheduleRunStatus::Success {
+                println!(
+                    "Ran {}{}",
+                    schedule.name,
+                    run.thread_id
+                        .map(|id| format!(" in chat {id}"))
+                        .unwrap_or_default()
+                );
+                if let Some(response) = run.response.as_deref().filter(|text| !text.is_empty()) {
+                    println!("{response}");
+                }
+            }
             if run.status == ScheduleRunStatus::Failed {
                 anyhow::bail!(
                     "scheduled run failed: {}",
@@ -2818,17 +3264,29 @@ async fn schedule_command(
                 println!("No runs recorded yet.");
             } else {
                 for run in runs {
-                    println!(
-                        "{:?}\t{}\t{}\t{}",
+                    let mut row = format!(
+                        "{:?}\t{}",
                         run.status,
-                        run.finished_at.to_rfc3339(),
-                        run.thread_id.map_or_else(String::new, |id| id.to_string()),
-                        run.error.unwrap_or_default()
+                        run.finished_at
+                            .with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d %H:%M")
                     );
+                    for field in [run.thread_id.map(|id| format!("chat {id}")), run.error]
+                        .into_iter()
+                        .flatten()
+                    {
+                        row.push('\t');
+                        row.push_str(&field);
+                    }
+                    println!("{row}");
                 }
             }
         }
-        ScheduleCommand::Logs { reference } => {
+        ScheduleCommand::Logs {
+            reference,
+            tail,
+            open,
+        } => {
             let is_schedule_log = reference.is_some();
             let path = reference.map_or_else(
                 || Ok(scheduler.logs_dir()),
@@ -2838,25 +3296,53 @@ async fn schedule_command(
                         .map(|schedule| scheduler.log_path(schedule.id))
                 },
             )?;
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
+            if let Some(count) = tail {
+                // clap requires a schedule reference with --tail.
+                let content = match fs::read_to_string(&path) {
+                    Ok(content) => content,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        println!("No runs logged yet in {}", path.display());
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                let lines: Vec<&str> = content.lines().collect();
+                for line in &lines[lines.len().saturating_sub(count)..] {
+                    println!("{line}");
+                }
+                return Ok(());
             }
             println!("{}", path.display());
-            #[cfg(target_os = "macos")]
-            {
-                let reveal = if is_schedule_log && path.is_file() {
-                    ProcessCommand::new("open").arg("-R").arg(&path).status()
+            // Revealing a file is opt-in: over SSH, in scripts and with piped
+            // output a file manager window is never what was asked for.
+            if open {
+                let directory = if is_schedule_log {
+                    path.parent().unwrap_or(&path)
                 } else {
-                    let directory = if is_schedule_log {
-                        path.parent().unwrap_or(&path)
-                    } else {
-                        &path
-                    };
-                    fs::create_dir_all(directory)?;
-                    ProcessCommand::new("open").arg(directory).status()
+                    &path
                 };
-                if let Err(error) = reveal {
-                    tracing::debug!(%error, "could not reveal schedule logs");
+                fs::create_dir_all(directory)?;
+                let mut reveal = if cfg!(target_os = "macos") {
+                    let mut command = ProcessCommand::new("open");
+                    if is_schedule_log && path.is_file() {
+                        command.arg("-R").arg(&path);
+                    } else {
+                        command.arg(directory);
+                    }
+                    command
+                } else if cfg!(target_os = "windows") {
+                    let mut command = ProcessCommand::new("explorer");
+                    command.arg(directory);
+                    command
+                } else {
+                    let mut command = ProcessCommand::new("xdg-open");
+                    command.arg(directory);
+                    command
+                };
+                let status = reveal.status().context("open the schedule log folder")?;
+                // explorer.exe exits 1 even when it opened the folder.
+                if !status.success() && !cfg!(target_os = "windows") {
+                    anyhow::bail!("could not open {}", directory.display());
                 }
             }
         }
@@ -2870,6 +3356,47 @@ async fn schedule_command(
                 );
             }
         }
+    }
+    Ok(())
+}
+
+/// A schedule runs unattended, maybe hours later, so a provider that does not
+/// exist is refused now. A model missing from a provider's list only warns:
+/// some providers serve more models than they list.
+async fn check_schedule_model(
+    paths: &Paths,
+    workspace: &Path,
+    trust: bool,
+    model: &str,
+) -> Result<()> {
+    // The scheduler itself explains the provider/model form.
+    let Some((provider_id, model_id)) = model.trim().split_once('/') else {
+        return Ok(());
+    };
+    let config = load_config(paths, workspace, trust)?;
+    let credentials = resolved_credentials(&read_auth(paths).unwrap_or_default());
+    let (instances, disabled) = provider_instances(&config, &credentials);
+    let providers = NativeProviderRegistry::discover_with_providers_and_store(
+        instances,
+        &disabled,
+        Arc::new(CredentialStore::new(paths.auth.clone())),
+    )
+    .await;
+    let storage_id = haarness_protocol::provider_storage_id(provider_id);
+    let Some(provider) = providers
+        .list()
+        .into_iter()
+        .find(|provider| provider.id == storage_id)
+    else {
+        anyhow::bail!(
+            "no provider named '{provider_id}' for --model {model}; run `haarness providers` to see the provider ids"
+        );
+    };
+    if !provider.models.is_empty() && !provider.models.iter().any(|known| known.id == model_id) {
+        eprintln!(
+            "Warning: {} does not list {model_id}; check `haarness models {provider_id}`. The schedule fails when it runs if the model is not offered.",
+            provider.name
+        );
     }
     Ok(())
 }
@@ -3046,8 +3573,33 @@ async fn execute_schedule(
     scheduler.finish(&schedule, run, guard)
 }
 
-fn print_workflow_run(run: &WorkflowRun) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(run)?);
+/// A run's status line, then its result (text as is, other values as JSON)
+/// or error; `--json` prints the whole record.
+fn print_workflow_run(run: &WorkflowRun, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(run)?);
+        return Ok(());
+    }
+    let phase = run
+        .phase
+        .as_deref()
+        .filter(|_| run.status == haarness_protocol::WorkflowRunStatus::Running)
+        .map(|phase| format!(", phase {phase}"))
+        .unwrap_or_default();
+    println!(
+        "{} {} (run {}{phase})",
+        run.workflow_name,
+        workflow_status(run.status),
+        run.id
+    );
+    match &run.result {
+        Some(serde_json::Value::String(text)) => println!("{text}"),
+        Some(value) => println!("{}", serde_json::to_string_pretty(value)?),
+        None => {}
+    }
+    if let Some(error) = &run.error {
+        println!("Error: {error}");
+    }
     Ok(())
 }
 
@@ -3181,6 +3733,14 @@ async fn interactive(
         resume = true;
     }
 }
+/// `haarness serve` listens here unless `--port` says otherwise.
+const DEFAULT_SERVE_PORT: u16 = 4096;
+
+/// The port of an `http://host:port` server URL.
+fn url_port(url: &str) -> Option<u16> {
+    url.trim_end_matches('/').rsplit_once(':')?.1.parse().ok()
+}
+
 async fn serve_command(
     paths: &Paths,
     workspace: PathBuf,
@@ -3213,14 +3773,15 @@ async fn serve_command(
     } else {
         haarness_server::auth::ServerAccess::Private
     };
-    check_network_access(args.host, args.port, &access, args.anonymous)?;
+    let port = args.port.unwrap_or(DEFAULT_SERVE_PORT);
+    check_network_access(args.host, port, &access, args.anonymous)?;
     if args.daemon && !args.background_child {
         let discovery = ensure_workspace_server_at(
             paths,
             &workspace,
             trust,
             yolo,
-            SocketAddr::new(args.host, args.port),
+            SocketAddr::new(args.host, port),
             token.unwrap_or_else(random_token),
             Some(access),
         )
@@ -3231,6 +3792,13 @@ async fn serve_command(
             discovery.url,
             workspace.display()
         );
+        if let Some(requested) = args.port.filter(|port| *port != 0)
+            && url_port(&discovery.url).is_some_and(|port| port != requested)
+        {
+            println!(
+                "This folder already had a server on another port, so it was reused instead of starting one on {requested}. Run `haarness serve --stop` first to move it."
+            );
+        }
         return Ok(());
     }
     // A running server is named before the lease it holds is tried, which
@@ -3251,7 +3819,7 @@ async fn serve_command(
         &workspace,
         trust,
         yolo,
-        SocketAddr::new(args.host, args.port),
+        SocketAddr::new(args.host, port),
         true,
     )
     .await?;
@@ -7793,6 +8361,8 @@ fn init_logging(
         layers.push(Box::new(
             tracing_subscriber::fmt::layer()
                 .with_writer(io::stderr)
+                // Colour only for a terminal: not in files, pipes or journald.
+                .with_ansi(io::stderr().is_terminal())
                 .with_filter(log_filter),
         ));
     }
@@ -7863,6 +8433,11 @@ fn haarness_filter(level: &str) -> String {
 }
 
 /// `haarness logs`: show the log directory and files, or tail the newest.
+/// A count and its noun: `1 model`, `3 models`.
+fn plural(count: usize, one: &str, many: &str) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
+}
+
 fn logs_command(paths: &Paths, tail: Option<usize>) -> Result<()> {
     let logs = paths.data.join("logs");
     let mut files: Vec<_> = fs::read_dir(&logs)
@@ -8775,6 +9350,87 @@ mod tests {
                 .ends_with(".tmp")
         }));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// `--help` is the reference people read first: every command and option
+    /// says in one line what it does.
+    #[test]
+    fn every_command_and_option_says_what_it_does() {
+        fn walk(command: &clap::Command, path: &str, missing: &mut Vec<String>) {
+            for argument in command.get_arguments() {
+                let id = argument.get_id().as_str();
+                if !argument.is_hide_set()
+                    && !matches!(id, "help" | "version")
+                    && argument.get_help().is_none()
+                {
+                    missing.push(format!("{path} <{id}>"));
+                }
+            }
+            for subcommand in command.get_subcommands() {
+                if subcommand.is_hide_set() || subcommand.get_name() == "help" {
+                    continue;
+                }
+                let path = format!("{path} {}", subcommand.get_name());
+                if subcommand.get_about().is_none() {
+                    missing.push(path.clone());
+                }
+                walk(subcommand, &path, missing);
+            }
+        }
+        let mut missing = Vec::new();
+        walk(&super::cli_command(), "haarness", &mut missing);
+        assert!(
+            missing.is_empty(),
+            "{} undescribed:\n{}",
+            missing.len(),
+            missing.join("\n")
+        );
+    }
+
+    #[test]
+    fn help_lists_only_the_global_options_a_command_uses() {
+        use clap::FromArgMatches as _;
+        let mut command = super::cli_command();
+        let serve = command
+            .find_subcommand_mut("serve")
+            .unwrap()
+            .render_help()
+            .to_string();
+        assert!(
+            !serve.contains("--continue") && !serve.contains("--thread"),
+            "{serve}"
+        );
+        assert!(serve.contains("--yolo") && serve.contains("--workspace"));
+        let doctor = command
+            .find_subcommand_mut("doctor")
+            .unwrap()
+            .render_help()
+            .to_string();
+        for option in ["--continue", "--thread", "--yolo", "--workspace"] {
+            assert!(!doctor.contains(option), "{option} in {doctor}");
+        }
+        let run = command
+            .find_subcommand_mut("run")
+            .unwrap()
+            .render_help()
+            .to_string();
+        assert!(run.contains("--continue") && run.contains("--yolo"));
+        // Hidden is not refused: scripts that pass them everywhere still parse.
+        let matches = super::cli_command()
+            .try_get_matches_from(["haarness", "doctor", "--continue"])
+            .unwrap();
+        assert!(
+            super::Cli::from_arg_matches(&matches)
+                .unwrap()
+                .continue_last
+        );
+    }
+
+    #[test]
+    fn a_server_port_is_read_from_its_url() {
+        assert_eq!(super::url_port("http://127.0.0.1:41000"), Some(41000));
+        assert_eq!(super::url_port("http://[::1]:4096/"), Some(4096));
+        assert_eq!(super::url_port("http://localhost"), None);
     }
 
     #[test]

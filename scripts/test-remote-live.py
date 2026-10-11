@@ -367,7 +367,7 @@ try:
     process.wait(15)
     assert not next(
         v
-        for v in json.loads(cli("remote", "status"))["items"]
+        for v in json.loads(cli("remote", "status", "--json"))["items"]
         if v["id"] == selected["id"]
     )["running"]
     cli(

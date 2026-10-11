@@ -13,11 +13,13 @@ pub struct LoginArgs {
     /// Print the sign-in link without opening a browser.
     #[arg(long)]
     pub no_browser: bool,
+    /// Print the sign-in link and the result as JSON lines.
     #[arg(long)]
     pub json: bool,
 }
 #[derive(Args)]
 pub struct AccountArgs {
+    /// Print JSON.
     #[arg(long)]
     pub json: bool,
     /// Switch the account used for Cloud models and sessions.
@@ -73,22 +75,31 @@ pub enum AgentCommand {
         json: bool,
     },
     /// Show one cloud agent.
-    Show { id: String },
+    Show {
+        /// Cloud agent id.
+        id: String,
+    },
     /// Create a cloud agent from a JSON file with its name, configuration and
     /// optional write-only environment values.
     Create {
+        /// The agent's JSON file.
         #[arg(long)]
         file: std::path::PathBuf,
     },
     /// Replace a cloud agent's configuration from a JSON file with its
     /// version and the full updated configuration.
     Update {
+        /// Cloud agent id.
         id: String,
+        /// The agent's JSON file.
         #[arg(long)]
         file: std::path::PathBuf,
     },
     /// Delete a cloud agent.
-    Delete { id: String },
+    Delete {
+        /// Cloud agent id.
+        id: String,
+    },
 }
 #[derive(Subcommand)]
 pub enum SessionCommand {
@@ -121,12 +132,15 @@ pub enum SessionCommand {
     },
     /// Save configuration/environment while stopped. File must include the current version.
     Update {
+        /// Cloud session id.
         id: String,
+        /// JSON file with the current version and the new settings.
         #[arg(long)]
         file: std::path::PathBuf,
     },
     /// Capture saved settings in an inert template with a fresh deploy key.
     SaveAgent {
+        /// Cloud session id.
         id: String,
         /// The new cloud agent's name.
         #[arg(long)]
@@ -139,13 +153,25 @@ pub enum SessionCommand {
         include_environment: bool,
     },
     /// Show one cloud session as JSON.
-    Show { id: String },
+    Show {
+        /// Cloud session id.
+        id: String,
+    },
     /// Start a stopped session.
-    Start { id: String },
+    Start {
+        /// Cloud session id.
+        id: String,
+    },
     /// Stop a running session.
-    Stop { id: String },
+    Stop {
+        /// Cloud session id.
+        id: String,
+    },
     /// Open a session in the terminal UI.
-    Attach { id: String },
+    Attach {
+        /// Cloud session id.
+        id: String,
+    },
 }
 #[derive(Subcommand)]
 pub enum WorkspaceCommand {
@@ -157,6 +183,7 @@ pub enum WorkspaceCommand {
     },
     /// Create a Cloud workspace. New work belongs in `cloud session create`.
     Create {
+        /// Workspace name.
         name: String,
         /// Git repository to clone into it.
         #[arg(long)]
@@ -166,11 +193,20 @@ pub enum WorkspaceCommand {
         json: bool,
     },
     /// Start a stopped workspace.
-    Start { id: String },
+    Start {
+        /// Cloud workspace id.
+        id: String,
+    },
     /// Stop a running workspace.
-    Stop { id: String },
+    Stop {
+        /// Cloud workspace id.
+        id: String,
+    },
     /// Open a workspace in the terminal UI.
-    Attach { id: String },
+    Attach {
+        /// Cloud workspace id.
+        id: String,
+    },
 }
 pub fn client() -> Result<Client> {
     Ok(Client::new(Config::from_env()?)?)

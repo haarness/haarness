@@ -24,64 +24,100 @@ pub struct Args {
 enum Command {
     /// Browse public and signed-in account-private resources.
     Search {
+        /// Only this kind: skill, agent, mcp, plugin or extension.
         #[arg(long)]
         kind: Option<String>,
+        /// Search text.
         #[arg(long)]
         q: Option<String>,
+        /// Only resources in this collection.
         #[arg(long)]
         collection: Option<String>,
+        /// Continue from the `nextCursor` of an earlier page.
         #[arg(long)]
         cursor: Option<String>,
     },
+    /// Show one resource's details.
     Detail {
+        /// Resource id, or publisher/slug.
         id: String,
+        /// The resource's kind, to find it by publisher/slug.
         #[arg(long)]
         kind: Option<String>,
     },
+    /// List one resource's published versions.
     Versions {
+        /// Resource id, or publisher/slug.
         id: String,
+        /// The resource's kind, to find it by publisher/slug.
         #[arg(long)]
         kind: Option<String>,
     },
+    /// List marketplace collections.
     Collections,
-    Installed,
+    /// List resources installed from the marketplace.
+    Installed {
+        /// Print the install records as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Verify and install a catalog resource on this machine.
     Install {
+        /// Resource kind: skill, agent, mcp, plugin or extension.
         kind: String,
+        /// Resource id, or publisher/slug.
         id: String,
+        /// Version number (default: the latest).
         #[arg(long)]
         version: Option<u64>,
+        /// Install it for this project only.
         #[arg(long, conflicts_with = "global")]
         local: bool,
+        /// Install it for all projects (the default).
         #[arg(long)]
         global: bool,
+        /// Settings the resource asks for, as a JSON object.
         #[arg(long, default_value = "{}")]
         values: String,
     },
+    /// Install another version of an installed resource.
     Update {
+        /// Resource id, or publisher/slug.
         id: String,
+        /// Version number (default: the latest).
         #[arg(long)]
         version: Option<u64>,
+        /// The copy installed for this project.
         #[arg(long)]
         local: bool,
     },
+    /// Turn an installed resource on.
     Enable {
+        /// Resource id, or publisher/slug.
         id: String,
+        /// The copy installed for this project.
         #[arg(long)]
         local: bool,
     },
+    /// Turn an installed resource off without removing it.
     Disable {
+        /// Resource id, or publisher/slug.
         id: String,
+        /// The copy installed for this project.
         #[arg(long)]
         local: bool,
     },
+    /// Uninstall a resource.
     Remove {
+        /// Resource id, or publisher/slug.
         id: String,
+        /// The copy installed for this project.
         #[arg(long)]
         local: bool,
     },
     /// Machine-readable management request, also exposed through the SDK.
     Request {
+        /// The request as JSON, such as '{"action":"installed"}'.
         json: String,
     },
 }
@@ -97,7 +133,31 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: Args) -> Re
         Command::Detail { id, kind } => json!({"action":"detail","id":id,"kind":kind}),
         Command::Versions { id, kind } => json!({"action":"versions","id":id,"kind":kind}),
         Command::Collections => json!({"action":"collections"}),
-        Command::Installed => json!({"action":"installed"}),
+        Command::Installed { json: false } => {
+            let installed = installed(paths, workspace, trust)?;
+            let rows = installed.as_array().map(Vec::as_slice).unwrap_or_default();
+            if rows.is_empty() {
+                println!(
+                    "Nothing installed from the marketplace. Find resources with `haarness marketplace search`."
+                );
+            }
+            for row in rows {
+                let text = |key: &str| row[key].as_str().unwrap_or_default().to_owned();
+                println!(
+                    "{}\t{}\tversion {}\t{}",
+                    text("name"),
+                    text("kind"),
+                    row["version"]["number"],
+                    if text("scope") == "local" {
+                        "this project"
+                    } else {
+                        "all projects"
+                    }
+                );
+            }
+            return Ok(());
+        }
+        Command::Installed { json: true } => json!({"action":"installed"}),
         Command::Install {
             kind,
             id,

@@ -135,7 +135,7 @@ schedule_output=$("$binary" --workspace "$workspace" schedule add \
     --name ecosystem-schedule --prompt "scheduled ecosystem smoke" \
     --model echo/echo-1 --every 1m --disabled)
 schedule_id=$(printf '%s\n' "$schedule_output" | awk '{print $1}')
-schedule_run=$("$binary" --workspace "$workspace" schedule run "$schedule_id")
+schedule_run=$("$binary" --workspace "$workspace" schedule run "$schedule_id" --json)
 schedule_id_fields=$(printf '%s\n' "$schedule_run" | awk '/"id":/ { count += 1 } END { print count + 0 }')
 test "$schedule_id_fields" -eq 1
 printf '%s\n' "$schedule_run" | grep -F '"status": "success"' >/dev/null
