@@ -1,7 +1,8 @@
 //! Checking an API key before it is stored: one cheap authenticated request,
 //! normally a model listing, whose answer says whether the provider knows the
-//! key. Only a clear refusal rejects a key; anything uncertain leaves it
-//! unchecked so a flaky network never blocks connecting.
+//! key. Only a clear refusal from a provider's own API rejects a key; anything
+//! uncertain leaves it unchecked so a flaky network or a gateway that guards
+//! the listing route never blocks connecting.
 
 use haarness_core::KeyCheck;
 use serde_json::Value;
@@ -10,9 +11,45 @@ use std::time::Duration;
 /// How long a check waits before the key is saved unchecked.
 const TIMEOUT: Duration = Duration::from_secs(8);
 
+/// Hosts of the native providers' own APIs. Compatible presets add theirs
+/// from [`crate::COMPAT_PRESETS`].
+const OFFICIAL_HOSTS: &[&str] = &[
+    "api.anthropic.com",
+    "api.openai.com",
+    "generativelanguage.googleapis.com",
+];
+
 /// Send `request` (already carrying the key) to the provider called `name`.
 pub(crate) async fn check(name: &str, request: reqwest::RequestBuilder) -> KeyCheck {
-    let response = match request.timeout(TIMEOUT).send().await {
+    let (client, request) = request.timeout(TIMEOUT).build_split();
+    let Ok(request) = request else {
+        return KeyCheck::Unchecked(format!("Haarness could not reach {name}"));
+    };
+    let official = official_api(request.url());
+    send(name, client.execute(request), official).await
+}
+
+/// Whether `url` is a provider's own public API, where a refused listing
+/// means a refused key. Gateways and proxies in front of a provider may
+/// refuse routes they do not serve (AWS API Gateway answers 403 "Missing
+/// Authentication Token"), so there a refusal leaves the key unchecked.
+fn official_api(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    url.scheme() == "https"
+        && (OFFICIAL_HOSTS.contains(&host)
+            || crate::COMPAT_PRESETS.iter().any(|preset| {
+                reqwest::Url::parse(preset.base_url).is_ok_and(|base| base.host_str() == Some(host))
+            }))
+}
+
+async fn send(
+    name: &str,
+    response: impl std::future::Future<Output = reqwest::Result<reqwest::Response>>,
+    official: bool,
+) -> KeyCheck {
+    let response = match response.await {
         Ok(response) => response,
         Err(error) if error.is_timeout() => {
             return KeyCheck::Unchecked(format!("{name} did not answer in time"));
@@ -24,22 +61,34 @@ pub(crate) async fn check(name: &str, request: reqwest::RequestBuilder) -> KeyCh
         return KeyCheck::Accepted;
     }
     let reason = response.text().await.ok().and_then(|body| reason(&body));
-    classify(name, status.as_u16(), reason)
+    classify(name, status.as_u16(), reason, official)
 }
 
-fn classify(name: &str, status: u16, reason: Option<String>) -> KeyCheck {
+fn classify(name: &str, status: u16, reason: Option<String>, official: bool) -> KeyCheck {
     let lower = reason.as_deref().unwrap_or_default().to_ascii_lowercase();
-    match status {
+    let refused = match status {
         // A restricted key that may not list models still authenticated.
         401 | 403 if lower.contains("scope") || lower.contains("insufficient permission") => {
-            KeyCheck::Accepted
+            return KeyCheck::Accepted;
         }
-        401 | 403 => KeyCheck::Rejected(reason),
+        401 | 403 => true,
         // Google answers an unknown key with 400 "API key not valid".
-        400 if lower.contains("api key") => KeyCheck::Rejected(reason),
+        400 => lower.contains("api key"),
         // No listing route to ask: nothing is known about the key.
-        404 | 405 => KeyCheck::Unsupported,
-        _ => KeyCheck::Unchecked(format!("{name} answered HTTP {status}")),
+        404 | 405 => return KeyCheck::Unsupported,
+        _ => false,
+    };
+    match (refused, official) {
+        (true, true) => KeyCheck::Rejected(reason),
+        // A gateway's refusal may be about the route, not the key: say what
+        // it answered and keep the key.
+        (true, false) => KeyCheck::Unchecked(format!(
+            "{name} answered HTTP {status}{}",
+            reason
+                .map(|reason| format!(" ({reason})"))
+                .unwrap_or_default()
+        )),
+        (false, _) => KeyCheck::Unchecked(format!("{name} answered HTTP {status}")),
     }
 }
 
@@ -68,34 +117,102 @@ fn reason(body: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{KeyCheck, check, classify, reason};
+    use super::{KeyCheck, check, classify, official_api, reason, send};
 
     #[test]
-    fn only_a_clear_refusal_rejects_a_key() {
+    fn only_a_clear_refusal_from_a_providers_own_api_rejects_a_key() {
         assert_eq!(
-            classify("Anthropic", 401, Some("invalid x-api-key".into())),
+            classify("Anthropic", 401, Some("invalid x-api-key".into()), true),
             KeyCheck::Rejected(Some("invalid x-api-key".into()))
         );
         assert_eq!(
-            classify("Google Gemini", 400, Some("API key not valid".into())),
+            classify("Google Gemini", 400, Some("API key not valid".into()), true),
             KeyCheck::Rejected(Some("API key not valid".into()))
         );
         assert_eq!(
             classify(
                 "OpenAI",
                 401,
-                Some("You have insufficient permissions for this operation. Missing scopes: api.model.read".into())
+                Some("You have insufficient permissions for this operation. Missing scopes: api.model.read".into()),
+                true
             ),
             KeyCheck::Accepted
         );
-        assert_eq!(classify("Acme", 404, None), KeyCheck::Unsupported);
+        assert_eq!(classify("Acme", 404, None, true), KeyCheck::Unsupported);
         assert_eq!(
-            classify("Acme", 503, None),
+            classify("Acme", 503, None, true),
             KeyCheck::Unchecked("Acme answered HTTP 503".into())
         );
         assert_eq!(
-            classify("Acme", 400, Some("bad model".into())),
+            classify("Acme", 400, Some("bad model".into()), true),
             KeyCheck::Unchecked("Acme answered HTTP 400".into())
+        );
+    }
+
+    #[test]
+    fn a_gateways_refusal_leaves_the_key_unchecked() {
+        assert_eq!(
+            classify(
+                "Acme",
+                403,
+                Some("Missing Authentication Token".into()),
+                false
+            ),
+            KeyCheck::Unchecked("Acme answered HTTP 403 (Missing Authentication Token)".into())
+        );
+        assert_eq!(
+            classify("Acme", 401, None, false),
+            KeyCheck::Unchecked("Acme answered HTTP 401".into())
+        );
+        assert_eq!(
+            classify("Acme", 400, Some("API key not valid".into()), false),
+            KeyCheck::Unchecked("Acme answered HTTP 400 (API key not valid)".into())
+        );
+        assert_eq!(classify("Acme", 405, None, false), KeyCheck::Unsupported);
+    }
+
+    #[test]
+    fn official_apis_are_the_native_and_preset_hosts_over_https() {
+        let official = |url: &str| official_api(&reqwest::Url::parse(url).unwrap());
+        assert!(official("https://api.anthropic.com/v1/models?limit=1"));
+        assert!(official("https://api.openai.com/v1/models"));
+        assert!(official(
+            "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1"
+        ));
+        assert!(official("https://api.groq.com/openai/v1/models"));
+        assert!(official("https://api.together.ai/v1/models"));
+        assert!(!official("http://api.openai.com/v1/models"));
+        assert!(!official("https://gateway.example.com/v1/models"));
+        assert!(!official(
+            "https://abc123.execute-api.us-east-1.amazonaws.com/prod/models"
+        ));
+        assert!(!official("http://127.0.0.1:4000/v1/models"));
+    }
+
+    #[tokio::test]
+    async fn a_listing_refused_by_a_gateway_keeps_the_key_and_by_a_provider_rejects_it() {
+        use axum::{Json, Router, http::StatusCode, routing::get};
+        let router = Router::new().route(
+            "/models",
+            get(|| async {
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"message": "Missing Authentication Token"})),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = reqwest::Client::new();
+        let url = format!("http://{address}/models");
+        assert_eq!(
+            check("Acme", client.get(&url).bearer_auth("sk-real")).await,
+            KeyCheck::Unchecked("Acme answered HTTP 403 (Missing Authentication Token)".into())
+        );
+        assert_eq!(
+            send("Acme", client.get(&url).send(), true).await,
+            KeyCheck::Rejected(Some("Missing Authentication Token".into()))
         );
     }
 

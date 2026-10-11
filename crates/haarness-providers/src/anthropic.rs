@@ -1108,9 +1108,11 @@ mod tests {
             provider.check_api_key("sk-ant-good").await,
             KeyCheck::Accepted
         );
+        // This endpoint is not api.anthropic.com, so a refusal may be the
+        // gateway's: the key is kept with what it answered.
         assert_eq!(
             provider.check_api_key("sk-ant-fake").await,
-            KeyCheck::Rejected(Some("invalid x-api-key".into()))
+            KeyCheck::Unchecked("Anthropic answered HTTP 401 (invalid x-api-key)".into())
         );
     }
 

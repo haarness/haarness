@@ -420,8 +420,9 @@ pub enum KeyCheck {
     Accepted,
     /// The provider refused the key, with its own reason when it gave one.
     Rejected(Option<String>),
-    /// The key could not be checked: the provider was unreachable, slow, or
-    /// failed for another reason. Says why, in a few words.
+    /// The key could not be checked: the provider was unreachable, slow, a
+    /// gateway in front of it refused the check, or it failed for another
+    /// reason. Says why, in a few words.
     Unchecked(String),
     /// The provider has no cheap request that tells.
     Unsupported,
