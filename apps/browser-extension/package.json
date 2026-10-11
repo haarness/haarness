@@ -13,6 +13,7 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@haarness/browser-driver": "file:../../packages/browser-driver",
     "effect": "4.0.0-rc.112",
     "lucide-solid": "^1.41.0",
     "solid-js": "1.9.15"

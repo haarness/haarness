@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { tabID } from "../src/core/browser";
 import { createRegistry, threadKey, wireState, wireTab, type Snapshot, type TabRecord } from "../src/core/registry";
 
 function memory() {
@@ -7,7 +8,7 @@ function memory() {
   return { load: async () => saved && structuredClone(saved), save: async (snapshot: Snapshot) => void (saved = structuredClone(snapshot)) };
 }
 const record = (n: number): TabRecord => ({
-  id: `tab_00000000-0000-0000-0000-${String(n).padStart(12, "0")}`,
+  id: tabID(`00000000-0000-0000-0000-${String(n).padStart(12, "0")}`),
   tabId: n,
   generation: 0,
   url: "https://a.example/",

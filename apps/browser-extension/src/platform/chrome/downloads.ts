@@ -5,7 +5,8 @@
  * it completes the bridge is told the path it may read. Every other download is
  * the user's and is ignored.
  */
-import type { FileID } from "../../core/browser";
+import { fileID, type FileID } from "../../core/browser";
+import { destinationOrigin } from "../../core/policy";
 import type { createAttribution } from "../../core/downloads";
 import type { ChromeFileStore } from "./files";
 
@@ -28,8 +29,11 @@ export function createDownloads(deps: {
     created(item: chrome.downloads.DownloadItem) {
       const match = deps.attribution.claim({ id: item.id, url: item.url, finalUrl: item.finalUrl, startedAt: Date.parse(item.startTime) });
       if (!match) return;
-      const file = `file_${deps.uuid()}` as FileID;
-      deps.store(match.tabId).download(file, item.filename.split(/[\\/]/).pop() || match.name || "download");
+      const file = fileID(deps.uuid());
+      // A redirect may have moved the download to another site; its bytes come from there too.
+      const final = item.finalUrl ? destinationOrigin(item.finalUrl) : undefined;
+      const resources = final ? [...match.resources, final] : match.resources;
+      deps.store(match.tabId).download(file, item.filename.split(/[\\/]/).pop() || match.name || "download", resources);
       owned.set(item.id, { tabId: match.tabId, file, server: match.server, thread: match.thread, command: match.command, url: match.url });
     },
     async changed(delta: chrome.downloads.DownloadDelta, finished: (download: Finished) => void) {

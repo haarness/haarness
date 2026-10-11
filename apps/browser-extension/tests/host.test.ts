@@ -6,8 +6,7 @@
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import { createHost } from "../src/core/host";
-import type { CreatePage, PageSurface } from "../src/core/driver-contract";
-import { DRIVER_NOT_WIRED } from "../src/core/driver";
+import type { CreatePage, PageOptions, PageSurface } from "../src/core/driver-contract";
 import { createChromePlatform } from "../src/platform/chrome/index";
 import { installChrome, type FakeChrome } from "./fakes/chrome";
 
@@ -26,7 +25,7 @@ async function boot(options: { prepare?(fake: FakeChrome): void; createPage?: Cr
   if (options.reuse) (globalThis as unknown as { chrome: unknown }).chrome = fake.chrome;
   options.prepare?.(fake);
   const { platform, listen } = createChromePlatform();
-  const host = createHost({ platform, createPage: options.createPage, driverWired: !!options.createPage });
+  const host = createHost({ platform, createPage: options.createPage });
   hosts.push(host);
   listen(host.events);
   await host.start();
@@ -266,8 +265,27 @@ test("the page may not follow a redirect to a site this chat was not allowed", a
   assert.equal(twin.outcome.result.value.url, "https://www.a.example/home");
 });
 
+/** A driver page that answers every command with `{ok:true}` and records it. */
+function recordingPage(calls: string[]): CreatePage {
+  return (surface, _cdp, options) => ({
+    ready: Promise.resolve(),
+    state: () => ({ id: options.id, url: surface.url(), title: "", loading: false, canGoBack: false, canGoForward: false, generation: 0 }),
+    sources: () => [],
+    async inspect() {
+      return { resources: [], key: "k" };
+    },
+    async execute(command) {
+      calls.push(command.action.type);
+      return { value: { ok: true }, files: [] };
+    },
+    navigationStarted() {},
+    dispose() {},
+  });
+}
+
 test("pages Haarness may not control, opaque pages and Chrome-less tools are refused", async () => {
-  const h = await boot();
+  const calls: string[] = [];
+  const h = await boot({ createPage: recordingPage(calls) });
   h.start();
   h.attach();
   const web = await h.open("https://a.example/");
@@ -279,9 +297,10 @@ test("pages Haarness may not control, opaque pages and Chrome-less tools are ref
   assert.equal(evaluate.outcome.code, "unsupported");
   const lighthouse = await h.command({ action: { type: "lighthouse", tabID: blank.tab.id } });
   assert.equal(lighthouse.outcome.code, "unsupported");
+  // A blank page still has a snapshot.
   const snapshot = await h.command({ action: { type: "snapshot", tabID: blank.tab.id } });
-  assert.equal(snapshot.outcome.code, "operation_failed");
-  assert.ok(snapshot.outcome.message.includes(DRIVER_NOT_WIRED));
+  assert.equal(snapshot.outcome.type, "success");
+  assert.deepEqual(calls, ["snapshot"]);
 });
 
 test("pause and stop fail commands with their own codes and tell every server", async () => {
@@ -392,12 +411,16 @@ test("tabs that closed while the worker was stopped are revoked when it starts a
 test("the shared page driver plugs in through createPage and runs inside the site guard", async () => {
   const calls: string[] = [];
   let surface: PageSurface | undefined;
+  let pageOptions: PageOptions | undefined;
   let generation = 0;
   const createPage: CreatePage = (pageSurface, cdp, options) => {
     surface = pageSurface;
+    pageOptions = options as PageOptions;
+    generation = options.generation ?? 0;
     return {
       ready: Promise.resolve(),
       state: () => ({ id: options.id, url: pageSurface.url(), title: "", loading: false, canGoBack: false, canGoForward: false, generation }),
+      sources: () => [],
       async inspect() {
         return { resources: [], key: "k" };
       },
@@ -426,9 +449,15 @@ test("the shared page driver plugs in through createPage and runs inside the sit
     generation: state.generation,
   });
   assert.deepEqual(result.outcome, { type: "success", result: { value: { ok: true }, files: [] } });
-  // The page counts its own documents from zero; the server's generation is translated.
-  assert.deepEqual(calls, ["click@0"]);
+  // The page goes on from the generation the server last saw; nothing is translated.
+  assert.ok(state.generation > 0, "loading the URL moved the generation");
+  assert.equal(pageOptions?.generation, state.generation);
+  assert.deepEqual(calls, [`click@${state.generation}`]);
+  // Request bodies and session headers stay out of network.get in the user's own browser.
+  assert.equal(pageOptions?.diagnostics?.requestBodies, false);
+  assert.equal(pageOptions?.diagnostics?.redactHeader?.("x-csrf-token"), true);
   assert.equal(surface?.resourceOrigins, "securityOrigin");
+  assert.equal(surface?.wwwTwin, true);
   assert.equal(surface?.gateTopDocumentOnly, true);
   assert.deepEqual(surface?.selectAll, { commands: ["selectAll"] });
   assert.equal(surface?.supports("heap.snapshot"), false);

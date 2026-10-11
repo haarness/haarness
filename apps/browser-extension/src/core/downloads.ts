@@ -16,6 +16,8 @@ export interface Started {
   server: string;
   thread: string;
   name: string;
+  /** The origins the bytes come from: the tab's top document and the download URL. */
+  resources: string[];
 }
 
 export interface Item {

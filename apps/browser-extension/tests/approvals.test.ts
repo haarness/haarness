@@ -48,12 +48,12 @@ test("connection states and retry timing", () => {
 test("only a download an agent tab began during a command, matched within 5 s, is the agent's", () => {
   let now = 1_000;
   const attribution = createAttribution(() => now);
-  attribution.began({ url: "https://a.example/report.pdf", tabId: 7, command: "c1", server: "s", thread: THREAD, name: "report.pdf" });
+  attribution.began({ url: "https://a.example/report.pdf", tabId: 7, command: "c1", server: "s", thread: THREAD, name: "report.pdf", resources: [] });
   assert.equal(attribution.claim({ id: 1, url: "https://a.example/other.pdf", startedAt: now }), undefined);
   // Matched through the redirect's final URL.
   assert.equal(attribution.claim({ id: 2, url: "https://cdn.example/x", finalUrl: "https://a.example/report.pdf", startedAt: now })?.command, "c1");
   assert.equal(attribution.claim({ id: 3, url: "https://a.example/report.pdf", startedAt: now }), undefined, "claimed once");
-  attribution.began({ url: "https://a.example/late.zip", tabId: 7, command: "c2", server: "s", thread: THREAD, name: "late.zip" });
+  attribution.began({ url: "https://a.example/late.zip", tabId: 7, command: "c2", server: "s", thread: THREAD, name: "late.zip", resources: [] });
   now += 5_001;
   assert.equal(attribution.claim({ id: 4, url: "https://a.example/late.zip", startedAt: now }), undefined);
 });
