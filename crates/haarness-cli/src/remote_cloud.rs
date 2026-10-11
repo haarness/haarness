@@ -440,7 +440,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
     Ok(())
 }
 /// Keeps a shared chat's name in Cloud in step with the chat. A chat shared
-/// right after its first message is still "New thread" when published; its
+/// right after its first message is still "New chat" when published; its
 /// real title arrives later, and a rename can come at any time.
 async fn follow_title(
     client: &haarness_account::Client,

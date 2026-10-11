@@ -65,7 +65,7 @@ with tempfile.TemporaryDirectory(prefix="haarness-title-") as directory:
         permission = until(lambda: next(iter(api("/permissions")), None), "First task did not await approval")
         thread = until(
             lambda: next((thread for thread in api("/threads?archived=true")
-                          if thread["id"] == permission["threadId"] and thread["title"] != "New thread"), None),
+                          if thread["id"] == permission["threadId"] and thread["title"] not in ("New chat", "New thread")), None),
             "Title was not generated while the task was pending",
         )
         # No assistant response exists yet; Echo can only appear in the newly

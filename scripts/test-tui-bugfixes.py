@@ -146,7 +146,7 @@ try:
     keys('M-n')
     text('!')
     text('printf SHELL-DRAFT')
-    other = next(t for t in api('/threads') if t['id'] != thread and t['title'] == 'New thread')['id']
+    other = next(t for t in api('/threads') if t['id'] != thread and t['title'] in ('New chat', 'New thread'))['id']
     keys('C-l')
     text('normal-draft-mode')
     keys('Enter')

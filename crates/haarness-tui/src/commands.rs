@@ -2309,7 +2309,7 @@ impl App {
             "new" => {
                 let request = CreateThreadRequest {
                     schedule: None,
-                    title: Some("New thread".into()),
+                    title: None,
                     parent_id: None,
                     agent: Some(self.agent().into()),
                     provider: Some(self.thread.provider.clone()),
@@ -3683,8 +3683,9 @@ impl App {
             .await?;
         self.upsert_workflow_run(run.clone());
         // A chat opened only to run a workflow would otherwise stay "New
-        // thread" forever, as nothing in it is a prompt to title it from.
-        if self.thread.title == "New thread" && !self.thread.is_subagent {
+        // chat" forever, as nothing in it is a prompt to title it from.
+        if haarness_protocol::is_untitled_chat_title(&self.thread.title) && !self.thread.is_subagent
+        {
             let request = UpdateThreadRequest {
                 title: Some(format!("Workflow · {}", run.workflow_name)),
                 archived: None,
@@ -4712,7 +4713,7 @@ impl App {
         let thread = client
             .create_thread(CreateThreadRequest {
                 schedule: None,
-                title: Some("New thread".into()),
+                title: None,
                 parent_id: None,
                 agent: Some(self.agent().into()),
                 provider: Some(self.thread.provider.clone()),
@@ -4995,7 +4996,7 @@ fn language_entries(app: &App) -> Vec<OptionEntry> {
 }
 
 /// Archive an untouched session the user has moved on from, so launches and
-/// `/new` do not leave a trail of empty "New thread" rows. Best effort: on
+/// `/new` do not leave a trail of empty "New chat" rows. Best effort: on
 /// failure the empty session simply stays listed, as it always did.
 pub(crate) async fn archive_untouched(
     threads: &mut Vec<Thread>,
