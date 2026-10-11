@@ -546,7 +546,8 @@ test("the shared page driver plugs in through createPage and runs inside the sit
   h.start();
   h.attach();
   const { tab } = await h.open("https://a.example/");
-  // As on Desktop, the page exists before the tab's first load, so it saw that navigation.
+  // As on Desktop, the page exists before the tab's first load, so it saw that navigation;
+  // the about:blank Chrome reports for the new tab is not a navigation of its own.
   assert.equal(pageOptions?.generation, 0);
   const state = h.states().at(-1)!.message.state.tabs[0];
   const result = await h.command({

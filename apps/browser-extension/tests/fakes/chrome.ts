@@ -140,6 +140,8 @@ export class FakeChrome {
         for (const id of [ids].flat()) self.removeTab(id);
       },
       async group(options: { tabIds: number | number[]; groupId?: number }) {
+        // A round trip to the browser, during which other events arrive.
+        await new Promise((resolve) => setTimeout(resolve));
         const ids = [options.tabIds].flat();
         let groupId = options.groupId;
         const first = self.tabsById.get(ids[0])!;
@@ -307,6 +309,10 @@ export class FakeChrome {
     const opener = from === undefined ? undefined : this.tabsById.get(from);
     if (opener && opener.groupId >= 0) tab.groupId = opener.groupId;
     this.chrome.tabs.onCreated.emit({ ...tab });
+    // Chrome then reports the URL the tab was created with, as it starts loading it.
+    setTimeout(() => {
+      if (this.tabsById.get(tab.id) === tab) this.chrome.tabs.onUpdated.emit(tab.id, { url: tab.url, status: "loading" }, { ...tab });
+    });
     return tab;
   }
 
