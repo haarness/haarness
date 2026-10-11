@@ -20,7 +20,8 @@ test("workspace versions map onto Chrome's four numbers, previews before release
 test("the manifest key pins the extension ID native messaging allows", () => {
   assert.equal(extensionId(EXTENSION_KEY), EXTENSION_ID);
   assert.equal(EXTENSION_ID, "accdjhmcgljbadpeanajllmcembhkomn");
-  const local = "/Users/alex/work/haarness/.chrome-extension-key/pub.b64";
+  // The signing key folder sits beside the checkout on a maintainer's machine.
+  const local = new URL("../../../../.chrome-extension-key/pub.b64", import.meta.url);
   try {
     assert.equal(readFileSync(local, "utf8").trim(), EXTENSION_KEY);
   } catch (error) {
