@@ -43,13 +43,13 @@ Normal Send steers active work; **Queue** or **Alt+Enter** saves a follow-up unt
 5. **Answer approvals, or switch to Auto.** The shield pill at the left of the composer reads
    **Review** (the default) or **Auto**, and applies to the open chat on its server, so the TUI
    and other windows see the same mode. In Review, edits and commands inside the project run
-   without asking; Haarness asks before working outside the project, reading secrets such as
-   `.env`, switching agents, generating paid media, opening new browser sites or repeating a
-   failing step. A request card offers **Allow once**, **Allow once + Auto**, **Always for this
-   folder** (in a Git repository, **Always allow** offers the folder or the whole repository)
-   and **Deny**. Auto answers those requests once by itself for the chat and its agents; Cloud
-   actions that spend money or delete something still ask. See
-   [Automatic approvals](AUTO-APPROVALS.md).
+   without asking; Haarness asks before using files outside the project, reading secrets such as
+   `.env`, switching agents or generating paid media. The browser asks about a site only when
+   **Settings → Browser** sets it to **Requires approval**. A request card offers **Allow once**,
+   **Allow once + Auto**, **Always for this folder** (in a Git repository, **Always allow**
+   offers the folder or the whole repository) and **Deny**. Auto answers those requests once by
+   itself for the chat and its agents; Cloud actions that spend money or delete something still
+   ask. See [Automatic approvals](AUTO-APPROVALS.md).
 
 **Cmd+.** (Ctrl+. on Windows and Linux) switches the message box to the next agent and
 **Cmd+Shift+.** to the previous one; change them in **Settings → Keyboard shortcuts**.
