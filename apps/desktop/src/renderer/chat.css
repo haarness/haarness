@@ -1532,6 +1532,53 @@
 .dictation-error span {
   flex: 1;
 }
+/* A command's answer sits in the composer's tray, like the queue and the
+   plan, so it reads as the reply to what was just typed. */
+.command-note {
+  min-width: 0;
+  margin: 0 var(--s3) calc(-1 * var(--s2));
+  padding: var(--s1) var(--s1) var(--s3);
+  border: 1px solid var(--hairline);
+  border-bottom: 0;
+  border-radius: var(--r-xl) var(--r-xl) 0 0;
+  background: var(--raised);
+  animation: fade-up var(--fast) var(--ease);
+}
+.command-note header {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: var(--icon-button);
+  padding-inline: var(--s2) 0;
+  font-size: var(--ui-sm);
+  color: var(--muted);
+}
+.command-note header > svg {
+  flex: none;
+}
+/* Sized to its text, so a left-to-right command stays beside the icon in a
+   right-to-left window; the dismiss button takes the remaining space. */
+.command-note-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+}
+.command-note-dismiss {
+  margin-inline-start: auto;
+}
+.command-note-text {
+  margin: 0;
+  padding-inline: var(--s2);
+  max-height: 200px;
+  overflow-y: auto;
+  font-size: var(--ui);
+  line-height: var(--lh-ui);
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .jump-latest {
   position: absolute;
   top: calc(-32px - var(--s2));

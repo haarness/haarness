@@ -144,6 +144,10 @@ export function Session() {
     !!state.connection &&
     !!state.selected &&
     isLive(state.remoteShares[sessionKey(state.connection.id, state.selected)]);
+  const commandNoteKey = () =>
+    state.connection && state.selected
+      ? sessionKey(state.connection.id, state.selected)
+      : "";
   // What the approval pill's mode does, worded after the server's default
   // rules: Review does not ask before every edit or command.
   const approvalModeHint = () =>
@@ -1728,6 +1732,36 @@ export function Session() {
                   onClick={voice.clearError}
                 />
               </div>
+            </Show>
+            <Show when={state.commandNotes[commandNoteKey()]} keyed>
+              {(note) => (
+                <div class="command-note">
+                  <header>
+                    <Icon name="terminal" size="sm" />
+                    {/* The command and the server's answer are usually English;
+                        each takes its own direction in a right-to-left window. */}
+                    <span
+                      class="command-note-title"
+                      title={note.title}
+                      dir="auto"
+                    >
+                      {note.title}
+                    </span>
+                    <Button
+                      icon="close"
+                      size="sm"
+                      class="command-note-dismiss"
+                      label={t("Dismiss")}
+                      onClick={() =>
+                        set("commandNotes", commandNoteKey(), undefined)
+                      }
+                    />
+                  </header>
+                  <p class="command-note-text" role="status" dir="auto">
+                    {note.text}
+                  </p>
+                </div>
+              )}
             </Show>
             <InputQueue queue={queue} working={!!active()} />
             <div

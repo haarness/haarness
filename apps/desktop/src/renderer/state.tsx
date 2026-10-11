@@ -58,6 +58,7 @@ import {
 import { createProjectOverview } from "./project-overview";
 import { checkAttachments, fileAttachments, type Attachment } from "./media";
 import type { SearchEntry } from "./search";
+import { commandNote, type CommandNote } from "./command-result";
 import {
   readOrdering,
   orderedIds,
@@ -131,6 +132,9 @@ interface State extends Live {
   error: string;
   permissionErrors: Record<string, Record<string, string>>;
   notice: string;
+  /** The latest answer of a text or workflow command, and the goal's latest
+   * message, by session key, until the chat sends again or it is dismissed. */
+  commandNotes: Record<string, CommandNote | undefined>;
   connectionStatus: string;
   drafts: Record<string, string>;
   catalogVersion: number;
@@ -185,6 +189,7 @@ function createApp() {
     error: "",
     permissionErrors: {},
     notice: "",
+    commandNotes: {},
     connectionStatus: "",
     drafts: {},
     catalogVersion: 0,
@@ -1545,6 +1550,8 @@ function createApp() {
         ? previous
         : { fingerprint, requestId: crypto.randomUUID(), method };
     await window.haarness.storage(key, pending);
+    const noteKey = sessionKey(connection, thread.id);
+    set("commandNotes", noteKey, undefined);
     const input = {
       delivery,
       preview: true,
@@ -1554,14 +1561,18 @@ function createApp() {
       requestId: pending.requestId,
       ...(effort ? { reasoningEffort: effort } : {}),
     };
-    if (pending.method === "executeCommand" && command)
-      await targetApi("executeCommand", thread.id, {
-        name: command[1],
-        tools: { preview: true },
-        arguments: promptWithContext(command[2], context),
-        requestId: pending.requestId,
-      });
-    else await targetApi(pending.method, thread.id, input);
+    if (pending.method === "executeCommand" && command) {
+      const note = commandNote(
+        text,
+        await targetApi<T.CommandExecutionResponse>("executeCommand", thread.id, {
+          name: command[1],
+          tools: { preview: true },
+          arguments: promptWithContext(command[2], context),
+          requestId: pending.requestId,
+        }),
+      );
+      if (note) set("commandNotes", noteKey, note);
+    } else await targetApi(pending.method, thread.id, input);
     await window.haarness.storage(key, null);
     if (state.drafts[sessionKey(connection, thread.id)] === text)
       set("drafts", sessionKey(connection, thread.id), "");
@@ -1714,6 +1725,15 @@ function createApp() {
     lastCursor = envelope.eventId;
     for (const journal of journals) journal.push(item as T.EventEnvelope);
     reduceEvent(state, set, item as T.EventEnvelope);
+    // Goals pause, block and finish on their own; the TUI shows the message
+    // in its status line, and Desktop beside the goal's chat composer.
+    if (envelope.type === "goal.updated" && envelope.threadId) {
+      const key = sessionKey(state.connection!.id, envelope.threadId);
+      const message = (envelope.payload as Partial<T.GoalUpdatedEvent>).message?.trim();
+      // A /goal command already showing this message keeps its own title.
+      if (message && state.commandNotes[key]?.text !== message)
+        set("commandNotes", key, { title: "/goal", text: message });
+    }
     if (envelope.type === "approval_mode.changed")
       rememberApprovalMode(
         state.connection!.id,

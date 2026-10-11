@@ -43,6 +43,8 @@ On connection or resynchronization, the desktop captures `/v1/info`'s event curs
 
 Open a conversation's actions menu or search the command palette for **Undo last turn**, **Redo turn**, **Compact chat**, or **Find in chat**. The composer also accepts `/undo`, `/redo`, and `/compact` as local commands.
 
+Slash commands that answer with text, such as `/workflow` or `/goal status`, show the answer in a tray above the composer; `/workflow run` names the run and the ID that `/workflow cancel`, `pause` and `resume` take. The answer stays with its chat until you dismiss it or send the next message. A goal that pauses, blocks or finishes on its own shows its message there too.
+
 Undo restores the previous conversation boundary and the files changed by that turn, and puts the undone prompt back in the composer. An existing draft is preserved. Redo restores the next undone turn; an untouched restored prompt is removed from the draft. Undo state and drafts survive reload. Sending a new message after undo replaces the undone branch. If files changed outside the conversation conflict with an undo, Haarness reports the conflict without overwriting those edits.
 
 Manual compaction asks the conversation's model to summarize its history. History actions are unavailable during an active turn or another history operation. Redo or continue an undone conversation before compacting. Provider errors leave the draft available to retry.
