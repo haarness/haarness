@@ -12,7 +12,7 @@ use std::{
 #[derive(Args)]
 pub struct ExtensionArgs {
     /// Manage extensions for this project instead of all projects.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, visible_alias = "local")]
     project: bool,
     #[command(subcommand)]
     command: ExtensionCommand,
@@ -20,21 +20,39 @@ pub struct ExtensionArgs {
 #[derive(Subcommand)]
 enum ExtensionCommand {
     /// Create a typed, dependency-free starter extension.
-    Init { path: PathBuf },
+    Init {
+        /// New folder for the extension.
+        path: PathBuf,
+        /// Extension name: lowercase letters, digits and underscores (default:
+        /// the folder name).
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// Trust and install a local file/package or npm:package[@version]. Executes its initializer.
     Install {
+        /// Extension file or folder, or npm:package[@version].
         source: String,
+        /// Options passed to the extension, as a JSON object.
         #[arg(long, default_value = "{}")]
         options: String,
     },
     /// Show configured sources and the global enable switch without running code.
     List,
     /// Enable all extensions, or one installed extension by name or list index.
-    Enable { target: Option<String> },
+    Enable {
+        /// Extension name or list number (default: all extensions).
+        target: Option<String>,
+    },
     /// Disable all extensions, or one installed extension by name or list index.
-    Disable { target: Option<String> },
+    Disable {
+        /// Extension name or list number (default: all extensions).
+        target: Option<String>,
+    },
     /// Unregister an extension by name or list index; preserves source files.
-    Remove { target: String },
+    Remove {
+        /// Extension name or list number.
+        target: String,
+    },
     /// Load enabled extensions and validate their API, hooks, and tool schemas.
     Check {
         /// Show extension console output while validating.
@@ -242,6 +260,31 @@ fn save(path: &Path, config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// A valid extension name from the starter's folder name: `second-ext`
+/// becomes `second_ext`. Extension names must be unique, so a fixed starter
+/// name would clash with the second extension a person creates.
+fn starter_name(path: &Path) -> String {
+    let folder = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let mut name = String::new();
+    for character in folder.chars() {
+        if character.is_ascii_lowercase() || character.is_ascii_digit() {
+            name.push(character);
+        } else if !name.is_empty() && !name.ends_with('_') {
+            name.push('_');
+        }
+    }
+    name.truncate(24);
+    let name = name.trim_end_matches('_');
+    if name.is_empty() {
+        "hello".to_owned()
+    } else {
+        name.to_owned()
+    }
+}
+
 const STARTER: &str = r#"import type { Extension } from "./api";
 
 export default {
@@ -280,17 +323,30 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: ExtensionAr
         }
     }
     let enable = matches!(args.command, ExtensionCommand::Enable { .. });
-    match args.command {
-        ExtensionCommand::Init { path } => {
+    let summary = match args.command {
+        ExtensionCommand::Init { path, name } => {
+            let name = match name {
+                Some(name) => {
+                    haarness_extensions::validate_name(&name)?;
+                    name
+                }
+                None => starter_name(&path),
+            };
             std::fs::create_dir(&path).context("choose a new directory for the extension")?;
             std::fs::write(path.join("api.d.ts"), haarness_extensions::TYPES)?;
-            std::fs::write(path.join("index.ts"), STARTER)?;
+            std::fs::write(
+                path.join("index.ts"),
+                STARTER.replace("name: \"hello\"", &format!("name: \"{name}\"")),
+            )?;
             std::fs::write(
                 path.join("package.json"),
-                "{\"name\":\"haarness-extension-hello\",\"version\":\"0.1.0\",\"type\":\"module\",\"haarness\":{\"extension\":\"index.ts\"}}\n",
+                format!(
+                    "{{\"name\":\"haarness-extension-{}\",\"version\":\"0.1.0\",\"type\":\"module\",\"haarness\":{{\"extension\":\"index.ts\"}}}}\n",
+                    name.replace('_', "-")
+                ),
             )?;
             println!(
-                "Created {}. Edit index.ts, then run: haarness extension install {}",
+                "Created extension {name} in {}. Edit index.ts, then run: haarness extension install {}",
                 path.display(),
                 path.display()
             );
@@ -315,8 +371,13 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: ExtensionAr
                     entry.source.display()
                 );
             }
+            if config.entries.is_empty() {
+                println!(
+                    "No extensions installed. Create one with `haarness extension init <folder>`."
+                );
+            }
             println!(
-                "Use extension check to inspect loaded tools, including discovered plugin/project extensions."
+                "Use `haarness extension check` to inspect loaded tools, including discovered plugin/project extensions."
             );
             return Ok(());
         }
@@ -353,28 +414,29 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: ExtensionAr
             config.enabled = true;
             // Validate together to reject collisions before persisting.
             let loaded = Extensions::load(&config, workspace).await?;
-            config
-                .entries
-                .last_mut()
-                .context("installed extension")?
-                .name = loaded.names().last().cloned();
-            println!("Validated {}", loaded.names().join(", "));
+            let installed = config.entries.last_mut().context("installed extension")?;
+            installed.name = loaded.names().last().cloned();
+            format!("Installed {}.", entry_label(installed))
         }
         ExtensionCommand::Enable { target } | ExtensionCommand::Disable { target } => {
+            let verb = if enable { "Enabled" } else { "Disabled" };
             if let Some(target) = target {
                 let index = select(&config, &target)?;
                 config.entries[index].enabled = enable;
+                format!("{verb} {}.", entry_label(&config.entries[index]))
             } else {
                 config.enabled = enable;
+                format!("{verb} extensions.")
             }
         }
         ExtensionCommand::Remove { target } => {
             let index = select(&config, &target)?;
-            config.entries.remove(index);
+            let removed = config.entries.remove(index);
+            format!("Removed {}; its files were kept.", entry_label(&removed))
         }
-    }
+    };
     save(&path, &config)?;
-    println!("Saved. Running workspace servers apply extension changes when active work is idle.");
+    println!("{summary} Running Haarness servers pick this up once no turn is running.");
     Ok(())
 }
 
@@ -709,6 +771,13 @@ pub fn watch_sources(source: &Path, roots: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+fn entry_label(entry: &Entry) -> String {
+    entry
+        .name
+        .clone()
+        .unwrap_or_else(|| entry.source.display().to_string())
+}
+
 fn select(config: &Config, target: &str) -> Result<usize> {
     if let Some(index) = config
         .entries
@@ -722,12 +791,22 @@ fn select(config: &Config, target: &str) -> Result<usize> {
             return Ok(index - 1);
         }
     }
-    bail!("extension {target} not found; use extension list for names and indices")
+    bail!("extension {target} not found; use `haarness extension list` for names and indices")
 }
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn starter_extensions_are_named_after_their_folder() {
+        assert_eq!(starter_name(Path::new("/tmp/second-ext")), "second_ext");
+        assert_eq!(starter_name(Path::new("My Tools!")), "my_tools");
+        assert_eq!(starter_name(Path::new("--")), "hello");
+        let long = starter_name(Path::new("a-very-long-extension-folder-name"));
+        assert!(haarness_extensions::validate_name(&long).is_ok(), "{long}");
+        assert!(haarness_extensions::validate_name(&starter_name(Path::new("x__y"))).is_ok());
+    }
 
     #[test]
     fn project_extensions_override_only_the_selected_project() {

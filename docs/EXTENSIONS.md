@@ -19,9 +19,11 @@ haarness extension check
 haarness
 ```
 
-The starter registers `ext__hello__greet`. Ask Haarness to greet someone and it
-can call the tool. Registered tools also appear in `/tools` and the REST tool
-catalog, with source `extension:hello`; ordinary availability controls and lazy
+The starter is named after its folder (`./my-extension` becomes `my_extension`;
+`--name` chooses another), so it registers `ext__my_extension__greet`. Ask
+Haarness to greet someone and it can call the tool. Registered tools also appear
+in `/tools` and the REST tool catalog, with source `extension:my_extension`;
+ordinary availability controls and lazy
 tool loading apply.
 
 The generated extension needs no SDK download or build step:
@@ -31,7 +33,7 @@ import type { Extension } from "./api"
 
 export default {
   apiVersion: 1,
-  name: "hello",
+  name: "my_extension",
   tools: {
     greet: {
       description: "Greet someone by name",
@@ -71,9 +73,9 @@ haarness extension list
 haarness extension check --verbose # include console output for debugging
 haarness extension disable       # disable the complete extension system
 haarness extension enable
-haarness extension disable hello
-haarness extension enable hello
-haarness extension remove hello  # unregister it; preserve its files
+haarness extension disable my_extension
+haarness extension enable my_extension
+haarness extension remove my_extension  # unregister it; preserve its files
 # Names or the 1-based indices shown by list are accepted.
 ```
 
@@ -220,7 +222,7 @@ classified as mutating, participates in snapshots, and is unavailable in plan
 mode. Permission rules use the namespaced tool name, for example:
 
 ```json
-{"permission":{"ext__hello__greet":"ask"}}
+{"permission":{"ext__my_extension__greet":"ask"}}
 ```
 
 ## Trust and process lifetime

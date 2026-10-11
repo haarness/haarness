@@ -138,7 +138,8 @@ def main():
             assert (starter / "api.d.ts").is_file()
             run("extension", "install", str(starter))
             check = run("extension", "check")
-            assert "ext__hello__greet" in check
+            # The starter is named after its folder.
+            assert "ext__starter__greet" in check
             run("extension", "remove", "1")
             run("extension", "disable")
 
