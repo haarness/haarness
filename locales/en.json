@@ -2218,7 +2218,6 @@
   "Agents may not use Chrome": "Agents may not use Chrome",
   "Agents can use your own Chrome — with your sign-ins — through the Haarness for Chrome extension. Each new site asks first.": "Agents can use your own Chrome — with your sign-ins — through the Haarness for Chrome extension. Each new site asks first.",
   "You are connected over SSH. Chrome works with projects on the computer where Chrome runs.": "You are connected over SSH. Chrome works with projects on the computer where Chrome runs.",
-  "This terminal reaches the project from another computer. Chrome works with projects on the computer where Chrome runs.": "This terminal reaches the project from another computer. Chrome works with projects on the computer where Chrome runs.",
   "On that computer, run {command}, or open Settings → Browser → Chrome in Haarness Desktop.": "On that computer, run {command}, or open Settings → Browser → Chrome in Haarness Desktop.",
   "Checking this computer…": "Checking this computer…",
   "Could not set up Chrome": "Could not set up Chrome",
@@ -2250,7 +2249,6 @@
   "Open the Haarness for Chrome page in the Chrome Web Store:": "Open the Haarness for Chrome page in the Chrome Web Store:",
   "Click Add to Chrome": "Click Add to Chrome",
   "Pin Haarness to the toolbar": "Pin Haarness to the toolbar",
-  "This build of Haarness has no Haarness for Chrome extension to load.": "This build of Haarness has no Haarness for Chrome extension to load.",
   "Open {page} in {browser}": "Open {page} in {browser}",
   "or {page} in {browser}": "or {page} in {browser}",
   "Turn on Developer mode (keep it on)": "Turn on Developer mode (keep it on)",
@@ -2382,5 +2380,14 @@
   "Versions": "Versions",
   "Extension folder": "Extension folder",
   "Update ready": "Update ready",
-  "Something went wrong.": "Something went wrong."
+  "Something went wrong.": "Something went wrong.",
+  "Agent browser control is off": "Agent browser control is off",
+  "Agents can't use any browser in this project, Chrome included. Turn on Agent browser control in Haarness Desktop (Settings → Browser), or set browser.policy.enabled to true in your Haarness config.": "Agents can't use any browser in this project, Chrome included. Turn on Agent browser control in Haarness Desktop (Settings → Browser), or set browser.policy.enabled to true in your Haarness config.",
+  "This project's settings turn Chrome off": "This project's settings turn Chrome off",
+  "Agents can still use Chrome in your other projects. To use it here, remove browser.chrome.enabled: false from this project's Haarness config.": "Agents can still use Chrome in your other projects. To use it here, remove browser.chrome.enabled: false from this project's Haarness config.",
+  "This terminal can't set up Chrome for this project. Chrome works with projects on the computer where Chrome runs.": "This terminal can't set up Chrome for this project. Chrome works with projects on the computer where Chrome runs.",
+  "This Haarness installation doesn't include Haarness for Chrome. Set it up from Haarness Desktop (Settings → Browser → Chrome), then press Enter here.": "This Haarness installation doesn't include Haarness for Chrome. Set it up from Haarness Desktop (Settings → Browser → Chrome), then press Enter here.",
+  "Chrome is turned off for this project.": "Chrome is turned off for this project.",
+  "{category}: {decision} by default": "{category}: {decision} by default",
+  "{category} on {origin}: {decision}": "{category} on {origin}: {decision}"
 }

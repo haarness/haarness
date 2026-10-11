@@ -2218,7 +2218,6 @@
   "Agents may not use Chrome": "智能体不能使用 Chrome",
   "Agents can use your own Chrome — with your sign-ins — through the Haarness for Chrome extension. Each new site asks first.": "智能体可以通过 Haarness for Chrome 扩展使用你自己的 Chrome，包括你的登录状态。每个新网站都会先征求你的同意。",
   "You are connected over SSH. Chrome works with projects on the computer where Chrome runs.": "你正通过 SSH 连接。Chrome 只能用于运行 Chrome 的那台电脑上的项目。",
-  "This terminal reaches the project from another computer. Chrome works with projects on the computer where Chrome runs.": "此终端从另一台电脑访问该项目。Chrome 只能用于运行 Chrome 的那台电脑上的项目。",
   "On that computer, run {command}, or open Settings → Browser → Chrome in Haarness Desktop.": "在那台电脑上运行 {command}，或在 Haarness Desktop 中打开 设置 → 浏览器 → Chrome。",
   "Checking this computer…": "正在检查这台电脑…",
   "Could not set up Chrome": "无法设置 Chrome",
@@ -2250,7 +2249,6 @@
   "Open the Haarness for Chrome page in the Chrome Web Store:": "在 Chrome 应用商店中打开 Haarness for Chrome 页面：",
   "Click Add to Chrome": "点击“添加至 Chrome”",
   "Pin Haarness to the toolbar": "将 Haarness 固定到工具栏",
-  "This build of Haarness has no Haarness for Chrome extension to load.": "此 Haarness 版本没有可加载的 Haarness for Chrome 扩展。",
   "Open {page} in {browser}": "在 {browser} 中打开 {page}",
   "or {page} in {browser}": "或在 {browser} 中打开 {page}",
   "Turn on Developer mode (keep it on)": "开启“开发者模式”（保持开启）",
@@ -2382,5 +2380,14 @@
   "Versions": "版本",
   "Extension folder": "扩展文件夹",
   "Update ready": "更新已就绪",
-  "Something went wrong.": "出了点问题。"
+  "Something went wrong.": "出了点问题。",
+  "Agent browser control is off": "智能体浏览器控制已关闭",
+  "Agents can't use any browser in this project, Chrome included. Turn on Agent browser control in Haarness Desktop (Settings → Browser), or set browser.policy.enabled to true in your Haarness config.": "智能体在此项目中不能使用任何浏览器，包括 Chrome。请在 Haarness Desktop 的 设置 → 浏览器 中开启“智能体浏览器控制”，或在 Haarness 配置中将 browser.policy.enabled 设为 true。",
+  "This project's settings turn Chrome off": "此项目的设置关闭了 Chrome",
+  "Agents can still use Chrome in your other projects. To use it here, remove browser.chrome.enabled: false from this project's Haarness config.": "智能体仍可在你的其他项目中使用 Chrome。要在这里使用，请从此项目的 Haarness 配置中删除 browser.chrome.enabled: false。",
+  "This terminal can't set up Chrome for this project. Chrome works with projects on the computer where Chrome runs.": "此终端无法为该项目设置 Chrome。Chrome 只能用于运行 Chrome 的那台电脑上的项目。",
+  "This Haarness installation doesn't include Haarness for Chrome. Set it up from Haarness Desktop (Settings → Browser → Chrome), then press Enter here.": "此 Haarness 安装不包含 Haarness for Chrome。请在 Haarness Desktop 的 设置 → 浏览器 → Chrome 中完成设置，然后在这里按 Enter。",
+  "Chrome is turned off for this project.": "此项目已关闭 Chrome。",
+  "{category}: {decision} by default": "{category}：默认{decision}",
+  "{category} on {origin}: {decision}": "{origin} 上的{category}：{decision}"
 }

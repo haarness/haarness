@@ -2218,7 +2218,6 @@
   "Agents may not use Chrome": "Os agentes não podem usar o Chrome",
   "Agents can use your own Chrome — with your sign-ins — through the Haarness for Chrome extension. Each new site asks first.": "Os agentes podem usar seu próprio Chrome — com seus logins — pela extensão Haarness for Chrome. Cada site novo pede permissão primeiro.",
   "You are connected over SSH. Chrome works with projects on the computer where Chrome runs.": "Você está conectado por SSH. O Chrome funciona com projetos no computador em que ele está em execução.",
-  "This terminal reaches the project from another computer. Chrome works with projects on the computer where Chrome runs.": "Este terminal acessa o projeto de outro computador. O Chrome funciona com projetos no computador em que ele está em execução.",
   "On that computer, run {command}, or open Settings → Browser → Chrome in Haarness Desktop.": "Nesse computador, execute {command} ou abra Configurações → Navegador → Chrome no Haarness Desktop.",
   "Checking this computer…": "Verificando este computador…",
   "Could not set up Chrome": "Não foi possível configurar o Chrome",
@@ -2250,7 +2249,6 @@
   "Open the Haarness for Chrome page in the Chrome Web Store:": "Abra a página do Haarness for Chrome na Chrome Web Store:",
   "Click Add to Chrome": "Clique em “Usar no Chrome”",
   "Pin Haarness to the toolbar": "Fixe o Haarness na barra de ferramentas",
-  "This build of Haarness has no Haarness for Chrome extension to load.": "Esta versão do Haarness não inclui a extensão Haarness for Chrome para carregar.",
   "Open {page} in {browser}": "Abra {page} no {browser}",
   "or {page} in {browser}": "ou {page} no {browser}",
   "Turn on Developer mode (keep it on)": "Ative o “Modo do desenvolvedor” (mantenha ativado)",
@@ -2382,5 +2380,14 @@
   "Versions": "Versões",
   "Extension folder": "Pasta da extensão",
   "Update ready": "Atualização pronta",
-  "Something went wrong.": "Algo deu errado."
+  "Something went wrong.": "Algo deu errado.",
+  "Agent browser control is off": "O controle do navegador pelo agente está desativado",
+  "Agents can't use any browser in this project, Chrome included. Turn on Agent browser control in Haarness Desktop (Settings → Browser), or set browser.policy.enabled to true in your Haarness config.": "Os agentes não podem usar nenhum navegador neste projeto, nem mesmo o Chrome. Ative o controle do navegador pelo agente no Haarness Desktop (Configurações → Navegador) ou defina browser.policy.enabled como true na sua configuração do Haarness.",
+  "This project's settings turn Chrome off": "As configurações deste projeto desativam o Chrome",
+  "Agents can still use Chrome in your other projects. To use it here, remove browser.chrome.enabled: false from this project's Haarness config.": "Os agentes ainda podem usar o Chrome nos seus outros projetos. Para usá-lo aqui, remova browser.chrome.enabled: false da configuração do Haarness deste projeto.",
+  "This terminal can't set up Chrome for this project. Chrome works with projects on the computer where Chrome runs.": "Este terminal não pode configurar o Chrome para este projeto. O Chrome funciona com projetos no computador em que ele está em execução.",
+  "This Haarness installation doesn't include Haarness for Chrome. Set it up from Haarness Desktop (Settings → Browser → Chrome), then press Enter here.": "Esta instalação do Haarness não inclui o Haarness for Chrome. Configure-o pelo Haarness Desktop (Configurações → Navegador → Chrome) e depois pressione Enter aqui.",
+  "Chrome is turned off for this project.": "O Chrome está desativado para este projeto.",
+  "{category}: {decision} by default": "{category}: {decision} por padrão",
+  "{category} on {origin}: {decision}": "{category} em {origin}: {decision}"
 }

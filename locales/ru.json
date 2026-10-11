@@ -2218,7 +2218,6 @@
   "Agents may not use Chrome": "Агентам нельзя использовать Chrome",
   "Agents can use your own Chrome — with your sign-ins — through the Haarness for Chrome extension. Each new site asks first.": "Агенты могут пользоваться вашим Chrome — с вашими входами в аккаунты — через расширение Haarness for Chrome. Для каждого нового сайта сначала спрашивается разрешение.",
   "You are connected over SSH. Chrome works with projects on the computer where Chrome runs.": "Вы подключены по SSH. Chrome работает с проектами на том компьютере, где запущен Chrome.",
-  "This terminal reaches the project from another computer. Chrome works with projects on the computer where Chrome runs.": "Этот терминал подключается к проекту с другого компьютера. Chrome работает с проектами на том компьютере, где запущен Chrome.",
   "On that computer, run {command}, or open Settings → Browser → Chrome in Haarness Desktop.": "На том компьютере выполните {command} или откройте Настройки → Браузер → Chrome в Haarness Desktop.",
   "Checking this computer…": "Проверка этого компьютера…",
   "Could not set up Chrome": "Не удалось настроить Chrome",
@@ -2250,7 +2249,6 @@
   "Open the Haarness for Chrome page in the Chrome Web Store:": "Откройте страницу Haarness for Chrome в Интернет-магазине Chrome:",
   "Click Add to Chrome": "Нажмите «Установить»",
   "Pin Haarness to the toolbar": "Закрепите Haarness на панели инструментов",
-  "This build of Haarness has no Haarness for Chrome extension to load.": "В этой сборке Haarness нет расширения Haarness for Chrome для загрузки.",
   "Open {page} in {browser}": "Откройте {page} в {browser}",
   "or {page} in {browser}": "или {page} в {browser}",
   "Turn on Developer mode (keep it on)": "Включите «Режим разработчика» (не выключайте его)",
@@ -2382,5 +2380,14 @@
   "Versions": "Версии",
   "Extension folder": "Папка расширения",
   "Update ready": "Обновление готово",
-  "Something went wrong.": "Что-то пошло не так."
+  "Something went wrong.": "Что-то пошло не так.",
+  "Agent browser control is off": "Управление браузером агентом выключено",
+  "Agents can't use any browser in this project, Chrome included. Turn on Agent browser control in Haarness Desktop (Settings → Browser), or set browser.policy.enabled to true in your Haarness config.": "Агенты не могут использовать в этом проекте ни один браузер, включая Chrome. Включите управление браузером агентом в Haarness Desktop (Настройки → Браузер) или задайте browser.policy.enabled = true в конфигурации Haarness.",
+  "This project's settings turn Chrome off": "Настройки этого проекта отключают Chrome",
+  "Agents can still use Chrome in your other projects. To use it here, remove browser.chrome.enabled: false from this project's Haarness config.": "В других ваших проектах агенты по-прежнему могут использовать Chrome. Чтобы использовать его здесь, удалите browser.chrome.enabled: false из конфигурации Haarness этого проекта.",
+  "This terminal can't set up Chrome for this project. Chrome works with projects on the computer where Chrome runs.": "Этот терминал не может настроить Chrome для этого проекта. Chrome работает с проектами на том компьютере, где запущен Chrome.",
+  "This Haarness installation doesn't include Haarness for Chrome. Set it up from Haarness Desktop (Settings → Browser → Chrome), then press Enter here.": "Эта установка Haarness не содержит Haarness for Chrome. Настройте его в Haarness Desktop (Настройки → Браузер → Chrome), затем нажмите здесь Enter.",
+  "Chrome is turned off for this project.": "Chrome отключён для этого проекта.",
+  "{category}: {decision} by default": "{category}: по умолчанию {decision}",
+  "{category} on {origin}: {decision}": "{category} на {origin}: {decision}"
 }

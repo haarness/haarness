@@ -1,6 +1,7 @@
 use super::*;
 use crate::chrome::{
-    Access, ExtensionCopy, Host, Hosts, LocalAction, Settings, Setup, SetupBrowser, Unavailable,
+    Access, ExtensionCopy, Host, Hosts, LocalAction, Restriction, Settings, Setup, SetupBrowser,
+    Unavailable,
 };
 use crate::state::Overlay;
 use std::sync::{Arc, Mutex};
@@ -78,9 +79,15 @@ async fn settle_chrome(app: &mut App, client: &crate::api::ApiClient) {
     }
 }
 
-/// A server that answers by route: the Chrome hosts, and `browser-settings`
-/// reads and writes kept in memory, which the hosts' settings block follows.
-/// Records every request it saw.
+/// The instance id `chrome_server` answers `/v1/info` with.
+const SERVER_ID: &str = "0199d0c4-7f3a-7c1e-9a52-3f1d2b4c5e6f";
+
+/// A server that answers by route: the Chrome hosts, `browser-settings`
+/// reads and writes kept in memory, which the hosts' settings block follows,
+/// and `/v1/info`. A `blockedBy` beside the settings keeps Chrome off under
+/// the switch, as agent browser control or a project does; `legacy` answers
+/// as a server from before `globalEnabled` and `blockedBy`. Records every
+/// request it saw.
 async fn chrome_server(
     hosts: serde_json::Value,
     settings: serde_json::Value,
@@ -129,12 +136,31 @@ async fn chrome_server(
             let response = if text.starts_with("GET /v1/browser/hosts") {
                 // As a real server does, the hosts report the settings in force.
                 let mut hosts = hosts.clone();
-                let effective = settings.lock().unwrap()["chrome"]["settings"].clone();
+                let data = settings.lock().unwrap().clone();
+                let effective = &data["chrome"]["settings"];
                 if effective.is_object() {
-                    hosts["chrome"]["enabled"] = effective["enabled"].clone();
+                    let switch = effective["enabled"].as_bool().unwrap_or(true);
+                    let blocked = data["blockedBy"].clone();
+                    hosts["chrome"]["enabled"] = serde_json::json!(switch && blocked.is_null());
                     hosts["chrome"]["defaultBrowser"] = effective["defaultBrowser"].clone();
+                    if data["legacy"] != true {
+                        hosts["chrome"]["globalEnabled"] = serde_json::json!(switch);
+                        hosts["chrome"]["blockedBy"] = if switch {
+                            blocked
+                        } else {
+                            serde_json::Value::Null
+                        };
+                    }
                 }
                 hosts.to_string()
+            } else if text.starts_with("GET /v1/info") {
+                serde_json::json!({
+                    "name": "haarness", "version": "test",
+                    "schemaVersion": haarness_protocol::SCHEMA_VERSION,
+                    "serverInstanceId": SERVER_ID, "capabilities": [],
+                    "workspace": "/workspace",
+                })
+                .to_string()
             } else if text.starts_with("POST /v1/manage/browser-settings") {
                 let input: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
                 let mut data = settings.lock().unwrap();
@@ -328,12 +354,15 @@ fn chrome_dialog_walks_from_setup_to_connected_at_80_and_120_columns() {
                 enabled: false,
                 default_browser: "chrome".into(),
                 ever_connected: true,
+                ..Access::default()
             };
         }
         app.chrome.settings = Some(Settings {
             enabled: false,
             default_browser: "chrome".into(),
-            restrictions: vec!["Chrome is turned off for this project".into()],
+            restrictions: vec![Restriction::Text(
+                "Chrome is turned off for this project".into(),
+            )],
         });
         let rendered = chrome_text(&app, size);
         for expected in [
@@ -566,8 +595,7 @@ async fn without_an_extension_to_add_the_dialog_does_not_wait_for_chrome() {
         let rendered = chrome_text(&app, (width, 44));
         assert!(rendered.contains("○ Not set up"), "{width}\n{rendered}");
         assert!(
-            flat(&rendered)
-                .contains("This build of Haarness has no Haarness for Chrome extension to load."),
+            flat(&rendered).contains("This Haarness installation doesn't include Haarness for Chrome. Set it up from Haarness Desktop (Settings → Browser → Chrome), then press Enter here."),
             "{width}\n{rendered}"
         );
         assert!(!rendered.contains("Waiting for Chrome"), "{rendered}");
@@ -921,4 +949,431 @@ async fn status_has_a_chrome_line() {
             .any(|line| line == "Chrome   Connected · Google Chrome · 1 tab in this chat"),
         "{lines:#?}"
     );
+}
+
+/// The switch is the shared "Let agents use Chrome" setting, not whether
+/// agents may use Chrome in this project. When agent browser control or the
+/// project keeps Chrome off under it, the dialog says which, never offers a
+/// turn-on that changes nothing, and `e` still turns the switch itself off.
+#[tokio::test]
+async fn chrome_says_what_keeps_it_off_when_the_switch_is_on() {
+    let global = serde_json::json!({
+        "enabled": true,
+        "defaults": {"browsing": "ask", "downloads": "ask", "uploads": "ask", "scripts": "ask"},
+        "defaultBrowser": "auto", "sites": [],
+    });
+    let hosts = serde_json::json!({"hosts": [], "chrome": {"enabled": true, "defaultBrowser": "auto", "everConnected": false}});
+    let sets = |requests: &Arc<Mutex<Vec<String>>>| {
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.contains("\"action\":\"set\""))
+            .count()
+    };
+    for (blocked, legacy, restrictions, heading, advice) in [
+        (
+            "browser-control",
+            false,
+            serde_json::json!([]),
+            "○ Agent browser control is off",
+            "Turn on Agent browser control in Haarness Desktop (Settings → Browser), or set browser.policy.enabled to true",
+        ),
+        (
+            "project",
+            false,
+            serde_json::json!([{"kind": "off"}]),
+            "○ This project's settings turn Chrome off",
+            "remove browser.chrome.enabled: false from this project's Haarness config",
+        ),
+        // A server from before `blockedBy` says only that Chrome is off;
+        // the project's restrictions tell the two causes apart.
+        (
+            "browser-control",
+            true,
+            serde_json::json!(null),
+            "○ Agent browser control is off",
+            "Agents can't use any browser in this project, Chrome included.",
+        ),
+        (
+            "project",
+            true,
+            serde_json::json!(null),
+            "○ This project's settings turn Chrome off",
+            "Agents can still use Chrome in your other projects.",
+        ),
+    ] {
+        let mut chrome = serde_json::json!({"settings": global, "globalSettings": global,
+        "projectRestrictions": if legacy && blocked == "project" {
+            serde_json::json!(["Chrome is turned off for this project."])
+        } else {
+            serde_json::json!([])
+        }});
+        if !restrictions.is_null() {
+            chrome["restrictions"] = restrictions;
+        }
+        let (client, requests) = chrome_server(
+            hosts.clone(),
+            serde_json::json!({"revision": "r1", "chrome": chrome, "blockedBy": blocked, "legacy": legacy}),
+        )
+        .await;
+        let mut app = connect_fixture();
+        app.open_chrome(&client);
+        settle_chrome(&mut app, &client).await;
+        for width in [80, 120] {
+            let rendered = chrome_text(&app, (width, 44));
+            let words = flat(&rendered);
+            assert!(
+                rendered.contains(heading),
+                "{blocked} {legacy}: {width}\n{rendered}"
+            );
+            assert!(
+                words.contains(advice),
+                "{blocked} {legacy}: {width}\n{rendered}"
+            );
+            assert!(
+                !rendered.contains("enter turn on"),
+                "{blocked}: {width}\n{rendered}"
+            );
+            assert!(
+                rendered.contains("enter check again"),
+                "{blocked}: {width}\n{rendered}"
+            );
+            // The switch shows the shared setting, which is on.
+            let row = rendered
+                .lines()
+                .find(|row| row.contains("Let agents use Chrome"))
+                .unwrap();
+            assert!(row.contains("On"), "{width}\n{rendered}");
+            for row in rendered.lines() {
+                assert!(row.width() <= width as usize, "{width}: {row}");
+            }
+        }
+        // Enter looks again rather than rewrite a switch that is already on.
+        crate::input::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &client,
+        )
+        .await
+        .unwrap();
+        settle_chrome(&mut app, &client).await;
+        assert_eq!(sets(&requests), 0, "{blocked} {legacy}");
+
+        // `e` turns the shared switch off; the dialog then offers to turn it
+        // back on, the first thing that has to happen.
+        crate::input::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+            &client,
+        )
+        .await
+        .unwrap();
+        settle_chrome(&mut app, &client).await;
+        assert_eq!(sets(&requests), 1, "{blocked} {legacy}");
+        assert!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.contains("\"action\":\"set\"")
+                    && request.contains("\"enabled\":false")),
+            "{blocked} {legacy}"
+        );
+        let rendered = chrome_text(&app, (100, 44));
+        assert!(
+            rendered.contains("○ Agents may not use Chrome"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("enter turn on"), "{rendered}");
+    }
+}
+
+/// Turning the switch on shows "Checking…" until the server says what that
+/// changed, rather than guess from settings that cannot see agent browser
+/// control.
+#[tokio::test]
+async fn turning_chrome_on_waits_for_the_server_to_say_what_changed() {
+    let global = serde_json::json!({
+        "enabled": false,
+        "defaults": {"browsing": "ask", "downloads": "ask", "uploads": "ask", "scripts": "ask"},
+        "defaultBrowser": "auto", "sites": [],
+    });
+    let (client, _) = chrome_server(
+        serde_json::json!({"hosts": [], "chrome": {"enabled": false, "defaultBrowser": "auto", "everConnected": false}}),
+        serde_json::json!({"revision": "r1", "chrome": {"settings": global, "globalSettings": global,
+            "restrictions": []}, "blockedBy": "browser-control"}),
+    )
+    .await;
+    let mut app = connect_fixture();
+    app.open_chrome(&client);
+    settle_chrome(&mut app, &client).await;
+    assert!(chrome_text(&app, (100, 44)).contains("enter turn on"));
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    // Saved, the switch reads On while the server is asked again.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while app.chrome.saving().is_some() && std::time::Instant::now() < deadline {
+        app.poll_chrome(&client);
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    // The poll that took the saved settings has only just asked again.
+    let rendered = chrome_text(&app, (100, 44));
+    assert!(rendered.contains("Checking…"), "{rendered}");
+    assert!(
+        !rendered.contains("Agent browser control is off"),
+        "{rendered}"
+    );
+    let row = rendered
+        .lines()
+        .find(|row| row.contains("Let agents use Chrome"))
+        .unwrap();
+    assert!(row.contains("On"), "{rendered}");
+    settle_chrome(&mut app, &client).await;
+    let rendered = chrome_text(&app, (100, 44));
+    assert!(
+        rendered.contains("○ Agent browser control is off"),
+        "{rendered}"
+    );
+}
+
+/// Project restrictions read in the person's language, from the structured
+/// list a server sends, or as sent by an older one.
+#[test]
+fn project_restrictions_are_worded_in_the_chosen_language() {
+    let mut app = connect_fixture();
+    app.open_overlay(Overlay::Chrome);
+    app.chrome.here = true;
+    app.chrome.local = Some(registered_setup());
+    app.chrome.hosts = Some(Ok(Hosts::default()));
+    let restrictions = vec![
+        Restriction::Default {
+            category: "scripts".into(),
+            decision: "deny".into(),
+        },
+        Restriction::Site {
+            origin: "https://bank.example".into(),
+            category: "downloads".into(),
+            decision: "ask".into(),
+        },
+        Restriction::Off,
+    ];
+    app.chrome.settings = Some(Settings {
+        enabled: true,
+        default_browser: "auto".into(),
+        restrictions,
+    });
+    let rendered = flat(&chrome_text(&app, (120, 60)));
+    for expected in [
+        "Restricted by this project's settings:",
+        "· Scripts: Block by default",
+        "· Downloads on https://bank.example: Requires approval",
+        "· Chrome is turned off for this project.",
+    ] {
+        assert!(rendered.contains(expected), "{expected}\n{rendered}");
+    }
+    app.language = crate::locale::Language::Japanese;
+    let rendered = flat(&chrome_text(&app, (120, 60)));
+    for expected in [
+        "· スクリプト: 既定でブロック",
+        "· https://bank.example のダウンロード: 承認が必要",
+        "· このプロジェクトでは Chrome がオフになっています。",
+    ] {
+        assert!(rendered.contains(expected), "{expected}\n{rendered}");
+    }
+    assert!(!rendered.contains("by default"), "{rendered}");
+
+    // An older server's sentences show as they came.
+    let mut chrome = crate::chrome::Chrome::default();
+    let view = serde_json::json!({"settings": {"enabled": true}, "globalSettings": null,
+        "projectRestrictions": ["Scripts: Block by default"]});
+    let settings = crate::chrome::tests_settings_from_view(&view);
+    assert_eq!(
+        settings.restrictions,
+        vec![Restriction::Text("Scripts: Block by default".into())]
+    );
+    chrome.settings = Some(settings);
+    // A structured list wins, and kinds this client does not know are left out.
+    let view = serde_json::json!({"settings": {"enabled": true}, "globalSettings": {"enabled": false},
+        "projectRestrictions": ["Scripts: Block by default"],
+        "restrictions": [{"kind": "default", "category": "scripts", "decision": "deny"}, {"kind": "later"}]});
+    let settings = crate::chrome::tests_settings_from_view(&view);
+    assert!(!settings.enabled, "the switch is the global value");
+    assert_eq!(
+        settings.restrictions,
+        vec![Restriction::Default {
+            category: "scripts".into(),
+            decision: "deny".into()
+        }]
+    );
+}
+
+/// A CLI-only install says once, in the person's language, that there is
+/// nothing to add and where to get it; the CLI's own English note for the
+/// same thing is not repeated, while its other notes still show.
+#[test]
+fn nothing_to_add_is_said_once() {
+    let mut app = connect_fixture();
+    app.open_overlay(Overlay::Chrome);
+    app.chrome.here = true;
+    app.chrome.hosts = Some(Ok(Hosts::default()));
+    app.chrome.local = Some(Setup {
+        extension: None,
+        warnings: vec![
+            "Haarness for Chrome is not included in this installation. Set it up from Haarness Desktop (Settings → Browser → Chrome).".into(),
+            "A separate Haarness data folder is in use (/tmp/x), so Chrome will work with that folder's projects only.".into(),
+        ],
+        ..registered_setup()
+    });
+    let rendered = flat(&chrome_text(&app, (120, 60)));
+    assert!(
+        rendered.contains("This Haarness installation doesn't include Haarness for Chrome."),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("is not included in this installation"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("A separate Haarness data folder is in use"),
+        "{rendered}"
+    );
+    app.language = crate::locale::Language::German;
+    let rendered = flat(&chrome_text(&app, (120, 60)));
+    assert!(
+        rendered.contains("Diese Haarness-Installation enthält Haarness for Chrome nicht."),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("is not included"), "{rendered}");
+}
+
+/// At 80x30 the steps no longer fit: the dialog scrolls instead of dropping
+/// its last rows, and says how.
+#[tokio::test]
+async fn a_short_terminal_scrolls_the_chrome_dialog() {
+    let client = offline_client();
+    let mut app = connect_fixture();
+    app.open_overlay(Overlay::Chrome);
+    app.chrome.here = true;
+    app.chrome.hosts = Some(Ok(Hosts::default()));
+    app.chrome.local = Some(registered_setup());
+    let last = "Chrome settings apply to every project on this computer.";
+    let rendered = chrome_text(&app, (80, 30));
+    assert!(rendered.contains("Waiting for Chrome…"), "{rendered}");
+    assert!(rendered.contains("pgup/pgdn scroll"), "{rendered}");
+    assert!(!rendered.contains(last), "{rendered}");
+    for key in [KeyCode::End, KeyCode::Down, KeyCode::PageDown] {
+        crate::input::handle_key(&mut app, KeyEvent::new(key, KeyModifiers::NONE), &client)
+            .await
+            .unwrap();
+    }
+    let rendered = chrome_text(&app, (80, 30));
+    assert!(rendered.contains(last), "{rendered}");
+    assert!(rendered.contains("Let agents use Chrome"), "{rendered}");
+    assert!(!rendered.contains("Waiting for Chrome…"), "{rendered}");
+    crate::input::handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+        &client,
+    )
+    .await
+    .unwrap();
+    assert!(chrome_text(&app, (80, 30)).contains("Waiting for Chrome…"));
+    // Tall enough, nothing scrolls and the hint is gone.
+    let rendered = chrome_text(&app, (80, 44));
+    assert!(rendered.contains(last), "{rendered}");
+    assert!(!rendered.contains("pgup/pgdn scroll"), "{rendered}");
+}
+
+/// A terminal attached by address to a project on this same computer sets
+/// Chrome up here: `browser status` lists the servers Chrome reaches on this
+/// computer, and the project's server is one of them. Another server, or
+/// none, keeps the "elsewhere" wording, which no longer claims another
+/// computer.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_attached_terminal_on_the_same_computer_sets_chrome_up_here() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if crate::connect::over_ssh() {
+        // Over SSH, Chrome is on the other end: nothing is looked up here.
+        return;
+    }
+    let directory = std::env::temp_dir().join(format!("haarness-chrome-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let log = directory.join("calls");
+    let program = |server: &str| {
+        let report = serde_json::json!({
+            "removed": false, "warnings": [],
+            "browsers": [{"browser":"chrome","name":"Google Chrome","extensionsPage":"chrome://extensions",
+                "registered": false, "supported": true}],
+            "extension": {"path": EXTENSION},
+            "connections": [{"workspace": "/workspace", "serverId": server, "hosts": []}],
+        });
+        let script = directory.join(format!("haarness-{server}"));
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho \"$@\" >> '{}'\necho '{report}'\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    };
+    let (client, _) = chrome_server(
+        serde_json::json!({"hosts": [], "chrome": {"enabled": true, "defaultBrowser": "auto", "everConnected": false}}),
+        serde_json::json!({}),
+    )
+    .await;
+    assert!(!client.supports_local_workspace_switch());
+
+    let mut app = connect_fixture();
+    app.chrome.program = Some(program(SERVER_ID));
+    app.execute_command("/chrome", &client).await.unwrap();
+    assert!(chrome_text(&app, (100, 40)).contains("Checking"));
+    settle_chrome(&mut app, &client).await;
+    assert!(app.chrome.here);
+    let rendered = chrome_text(&app, (100, 40));
+    assert!(rendered.contains("○ Not set up"), "{rendered}");
+    assert!(rendered.contains("enter set up"), "{rendered}");
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        "browser status --json\n"
+    );
+
+    // `/chrome setup` sets up once this computer turns out to be the one.
+    app.close_overlay();
+    app.chrome = crate::chrome::Chrome::default();
+    app.chrome.program = Some(program(SERVER_ID));
+    app.execute_command("/chrome setup", &client).await.unwrap();
+    settle_chrome(&mut app, &client).await;
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        "browser status --json\nbrowser status --json\nbrowser setup --json\n"
+    );
+
+    // Chrome here reaches another server only: not this project's.
+    app.close_overlay();
+    app.chrome = crate::chrome::Chrome::default();
+    app.chrome.program = Some(program("0199d0c4-0000-7000-8000-000000000000"));
+    app.execute_command("/chrome", &client).await.unwrap();
+    settle_chrome(&mut app, &client).await;
+    assert!(!app.chrome.here);
+    for width in [80, 120] {
+        let rendered = flat(&chrome_text(&app, (width, 40)));
+        assert!(
+            rendered.contains("This terminal can't set up Chrome for this project."),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("another computer"), "{rendered}");
+        assert!(rendered.contains("c copy command"), "{rendered}");
+    }
+    let _ = std::fs::remove_dir_all(&directory);
 }

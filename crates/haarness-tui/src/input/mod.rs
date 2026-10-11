@@ -1527,6 +1527,20 @@ async fn handle_overlay_key(app: &mut App, key: KeyEvent, client: &ApiClient) ->
             KeyCode::Char('d') => app.cycle_chrome_browser(client),
             KeyCode::Char('c') => app.copy_chrome_detail(),
             KeyCode::Char('o') => app.open_chrome_store(),
+            // A short terminal scrolls the dialog.
+            KeyCode::PageUp | KeyCode::Up => {
+                let step = if key.code == KeyCode::PageUp { 10 } else { 1 };
+                app.overlay_scroll = app.overlay_scroll.saturating_sub(step);
+            }
+            KeyCode::PageDown | KeyCode::Down => {
+                let step = if key.code == KeyCode::PageDown { 10 } else { 1 };
+                app.overlay_scroll = app
+                    .overlay_scroll
+                    .saturating_add(step)
+                    .min(app.max_overlay_scroll.get());
+            }
+            KeyCode::Home => app.overlay_scroll = 0,
+            KeyCode::End => app.overlay_scroll = app.max_overlay_scroll.get(),
             _ => {}
         }
         return Ok(AppAction::Continue);
