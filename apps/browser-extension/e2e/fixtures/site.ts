@@ -104,10 +104,27 @@ export async function startSite(): Promise<TestSite> {
         return response.end();
       }
       case "/downloads":
-        return html(page("Downloads", `<a id="report" href="/report.txt">Get the report</a>`));
+        return html(
+          page(
+            "Downloads",
+            `<a id="report" href="/report.txt">Get the report</a> <button id="export" type="button">Export</button>`,
+            // The page asks the server to build the file, then downloads it: well after the click returned.
+            `document.getElementById("export").onclick = async () => {
+               await fetch("/prepare?ms=2000");
+               location.href = "/export.csv";
+             };`,
+          ),
+        );
       case "/report.txt":
         response.writeHead(200, { "content-type": "text/plain", "content-disposition": 'attachment; filename="report.txt"' });
         return response.end("Quarterly report from the fixture");
+      case "/prepare":
+        await new Promise((resolve) => setTimeout(resolve, Number(url.searchParams.get("ms") ?? 2000)));
+        response.writeHead(204);
+        return response.end();
+      case "/export.csv":
+        response.writeHead(200, { "content-type": "text/csv", "content-disposition": 'attachment; filename="export.csv"' });
+        return response.end("id,total\n1,42\n");
       case "/redirect":
         response.writeHead(302, { location: url.searchParams.get("to") ?? "/" });
         return response.end();
@@ -117,6 +134,8 @@ export async function startSite(): Promise<TestSite> {
         return html(page("Popped window", "<p>Opened by the page.</p>"));
       case "/frame":
         return html(page("Framed", `<iframe id="inner" src="${origin(url.searchParams.get("inner") ?? "other")}/inner" width="400" height="120"></iframe>`));
+      case "/pixel":
+        return html(page("Tracked", `<img alt="" src="${origin(url.searchParams.get("from") ?? "other")}/pixel.gif" width="1" height="1">`));
       case "/inner":
         return html(`<!doctype html><title>Inner</title><label>Inner field <input id="inner-field"></label><button type="button">Inner button</button>`);
       case "/later":

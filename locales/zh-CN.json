@@ -2383,5 +2383,17 @@
   "Extension folder": "扩展文件夹",
   "Update ready": "更新已就绪",
   "Something went wrong.": "出了点问题。",
-  "This request also needs an approval outside Chrome. Answer it in Haarness.": "此请求还需要一项 Chrome 之外的批准。请在 Haarness 中回复。"
+  "This request also needs an approval outside Chrome. Answer it in Haarness.": "此请求还需要一项 Chrome 之外的批准。请在 Haarness 中回复。",
+  "This project is not connected.": "此项目未连接。",
+  "This approval is no longer waiting.": "此批准已不再等待处理。",
+  "Haarness did not answer.": "Haarness 没有响应。",
+  "Haarness is not reachable.": "无法连接到 Haarness。",
+  "Haarness could not do that: {reason}": "Haarness 无法完成此操作：{reason}",
+  "Restart this project's Haarness server.": "请重启此项目的 Haarness 服务器。",
+  "This project's Haarness server does not accept Chrome. Restart it without --anonymous.": "此项目的 Haarness 服务器不接受 Chrome。请在不使用 --anonymous 的情况下重启它。",
+  "This project's Haarness server is not reachable.": "无法连接到此项目的 Haarness 服务器。",
+  "This project's Haarness server did not answer in time.": "此项目的 Haarness 服务器未及时响应。",
+  "This chat has no tabs here.": "此对话在这里没有标签页。",
+  "Haarness for Chrome restarted. Try again.": "Haarness for Chrome 已重启。请重试。",
+  "Haarness for Chrome is restarting. Try again.": "Haarness for Chrome 正在重启。请重试。"
 }

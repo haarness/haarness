@@ -40,6 +40,8 @@ export interface FakeTab {
   autoDiscardable: boolean;
   selected: boolean;
   frozen: boolean;
+  /** The top document's loader; a new document gets a new one. */
+  loaderId: string;
 }
 
 interface Paused {
@@ -89,10 +91,17 @@ export class FakeChrome {
   paused = new Map<string, Paused>();
   /** URL → where the site redirects it. */
   redirects = new Map<string, string>();
+  /** Page URL → the frames and resources it loads once committed. */
+  subresources = new Map<string, { url: string; resourceType: string; frameId?: string }[]>();
+  /** Subresources the extension failed through Fetch, in order. */
+  refused: string[] = [];
   titles = new Map<string, string>();
   badge = "";
   reloads = 0;
+  /** Debugger detaches the extension asked for, by tab. */
+  detaches: number[] = [];
   private request = 0;
+  private loaders = 0;
 
   readonly chrome = this.build();
 
@@ -140,6 +149,8 @@ export class FakeChrome {
         for (const id of [ids].flat()) self.removeTab(id);
       },
       async group(options: { tabIds: number | number[]; groupId?: number }) {
+        // A round trip to the browser, during which other events arrive.
+        await new Promise((resolve) => setTimeout(resolve));
         const ids = [options.tabIds].flat();
         let groupId = options.groupId;
         const first = self.tabsById.get(ids[0])!;
@@ -252,6 +263,7 @@ export class FakeChrome {
         self.attached.add(tabId);
       },
       async detach({ tabId }: { tabId: number }) {
+        self.detaches.push(tabId);
         if (!self.attached.delete(tabId)) throw new Error("Debugger is not attached to the tab with id: " + tabId);
         self.fetching.delete(tabId);
       },
@@ -299,6 +311,7 @@ export class FakeChrome {
       autoDiscardable: true,
       selected: false,
       frozen: false,
+      loaderId: `loader-${++this.loaders}`,
     };
     this.tabsById.set(tab.id, tab);
     if (options.active) this.activate(tab);
@@ -307,6 +320,10 @@ export class FakeChrome {
     const opener = from === undefined ? undefined : this.tabsById.get(from);
     if (opener && opener.groupId >= 0) tab.groupId = opener.groupId;
     this.chrome.tabs.onCreated.emit({ ...tab });
+    // Chrome then reports the URL the tab was created with, as it starts loading it.
+    setTimeout(() => {
+      if (this.tabsById.get(tab.id) === tab) this.chrome.tabs.onUpdated.emit(tab.id, { url: tab.url, status: "loading" }, { ...tab });
+    });
     return tab;
   }
 
@@ -327,10 +344,15 @@ export class FakeChrome {
     if (groupId >= 0 && ![...this.tabsById.values()].some((tab) => tab.groupId === groupId)) this.groupsById.delete(groupId);
   }
 
+  /** A new document commits in the tab, as Chrome reports it: loading, then complete. */
   commit(tab: FakeTab, url: string) {
     tab.url = url;
     tab.title = this.titles.get(url) ?? "";
-    this.chrome.tabs.onUpdated.emit(tab.id, { url, status: "complete", title: tab.title }, { ...tab });
+    tab.loaderId = `loader-${++this.loaders}`;
+    tab.status = "loading";
+    this.chrome.tabs.onUpdated.emit(tab.id, { url, status: "loading" }, { ...tab });
+    tab.status = "complete";
+    this.chrome.tabs.onUpdated.emit(tab.id, { status: "complete", title: tab.title }, { ...tab });
   }
 
   private event(tabId: number, method: string, params: unknown) {
@@ -342,7 +364,7 @@ export class FakeChrome {
     const tab = this.tabsById.get(tabId)!;
     switch (method) {
       case "Page.getFrameTree":
-        return { frameTree: { frame: { id: `frame-${tabId}`, url: tab.url, loaderId: "l", securityOrigin: "", mimeType: "text/html" } } };
+        return { frameTree: { frame: { id: `frame-${tabId}`, url: tab.url, loaderId: tab.loaderId, securityOrigin: "", mimeType: "text/html" } } };
       case "Fetch.enable":
         this.fetching.set(tabId, { patterns: params.patterns });
         return {};
@@ -387,11 +409,25 @@ export class FakeChrome {
       url = next;
     }
     this.commit(tab, url);
+    for (const resource of this.subresources.get(url) ?? []) {
+      if (!this.fetching.has(tab.id)) break;
+      const requestId = `request-${++this.request}`;
+      const decision = await new Promise<"continue" | "fail">((resolve) => {
+        this.paused.set(requestId, { resolve });
+        this.event(tab.id, "Fetch.requestPaused", {
+          requestId,
+          request: { url: resource.url, method: "GET", headers: {} },
+          frameId: resource.frameId ?? `frame-${tab.id}`,
+          resourceType: resource.resourceType,
+        });
+      });
+      if (decision === "fail") this.refused.push(resource.url);
+    }
     queueMicrotask(() => {
-      this.event(tab.id, "Page.frameNavigated", { frame: { id: `frame-${tab.id}`, url, loaderId: "l2" }, type: "Navigation" });
+      this.event(tab.id, "Page.frameNavigated", { frame: { id: `frame-${tab.id}`, url, loaderId: tab.loaderId }, type: "Navigation" });
       this.event(tab.id, "Page.loadEventFired", { timestamp: 1 });
     });
-    return { frameId: `frame-${tab.id}`, loaderId: "l2" };
+    return { frameId: `frame-${tab.id}`, loaderId: tab.loaderId };
   }
 }
 

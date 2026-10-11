@@ -2383,5 +2383,17 @@
   "Extension folder": "Carpeta de la extensión",
   "Update ready": "Actualización lista",
   "Something went wrong.": "Algo salió mal.",
-  "This request also needs an approval outside Chrome. Answer it in Haarness.": "Esta solicitud también necesita una aprobación fuera de Chrome. Responde en Haarness."
+  "This request also needs an approval outside Chrome. Answer it in Haarness.": "Esta solicitud también necesita una aprobación fuera de Chrome. Responde en Haarness.",
+  "This project is not connected.": "Este proyecto no está conectado.",
+  "This approval is no longer waiting.": "Esta aprobación ya no está pendiente.",
+  "Haarness did not answer.": "Haarness no respondió.",
+  "Haarness is not reachable.": "No se puede acceder a Haarness.",
+  "Haarness could not do that: {reason}": "Haarness no pudo hacerlo: {reason}",
+  "Restart this project's Haarness server.": "Reinicia el servidor de Haarness de este proyecto.",
+  "This project's Haarness server does not accept Chrome. Restart it without --anonymous.": "El servidor de Haarness de este proyecto no acepta Chrome. Reinícialo sin --anonymous.",
+  "This project's Haarness server is not reachable.": "No se puede acceder al servidor de Haarness de este proyecto.",
+  "This project's Haarness server did not answer in time.": "El servidor de Haarness de este proyecto no respondió a tiempo.",
+  "This chat has no tabs here.": "Este chat no tiene pestañas aquí.",
+  "Haarness for Chrome restarted. Try again.": "Haarness for Chrome se reinició. Inténtalo de nuevo.",
+  "Haarness for Chrome is restarting. Try again.": "Haarness for Chrome se está reiniciando. Inténtalo de nuevo."
 }

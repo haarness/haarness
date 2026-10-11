@@ -26,6 +26,8 @@ export function createBridge(platform: Pick<Platform, "connectNative" | "alarm">
   let watching = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let connection: Connection = "connecting";
+  /** Set by the owner's first connect(), once `hello` has its state; nothing else opens the port before. */
+  let enabled = false;
   const reassembler = createReassembler();
 
   const set = (next: Connection) => {
@@ -34,6 +36,7 @@ export function createBridge(platform: Pick<Platform, "connectNative" | "alarm">
   };
 
   function connect() {
+    enabled = true;
     clearTimeout(timer);
     timer = undefined;
     if (port) return;
@@ -94,14 +97,14 @@ export function createBridge(platform: Pick<Platform, "connectNative" | "alarm">
     watch(delta: 1 | -1) {
       const before = watching;
       watching = Math.max(0, watching + delta);
-      if (!port && before === 0 && watching > 0) {
+      if (enabled && !port && before === 0 && watching > 0) {
         attempt = 0;
         connect();
       }
     },
-    /** "Check again", the reconnect alarm, or the worker starting. */
+    /** "Check again" or the reconnect alarm. */
     retry() {
-      if (!port) connect();
+      if (enabled && !port) connect();
     },
     /** Closes the port and stops retrying. */
     close() {
@@ -112,6 +115,7 @@ export function createBridge(platform: Pick<Platform, "connectNative" | "alarm">
     },
     /** Starts a fresh bridge so it reads a new `hello` (the profile label changed). */
     restart() {
+      if (!enabled) return;
       if (!port) return connect();
       generation++;
       port.close();

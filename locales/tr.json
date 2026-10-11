@@ -2383,5 +2383,17 @@
   "Extension folder": "Uzantı klasörü",
   "Update ready": "Güncelleme hazır",
   "Something went wrong.": "Bir şeyler ters gitti.",
-  "This request also needs an approval outside Chrome. Answer it in Haarness.": "Bu istek Chrome dışında da bir onay gerektiriyor. Haarness'ta yanıtlayın."
+  "This request also needs an approval outside Chrome. Answer it in Haarness.": "Bu istek Chrome dışında da bir onay gerektiriyor. Haarness'ta yanıtlayın.",
+  "This project is not connected.": "Bu proje bağlı değil.",
+  "This approval is no longer waiting.": "Bu onay artık beklemede değil.",
+  "Haarness did not answer.": "Haarness yanıt vermedi.",
+  "Haarness is not reachable.": "Haarness'a ulaşılamıyor.",
+  "Haarness could not do that: {reason}": "Haarness bunu yapamadı: {reason}",
+  "Restart this project's Haarness server.": "Bu projenin Haarness sunucusunu yeniden başlatın.",
+  "This project's Haarness server does not accept Chrome. Restart it without --anonymous.": "Bu projenin Haarness sunucusu Chrome'u kabul etmiyor. --anonymous olmadan yeniden başlatın.",
+  "This project's Haarness server is not reachable.": "Bu projenin Haarness sunucusuna ulaşılamıyor.",
+  "This project's Haarness server did not answer in time.": "Bu projenin Haarness sunucusu zamanında yanıt vermedi.",
+  "This chat has no tabs here.": "Bu sohbetin burada sekmesi yok.",
+  "Haarness for Chrome restarted. Try again.": "Haarness for Chrome yeniden başlatıldı. Yeniden deneyin.",
+  "Haarness for Chrome is restarting. Try again.": "Haarness for Chrome yeniden başlatılıyor. Yeniden deneyin."
 }
