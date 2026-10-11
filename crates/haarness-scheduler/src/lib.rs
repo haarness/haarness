@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
+    fmt::Write as _,
     fs::{self, OpenOptions},
     io::{self, Write as _},
     path::{Path, PathBuf},
@@ -187,6 +188,8 @@ pub struct Scheduler {
     data_root: Option<PathBuf>,
     backend: Backend,
     install: bool,
+    /// Storage variables a native runner must see; see `storage_environment`.
+    environment: Vec<(&'static str, String)>,
 }
 
 impl Scheduler {
@@ -194,15 +197,19 @@ impl Scheduler {
         let project = ProjectDirs::from("dev", "haarness", "haarness")
             .context("OS data directories are unavailable")?;
         let base = BaseDirs::new().context("OS home directory is unavailable")?;
-        let (config, state) = data_root.as_ref().map_or_else(
-            || {
-                (
-                    project.config_dir().to_path_buf(),
-                    project.data_local_dir().to_path_buf(),
-                )
-            },
-            |root| (root.join("config"), root.join("data")),
-        );
+        // HAARNESS_HOME keeps everything under one folder, schedules too, so
+        // an isolated install never shares the person's schedule list.
+        let home = std::env::var_os("HAARNESS_HOME")
+            .map(PathBuf::from)
+            .filter(|root| root.is_absolute());
+        let (config, state) = match (&data_root, home) {
+            (Some(root), _) => (root.join("config"), root.join("data")),
+            (None, Some(home)) => (home.join("config"), home.join("state")),
+            (None, None) => (
+                project.config_dir().to_path_buf(),
+                project.data_local_dir().to_path_buf(),
+            ),
+        };
         let systemd = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| base.home_dir().join(".config"))
@@ -219,6 +226,7 @@ impl Scheduler {
             data_root,
             backend: Backend::current()?,
             install: std::env::var_os("HAARNESS_SCHEDULE_SKIP_INSTALL").is_none(),
+            environment: storage_environment(),
         })
     }
 
@@ -236,6 +244,7 @@ impl Scheduler {
             data_root,
             backend,
             install,
+            environment: Vec::new(),
         }
     }
 
@@ -347,6 +356,7 @@ impl Scheduler {
             created_at: timestamp,
             updated_at: timestamp,
         };
+        self.ensure_unique_name(&schedule)?;
         self.persist(&schedule)?;
         if let Err(error) = self.install(&schedule) {
             let _ = fs::remove_file(self.job_path(schedule.id));
@@ -403,6 +413,10 @@ impl Scheduler {
         if schedule.enabled || schedule.trigger != current.trigger {
             validate_trigger(&schedule.trigger)?;
         }
+        // Duplicates saved before names were unique stay editable.
+        if schedule.name != current.name {
+            self.ensure_unique_name(&schedule)?;
+        }
         self.uninstall(&current)?;
         self.persist(&schedule)?;
         self.install(&schedule)?;
@@ -451,6 +465,22 @@ impl Scheduler {
             .list()?
             .into_iter()
             .find(|schedule| schedule.id.to_string() == reference || schedule.name == reference))
+    }
+
+    /// Names double as references (`haarness schedule run <name>`), so two
+    /// schedules may not share one.
+    fn ensure_unique_name(&self, schedule: &Schedule) -> Result<()> {
+        if self
+            .list()?
+            .iter()
+            .any(|other| other.name == schedule.name && other.id != schedule.id)
+        {
+            anyhow::bail!(
+                "a schedule named \"{}\" already exists; choose another name",
+                schedule.name
+            );
+        }
+        Ok(())
     }
 
     pub fn require(&self, reference: &str) -> Result<Schedule> {
@@ -655,6 +685,11 @@ impl Scheduler {
                 environment.insert(key, value);
             }
         }
+        environment.extend(
+            self.environment
+                .iter()
+                .map(|(key, value)| (*key, value.clone())),
+        );
         let env = environment
             .into_iter()
             .map(|(key, value)| {
@@ -714,8 +749,16 @@ impl Scheduler {
                 .collect::<Vec<_>>()
                 .join("\n"),
         };
+        let mut environment = String::new();
+        for (key, value) in &self.environment {
+            let _ = writeln!(
+                environment,
+                "Environment={}",
+                systemd_argument(OsStr::new(&format!("{key}={value}")))
+            );
+        }
         let service = format!(
-            "[Unit]\nDescription=Haarness scheduled run {}\n\n[Service]\nType=oneshot\nWorkingDirectory={}\nExecStart={}\nStandardOutput=append:{}\nStandardError=append:{}\n",
+            "[Unit]\nDescription=Haarness scheduled run {}\n\n[Service]\nType=oneshot\n{environment}WorkingDirectory={}\nExecStart={}\nStandardOutput=append:{}\nStandardError=append:{}\n",
             systemd_escape(&schedule.name),
             systemd_argument(schedule.workspace.as_os_str()),
             args.iter()
@@ -748,16 +791,30 @@ impl Scheduler {
             Trigger::Cron { expression } => windows_cron_triggers(expression)?,
         };
         let args = self.runner_args(schedule, RunSource::WindowsTask);
-        let command = args
+        let mut command = args
             .first()
             .context("schedule runner command is empty")?
-            .to_string_lossy();
-        let arguments = args
+            .to_string_lossy()
+            .into_owned();
+        let mut arguments = args
             .iter()
             .skip(1)
             .map(|value| windows_argument(value))
             .collect::<Vec<_>>()
             .join(" ");
+        if !self.environment.is_empty() {
+            // A task has no environment of its own: cmd sets it, then starts
+            // the runner. `/s` runs the quoted line exactly as written.
+            let mut assignments = String::new();
+            for (key, value) in &self.environment {
+                let _ = write!(assignments, "set \"{key}={value}\" && ");
+            }
+            arguments = format!(
+                "/d /s /c \"{assignments}{} {arguments}\"",
+                windows_argument(OsStr::new(&command))
+            );
+            command = "cmd.exe".into();
+        }
         Ok(format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Task version=\"1.4\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n  <RegistrationInfo><Description>Haarness scheduled run {}</Description></RegistrationInfo>\n  <Triggers>\n{}\n  </Triggers>\n  <Principals><Principal id=\"Author\"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\n  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Enabled>true</Enabled></Settings>\n  <Actions Context=\"Author\"><Exec><Command>{}</Command><Arguments>{}</Arguments><WorkingDirectory>{}</WorkingDirectory></Exec></Actions>\n</Task>\n",
             xml_escape(&schedule.name),
@@ -939,10 +996,24 @@ struct ParsedRequest {
     trigger: Trigger,
 }
 
+/// `text` without a leading `keyword`, matched ignoring ASCII case so
+/// "Every day at 8am" reads like "every day at 8am". The rest keeps its case.
+fn strip_keyword<'a>(text: &'a str, keyword: &str) -> Option<&'a str> {
+    text.get(..keyword.len())
+        .filter(|head| head.eq_ignore_ascii_case(keyword))
+        .map(|_| &text[keyword.len()..])
+}
+
+/// The byte offset of the lowercase `needle` in `text`, ignoring ASCII case.
+/// ASCII lowercasing keeps every byte offset, so the offset fits `text`.
+fn find_keyword(text: &str, needle: &str) -> Option<usize> {
+    text.to_ascii_lowercase().find(needle)
+}
+
 fn parse_request(request: &str) -> Result<ParsedRequest> {
     let mut text = request.trim().to_owned();
     let mut name = None;
-    if let Some(start) = text.find("named \"") {
+    if let Some(start) = find_keyword(&text, "named \"") {
         let value = &text[start + 7..];
         if let Some(end) = value.find('"') {
             name = clean(Some(value[..end].to_owned()));
@@ -955,12 +1026,12 @@ fn parse_request(request: &str) -> Result<ParsedRequest> {
         "schedule an job ",
         "schedule ",
     ] {
-        if text.to_lowercase().starts_with(prefix) {
-            text = text[prefix.len()..].trim().to_owned();
+        if let Some(rest) = strip_keyword(&text, prefix) {
+            text = rest.trim().to_owned();
             break;
         }
     }
-    if let Some(rest) = text.strip_prefix("in ") {
+    if let Some(rest) = strip_keyword(&text, "in ") {
         let (amount, unit, prompt) = interval_parts(rest, false)?;
         let seconds = interval_seconds(amount, unit)?;
         let at = Utc::now()
@@ -972,8 +1043,8 @@ fn parse_request(request: &str) -> Result<ParsedRequest> {
             trigger: Trigger::Once { at },
         });
     }
-    if let Some(rest) = text.strip_prefix("every ") {
-        if let Some(rest) = rest.strip_prefix("day at ") {
+    if let Some(rest) = strip_keyword(&text, "every ") {
+        if let Some(rest) = strip_keyword(rest, "day at ") {
             let (clock, prompt) = split_prompt(rest)?;
             let (hour, minute) = parse_clock(clock)?;
             return Ok(ParsedRequest {
@@ -996,14 +1067,8 @@ fn parse_request(request: &str) -> Result<ParsedRequest> {
         .iter()
         .enumerate()
         {
-            if let Some(rest) = rest.to_lowercase().strip_prefix(&format!("{weekday} at ")) {
-                let original = rest;
-                let (clock, _) = split_prompt(original)?;
-                let prompt_start = text
-                    .to_lowercase()
-                    .find(" to ")
-                    .context("schedule prompt is required after 'to'")?;
-                let prompt = text[prompt_start + 4..].trim().to_owned();
+            if let Some(rest) = strip_keyword(rest, &format!("{weekday} at ")) {
+                let (clock, prompt) = split_prompt(rest)?;
                 let (hour, minute) = parse_clock(clock)?;
                 return Ok(ParsedRequest {
                     name,
@@ -1023,7 +1088,7 @@ fn parse_request(request: &str) -> Result<ParsedRequest> {
             },
         });
     }
-    if let Some(rest) = text.strip_prefix("on ") {
+    if let Some(rest) = strip_keyword(&text, "on ") {
         let (date, prompt) = split_prompt(rest)?;
         let at = DateTime::parse_from_rfc3339(date)
             .map(|value| value.with_timezone(&Utc))
@@ -1059,8 +1124,7 @@ fn interval_parts(rest: &str, require_to: bool) -> Result<(u64, &str, String)> {
         .context("schedule interval must start with an integer")?;
     let unit = words.next().context("schedule interval unit is required")?;
     let suffix = words.next().context("schedule prompt is required")?.trim();
-    let prompt = suffix
-        .strip_prefix("to ")
+    let prompt = strip_keyword(suffix, "to ")
         .or_else(|| (!require_to).then_some(suffix))
         .context("recurring schedule prompt must follow 'to'")?
         .trim_matches(|character: char| character == ',' || character.is_whitespace())
@@ -1085,9 +1149,8 @@ fn interval_seconds(amount: u64, unit: &str) -> Result<u64> {
 }
 
 fn split_prompt(value: &str) -> Result<(&str, String)> {
-    let (left, right) = value
-        .split_once(" to ")
-        .context("schedule prompt is required after 'to'")?;
+    let split = find_keyword(value, " to ").context("schedule prompt is required after 'to'")?;
+    let (left, right) = (&value[..split], &value[split + 4..]);
     if right.trim().is_empty() {
         anyhow::bail!("schedule prompt is required");
     }
@@ -1353,20 +1416,46 @@ fn canonical_directory(path: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Where Haarness keeps its files, as this process sees it. A scheduled run is
+/// started by launchd, systemd or Task Scheduler with none of the creating
+/// shell's environment, so it gets these to use the same install: the same
+/// schedules, chats, credentials and Cloud sign-in.
+fn storage_environment() -> Vec<(&'static str, String)> {
+    [
+        "HAARNESS_HOME",
+        "HAARNESS_DATA_DIR",
+        "HAARNESS_CLOUD_CONFIG_DIR",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+    ]
+    .into_iter()
+    .filter_map(|key| {
+        let value = std::env::var_os(key)?.into_string().ok()?;
+        (!value.is_empty()).then_some((key, value))
+    })
+    .collect()
+}
+
 fn describe_trigger(trigger: &Trigger) -> String {
+    let every = |count: u64, unit: &str| {
+        if count == 1 {
+            format!("Every {unit}")
+        } else {
+            format!("Every {count} {unit}s")
+        }
+    };
     match trigger {
-        Trigger::Interval { seconds } if seconds % 86_400 == 0 => {
-            format!("Every {} day(s)", seconds / 86_400)
-        }
-        Trigger::Interval { seconds } if seconds % 3_600 == 0 => {
-            format!("Every {} hour(s)", seconds / 3_600)
-        }
-        Trigger::Interval { seconds } if seconds % 60 == 0 => {
-            format!("Every {} minute(s)", seconds / 60)
-        }
-        Trigger::Interval { seconds } => format!("Every {seconds} second(s)"),
-        Trigger::Cron { expression } => expression.clone(),
-        Trigger::Once { at } => format!("Once at {}", at.to_rfc3339()),
+        Trigger::Interval { seconds } if seconds % 86_400 == 0 => every(seconds / 86_400, "day"),
+        Trigger::Interval { seconds } if seconds % 3_600 == 0 => every(seconds / 3_600, "hour"),
+        Trigger::Interval { seconds } if seconds % 60 == 0 => every(seconds / 60, "minute"),
+        Trigger::Interval { seconds } => every(*seconds, "second"),
+        Trigger::Cron { expression } => format!("Cron {expression}"),
+        Trigger::Once { at } => format!(
+            "Once at {}",
+            at.with_timezone(&Local).format("%Y-%m-%d %H:%M")
+        ),
     }
 }
 
@@ -1676,6 +1765,37 @@ mod tests {
     }
 
     #[test]
+    fn triggers_read_in_plain_words() {
+        assert_eq!(
+            describe_trigger(&Trigger::Interval { seconds: 60 }),
+            "Every minute"
+        );
+        assert_eq!(
+            describe_trigger(&Trigger::Interval { seconds: 1_800 }),
+            "Every 30 minutes"
+        );
+        assert_eq!(
+            describe_trigger(&Trigger::Interval { seconds: 7_200 }),
+            "Every 2 hours"
+        );
+        assert_eq!(
+            describe_trigger(&Trigger::Interval { seconds: 86_400 }),
+            "Every day"
+        );
+        assert_eq!(
+            describe_trigger(&Trigger::Interval { seconds: 90 }),
+            "Every 90 seconds"
+        );
+        let at = chrono::TimeZone::with_ymd_and_hms(&Local, 2026, 10, 10, 16, 50, 0).unwrap();
+        assert_eq!(
+            describe_trigger(&Trigger::Once {
+                at: at.with_timezone(&Utc)
+            }),
+            "Once at 2026-10-10 16:50"
+        );
+    }
+
+    #[test]
     fn natural_language_matches_common_haarness_forms() {
         let parsed = parse_request("every Monday at 8am to summarize notifications").unwrap();
         assert_eq!(
@@ -1690,6 +1810,38 @@ mod tests {
         assert_eq!(parsed.name.as_deref(), Some("repo-summary"));
         assert_eq!(parsed.prompt, "summarize the repo");
         assert_eq!(parsed.trigger, Trigger::Interval { seconds: 120 });
+    }
+
+    #[test]
+    fn natural_language_keywords_ignore_case_and_keep_the_prompt_as_typed() {
+        let parsed = parse_request("Every Day at 8AM To Summarize PRs").unwrap();
+        assert_eq!(
+            parsed.trigger,
+            Trigger::Cron {
+                expression: "0 8 * * *".into()
+            }
+        );
+        assert_eq!(parsed.prompt, "Summarize PRs");
+        let parsed = parse_request("EVERY friday AT 5pm to Write the Weekly note").unwrap();
+        assert_eq!(
+            parsed.trigger,
+            Trigger::Cron {
+                expression: "0 17 * * 5".into()
+            }
+        );
+        assert_eq!(parsed.prompt, "Write the Weekly note");
+        let parsed = parse_request("In 10 minutes to Check CI").unwrap();
+        assert!(matches!(parsed.trigger, Trigger::Once { .. }));
+        assert_eq!(parsed.prompt, "Check CI");
+        let parsed = parse_request("Every 30 Minutes TO Ping").unwrap();
+        assert_eq!(parsed.trigger, Trigger::Interval { seconds: 1800 });
+        assert_eq!(parsed.prompt, "Ping");
+        let parsed = parse_request("On 2030-01-02 to Renew the Domain").unwrap();
+        assert!(matches!(parsed.trigger, Trigger::Once { .. }));
+        assert_eq!(parsed.prompt, "Renew the Domain");
+        let parsed = parse_request("Schedule Named \"Ünïcode\" every day at 7am to Grüß").unwrap();
+        assert_eq!(parsed.name.as_deref(), Some("Ünïcode"));
+        assert_eq!(parsed.prompt, "Grüß");
     }
 
     #[test]
@@ -1724,6 +1876,39 @@ mod tests {
         assert!(xml.contains("<key>Minute</key><integer>30</integer>"));
         assert!(xml.contains("schedule</string>"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_runners_use_the_install_that_created_the_schedule() {
+        for backend in [Backend::Launchd, Backend::SystemdUser, Backend::WindowsTask] {
+            let (root, mut scheduler) = fixture(backend);
+            let schedule = create(&scheduler, &root, Trigger::Interval { seconds: 3600 });
+            scheduler.environment = vec![
+                ("HAARNESS_HOME", "/isolated home".into()),
+                ("XDG_CACHE_HOME", "/xdg/cache".into()),
+            ];
+            match backend {
+                Backend::Launchd => {
+                    let xml = scheduler.render_launchd(&schedule).unwrap();
+                    assert!(
+                        xml.contains("<key>HAARNESS_HOME</key><string>/isolated home</string>")
+                    );
+                    assert!(xml.contains("<key>XDG_CACHE_HOME</key><string>/xdg/cache</string>"));
+                }
+                Backend::SystemdUser => {
+                    let (service, _) = scheduler.render_systemd(&schedule).unwrap();
+                    assert!(service.contains("Environment=\"HAARNESS_HOME=/isolated home\"\n"));
+                }
+                Backend::WindowsTask => {
+                    let xml = scheduler.render_windows(&schedule).unwrap();
+                    assert!(xml.contains("<Command>cmd.exe</Command>"), "{xml}");
+                    assert!(xml.contains(
+                        "<Arguments>/d /s /c &quot;set &quot;HAARNESS_HOME=/isolated home&quot; &amp;&amp; set &quot;XDG_CACHE_HOME=/xdg/cache&quot; &amp;&amp; /opt/bin/haarness --workspace"
+                    ), "{xml}");
+                }
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
@@ -1828,6 +2013,53 @@ mod tests {
             })
             .unwrap_err();
         assert!(error.to_string().contains("provider/model"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn schedule_names_are_unique_because_they_are_references() {
+        let (root, scheduler) = fixture(Backend::Launchd);
+        let first = create(&scheduler, &root, Trigger::Interval { seconds: 3600 });
+        let error = scheduler
+            .create(CreateSchedule {
+                request: Some("every day at 8am to repo summary".into()),
+                workspace: root.join("workspace"),
+                enabled: true,
+                ..CreateSchedule::default()
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("already exists"), "{error}");
+        let second = scheduler
+            .create(CreateSchedule {
+                name: Some("other".into()),
+                prompt: Some("x".into()),
+                workspace: root.join("workspace"),
+                trigger: Some(Trigger::Interval { seconds: 3600 }),
+                enabled: true,
+                ..CreateSchedule::default()
+            })
+            .unwrap();
+        let error = scheduler
+            .update(
+                "other",
+                UpdateSchedule {
+                    name: Some(first.name.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("already exists"), "{error}");
+        // Keeping its own name is not a clash.
+        scheduler
+            .update(
+                &second.id.to_string(),
+                UpdateSchedule {
+                    name: Some("other".into()),
+                    prompt: Some("y".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 }
