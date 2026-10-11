@@ -27,10 +27,10 @@ dependencies, pinned to the exact versions Desktop uses.
 | `page` | `createPage(surface, cdp, options)`: snapshots and element refs, input, frames, dialogs, evaluation, waits, screenshots, uploads, diagnostics and the permission targets of every page tool. `lastRef()` reads the ref counter. |
 | `cdp` | `createCdpEvents` (the event fan-out and iframe-session filter both transports use), `abortError`, `waitFor`. |
 | `errors` | `protocolError` (CDP failures with a recovery hint), `browserFailure` (an error as a tool outcome) and `BrowserCodeError` (a failure with a host code such as `unsupported`). Hints default to the Haarness browser's wording; pass `"chrome"` for Chrome's. |
-| `policy` | `normalizeURL`, `destinationOrigin`, `browserSiteAccess` (site rules), `wwwTwin`. |
-| `diagnostics` | Console and network capture for `browser_console` and `browser_network_*`, with optional request-body omission and extra header redaction. |
+| `policy` | `normalizeURL`, `destinationOrigin`, `browserSiteAccess` (site rules), `wwwTwin` and `navigationResources` (the permission target of loading a URL, for a host's `tabs.open`). |
+| `diagnostics` | Console and network capture for `browser_console` and `browser_network_*`, with optional request-body omission and extra header redaction (`isSensitiveHeader`). |
 | `analysis` | Trace, CPU profile and heap snapshot analysis (Desktop's profiling tools). |
-| `agent-cursor` | The in-page agent cursor script, its labels and `createAgentCursor`. |
+| `agent-cursor` | The in-page agent cursor (`cursorScript`), its labels (`cursorLabel`, `cursorLabelKeys`) and `createAgentCursor`. |
 
 `scripts/contract.ts` generates the server's tool catalog,
 `crates/haarness-server/src/browser-tools.json`, from `Operations`.

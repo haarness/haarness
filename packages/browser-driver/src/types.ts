@@ -302,8 +302,11 @@ export interface Page<F extends Browser.HostFile = Browser.HostFile> {
    */
   navigationStarted(): void;
   /**
-   * Sorted, de-duplicated URLs of the top document and every frame document
-   * seen since the last navigation: Desktop's capture and download resources.
+   * The resources a capture or download from this tab now comes from, as
+   * captures record them: with `resourceOrigins: "url"`, the sorted URLs of
+   * the top document and every frame document seen since the last navigation
+   * (only the top one with `gateTopDocumentOnly`); with `"securityOrigin"`,
+   * their origins the same way.
    */
   sources(): string[];
   /** Refuses further commands and drops its listeners and refs; the host disposes the transport, views and files. */
