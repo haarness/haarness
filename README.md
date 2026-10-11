@@ -70,8 +70,9 @@ inside the project run without asking; Haarness asks before using files outside 
 reading secrets such as `.env`, switching agents or generating paid media, plus anything your own
 rules set to ask. Desktop's browser asks about a site only when **Settings → Browser** sets it to
 **Requires approval**. Auto answers those requests itself, except Haarness Cloud actions that
-spend money or delete something, which always ask, and a site set to **Requires approval**, which
-asks unless **Remember site approvals** is on.
+spend money or delete something, which always ask, a site set to **Requires approval**, which
+asks unless **Remember site approvals** is on, and a website in your own Chrome (below), which
+only a person can allow.
 
 In the TUI, answer a request with a key:
 
@@ -84,6 +85,12 @@ In the TUI, answer a request with a key:
 "always" answer saves the rule shown on the card, which is a pattern: approving `rm -rf build`
 allows every `rm` command. See
 [Permissions and approvals](https://haarness.ai/docs/security/permissions).
+
+**Use your Chrome.** Agents can also work in your own Google Chrome, signed in as you, through the
+Haarness for Chrome extension: set it up with `/chrome` in the TUI, **Settings → Browser → Chrome**
+in Desktop, or `haarness browser setup`. Each new site asks in each chat (**Allow in Chrome**:
+`a` allows it in this chat), and Auto, `--yolo`, hooks and permission rules never answer for you.
+See [Use your Chrome](https://haarness.ai/docs/desktop/use-your-chrome).
 
 ### 4. Run without the UI
 
@@ -124,6 +131,12 @@ Haarness account when you are signed in and anonymous otherwise. Turn it off in 
 [Usage statistics](docs/USAGE-STATISTICS.md).
 
 ## What works
+
+- [Haarness for Chrome](docs/CHROME-EXTENSION.md): agents in the TUI, CLI, Desktop and SDKs
+  can use your own Chrome profile, signed in as you, alongside Desktop's isolated browser.
+  Agents work only in their own tab groups, every site asks per chat (scripts separately), and
+  the Haarness button in Chrome pauses, stops or answers. Set up with `haarness browser setup`,
+  `/chrome` or Settings → Browser → Chrome; see [Browser alongside chat](docs/BROWSER.md).
 
 - [Haarness Router integration](docs/ROUTER.md): connect a self-hosted router by
   address in Desktop, TUI, or CLI. Access keys are optional, models refresh
@@ -334,7 +347,7 @@ directory is refused; branch deletion uses Git's safe merged-branch check.
 
 ## Terminal UI
 
-Inside the TUI, type `/` to browse commands. Press **F2** to switch models without submitting your draft (Ctrl+M is Enter in conventional terminals). The catalog includes `/new`, `/sessions` (`/resume`, `/continue`, and `/threads` are aliases), `/worktree`, `/connect`, `/models`, `/providers`, `/agents`, `/plugin`, `/workflow`, `/btw`, `/goal`, `/plan`, `/review`, `/build`, `/explore`, `/compact`, `/diff`, `/terminal`, `/undo`, `/redo`, `/timeline`, `/messages`, `/fork`, `/rename`, `/archive`, `/reasoning`, `/ultracode`, `/mcp`, `/skills`, `/tools`, `/status`, `/tasks`, `/background`, `/cancel`, `/help`, and `/exit`. Use the arrow keys and Enter to select, or Tab to complete a command. Connected providers and their discovered models sort first; selecting a disconnected provider explains how to connect it.
+Inside the TUI, type `/` to browse commands. Press **F2** to switch models without submitting your draft (Ctrl+M is Enter in conventional terminals). The catalog includes `/new`, `/sessions` (`/resume`, `/continue`, and `/threads` are aliases), `/worktree`, `/connect`, `/chrome`, `/models`, `/providers`, `/agents`, `/plugin`, `/workflow`, `/btw`, `/goal`, `/plan`, `/review`, `/build`, `/explore`, `/compact`, `/diff`, `/terminal`, `/undo`, `/redo`, `/timeline`, `/messages`, `/fork`, `/rename`, `/archive`, `/reasoning`, `/ultracode`, `/mcp`, `/skills`, `/tools`, `/status`, `/tasks`, `/background`, `/cancel`, `/help`, and `/exit`. Use the arrow keys and Enter to select, or Tab to complete a command. Connected providers and their discovered models sort first; selecting a disconnected provider explains how to connect it.
 
 `/terminal` opens a full-screen VT terminal backed by a server-owned workspace PTY. `Ctrl+]` (or `F12`, for keyboards where `]` is hard to reach) detaches without stopping it, `Ctrl+Shift+T` opens another tab (in terminals with enhanced key reporting; elsewhere use `/terminal new`), `Ctrl+Shift+W` closes and terminates the active tab, and `Alt+Left/Right` switches tabs. A shell that exits closes its tab, and closing the last one returns to the chat. Reopening `/terminal` reconnects and replays bounded output.
 
@@ -676,7 +689,7 @@ The separate networked smoke clones the current public `anthropics/claude-code` 
 
 ## Desktop app
 
-The Electron desktop app lives in `apps/desktop`, with Haarness's own design and a shared workspace server. It includes streaming conversations, approvals, a file editor, diff review, terminals, extensions, plugins, and runtime settings.
+The Electron desktop app lives in `apps/desktop`, with Haarness's own design and a shared workspace server. It includes streaming conversations, approvals, a file editor, diff review, terminals, a built-in browser, setup for [Haarness for Chrome](docs/CHROME-EXTENSION.md), extensions, plugins, and runtime settings.
 
 ```sh
 npm run desktop:install

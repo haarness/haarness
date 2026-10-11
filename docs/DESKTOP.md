@@ -50,7 +50,9 @@ Normal Send steers active work; **Queue** or **Alt+Enter** saves a follow-up unt
    offers the folder or the whole repository) and **Deny**. Auto answers those requests once by
    itself for the chat and its agents; Cloud actions that spend money or delete something still
    ask, and so does a site set to **Requires approval** unless **Remember site approvals** is on.
-   See [Automatic approvals](AUTO-APPROVALS.md).
+   Auto never answers for a website in your own Chrome: its card, **Allow in Chrome**, offers
+   **Deny**, **Allow once** and **Allow in this chat**. See [Automatic approvals](AUTO-APPROVALS.md)
+   and [Chrome approvals](PERMISSIONS-AND-EXECUTION.md#chrome-approvals).
 
 **Cmd+.** (Ctrl+. on Windows and Linux) switches the message box to the next agent and
 **Cmd+Shift+.** to the previous one; change them in **Settings → Keyboard shortcuts**.
@@ -80,7 +82,7 @@ npm run desktop:dev
 npm run desktop:package
 ```
 
-Packaging builds the Rust executable, SDK, renderer and Electron main/preload, then bundles the Rust executable and Bun 1.3.14 into the application. Extensions and workflows therefore work without a separate Bun installation. The Rust executable also embeds ripgrep 15.2.0, available as `rg` in agent shell calls and integrated terminals without a separate install or download. Installers appear in `apps/desktop/release`. `npm --prefix apps/desktop run package:dir` produces an unpacked application for local testing. Build on the target platform for macOS DMG/ZIP, Windows NSIS, and Linux AppImage/DEB.
+Packaging builds the Rust executable, SDK, Haarness for Chrome extension, renderer and Electron main/preload, then bundles the Rust executable and Bun 1.3.14 into the application, with the built extension in `browser-extension/chrome` beside `bin/` in its resources. Extensions and workflows therefore work without a separate Bun installation. The Rust executable also embeds ripgrep 15.2.0, available as `rg` in agent shell calls and integrated terminals without a separate install or download. Installers appear in `apps/desktop/release`. `npm --prefix apps/desktop run package:dir` produces an unpacked application for local testing. A packaged Desktop runs `haarness browser setup --quiet --if-missing --json` once in the background at launch, so Chrome can start Haarness and the extension copy in the data directory follows Desktop updates; it skips this when `HAARNESS_DESKTOP_TEST`, `HAARNESS_DATA_DIR` or `HAARNESS_DESKTOP_DATA` is set, and the command does nothing after `haarness browser remove` until setup runs again. See [Haarness for Chrome](CHROME-EXTENSION.md#packaging). Build on the target platform for macOS DMG/ZIP, Windows NSIS, and Linux AppImage/DEB.
 
 Signing and notarization use standard electron-builder credentials supplied by release CI. Local packaging uses an ad hoc signature. For distribution, explicitly override `mac.identity` with the release signing identity and supply notarization credentials. An optional HTTPS `HAARNESS_UPDATE_URL` points to an electron-updater generic feed. Do not point production clients at unsigned or development artifacts.
 
@@ -314,6 +316,14 @@ Open **Browser** in the side panel to browse alongside a conversation, or ask Ha
 
 
 Composer history uses the unsent text as a prefix: Up recalls only prompts beginning with that draft, and does nothing when there are no matches. An empty draft browses all history, with the current conversation first. Down past the newest match restores the exact draft, attachments and context. Editing a recalled prompt begins a new search.
+
+### Chrome
+
+Agents can also use the user's own Chrome through Haarness for Chrome ([details](CHROME-EXTENSION.md)). **Settings → Browser → Chrome** shows its connection, **Let agents use Chrome**, **Browser for new agent tabs** and **Chrome site permissions**; these always save globally, and are disabled with the reason for remote projects or servers without `browser-extension.v1`. Search finds them under terms such as `chrome`, `edge`, `brave`, `signed in` and `real profile`.
+
+**Set up Chrome…** opens **Use Chrome with Haarness**. Step 1 runs the bundled `haarness browser setup --json` through the main process and shows **Chrome can start Haarness** with the browsers it registered (and why Flatpak or Snap browsers cannot be used). Step 2, **Add Haarness for Chrome**, lists the browser's extensions page with a copy button, **Turn on Developer mode (keep it on)**, **Load unpacked** with the folder path, **Copy** and a reveal button (**Show in Finder**, **Show in Explorer** or **Show in Files**, which opens only that folder), and **Pin Haarness to the toolbar**; once a Web Store listing exists, a store button replaces these steps. Step 3 polls `listBrowserHosts` every 2 s, from **Waiting for Chrome…** to **Connected to Google Chrome**.
+
+A Chrome approval opens the dock as **Allow in Chrome**, with **Deny**, **Allow once** and **Allow in this chat**, and no folder, repository or Auto choices; the fallback auto-approver for older servers skips it. Browser rows whose result came from Chrome carry a small **Chrome** chip in the transcript, and the Browser panel says "This chat also uses Chrome · {count} tabs" while the chat has Chrome tabs.
 
 ### Canvas previews
 
