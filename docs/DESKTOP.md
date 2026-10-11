@@ -186,7 +186,7 @@ The rounded composer has attachment and approval controls on the left, with agen
 
 Commands, agents and skills use dedicated editors with a large prompt area and a clear project or all-projects scope. Editing preserves the definition's original scope and unexposed metadata. Commands offer agent/model pickers, an argument hint and an **Insert arguments** action for `$ARGUMENTS`. Agents offer session/subagent modes and optional tool-access override rows. Skill notes have their own field.
 
-Model pickers list connected providers using friendly names. **Use session model** and **Use session agent** let reusable definitions inherit the conversation's choices; an existing unavailable selection is preserved until explicitly changed. Custom-provider setup separates API format, authentication and model discovery. API keys stay masked and use the credential store. Explicit model lists use removable rows.
+Model pickers list connected providers using friendly names. **Use chat model** and **Use chat agent** let reusable definitions inherit the conversation's choices; an existing unavailable selection is preserved until explicitly changed. Custom-provider setup separates API format, authentication and model discovery. API keys stay masked and use the credential store. Explicit model lists use removable rows.
 
 Workflow inputs are populated from declared metadata with text, number and yes/no controls, plus optional named inputs and execution pickers. Complex custom values remain available through the explicit Structured input type. Plugin, marketplace and extension installers ask for a source type first, then show only the relevant folder, repository, marketplace or package fields; local sources support the native file/folder picker.
 
@@ -236,13 +236,13 @@ The presentation layers are `provider-brands.ts` (identity), `ProviderIcon.tsx` 
 
 ## Conversation context and usage
 
-Choose **Context** from the side-panel launcher or **View conversation context** in Universal search to open the **Context** side-panel tab. It follows the selected conversation and refreshes when provider usage reports arrive. The open tab is restored with the saved layout after reload. New chats show an empty state until a conversation exists.
+Choose **Context** from the side-panel launcher or **View chat context** in Universal search to open the **Context** side-panel tab. It follows the selected conversation and refreshes when provider usage reports arrive. The open tab is restored with the saved layout after reload. New chats show an empty state until a conversation exists.
 
 The inspector separates three measurements:
 
 - **Retained text estimate** breaks saved context into user messages, assistant messages, tool calls, tool results and compaction summary. It respects undo boundaries and the latest compaction's retained tail. Its four-characters-per-token heuristic excludes system instructions, tool definitions, media and provider overhead, so the displayed share of a known model limit is not full request occupancy. Missing model limits remain unavailable.
 - **Latest reported request** displays input, output, cache-read and cache-write tokens as reported, with the actual turn's model when available. Cache semantics differ across providers, so cache counts are not added to input. Reasoning token counts are not separately available in the current protocol.
-- **Conversation totals** uses `threadUsage` for cumulative input/output/cache statistics, including usage from undone and compacted history. Known cost includes only priced requests; unavailable pricing is not shown as zero.
+- **Chat totals** uses `threadUsage` for cumulative input/output/cache statistics, including usage from undone and compacted history. Known cost includes only priced requests; unavailable pricing is not shown as zero.
 
 `context-usage.ts` owns the text estimate and history boundaries. `ConversationContext.tsx` owns the inspector and guards requests by connection, conversation and request generation so a late response cannot replace another conversation's statistics. It uses the existing SDK/IPC contract and leaves provider billing and runtime compaction decisions unchanged.
 
