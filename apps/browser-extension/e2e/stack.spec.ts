@@ -427,6 +427,8 @@ test("a window the agent's page opens joins the chat's group", async ({ stack })
 
 const REVOKED = "The user took this tab back from Haarness. Don't use it again without asking.";
 const CHROME_PAUSED = "The user paused Haarness in Chrome. Ask them to resume it from the Haarness button in Chrome's toolbar; do not retry until they do.";
+const CHROME_STOPPED =
+  "The user stopped Haarness in Chrome (they cancelled the debugging bar or pressed Stop). Ask before trying again; they can click Resume on the Haarness button in Chrome's toolbar.";
 const CHROME_RECOVERY =
   "Chrome disconnected or the Haarness extension restarted. List tabs and inspect the page before repeating any mutation; its outcome may be unknown.";
 
@@ -442,6 +444,23 @@ function bridgePid(stack: Stack) {
 function chromeTab(stack: Stack, tabID: string) {
   return stack.host((host, id) => host.debug.registry.all().flatMap((entry: any) => entry.tabs).find((tab: any) => tab.id === id)?.tabId, tabID) as Promise<number>;
 }
+
+test("Stop Haarness in this browser stops every working chat and refuses calls until Resume", async ({ stack }) => {
+  const thread = await stack.thread("Stop everything");
+  const tab = await open(stack, thread, stack.site.url("shop", "/"));
+  const args = JSON.stringify({ tabID: tab.id, condition: "text", text: "Never shown", timeoutMs: 30_000 });
+  const turn = await stack.api.startTurn(thread.id, { requestId: crypto.randomUUID(), text: `!tool browser_wait ${args}` });
+  await expect.poll(async () => (await stack.host((host) => host.snapshot().chats)).some((chat: any) => chat.working), { timeout: 20_000 }).toBe(true);
+  // The keyboard shortcut (chrome.commands "stop-all").
+  await stack.host((host) => host.events.stopAll());
+  await expect.poll(async () => (await stack.api.getTurn(turn.id)).status, { timeout: 20_000 }).toBe("interrupted");
+  await expect.poll(async () => (await stack.api.listBrowserHosts()).hosts[0]?.stopped).toBe(true);
+  expect(failed(await stack.tool(thread, "browser_snapshot", { tabID: tab.id }))).toContain(CHROME_STOPPED);
+  expect(failed(await stack.tool(thread, "browser_tabs_open", { url: stack.site.url("shop", "/form"), browser: "chrome" }))).toContain(CHROME_STOPPED);
+  expect(await stack.host((host) => host.request({ type: "resume" }))).toEqual({ ok: true });
+  await expect.poll(async () => (await stack.api.listBrowserHosts()).hosts[0]?.stopped).toBe(false);
+  expect(value<{ content: string }>(await stack.tool(thread, "browser_snapshot", { tabID: tab.id })).content).toContain("Welcome to shop.test.");
+});
 
 test("a tab the user drags out of the group is theirs again", async ({ stack }) => {
   const thread = await stack.thread("Give it back");
@@ -666,4 +685,53 @@ test("a Chrome approval can be answered from the extension's popup", async ({ st
   // Allowed in this chat, as from Haarness itself.
   value(await stack.tool(thread, "browser_navigate", { tabID: value<Tab>(await call.done).id, url: stack.site.url("shop", "/form") }));
   await expect.poll(async () => (await stack.host((host) => host.snapshot().approvals)).length).toBe(0);
+});
+
+test("with the chat also open in Desktop, its tab list merges the Haarness browser's tabs and Chrome's", async ({ stack }) => {
+  const thread = await stack.thread("Both browsers");
+  const inChrome = await open(stack, thread, stack.site.url("shop", "/"));
+  // Desktop's Haarness browser for this chat, played through the SDK's host socket.
+  const desktop = {
+    id: `tab_${crypto.randomUUID()}`,
+    url: "https://desktop.example/",
+    title: "Desktop page",
+    loading: false,
+    canGoBack: false,
+    canGoForward: false,
+    generation: 0,
+  };
+  const state = { tabs: [desktop], focusedTabID: desktop.id };
+  const socket = await stack.api.connectBrowserHost(thread.id, { version: 1 });
+  const serving = (async () => {
+    for await (const message of socket as AsyncIterable<any>) {
+      if (message.type === "attached") socket.send({ type: "state", state });
+      if (message.type === "command")
+        socket.send({
+          type: "result",
+          id: message.id,
+          outcome: { type: "success", result: { value: message.command.inspect ? { resources: [], key: "inventory" } : state, files: [] } },
+        });
+    }
+  })().catch(() => {});
+  // Desktop answers the list (its inventory may need the user's approval once), Chrome's tabs are added.
+  const listed = async () => {
+    const call = stack.call(thread, "browser_tabs_list", {});
+    const done = await Promise.race([call.done.then(() => true), new Promise((resolve) => setTimeout(() => resolve(false), 1_500))]);
+    if (!done && (await stack.prompts(thread)).length) await stack.answer(thread, "always");
+    return value<{ tabs: Tab[]; browsers: { browser: string; available: boolean }[] }>(await call.done);
+  };
+  await expect.poll(async () => (await listed()).browsers.find((entry) => entry.browser === "haarness")?.available).toBe(true);
+  const list = await listed();
+  expect(list.tabs.map((entry) => [entry.id, entry.browser])).toEqual([
+    [desktop.id, "haarness"],
+    [inChrome.id, "chrome"],
+  ]);
+  expect(list.browsers.map((entry) => [entry.browser, entry.available])).toEqual([
+    ["haarness", true],
+    ["chrome", true],
+  ]);
+  // A Chrome tab is still served by Chrome.
+  expect(value<{ content: string }>(await stack.tool(thread, "browser_snapshot", { tabID: inChrome.id })).content).toContain("Welcome to shop.test.");
+  socket.close();
+  await serving;
 });
