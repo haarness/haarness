@@ -2382,5 +2382,6 @@
   "Versions": "เวอร์ชัน",
   "Extension folder": "โฟลเดอร์ส่วนขยาย",
   "Update ready": "พร้อมอัปเดต",
-  "Something went wrong.": "เกิดข้อผิดพลาด"
+  "Something went wrong.": "เกิดข้อผิดพลาด",
+  "This request also needs an approval outside Chrome. Answer it in Haarness.": "คำขอนี้ต้องได้รับการอนุมัติภายนอก Chrome ด้วย โปรดตอบใน Haarness"
 }

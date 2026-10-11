@@ -23,6 +23,8 @@ export interface UiApproval {
   title: string;
   project: string;
   lines: ApprovalLine[];
+  /** False when only Haarness can answer it: the request also needs an approval outside Chrome. */
+  answerable: boolean;
 }
 
 export interface UiProject {

@@ -2382,5 +2382,6 @@
   "Versions": "版本",
   "Extension folder": "扩展文件夹",
   "Update ready": "更新已就绪",
-  "Something went wrong.": "出了点问题。"
+  "Something went wrong.": "出了点问题。",
+  "This request also needs an approval outside Chrome. Answer it in Haarness.": "此请求还需要一项 Chrome 之外的批准。请在 Haarness 中回复。"
 }

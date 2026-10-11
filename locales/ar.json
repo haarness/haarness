@@ -2382,5 +2382,6 @@
   "Versions": "الإصدارات",
   "Extension folder": "مجلد الامتداد",
   "Update ready": "التحديث جاهز",
-  "Something went wrong.": "حدث خطأ ما."
+  "Something went wrong.": "حدث خطأ ما.",
+  "This request also needs an approval outside Chrome. Answer it in Haarness.": "يحتاج هذا الطلب أيضًا إلى موافقة خارج Chrome. أجب في Haarness."
 }

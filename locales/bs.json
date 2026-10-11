@@ -2382,5 +2382,6 @@
   "Versions": "Verzije",
   "Extension folder": "Mapa proširenja",
   "Update ready": "Ažuriranje spremno",
-  "Something went wrong.": "Nešto nije u redu."
+  "Something went wrong.": "Nešto nije u redu.",
+  "This request also needs an approval outside Chrome. Answer it in Haarness.": "Ovaj zahtjev traži i odobrenje izvan Chromea. Odgovori u Haarnessu."
 }

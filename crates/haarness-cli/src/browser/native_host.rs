@@ -512,22 +512,61 @@ impl Bridge {
             self.activity.remove(&id);
         }
         for server in servers {
-            if !self.servers.contains_key(&server.id) {
-                tracing::info!(server = %server.id, workspace = %server.workspace, capable = server.capable, "Haarness server found");
-                let link = if server.capable {
-                    Link::Connecting
-                } else {
-                    Link::Problem(NEEDS_RESTART.into())
-                };
-                self.servers.insert(
-                    server.id.clone(),
-                    Slot {
+            let link = if server.capable {
+                Link::Connecting
+            } else {
+                Link::Problem(NEEDS_RESTART.into())
+            };
+            match self.servers.get_mut(&server.id) {
+                None => {
+                    tracing::info!(server = %server.id, workspace = %server.workspace, capable = server.capable, "Haarness server found");
+                    self.servers.insert(
+                        server.id.clone(),
+                        Slot {
+                            server: server.clone(),
+                            link,
+                        },
+                    );
+                }
+                // Its record changed: the old address or token is no good, and
+                // a server that refused before may accept now.
+                Some(slot)
+                    if slot.server.base != server.base || slot.server.token != server.token =>
+                {
+                    tracing::info!(server = %server.id, "Haarness server record changed");
+                    *slot = Slot {
                         server: server.clone(),
                         link,
-                    },
-                );
+                    };
+                    self.stop_relay(&server.id);
+                    self.server_quiet(&server.id);
+                }
+                Some(_) => {}
             }
             self.start_relay(&server);
+        }
+        self.send_servers();
+    }
+
+    /// An explicit rescan also asks the servers that refused Chrome again.
+    fn retry_refused(&mut self) {
+        let refused: Vec<String> = self
+            .servers
+            .iter()
+            .filter(|(id, slot)| {
+                slot.server.capable
+                    && matches!(slot.link, Link::Problem(_))
+                    && self.relays.contains_key(*id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in refused {
+            self.stop_relay(&id);
+            if let Some(slot) = self.servers.get_mut(&id) {
+                slot.link = Link::Connecting;
+                let server = slot.server.clone();
+                self.start_relay(&server);
+            }
         }
         self.send_servers();
     }
@@ -567,8 +606,10 @@ impl Bridge {
                 if self.connected(&server).is_none() {
                     return;
                 }
+                // Shown in Chrome, but only Chrome's own may be answered there.
                 let ids: HashSet<String> = approvals
                     .iter()
+                    .filter(|approval| approval["answerable"] == true)
                     .filter_map(|approval| approval["id"].as_str().map(str::to_owned))
                     .collect();
                 let activity = json!({"type":"activity","server":server,"active":active,"approvals":approvals});
@@ -582,11 +623,16 @@ impl Bridge {
                 let Some(slot) = self.servers.get_mut(&server) else {
                     return;
                 };
+                // A refusal that lasts is answered when the server changes;
+                // asking it who it is again would only repeat the answer.
+                let lasting = problem.is_some();
                 slot.link = problem.map_or(Link::Connecting, Link::Problem);
                 self.server_quiet(&server);
                 self.send_servers();
-                let _ = self.discover.send(Discovered::Forget(server));
-                let _ = self.discover.send(Discovered::Rescan);
+                if !lasting {
+                    let _ = self.discover.send(Discovered::Forget(server));
+                    let _ = self.discover.send(Discovered::Rescan);
+                }
             }
         }
     }
@@ -639,6 +685,7 @@ impl Bridge {
             "download" => self.download(&message),
             "rescan" => {
                 let _ = self.discover.send(Discovered::Rescan);
+                self.retry_refused();
             }
             _ => tracing::debug!(kind = %kind, "ignoring an extension message"),
         }
@@ -858,12 +905,19 @@ mod tests {
     const ROOT_THREAD: &str = "019a0000-0000-7000-8000-000000000001";
     const SUBAGENT: &str = "019a0000-0000-7000-8000-000000000002";
     const PERMISSION: &str = "019a0000-0000-7000-8000-00000000000a";
+    const COMBINED: &str = "019a0000-0000-7000-8000-00000000000c";
 
     /// A Haarness server as the bridge sees it: `/v1/info`, the extension
     /// host socket, and the REST routes the extension may ask for.
     #[derive(Clone)]
     struct Fake {
         sockets: Arc<AtomicUsize>,
+        /// Upgrade requests, accepted or not.
+        attempts: Arc<AtomicUsize>,
+        /// `/v1/info` requests.
+        infos: Arc<AtomicUsize>,
+        /// Refuse the extension host socket with this status.
+        refuse: Arc<parking_lot::Mutex<Option<StatusCode>>>,
         received: mpsc::UnboundedSender<Value>,
         to_host: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<Value>>>,
         rest: Arc<parking_lot::Mutex<Vec<String>>>,
@@ -873,6 +927,9 @@ mod tests {
     struct Server {
         url: String,
         sockets: Arc<AtomicUsize>,
+        attempts: Arc<AtomicUsize>,
+        infos: Arc<AtomicUsize>,
+        refuse: Arc<parking_lot::Mutex<Option<StatusCode>>>,
         received: mpsc::UnboundedReceiver<Value>,
         to_host: mpsc::UnboundedSender<Value>,
         rest: Arc<parking_lot::Mutex<Vec<String>>>,
@@ -906,6 +963,10 @@ mod tests {
         Query(query): Query<HashMap<String, String>>,
         upgrade: WebSocketUpgrade,
     ) -> axum::response::Response {
+        fake.attempts.fetch_add(1, Ordering::SeqCst);
+        if let Some(status) = *fake.refuse.lock() {
+            return status.into_response();
+        }
         if !authorized(&headers) {
             return StatusCode::UNAUTHORIZED.into_response();
         }
@@ -963,6 +1024,9 @@ mod tests {
         let (to_host, to_host_receiver) = mpsc::unbounded_channel();
         let fake = Fake {
             sockets: Arc::new(AtomicUsize::new(0)),
+            attempts: Arc::default(),
+            infos: Arc::default(),
+            refuse: Arc::default(),
             received: received_sender,
             to_host: Arc::new(tokio::sync::Mutex::new(to_host_receiver)),
             rest: Arc::default(),
@@ -975,7 +1039,13 @@ mod tests {
             capable,
         );
         let app = Router::new()
-            .route("/v1/info", get(move || async move { Json(identity) }))
+            .route(
+                "/v1/info",
+                get(move |State(fake): State<Fake>| async move {
+                    fake.infos.fetch_add(1, Ordering::SeqCst);
+                    Json(identity)
+                }),
+            )
             .route("/v1/browser/extension/host", get(host))
             .route(
                 "/v1/turns/active",
@@ -1018,6 +1088,9 @@ mod tests {
         Server {
             url,
             sockets: fake.sockets,
+            attempts: fake.attempts,
+            infos: fake.infos,
+            refuse: fake.refuse,
             received,
             to_host,
             rest: fake.rest,
@@ -1273,7 +1346,9 @@ mod tests {
         // Activity: active chats and the explicit Chrome approvals waiting.
         *server.permissions.lock() = json!([
             {"permissionId":PERMISSION,"threadId":SUBAGENT,"permission":"browser_site","patterns":["chrome-browsing:019a:https://shop.example"],"explicit":true},
-            {"permissionId":"019a0000-0000-7000-8000-00000000000b","threadId":SUBAGENT,"permission":"bash","patterns":["rm -rf /"]}
+            {"permissionId":"019a0000-0000-7000-8000-00000000000b","threadId":SUBAGENT,"permission":"bash","patterns":["rm -rf /"]},
+            {"permissionId":COMBINED,"threadId":SUBAGENT,"permission":"multiple","explicit":true,
+                "patterns":["browser_site:chrome-uploads:019a:https://shop.example","external_directory:/home/a/Documents/*"]}
         ]);
         let activity = chrome
             .next_matching("activity", |message| message["approvals"] != json!([]))
@@ -1281,12 +1356,19 @@ mod tests {
         assert_eq!(
             activity,
             json!({"type":"activity","server":"server-a","active":[SUBAGENT],
-                "approvals":[{"id":PERMISSION,"thread":SUBAGENT,"patterns":["chrome-browsing:019a:https://shop.example"],"explicit":true}]})
+            "approvals":[
+                {"id":PERMISSION,"thread":SUBAGENT,"patterns":["chrome-browsing:019a:https://shop.example"],"explicit":true,"answerable":true},
+                {"id":COMBINED,"thread":SUBAGENT,"patterns":["chrome-uploads:019a:https://shop.example"],"explicit":true,"answerable":false}
+            ]})
         );
-        // Only a waiting Chrome approval may be answered from Chrome.
-        chrome.send(json!({"type":"answer","server":"server-a","permission":"019a0000-0000-7000-8000-00000000000b","decision":"always"})).await;
-        let refused = chrome.next("answered").await;
-        assert_eq!(refused["ok"], false);
+        // Only a waiting Chrome approval may be answered from Chrome: not
+        // another kind, and not one that also waits on something else.
+        for other in ["019a0000-0000-7000-8000-00000000000b", COMBINED] {
+            chrome.send(json!({"type":"answer","server":"server-a","permission":other,"decision":"always"})).await;
+            let refused = chrome.next("answered").await;
+            assert_eq!(refused["ok"], false);
+            assert_eq!(refused["permission"], other);
+        }
         chrome.send(json!({"type":"answer","server":"server-a","permission":PERMISSION,"decision":"always"})).await;
         assert_eq!(
             chrome.next("answered").await,
@@ -1318,7 +1400,9 @@ mod tests {
                 "{rest:?}"
             );
             assert!(
-                !rest.iter().any(|line| line.contains("00000000000b")),
+                !rest
+                    .iter()
+                    .any(|line| line.contains("00000000000b") || line.contains(COMBINED)),
                 "{rest:?}"
             );
         }
@@ -1407,6 +1491,93 @@ mod tests {
         assert_eq!(again["stopped"], true);
         assert_eq!(again["focusedAt"], 9);
         assert_eq!(server.sockets.load(Ordering::SeqCst), 2);
+        drop(chrome);
+        assert_eq!(task.await.unwrap(), Exit::Closed);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_lasting_refusal_waits_for_the_server_to_change() {
+        let root = temp("bridge-refused");
+        let mut server = fake_server(true).await;
+        *server.refuse.lock() = Some(StatusCode::FORBIDDEN);
+        let url = server.url.clone();
+        let record = |token: &str| {
+            write_record(
+                &root.join("cache"),
+                "project",
+                &url,
+                token,
+                std::process::id(),
+                "/work/project",
+            );
+        };
+        record(TOKEN);
+        let (mut chrome, task) = bridge(&root, unwatched(&root));
+        chrome.send(hello(1)).await;
+        let refused = chrome
+            .next_matching("servers", |message| {
+                message["servers"][0]["state"] == "error"
+            })
+            .await;
+        assert!(
+            refused["servers"][0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("does not accept Chrome"),
+            "{refused}"
+        );
+        // Retrying every few seconds would only hear the same answer.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(server.attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(server.infos.load(Ordering::SeqCst), 1, "no rediscovery");
+
+        // A changed record (here, a new token) is asked again.
+        record("rotated-token");
+        let attempts = server.attempts.clone();
+        let attempted = |count| {
+            let attempts = attempts.clone();
+            async move {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while attempts.load(Ordering::SeqCst) < count {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .expect("the bridge asked again");
+            }
+        };
+        attempted(2).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(server.attempts.load(Ordering::SeqCst), 2);
+
+        // So is a refused server when the extension asks to look again.
+        *server.refuse.lock() = None;
+        record(TOKEN);
+        attempted(3).await;
+        chrome
+            .next_matching("servers", |message| {
+                message["servers"][0]["state"] == "connected"
+            })
+            .await;
+        server.next("hello").await;
+        assert_eq!(server.sockets.load(Ordering::SeqCst), 1);
+        *server.refuse.lock() = Some(StatusCode::NOT_IMPLEMENTED);
+        server.to_host.send(json!({"type":"close-me"})).unwrap();
+        chrome
+            .next_matching("servers", |message| {
+                message["servers"][0]["state"] == "error"
+            })
+            .await;
+        let before = server.attempts.load(Ordering::SeqCst);
+        *server.refuse.lock() = None;
+        chrome.send(json!({"type":"rescan"})).await;
+        attempted(before + 1).await;
+        chrome
+            .next_matching("servers", |message| {
+                message["servers"][0]["state"] == "connected"
+            })
+            .await;
         drop(chrome);
         assert_eq!(task.await.unwrap(), Exit::Closed);
         fs::remove_dir_all(root).unwrap();
