@@ -203,12 +203,15 @@ fn real_cli_save_inspect_dry_run_restore_conflict_force_and_runtime_agent_discov
         !fixture.root.join("source/data/logs").exists(),
         "save does not start runtime logging"
     );
-    let manifest = fixture.ok("target", &["profile", "inspect", file]);
+    let manifest = fixture.ok("target", &["profile", "inspect", file, "--json"]);
     assert_eq!(manifest["name"], "Portable engineering");
-    let dry = fixture.ok("target", &["profile", "restore", file, "--dry-run"]);
+    let dry = fixture.ok(
+        "target",
+        &["profile", "restore", file, "--dry-run", "--json"],
+    );
     assert_eq!(dry["dryRun"], true);
     assert!(!fixture.root.join("target/config/haarness.json").exists());
-    fixture.ok("target", &["profile", "restore", file]);
+    fixture.ok("target", &["profile", "restore", file, "--json"]);
     for relative in [
         "config/haarness.json",
         "config/agents/portable-review.md",
@@ -236,7 +239,7 @@ fn real_cli_save_inspect_dry_run_restore_conflict_force_and_runtime_agent_discov
             .unwrap()
             .contains("alternate")
     );
-    fixture.ok("target", &["profile", "restore", file, "--force"]);
+    fixture.ok("target", &["profile", "restore", file, "--force", "--json"]);
     let agents = fixture.ok("target", &["agents", "--json"]);
     assert!(
         agents
@@ -293,6 +296,7 @@ fn real_cli_save_inspect_dry_run_restore_conflict_force_and_runtime_agent_discov
                 scope,
                 "--output",
                 output.to_str().unwrap(),
+                "--json",
             ],
         );
         assert!(
@@ -325,6 +329,7 @@ async fn real_cloud_upload_discovery_download_restore_auth_and_restart_persisten
             "Cloud engineering",
             "--output",
             file.to_str().unwrap(),
+            "--json",
         ],
     );
     let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -417,7 +422,15 @@ async fn real_cloud_upload_discovery_download_restore_auth_and_restart_persisten
     let url = fixture.start(port, &token).await;
     let listed = fixture.ok(
         "target",
-        &["profile", "--url", &url, "--token", &token, "cloud-list"],
+        &[
+            "profile",
+            "--url",
+            &url,
+            "--token",
+            &token,
+            "cloud-list",
+            "--json",
+        ],
     );
     assert_eq!(listed.as_array().unwrap().len(), 2);
     fixture.ok(
@@ -430,6 +443,7 @@ async fn real_cloud_upload_discovery_download_restore_auth_and_restart_persisten
             &token,
             "cloud-delete",
             &id,
+            "--json",
         ],
     );
     assert_eq!(

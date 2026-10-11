@@ -391,6 +391,11 @@ impl Archive {
                 files.remove(&path);
             }
         }
+        for (path, (data, _)) in &mut files {
+            if is_machine_settings(path) {
+                *data = with_machine_settings(data, None);
+            }
+        }
         let manifest = Manifest {
             format: "haarness.profile".into(),
             version: 1,
@@ -427,6 +432,7 @@ impl Archive {
         let _lock = lock(&roots.data.join(".profile-restore.lock"))?;
         let mut targets = Vec::new();
         let mut unique = BTreeSet::new();
+        let mut existing = Vec::new();
         for entry in &self.manifest.entries {
             ensure!(
                 allowed(&entry.path, self.manifest.scope),
@@ -441,11 +447,7 @@ impl Archive {
                     "profile target is not a regular file: {}",
                     target.display()
                 );
-                ensure!(
-                    force,
-                    "profile restore would overwrite {}; use --force",
-                    target.display()
-                );
+                existing.push(target.display().to_string());
             }
             for parent in target.ancestors().skip(1) {
                 if let Ok(metadata) = fs::symlink_metadata(parent) {
@@ -458,9 +460,16 @@ impl Archive {
             }
             targets.push(target);
         }
+        // A dry run reports every file it would overwrite instead of
+        // stopping at the first one.
         if dry_run {
             return Ok(targets);
         }
+        ensure!(
+            force || existing.is_empty(),
+            "profile restore would overwrite {}; use --force",
+            existing.join(", ")
+        );
         let mut staged = Vec::new();
         let preparation = (|| -> Result<()> {
             for (entry, target) in self.manifest.entries.iter().zip(&targets) {
@@ -472,13 +481,16 @@ impl Archive {
                     target.clone(),
                     parent.join(format!(".haarness-profile-{}.bak", Uuid::now_v7())),
                 ));
-                private_write(
-                    &file,
-                    self.files
-                        .get(&entry.path)
-                        .context("profile file missing")?,
-                    entry.executable,
-                )?;
+                let data = self
+                    .files
+                    .get(&entry.path)
+                    .context("profile file missing")?;
+                let data = if is_machine_settings(&entry.path) {
+                    with_machine_settings(data, machine_settings(target))
+                } else {
+                    data.clone()
+                };
+                private_write(&file, &data, entry.executable)?;
             }
             Ok(())
         })();
@@ -528,6 +540,72 @@ impl Archive {
         result?;
         Ok(targets)
     }
+}
+
+/// Global configuration files that may hold this machine's usage-statistics
+/// choice (`telemetry.usage`).
+fn is_machine_settings(path: &str) -> bool {
+    matches!(
+        path,
+        "global/config/haarness.json" | "global/config/haarness.jsonc"
+    )
+}
+
+/// The `telemetry` setting in an existing configuration file.
+fn machine_settings(path: &Path) -> Option<serde_json::Value> {
+    let text = fs::read_to_string(path).ok()?;
+    jsonc_parser::parse_to_serde_value::<serde_json::Value>(
+        &text,
+        &jsonc_parser::ParseOptions::default(),
+    )
+    .ok()?
+    .get("telemetry")
+    .cloned()
+}
+
+/// Consent to usage statistics belongs to one machine: a profile never
+/// carries it, and restoring one keeps the target's own choice. This is
+/// `data` with its `telemetry` setting replaced by `kept`, or removed;
+/// comments and formatting stay. Text that is not a JSON object is left as is.
+fn with_machine_settings(data: &[u8], kept: Option<serde_json::Value>) -> Vec<u8> {
+    use jsonc_parser::cst::{CstInputValue, CstRootNode};
+    fn input(value: serde_json::Value) -> CstInputValue {
+        match value {
+            serde_json::Value::Null => CstInputValue::Null,
+            serde_json::Value::Bool(value) => CstInputValue::Bool(value),
+            serde_json::Value::Number(value) => CstInputValue::Number(value.to_string()),
+            serde_json::Value::String(value) => CstInputValue::String(value),
+            serde_json::Value::Array(values) => {
+                CstInputValue::Array(values.into_iter().map(input).collect())
+            }
+            serde_json::Value::Object(values) => CstInputValue::Object(
+                values
+                    .into_iter()
+                    .map(|(key, value)| (key, input(value)))
+                    .collect(),
+            ),
+        }
+    }
+    let Ok(text) = std::str::from_utf8(data) else {
+        return data.to_vec();
+    };
+    let Ok(root) = CstRootNode::parse(text, &jsonc_parser::ParseOptions::default()) else {
+        return data.to_vec();
+    };
+    let Some(object) = root.object_value() else {
+        return data.to_vec();
+    };
+    let current = object.get("telemetry");
+    if current.is_none() && kept.is_none() {
+        return data.to_vec();
+    }
+    if let Some(property) = current {
+        property.remove();
+    }
+    if let Some(value) = kept {
+        object.append("telemetry", input(value));
+    }
+    root.to_string().into_bytes()
 }
 
 fn validate_name(name: &str) -> Result<()> {

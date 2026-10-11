@@ -9,6 +9,7 @@ license.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 fs2.workspace = true
+jsonc-parser.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

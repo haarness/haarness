@@ -172,6 +172,73 @@ fn conflict_preflight_changes_nothing_and_force_replaces_only_listed_files() {
     );
 }
 
+#[test]
+fn usage_statistics_consent_stays_with_each_machine() {
+    let fixture = Fixture::new();
+    let source = fixture.roots("source");
+    put(
+        &source.config,
+        "haarness.json",
+        "{\n  // shared model\n  \"model\": \"echo/echo-1\",\n  \"telemetry\": { \"usage\": true }\n}\n",
+    );
+    let bytes = Archive::capture(&source, "consent", Scope::Global).unwrap();
+    let mut archive = Archive::decode(&bytes).unwrap();
+    let saved = String::from_utf8(archive.files["global/config/haarness.json"].clone()).unwrap();
+    assert!(!saved.contains("telemetry"), "{saved}");
+    assert!(saved.contains("// shared model") && saved.contains("echo/echo-1"));
+
+    // An archive saved before consent was left out still keeps the target's
+    // own choice, and never adds one the target did not make.
+    archive.files.insert(
+        "global/config/haarness.json".into(),
+        br#"{"model":"echo/echo-2","telemetry":{"usage":true}}"#.to_vec(),
+    );
+    let destination = fixture.roots("destination");
+    put(
+        &destination.config,
+        "haarness.json",
+        r#"{"telemetry":{"usage":false}}"#,
+    );
+    archive.restore(&destination, true, false).unwrap();
+    let restored: serde_json::Value =
+        serde_json::from_slice(&fs::read(destination.config.join("haarness.json")).unwrap())
+            .unwrap();
+    assert_eq!(restored["model"], "echo/echo-2");
+    assert_eq!(restored["telemetry"]["usage"], false);
+
+    let fresh = fixture.roots("fresh");
+    archive.restore(&fresh, false, false).unwrap();
+    let restored: serde_json::Value =
+        serde_json::from_slice(&fs::read(fresh.config.join("haarness.json")).unwrap()).unwrap();
+    assert_eq!(restored["model"], "echo/echo-2");
+    assert!(restored.get("telemetry").is_none());
+}
+
+#[test]
+fn dry_run_lists_every_target_and_a_refusal_names_every_conflict() {
+    let fixture = Fixture::new();
+    let source = fixture.roots("source");
+    put(&source.config, "AGENTS.md", "new instructions");
+    put(&source.config, "agents/a.md", "a");
+    put(&source.project, "haarness.json", "{}");
+    let archive =
+        Archive::decode(&Archive::capture(&source, "conflicts", Scope::Both).unwrap()).unwrap();
+    let destination = fixture.roots("destination");
+    put(&destination.config, "AGENTS.md", "mine");
+    put(&destination.project, "haarness.json", "mine");
+    let targets = archive.restore(&destination, false, true).unwrap();
+    assert_eq!(targets.len(), 3);
+    let error = archive
+        .restore(&destination, false, false)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("AGENTS.md") && error.contains("haarness.json"),
+        "{error}"
+    );
+    assert!(!destination.config.join("agents/a.md").exists());
+}
+
 fn crafted(
     path: &str,
     version: u32,

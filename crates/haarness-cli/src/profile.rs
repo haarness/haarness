@@ -24,6 +24,7 @@ pub struct ProfileArgs {
         hide_env_values = true
     )]
     token: Option<String>,
+    /// Print machine-readable JSON instead of a summary.
     #[arg(long, global = true)]
     json: bool,
 }
@@ -49,11 +50,15 @@ impl From<Selection> for Scope {
 enum Command {
     /// Save portable configuration; excludes credential stores and runtime state.
     Save {
+        /// Profile name.
         name: String,
+        /// Archive file to write (default: <name>.profile.zip here).
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Global configuration, this project's (local), or both.
         #[arg(long, value_enum, default_value = "both")]
         scope: Selection,
+        /// Replace an existing archive file.
         #[arg(long)]
         force: bool,
         /// Also upload the saved archive to the configured catalog.
@@ -61,46 +66,72 @@ enum Command {
         cloud: bool,
     },
     /// Validate an archive and show its manifest without restoring anything.
-    Inspect { file: PathBuf },
+    Inspect {
+        /// Profile archive (.profile.zip).
+        file: PathBuf,
+    },
     /// Restore configuration into this installation and --workspace.
     Restore {
+        /// Profile archive (.profile.zip).
         file: PathBuf,
+        /// Overwrite files that already exist.
         #[arg(long)]
         force: bool,
+        /// List the files a restore would write, and which exist, without
+        /// changing anything.
         #[arg(long)]
         dry_run: bool,
     },
     /// Upload a validated archive. Each upload receives a new immutable ID.
-    CloudPush { file: PathBuf },
+    CloudPush {
+        /// Profile archive (.profile.zip).
+        file: PathBuf,
+    },
     /// Discover stored profiles by name, newest first.
     CloudList {
+        /// Only profiles whose name contains this text.
         #[arg(long, default_value = "")]
         query: String,
+        /// Skip this many profiles.
         #[arg(long, default_value_t = 0)]
         offset: usize,
+        /// Show at most this many profiles (1-100).
         #[arg(long, default_value_t = 100)]
         limit: usize,
     },
     /// Inspect a stored profile's metadata.
-    CloudGet { id: Uuid },
+    CloudGet {
+        /// Stored profile id.
+        id: Uuid,
+    },
     /// Download and validate an archive without restoring it.
     CloudDownload {
+        /// Stored profile id.
         id: Uuid,
+        /// Archive file to write.
         #[arg(short, long)]
         output: PathBuf,
+        /// Replace an existing archive file.
         #[arg(long)]
         force: bool,
     },
     /// Download and restore a profile using the same local safety checks.
     CloudRestore {
+        /// Stored profile id.
         id: Uuid,
+        /// Overwrite files that already exist.
         #[arg(long)]
         force: bool,
+        /// List the files a restore would write, and which exist, without
+        /// changing anything.
         #[arg(long)]
         dry_run: bool,
     },
     /// Delete one archive from the catalog.
-    CloudDelete { id: Uuid },
+    CloudDelete {
+        /// Stored profile id.
+        id: Uuid,
+    },
 }
 
 pub async fn run(paths: &super::Paths, workspace: &Path, args: &ProfileArgs) -> Result<()> {
@@ -186,15 +217,185 @@ pub async fn run(paths: &super::Paths, workspace: &Path, args: &ProfileArgs) -> 
     if args.json {
         println!("{}", serde_json::to_string(&result)?);
     } else {
-        println!("{}", serde_json::to_string_pretty(&result)?);
+        print!("{}", summary(&args.command, &result)?);
     }
     Ok(())
 }
 
 fn restore(roots: &Roots, bytes: &[u8], force: bool, dry_run: bool) -> Result<serde_json::Value> {
     let archive = Archive::decode(bytes)?;
-    let targets = archive.restore(roots, force, dry_run)?;
-    Ok(json!({"name":archive.manifest.name, "dryRun":dry_run, "targets":targets}))
+    // Which targets already exist, before a restore replaces them.
+    let planned = archive.restore(roots, force, true)?;
+    let overwrite: Vec<_> = planned
+        .iter()
+        .filter(|target| target.exists())
+        .cloned()
+        .collect();
+    let targets = if dry_run {
+        planned
+    } else {
+        archive.restore(roots, force, false)?
+    };
+    Ok(json!({
+        "name": archive.manifest.name,
+        "dryRun": dry_run,
+        "targets": targets,
+        "overwrite": overwrite,
+    }))
+}
+
+/// The human-readable result of a profile command; `--json` prints the data.
+fn summary(command: &Command, result: &serde_json::Value) -> Result<String> {
+    use std::fmt::Write as _;
+    let mut text = String::new();
+    match command {
+        Command::Save { .. } => {
+            let manifest: haarness_profiles::Manifest =
+                serde_json::from_value(result["manifest"].clone())?;
+            writeln!(
+                text,
+                "Saved profile \"{}\" ({}) to {}",
+                manifest.name,
+                files(manifest.entries.len()),
+                result["output"].as_str().unwrap_or_default()
+            )?;
+            if let Ok(record) =
+                serde_json::from_value::<haarness_profiles::Record>(result["cloud"].clone())
+            {
+                writeln!(text, "Uploaded as {}", record.id)?;
+            }
+        }
+        Command::Inspect { .. } => {
+            let manifest: haarness_profiles::Manifest = serde_json::from_value(result.clone())?;
+            writeln!(
+                text,
+                "Profile \"{}\", saved {}, {} scope, {}:",
+                manifest.name,
+                local_time(manifest.created_at),
+                scope_name(manifest.scope),
+                files(manifest.entries.len())
+            )?;
+            for entry in &manifest.entries {
+                writeln!(text, "  {}  ({} bytes)", entry.path, entry.size)?;
+            }
+        }
+        Command::Restore { force, .. } | Command::CloudRestore { force, .. } => {
+            let paths = |key: &str| -> Vec<&str> {
+                result[key]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect()
+            };
+            let (targets, overwrite) = (paths("targets"), paths("overwrite"));
+            let name = result["name"].as_str().unwrap_or_default();
+            if result["dryRun"] == true {
+                writeln!(
+                    text,
+                    "Restoring profile \"{name}\" would write {}:",
+                    files(targets.len())
+                )?;
+                for target in &targets {
+                    let action = if overwrite.contains(target) {
+                        "overwrite"
+                    } else {
+                        "create"
+                    };
+                    writeln!(text, "  {action:<9}  {target}")?;
+                }
+                if !force && !overwrite.is_empty() {
+                    writeln!(
+                        text,
+                        "Add --force to overwrite the {} that already {}.",
+                        files(overwrite.len()),
+                        if overwrite.len() == 1 {
+                            "exists"
+                        } else {
+                            "exist"
+                        }
+                    )?;
+                }
+            } else {
+                writeln!(
+                    text,
+                    "Restored profile \"{name}\": wrote {} ({} replaced).",
+                    files(targets.len()),
+                    overwrite.len()
+                )?;
+            }
+        }
+        Command::CloudPush { .. } => {
+            let record: haarness_profiles::Record = serde_json::from_value(result.clone())?;
+            writeln!(
+                text,
+                "Uploaded profile \"{}\" as {}",
+                record.name, record.id
+            )?;
+        }
+        Command::CloudList { .. } => {
+            let records: Vec<haarness_profiles::Record> = serde_json::from_value(result.clone())?;
+            if records.is_empty() {
+                writeln!(text, "No stored profiles.")?;
+            }
+            for record in records {
+                writeln!(
+                    text,
+                    "{}  {}  {}, {} scope, {}",
+                    record.id,
+                    record.name,
+                    local_time(record.created_at),
+                    scope_name(record.scope),
+                    files(record.entry_count)
+                )?;
+            }
+        }
+        Command::CloudGet { .. } => {
+            let record: haarness_profiles::Record = serde_json::from_value(result.clone())?;
+            writeln!(
+                text,
+                "Profile \"{}\" ({}): saved {}, uploaded {}, {} scope, {}, {} bytes",
+                record.name,
+                record.id,
+                local_time(record.created_at),
+                local_time(record.uploaded_at),
+                scope_name(record.scope),
+                files(record.entry_count),
+                record.size_bytes
+            )?;
+        }
+        Command::CloudDownload { id, .. } => {
+            writeln!(
+                text,
+                "Downloaded {id} to {}",
+                result["output"].as_str().unwrap_or_default()
+            )?;
+        }
+        Command::CloudDelete { id } => writeln!(text, "Deleted {id}")?,
+    }
+    Ok(text)
+}
+
+fn files(count: usize) -> String {
+    if count == 1 {
+        "1 file".into()
+    } else {
+        format!("{count} files")
+    }
+}
+
+fn scope_name(scope: Scope) -> &'static str {
+    match scope {
+        Scope::Global => "global",
+        Scope::Local => "project",
+        Scope::Both => "global and project",
+    }
+}
+
+fn local_time(time: chrono::DateTime<chrono::Utc>) -> String {
+    time.with_timezone(&chrono::Local)
+        .format("%Y-%m-%d %H:%M")
+        .to_string()
 }
 
 fn slug(name: &str) -> String {
