@@ -1529,6 +1529,31 @@
     }
   },
   {
+    "name": "usage_summary",
+    "method": "GET",
+    "path": "/api/v1/telemetry/usage",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/UsageSummaryResponse"
+    },
+    "query": {
+      "$ref": "#/components/schemas/UsageSummaryQuery"
+    }
+  },
+  {
+    "name": "report_usage",
+    "method": "POST",
+    "path": "/api/v1/telemetry/usage",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/UsageReportResponse"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/UsageReportRequest"
+    }
+  },
+  {
     "name": "list_workspaces",
     "method": "GET",
     "path": "/api/v1/workspaces",
@@ -1946,6 +1971,18 @@
     "contentType": "application/json",
     "body": {
       "$ref": "#/components/schemas/ReviewVersionRequest"
+    }
+  },
+  {
+    "name": "internal_usage_summary",
+    "method": "GET",
+    "path": "/internal/ops/telemetry/usage",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/UsageOpsResponse"
+    },
+    "query": {
+      "$ref": "#/components/schemas/InternalUsageSummaryQuery"
     }
   },
   {

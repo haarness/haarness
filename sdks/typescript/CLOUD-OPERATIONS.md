@@ -125,6 +125,8 @@
 | `save_session_agent` | `saveSessionAgent` | `POST /api/v1/sessions/{id}/save-agent` |
 | `start_agent_session` | `startAgentSession` | `POST /api/v1/sessions/{id}/start` |
 | `stop_agent_session` | `stopAgentSession` | `POST /api/v1/sessions/{id}/stop` |
+| `usage_summary` | `usageSummary` | `GET /api/v1/telemetry/usage` |
+| `report_usage` | `reportUsage` | `POST /api/v1/telemetry/usage` |
 | `list_workspaces` | `listWorkspaces` | `GET /api/v1/workspaces` |
 | `create_workspace` | `createWorkspace` | `POST /api/v1/workspaces` |
 | `workspace_options` | `workspaceOptions` | `GET /api/v1/workspaces/options` |
@@ -162,6 +164,7 @@
 | `internal_retry_job` | `internalRetryJob` | `POST /internal/ops/jobs/{id}/retry` |
 | `internal_ledger_check` | `internalLedgerCheck` | `GET /internal/ops/ledger-check` |
 | `internal_review_version` | `internalReviewVersion` | `POST /internal/ops/marketplace/versions/{id}/review` |
+| `internal_usage_summary` | `internalUsageSummary` | `GET /internal/ops/telemetry/usage` |
 | `internal_mfa_reset` | `internalMfaReset` | `POST /internal/ops/users/{id}/mfa/reset` |
 | `publish_release` | `publishRelease` | `POST /internal/releases` |
 | `upload_release_artifact` | `uploadReleaseArtifact` | `POST /internal/releases/artifacts` |

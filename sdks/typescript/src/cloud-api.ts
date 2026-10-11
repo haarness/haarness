@@ -482,6 +482,14 @@ export class CloudApi extends Transport {
   stopAgentSession(id: string, options: RequestOptions = {}): Promise<T.WorkspaceOperationResponse> {
     return this.request("POST", `/api/v1/sessions/${this.segment(id)}/stop`, { binaryBody: false, binaryResponse: false, ...options });
   }
+  /** GET /api/v1/telemetry/usage */
+  usageSummary(query: T.UsageSummaryQuery = {}, options: RequestOptions = {}): Promise<T.UsageSummaryResponse> {
+    return this.request("GET", `/api/v1/telemetry/usage`, { query, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /api/v1/telemetry/usage */
+  reportUsage(body: T.UsageReportRequest, options: RequestOptions = {}): Promise<T.UsageReportResponse> {
+    return this.request("POST", `/api/v1/telemetry/usage`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
   /** GET /api/v1/workspaces */
   listWorkspaces(query: T.ListWorkspacesQuery = {}, options: RequestOptions = {}): Promise<T.Page_WorkspaceDto> {
     return this.request("GET", `/api/v1/workspaces`, { query, binaryBody: false, binaryResponse: false, ...options });
@@ -629,6 +637,10 @@ export class CloudApi extends Transport {
   /** POST /internal/ops/marketplace/versions/{id}/review */
   internalReviewVersion(id: string, body: T.ReviewVersionRequest, options: RequestOptions = {}): Promise<T.ReviewVersionResponse> {
     return this.request("POST", `/internal/ops/marketplace/versions/${this.segment(id)}/review`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /internal/ops/telemetry/usage */
+  internalUsageSummary(query: T.InternalUsageSummaryQuery = {}, options: RequestOptions = {}): Promise<T.UsageOpsResponse> {
+    return this.request("GET", `/internal/ops/telemetry/usage`, { query, binaryBody: false, binaryResponse: false, ...options });
   }
   /** POST /internal/ops/users/{id}/mfa/reset */
   internalMfaReset(id: string, options: RequestOptions = {}): Promise<void> {

@@ -479,6 +479,14 @@ class CloudApi(Transport):
         """POST /api/v1/sessions/{id}/stop."""
         return cast("T.WorkspaceOperationResponse", self.request('POST', f'/api/v1/sessions/{self.segment(id)}/stop', binary_body=False, binary_response=False, options=options))
 
+    def usage_summary(self, query: T.UsageSummaryQuery | None = None, *, options: RequestOptions | None = None) -> T.UsageSummaryResponse:
+        """GET /api/v1/telemetry/usage."""
+        return cast("T.UsageSummaryResponse", self.request('GET', f'/api/v1/telemetry/usage', query=query, binary_body=False, binary_response=False, options=options))
+
+    def report_usage(self, body: T.UsageReportRequest, *, options: RequestOptions | None = None) -> T.UsageReportResponse:
+        """POST /api/v1/telemetry/usage."""
+        return cast("T.UsageReportResponse", self.request('POST', f'/api/v1/telemetry/usage', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
     def list_workspaces(self, query: T.ListWorkspacesQuery | None = None, *, options: RequestOptions | None = None) -> T.Page_WorkspaceDto:
         """GET /api/v1/workspaces."""
         return cast("T.Page_WorkspaceDto", self.request('GET', f'/api/v1/workspaces', query=query, binary_body=False, binary_response=False, options=options))
@@ -626,6 +634,10 @@ class CloudApi(Transport):
     def internal_review_version(self, id: str, body: T.ReviewVersionRequest, *, options: RequestOptions | None = None) -> T.ReviewVersionResponse:
         """POST /internal/ops/marketplace/versions/{id}/review."""
         return cast("T.ReviewVersionResponse", self.request('POST', f'/internal/ops/marketplace/versions/{self.segment(id)}/review', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def internal_usage_summary(self, query: T.InternalUsageSummaryQuery | None = None, *, options: RequestOptions | None = None) -> T.UsageOpsResponse:
+        """GET /internal/ops/telemetry/usage."""
+        return cast("T.UsageOpsResponse", self.request('GET', f'/internal/ops/telemetry/usage', query=query, binary_body=False, binary_response=False, options=options))
 
     def internal_mfa_reset(self, id: str, *, options: RequestOptions | None = None) -> None:
         """POST /internal/ops/users/{id}/mfa/reset."""
@@ -1168,6 +1180,14 @@ class AsyncCloudApi(AsyncTransport):
         """POST /api/v1/sessions/{id}/stop."""
         return cast("T.WorkspaceOperationResponse", await self.request('POST', f'/api/v1/sessions/{self.segment(id)}/stop', binary_body=False, binary_response=False, options=options))
 
+    async def usage_summary(self, query: T.UsageSummaryQuery | None = None, *, options: RequestOptions | None = None) -> T.UsageSummaryResponse:
+        """GET /api/v1/telemetry/usage."""
+        return cast("T.UsageSummaryResponse", await self.request('GET', f'/api/v1/telemetry/usage', query=query, binary_body=False, binary_response=False, options=options))
+
+    async def report_usage(self, body: T.UsageReportRequest, *, options: RequestOptions | None = None) -> T.UsageReportResponse:
+        """POST /api/v1/telemetry/usage."""
+        return cast("T.UsageReportResponse", await self.request('POST', f'/api/v1/telemetry/usage', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
     async def list_workspaces(self, query: T.ListWorkspacesQuery | None = None, *, options: RequestOptions | None = None) -> T.Page_WorkspaceDto:
         """GET /api/v1/workspaces."""
         return cast("T.Page_WorkspaceDto", await self.request('GET', f'/api/v1/workspaces', query=query, binary_body=False, binary_response=False, options=options))
@@ -1315,6 +1335,10 @@ class AsyncCloudApi(AsyncTransport):
     async def internal_review_version(self, id: str, body: T.ReviewVersionRequest, *, options: RequestOptions | None = None) -> T.ReviewVersionResponse:
         """POST /internal/ops/marketplace/versions/{id}/review."""
         return cast("T.ReviewVersionResponse", await self.request('POST', f'/internal/ops/marketplace/versions/{self.segment(id)}/review', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def internal_usage_summary(self, query: T.InternalUsageSummaryQuery | None = None, *, options: RequestOptions | None = None) -> T.UsageOpsResponse:
+        """GET /internal/ops/telemetry/usage."""
+        return cast("T.UsageOpsResponse", await self.request('GET', f'/internal/ops/telemetry/usage', query=query, binary_body=False, binary_response=False, options=options))
 
     async def internal_mfa_reset(self, id: str, *, options: RequestOptions | None = None) -> None:
         """POST /internal/ops/users/{id}/mfa/reset."""
