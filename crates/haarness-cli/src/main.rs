@@ -11533,6 +11533,7 @@ mod tests {
     fn yolo_leaves_requests_that_always_ask_to_a_person() {
         let pending = |allow_always| haarness_protocol::PendingPermissionInfo {
             allow_always,
+            explicit: false,
             repository_scope: None,
             permission_id: "p".into(),
             operation: "cloud:session_create".into(),
@@ -11562,6 +11563,7 @@ mod tests {
         let root = ThreadId::new();
         let request = haarness_protocol::PendingPermissionInfo {
             allow_always: None,
+            explicit: false,
             repository_scope: None,
             permission_id: "late".into(),
             operation: "external_directory:/outside".into(),

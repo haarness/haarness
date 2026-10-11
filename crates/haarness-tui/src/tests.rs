@@ -2201,6 +2201,7 @@ fn new_item_kinds_render_in_the_transcript() {
     app.pending_permissions
         .push(haarness_protocol::PendingPermissionInfo {
             allow_always: None,
+            explicit: false,
             repository_scope: None,
             permission_id: "p1".into(),
             operation: "bash:rm -rf target".into(),
@@ -7726,6 +7727,7 @@ fn pending_permission_fixture(
 ) -> haarness_protocol::PendingPermissionInfo {
     haarness_protocol::PendingPermissionInfo {
         allow_always: None,
+        explicit: false,
         repository_scope: None,
         permission_id: id.into(),
         operation: "bash:git push origin main".into(),
@@ -7873,6 +7875,7 @@ fn an_always_rule_identical_to_the_subject_is_not_repeated() {
     app.pending_permissions
         .push(haarness_protocol::PendingPermissionInfo {
             allow_always: None,
+            explicit: false,
             repository_scope: None,
             permission_id: "perm-external".into(),
             operation: format!("external_directory:{path}"),
@@ -9187,6 +9190,7 @@ async fn mouse_hover_paints_chrome_but_keeps_transcript_rows_quiet() {
     app.pending_permissions
         .push(haarness_protocol::PendingPermissionInfo {
             allow_always: None,
+            explicit: false,
             repository_scope: None,
             permission_id: "permission-hover".into(),
             operation: "bash:echo hover".into(),
@@ -14594,6 +14598,7 @@ async fn yolo_answers_its_own_conversation_once_and_leaves_the_rest() {
         workspace_http_status_client(vec![(200, "{}".into()), (200, "{}".into())], false).await;
     let waiting = |id: &str, thread_id, root| haarness_protocol::PendingPermissionInfo {
         allow_always: None,
+        explicit: false,
         repository_scope: None,
         permission_id: id.into(),
         operation: "external_directory:/tmp/x".into(),
