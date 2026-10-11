@@ -4468,7 +4468,28 @@ fn requested_run_model(
         let model = info.models.first()?;
         Some((info.id.clone(), model.id.clone()))
     };
+    // Many providers' own model ids hold a slash (`--provider together -m
+    // zai-org/GLM-5.1`, `--provider openrouter -m anthropic/…`). The chosen
+    // provider keeps such a model when it lists it, or when the part before
+    // the slash names no provider here.
+    let explicit = |provider: &str, model: &str| {
+        let (prefix, rest) = model.split_once('/')?;
+        if prefix.trim().is_empty() || rest.trim().is_empty() {
+            return None;
+        }
+        let id = listed_id(provider);
+        let info = providers.iter().find(|info| info.id == id)?;
+        let prefix_listed = providers
+            .iter()
+            .any(|candidate| candidate.id == listed_id(prefix));
+        (info.models.iter().any(|offered| offered.id == model) || !prefix_listed)
+            .then(|| (info.id.clone(), model.to_owned()))
+    };
+    let explicit = provider
+        .zip(model.map(str::trim))
+        .and_then(|(provider, model)| explicit(provider, model));
     let mut chosen = match (provider, model.map(str::trim)) {
+        _ if explicit.is_some() => explicit.expect("checked above"),
         (_, Some(model)) if model.contains('/') => {
             qualified_run_model(provider.unwrap_or_default(), model)?
         }
@@ -11053,6 +11074,24 @@ mod tests {
         assert_eq!(
             chosen(None, Some("fireworks/kimi")),
             Ok(("fireworks-ai".into(), "kimi".into()))
+        );
+        // The chosen provider's own ids may hold a slash.
+        assert_eq!(
+            chosen(Some("together"), Some("zai-org/GLM-5.1")),
+            Ok(("togetherai".into(), "zai-org/GLM-5.1".into()))
+        );
+        assert_eq!(
+            chosen(Some("together"), Some("meta-llama/Unlisted-70B")),
+            Ok(("togetherai".into(), "meta-llama/Unlisted-70B".into()))
+        );
+        // A prefix naming another provider still names that provider.
+        assert_eq!(
+            chosen(Some("together"), Some("fireworks/kimi")),
+            Ok(("fireworks-ai".into(), "kimi".into()))
+        );
+        assert_eq!(
+            chosen(Some("together"), Some("openai/gpt-5.6")),
+            Err("OpenAI is not connected. Connect it with `haarness auth login openai`, then run this again.".into())
         );
         assert_eq!(
             chosen(Some("openai"), None),
