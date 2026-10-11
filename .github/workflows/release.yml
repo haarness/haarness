@@ -57,12 +57,21 @@ jobs:
       - run: cargo test --workspace
       - name: Public release URL verification regression
         run: python scripts/test-release-publish.py
-      - run: cargo build --release -p haarness-cli
       - run: npm --prefix sdks/typescript ci
       - run: npm --prefix sdks/typescript run build
       - run: npm --prefix sdks/typescript test
       - run: npm --prefix packages/browser-driver ci
       - run: npm run driver:test
+      # The CLI carries Haarness for Chrome so a CLI-only install can set up
+      # Chrome. Every later cargo build (Desktop packaging too) keeps the
+      # variable, so none of them replaces the binary with one without it.
+      - name: Build Haarness for Chrome for the CLI
+        shell: bash
+        run: |
+          npm --prefix apps/browser-extension ci
+          npm --prefix apps/browser-extension run build
+          echo "HAARNESS_EMBED_BROWSER_EXTENSION=${{ github.workspace }}/apps/browser-extension/dist/chrome" >> "$GITHUB_ENV"
+      - run: cargo build --release -p haarness-cli
       - run: npm --prefix apps/desktop ci
       - run: npm --prefix apps/desktop test
       - name: Installer verification
