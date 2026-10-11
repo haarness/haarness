@@ -40,6 +40,8 @@ export interface FakeTab {
   autoDiscardable: boolean;
   selected: boolean;
   frozen: boolean;
+  /** The top document's loader; a new document gets a new one. */
+  loaderId: string;
 }
 
 interface Paused {
@@ -96,7 +98,10 @@ export class FakeChrome {
   titles = new Map<string, string>();
   badge = "";
   reloads = 0;
+  /** Debugger detaches the extension asked for, by tab. */
+  detaches: number[] = [];
   private request = 0;
+  private loaders = 0;
 
   readonly chrome = this.build();
 
@@ -258,6 +263,7 @@ export class FakeChrome {
         self.attached.add(tabId);
       },
       async detach({ tabId }: { tabId: number }) {
+        self.detaches.push(tabId);
         if (!self.attached.delete(tabId)) throw new Error("Debugger is not attached to the tab with id: " + tabId);
         self.fetching.delete(tabId);
       },
@@ -305,6 +311,7 @@ export class FakeChrome {
       autoDiscardable: true,
       selected: false,
       frozen: false,
+      loaderId: `loader-${++this.loaders}`,
     };
     this.tabsById.set(tab.id, tab);
     if (options.active) this.activate(tab);
@@ -337,10 +344,15 @@ export class FakeChrome {
     if (groupId >= 0 && ![...this.tabsById.values()].some((tab) => tab.groupId === groupId)) this.groupsById.delete(groupId);
   }
 
+  /** A new document commits in the tab, as Chrome reports it: loading, then complete. */
   commit(tab: FakeTab, url: string) {
     tab.url = url;
     tab.title = this.titles.get(url) ?? "";
-    this.chrome.tabs.onUpdated.emit(tab.id, { url, status: "complete", title: tab.title }, { ...tab });
+    tab.loaderId = `loader-${++this.loaders}`;
+    tab.status = "loading";
+    this.chrome.tabs.onUpdated.emit(tab.id, { url, status: "loading" }, { ...tab });
+    tab.status = "complete";
+    this.chrome.tabs.onUpdated.emit(tab.id, { status: "complete", title: tab.title }, { ...tab });
   }
 
   private event(tabId: number, method: string, params: unknown) {
@@ -352,7 +364,7 @@ export class FakeChrome {
     const tab = this.tabsById.get(tabId)!;
     switch (method) {
       case "Page.getFrameTree":
-        return { frameTree: { frame: { id: `frame-${tabId}`, url: tab.url, loaderId: "l", securityOrigin: "", mimeType: "text/html" } } };
+        return { frameTree: { frame: { id: `frame-${tabId}`, url: tab.url, loaderId: tab.loaderId, securityOrigin: "", mimeType: "text/html" } } };
       case "Fetch.enable":
         this.fetching.set(tabId, { patterns: params.patterns });
         return {};
@@ -412,10 +424,10 @@ export class FakeChrome {
       if (decision === "fail") this.refused.push(resource.url);
     }
     queueMicrotask(() => {
-      this.event(tab.id, "Page.frameNavigated", { frame: { id: `frame-${tab.id}`, url, loaderId: "l2" }, type: "Navigation" });
+      this.event(tab.id, "Page.frameNavigated", { frame: { id: `frame-${tab.id}`, url, loaderId: tab.loaderId }, type: "Navigation" });
       this.event(tab.id, "Page.loadEventFired", { timestamp: 1 });
     });
-    return { frameId: `frame-${tab.id}`, loaderId: "l2" };
+    return { frameId: `frame-${tab.id}`, loaderId: tab.loaderId };
   }
 }
 

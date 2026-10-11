@@ -129,6 +129,7 @@ export function createChromePlatform() {
     debugger: {
       session: (tabId) => debuggers.session(tabId),
       attached: (tabId) => debuggers.attached(tabId),
+      park: (tabId) => debuggers.park(tabId),
       detach: (tabId) => debuggers.detach(tabId),
       detachAll: () => debuggers.detachAll(),
     },
@@ -202,6 +203,8 @@ export function createChromePlatform() {
           title: tab.title ?? tabCache.title,
           loading: tab.status === "loading",
         });
+      // A tab Haarness let go of while idle starts loading a new document.
+      if (change.status === "loading") debuggers.navigated(tabId);
       if (change.url === undefined && change.groupId === undefined && change.title === undefined && change.status === undefined)
         return;
       target.tabUpdated(
