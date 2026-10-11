@@ -2178,5 +2178,12 @@
   "Approval needed": "الموافقة مطلوبة",
   "Answer needed": "الإجابة مطلوبة",
   "Browse and manage durable workflows": "تصفّح سير العمل المتين وأدره",
-  "Set or manage a persistent autonomous goal": "عيّن هدفًا مستقلًا مستمرًا أو أدره"
+  "Set or manage a persistent autonomous goal": "عيّن هدفًا مستقلًا مستمرًا أو أدره",
+  "Allow in Chrome": "السماح في Chrome",
+  "Use {origin} in Chrome": "استخدام {origin} في Chrome",
+  "Send downloads from {origin} in Chrome to the agent": "إرسال تنزيلات {origin} في Chrome إلى الوكيل",
+  "Upload files to {origin} in Chrome": "رفع ملفات إلى {origin} في Chrome",
+  "Run scripts on {origin} in Chrome": "تشغيل نصوص برمجية على {origin} في Chrome",
+  "Allow in this chat": "السماح في هذه المحادثة",
+  "deny": "رفض"
 }

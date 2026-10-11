@@ -2178,5 +2178,12 @@
   "Approval needed": "승인 필요",
   "Answer needed": "답변 필요",
   "Browse and manage durable workflows": "지속형 워크플로 탐색 및 관리",
-  "Set or manage a persistent autonomous goal": "지속적인 자율 목표 설정 또는 관리"
+  "Set or manage a persistent autonomous goal": "지속적인 자율 목표 설정 또는 관리",
+  "Allow in Chrome": "Chrome에서 허용",
+  "Use {origin} in Chrome": "Chrome에서 {origin} 사용",
+  "Send downloads from {origin} in Chrome to the agent": "Chrome에서 {origin}의 다운로드를 에이전트에게 보내기",
+  "Upload files to {origin} in Chrome": "Chrome에서 {origin}에 파일 업로드",
+  "Run scripts on {origin} in Chrome": "Chrome에서 {origin}에 스크립트 실행",
+  "Allow in this chat": "이 채팅에서 허용",
+  "deny": "거부"
 }

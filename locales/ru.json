@@ -2178,5 +2178,12 @@
   "Approval needed": "Требуется разрешение",
   "Answer needed": "Требуется ответ",
   "Browse and manage durable workflows": "Просмотр и управление постоянными рабочими процессами",
-  "Set or manage a persistent autonomous goal": "Задать постоянную автономную цель или управлять ею"
+  "Set or manage a persistent autonomous goal": "Задать постоянную автономную цель или управлять ею",
+  "Allow in Chrome": "Разрешить в Chrome",
+  "Use {origin} in Chrome": "Использовать {origin} в Chrome",
+  "Send downloads from {origin} in Chrome to the agent": "Передавать агенту загрузки с {origin} в Chrome",
+  "Upload files to {origin} in Chrome": "Загружать файлы на {origin} в Chrome",
+  "Run scripts on {origin} in Chrome": "Запускать скрипты на {origin} в Chrome",
+  "Allow in this chat": "Разрешить в этом чате",
+  "deny": "запретить"
 }

@@ -64,6 +64,16 @@ impl PermissionChoice {
         {
             return vec![Self::Once, Self::Reject];
         }
+        // Chrome site access is granted to one chat, never to a folder or a
+        // repository, and never by switching the chat to Auto. Allowing it
+        // in this chat is the answer people mean, so it comes first and is
+        // what a bare Enter picks.
+        if app
+            .first_pending_permission()
+            .is_some_and(|pending| pending.explicit)
+        {
+            return vec![Self::Always, Self::Once, Self::Reject];
+        }
         let mut choices = Self::ALL.to_vec();
         if app
             .first_pending_permission()
@@ -95,6 +105,17 @@ impl PermissionChoice {
             Self::Workspace => "This folder",
             Self::Repository => "Repository",
             Self::Reject => "Reject",
+        }
+    }
+
+    /// The chip's words for an `explicit` (Chrome site access) request, where
+    /// Always means "in this chat" and a no is a denial of that site.
+    #[must_use]
+    pub const fn label_for(self, explicit: bool) -> &'static str {
+        match self {
+            Self::Always if explicit => "Allow in this chat",
+            Self::Reject if explicit => "Deny",
+            other => other.label(),
         }
     }
 

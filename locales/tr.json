@@ -2178,5 +2178,12 @@
   "Approval needed": "Onay gerekiyor",
   "Answer needed": "Yanıt gerekiyor",
   "Browse and manage durable workflows": "Kalıcı iş akışlarına göz at ve yönet",
-  "Set or manage a persistent autonomous goal": "Kalıcı otonom bir hedef belirle veya yönet"
+  "Set or manage a persistent autonomous goal": "Kalıcı otonom bir hedef belirle veya yönet",
+  "Allow in Chrome": "Chrome'da izin ver",
+  "Use {origin} in Chrome": "Chrome'da {origin} kullan",
+  "Send downloads from {origin} in Chrome to the agent": "Chrome'da {origin} kaynağından indirilenleri ajana gönder",
+  "Upload files to {origin} in Chrome": "Chrome'da {origin} adresine dosya yükle",
+  "Run scripts on {origin} in Chrome": "Chrome'da {origin} üzerinde betik çalıştır",
+  "Allow in this chat": "Bu sohbette izin ver",
+  "deny": "reddet"
 }
