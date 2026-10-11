@@ -111,6 +111,37 @@ test("hello names this browser once and keeps its id across restarts", async () 
   assert.equal(second.sent[0].browser.id, hello.browser.id);
 });
 
+test("the extension's own reload keeps the chats' tabs, but a stale hand-over is ignored", async () => {
+  const first = await boot();
+  first.start();
+  first.attach();
+  const { tab } = await first.open("about:blank");
+  assert.deepEqual(await first.host.request({ type: "reload" }), { ok: true });
+  assert.equal(first.fake.reloads, 1);
+  first.host.dispose();
+  // Chrome clears session storage when the extension reloads.
+  first.fake.stores.session.clear();
+  const second = await boot({ reuse: first.fake });
+  assert.deepEqual(
+    second.host.debug.registry.all().flatMap((entry) => entry.tabs.map((record) => record.id)),
+    [tab.id],
+  );
+  second.start();
+  second.attach();
+  // The next server connection gets the chat's inventory again.
+  await second.until((message) => message.type === "to-server" && message.message.state?.tabs[0]?.id === tab.id);
+  assert.equal(first.fake.stores.local.get("handoff"), null, "a hand-over is used once");
+
+  // A hand-over older than a minute (the browser restarted meanwhile) is not taken.
+  await second.host.request({ type: "reload" });
+  second.host.dispose();
+  first.fake.stores.session.clear();
+  const handoff = first.fake.stores.local.get("handoff") as { at: number };
+  first.fake.stores.local.set("handoff", { ...handoff, at: handoff.at - 61_000 });
+  const third = await boot({ reuse: first.fake });
+  assert.deepEqual(third.host.debug.registry.all(), []);
+});
+
 test("new tabs open in the background, in one group per chat named after it; a subagent gets its own", async () => {
   const h = await boot();
   h.start();

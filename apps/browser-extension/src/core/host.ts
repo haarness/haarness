@@ -57,6 +57,16 @@ const OPEN_LIMIT = "Close a browser tab before opening more (32 maximum).";
 const IDLE_DETACH_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 const REFUSAL_NOTE_MS = 120_000;
+/** How long a reload's hand-over stays valid for the instance that starts next. */
+const HANDOFF_MS = 60_000;
+
+/** This browser session's state, kept in storage.local across the extension's own reload. */
+interface Handoff {
+  at: number;
+  registry: unknown;
+  refSeed: number;
+  stopped: boolean;
+}
 
 export interface HostOptions {
   platform: Platform;
@@ -127,6 +137,7 @@ export function createHost(options: HostOptions) {
   let started: Promise<void> | undefined;
   function start() {
     started ??= (async () => {
+      await takeHandoff();
       const [id, paused, saved, stopped, seed, focused, info] = await Promise.all([
         platform.local.get<string>("browserId"),
         platform.local.get<boolean>("paused"),
@@ -152,6 +163,35 @@ export function createHost(options: HostOptions) {
       bridge.connect();
     })();
     return started;
+  }
+
+  /**
+   * Chrome clears session storage when the extension reloads (to pick up an
+   * update), which would orphan every agent tab. The instance that reloads
+   * hands its state over through storage.local; the next one takes it back,
+   * only within a minute, so a browser restart never revives old tab ids.
+   */
+  async function reload() {
+    await registry.flush();
+    const handoff: Handoff = {
+      at: platform.now(),
+      registry: await platform.session.get("registry"),
+      refSeed: Math.max(refSeed, lastRef()),
+      stopped: control.stopped,
+    };
+    await platform.local.set("handoff", handoff);
+    platform.reload();
+  }
+
+  async function takeHandoff() {
+    const handoff = await platform.local.get<Handoff | null>("handoff");
+    if (!handoff) return;
+    await platform.local.set("handoff", null);
+    const fresh = platform.now() - handoff.at < HANDOFF_MS;
+    if (!fresh || !handoff.registry || (await platform.session.get("registry")) !== undefined) return;
+    await platform.session.set("registry", handoff.registry);
+    await platform.session.set("refSeed", handoff.refSeed);
+    await platform.session.set("stopped", handoff.stopped);
   }
 
   /** After a worker restart: forget tabs that closed or left their group while it was stopped. */
@@ -819,7 +859,7 @@ export function createHost(options: HostOptions) {
       const tried = await platform.local.get<string>("reloadedFor");
       if (tried !== disk) {
         await platform.local.set("reloadedFor", disk);
-        platform.reload();
+        await reload();
         return;
       }
     }
@@ -959,7 +999,7 @@ export function createHost(options: HostOptions) {
         for (const current of registry.all()) if (current.tabs.length) await close(current, [...current.tabs], true);
         return { ok: true };
       case "reload":
-        platform.reload();
+        await reload();
         return { ok: true };
       case "retry":
         bridge.retry();
