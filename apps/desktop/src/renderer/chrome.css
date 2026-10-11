@@ -1,0 +1,269 @@
+/* Settings › Browser › Chrome, and the "Use Chrome with Haarness" dialog. */
+
+/* The connection reads like the remote-control status: a dot, green while a
+   Chrome is connected, copper while the user paused or stopped it. */
+.chrome-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+  max-width: 260px;
+  margin-inline-end: var(--s2);
+  font-size: var(--ui);
+  color: var(--muted);
+}
+.chrome-status .remote-dot {
+  flex: none;
+}
+.chrome-status.live {
+  color: var(--text);
+}
+.chrome-status.live .remote-dot {
+  background: var(--green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 22%, transparent);
+}
+.chrome-status.paused .remote-dot {
+  background: var(--accent);
+}
+.chrome-status-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chrome-note {
+  margin: var(--s3) 0 0;
+  line-height: 1.5;
+}
+.chrome-note > span {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--s2);
+}
+.chrome-note strong {
+  flex-basis: 100%;
+  font-weight: 600;
+}
+.chrome-restriction:not(:last-child)::after {
+  content: " ·";
+}
+/* The table's title sits where a row's would, so it reads as one of them. */
+.chrome-permissions {
+  padding-block-start: var(--s4);
+}
+.chrome-permissions-head {
+  margin-block-end: var(--s1);
+}
+.chrome-permissions-head strong {
+  font-size: var(--ui-lg);
+  font-weight: 500;
+}
+.chrome-permissions-head p {
+  max-width: 520px;
+  margin: 2px 0 0;
+  font-size: var(--ui);
+  line-height: 1.5;
+  color: var(--muted);
+}
+.chrome-permissions {
+  container-type: inline-size;
+}
+/* Doubled with the shared table class: these rules refine the agent table's
+   own, whichever stylesheet loads first. */
+.browser-permissions.chrome-permissions .select-trigger {
+  min-width: 112px;
+}
+/* Four decisions and a site do not fit one line of a narrow pane: each site
+   then heads its own row of four columns, under the same column labels, so
+   no decision is cut short and the site is never squeezed to a sliver. */
+@container (max-width: 880px) {
+  .browser-permissions.chrome-permissions table,
+  .browser-permissions.chrome-permissions thead,
+  .browser-permissions.chrome-permissions tbody {
+    display: block;
+  }
+  .browser-permissions.chrome-permissions tr {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) var(--icon-button);
+    column-gap: var(--s2);
+    align-items: center;
+    padding-block: var(--s2);
+    border-bottom: 1px solid var(--hairline);
+  }
+  .browser-permissions.chrome-permissions th,
+  .browser-permissions.chrome-permissions td {
+    padding: var(--s1) 0;
+    border-bottom: 0;
+  }
+  .browser-permissions.chrome-permissions tr > :first-child {
+    grid-column: 1 / -1;
+    max-width: none;
+  }
+  .browser-permissions.chrome-permissions thead tr > :first-child {
+    display: none;
+  }
+  .browser-permissions.chrome-permissions .select-trigger {
+    width: 100%;
+    min-width: 0;
+  }
+}
+.browser-settings > .chrome-permissions + p.muted {
+  margin-block-start: var(--s2);
+}
+
+/* ------------------------------------------------------------- dialog */
+.chrome-dialog {
+  width: min(600px, calc(100vw - 32px));
+}
+.chrome-steps {
+  list-style: none;
+  margin: var(--s2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+}
+.chrome-step {
+  display: flex;
+  gap: var(--s3);
+  align-items: flex-start;
+}
+.chrome-step-mark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid var(--hairline);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.chrome-step[data-state="current"] .chrome-step-mark {
+  border-color: var(--primary-edge);
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+.chrome-step[data-state="done"] .chrome-step-mark {
+  border-color: transparent;
+  background: var(--green-soft);
+  color: var(--green);
+}
+.chrome-step[data-state="failed"] .chrome-step-mark {
+  border-color: transparent;
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.chrome-step-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  /* Centre the first line on the 24px mark. */
+  padding-block-start: 2px;
+  font-size: var(--ui);
+  line-height: 1.5;
+}
+.chrome-step-body > strong {
+  font-size: var(--ui-lg);
+  font-weight: 500;
+}
+.chrome-step[data-state="pending"] .chrome-step-body > strong {
+  color: var(--muted);
+}
+.chrome-step-body p,
+.chrome-step-body .form-error {
+  margin: 0;
+}
+.chrome-browsers {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+.chrome-browsers li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+}
+.chrome-browsers li > svg {
+  flex: none;
+  margin-block-start: 3px;
+  color: var(--green);
+}
+.chrome-browsers li.unsupported > svg {
+  color: var(--accent);
+}
+.chrome-browsers small {
+  display: block;
+  color: var(--muted);
+  font-size: var(--ui-sm);
+}
+.chrome-warning {
+  color: var(--muted);
+  font-size: var(--ui-sm);
+}
+.chrome-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+.chrome-actions button,
+.chrome-reveal button {
+  gap: var(--s2);
+}
+.chrome-substeps {
+  margin: 0;
+  padding-inline-start: var(--s5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+.chrome-substeps li {
+  padding-inline-start: var(--s1);
+}
+.chrome-substeps li > span {
+  display: block;
+}
+.chrome-substeps li > span + span {
+  margin-block-start: var(--s2);
+}
+/* A page address or a folder path, copied as written: it keeps its own
+   direction in Arabic and wraps whole, since its end names the folder. */
+.chrome-substeps li > .chrome-copy {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  padding-block: var(--s0);
+  padding-inline: var(--s2) var(--s0);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+.chrome-copy code {
+  flex: 1;
+  min-width: 0;
+  padding-block: var(--s1);
+  overflow-wrap: anywhere;
+  font-size: var(--ui-sm);
+  direction: ltr;
+  unicode-bidi: isolate;
+  text-align: start;
+}
+.chrome-substeps li > .chrome-reveal {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+}
+.chrome-reveal small {
+  color: var(--muted);
+  font-size: var(--ui-sm);
+}
