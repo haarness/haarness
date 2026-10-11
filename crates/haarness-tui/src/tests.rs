@@ -14505,6 +14505,121 @@ async fn auto_mode_failure_stays_manual_and_allow_once_auto_requires_success() {
     assert!(server.await.unwrap()[0].contains("\"decision\":\"once\""));
 }
 
+/// `haarness --yolo`: the TUI answers what its own conversation asks, once,
+/// even on a server with shared approval modes, and leaves other chats and
+/// requests that always ask alone. The server never becomes a yolo server.
+#[tokio::test]
+async fn yolo_answers_its_own_conversation_once_and_leaves_the_rest() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.yolo = true;
+    app.approval_server = true;
+    let (client, server) =
+        workspace_http_status_client(vec![(200, "{}".into()), (200, "{}".into())], false).await;
+    let other_chat = ThreadId::new();
+    for (id, owner, root, always) in [
+        ("own", thread.id, thread.id, true),
+        ("child", ThreadId::new(), thread.id, true),
+        ("other-chat", other_chat, other_chat, true),
+        ("always-asks", thread.id, thread.id, false),
+    ] {
+        let event = fixture_event(
+            "permission.requested",
+            owner,
+            root,
+            serde_json::json!({"permissionId":id,"permission":"external_directory","allowAlways":always}),
+        );
+        app.reduce(event.clone(), &client).await.unwrap();
+        // A replayed event is not answered twice.
+        app.reduce(event, &client).await.unwrap();
+    }
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 2, "{requests:#?}");
+    assert!(requests[0].contains("/permissions/own"), "{}", requests[0]);
+    assert!(requests[1].contains("/permissions/child"), "{}", requests[1]);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.contains("\"decision\":\"once\""))
+    );
+    let cards: Vec<_> = app
+        .pending_permissions
+        .iter()
+        .map(|pending| pending.permission_id.as_str())
+        .collect();
+    assert_eq!(cards, ["always-asks"]);
+    assert!(frame_text(&app, (140, 40)).contains("approvals: --yolo"));
+
+    // Opening a chat with requests already waiting answers its own only
+    // (the first response is the server info hydration reads).
+    let (client, server) =
+        workspace_http_status_client(vec![(200, "{}".into()), (200, "{}".into())], false).await;
+    let waiting = |id: &str, thread_id, root| haarness_protocol::PendingPermissionInfo {
+        allow_always: None,
+        repository_scope: None,
+        permission_id: id.into(),
+        operation: "external_directory:/tmp/x".into(),
+        detail: serde_json::Value::Null,
+        permission: "external_directory".into(),
+        patterns: Vec::new(),
+        always_patterns: Vec::new(),
+        thread_id,
+        root_thread_id: Some(root),
+        turn_id: None,
+        agent: None,
+        created_at: chrono::Utc::now(),
+    };
+    app.hydrate_permissions(
+        vec![
+            waiting("waiting", thread.id, thread.id),
+            waiting("elsewhere", other_chat, other_chat),
+        ],
+        &client,
+    )
+    .await;
+    let requests = server.await.unwrap();
+    assert!(
+        requests[1].contains("/permissions/waiting"),
+        "{requests:#?}"
+    );
+    assert!(app.pending_permissions.is_empty());
+}
+
+#[tokio::test]
+async fn a_yolo_client_flags_the_turns_it_starts_and_a_plain_one_does_not() {
+    for yolo in [true, false] {
+        let (client, server) = workspace_http_status_client(vec![(200, "{}".into())], false).await;
+        let client = client.with_auto_approve(yolo);
+        assert_eq!(client.auto_approves(), yolo);
+        // `{}` is not a turn; only the request matters here.
+        let _ = client
+            .start_turn(
+                ThreadId::new(),
+                haarness_protocol::StartTurnRequest {
+                    request_id: haarness_protocol::RequestId::new(),
+                    text: "hi".into(),
+                    attachments: Vec::new(),
+                    synthetic: false,
+                    auto_approve: false,
+                    agent: None,
+                    provider: None,
+                    model: None,
+                    reasoning_effort: None,
+                    tools: None,
+                    command: None,
+                },
+            )
+            .await;
+        let requests = server.await.unwrap();
+        assert_eq!(
+            requests[0].contains("\"autoApprove\":true"),
+            yolo,
+            "{}",
+            requests[0]
+        );
+    }
+}
+
 #[tokio::test]
 async fn auto_mode_shortcut_and_restricted_requests_are_manual() {
     let thread = fixture_thread();

@@ -260,7 +260,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
             let account = status["selectedAccountId"]
                 .as_str()
                 .context("Sign in and select a Cloud account first")?;
-            let discovery = ensure_workspace_server(paths, workspace, trust, false).await?;
+            let discovery = ensure_workspace_server(paths, workspace, trust).await?;
             let project = paths
                 .workspace_id
                 .clone()
@@ -384,7 +384,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
                     // Resolve the current address/token before each transport generation.
                     let discovery = tokio::select! {
                         () = stop.cancelled() => break,
-                        result = ensure_workspace_server(paths, workspace, trust, false) => result,
+                        result = ensure_workspace_server(paths, workspace, trust) => result,
                     };
                     match discovery {
                         Ok(discovery) => {

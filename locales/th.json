@@ -1619,6 +1619,7 @@
   "Review · asks before risky steps · ctrl+y for Auto": "ตรวจทาน · ถามก่อนขั้นตอนที่มีความเสี่ยง · ctrl+y เพื่อใช้อัตโนมัติ",
   "approvals: review": "การอนุมัติ: ตรวจทาน",
   "approvals: auto": "การอนุมัติ: อัตโนมัติ",
+  "approvals: --yolo": "การอนุมัติ: --yolo",
   "Answer the approval above · ctrl+g to type": "ตอบคำขออนุมัติด้านบน · ctrl+g เพื่อพิมพ์",
   "Haarness needs approval": "Haarness ต้องการการอนุมัติ",
   "Approval pending": "รอการอนุมัติ",

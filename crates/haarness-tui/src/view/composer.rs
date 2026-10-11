@@ -368,9 +368,12 @@ fn status_band(app: &App, width: usize) -> Line {
     }
     // Permission mode uses spare space without displacing location, queue or
     // stop hints. It names what it is: an agent can be called "review" too.
+    // `--yolo` answers this TUI's requests whatever the chat's own mode is.
     let mode = format!(
         "  {}",
-        app.language.text(if app.auto_permissions {
+        app.language.text(if app.yolo {
+            "approvals: --yolo"
+        } else if app.auto_permissions {
             "approvals: auto"
         } else {
             "approvals: review"
@@ -381,7 +384,7 @@ fn status_band(app: &App, width: usize) -> Line {
         left.push(
             Span::new(
                 mode,
-                if app.auto_permissions {
+                if app.yolo || app.auto_permissions {
                     theme.accent
                 } else {
                     theme.muted

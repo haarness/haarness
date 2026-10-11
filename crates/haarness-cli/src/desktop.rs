@@ -139,7 +139,7 @@ async fn execute(paths: &Paths, workspace: &Path, trust: bool, request: Request)
                 )
                 .await?;
             }
-            let discovery = ensure_workspace_server(paths, workspace, trust, false).await?;
+            let discovery = ensure_workspace_server(paths, workspace, trust).await?;
             Ok(
                 json!({"schemaVersion":1,"url":discovery.url,"token":discovery.token,
                 "workspace":workspace,"workspaceId":paths.workspace_id,"upgradePending":false}),

@@ -14,7 +14,8 @@ The mode belongs to the chat, on its server, so every client sees and applies th
 - The server answers eligible requests in an Auto chat without showing a prompt. Requests a tool always asks about, such as starting or deleting Cloud sessions, are never eligible.
 - Turning Auto on also approves, once, the eligible requests already waiting in that chat and the agents that follow it.
 - Every client hears an `approval_mode.changed` event for the chat and for every agent below it, in the order the changes were made.
-- A single turn started with `autoApprove` (a schedule, `haarness run --yolo`) approves its own requests once and teaches no rule to other chats; a shared chat cannot start such a turn.
+- A single turn started with `autoApprove` (a schedule, `haarness run --yolo`, `haarness acp --yolo`, a terminal UI started with `--yolo`) approves its own requests once and teaches no rule to other chats; a shared chat cannot start such a turn.
+- A client's `--yolo` never reaches the folder's server, which outlives the client and serves every chat in the folder. While they wait, `haarness run --yolo` and `haarness workflow run --yolo` also answer **Allow once** to what their own chat (its agents, workflows and later turns) asks, and a `--yolo` terminal UI does the same in the conversation it shows; requests that always ask are left to a person. Only `haarness serve --yolo` approves, and records Always rules, for every chat on its server until it stops.
 
 API (`approval-mode.v1` in the server's capabilities):
 
@@ -37,7 +38,7 @@ Clients connected to an older server keep the earlier client-side behaviour desc
 
 - **Ctrl+Y** toggles Auto/Review for the open chat. `/permissions-mode auto`, `/permissions-mode review`, and `/permission-mode` work through the command menu too.
 - A pending permission offers **Once + Auto** (`u`). Because it changes how the whole chat is answered, the first press only stages it, like the Always choices; Enter or `u` again confirms. It enables Auto only after a successful one-time reply.
-- The status band shows the open chat's mode as `approvals: review` or `approvals: auto` when space permits, and follows a change made from another client.
+- The status band shows the open chat's mode as `approvals: review` or `approvals: auto` when space permits, and follows a change made from another client. A TUI started with `--yolo` shows `approvals: --yolo` instead.
 - `/new` starts the new chat in the open chat's mode.
 - With an older server, the mode is local to the TUI launch and covers new requests from every chat on that server, as before.
 

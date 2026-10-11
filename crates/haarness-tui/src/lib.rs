@@ -209,7 +209,8 @@ pub async fn resume_attached_with_resolver(
 /// switched to, once the terminal has been restored, so the CLI can start
 /// that workspace's own server without nesting TUIs.
 /// `restarter` brings the workspace server back if it stops or crashes while
-/// the TUI is open.
+/// the TUI is open. `yolo` approves what this TUI's own conversations ask,
+/// for as long as it runs (see [`ApiClient::with_auto_approve`]).
 pub async fn run_with_thread_and_resolver_switching(
     server: &str,
     token: &str,
@@ -217,6 +218,7 @@ pub async fn run_with_thread_and_resolver_switching(
     continue_last: bool,
     resolver: EndpointResolver,
     restarter: ServerRestarter,
+    yolo: bool,
 ) -> Result<Option<PathBuf>> {
     run_with_thread_and_resolver_fork_switching(
         server,
@@ -226,12 +228,14 @@ pub async fn run_with_thread_and_resolver_switching(
         false,
         resolver,
         restarter,
+        yolo,
     )
     .await
 }
 
 /// As [`run_with_thread_and_resolver_switching`], forking the selected or
 /// continued session first so the original remains untouched.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_with_thread_and_resolver_fork_switching(
     server: &str,
     token: &str,
@@ -240,11 +244,13 @@ pub async fn run_with_thread_and_resolver_fork_switching(
     fork: bool,
     resolver: EndpointResolver,
     restarter: ServerRestarter,
+    yolo: bool,
 ) -> Result<Option<PathBuf>> {
     Box::pin(run_with_client(
         ApiClient::new(server, token)?
             .with_endpoint_resolver(resolver)
-            .with_server_restarter(restarter),
+            .with_server_restarter(restarter)
+            .with_auto_approve(yolo),
         initial_thread,
         continue_last,
         fork,
@@ -328,6 +334,7 @@ async fn run_with_client(
         |view| view.viewport_offset,
     );
     let mut app = App::new(thread, threads, items, providers, agents);
+    app.yolo = client.auto_approves();
     app.input_queue = client.input_queue(app.thread.id).await.unwrap_or_default();
     app.original_client = Some(client.clone());
     app.workspace_local_switching = client.supports_local_workspace_switch();

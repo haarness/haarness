@@ -1619,6 +1619,7 @@
   "Review · asks before risky steps · ctrl+y for Auto": "レビュー · リスクのある操作の前に確認します · ctrl+y で自動",
   "approvals: review": "承認: レビュー",
   "approvals: auto": "承認: 自動",
+  "approvals: --yolo": "承認: --yolo",
   "Answer the approval above · ctrl+g to type": "上の承認に応答してください · ctrl+g で入力",
   "Haarness needs approval": "Haarness が承認を求めています",
   "Approval pending": "承認待ち",

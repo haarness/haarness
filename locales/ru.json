@@ -1619,6 +1619,7 @@
   "Review · asks before risky steps · ctrl+y for Auto": "Обзор · спрашивает перед рискованными шагами · ctrl+y для авто",
   "approvals: review": "разрешения: обзор",
   "approvals: auto": "разрешения: авто",
+  "approvals: --yolo": "разрешения: --yolo",
   "Answer the approval above · ctrl+g to type": "Ответьте на запрос разрешения выше · ctrl+g, чтобы печатать",
   "Haarness needs approval": "Haarness нужно разрешение",
   "Approval pending": "Ожидает разрешения",

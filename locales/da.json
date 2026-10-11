@@ -1619,6 +1619,7 @@
   "Review · asks before risky steps · ctrl+y for Auto": "Gennemgang · spørger før risikable trin · ctrl+y for automatisk",
   "approvals: review": "godkendelser: gennemgang",
   "approvals: auto": "godkendelser: automatisk",
+  "approvals: --yolo": "godkendelser: --yolo",
   "Answer the approval above · ctrl+g to type": "Besvar godkendelsen ovenfor · ctrl+g for at skrive",
   "Haarness needs approval": "Haarness skal have godkendelse",
   "Approval pending": "Godkendelse afventer",

@@ -1619,6 +1619,7 @@
   "Review · asks before risky steps · ctrl+y for Auto": "검토 · 위험한 단계 전에 묻습니다 · ctrl+y로 자동",
   "approvals: review": "승인: 검토",
   "approvals: auto": "승인: 자동",
+  "approvals: --yolo": "승인: --yolo",
   "Answer the approval above · ctrl+g to type": "위의 승인 요청에 답하세요 · ctrl+g로 입력",
   "Haarness needs approval": "Haarness에 승인이 필요합니다",
   "Approval pending": "승인 대기 중",

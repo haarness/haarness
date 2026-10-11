@@ -111,8 +111,9 @@ struct Cli {
     /// it garbles the display, so redirect stderr when using it there).
     #[arg(long, global = true)]
     print_logs: bool,
-    /// Auto-approve every permission prompt (recording the rules an "always"
-    /// answer would persist).
+    /// Approve every permission request without asking, for this command
+    /// only: a run, the terminal UI it opens, ACP. With `serve`, every chat
+    /// on that server, until it stops.
     #[arg(long, global = true, visible_alias = "dangerously-skip-permissions")]
     yolo: bool,
     /// Open a specific chat by id. `--session` is an alias.
@@ -1433,7 +1434,7 @@ async fn main() -> Result<()> {
         }
         Some(Command::Acp(args)) => {
             let discovery =
-                ensure_workspace_server(&paths, &workspace, project_config, cli.yolo).await?;
+                ensure_workspace_server(&paths, &workspace, project_config).await?;
             acp::serve(acp::Config {
                 client: haarness_tui::api::ApiClient::new(&discovery.url, &discovery.token)?,
                 workspace,
@@ -1478,17 +1479,16 @@ async fn main() -> Result<()> {
             auth_command(&paths, &workspace, project_config, command).await
         }
         Some(Command::Mcp { command }) => {
-            mcp_command(&paths, &workspace, project_config, cli.yolo, command).await
+            mcp_command(&paths, &workspace, project_config, command).await
         }
         Some(Command::Sessions { command }) => {
-            session_command(&paths, &workspace, project_config, cli.yolo, command).await
+            session_command(&paths, &workspace, project_config, command).await
         }
         Some(Command::Btw { id, question, json }) => {
             btw_command(
                 &paths,
                 &workspace,
                 project_config,
-                cli.yolo,
                 ThreadId(id),
                 question,
                 json,
@@ -1540,7 +1540,7 @@ async fn main() -> Result<()> {
             workflow_command(&paths, &workspace, project_config, cli.yolo, command).await
         }
         Some(Command::Schedule { command }) => {
-            schedule_command(&paths, &workspace, project_config, cli.yolo, project_config_override, command).await
+            schedule_command(&paths, &workspace, project_config, project_config_override, command).await
         }
         Some(Command::Models { provider, verbose }) => {
             models_command(
@@ -2671,12 +2671,11 @@ async fn btw_command(
     paths: &Paths,
     workspace: &Path,
     trust: bool,
-    yolo: bool,
     thread_id: ThreadId,
     question: String,
     json_output: bool,
 ) -> Result<()> {
-    let discovery = ensure_workspace_server(paths, workspace, trust, yolo).await?;
+    let discovery = ensure_workspace_server(paths, workspace, trust).await?;
     let client = haarness_tui::api::ApiClient::new(&discovery.url, &discovery.token)?;
     let response = client.btw(thread_id, question).await?;
     if json_output {
@@ -2691,10 +2690,9 @@ async fn session_command(
     paths: &Paths,
     workspace: &Path,
     trust: bool,
-    yolo: bool,
     command: SessionCommand,
 ) -> Result<()> {
-    let discovery = ensure_workspace_server(paths, workspace, trust, yolo).await?;
+    let discovery = ensure_workspace_server(paths, workspace, trust).await?;
     let client = haarness_tui::api::ApiClient::new(&discovery.url, &discovery.token)?;
     match command {
         SessionCommand::List { all, json } => {
@@ -3018,10 +3016,17 @@ async fn workflow_command(
     yolo: bool,
     command: WorkflowCommand,
 ) -> Result<()> {
+    // --yolo approves while `workflow run` waits; a detached run has nobody
+    // left to approve for it.
+    if yolo && matches!(command, WorkflowCommand::Run { detach: true, .. }) {
+        anyhow::bail!(
+            "--yolo approves a workflow's requests only while `haarness workflow run` waits for it; leave out --detach, or allow its tools with permission rules"
+        );
+    }
     // Workflow mutations belong to the durable server too. In particular,
     // `workflow run --detach` must not be a task spawned inside a process that
     // exits immediately afterwards.
-    let discovery = ensure_workspace_server(paths, workspace, trust, yolo).await?;
+    let discovery = ensure_workspace_server(paths, workspace, trust).await?;
     let client = haarness_tui::api::ApiClient::new(&discovery.url, &discovery.token)?;
 
     match command {
@@ -3105,6 +3110,9 @@ async fn workflow_command(
                     if run.status != haarness_protocol::WorkflowRunStatus::Running {
                         break run;
                     }
+                    if yolo && let Some(root) = run.thread_id {
+                        approve_run_requests_once(&client, root).await?;
+                    }
                     if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                         anyhow::bail!(
                             "workflow wait timed out; {} continues on the Haarness server (run {})",
@@ -3141,7 +3149,6 @@ async fn schedule_command(
     paths: &Paths,
     workspace: &Path,
     trust: bool,
-    yolo: bool,
     project_config_override: Option<bool>,
     command: ScheduleCommand,
 ) -> Result<()> {
@@ -3352,7 +3359,7 @@ async fn schedule_command(
             }
         }
         ScheduleCommand::Trigger { reference, source } => {
-            let run = execute_schedule(paths, &scheduler, &reference, source, yolo, trust).await?;
+            let run = execute_schedule(paths, &scheduler, &reference, source, trust).await?;
             println!("{}", serde_json::to_string(&run)?);
             if run.status == ScheduleRunStatus::Failed {
                 anyhow::bail!(
@@ -3456,7 +3463,6 @@ async fn execute_schedule(
     scheduler: &Scheduler,
     reference: &str,
     source: ScheduleRunSource,
-    yolo: bool,
     trust: bool,
 ) -> Result<ScheduleRun> {
     let schedule = scheduler.require(reference)?;
@@ -3495,13 +3501,9 @@ async fn execute_schedule(
     let mut thread_id = None;
     let mut turn_id = None;
     let result = async {
-        let discovery = ensure_workspace_server(
-            paths,
-            &schedule.workspace,
-            schedule.trust_project && trust,
-            yolo,
-        )
-        .await?;
+        let discovery =
+            ensure_workspace_server(paths, &schedule.workspace, schedule.trust_project && trust)
+                .await?;
         let client = haarness_tui::api::ApiClient::new(&discovery.url, &discovery.token)?;
         let (provider, model) = schedule
             .model
@@ -3722,15 +3724,15 @@ async fn interactive(
     let mut initial_thread = thread;
     let mut resume = continue_last;
     loop {
-        let discovery =
-            ensure_workspace_server(&active_paths, &active_workspace, trust, yolo).await?;
+        let discovery = ensure_workspace_server(&active_paths, &active_workspace, trust).await?;
         let selected = haarness_tui::run_with_thread_and_resolver_switching(
             &discovery.url,
             &discovery.token,
             initial_thread,
             resume,
             runtime_endpoint_resolver(&active_paths, &active_workspace),
-            workspace_server_restarter(&active_paths, &active_workspace, trust, yolo),
+            workspace_server_restarter(&active_paths, &active_workspace, trust),
+            yolo,
         )
         .await?;
         let Some(path) = selected else {
@@ -4076,8 +4078,7 @@ async fn tui_command(
     let mut resume = continue_last;
     let mut fork = args.fork;
     loop {
-        let discovery =
-            ensure_workspace_server(&active_paths, &active_workspace, trust, yolo).await?;
+        let discovery = ensure_workspace_server(&active_paths, &active_workspace, trust).await?;
         let selected = haarness_tui::run_with_thread_and_resolver_fork_switching(
             &discovery.url,
             &discovery.token,
@@ -4085,7 +4086,8 @@ async fn tui_command(
             resume,
             fork,
             runtime_endpoint_resolver(&active_paths, &active_workspace),
-            workspace_server_restarter(&active_paths, &active_workspace, trust, yolo),
+            workspace_server_restarter(&active_paths, &active_workspace, trust),
+            yolo,
         )
         .await?;
         let Some(path) = selected else {
@@ -4174,7 +4176,7 @@ async fn run_command(
             .await?;
             haarness_tui::api::ApiClient::with_auth(&server, token)?.with_attachment_uploads()
         } else {
-            let discovery = ensure_workspace_server(paths, &workspace, trust, yolo).await?;
+            let discovery = ensure_workspace_server(paths, &workspace, trust).await?;
             haarness_tui::api::ApiClient::new(&discovery.url, &discovery.token)?
         };
         // Checked before a chat exists, so a typo leaves no empty chat behind.
@@ -4225,7 +4227,7 @@ async fn run_command(
         let (provider, model) = requested_model.unzip();
         let goal = args.goal;
         stop_on_signal(&client, thread.id, goal, async {
-            let mut watch = RunWatch::new();
+            let mut watch = RunWatch::new(yolo);
             if let Some(workflow) = args.workflow {
                 let mut values = serde_json::Map::new();
                 if !prompt.trim().is_empty() {
@@ -4666,13 +4668,16 @@ enum Approver {
 /// and answer what its agents ask.
 struct RunWatch {
     approver: Approver,
+    /// `--yolo`: the run approves its own requests once, as they come, and
+    /// asks the approver only for those that must ask every time.
+    yolo: bool,
     activity: Option<RunActivity>,
 }
 
 impl RunWatch {
     /// A `haarness run`. Someone at a terminal sees progress and is asked
     /// for approvals; a script's or CI job's prompts are refused.
-    fn new() -> Self {
+    fn new(yolo: bool) -> Self {
         let terminal = io::stderr().is_terminal();
         Self {
             // Piped context (`git diff | haarness run …`) still leaves the
@@ -4682,6 +4687,7 @@ impl RunWatch {
             } else {
                 Approver::Nobody
             },
+            yolo,
             activity: terminal.then(RunActivity::start),
         }
     }
@@ -4690,6 +4696,7 @@ impl RunWatch {
     fn scheduled() -> Self {
         Self {
             approver: Approver::OtherClients,
+            yolo: false,
             activity: None,
         }
     }
@@ -4710,6 +4717,9 @@ impl RunWatch {
     /// nobody to ask, it is refused and the run stops, saying how to allow it.
     async fn answer(&self, client: &haarness_tui::api::ApiClient, root: ThreadId) -> Result<()> {
         resolve_noninteractive_questions_client(client, root, self).await?;
+        if self.yolo {
+            approve_run_requests_once(client, root).await?;
+        }
         if self.approver == Approver::OtherClients {
             return Ok(());
         }
@@ -4724,6 +4734,19 @@ impl RunWatch {
                 decision,
                 feedback: None,
             };
+            if self.approver == Approver::Nobody && pending.allow_always == Some(false) {
+                // Neither a rule nor --yolo answers this kind of request.
+                let _ = client.interrupt_session(root, false).await;
+                let _ = client
+                    .reply_permission(
+                        &pending.permission_id,
+                        reply(PermissionReplyDecision::Reject),
+                    )
+                    .await;
+                anyhow::bail!(
+                    "Stopped: the agent asked to {request}, which always needs an answer, and nobody can give one in this run. Run it at a terminal, or from the terminal UI or Desktop."
+                );
+            }
             if self.approver == Approver::Nobody {
                 // Stop first: refused, the agent would carry on another way,
                 // and a script is better served by a clear stop.
@@ -4776,6 +4799,44 @@ impl RunWatch {
             "y" | "yes"
         ))
     }
+}
+
+/// `--yolo` for one run: approve, once, every request in the run's chat (its
+/// agents, workflows and later turns included) that offers Always. Nothing is
+/// remembered, and a request that must ask every time is left to the caller.
+/// The workspace server is never a yolo server on the run's behalf: it serves
+/// every chat in the folder and outlives the run.
+async fn approve_run_requests_once(
+    client: &haarness_tui::api::ApiClient,
+    root: ThreadId,
+) -> Result<()> {
+    for pending in client
+        .pending_permissions()
+        .await?
+        .into_iter()
+        .filter(|pending| {
+            (pending.thread_id == root || pending.root_thread_id == Some(root))
+                && yolo_answers(pending)
+        })
+    {
+        let reply = PermissionReply {
+            decision: PermissionReplyDecision::Once,
+            feedback: None,
+        };
+        // Already answered elsewhere, or its turn stopped: nothing to do.
+        if let Err(error) = client.reply_permission(&pending.permission_id, reply).await
+            && haarness_tui::api::refusal_status(&error) != Some(reqwest::StatusCode::NOT_FOUND)
+        {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+/// Whether `--yolo` may answer a request: not one that always asks (a Cloud
+/// action that spends money, a tool that requires approval each time).
+fn yolo_answers(pending: &haarness_protocol::PendingPermissionInfo) -> bool {
+    pending.allow_always != Some(false)
 }
 
 /// The terminal a run's approvals are typed into when stdin carries piped
@@ -6685,10 +6746,9 @@ async fn mcp_command(
     paths: &Paths,
     workspace: &Path,
     trust: bool,
-    yolo: bool,
     command: McpCommand,
 ) -> Result<()> {
-    let discovery = ensure_workspace_server(paths, workspace, trust, yolo).await?;
+    let discovery = ensure_workspace_server(paths, workspace, trust).await?;
     let client = haarness_tui::api::ApiClient::new(&discovery.url, &discovery.token)?;
     match command {
         McpCommand::List => {
@@ -8827,7 +8887,6 @@ fn workspace_server_restarter(
     paths: &Paths,
     workspace: &Path,
     trust: bool,
-    yolo: bool,
 ) -> haarness_tui::api::ServerRestarter {
     let paths = paths.clone();
     let workspace = workspace.to_path_buf();
@@ -8837,7 +8896,7 @@ fn workspace_server_restarter(
         Box::pin(async move {
             let discovery = match inspect_workspace_server(&paths, &workspace).await? {
                 Some(live) => live.discovery,
-                None => ensure_workspace_server(&paths, &workspace, trust, yolo).await?,
+                None => ensure_workspace_server(&paths, &workspace, trust).await?,
             };
             Ok(haarness_tui::api::EndpointCredentials::new(
                 discovery.url,
@@ -9067,17 +9126,21 @@ fn comparable_workspace(workspace: &Path) -> PathBuf {
 /// Ensure the default TUI/Desktop execution owner exists independently of
 /// this client process. Closing or switching a client therefore only detaches
 /// it; the server continues provider, tool, workflow, and child-agent work.
+///
+/// A client's `--yolo` never reaches this server: it outlives the client and
+/// serves every chat in the folder, so it would keep approving for all of
+/// them until `serve --stop`. `run`, ACP and the TUI approve their own
+/// requests instead; only `haarness serve --yolo` makes a yolo server.
 async fn ensure_workspace_server(
     paths: &Paths,
     workspace: &Path,
     trust: bool,
-    yolo: bool,
 ) -> Result<RuntimeDiscovery> {
     ensure_workspace_server_at(
         paths,
         workspace,
         trust,
-        yolo,
+        false,
         SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0),
         random_token(),
         None,
@@ -11289,6 +11352,7 @@ mod tests {
             .unwrap();
         let watch = RunWatch {
             approver: Approver::Nobody,
+            yolo: false,
             activity: None,
         };
         let error = tokio::time::timeout(
@@ -11321,6 +11385,127 @@ mod tests {
         server.shutdown().await.unwrap();
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// `run --yolo` on a server that is not a yolo server: a request its own
+    /// flagged turn does not cover (a workflow's, a queued turn's) is
+    /// approved once by the run, and the next chat still asks.
+    #[tokio::test]
+    async fn a_yolo_run_approves_its_own_requests_once_and_teaches_no_rule() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-cli-run-yolo-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let outside = root.join("outside.txt");
+        let store = Arc::new(haarness_store::SqliteStore::open(root.join("haarness.db")).unwrap());
+        let provider: Arc<dyn ModelProvider> = Arc::new(OutsideWriteProvider(outside.clone()));
+        let runtime = Arc::new(AgentRuntime::new(
+            store,
+            Arc::new(haarness_core::StaticProviderRegistry::new(vec![provider])),
+            Arc::new(haarness_server::NativeToolRegistry::new(workspace.clone())),
+            haarness_core::EventBus::new(32),
+        ));
+        let (client, server) = run_client(&runtime, &workspace).await;
+        let start = |thread: ThreadId| {
+            let client = client.clone();
+            async move {
+                client
+                    .start_turn(
+                        thread,
+                        StartTurnRequest {
+                            request_id: RequestId::new(),
+                            text: "write outside".into(),
+                            attachments: Vec::new(),
+                            synthetic: false,
+                            auto_approve: false,
+                            agent: None,
+                            provider: None,
+                            model: None,
+                            reasoning_effort: None,
+                            tools: None,
+                            command: None,
+                        },
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+        let new_chat = || async {
+            client
+                .create_thread(CreateThreadRequest {
+                    provider: Some("outside-test".into()),
+                    model: Some("outside-test-1".into()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .id
+        };
+
+        let chat = new_chat().await;
+        let turn = start(chat).await;
+        let yolo = RunWatch {
+            approver: Approver::Nobody,
+            yolo: true,
+            activity: None,
+        };
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            wait_for_turn_client(&client, turn.id, &yolo),
+        )
+        .await
+        .expect("a --yolo run answers its own request")
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "x");
+        assert_eq!(
+            client.turn(turn.id).await.unwrap().status,
+            TurnStatus::Completed
+        );
+
+        // Another chat on the same server still asks: nothing was remembered.
+        std::fs::remove_file(&outside).unwrap();
+        let other = new_chat().await;
+        let turn = start(other).await;
+        let nobody = RunWatch {
+            approver: Approver::Nobody,
+            yolo: false,
+            activity: None,
+        };
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            wait_for_turn_client(&client, turn.id, &nobody),
+        )
+        .await
+        .expect("the plain run waited for an approval nobody can give")
+        .unwrap_err()
+        .to_string();
+        assert!(error.starts_with("Stopped: the agent asked to"), "{error}");
+        assert!(!outside.exists());
+        server.shutdown().await.unwrap();
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn yolo_leaves_requests_that_always_ask_to_a_person() {
+        let pending = |allow_always| haarness_protocol::PendingPermissionInfo {
+            allow_always,
+            repository_scope: None,
+            permission_id: "p".into(),
+            operation: "cloud:session_create".into(),
+            detail: serde_json::Value::Null,
+            permission: "cloud".into(),
+            patterns: Vec::new(),
+            always_patterns: Vec::new(),
+            thread_id: ThreadId::new(),
+            root_thread_id: None,
+            turn_id: None,
+            agent: None,
+            created_at: chrono::Utc::now(),
+        };
+        assert!(super::yolo_answers(&pending(None)));
+        assert!(super::yolo_answers(&pending(Some(true))));
+        assert!(!super::yolo_answers(&pending(Some(false))));
     }
 
     #[test]

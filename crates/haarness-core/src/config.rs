@@ -80,9 +80,9 @@ pub struct RuntimeConfig {
     /// Autonomous continuations per goal; defaults to 20 when absent.
     pub goal_max_turns: Option<u32>,
     pub compaction: CompactionSettings,
-    /// `--yolo`: auto-approve every would-be prompt, recording the "always"
-    /// rules it would have persisted. For headless runs and users who opt out
-    /// of prompting entirely.
+    /// `serve --yolo`: auto-approve every would-be prompt in every chat on
+    /// this server, recording the "always" rules it would have persisted.
+    /// Clients' `--yolo` never sets this; their turns carry `auto_approve`.
     pub auto_approve: bool,
     /// User-defined slash commands (markdown files + config entries).
     pub commands: Vec<haarness_protocol::CommandInfo>,

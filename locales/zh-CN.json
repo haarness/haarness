@@ -1619,6 +1619,7 @@
   "Review · asks before risky steps · ctrl+y for Auto": "审查 · 执行有风险的步骤前会先询问 · ctrl+y 切换为自动",
   "approvals: review": "批准：审查",
   "approvals: auto": "批准：自动",
+  "approvals: --yolo": "批准：--yolo",
   "Answer the approval above · ctrl+g to type": "请先回答上方的批准请求 · ctrl+g 输入文字",
   "Haarness needs approval": "Haarness 需要批准",
   "Approval pending": "待批准",

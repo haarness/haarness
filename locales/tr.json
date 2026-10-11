@@ -1619,6 +1619,7 @@
   "Review · asks before risky steps · ctrl+y for Auto": "İnceleme · riskli adımlardan önce sorar · otomatik için ctrl+y",
   "approvals: review": "onaylar: inceleme",
   "approvals: auto": "onaylar: otomatik",
+  "approvals: --yolo": "onaylar: --yolo",
   "Answer the approval above · ctrl+g to type": "Yukarıdaki onaya yanıt verin · yazmak için ctrl+g",
   "Haarness needs approval": "Haarness onay gerektiriyor",
   "Approval pending": "Onay bekleniyor",
