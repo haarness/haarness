@@ -348,6 +348,12 @@ test("Chrome's own pages are off limits even in an agent tab", async ({ stack })
   expect(failed(await stack.tool(thread, "browser_snapshot", { tabID: tab.id }))).toContain(
     "Haarness cannot control this Chrome page (browser, extension and file pages are off limits). Navigate the tab to an http(s) site.",
   );
+  // An extension page the user drags into the chat's group is not shared with it.
+  const [group] = await stack.worker.evaluate(() => chrome.tabGroups.query({}));
+  const welcome = await stack.worker.evaluate(() => chrome.tabs.query({ url: chrome.runtime.getURL("welcome.html") }).then(([entry]) => entry.id!));
+  await stack.worker.evaluate(([id, groupId]) => chrome.tabs.group({ tabIds: [id], groupId }), [welcome, group.id] as const);
+  await expect.poll(() => stack.worker.evaluate((id) => chrome.tabs.get(id).then((entry) => entry.groupId), welcome)).toBe(-1);
+  expect(value<{ tabs: Tab[] }>(await stack.tool(thread, "browser_tabs_list", {})).tabs.map((entry) => entry.id)).toEqual([tab.id]);
 });
 
 test("an upload reaches the site from the file the bridge staged", async ({ stack }) => {
@@ -586,4 +592,71 @@ test("after 30 s without commands the tab is let go, and the next command attach
   expect(snapshot.content).toContain("Welcome to shop.test.");
   value(await stack.tool(thread, "browser_click", { tabID: tab.id, ref: ref(snapshot, "Form") }));
   await expect.poll(() => page.url()).toBe(stack.site.url("shop", "/form"));
+});
+
+test("two Chrome profiles: a chat sticks to the profile holding its tabs, and each call reaches it", async ({ stack }) => {
+  const work = await stack.second("work-profile");
+  const request = (worker: typeof work.worker, message: unknown) =>
+    worker.evaluate((body) => (globalThis as unknown as { haarness: { request(body: unknown): Promise<unknown> } }).haarness.request(body), message);
+  await request(work.worker, { type: "settings", settings: { label: "Work" } });
+  const hosts = async () => (await stack.api.listBrowserHosts()).hosts;
+  await expect.poll(async () => (await hosts()).map((host) => host.label ?? "").sort()).toEqual(["", "Work"]);
+  const paused = async (label: string) => (await hosts()).find((host) => (host.label ?? "") === label)?.paused;
+  const owned = (worker: typeof work.worker) =>
+    worker.evaluate(() =>
+      (globalThis as unknown as { haarness: { debug: { registry: { all(): { tabs: { id: string }[] }[] } } } }).haarness.debug.registry
+        .all()
+        .flatMap((entry) => entry.tabs.map((tab) => tab.id)),
+    );
+
+  // With the work profile paused, the first chat opens its tab in the other profile.
+  await request(work.worker, { type: "pause", paused: true });
+  await expect.poll(() => paused("Work")).toBe(true);
+  const first = await stack.thread("Personal errands");
+  const personal = await open(stack, first, stack.site.url("shop", "/"));
+  // With that one paused instead, a second chat opens in the work profile.
+  await request(work.worker, { type: "pause", paused: false });
+  await stack.host((host) => host.request({ type: "pause", paused: true }));
+  await expect.poll(() => paused("")).toBe(true);
+  await expect.poll(() => paused("Work")).toBe(false);
+  const second = await stack.thread("Office work");
+  const office = await open(stack, second, stack.site.url("other", "/"));
+  await stack.host((host) => host.request({ type: "pause", paused: false }));
+  await expect.poll(() => paused("")).toBe(false);
+  // The first chat sticks to the profile that holds its tabs.
+  const more = value<Tab>(await stack.tool(first, "browser_tabs_open", { url: stack.site.url("shop", "/form"), browser: "chrome" }));
+  expect(await owned(stack.worker)).toEqual([personal.id, more.id]);
+  expect(await owned(work.worker)).toEqual([office.id]);
+
+  const list = value<{ tabs: Tab[]; browsers: { browser: string; name: string; available: boolean }[] }>(
+    await stack.tool(first, "browser_tabs_list", {}),
+  );
+  expect(list.tabs.map((entry) => entry.id)).toEqual([personal.id, more.id]);
+  const chrome = list.browsers.filter((entry) => entry.browser === "chrome");
+  expect(chrome.map((entry) => entry.name).sort()).toEqual(["Chromium", "Chromium (Work)"].sort());
+  expect(chrome.every((entry) => entry.available)).toBe(true);
+  expect(value<{ content: string }>(await stack.tool(second, "browser_snapshot", { tabID: office.id })).content).toContain("Welcome to other.test.");
+  expect(failed(await stack.tool(first, "browser_snapshot", { tabID: office.id }))).toContain("Call browser_tabs_list.");
+});
+
+test("a Chrome approval can be answered from the extension's popup", async ({ stack }) => {
+  const thread = await stack.thread("Answer in Chrome");
+  const call = stack.call(thread, "browser_tabs_open", { url: stack.site.url("shop", "/"), browser: "chrome" });
+  // The bridge forwards the waiting approval; the popup lists it.
+  type Approval = { server: string; id: string; title: string; lines: { category: string; origin: string }[] };
+  let approval: Approval | undefined;
+  await expect
+    .poll(async () => {
+      approval = (await stack.host((host) => host.snapshot().approvals))[0] as Approval | undefined;
+      return approval?.title;
+    })
+    .toBe("Answer in Chrome");
+  expect(approval!.lines).toContainEqual({ category: "browsing", origin: stack.site.origin("shop") });
+  expect(await stack.host((host, body) => host.request(body), { type: "answer", server: approval!.server, permission: approval!.id, decision: "always" })).toEqual({
+    ok: true,
+  });
+  expect(value<Tab>(await call.done).title).toBe("Home of shop.test");
+  // Allowed in this chat, as from Haarness itself.
+  value(await stack.tool(thread, "browser_navigate", { tabID: value<Tab>(await call.done).id, url: stack.site.url("shop", "/form") }));
+  await expect.poll(async () => (await stack.host((host) => host.snapshot().approvals)).length).toBe(0);
 });

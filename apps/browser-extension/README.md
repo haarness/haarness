@@ -46,10 +46,11 @@ Logs: the service worker's console (`chrome://extensions` → **Inspect views: s
 ```sh
 npm test                      # unit tests: chunks, registry, groups, queue, Fetch decisions, downloads, version mapping, i18n keys
 npm run typecheck
-npm run test:e2e              # Playwright with Chromium and a real haarness binary
+npm run test:e2e              # Playwright with Chromium: a fake bridge, then the real haarness stack
+npx playwright test --project full-stack   # only the real stack
 ```
 
-The end-to-end suite launches Chromium with `--load-extension`, registers the host inside the temporary profile with `haarness browser setup --manifest-dir <profile>/NativeMessagingHosts`, and starts a daemon in a disposable workspace with an isolated `HAARNESS_DATA_DIR`. It needs Playwright's Chromium (`npx playwright install chromium`) or `HAARNESS_E2E_CHROMIUM`, and a `HAARNESS_BIN` copied out of `target/` so a parallel build cannot replace it mid-run. Branded Google Chrome ignores `--load-extension`, and the headless shell runs no extensions; see [docs/CHROME-EXTENSION.md](../../docs/CHROME-EXTENSION.md#end-to-end).
+The `fake-bridge` project plays the bridge and servers itself. The `full-stack` project launches Chromium with `--load-extension`, registers the host inside the temporary profile with `haarness browser setup --manifest-dir <profile>/NativeMessagingHosts`, starts a daemon in a disposable git project with an isolated `HAARNESS_DATA_DIR` and `HOME`, and drives every tool through the TypeScript SDK (build it first: `npm --prefix ../../sdks/typescript run build`). It needs Playwright's Chromium (`npx playwright install chromium`) or `HAARNESS_E2E_CHROMIUM`, and `HAARNESS_BIN` copied out of `target/` so a parallel build cannot replace it mid-run (without it, the newest `target/` build is used). Branded Google Chrome ignores `--load-extension`, and the headless shell runs no extensions; see [docs/CHROME-EXTENSION.md](../../docs/CHROME-EXTENSION.md#end-to-end).
 
 ## Rules
 
