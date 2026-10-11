@@ -1,0 +1,216 @@
+/**
+ * Haarness for Chrome, as Desktop sees it: the server's `browser.chrome`
+ * settings, the hosts API, the `haarness browser setup --json` report, and
+ * the explicit Chrome approvals. Shared by main and renderer, so it returns
+ * data and English-free kinds; the renderer chooses the words.
+ */
+import type { BrowserDecision } from "./browser-settings";
+
+export const CHROME_CAPABILITY = "browser-extension.v1";
+export type ChromeField = "browsing" | "downloads" | "uploads" | "scripts";
+export const chromeFields: readonly ChromeField[] = [
+  "browsing",
+  "downloads",
+  "uploads",
+  "scripts",
+];
+export type ChromeAccess = Record<ChromeField, BrowserDecision>;
+export interface ChromeSite extends ChromeAccess {
+  origin: string;
+}
+export type ChromeDefaultBrowser = "auto" | "haarness" | "chrome";
+/** `browser.chrome`: always written whole, to the global layer. */
+export interface ChromeSettings {
+  enabled: boolean;
+  defaults: ChromeAccess;
+  defaultBrowser: ChromeDefaultBrowser;
+  sites: ChromeSite[];
+}
+/** The `chrome` part of a `browser-settings` get. */
+export interface ChromeSettingsView {
+  settings: ChromeSettings;
+  globalSettings: ChromeSettings | null;
+  projectRestrictions: string[];
+}
+export function defaultChromeSettings(): ChromeSettings {
+  return {
+    enabled: true,
+    defaults: { browsing: "ask", downloads: "ask", uploads: "ask", scripts: "ask" },
+    defaultBrowser: "auto",
+    sites: [],
+  };
+}
+/**
+ * What the Chrome rows edit. A project can only tighten Chrome, so the rows
+ * show and save the global layer; the effective value would write a
+ * project's restrictions into every project on this computer.
+ */
+export function editableChromeSettings(view?: ChromeSettingsView | null) {
+  return structuredClone(view?.globalSettings ?? defaultChromeSettings());
+}
+
+/** One connected browser from `GET /v1/browser/hosts`. */
+export interface ChromeHost {
+  kind: string;
+  browserId: string;
+  name: string;
+  label?: string | null;
+  version?: string;
+  extensionVersion?: string;
+  paused: boolean;
+  stopped: boolean;
+  connectedAt?: string;
+  threads?: number;
+  tabs?: number;
+  /** Tabs held for the thread named in the request, when one was. */
+  threadTabs?: number;
+}
+export interface ChromeHosts {
+  hosts: ChromeHost[];
+  chrome?: {
+    enabled: boolean;
+    defaultBrowser: ChromeDefaultBrowser;
+    everConnected: boolean;
+  };
+}
+export function chromeHostName(host: Pick<ChromeHost, "name" | "label">) {
+  return host.label ? `${host.name} (${host.label})` : host.name;
+}
+export type ChromeConnection =
+  | { state: "none" }
+  | { state: "connected"; name: string }
+  | { state: "several"; count: number }
+  | { state: "paused" }
+  | { state: "stopped" };
+/**
+ * One line for every connected Chrome: a browser the user paused or stopped
+ * counts only when no other one is usable, and then says which it was.
+ */
+export function chromeConnection(hosts: readonly ChromeHost[]): ChromeConnection {
+  const chrome = hosts.filter((host) => host.kind === "chrome");
+  if (!chrome.length) return { state: "none" };
+  const usable = chrome.filter((host) => !host.paused && !host.stopped);
+  if (usable.length === 1)
+    return { state: "connected", name: chromeHostName(usable[0]) };
+  if (usable.length > 1) return { state: "several", count: usable.length };
+  return chrome.every((host) => host.stopped)
+    ? { state: "stopped" }
+    : { state: "paused" };
+}
+/** How many of one chat's tabs live in Chrome, across every connected browser. */
+export function chromeThreadTabs(hosts: readonly ChromeHost[]) {
+  return hosts
+    .filter((host) => host.kind === "chrome")
+    .reduce((sum, host) => sum + Math.max(0, host.threadTabs ?? 0), 0);
+}
+
+/** One browser in the `haarness browser setup|status --json` report. */
+export interface ChromeSetupBrowser {
+  browser: string;
+  name: string;
+  extensionsPage?: string;
+  manifest?: string | null;
+  detected?: boolean;
+  registered?: boolean;
+  supported?: boolean;
+  note?: string | null;
+}
+export interface ChromeSetupInfo {
+  hostName: string;
+  extensionId: string;
+  webStoreUrl?: string | null;
+  executable?: string;
+  wrapper?: string;
+  removed?: boolean;
+  warnings?: string[];
+  browsers: ChromeSetupBrowser[];
+  extension?: { path: string; version?: string } | null;
+}
+/** Browsers Chrome-side setup reached, and the ones it could only explain. */
+export function setupBrowsers(info: ChromeSetupInfo) {
+  return {
+    ready: info.browsers.filter(
+      (item) => item.registered && item.supported !== false,
+    ),
+    unsupported: info.browsers.filter((item) => item.supported === false),
+  };
+}
+/** The extensions page to open: Google Chrome's when it is set up. */
+export function extensionsPage(info: ChromeSetupInfo) {
+  const { ready } = setupBrowsers(info);
+  const preferred =
+    ready.find((item) => item.browser === "chrome") ?? ready[0];
+  return preferred?.extensionsPage || "chrome://extensions";
+}
+/** Only an https Web Store link is offered; anything else falls back to the
+ * unpacked-extension steps. */
+export function webStoreLink(info: ChromeSetupInfo) {
+  try {
+    const url = new URL(info.webStoreUrl ?? "");
+    return url.protocol === "https:" ? url.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A Chrome site gate: `chrome-<category>:<thread>:<origin>`, prefixed with
+ * `browser_site:` when it is combined with other browser permissions.
+ */
+const chromePattern =
+  /^(?:browser_site:)?chrome-(browsing|downloads|uploads|scripts):([^:\s]+):(\S+)$/;
+export function chromeApproval(pattern: string) {
+  const match = chromePattern.exec(pattern);
+  return match
+    ? { category: match[1] as ChromeField, thread: match[2], origin: match[3] }
+    : undefined;
+}
+/**
+ * A request that only a person may answer. The server marks it `explicit`;
+ * a Chrome site pattern is treated the same way, so a client never answers
+ * one on the user's behalf even before the server says so.
+ */
+export function isExplicitPermission(request: {
+  explicit?: boolean | null;
+  operation?: string;
+  patterns?: readonly string[];
+}) {
+  return (
+    request.explicit === true ||
+    !!(request.operation && chromeApproval(request.operation)) ||
+    (request.patterns ?? []).some((pattern) => !!chromeApproval(pattern))
+  );
+}
+const wwwTwin = (origin: string) => {
+  try {
+    const url = new URL(origin);
+    url.hostname = url.hostname.startsWith("www.")
+      ? url.hostname.slice(4)
+      : "www." + url.hostname;
+    return url.origin;
+  } catch {
+    return origin;
+  }
+};
+/**
+ * What an explicit Chrome request asks for, one line per category and site.
+ * A site and its `www.` twin are asked together, so they read as one line.
+ */
+export function chromeApprovalLines(patterns: readonly string[]) {
+  const lines: { category: ChromeField; origin: string }[] = [];
+  for (const pattern of patterns) {
+    const approval = chromeApproval(pattern);
+    if (
+      !approval ||
+      lines.some(
+        (line) =>
+          line.category === approval.category &&
+          (line.origin === approval.origin ||
+            line.origin === wwwTwin(approval.origin)),
+      )
+    )
+      continue;
+    lines.push({ category: approval.category, origin: approval.origin });
+  }
+  return lines;
+}

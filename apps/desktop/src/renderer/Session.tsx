@@ -31,6 +31,12 @@ import { agentColor } from "./agent-colors";
 import { conversationAgents, selectConversationAgent } from "./agent-selection";
 import { providerModelOptions } from "./provider-model-options";
 import { canAutoApprove, describeAlwaysRule } from "./approval-mode";
+import {
+  chromeApproval,
+  chromeApprovalLines,
+  isExplicitPermission,
+  type ChromeField,
+} from "../chrome";
 import { chatTitle } from "./chat-title";
 import { parseModel, selectModel } from "./model-selection";
 import { AgentTask } from "./AgentTask";
@@ -2425,6 +2431,17 @@ function Permission(props: {
   const category = () =>
     props.permission.permission || props.permission.operation.split(":")[0];
   const title = () => permissionTitles[category()] ?? "Permission needed";
+  // A site in the user's own Chrome is answered by a person, for this chat
+  // at most: no folder or repository rule, and no switch to Auto.
+  const explicit = () => isExplicitPermission(props.permission);
+  const otherPatterns = () =>
+    (props.permission.patterns ?? []).filter((pattern) => !chromeApproval(pattern));
+  const explicitDetail = () => {
+    const value = props.permission.detail;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+    const rest = Object.entries(value).filter(([key]) => key !== "__browser");
+    return rest.length ? stringify(Object.fromEntries(rest)) : "";
+  };
   // A file change is approved for what it changes, so show the change itself
   // rather than only the path it touches.
   const changes = () =>
@@ -2460,7 +2477,9 @@ function Permission(props: {
     >
       <header class="prompt-head">
         <Icon name={shape().icon} size="sm" />
-        <strong class="prompt-title">{t(title())}</strong>
+        <strong class="prompt-title">
+          {explicit() ? t("Allow in Chrome") : t(title())}
+        </strong>
         <Show when={props.queued > 1}>
           <span class="prompt-count">
             {t("{index} of {total}", { index: 1, total: props.queued })}
@@ -2476,12 +2495,43 @@ function Permission(props: {
         </Show>
       </header>
       <Show
-        when={permissionCommand(props.permission.detail)}
-        fallback={<pre class="prompt-subject prompt-detail">{detail()}</pre>}
+        when={!explicit()}
+        fallback={
+          <>
+            <ul class="prompt-subject chrome-approval">
+              <For each={chromeApprovalLines(props.permission.patterns ?? [])}>
+                {(line) => (
+                  <li>
+                    {splitAround(
+                      chromeRequestText(line.category),
+                      () => <bdi>{line.origin}</bdi>,
+                      "{origin}",
+                    )}
+                  </li>
+                )}
+              </For>
+              <For each={otherPatterns()}>
+                {(pattern) => (
+                  <li>
+                    <code>{pattern}</code>
+                  </li>
+                )}
+              </For>
+            </ul>
+            <Show when={explicitDetail()}>
+              <pre class="prompt-subject prompt-detail">{explicitDetail()}</pre>
+            </Show>
+          </>
+        }
       >
-        <pre class="prompt-subject approval-command">
-          {permissionCommand(props.permission.detail)}
-        </pre>
+        <Show
+          when={permissionCommand(props.permission.detail)}
+          fallback={<pre class="prompt-subject prompt-detail">{detail()}</pre>}
+        >
+          <pre class="prompt-subject approval-command">
+            {permissionCommand(props.permission.detail)}
+          </pre>
+        </Show>
       </Show>
       <Show when={changes().length}>
         <div class="approval-changes">
@@ -2497,60 +2547,98 @@ function Permission(props: {
           {app.permissionError(props.permission.permissionId)}
         </p>
       </Show>
-      <footer class="prompt-actions">
-        <button
-          class="ghost"
-          disabled={answered()}
-          onClick={() => decide("reject")}
-        >
-          {t("Deny")}
-        </button>
-        <Show when={props.permission.allowAlways !== false}>
-          <Show
-            when={props.permission.repositoryScope}
-            fallback={
-              <button
-                disabled={answered()}
-                onClick={() => decide("always_workspace")}
-                title={alwaysRules().join("\n")}
-              >
-                {t("Always for this folder")}
-              </button>
-            }
-          >
-            <MenuButton
-              label={t("Always allow")}
-              content={
-                <>
-                  {t("Always allow")}
-                  <Icon name="down" size="xs" />
-                </>
-              }
-              class="prompt-always"
-              title={alwaysRules().join("\n") || t("Always allow")}
-              items={alwaysChoices()}
-            />
-          </Show>
-        </Show>
-        <Show when={!app.isAutoApproval() && canAutoApprove(props.permission)}>
+      <Show when={explicit()}>
+        <footer class="prompt-actions">
           <button
+            class="ghost"
             disabled={answered()}
-            onClick={() => decide("auto")}
-            title={t("Allow this request once and enable Auto for this chat and its agents")}
+            onClick={() => decide("reject")}
           >
-            {t("Allow once + Auto")}
+            {t("Deny")}
           </button>
-        </Show>
-        <button
-          class="primary"
-          disabled={answered()}
-          onClick={() => decide("once")}
-        >
-          {t("Allow once")}
-        </button>
-      </footer>
+          <button disabled={answered()} onClick={() => decide("once")}>
+            {t("Allow once")}
+          </button>
+          <button
+            class="primary"
+            disabled={answered()}
+            onClick={() => decide("always")}
+            title={t("Lasts for this chat until its Haarness server stops.")}
+          >
+            {t("Allow in this chat")}
+          </button>
+        </footer>
+      </Show>
+      <Show when={!explicit()}>
+        <footer class="prompt-actions">
+          <button
+            class="ghost"
+            disabled={answered()}
+            onClick={() => decide("reject")}
+          >
+            {t("Deny")}
+          </button>
+          <Show when={props.permission.allowAlways !== false}>
+            <Show
+              when={props.permission.repositoryScope}
+              fallback={
+                <button
+                  disabled={answered()}
+                  onClick={() => decide("always_workspace")}
+                  title={alwaysRules().join("\n")}
+                >
+                  {t("Always for this folder")}
+                </button>
+              }
+            >
+              <MenuButton
+                label={t("Always allow")}
+                content={
+                  <>
+                    {t("Always allow")}
+                    <Icon name="down" size="xs" />
+                  </>
+                }
+                class="prompt-always"
+                title={alwaysRules().join("\n") || t("Always allow")}
+                items={alwaysChoices()}
+              />
+            </Show>
+          </Show>
+          <Show when={!app.isAutoApproval() && canAutoApprove(props.permission)}>
+            <button
+              disabled={answered()}
+              onClick={() => decide("auto")}
+              title={t("Allow this request once and enable Auto for this chat and its agents")}
+            >
+              {t("Allow once + Auto")}
+            </button>
+          </Show>
+          <button
+            class="primary"
+            disabled={answered()}
+            onClick={() => decide("once")}
+          >
+            {t("Allow once")}
+          </button>
+        </footer>
+      </Show>
     </section>
   );
+}
+/** What an explicit Chrome request lets the agent do, with `{origin}` left
+ * for the caller to isolate (an origin is a Latin run in any language). */
+function chromeRequestText(category: ChromeField) {
+  switch (category) {
+    case "browsing":
+      return t("Use {origin} in Chrome");
+    case "downloads":
+      return t("Send downloads from {origin} in Chrome to the agent");
+    case "uploads":
+      return t("Upload files to {origin} in Chrome");
+    case "scripts":
+      return t("Run scripts on {origin} in Chrome");
+  }
 }
 function Question(props: { question: T.PendingQuestionInfo }) {
   const app = useApp();

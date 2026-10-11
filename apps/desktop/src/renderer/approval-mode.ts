@@ -1,4 +1,5 @@
 import type { PendingPermissionInfo, Thread } from "@haarness/sdk";
+import { isExplicitPermission } from "../chrome";
 
 export type ApprovalModes = Record<string, Record<string, boolean>>;
 export function readApprovalModes(value: unknown): ApprovalModes {
@@ -42,17 +43,22 @@ export function autoApproval(
   }
   return rules["*"] ?? false;
 }
+/** Whether this client may answer a request for the user. An explicit
+ * request (a site in the user's own Chrome) always waits for a person. */
 export function canAutoApprove(
   request: Pick<PendingPermissionInfo, "permission" | "operation"> & {
+    patterns?: string[];
     allowOnce?: boolean;
     allowAlways?: boolean | null;
+    explicit?: boolean | null;
   },
 ): boolean {
   const category = request.permission || request.operation.split(":")[0];
   return (
     request.allowOnce !== false &&
     request.allowAlways !== false &&
-    category !== "instruction_import"
+    category !== "instruction_import" &&
+    !isExplicitPermission(request)
   );
 }
 
