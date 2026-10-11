@@ -1,5 +1,6 @@
 import test from "node:test";
 import { cursorLabelKeys } from "../src/main/browser/agent-cursor";
+import { errorTextKeys } from "../src/renderer/error-text";
 import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import { defaults } from "../src/shared";
@@ -126,6 +127,8 @@ test("keys translated through a variable are in the catalog", () => {
     "See where Haarness points, clicks and types while it controls the browser. Turning it off makes browser actions a little faster.",
     // The agent cursor's labels, translated in the main process.
     ...cursorLabelKeys,
+    // Plain copy that stands in for transport and port failures.
+    ...errorTextKeys,
     "signed in", "API key", "from the environment",
     // Custom-provider API formats, kept as English keys in the `protocols`
     // constant and translated at the render site.
@@ -191,6 +194,8 @@ test("keys translated through a variable are in the catalog", () => {
     "Needs approval", "Needs an answer",
     // Theme descriptions from `themes.ts`, shown as the swatch tooltip.
     ...themes.map((theme) => theme.description),
+    // Plain readings of an "always" rule's catch-all, from `everyRequest`.
+    "Every command", "Every file edit", "Every file read", "Every web page", "Every workflow",
     // Helper labels and built-in slash command descriptions.
     "Open providers", "Use an API key",
     // `historyCommands` (conversation-controls.ts imports the app state, so its

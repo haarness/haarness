@@ -11,7 +11,7 @@ import {
   onCleanup,
   onMount,
 } from "solid-js";
-import { Button, Icon, confirm, dismissOnBackdrop } from "./ui";
+import { Button, ErrorNotice, Icon, confirm, dismissOnBackdrop } from "./ui";
 import { ProviderIcon } from "./ProviderIcon";
 import { ProviderForm } from "./ProviderForm";
 import { RouterConnectionDialog } from "./RouterConnectionDialog";
@@ -253,10 +253,16 @@ export function ConnectProvider(props: {
   });
   const subtitle = createMemo(() => {
     const current = step();
+    // The welcome names the choices in the order the dialog offers them:
+    // the Haarness Cloud card (local servers only), then the providers.
     if (current.kind === "pick")
       return props.onboarding
-        ? t("Connect a provider to start chatting. Sign in with a ChatGPT subscription, or paste an API key from OpenAI, Anthropic, Google and more.")
-        : t("Sign in or add an API key. Keys stay on this Haarness server.");
+        ? local()
+          ? t("Pick how Haarness gets its models: your Haarness Cloud account, a ChatGPT subscription, or an API key from OpenAI, Anthropic, Google and more.")
+          : t("Pick how Haarness gets its models: a ChatGPT subscription, or an API key from OpenAI, Anthropic, Google and more.")
+        : local()
+          ? t("Sign in or add an API key. Keys stay on this computer.")
+          : t("Sign in or add an API key. Keys stay on this Haarness server.");
     if (current.kind === "method") return t("How do you want to connect?");
     if (current.kind === "key") return current.provider.note ?? "";
     return "";
@@ -305,9 +311,7 @@ export function ConnectProvider(props: {
         <Button icon="close" label={t("Close dialog")} onClick={close} />
       </header>
       <Show when={error()}>
-        <p class="form-error" role="alert">
-          {error()}
-        </p>
+        <ErrorNotice error={error()} />
       </Show>
       <Switch>
         <Match when={step().kind === "pick"}>
@@ -431,9 +435,7 @@ export function ConnectProvider(props: {
                   )}
                 </For>
                 <Show when={provider().env.length}>
-                  <p class="muted connect-hint">
-                    {t("Or set {env} in the environment before starting Haarness.").replace("{env}", provider().env.join(" / "))}
-                  </p>
+                  <EnvironmentHint env={provider().env} />
                 </Show>
               </div>
             );
@@ -458,27 +460,26 @@ export function ConnectProvider(props: {
                   />
                 </label>
                 <p class="muted connect-hint">
+                  {local()
+                    ? t("Saved on this computer, never in your project.")
+                    : t("Saved on this Haarness server, never in your project.")}
+                </p>
+                <Show when={provider().env.length}>
+                  <EnvironmentHint env={provider().env} />
+                </Show>
+                <footer>
                   <Show when={provider().keyUrl}>
                     {(url) => (
-                      <>
-                        <button type="button" class="link" onClick={() => void window.haarness.openExternal(url())}>
-                          {t("Create a key")}
-                        </button>
-                        {" · "}
-                      </>
+                      <button
+                        type="button"
+                        class="connect-create-key"
+                        onClick={() => void window.haarness.openExternal(url())}
+                      >
+                        {t("Create a key")}
+                        <Icon name="external" size="sm" />
+                      </button>
                     )}
                   </Show>
-                  <Show when={provider().env.length}>
-                    {splitAround(
-                      t("or set {env} in the environment"),
-                      () => <code>{provider().env.join(" / ")}</code>,
-                      "{env}",
-                    )}
-                    {" · "}
-                  </Show>
-                  {t("Stored in owner-only auth.json on this Haarness server, never in the project.")}
-                </p>
-                <footer>
                   <button type="button" disabled={busy()} onClick={back}>
                     {t("Back")}
                   </button>
@@ -557,9 +558,7 @@ export function ConnectProvider(props: {
                     </footer>
                   </Match>
                   <Match when={login().state !== "pending"}>
-                    <p class="form-error" role="alert">
-                      {login().error ?? t("Sign-in cancelled")}
-                    </p>
+                    <ErrorNotice error={login().error ?? t("Sign-in cancelled")} />
                     <footer>
                       <button type="button" onClick={back}>
                         {t("Back")}
@@ -602,6 +601,28 @@ export function ConnectProvider(props: {
   );
 }
 
+/**
+ * Environment variables are another way to connect, not a first-run step, so
+ * they wait behind a disclosure instead of sitting in the instructions.
+ */
+function EnvironmentHint(props: { env: string[] }) {
+  return (
+    <details class="connect-other">
+      <summary>
+        <Icon name="chevron" size="xs" />
+        {t("Other ways to connect")}
+      </summary>
+      <p class="muted">
+        {splitAround(
+          t("Set {env} in the environment before starting Haarness."),
+          () => <code>{props.env.join(" / ")}</code>,
+          "{env}",
+        )}
+      </p>
+    </details>
+  );
+}
+
 /** Disconnect with a confirmation, shared by Settings and the picker. */
 export async function disconnectProvider(
   app: ReturnType<typeof useApp>,
@@ -609,8 +630,11 @@ export async function disconnectProvider(
 ) {
   if (
     !(await confirm(
-      t("Disconnect provider?"),
-      t("Remove the stored {name} credential?").replace("{name}", provider.name),
+      t("Disconnect {name}?", { name: provider.name }),
+      t("Haarness forgets the stored {name} credential. You can connect it again at any time.", {
+        name: provider.name,
+      }),
+      { submit: t("Disconnect"), danger: true },
     ))
   )
     return false;

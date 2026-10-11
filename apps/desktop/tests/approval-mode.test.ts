@@ -6,6 +6,7 @@ import {
   approveAndEnable,
   canAutoApprove,
   createAutoApprover,
+  describeAlwaysRule,
   readApprovalModes,
 } from "../src/renderer/approval-mode";
 const request = (id: string, threadId = "root"): PendingPermissionInfo => ({
@@ -131,4 +132,28 @@ test("Allow once + Auto never enables after a failed reply or after navigation/r
   current = true;
   await approveAndEnable({ ...callbacks, reply: async () => {} });
   assert.equal(enabled, 1);
+});
+
+test("always rules read as plain words, never as stored permission patterns", () => {
+  const words = {
+    t: (key: string, values: Record<string, string> = {}) =>
+      key.replace(/\{(\w+)\}/g, (_, name: string) => values[name] ?? ""),
+    shortPath: (path: string) => "…/" + path.split("/").slice(-2).join("/"),
+  };
+  const say = (permission: string, rule: string) => describeAlwaysRule(permission, rule, words);
+  assert.equal(
+    say("external_directory", "external_directory:/private/tmp/qa/desktop-onboarding/projects/*"),
+    "Anything in …/desktop-onboarding/projects",
+  );
+  assert.equal(say("external_directory", "external_directory:*"), "Any folder outside the project");
+  assert.equal(say("bash", "bash:git push *"), "Commands starting with git push");
+  assert.equal(say("bash", "bash:*"), "Every command");
+  assert.equal(say("edit", "edit:*"), "Every file edit");
+  assert.equal(say("read", "read:.env"), "Reading .env");
+  assert.equal(say("media_generate", "media_generate:image:*"), "Any image generation");
+  assert.equal(say("agent_switch", "agent_switch:thread:6275696c64"), "Only this agent, in this chat");
+  assert.equal(say("glob", "glob:*"), "Every request of this kind");
+  // Without a plainer reading the rule is still shown, minus its prefix.
+  assert.equal(say("browser_site", "browser_site:https://example.com"), "https://example.com");
+  assert.equal(say("multiple", "browser:navigate:https://example.com"), "browser:navigate:https://example.com");
 });

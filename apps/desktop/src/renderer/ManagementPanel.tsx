@@ -15,6 +15,7 @@ import type {
 import { useApp } from "./state";
 import { Select } from "./Select";
 import { ProviderLabel } from "./ProviderIcon";
+import { ErrorNotice } from "./ui";
 import "./management.css";
 
 /** A sentence reads as text; JSON, commands and paths keep the code face. */
@@ -140,16 +141,30 @@ export function ManagementPanel(props: {
   return (
     <section class="management-panel" classList={{ "router-connection-panel": view()?.title === "Connect Haarness Router" || view()?.title === "Router connected" }} aria-busy={busy()}>
       <Show when={error()}>
-        <p role="alert" class="form-error">
-          {error()}
-        </p>
+        <ErrorNotice error={error()} />
       </Show>
       <Show
         when={view()}
         fallback={
-          <p class="muted">
-            {busy() ? t("Loading…") : t("Configuration is unavailable.")}
-          </p>
+          // A failed first load already said why above; offer the retry
+          // rather than a second, vaguer line.
+          <Show
+            when={!busy() && error()}
+            fallback={
+              <p class="muted">
+                {busy() ? t("Loading…") : t("Configuration is unavailable.")}
+              </p>
+            }
+          >
+            <div class="management-actions">
+              <button
+                type="button"
+                onClick={() => void request(props.initialRequest ?? { action: "view" }, true)}
+              >
+                {t("Try again")}
+              </button>
+            </div>
+          </Show>
         }
         keyed
       >

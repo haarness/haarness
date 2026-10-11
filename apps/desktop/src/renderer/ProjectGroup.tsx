@@ -298,6 +298,7 @@ function ProjectGroup(props: {
                       t(
                         "Archived chats leave the sidebar. Search still finds them, and each one can be restored.",
                       ),
+                      { submit: t("Archive chats") },
                     )
                   )
                     await app.archiveProjectChats(props.project.id);
@@ -311,10 +312,13 @@ function ProjectGroup(props: {
                 void app.run(async () => {
                   if (
                     await confirm(
-                      t("Remove this project from the sidebar?"),
+                      t("Remove {name} from the sidebar?", {
+                        name: props.project.label,
+                      }),
                       t(
                         "Conversation history, running tasks and the saved server connection are preserved.",
                       ),
+                      { submit: t("Remove project"), danger: true },
                     )
                   )
                     await app.forgetProject(props.project.id);
@@ -435,6 +439,7 @@ export function ProjectSection(props: {
                     await confirm(
                       t("Remove section {name}?", { name: props.name }),
                       t("Its projects stay in the sidebar without a section."),
+                      { submit: t("Remove section"), danger: true },
                     )
                   )
                     await app.removeSection(props.name);

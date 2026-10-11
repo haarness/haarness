@@ -346,7 +346,7 @@ function MemoryEditor(props: {
               type="button"
               disabled={busy() || deleting()}
               onClick={async () => {
-                if (!(await confirm(t("Delete memory?"), form.name))) return;
+                if (!(await confirm(t("Delete memory?"), form.name, { submit: t("Delete memory"), danger: true }))) return;
                 setDeleting(true);
                 try {
                   await props.remove();

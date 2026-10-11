@@ -961,6 +961,40 @@
   vertical-align: 0.06em;
   margin-inline: 3px -3px;
 }
+/* Where replies come from when only a local runtime offers a model: a quiet
+   line under the starters, not a card. */
+/* It reads as one sentence, so it wraps like one: inline pieces, not a row. */
+.conversation-empty .local-model-hint {
+  margin: var(--s6) auto 0;
+  max-width: 620px;
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  line-height: 1.6;
+  text-wrap: balance;
+}
+.local-model-hint > svg {
+  vertical-align: -2px;
+  margin-inline-end: var(--s1);
+}
+.local-model-hint .icon-button {
+  vertical-align: middle;
+  margin-inline-start: var(--s0);
+}
+.local-model-hint .link {
+  margin-inline-start: var(--s1);
+  border: 0;
+  padding: 0;
+  min-height: 0;
+  background: none;
+  color: var(--text);
+  font-size: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.local-model-hint .link:hover:not(:disabled) {
+  background: none;
+  color: var(--primary-hover);
+}
 .suggestions {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

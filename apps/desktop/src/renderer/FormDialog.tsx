@@ -1,6 +1,6 @@
 import { t } from "./i18n";
 import { Show, createSignal, onMount, type Accessor, type JSX } from "solid-js";
-import { Button, dismissOnBackdrop, focusFirstField } from "./ui";
+import { Button, ErrorNotice, dismissOnBackdrop, focusFirstField } from "./ui";
 
 /** Preserve failed drafts and allow dismissal without waiting for pending writes. */
 export function FormDialog(props: {
@@ -83,9 +83,7 @@ export function FormDialog(props: {
           {props.children(locked)}
         </fieldset>
         <Show when={error()}>
-          <p ref={alert} class="form-error" role="alert" tabindex="-1">
-            {error()}
-          </p>
+          <ErrorNotice ref={(element) => (alert = element)} error={error()} focusable />
         </Show>
         <footer>
           <button type="button" onClick={close}>

@@ -222,7 +222,12 @@ export function AccountMenu(props: {
       <button
         class={props.models ? "account-connect" : "nav-row"}
         aria-label={props.models ? t("Use Haarness Cloud") : account().loggedIn ? account().user?.displayName || t("Haarness account") : t("Sign in to Haarness")}
-        onClick={show}
+        onClick={() => {
+          show();
+          // The card already said what Cloud gives; signed out, it goes
+          // straight to the browser rather than to a second pitch.
+          if (props.models && !account().loggedIn) void signIn();
+        }}
       >
         <Show
           when={props.models}

@@ -117,3 +117,52 @@ export async function approveAndEnable(input: {
   input.acknowledge();
   if (input.current()) await input.enable();
 }
+
+/** The plain reading of a stored rule's catch-all, by permission. */
+const everyRequest: Record<string, string> = {
+  bash: "Every command",
+  edit: "Every file edit",
+  read: "Every file read",
+  webfetch: "Every web page",
+  workflow: "Every workflow",
+};
+
+/**
+ * What an "always" answer lets through, in words. The stored rule keeps its
+ * `permission:` prefix and glob (`external_directory:/tmp/notes/*`), which
+ * read as internals; the menu says "Anything in …/tmp/notes" instead. A rule
+ * with no plainer reading is shown without its prefix.
+ */
+export function describeAlwaysRule(
+  permission: string,
+  rule: string,
+  words: {
+    t: (key: string, values?: Record<string, string>) => string;
+    shortPath: (path: string) => string;
+  },
+): string {
+  const { t } = words;
+  const pattern =
+    permission && permission !== "multiple" && rule.startsWith(permission + ":")
+      ? rule.slice(permission.length + 1)
+      : rule;
+  if (permission === "agent_switch") return t("Only this agent, in this chat");
+  if (permission === "external_directory") {
+    const folder = pattern.replace(/[/\\]\*$/, "");
+    return folder === "*"
+      ? t("Any folder outside the project")
+      : t("Anything in {folder}", { folder: words.shortPath(folder) });
+  }
+  if (pattern === "*")
+    return everyRequest[permission]
+      ? t(everyRequest[permission])
+      : t("Every request of this kind");
+  if (permission === "bash" && pattern.endsWith(" *"))
+    return t("Commands starting with {command}", { command: pattern.slice(0, -2) });
+  if (permission === "read") return t("Reading {path}", { path: pattern });
+  if (permission === "media_generate" && pattern === "image:*")
+    return t("Any image generation");
+  if (permission === "media_generate" && pattern === "video:*")
+    return t("Any video generation");
+  return pattern;
+}

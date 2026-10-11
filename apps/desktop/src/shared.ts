@@ -50,7 +50,8 @@ export interface Preferences {
   language: string;
 }
 export const defaults: Preferences = {
-  theme: "dark",
+  // A new install follows the system until someone picks Light or Dark.
+  theme: "system",
   palette: "haarness",
   fontSize: 14,
   notifications: true,

@@ -30,7 +30,7 @@ import {
 import { agentColor } from "./agent-colors";
 import { conversationAgents, selectConversationAgent } from "./agent-selection";
 import { providerModelOptions } from "./provider-model-options";
-import { canAutoApprove } from "./approval-mode";
+import { canAutoApprove, describeAlwaysRule } from "./approval-mode";
 import { parseModel, selectModel } from "./model-selection";
 import { AgentTask } from "./AgentTask";
 import { Shimmer } from "./Shimmer";
@@ -143,6 +143,16 @@ export function Session() {
     !!state.connection &&
     !!state.selected &&
     isLive(state.remoteShares[sessionKey(state.connection.id, state.selected)]);
+  // What the approval pill's mode does, worded after the server's default
+  // rules: Review does not ask before every edit or command.
+  const approvalModeHint = () =>
+    app.isAutoApproval()
+      ? state.selected
+        ? t("Auto: permission requests in this chat and its agents are allowed once without asking. Click to switch to Review.")
+        : t("Auto: permission requests in new chats here are allowed once without asking. Click to switch to Review.")
+      : state.selected
+        ? t("Review: edits and commands inside the project run without asking. By default this chat and its agents ask before working outside the project, reading secrets such as .env, switching agents, generating paid media, opening new browser sites or repeating a failing step. Click to switch to Auto.")
+        : t("Review: edits and commands inside the project run without asking. By default new chats here ask before working outside the project, reading secrets such as .env, switching agents, generating paid media, opening new browser sites or repeating a failing step. Click to switch to Auto.");
   // Learn whether the chat that just opened is shared, for the composer chip.
   // The server answers from local state: no Cloud call, nothing to wait for.
   createEffect(
@@ -277,6 +287,27 @@ export function Session() {
     // the welcome screen. An open settings editor is left alone.
     if (!state.settings && !state.connect) app.openConnect({ onboarding: true });
   });
+  // A model a local runtime offers is picked without a welcome, so the first
+  // chats say once where replies come from and how to add a stronger model.
+  const [localHintDismissed, setLocalHintDismissed] = createSignal(true);
+  void window.haarness
+    .storage("local-model-hint:v1")
+    .then((value) => setLocalHintDismissed(value === true))
+    .catch(() => {});
+  const localModel = () => {
+    const key = selectedModel();
+    const runtime = key && localRuntimes[key.provider];
+    if (!key || !runtime) return undefined;
+    const elsewhere = state.providers.some(
+      (provider) =>
+        provider.authenticated && provider.models.length && !localRuntimes[provider.id],
+    );
+    return elsewhere ? undefined : { runtime, model: key.model };
+  };
+  const dismissLocalHint = () => {
+    setLocalHintDismissed(true);
+    void window.haarness.storage("local-model-hint:v1", true).catch(() => {});
+  };
   const modelValue = () => {
     const key = selectedModel();
     return key ? key.provider + "/" + key.model : "";
@@ -1159,6 +1190,8 @@ export function Session() {
       app.openConnect({ onboarding: true });
       return;
     }
+    // The local-model hint has been read once a first message goes to it.
+    if (localModel() && !localHintDismissed()) dismissLocalHint();
     voice.cancel();
     let connection = project()?.id;
     let createdOwner = "";
@@ -1508,6 +1541,32 @@ export function Session() {
                     )}
                   </For>
                 </div>
+              </Show>
+              <Show when={project() && !localHintDismissed() && localModel()}>
+                {(local) => (
+                  <p class="local-model-hint">
+                    <Icon name="computer" size="sm" />
+                    <span>
+                      {t("Replies come from {model}, which {runtime} runs on this computer.", {
+                        model: local().model,
+                        runtime: local().runtime,
+                      })}
+                    </span>
+                    <button
+                      type="button"
+                      class="link"
+                      onClick={() => app.openConnect()}
+                    >
+                      {t("Connect a provider for larger models")}
+                    </button>
+                    <Button
+                      icon="close"
+                      size="sm"
+                      label={t("Dismiss")}
+                      onClick={dismissLocalHint}
+                    />
+                  </p>
+                )}
               </Show>
             </div>
           </Show>
@@ -1872,15 +1931,8 @@ export function Session() {
                       disabled={!!state.openingProject}
                       aria-label={t("Automatic approvals")}
                       aria-pressed={app.isAutoApproval()}
-                      title={t(
-                        app.isAutoApproval()
-                          ? state.selected
-                            ? "Auto allows requests once for this conversation and its agents. Click to switch."
-                            : "Auto allows requests once for this workspace. Click to switch."
-                          : state.selected
-                            ? "Review permission requests for this conversation and its agents. Click to switch."
-                            : "Review permission requests for this workspace. Click to switch.",
-                      )}
+                      aria-description={approvalModeHint()}
+                      title={approvalModeHint()}
                       onClick={() =>
                         app.run(() =>
                           app.setAutoApproval(!app.isAutoApproval()),
@@ -1888,7 +1940,8 @@ export function Session() {
                       }
                     >
                       <Icon name="shield" size="sm" />
-                      {app.isAutoApproval() ? t("Auto-approve") : t("Ask first")}
+                      {/* The same two names as the TUI and the docs. */}
+                      {app.isAutoApproval() ? t("Auto") : t("Review")}
                     </button>
                   </Show>
                   <Show when={remoteShared()}>
@@ -2250,6 +2303,12 @@ function Message(props: {
  */
 /** A compact unified diff for one edit inside a transcript step. */
 
+/** Model runtimes Haarness finds on this computer without being told. */
+const localRuntimes: Record<string, string> = {
+  ollama: "Ollama",
+  lmstudio: "LM Studio",
+};
+
 const permissionTitles: Record<string, string> = {
   bash: "Run a command",
   read: "Read a file",
@@ -2332,10 +2391,15 @@ function Permission(props: {
     ["edit", "write"].includes(category())
       ? toolChanges(category(), props.permission.detail)
       : [];
+  // What "always" would let through, in words rather than as stored rules.
+  const alwaysRules = () =>
+    (props.permission.alwaysPatterns ?? []).map((rule) =>
+      describeAlwaysRule(category(), rule, { t, shortPath }),
+    );
   const alwaysChoices = (): MenuAction[] => [
     {
       label: t("Always for this folder"),
-      detail: props.permission.alwaysPatterns?.join(", ") || shortPath(app.state.connection?.workspace ?? ""),
+      detail: alwaysRules().join(", ") || shortPath(app.state.connection?.workspace ?? ""),
       icon: "folder",
       run: () => decide("always_workspace"),
     },
@@ -2408,7 +2472,7 @@ function Permission(props: {
               <button
                 disabled={answered()}
                 onClick={() => decide("always_workspace")}
-                title={props.permission.alwaysPatterns?.join("\n")}
+                title={alwaysRules().join("\n")}
               >
                 {t("Always for this folder")}
               </button>
@@ -2423,7 +2487,7 @@ function Permission(props: {
                 </>
               }
               class="prompt-always"
-              title={props.permission.alwaysPatterns?.join("\n") || t("Always allow")}
+              title={alwaysRules().join("\n") || t("Always allow")}
               items={alwaysChoices()}
             />
           </Show>

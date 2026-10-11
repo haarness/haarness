@@ -153,6 +153,17 @@ fieldset {
 .primary:disabled {
   opacity: 0.45;
 }
+/* The submit of a confirmation that removes, deletes or discards. */
+.danger-action {
+  background: var(--danger);
+  color: var(--page);
+  border-color: transparent;
+  font-weight: 600;
+}
+.danger-action:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 86%, var(--text));
+  border-color: transparent;
+}
 .icon-button {
   padding: 0;
   border: 0;
@@ -345,6 +356,12 @@ input[type="number"] {
 .danger,
 .removed {
   color: var(--danger);
+}
+/* A failure's title sits on its own line, above what happened. */
+.form-error > strong,
+.notice-inline > strong {
+  display: block;
+  font-weight: 600;
 }
 .added {
   color: var(--green);
