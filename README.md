@@ -1,28 +1,116 @@
 # Haarness
 
-Haarness is a durable agentic coding harness written in Rust. A versioned REST/SSE server owns durable agent state; the terminal client is a strict server client rendered through OpenTUI's native Zig core. The application, server, TUI, and compressed native library ship as one platform executable.
+Haarness is a coding agent that works in your project folder, from a terminal UI, a desktop app,
+scripts and CI, or your editor. A local server owns every chat, turn and tool call and keeps them
+durable: closing a window or losing a connection never stops the work, and every client sees the
+same chats. The CLI, server and terminal UI are one Rust executable.
 
 > Haarness permissions are application-level policy, not an operating-system sandbox. Review approval prompts before allowing tools to operate.
 
-## Install binaries
+**Documentation:** user guides at <https://haarness.ai/docs> · engineering docs in [docs/](docs/README.md) · [contributing](CONTRIBUTING.md)
+
+## Quick start
+
+### 1. Install
 
 Once the public release service is deployed and a stable release is published:
 
 ```sh
+# CLI and terminal UI (macOS, Linux)
 curl -fsSL https://app.haarness.ai/install.sh | sh
-# Desktop (macOS/Linux):
+# Desktop app (macOS, Linux)
 curl -fsSL https://app.haarness.ai/install.sh | HAARNESS_PRODUCT=desktop sh
-# Upgrade an installed CLI:
-haarness upgrade
 ```
 
-Windows: `irm https://app.haarness.ai/install.ps1 | iex`; set
-`$env:HAARNESS_PRODUCT='desktop'` first for the Desktop installer. Installers verify
-SHA-256 before replacement. macOS curl installations clear quarantine on the verified
-payload, including nested Desktop executables. Use `HAARNESS_CHANNEL=preview` for
-preview builds and `HAARNESS_VERSION` to pin one. See the
-[release testing skill](skills/haarness-release/SKILL.md) for local installation,
+On Windows, run `irm https://app.haarness.ai/install.ps1 | iex` in PowerShell (set
+`$env:HAARNESS_PRODUCT='desktop'` first for Desktop). `haarness doctor` checks the install. To
+build from source instead, see [Build from source](#build-from-source).
+
+### 2. Connect a provider
+
+```sh
+cd your-project
+haarness
+```
+
+With nothing connected, the terminal UI opens on **Connect a provider**. Choose **Haarness
+Cloud** to use Cloud models with your Haarness account, sign in with a ChatGPT, GitHub Copilot or
+xAI subscription, or paste an API key for OpenAI, Anthropic, Google Gemini, OpenRouter or one of
+the other providers in the list. `/connect` opens the same picker later. A running Ollama or LM
+Studio is detected and used without this step.
+
+From a shell instead:
+
+```sh
+haarness login                # Haarness Cloud account (--device on a machine without a browser)
+haarness auth login openai    # ChatGPT Plus/Pro in the browser (--method headless for a code)
+haarness auth set anthropic   # asks for an API key; a piped key works too
+```
+
+Provider environment variables such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` work as well.
+
+### 3. Your first chat
+
+**Terminal UI.** Type your request at **Ask anything…** and press Enter. `/` lists commands, `@`
+attaches files or hands work to an agent, and `!` runs a shell command. Quitting leaves running
+work on the server; `haarness -c` continues the last chat.
+
+**Desktop.** Choose **Open project** and pick a folder. The **Welcome to Haarness** dialog
+connects Haarness Cloud or a provider; then type in the message box and press Enter. See the
+[Desktop first run](docs/DESKTOP.md#first-run).
+
+**Approvals.** Each chat is in **Review** (the default) or **Auto**, stored on the server and
+shared by every client attached to it: **Ctrl+Y** in the TUI or the shield pill in Desktop's
+composer changes the open chat, and the choice survives quitting. In Review, edits and commands
+inside the project run without asking; Haarness asks before leaving the project, reading secrets
+such as `.env`, switching agents, generating paid media, opening a new site in Desktop's browser
+or repeating a failing step, plus anything your own rules set to ask. Auto answers those requests
+itself, except Haarness Cloud actions that spend money or delete something, which always ask. In
+the TUI, answer a request with `y` (allow once), `a` (always), `w` (always in this folder), `r`
+(always in this repository), `u` (once, then Auto) or `n` (reject); `a`, `w`, `r` and `u` first
+show what they grant, and Enter or the same key again confirms. An "always" answer saves the
+rule shown on the card, which is a pattern: approving `rm -rf build` allows every `rm` command.
+**Always** applies to every chat on that server until it stops; **This folder** and
+**Repository** are saved and apply after restarts. See
+[Permissions and approvals](https://haarness.ai/docs/security/permissions).
+
+### 4. Run without the UI
+
+```sh
+haarness run "Summarize what this project does"
+git diff | haarness run "Review this change"
+haarness run -m anthropic/claude-sonnet-5-5 --file ./brief.pdf "Check the code against this brief"
+haarness run --format json "List the open TODOs"   # newline-delimited JSON records
+```
+
+`haarness run` uses your default model, else a connected provider's. With no terminal to ask at
+(a script, CI), a permission request is refused and the run stops, naming what was asked: allow
+it with a permission rule, or pass `--yolo` where the damage is bounded. Ctrl-C stops the run's
+work on the server and exits with status 130. See
+[Run a prompt from a script or CI](https://haarness.ai/docs/cli/headless-runs).
+
+## Install options
+
+`haarness upgrade` installs a newer release. Installers verify SHA-256 before replacement, and
+macOS curl installations clear quarantine on the verified payload, including nested Desktop
+executables. Use `HAARNESS_CHANNEL=preview` for preview builds and `HAARNESS_VERSION` to pin
+one. See the [release testing skill](skills/haarness-release/SKILL.md) for local installation,
 publishing, platform validation and rollback.
+
+## Usage statistics
+
+Usage statistics are on by default. A running Haarness server sends Haarness Cloud a daily
+summary about every six hours: counts of chats and turns (completed, failed, interrupted, run by
+subagents or schedules), tokens, the cost estimate, tool calls and errors by built-in tool, and
+files changed with lines added and removed, per provider and model. Providers and models are
+named only when Haarness ships them; anything else is reported as `custom`, `other`, `local` or
+`mcp`. The summary also carries a random installation id, the app version, the OS and the CPU
+type, and never prompts, answers, code, file names, paths or titles. It is linked to your
+Haarness account when you are signed in and anonymous otherwise. Turn it off in Desktop
+**Settings → General → Share usage statistics**, with `/usage-statistics` in the TUI,
+`haarness telemetry off`, `HAARNESS_TELEMETRY=0` or `DO_NOT_TRACK=1`;
+`haarness telemetry preview` shows exactly what is sent. See
+[Usage statistics](docs/USAGE-STATISTICS.md).
 
 ## What works
 
@@ -52,8 +140,8 @@ publishing, platform validation and rollback.
   `haarness insights --days 7` generates a private HTML report with findings.
   The TUI exposes `/stats` and `/insights`. See [Insights](docs/INSIGHTS.md).
 
-- Usage statistics: a daily summary of chats, turns, tokens, models and tool calls
-  (never prompts, code, file names or paths) shared with Haarness Cloud.
+- Usage statistics, on by default: a daily summary of chats, turns, tokens, models and
+  tool calls (never prompts, code, file names or paths) shared with Haarness Cloud.
   `haarness telemetry preview` shows exactly what is sent;
   `haarness telemetry off`, `HAARNESS_TELEMETRY=0` or `DO_NOT_TRACK=1` turns it off.
   See [Usage statistics](docs/USAGE-STATISTICS.md).
@@ -64,7 +152,7 @@ publishing, platform validation and rollback.
 - Dynamic workflows with static project/global/plugin discovery, native and restricted-portable runtimes, permission-checked agents/tools/shell/nesting, immutable source snapshots, durable logs and child sessions, lifecycle controls, live events, and TUI/CLI/model-facing management.
 - Durable native scheduling with CLI and model-facing management, overlap locks, run history, and OS registration through launchd on macOS, systemd user timers on Linux, and Task Scheduler on Windows.
 - Native OpenAI Responses, Anthropic Messages, Gemini, Azure OpenAI, Google Vertex AI, GitHub Copilot, Amazon Bedrock, and OpenAI-compatible adapters with authenticated model discovery, provider-specific authentication and tool-schema transforms, required schema-constrained workflow output, durable Gemini thought signatures, PDF/image input across native adapters, Gemini audio/video understanding, and provider-neutral text, reasoning, tools, usage, cancellation, and error events.
-- Built-in read/list/glob/grep/write/edit/multiedit/apply-patch/bash/web-fetch tools, PDF/image/audio/video-aware file reads, optional image/video generation, permission-preserving batch calls, confined JavaScript orchestration over MCP tools, exact ordered permissions, blocking approvals/questions, durable child agents, plan/review/explore profiles, and four-child concurrency.
+- Built-in read/list/glob/grep/write/edit/multiedit/apply-patch/bash/web-fetch tools, PDF/image/audio/video-aware file reads, optional image/video generation, permission-preserving batch calls, confined JavaScript orchestration over MCP tools, exact ordered permissions, blocking approvals/questions, durable child agents, plan/review/explore profiles, and configurable child-agent concurrency (four at a time by default).
 - MCP stdio, Streamable HTTP, and legacy SSE initialization; generic OAuth 2.1/PKCE discovery; durable authorization state; explicit connection status; capability discovery; namespaced tools; and direct calls through the official Rust SDK.
 - Recursive Agent Skill discovery and loading from global, project, and Haarness plugin roots, plus CLI create/get/list/remove lifecycle and `AGENTS.md` project context.
 - Recursive slash-command and custom-agent discovery with project/global CLI lifecycle, collision-safe plugin namespaces, command model/agent overrides, and custom-agent model pinning for primary and child sessions.
@@ -72,9 +160,9 @@ publishing, platform validation and rollback.
 - A quiet editorial OpenTUI interface built from edges rather than boxes: a launch masthead that becomes scrollback, a prompt that floats on the page over a rule that breathes while a turn runs, a command-driven custom status line, 17 selectable UI languages shared with Desktop (English by default), compact activity rows, PDF/image/audio/video drag-and-drop chips, filtered slash/file autocomplete, borderless command/thread/model/agent selectors, reasoning controls, permission prompts, persistent tabbed workspace terminals, and reliable terminal cleanup.
 - Owner-only credential and runtime-discovery files, loopback-by-default binding, explicit authenticated network exposure, host/origin validation, and redacted-by-construction normal logs.
 
-## Build and use
+## Build from source
 
-The repository vendors OpenTUI v0.5.9's native source and checksummed libraries for every supported target, then embeds the selected archive. Normal builds are offline and end users do not need Bun, Node.js, TypeScript, Zig, or OpenTUI. Terminal capabilities are forwarded across the Rust/native boundary; terminals without truecolor use OpenTUI's palette-aware ANSI-256 renderer, including Apple Terminal when `COLORTERM` incorrectly claims truecolor support. Haarness queries the terminal's default background to select a readable dark/light variant. In the default `auto` background mode it preserves that background when exact RGB page colors are unavailable, unless you explicitly choose or preview a theme. Explicit choices paint their own background, including light themes on dark terminals, and survive restart. Page, sidebar, transcript, code, and status surfaces then use the terminal background together; menus, dialogs, selections, and emphasized diffs remain solid. Set `[tui] background_mode = "theme"` or `"terminal"` in `config.toml` to force either behavior.
+The repository vendors OpenTUI v0.5.9's native source and checksummed libraries for every supported target, then embeds the selected archive. Normal builds are offline and end users do not need Bun, Node.js, TypeScript, Zig, or OpenTUI. Terminal capabilities are forwarded across the Rust/native boundary; terminals without truecolor use OpenTUI's palette-aware ANSI-256 renderer, including Apple Terminal when `COLORTERM` incorrectly claims truecolor support. Haarness queries the terminal's default background to select a readable dark/light variant. In the default `auto` background mode it preserves that background when exact RGB page colors are unavailable, unless you explicitly choose or preview a theme. Explicit choices paint their own background, including light themes on dark terminals, and survive restart. Page, sidebar, transcript, code, and status surfaces then use the terminal background together; menus, dialogs, selections, and emphasized diffs remain solid. Set `[tui] background_mode = "theme"` or `"terminal"` in `~/.config/haarness/config.toml` to force either behavior.
 
 The default `haarness` theme pairs warm charcoal with paper-white focus in dark mode, and warm paper with ink focus in light mode, matching Desktop. Use `/themes haarness dark` or `/themes haarness light`, or open `/themes` to preview the collection. Existing saved theme choices are preserved. Every built-in light palette has light surfaces and contrast-checked body, secondary, syntax, and diff text.
 
@@ -84,7 +172,9 @@ cargo build --release
 ./target/release/haarness
 ```
 
-Useful commands:
+## Command examples
+
+The full list is in [Find the right command](https://haarness.ai/docs/cli/overview) and in `haarness --help`.
 
 ```sh
 haarness serve --port 4096
@@ -109,23 +199,23 @@ haarness run --provider openai --model gpt-5.6 "Inspect this repository"
 git diff | haarness run "Review this change"  # piped stdin is appended to the prompt; an idle pipe is ignored when a prompt is given
 haarness run --goal --provider openai --model gpt-5.6 "Ship and verify the migration"
 haarness run --ultracode --provider openai --model gpt-5.6 "Audit every API boundary"
-haarness run --provider gemini --model gemini-3.1-flash --file ./brief.pdf --file ./clip.mp4 "Compare these"
+haarness run --provider gemini --model gemini-3.5-flash --file ./brief.pdf --file ./clip.mp4 "Compare these"
 haarness providers
 haarness agents
-haarness agent create reviewer --description 'Review changes' --model anthropic/claude-sonnet-4-6 --tool bash=false --permission 'edit:*=deny' --prompt 'Review for correctness.' --project
+haarness agent create reviewer --description 'Review changes' --model anthropic/claude-sonnet-5-5 --tool bash=false --permission 'edit:*=deny' --prompt 'Review for correctness.' --project
 haarness command create audit --description 'Audit a subsystem' --template 'Audit $ARGUMENTS' --agent reviewer --project
 haarness skill create release-check --description 'Check release readiness' --instructions 'Verify build, tests, and artifacts.' --project
 haarness sessions list
 haarness sessions export SESSION_ID --output session.json
 haarness sessions export SESSION_ID --sanitize --output shareable-session.json
 haarness sessions import session.json
-haarness workspace list
-haarness workspace create review-fix --from main
-haarness workspace open review-fix
+haarness worktree list
+haarness worktree create review-fix --from main
+haarness worktree open review-fix
 # destructive operations require an explicit acknowledgement; dirty files
 # need the additional discard flags shown by `--help`
-haarness workspace reset review-fix --confirm
-haarness workspace remove review-fix --confirm --delete-branch
+haarness worktree reset review-fix --confirm
+haarness worktree remove review-fix --confirm --delete-branch
 haarness mcp ls
 haarness mcp add files --command my-mcp-server --arg=--root --arg=. --env TOKEN='${TOKEN}'
 haarness mcp add remote --url https://example.test/mcp --header 'Authorization=Bearer ${TOKEN}'
@@ -151,10 +241,11 @@ haarness schedule history morning-review
 haarness schedule run morning-review
 ```
 
+## Servers and clients
+
 A plain `haarness`, `haarness tui`, `haarness run`, or workflow command starts
-or reuses one loopback workspace server. The TUI, CLI, and Desktop
-frontends—are clients:
-switching sessions, `/new`, closing the terminal, or losing an SSE connection
+or reuses one loopback workspace server. The TUI, the CLI and Desktop are all
+clients of that server: switching chats, `/new`, closing the terminal, or losing an SSE connection
 only detaches that client and does not cancel turns, child agents, or workflows.
 Reopening Haarness hydrates an authoritative process-wide activity snapshot and
 continues streaming. Use `/cancel` for one turn or `haarness serve --stop` for
@@ -189,8 +280,10 @@ required history capability before opening. Local PDF/image/audio/video media
 selected by an attach client is bounded to 20 MiB and uploaded inline, so the server never attempts
 to read a path that exists only on the client machine.
 
-Servers bind loopback by default. An explicit `haarness serve` accepts connections
-without credentials unless `--password` / `HAARNESS_SERVER_PASSWORD` is set.
+Servers bind loopback by default. An explicit `haarness serve` on loopback accepts
+connections without credentials unless `--password` / `HAARNESS_SERVER_PASSWORD` is set.
+On a network address (`--host 0.0.0.0`) it refuses to start without a password or
+token unless `--anonymous` says that unauthenticated access is intended.
 Password authentication uses HTTP Basic; the username defaults to `haarness`
 and can be set with `--username` / `HAARNESS_SERVER_USERNAME`. Attach, TUI and
 headless clients accept the same options. `--token` / `HAARNESS_SERVER_TOKEN`
@@ -210,12 +303,14 @@ when making it reachable by other users. Each project has a separate session
 database, runtime record and server lease; project routing keeps the host's
 credentials at the gateway and uses private credentials for child daemons.
 
-`haarness workspace list` groups local checkouts and linked worktrees by
-project. `workspace create NAME [--from REF] [--branch NAME] [--path PATH]`
+## Worktrees
+
+`haarness worktree list` groups local checkouts and linked worktrees by
+project. `worktree create NAME [--from REF] [--branch NAME] [--path PATH]`
 creates a new non-tracking branch and Git worktree; omitted branch/path values
-are collision-resistant. `workspace open NAME-OR-ID` starts or attaches that
-workspace's independent server. The TUI exposes the same flow through
-`/workspace`: its create modal discovers local branches, remote branches, and
+are collision-resistant. `worktree open NAME-OR-ID` starts or attaches that
+worktree's independent server. The TUI exposes the same flow through
+`/worktree`: its create modal discovers local branches, remote branches, and
 tags, validates custom refs before creation, and supports open, reset, and
 remove without stopping work in another workspace. Explicit remote attaches
 can create and maintain server-side workspaces but cannot reinterpret a remote
@@ -226,17 +321,29 @@ Reset and removal apply only to Haarness-managed Git worktrees, always require
 the matching discard flags are supplied. Removal from inside the target
 directory is refused; branch deletion uses Git's safe merged-branch check.
 
-Inside the TUI, type `/` to browse commands. Press **F2** to switch models without submitting your draft (Ctrl+M is Enter in conventional terminals). The initial catalog includes `/new`, `/sessions` (`/resume`, `/continue`, and `/threads` are aliases), `/workspace`, `/models`, `/providers`, `/agents`, `/plugin`, `/workflow`, `/btw`, `/goal`, `/plan`, `/review`, `/build`, `/explore`, `/compact`, `/diff`, `/terminal`, `/undo`, `/redo`, `/timeline`, `/messages`, `/fork`, `/rename`, `/archive`, `/reasoning`, `/ultracode`, `/mcp`, `/skills`, `/tools`, `/status`, `/tasks`, `/background`, `/cancel`, `/help`, and `/exit`. `/terminal` opens a full-screen VT terminal backed by a server-owned workspace PTY; `Ctrl+]` (or `F12`, for keyboards where `]` is hard to reach) detaches without stopping it, `Ctrl+Shift+T` opens another tab (in terminals with enhanced key reporting; elsewhere use `/terminal new`), `Ctrl+Shift+W` closes and terminates the active tab, and `Alt+Left/Right` switches tabs. A shell that exits closes its tab, and closing the last one returns to the chat. Reopening `/terminal` reconnects and replays bounded output. Bare `/tools` opens the searchable runtime catalog with enabled, resident, deferred, source/group, and estimated-token state; Enter toggles durable workspace availability. `/tools lazy auto|always|off` controls context scaling and `/tools lazy reset` returns to the configured/default mode, while `/tools show|hide` retains the transcript-detail toggle. `/diff` opens a full-screen review: a nested file tree, syntax-highlighted patches with real line numbers and word-level emphasis, and a line cursor. `/diff` starts on the Git working tree, `/diff branch` compares the current branch with its detected base, and `/diff last` shows the latest completed mutating turn — and `s` cycles between the three without leaving the viewer. Inside it, `tab` moves between the tree and the patches, `n`/`p` jump between edits, `]`/`[` between files, `v` switches side-by-side and stacked layouts, `x` cycles context lines (4, 12, 50, all), `t` hides the tree, `o` shows one patch at a time, `r` marks a file reviewed, `c` queues a comment on the line under the cursor, and `?` lists every shortcut. Queued comments are handed to the composer when the viewer closes, so a review travels with your next message. Layout choices persist between sessions. `/undo` and `/redo` walk paired, conflict-checked workspace checkpoints one change at a time and report how far the history reaches in either direction; undo safely stops an active turn first, and submitting new work after undo confirms that boundary. `/timeline` (`/history`) lists every checkpoint in the session by the request that produced it and undoes back to the one you pick, one conflict-checked step at a time — a human edit in the way stops the walk and says so rather than clobbering it. Every discovered workflow is also a first-class slash command: a definition whose invocation is `release` runs as `/release [plain text or JSON]`; plugin workflows keep their namespaced invocation. `/workflow` opens a searchable dashboard of reusable definitions and durable runs and accepts run/inspect/pause/resume/cancel/delete commands. Use the arrow keys and Enter to select, or Tab to complete a command. Connected providers and their discovered models sort first; selecting a disconnected provider explains how to connect it. Drop a local image or short video into the terminal to attach it; attachments are capped at 20 MiB total for inline provider requests and Backspace removes the latest chip.
+## Terminal UI
+
+Inside the TUI, type `/` to browse commands. Press **F2** to switch models without submitting your draft (Ctrl+M is Enter in conventional terminals). The catalog includes `/new`, `/sessions` (`/resume`, `/continue`, and `/threads` are aliases), `/worktree`, `/connect`, `/models`, `/providers`, `/agents`, `/plugin`, `/workflow`, `/btw`, `/goal`, `/plan`, `/review`, `/build`, `/explore`, `/compact`, `/diff`, `/terminal`, `/undo`, `/redo`, `/timeline`, `/messages`, `/fork`, `/rename`, `/archive`, `/reasoning`, `/ultracode`, `/mcp`, `/skills`, `/tools`, `/status`, `/tasks`, `/background`, `/cancel`, `/help`, and `/exit`. Use the arrow keys and Enter to select, or Tab to complete a command. Connected providers and their discovered models sort first; selecting a disconnected provider explains how to connect it.
+
+`/terminal` opens a full-screen VT terminal backed by a server-owned workspace PTY. `Ctrl+]` (or `F12`, for keyboards where `]` is hard to reach) detaches without stopping it, `Ctrl+Shift+T` opens another tab (in terminals with enhanced key reporting; elsewhere use `/terminal new`), `Ctrl+Shift+W` closes and terminates the active tab, and `Alt+Left/Right` switches tabs. A shell that exits closes its tab, and closing the last one returns to the chat. Reopening `/terminal` reconnects and replays bounded output.
+
+Bare `/tools` opens the searchable runtime catalog with enabled, resident, deferred, source/group, and estimated-token state; Enter toggles durable workspace availability. `/tools lazy auto|always|off` controls context scaling and `/tools lazy reset` returns to the configured/default mode, while `/tools show|hide` retains the transcript-detail toggle.
+
+`/diff` opens a full-screen review: a nested file tree, syntax-highlighted patches with real line numbers and word-level emphasis, and a line cursor. `/diff` starts on the Git working tree, `/diff branch` compares the current branch with its detected base, and `/diff last` shows the latest completed mutating turn — and `s` cycles between the three without leaving the viewer. Inside it, `tab` moves between the tree and the patches, `n`/`p` jump between edits, `]`/`[` between files, `v` switches side-by-side and stacked layouts, `x` cycles context lines (4, 12, 50, all), `t` hides the tree, `o` shows one patch at a time, `r` marks a file reviewed, `c` queues a comment on the line under the cursor, and `?` lists every shortcut. Queued comments are handed to the composer when the viewer closes, so a review travels with your next message. Layout choices persist between sessions.
+
+`/undo` and `/redo` walk paired, conflict-checked workspace checkpoints one change at a time and report how far the history reaches in either direction; undo safely stops an active turn first, and submitting new work after undo confirms that boundary. `/timeline` (`/history`) lists every checkpoint in the session by the request that produced it and undoes back to the one you pick, one conflict-checked step at a time — a human edit in the way stops the walk and says so rather than clobbering it.
+
+Every discovered workflow is also a first-class slash command: a definition whose invocation is `release` runs as `/release [plain text or JSON]`; plugin workflows keep their namespaced invocation. `/workflow` opens a searchable dashboard of reusable definitions and durable runs and accepts run/inspect/pause/resume/cancel/delete commands.
+
+Drop a local PDF, image, audio file or short video into the terminal to attach it. Attachments are capped at 20 MiB total for inline provider requests, and Backspace removes the latest chip.
 
 Use **Alt+M** or **`/messages [search]`** to browse prompts and replies, jump to an earlier message, read/copy its full text, add it to a draft, or fork at that message. See [TUI message browser](docs/TUI-MESSAGES.md).
-
-
-Attachment chips support local PDF, image, audio, and short video files; the
-20 MiB aggregate inline limit and Backspace removal behavior apply to all four.
 
 See [Side questions with `/btw`](docs/SIDE-QUESTIONS.md) for isolated questions that leave the main transcript unchanged.
 
 `/ultracode` (or `/reasoning ultracode`) is a durable session preference for difficult work and independent verification, not a command to orchestrate every request. A standalone `ultracode` in an ordinary prompt enables the same reasoning policy for that turn only. Each enabled turn receives conservative execution-shape guidance, child tasks inherit the mode, and the runtime selects the strongest concrete reasoning effort advertised by the active model (Claude-compatible catalogs cap at `xhigh`). Models that do not publish concrete efforts keep their provider default instead of receiving a guessed value. `haarness run --ultracode` applies the same one-turn semantics from the CLI. Focused and short sequential work stays in the main agent; a few isolated investigations use task subagents; only broad, genuinely multi-stage work uses one durable top-level workflow. Workflow completion is event-driven, repeated model polling is refused, and workflow children cannot recursively launch workflows unless their definition explicitly opts in.
+
+## Agents, goals and workflows
 
 The `task` tool creates a durable child session. It inherits the parent model,
 reasoning mode, automatic-approval setting, and permission ceilings unless a
@@ -253,9 +360,9 @@ workspace server.
 
 Every provider request receives one provider-neutral system scaffold with the
 exact provider/model ID, working directory, git-repository status, OS,
-architecture, and the thread's stable creation date. Global instructions from
-the Haarness config `AGENTS.md` is
-layered before workspace `AGENTS.md`; each source is labeled. Global instruction imports are
+architecture, and the thread's stable creation date. The global `AGENTS.md` in
+the Haarness configuration folder is layered before workspace `AGENTS.md` files;
+each source is labeled. Global instruction imports are
 trusted configuration, while project imports are confined to the workspace.
 Custom-agent role text augments this runtime contract rather than replacing
 the environment or safety facts.
@@ -263,6 +370,8 @@ the environment or safety facts.
 `/goal <objective>` persists the objective and starts pursuing it immediately (input beyond 4,000 characters is retained through the limit and marked `[truncated]`). While the goal is active, the runtime re-presents an untrusted user-role goal doctrine on every logical continuation, accounts non-cached input plus output tokens and elapsed wall time, and allows the model to exit only through `update_goal` after proving completion or a recurring blocker. New goals negotiate 2–5 proposed completion criteria through the normal inline multi-select/custom-answer UI; completion evidence is checked against every approved criterion. Bare `/goal` opens management; exact `status`, `edit`, `pause`, `resume`, `clear`, `complete`, and `block` controls manage state, while longer text remains a literal objective. Clear is confirmed and completion opens localized Edit/New/Clear/Dismiss actions. `haarness run --goal` exposes the same lifecycle headlessly, accepts an ordinary multi-word objective, can target or fork `--session`/`--continue`, resolves criteria noninteractively, and returns success only for an achieved goal.
 
 See [WORKFLOWS.md](docs/WORKFLOWS.md) for workflow roots, source formats, context APIs, lifecycle behavior, and the native-code trust boundary.
+
+## Schedules
 
 Schedules are stored as owner-private JSON under the Haarness configuration
 root, while run records, locks, and logs live under its state root. Enabled jobs
@@ -285,7 +394,9 @@ in a scheduler definition. Workspace servers and their session stores are
 namespaced, so scheduled work in one registered workspace does not collide
 with an active server in another workspace under the same data root.
 
-Haarness loads only its own installed and explicitly configured plugin bundles. It never imports Claude Code home or project settings, plugins, skills, commands, agents, hooks, MCP configuration, or `CLAUDE.md` instructions. Commands, skills, nested agents, hooks, workflows, manifest or `.mcp.json` MCP servers, and dynamic MCP header helpers are mounted together. Commands, invocable skills, and agents use collision-safe plugin namespaces; plugin processes receive `CLAUDE_PLUGIN_ROOT` plus `HAARNESS_PLUGIN_ROOT` and compatibility aliases. `/plugin` lists them; `/plugin install <name@marketplace|local-path>`, `/plugin update|enable|disable|remove`, and `/plugin marketplace add` manage Haarness-owned installs. Configuration, provider definitions, skills, commands, agents, hooks, workflows, MCP definitions, and plugin roots hot reload as one generation; changes wait for active turns to become idle, and an invalid edit leaves the last-known-good generation running. The CLI accepts both `haarness plugin marketplace add <source>` and the shorter `haarness plugin marketplace <source>`.
+## Plugins, skills and tools
+
+Haarness loads only its own installed and explicitly configured plugin bundles. It never imports Claude Code settings, plugins, hooks or MCP configuration; Claude Code instructions (`CLAUDE.md`), agents, commands and skills load only when you turn them on under `compatibility.claude_code` (see [Configuration](#configuration)). Commands, skills, nested agents, hooks, workflows, manifest or `.mcp.json` MCP servers, and dynamic MCP header helpers are mounted together. Commands, invocable skills, and agents use collision-safe plugin namespaces; plugin processes receive `CLAUDE_PLUGIN_ROOT` plus `HAARNESS_PLUGIN_ROOT` and compatibility aliases. `/plugin` lists them; `/plugin install <name@marketplace|local-path>`, `/plugin update|enable|disable|remove`, and `/plugin marketplace add` manage Haarness-owned installs. Configuration, provider definitions, skills, commands, agents, hooks, workflows, MCP definitions, and plugin roots hot reload as one generation; changes wait for active turns to become idle, and an invalid edit leaves the last-known-good generation running. The CLI accepts both `haarness plugin marketplace add <source>` and the shorter `haarness plugin marketplace <source>`.
 
 Explicit administration requests expose `skill_manage`, `plugin_manage`, `mcp_manage`, `agent_manage`, and `command_manage`. Durable project knowledge uses the `memory_list`, `memory_read`, `memory_search`, `memory_save`, and `memory_delete` tools; it is stored under Haarness data rather than committed into the workspace, and its bounded index is refreshed into subsequent turns. Lifecycle requests expose `task_abort`, `session_manage`, `session_rename`, `session_message`, `session_wait`, and `agent_switch`. These schemas are intent-gated (or fully available in Ultracode) so ordinary coding turns do not pay for a large rarely-used tool catalog. Their schemas intentionally omit marketplace search, installation, publishing, updates, and versions. Managed skill, plugin, MCP-definition, command, agent, and memory mutations queue the same idle-time generation refresh; operational MCP reconnect, disconnect, authentication, and logout actions remain live. Agent switching requires user approval and continues in a fresh turn.
 
@@ -295,7 +406,9 @@ Marketplace plugin sources accept `.` or `./` when the marketplace root is itsel
 
 The commercial extension boundary is provider-neutral. Remote MCP authorization uses only public OAuth metadata discovery, authorization code + PKCE, optional dynamic client registration, and owner-only local credential storage. Haarness contains no company-internal identity broker, authentication transport, hostname, marketplace, or service dependency.
 
-Connecting a provider is one flow everywhere. In the TUI, `/connect` (alias `/login`) opens a picker of every provider with how it can be connected; choosing one either asks for a key (masked, with the console link and the environment variable that also works) or signs in: ChatGPT, xAI, GitHub Copilot and Haarness Cloud open the browser, show the device code, poll the daemon and land in the model picker when the browser comes back. `/connect openai` skips the picker; `/providers` remains the manager for disconnecting, custom endpoints and the Router. With nothing connected the picker opens on launch and the home screen says so; `HAARNESS_NO_CONNECT_PROMPT=1` suppresses the launch prompt. Desktop opens the same dialog on first run, from the composer's "Connect a provider" pill, and from Settings → Providers; it uses the management API, so it also works against a remote server, where the device-code method replaces the browser callback. The sign-in issuer can be pointed at a fixture with `HAARNESS_OPENAI_OAUTH_ISSUER` (and `HAARNESS_OPENAI_OAUTH_CALLBACK_PORT`), which is how `scripts/test-tui-connect.sh` and the Desktop e2e suite exercise the OAuth handshake without OpenAI.
+## Providers
+
+Connecting a provider is one flow everywhere. In the TUI, `/connect` (alias `/login`) opens a picker of every provider with how it can be connected; choosing one either asks for a key (masked, with the console link and the environment variable that also works) or signs in: ChatGPT, xAI, GitHub Copilot and Haarness Cloud open the browser, poll the daemon and land in the model picker when the browser comes back. xAI and GitHub Copilot also show a code to enter, and every sign-in offers a code method for SSH sessions and remote servers. `/connect openai` skips the picker; `/providers` remains the manager for disconnecting, custom endpoints and the Router. With nothing connected the picker opens on launch and the home screen says so; `HAARNESS_NO_CONNECT_PROMPT=1` suppresses the launch prompt. Desktop opens the same dialog on first run (see the [Desktop first run](docs/DESKTOP.md#first-run)), from the composer's "Connect a provider" pill, and from Settings → Providers; it uses the management API, so it also works against a remote server, where the device-code method replaces the browser callback. The sign-in issuer can be pointed at a fixture with `HAARNESS_OPENAI_OAUTH_ISSUER` (and `HAARNESS_OPENAI_OAUTH_CALLBACK_PORT`), which is how `scripts/test-tui-connect.sh` and the Desktop e2e suite exercise the OAuth handshake without OpenAI.
 
 Provider environment variables override stored credentials: `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`. Native Gemini checks `GOOGLE_API_KEY`, `GEMINI_API_KEY`, then `GOOGLE_GENERATIVE_AI_API_KEY`, in that order, before falling back to a stored `gemini` credential. `haarness auth login openai` implements a public-client PKCE browser flow, while `--method headless` uses its ChatGPT device-code flow; neither installs Codex nor requires registering a separate OpenAI app. `haarness auth login xai` implements the RFC 8628 SuperGrok device flow, and `haarness auth login github-copilot` implements GitHub's device flow with its public-client authentication and API headers. Access, refresh, expiry, and ChatGPT account records use typed `auth.json` fields. Haarness refreshes ChatGPT five minutes and xAI two minutes before expiry, coalesces concurrent refreshes, persists rotated tokens, scopes ChatGPT requests with its account/residency headers, and uses an inter-process compare-before-write guard so a late refresh cannot undo logout or re-login. Anthropic/Claude and Gemini use API keys because built-in subscription OAuth is unavailable for those providers; `haarness auth login anthropic` and `haarness auth login gemini` therefore prompt for a key. A running server reads native and compatible-provider credentials live, so login/logout and refreshed tokens do not require restart. What each credential can run is discovered rather than assumed: an OpenAI API key lists the public `/models` catalog, and a ChatGPT sign-in reads that account's own Codex catalog, which carries the models the subscription serves, the reasoning tiers each accepts, hidden internal models, and retirement notices. Pickers offer only the listed, non-retiring models; a model outside the account catalog fails before the request with the available alternatives, and provider error bodies (including the ChatGPT backend's `detail` field) are surfaced instead of a bare HTTP status.
 
@@ -333,22 +446,26 @@ haarness provider add company-vertex --url https://us-central1-aiplatform.google
 haarness auth set company-claude
 ```
 
-Use `--project` to write a trusted project definition. `--header NAME=VALUE` adds a validated request header; quote `--header 'Authorization=${COMPANY_MODELS_TOKEN}'` to resolve its value from the environment without storing the secret. Cleartext custom-provider URLs are accepted only for exact loopback hosts. Adding, removing, or changing a provider definition hot reloads a running workspace server after active work becomes idle, including a refreshed automatically discovered model catalog. Credential login, logout, and refresh also apply live to configured model IDs. Haarness does not include company-internal identity brokers, endpoints, provider names, or credentials.
+Use `--project` to write the definition into the project's configuration instead. `--header NAME=VALUE` adds a validated request header; quote `--header 'Authorization=${COMPANY_MODELS_TOKEN}'` to resolve its value from the environment without storing the secret. Cleartext custom-provider URLs are accepted only for exact loopback hosts. Adding, removing, or changing a provider definition hot reloads a running workspace server after active work becomes idle, including a refreshed automatically discovered model catalog. Credential login, logout, and refresh also apply live to configured model IDs. Haarness does not include company-internal identity brokers, endpoints, provider names, or credentials.
 
 The same portable adapter includes Moonshot AI, SiliconFlow (global and China), Nebius Token Factory, Requesty, NovitaAI, Ollama Cloud, Llama API, ModelScope, Upstage, DigitalOcean Gradient AI, Weights & Biases, and Chutes. Their conventional variables are `MOONSHOT_API_KEY`, `SILICONFLOW_API_KEY`, `SILICONFLOW_CN_API_KEY`, `NEBIUS_API_KEY`, `REQUESTY_API_KEY`, `NOVITA_API_KEY`, `OLLAMA_API_KEY`, `LLAMA_API_KEY`, `MODELSCOPE_API_KEY`, `UPSTAGE_API_KEY`, `DIGITALOCEAN_ACCESS_TOKEN`, `WANDB_API_KEY`, and `CHUTES_API_KEY`. Heterogeneous model catalogs use a curated text-and-tools fallback instead of exposing incompatible image, embedding, guard, or non-tool entries.
+
+## Interface language
 
 Interface language defaults to English regardless of the OS locale. Use `/language` in TUI or Desktop, or Desktop Settings → General → Language. See [supported languages and translation behavior](locales/README.md).
 
 ## Configuration
 
-Global configuration is stored in `~/.config/haarness/config.toml` on every OS, including macOS (`$HAARNESS_HOME/config` when `HAARNESS_HOME` is set, otherwise `$XDG_CONFIG_HOME/haarness` when that is set). The terminal UI reads its `[tui]` settings from the same file; settings it once kept in `~/Library/Application Support/dev.haarness.haarness` on macOS still apply until the shared file sets them. Project configuration and integrations load automatically in Desktop, TUI, CLI, and SDK-launched servers. CLI flags override project configuration, which overrides global configuration. To use only global configuration, pass `--disable-project-config` or set `HAARNESS_DISABLE_PROJECT_CONFIG=1`. This opt-out also skips project commands, agents, skills, hooks, MCP servers, extensions, workflows, and instruction files. Individual disabled features and ordinary tool permissions still apply. The old `--trust-project` flag remains accepted for compatibility.
+Global configuration lives in `~/.config/haarness/` on every OS, including macOS (`$HAARNESS_HOME/config` when `HAARNESS_HOME` is set, otherwise `$XDG_CONFIG_HOME/haarness` when that is set). Haarness writes `haarness.json` there (`haarness.jsonc` is read too); an existing `config.toml` beside it is still read and accepts the same sections. The terminal UI reads its `[tui]` settings from that `config.toml`; settings it once kept in `~/Library/Application Support/dev.haarness.haarness` on macOS still apply until the shared file sets them. Project configuration lives in `haarness.json` or `.haarness/haarness.json` (either may be `.jsonc`) and, like project integrations, loads automatically in Desktop, TUI, CLI, and SDK-launched servers. See [Configure Haarness](https://haarness.ai/docs/cli/configuration) and [configuration scopes](docs/CONFIGURATION-SCOPES.md). CLI flags override project configuration, which overrides global configuration. To use only global configuration, pass `--disable-project-config` or set `HAARNESS_DISABLE_PROJECT_CONFIG=1`. This opt-out also skips project commands, agents, skills, hooks, MCP servers, extensions, workflows, and instruction files. Individual disabled features and ordinary tool permissions still apply. The old `--trust-project` flag remains accepted for compatibility.
+
+The example below uses the TOML form. In `haarness.json` the same sections are JSON objects, for example `{"defaults": {"provider": "openai", "model": "gpt-5.6"}}`.
 
 ```toml
 [defaults]
 provider = "openai"          # used when a new thread does not name one
 model = "gpt-5.6"
 agent = "build"
-reasoning_effort = "medium"  # minimal|low|medium|high|xhigh|max
+reasoning_effort = "medium"  # none|minimal|low|medium|high|xhigh|max
 ultracode = false             # durable default for newly created sessions
 output_style = "concise"      # concise|explanatory|formal|minimal, or an output-styles/<name>.md file
 
@@ -510,7 +627,6 @@ transport = "streamable_http"
 url = "http://127.0.0.1:8080/mcp"
 enabled = true
 
-
 [mcp.remote.headers]
 Authorization = "Bearer ${MCP_TOKEN}"
 
@@ -523,11 +639,11 @@ oauthScopes = ["mcp:tools"]  # optional; otherwise server metadata selects scope
 enabled = true
 ```
 
-Approving a prompt with `a` allows the exact operation for the rest of the session; workspace-scoped approvals persist across restarts in the local database. Global skills live in the platform data directory under `haarness/skills/<name>/SKILL.md`; trusted project skills live in `.haarness/skills/<name>/SKILL.md`.
+Answering an approval with **Always** (`a`) saves the rule shown on the card, which is a pattern rather than the exact call (approving `rm -rf build` allows every `rm` command), for every chat on that server until it stops. **This folder** (`w`) and **Repository** (`r`) answers are saved in the local database and apply after restarts. See [Permissions and approvals](https://haarness.ai/docs/security/permissions#what-does-always-remember). Global skills live in `~/.config/haarness/skills/<name>/SKILL.md` (where `haarness skill create` writes them); project skills live in `.haarness/skills/<name>/SKILL.md`.
 
 The JSON/JSONC form (`haarness.json`, including legacy filename aliases) accepts the same sections plus the ecosystem keys `instructions` (extra instruction files: globs, `~/` paths, absolute paths and `http(s)://` URLs), `skills` (`paths` and remote `urls` indexes), and `compatibility.claude_code` (opt-in `instructions`, `agents`, `commands`, `skills` discovery of Claude Code files, all off by default). Markdown agents accept `hidden`, `color`, `steps`, `disable`, `temperature`, `top_p` and `variant`; commands accept `subtask: true` as `context: fork`; `@path` references in command templates attach file snapshots, directory listings or a subagent delegation hint. See [docs/CONFIGURATION-SCOPES.md](docs/CONFIGURATION-SCOPES.md).
 
-The built-in LSP catalog covers Rust, TypeScript/JavaScript, Python, Go, C/C++, shell, YAML, and TOML. The built-in formatter catalog covers rustfmt, gofmt, Prettier, Ruff, clang-format, shfmt, and Zig. Haarness discovers these commands on `PATH`; it does not silently install or update third-party executables. `/status` shows configured LSP processes as idle, running, missing, stopped, or error, and formatters as available or missing. Project `lsp` and `formatter` sections replace the global section when the project is trusted, so a project can disable either feature completely without affecting other workspaces.
+The built-in LSP catalog covers Rust, TypeScript/JavaScript, Python, Go, C/C++, shell, YAML, and TOML. The built-in formatter catalog covers rustfmt, gofmt, Prettier, Ruff, clang-format, shfmt, and Zig. Haarness discovers these commands on `PATH`; it does not silently install or update third-party executables. `/status` shows configured LSP processes as idle, running, missing, stopped, or error, and formatters as available or missing. Project `lsp` and `formatter` sections replace the global section unless project configuration is disabled, so a project can disable either feature completely without affecting other workspaces.
 
 Custom-provider protocols are explicit: `openai-chat-completions`, `anthropic-messages`, `gemini-generate-content`, `azure-openai`, `google-vertex`, `github-copilot`, and `amazon-bedrock`. The last four retain their provider-specific endpoints and authentication instead of being relabeled as generic compatible APIs. Capability overrides are conservative metadata defaults for APIs whose model list omits them; live model metadata wins except where config explicitly overrides it. Perplexity Sonar uses a documented static model fallback and is marked without custom function tools because its provider-specific search tools are not Haarness function tools.
 
@@ -547,7 +663,6 @@ See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for invariants, [API.md](docs/API.md
 That gate checks formatting, architecture boundaries, Clippy, the complete workspace suite, a release one-binary build, the embedded ABI, REST/provider/recovery flows, exact RGB output, slash-command interaction, a real tmux-driven TUI session, and an isolated installed-plugin smoke that loads a skill, executes a command through a pinned custom agent, exercises real MCP tools/resources/templates/prompts, and verifies disconnect/reconnect.
 The separate networked smoke clones the current public `anthropics/claude-code` marketplace into isolated state, installs its real `commit-commands` and `plugin-dev` plugins, discovers their commands, agents, and skills, executes a real command template through the echo provider, and verifies cache isolation and uninstall safety.
 
-
 ## Desktop app
 
 The Electron desktop app lives in `apps/desktop`, with Haarness's own design and a shared workspace server. It includes streaming conversations, approvals, a file editor, diff review, terminals, extensions, plugins, and runtime settings.
@@ -557,7 +672,7 @@ npm run desktop:install
 npm run desktop:dev
 ```
 
-See [Desktop development, packaging, and verification](docs/DESKTOP.md) and [conversation notifications](docs/DESKTOP-NOTIFICATIONS.md).
+See [Desktop](docs/DESKTOP.md) for its first run, development, packaging and verification, and [chat notifications](docs/DESKTOP-NOTIFICATIONS.md).
 
 ## Contributing
 
