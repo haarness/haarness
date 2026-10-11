@@ -201,7 +201,7 @@ pub fn collect_at(
                 .filter(|w| path.starts_with(Path::new(&w.path)))
                 .max_by_key(|w| Path::new(&w.path).components().count())
                 .map(|w| w.project_id.clone())
-                .context("current workspace is not registered; run a session here first")?,
+                .context("current workspace is not registered; run a chat here first")?,
         )
     } else if let Some(reference) = &options.project {
         let matches: Vec<_> = registry
@@ -724,33 +724,51 @@ fn history_connection(path: &Path) -> Result<Connection> {
 }
 
 fn findings(report: &Report) -> Vec<String> {
+    use render::{count, money, noun};
     let total = &report.total;
     if total.turns == 0 {
         return vec![
-            "No recorded turns match this scope. Run sessions or widen the date/project filters."
+            "No recorded turns match this scope. Start a chat or widen the date/project filters."
                 .into(),
         ];
     }
     let mut output = Vec::new();
     if let Some(project) = report.projects.first() {
-        output.push(format!("{} accounts for {} of {} recorded input/output tokens across {} active projects ({} turns).", project.name, project.metrics.tokens(), total.tokens(), report.projects.len(), project.metrics.turns));
+        output.push(format!(
+            "{} accounts for {} of {} recorded input/output tokens across {} ({}).",
+            project.name,
+            count(project.metrics.tokens()),
+            count(total.tokens()),
+            noun(
+                report.projects.len() as u64,
+                "active project",
+                "active projects"
+            ),
+            noun(project.metrics.turns, "turn", "turns")
+        ));
     }
     if let Some(model) = report.models.first() {
-        output.push(format!("{} is the largest token consumer: {} tokens across {} turns. Model attribution uses each turn's recorded model, including later model switches.", model.name, model.metrics.tokens(), model.metrics.turns));
+        output.push(format!("{} is the largest token consumer: {} across {}. Model attribution uses each turn's recorded model, including later model switches.", model.name, noun(model.metrics.tokens(), "token", "tokens"), noun(model.metrics.turns, "turn", "turns")));
     }
     if let Some(day) = report.days.iter().max_by_key(|day| day.metrics.tokens()) {
-        output.push(format!("{} was the busiest UTC day by recorded token volume: {} tokens across {} turns and {} sessions. Open the session breakdown to inspect the larger conversations.", day.name, day.metrics.tokens(), day.metrics.turns, day.metrics.sessions));
+        output.push(format!(
+            "{} was the busiest UTC day by recorded token volume: {} across {} and {}.",
+            day.name,
+            noun(day.metrics.tokens(), "token", "tokens"),
+            noun(day.metrics.turns, "turn", "turns"),
+            noun(day.metrics.sessions, "chat", "chats")
+        ));
     }
     let errors = report.tools.iter().max_by_key(|t| t.metrics.tool_errors);
     if let Some(tool) = errors.filter(|t| t.metrics.tool_errors > 0) {
-        output.push(format!("{} returned {} errors in {} results. Inspect those sessions for repeated friction; a tool error alone does not imply the task failed.", tool.name, tool.metrics.tool_errors, tool.metrics.tool_results));
+        output.push(format!("{} returned {} in {}. Inspect those chats for repeated friction; a tool error alone does not imply the task failed.", tool.name, noun(tool.metrics.tool_errors, "error", "errors"), noun(tool.metrics.tool_results, "result", "results")));
     }
     if total.unpriced_usage_records > 0 || total.turns_without_usage > 0 {
-        output.push(format!("Cost coverage is incomplete: {} usage records have no price and {} turns have no usage record. ${:.4} is the known subtotal, not the total bill.", total.unpriced_usage_records, total.turns_without_usage, total.known_cost_usd));
+        output.push(format!("Cost coverage is incomplete: {} no price and {} no usage record. {} is the known subtotal, not the total bill.", if total.unpriced_usage_records == 1 { "1 usage record has".to_owned() } else { format!("{} usage records have", count(total.unpriced_usage_records)) }, if total.turns_without_usage == 1 { "1 turn has".to_owned() } else { format!("{} turns have", count(total.turns_without_usage)) }, money(total.known_cost_usd)));
     }
     if let Some(file) = report.files.first() {
-        output.push(format!("{} has the most recorded file changes: {} changes, +{} / −{} lines. These are edit activity counts, not a net Git diff.", file.name, file.metrics.file_changes, file.metrics.additions, file.metrics.deletions));
+        output.push(format!("{} has the most recorded file changes: {}, +{} / −{} lines. These are edit activity counts, not a net Git diff.", file.name, noun(file.metrics.file_changes, "change", "changes"), count(file.metrics.additions), count(file.metrics.deletions)));
     }
-    output.push(format!("Turn outcomes: {} completed, {} failed, {} interrupted and {} still queued/running. These describe execution status, not task quality.", total.completed, total.failed, total.interrupted, total.in_progress));
+    output.push(format!("Turn outcomes: {} completed, {} failed, {} interrupted and {} still queued/running. These describe execution status, not task quality.", count(total.completed), count(total.failed), count(total.interrupted), count(total.in_progress)));
     output
 }

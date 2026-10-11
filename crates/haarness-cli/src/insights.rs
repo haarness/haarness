@@ -14,7 +14,7 @@ pub struct Filters {
     /// Include all workspaces belonging to the current project.
     #[arg(long)]
     current_project: bool,
-    /// Maximum recent matching sessions (default: no limit).
+    /// Include at most this many recent matching chats (default: no limit).
     #[arg(long)]
     limit: Option<usize>,
 }

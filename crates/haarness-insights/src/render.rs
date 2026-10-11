@@ -14,25 +14,59 @@ fn escape(text: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+/// `12642` as `12,642`.
+pub(crate) fn count(value: impl Into<u64>) -> String {
+    let digits = value.into().to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
+/// A count and its noun: `1 project`, `12,642 turns`.
+pub(crate) fn noun(value: impl Into<u64>, one: &str, many: &str) -> String {
+    let value = value.into();
+    format!("{} {}", count(value), if value == 1 { one } else { many })
+}
+
+/// Dollars to the cent; an amount under a cent keeps four decimals so it
+/// does not read as free.
+pub(crate) fn money(usd: f64) -> String {
+    if usd > 0.0 && usd < 0.01 {
+        return format!("${usd:.4}");
+    }
+    let cents = format!("{usd:.2}");
+    let (dollars, cents) = cents.split_once('.').unwrap_or((&cents, "00"));
+    format!("${}.{cents}", count(dollars.parse::<u64>().unwrap_or(0)))
+}
+
 pub fn render_text(report: &Report) -> String {
     let m = &report.total;
     let mut text = format!(
-        "Haarness · Cross-project insights\n{} projects · {} sessions · {} turns\n{} input + {} output tokens · cache read {} / write {}\nKnown cost ${:.4} · {} unpriced usage records · {} turns without usage\n{} tool calls · {} tool errors · {} file changes (+{} / -{})\n",
-        report.projects.len(),
-        m.sessions,
-        m.turns,
-        m.input_tokens,
-        m.output_tokens,
-        m.cache_read_tokens,
-        m.cache_write_tokens,
-        m.known_cost_usd,
-        m.unpriced_usage_records,
-        m.turns_without_usage,
-        m.tool_calls,
-        m.tool_errors,
-        m.file_changes,
-        m.additions,
-        m.deletions
+        "Haarness · Usage stats\n{} · {} · {}\n{} input + {} output tokens · cache read {} / write {}\nKnown cost {} · {} · {} without usage\n{} · {} · {} (+{} / -{})\n",
+        noun(report.projects.len() as u64, "project", "projects"),
+        noun(m.sessions, "chat", "chats"),
+        noun(m.turns, "turn", "turns"),
+        count(m.input_tokens),
+        count(m.output_tokens),
+        count(m.cache_read_tokens),
+        count(m.cache_write_tokens),
+        money(m.known_cost_usd),
+        noun(
+            m.unpriced_usage_records,
+            "unpriced usage record",
+            "unpriced usage records"
+        ),
+        noun(m.turns_without_usage, "turn", "turns"),
+        noun(m.tool_calls, "tool call", "tool calls"),
+        noun(m.tool_errors, "tool error", "tool errors"),
+        noun(m.file_changes, "file change", "file changes"),
+        count(m.additions),
+        count(m.deletions)
     );
     for (title, groups) in [
         ("Projects", &report.projects),
@@ -44,13 +78,13 @@ pub fn render_text(report: &Report) -> String {
             let m = &group.metrics;
             let _ = writeln!(
                 text,
-                "  {} · {} turns · {} tokens · ${:.4} known · {} calls / {} errors",
+                "  {} · {} · {} · {} known · {} / {}",
                 terminal_text(&group.name),
-                m.turns,
-                m.tokens(),
-                m.known_cost_usd,
-                m.tool_calls,
-                m.tool_errors
+                noun(m.turns, "turn", "turns"),
+                noun(m.tokens(), "token", "tokens"),
+                money(m.known_cost_usd),
+                noun(m.tool_calls, "call", "calls"),
+                noun(m.tool_errors, "error", "errors")
             );
         }
     }
@@ -92,11 +126,14 @@ pub fn render_html(report: &Report) -> String {
             .map_or_else(|| "All projects".to_owned(), |p| format!("Project: {p}"))
     };
     let scope = format!(
-        "{selection} · {scope} · {} projects · {} databases · {} of {} matching sessions",
-        report.projects.len(),
-        report.databases_read,
-        m.sessions,
-        report.matching_sessions
+        "{selection} · {scope} · {} · {} of {}",
+        noun(report.projects.len() as u64, "project", "projects"),
+        count(m.sessions),
+        noun(
+            report.matching_sessions as u64,
+            "matching chat",
+            "matching chats"
+        )
     );
     html = html
         .replace("{{scope}}", &escape(&scope))
@@ -104,27 +141,40 @@ pub fn render_html(report: &Report) -> String {
     let mut cards = String::new();
     for (label, value, detail) in [
         (
-            "Sessions",
-            m.sessions.to_string(),
-            format!("{} turns · {} completed", m.turns, m.completed),
+            "Chats",
+            count(m.sessions),
+            format!(
+                "{} · {} completed",
+                noun(m.turns, "turn", "turns"),
+                count(m.completed)
+            ),
         ),
         (
             "Input + output tokens",
-            m.tokens().to_string(),
-            format!("{} input · {} output", m.input_tokens, m.output_tokens),
+            count(m.tokens()),
+            format!(
+                "{} input · {} output",
+                count(m.input_tokens),
+                count(m.output_tokens)
+            ),
         ),
         (
             "Known cost",
-            format!("${:.4}", m.known_cost_usd),
+            money(m.known_cost_usd),
             format!(
-                "{} priced · {} unpriced records",
-                m.priced_usage_records, m.unpriced_usage_records
+                "{} · {} unpriced",
+                noun(m.priced_usage_records, "priced record", "priced records"),
+                count(m.unpriced_usage_records)
             ),
         ),
         (
             "Tool calls",
-            m.tool_calls.to_string(),
-            format!("{} errors · {} results", m.tool_errors, m.tool_results),
+            count(m.tool_calls),
+            format!(
+                "{} · {}",
+                noun(m.tool_errors, "error", "errors"),
+                noun(m.tool_results, "result", "results")
+            ),
         ),
     ] {
         let _ = write!(
@@ -150,7 +200,7 @@ pub fn render_html(report: &Report) -> String {
         ("tools", "Tools", &report.tools),
         ("files", "Recorded file changes", &report.files),
         ("days", "Daily activity · UTC", &report.days),
-        ("sessions", "Sessions", &report.sessions),
+        ("sessions", "Chats", &report.sessions),
     ] {
         section(&mut sections, id, title, groups);
     }
@@ -165,12 +215,27 @@ pub fn render_html(report: &Report) -> String {
     let _ = write!(
         warnings,
         "<p>Reported cache tokens: {} read · {} written (separate from the input/output total).</p>",
-        m.cache_read_tokens, m.cache_write_tokens
+        count(m.cache_read_tokens),
+        count(m.cache_write_tokens)
     );
     let _ = write!(
         warnings,
-        "<p>{} duplicate imported turns and {} detached context items excluded. {} turns have no usage record.</p>",
-        report.duplicate_turns_skipped, report.detached_items_skipped, m.turns_without_usage
+        "<p>{} and {} excluded. {} no usage record.</p>",
+        noun(
+            report.duplicate_turns_skipped as u64,
+            "duplicate imported turn",
+            "duplicate imported turns"
+        ),
+        noun(
+            report.detached_items_skipped,
+            "detached context item",
+            "detached context items"
+        ),
+        if m.turns_without_usage == 1 {
+            "1 turn has".to_owned()
+        } else {
+            format!("{} turns have", count(m.turns_without_usage))
+        }
     );
     html.replace("{{coverage}}", &warnings)
 }
@@ -178,8 +243,8 @@ pub fn render_html(report: &Report) -> String {
 fn section(html: &mut String, id: &str, title: &str, groups: &[Group]) {
     let _ = write!(
         html,
-        "<section id={id}><div class=section-title><h2>{title}</h2><span>{} entries</span></div>",
-        groups.len()
+        "<section id={id}><div class=section-title><h2>{title}</h2><span>{}</span></div>",
+        noun(groups.len() as u64, "entry", "entries")
     );
     if groups.is_empty() {
         html.push_str("<p class=empty>No recorded activity in this scope.</p></section>");
@@ -207,23 +272,23 @@ fn section(html: &mut String, id: &str, title: &str, groups: &[Group]) {
         );
         let values = if id == "tools" {
             vec![
-                m.tool_calls.to_string(),
-                m.tool_results.to_string(),
-                m.tool_errors.to_string(),
+                count(m.tool_calls),
+                count(m.tool_results),
+                count(m.tool_errors),
             ]
         } else if id == "files" {
             vec![
-                m.file_changes.to_string(),
-                format!("+{}", m.additions),
-                format!("−{}", m.deletions),
+                count(m.file_changes),
+                format!("+{}", count(m.additions)),
+                format!("−{}", count(m.deletions)),
             ]
         } else {
             vec![
-                m.turns.to_string(),
-                m.tokens().to_string(),
-                format!("${:.4}", m.known_cost_usd),
-                m.unpriced_usage_records.to_string(),
-                m.tool_errors.to_string(),
+                count(m.turns),
+                count(m.tokens()),
+                money(m.known_cost_usd),
+                count(m.unpriced_usage_records),
+                count(m.tool_errors),
             ]
         };
         for value in values {
@@ -253,4 +318,23 @@ pub fn write_report(directory: &Path, html: &str) -> Result<PathBuf> {
     file.write_all(html.as_bytes())?;
     file.sync_all()?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{count, money, noun};
+
+    #[test]
+    fn numbers_read_like_numbers() {
+        assert_eq!(count(0u64), "0");
+        assert_eq!(count(999u64), "999");
+        assert_eq!(count(12_642u64), "12,642");
+        assert_eq!(count(1_234_567u64), "1,234,567");
+        assert_eq!(noun(1u64, "project", "projects"), "1 project");
+        assert_eq!(noun(2_000u64, "turn", "turns"), "2,000 turns");
+        assert_eq!(money(0.0), "$0.00");
+        assert_eq!(money(0.004_2), "$0.0042");
+        assert_eq!(money(0.01), "$0.01");
+        assert_eq!(money(1_234.567), "$1,234.57");
+    }
 }
