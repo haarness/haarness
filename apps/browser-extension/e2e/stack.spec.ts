@@ -5,6 +5,8 @@
  * answered the way a person would, through the server's permissions API.
  */
 import type { BrowserToolResponse } from "@haarness/sdk";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { expect, test, value, type Stack } from "./fixtures/stack";
 
 type Tab = { id: string; url: string; title: string; generation: number; browser?: string };
@@ -381,7 +383,6 @@ test("a download the agent started is listed for its tab and handed over once al
   const saved = value<{ files: { path: string; workspaceRelativePath?: string; bytes: number }[] }>(await call.done);
   const [file] = saved.files;
   expect(file.bytes).toBe("Quarterly report from the fixture".length);
-  const { readFileSync } = await import("node:fs");
   expect(readFileSync(file.path, "utf8")).toBe("Quarterly report from the fixture");
   // A download the user starts in their own tab is never the agent's.
   const mine = await stack.context.newPage();
@@ -409,4 +410,180 @@ test("a window the agent's page opens joins the chat's group", async ({ stack })
   const grouped = await stack.worker.evaluate((groupId) => chrome.tabs.query({ groupId }), groups[0].id);
   expect(grouped).toHaveLength(2);
   expect(value<{ content: string }>(await stack.tool(thread, "browser_snapshot", { tabID: popped.id })).content).toContain("Opened by the page.");
+});
+
+const REVOKED = "The user took this tab back from Haarness. Don't use it again without asking.";
+const CHROME_PAUSED = "The user paused Haarness in Chrome. Ask them to resume it from the Haarness button in Chrome's toolbar; do not retry until they do.";
+const CHROME_RECOVERY =
+  "Chrome disconnected or the Haarness extension restarted. List tabs and inspect the page before repeating any mutation; its outcome may be unknown.";
+
+/** The running bridge's pid, from the bridge log in this test's own data folder. */
+function bridgePid(stack: Stack) {
+  const log = readFileSync(join(stack.env.HAARNESS_DATA_DIR, "data/logs/browser-host.log"), "utf8");
+  const pid = [...log.matchAll(/browser bridge starting .*pid=(\d+)/g)].at(-1)?.[1];
+  if (!pid) throw new Error(`No bridge in the log:\n${log}`);
+  return Number(pid);
+}
+
+/** Chrome's id for a Haarness tab. */
+function chromeTab(stack: Stack, tabID: string) {
+  return stack.host((host, id) => host.debug.registry.all().flatMap((entry: any) => entry.tabs).find((tab: any) => tab.id === id)?.tabId, tabID) as Promise<number>;
+}
+
+test("a tab the user drags out of the group is theirs again", async ({ stack }) => {
+  const thread = await stack.thread("Give it back");
+  const tab = await open(stack, thread, stack.site.url("shop", "/"));
+  const tabId = await chromeTab(stack, tab.id);
+  await stack.worker.evaluate((id) => chrome.tabs.ungroup(id), tabId);
+  await expect.poll(async () => value<{ tabs: Tab[] }>(await stack.tool(thread, "browser_tabs_list", {})).tabs).toEqual([]);
+  expect(failed(await stack.tool(thread, "browser_snapshot", { tabID: tab.id }))).toContain(REVOKED);
+  // The tab is the user's again: still open, outside any group.
+  expect(await stack.worker.evaluate((id) => chrome.tabs.get(id).then((entry) => entry.groupId), tabId)).toBe(-1);
+});
+
+test("pausing Haarness in Chrome refuses every call until the user resumes", async ({ stack }) => {
+  const thread = await stack.thread("Paused work");
+  const tab = await open(stack, thread, stack.site.url("shop", "/"));
+  expect(await stack.host((host) => host.request({ type: "pause", paused: true }))).toEqual({ ok: true });
+  await expect.poll(async () => (await stack.api.listBrowserHosts()).hosts[0]?.paused).toBe(true);
+  expect(failed(await stack.tool(thread, "browser_snapshot", { tabID: tab.id }))).toContain(CHROME_PAUSED);
+  expect(failed(await stack.tool(thread, "browser_tabs_open", { url: stack.site.url("shop", "/form"), browser: "chrome" }))).toContain(CHROME_PAUSED);
+  await stack.host((host) => host.request({ type: "pause", paused: false }));
+  await expect.poll(async () => (await stack.api.listBrowserHosts()).hosts[0]?.paused).toBe(false);
+  expect(value<{ content: string }>(await stack.tool(thread, "browser_snapshot", { tabID: tab.id })).content).toContain("Welcome to shop.test.");
+});
+
+test("Stop in Chrome interrupts the chat's running turn", async ({ stack }) => {
+  const thread = await stack.thread("Long wait");
+  const tab = await open(stack, thread, stack.site.url("shop", "/"));
+  const args = JSON.stringify({ tabID: tab.id, condition: "text", text: "Never shown", timeoutMs: 30_000 });
+  const turn = await stack.api.startTurn(thread.id, { requestId: crypto.randomUUID(), text: `!tool browser_wait ${args}` });
+  // The bridge reports the active turn; the chat shows as working with its tabs.
+  const key = await expect
+    .poll(async () => (await stack.host((host) => host.snapshot().chats)).find((chat: any) => chat.working)?.key, { timeout: 20_000 })
+    .toBeTruthy()
+    .then(async () => (await stack.host((host) => host.snapshot().chats)).find((chat: any) => chat.working).key);
+  await expect.poll(async () => stack.host((host) => host.debug.queues.pending())).toBeTruthy();
+  const started = Date.now();
+  expect(await stack.host((host, chat) => host.request({ type: "stop-chat", key: chat }), key)).toEqual({ ok: true });
+  await expect.poll(async () => (await stack.api.getTurn(turn.id)).status, { timeout: 20_000 }).toBe("interrupted");
+  expect(Date.now() - started).toBeLessThan(15_000);
+  // The wait itself was cancelled in Chrome.
+  await expect.poll(async () => stack.host((host) => host.debug.queues.pending())).toBeFalsy();
+});
+
+/** Marks the running service worker, to tell when a new one has started. */
+async function markWorker(stack: Stack) {
+  await stack.worker.evaluate(() => ((globalThis as { e2eMark?: boolean }).e2eMark = true));
+  return async () => {
+    for (const worker of stack.context.serviceWorkers())
+      if (!(await worker.evaluate(() => (globalThis as { e2eMark?: boolean }).e2eMark === true).catch(() => true))) return worker;
+    return undefined;
+  };
+}
+
+test("after Chrome stops the service worker, the next one republishes the chats and their tab ids work", async ({ stack }) => {
+  const thread = await stack.thread("Survive a restart");
+  const tab = await open(stack, thread, stack.site.url("shop", "/form"));
+  const before = (await stack.api.listBrowserHosts()).hosts[0].connectedAt;
+  const fresh = await markWorker(stack);
+  const internals = await stack.context.newPage();
+  await internals.goto("chrome://serviceworker-internals/");
+  await internals.getByText("Stop", { exact: true }).first().click();
+  await expect.poll(async () => !!(await fresh()), { timeout: 30_000 }).toBe(true);
+  // A new worker starts a new bridge, which reconnects and republishes the chat.
+  await expect.poll(async () => (await stack.api.listBrowserHosts()).hosts.map((host) => host.connectedAt), { timeout: 30_000 }).not.toEqual([before]);
+  await stack.connected();
+  const list = value<{ tabs: Tab[] }>(await stack.tool(thread, "browser_tabs_list", {}));
+  expect(list.tabs.map((entry) => entry.id)).toEqual([tab.id]);
+  expect(value<{ content: string }>(await stack.tool(thread, "browser_snapshot", { tabID: tab.id })).content).toContain("Send order");
+});
+
+test.describe("loaded like Load unpacked", () => {
+  test.use({ install: "unpacked" });
+
+  test("the extension's own reload (an update) keeps the chats' tabs", async ({ stack }) => {
+    const thread = await stack.thread("Survive an update");
+    const tab = await open(stack, thread, stack.site.url("shop", "/form"));
+    const next = stack.context.waitForEvent("serviceworker", { timeout: 30_000 });
+    // The popup's Reload, the same path an update takes.
+    await stack.host((host) => host.request({ type: "reload" })).catch(() => {});
+    const worker = await next;
+    await stack.connected();
+    await expect
+      .poll(async () => value<{ tabs: Tab[] }>(await stack.tool(thread, "browser_tabs_list", {})).tabs.map((entry) => entry.id))
+      .toEqual([tab.id]);
+    expect(value<{ content: string }>(await stack.tool(thread, "browser_snapshot", { tabID: tab.id })).content).toContain("Send order");
+    const groups = await worker.evaluate(() => chrome.tabGroups.query({}));
+    expect(groups.map((group) => group.title)).toEqual(["Survive an update"]);
+  });
+});
+
+test("when the daemon restarts, the bridge reconnects and the chat's tabs come back", async ({ stack }) => {
+  const thread = await stack.thread("Survive the daemon");
+  const tab = await open(stack, thread, stack.site.url("shop", "/form"));
+  stack.stopDaemon();
+  await stack.startDaemon();
+  await stack.connected();
+  await expect
+    .poll(async () => value<{ tabs: Tab[] }>(await stack.tool(thread, "browser_tabs_list", {})).tabs.map((entry) => entry.id))
+    .toEqual([tab.id]);
+  // Approvals lasted only as long as that server: the site asks again.
+  const read = stack.call(thread, "browser_snapshot", { tabID: tab.id });
+  expect((await stack.answer(thread, "once")).patterns).toEqual([`chrome-browsing:${thread.id}:${stack.site.origin("shop")}`]);
+  expect(value<{ content: string }>(await read.done).content).toContain("Send order");
+});
+
+test("a call in flight when the bridge dies fails with the recovery advice, and the chat's tabs come back", async ({ stack }) => {
+  const thread = await stack.thread("Lose the bridge");
+  const tab = await open(stack, thread, stack.site.url("shop", "/"));
+  const wait = stack.call(thread, "browser_wait", { tabID: tab.id, condition: "text", text: "Never shown", timeoutMs: 30_000 });
+  await expect.poll(async () => stack.host((host) => host.debug.queues.pending())).toBeTruthy();
+  const started = Date.now();
+  process.kill(bridgePid(stack), "SIGKILL");
+  expect(failed(await wait.done)).toContain(CHROME_RECOVERY);
+  expect(Date.now() - started).toBeLessThan(15_000);
+  // The extension starts a new bridge, which reconnects and republishes the chat.
+  await expect
+    .poll(async () => value<{ tabs: Tab[] }>(await stack.tool(thread, "browser_tabs_list", {})).tabs.map((entry) => entry.id), { timeout: 30_000 })
+    .toEqual([tab.id]);
+  expect(value<{ content: string }>(await stack.tool(thread, "browser_snapshot", { tabID: tab.id })).content).toContain("Welcome to shop.test.");
+});
+
+test("a call in flight when the user quits Chrome fails with the recovery advice", async ({ stack }) => {
+  const thread = await stack.thread("Lose Chrome");
+  const tab = await open(stack, thread, stack.site.url("shop", "/"));
+  const wait = stack.call(thread, "browser_wait", { tabID: tab.id, condition: "text", text: "Never shown", timeoutMs: 30_000 });
+  await expect.poll(async () => stack.host((host) => host.debug.queues.pending())).toBeTruthy();
+  const started = Date.now();
+  await stack.close();
+  expect(failed(await wait.done)).toContain(CHROME_RECOVERY);
+  expect(Date.now() - started).toBeLessThan(15_000);
+  // Quitting closed the tab, and Chrome is no longer available to the chat.
+  expect(failed(await stack.tool(thread, "browser_snapshot", { tabID: tab.id }))).toContain("Call browser_tabs_list.");
+  const list = value<{ tabs: Tab[]; browsers: { browser: string; available: boolean }[] }>(await stack.tool(thread, "browser_tabs_list", {}));
+  expect(list.tabs).toEqual([]);
+  expect(list.browsers.find((entry) => entry.browser === "chrome")?.available).toBe(false);
+});
+
+test("after 30 s without commands the tab is let go, and the next command attaches a fresh page", async ({ stack }) => {
+  test.setTimeout(150_000);
+  const thread = await stack.thread("Idle for a while");
+  const tab = await open(stack, thread, stack.site.url("shop", "/form"));
+  const first = value<{ content: string }>(await stack.tool(thread, "browser_snapshot", { tabID: tab.id }));
+  const tabId = await chromeTab(stack, tab.id);
+  // (chrome.debugger.getTargets would count Playwright's own attachment.)
+  const attached = () => stack.host((host, id) => host.debug.pages.has(id), tabId);
+  expect(await attached()).toBe(true);
+  await expect.poll(attached, { timeout: 45_000, intervals: [1_000] }).toBe(false);
+  // The user moves on in that tab while Haarness is detached.
+  const page = await stack.page(tab.id);
+  await page.goto(stack.site.url("shop", "/"));
+  await expect.poll(async () => value<{ tabs: Tab[] }>(await stack.tool(thread, "browser_tabs_list", {})).tabs[0].url).toBe(stack.site.url("shop", "/"));
+  // A ref from before is stale; a new snapshot works on the new page.
+  expect(failed(await stack.tool(thread, "browser_click", { tabID: tab.id, ref: ref(first, "Send order") }))).toMatch(/stale|changed|snapshot/i);
+  const snapshot = value<{ content: string }>(await stack.tool(thread, "browser_snapshot", { tabID: tab.id }));
+  expect(snapshot.content).toContain("Welcome to shop.test.");
+  value(await stack.tool(thread, "browser_click", { tabID: tab.id, ref: ref(snapshot, "Form") }));
+  await expect.poll(() => page.url()).toBe(stack.site.url("shop", "/form"));
 });

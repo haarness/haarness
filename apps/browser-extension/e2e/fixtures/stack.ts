@@ -100,13 +100,19 @@ export interface Stack {
 export interface StackOptions {
   /** `.haarness/config.toml` of the project. */
   projectConfig: string;
+  /**
+   * How Chromium loads the extension: from the command line (fast; Chrome
+   * disables it if it reloads itself), or over CDP like Load unpacked.
+   */
+  install: "command-line" | "unpacked";
 }
 
 export const ECHO_CONFIG = '[defaults]\nprovider = "echo"\nmodel = "echo-1"\n';
 
 export const test = base.extend<StackOptions & { stack: Stack }>({
   projectConfig: [ECHO_CONFIG, { option: true }],
-  stack: async ({ projectConfig }, use, info) => {
+  install: ["command-line", { option: true }],
+  stack: async ({ projectConfig, install }, use, info) => {
     const bin = haarnessBinary();
     test.skip(!bin, "Build haarness (cargo build -p haarness-cli) or set HAARNESS_BIN to run the full-stack tests.");
     if (!existsSync(join(EXTENSION, "manifest.json")))
@@ -146,6 +152,9 @@ export const test = base.extend<StackOptions & { stack: Stack }>({
     );
     if (!setup.browsers?.some((entry: { registered: boolean }) => entry.registered))
       throw new Error(`haarness browser setup did not register the host: ${JSON.stringify(setup)}`);
+    const extension: string = setup.extension?.path;
+    if (!extension || !existsSync(join(extension, "manifest.json")))
+      throw new Error(`haarness browser setup did not copy the extension: ${JSON.stringify(setup)}`);
 
     const site = await startSite();
     let api: Haarness | undefined;
@@ -236,22 +245,39 @@ export const test = base.extend<StackOptions & { stack: Stack }>({
         }
       },
       async launch() {
+        // Developer mode is on, as unpacked installs require: without it Chrome
+        // disables a command-line extension that reloads itself.
+        const preferences = join(profile, "Default", "Preferences");
+        if (!existsSync(preferences)) {
+          mkdirSync(dirname(preferences), { recursive: true });
+          writeFileSync(preferences, JSON.stringify({ extensions: { ui: { developer_mode: true } } }));
+        }
         const executablePath = process.env.HAARNESS_E2E_CHROMIUM || (existsSync(LOCAL_CHROMIUM) ? LOCAL_CHROMIUM : undefined);
+        // The copy `haarness browser setup` made, which is what users load.
+        const unpacked = install === "unpacked";
         context = await chromium.launchPersistentContext(profile, {
           ...(executablePath ? { executablePath } : { channel: "chromium" }),
           headless: !process.env.HAARNESS_E2E_HEADED,
           viewport: { width: 1200, height: 800 },
           acceptDownloads: true,
           downloadsPath: downloads,
+          ...(unpacked ? { ignoreDefaultArgs: ["--disable-extensions"] } : {}),
           args: [
-            `--disable-extensions-except=${EXTENSION}`,
-            `--load-extension=${EXTENSION}`,
+            ...(unpacked
+              ? ["--enable-unsafe-extension-debugging"]
+              : [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`]),
             "--silent-debugger-extension-api",
             // Every *.test name is the fixture site, so one port serves several origins.
             "--host-resolver-rules=MAP *.test 127.0.0.1",
           ],
           env,
         });
+        // Like Load unpacked on chrome://extensions: an extension that can reload itself.
+        if (unpacked) {
+          const browser = await context.browser()!.newBrowserCDPSession();
+          await browser.send("Extensions.loadUnpacked" as never, { path: extension } as never);
+          await browser.detach();
+        }
         // Leave the page's JavaScript dialogs to Haarness; Playwright would dismiss them.
         context.on("dialog", () => {});
         worker =
