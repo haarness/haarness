@@ -224,7 +224,8 @@ criteria evidence checks, and provider-limit transitions. Goal objectives are
 bounded to 4,000 characters with an explicit `[truncated]` marker.
 
 `/openapi.json` combines the live `haarness-protocol` schemas with every route
-from the generated [sdks/openapi.json](../sdks/openapi.json), and is the
+from the generated [sdks/openapi.json](../sdks/openapi.json), listing what it
+filled in from that file under `x-haarness-reference`, and is the
 desktop-client compatibility contract.
 
 `GET /v1/commands` is the authoritative executable slash-command registry.

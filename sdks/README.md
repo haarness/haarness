@@ -474,8 +474,11 @@ python3 sdks/generate.py
 ./scripts/test-sdks.sh
 ```
 
-`schema.json` is the unmodified live server schema snapshot. `inventory.py`
-extracts every registered method/path and handler signature from Rust.
+`schema.json` is the live server's own schema snapshot: a running server's
+`/openapi.json` also fills in every route and shape from `openapi.json` and
+lists those under `x-haarness-reference`, which `server.py` leaves out.
+`inventory.py` extracts every registered method/path and handler signature
+from Rust.
 `generate.py` combines those with explicit contracts for server-local wire
 shapes missing from the protocol schemas. It emits the complete OpenAPI spec,
 operation inventory, TypeScript types/methods, and Python types/sync/async

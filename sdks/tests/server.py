@@ -214,6 +214,13 @@ if __name__ == "__main__":
 
     with Fixture() as server:
         schema = server.json("/openapi.json")
+        # The server fills its document in from the generated openapi.json
+        # and lists what it filled; schema.json is the server's own part.
+        filled = schema.pop("x-haarness-reference", {})
+        for path in filled.get("paths", []):
+            del schema["paths"][path]
+        for name in filled.get("schemas", []):
+            del schema["components"]["schemas"][name]
         target = ROOT / "sdks/schema.json"
         if "--check" in sys.argv:
             assert json.loads(target.read_text()) == schema, (
