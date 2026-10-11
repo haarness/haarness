@@ -1,5 +1,6 @@
 mod account;
 mod acp;
+mod browser;
 mod browser_settings;
 mod capability_state;
 mod config_specs;
@@ -16,8 +17,10 @@ mod memory_settings;
 mod otel;
 mod plugins;
 mod profile;
+mod reconnect;
 mod remote;
 mod remote_cloud;
+mod rendezvous;
 mod router_connection;
 mod upgrade;
 mod usage_stats;
@@ -55,6 +58,7 @@ use haarness_workflows::{ExecutorConfig, WorkflowCoordinator, WorkflowExecutor};
 use haarness_workspaces::WorkspaceManager;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_sdk::trace::SdkTracerProvider;
+use rendezvous::{RuntimeDiscovery, comparable_workspace, set_private, write_private_json};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
@@ -143,6 +147,8 @@ enum Command {
     /// Private, versioned desktop bridge. Requests are read from standard input.
     #[command(hide = true)]
     Desktop,
+    /// Use your own Chrome with Haarness: set up, check or remove Haarness for Chrome.
+    Browser(browser::BrowserArgs),
     /// Manage trusted TypeScript/JavaScript runtime extensions.
     #[command(visible_alias = "extensions")]
     Extension(extensions::ExtensionArgs),
@@ -1305,6 +1311,11 @@ struct ScheduleUpdateArgs {
 async fn main() -> Result<()> {
     quiet_closed_stdout();
     let args = std::env::args_os().collect::<Vec<_>>();
+    // Chrome's bridge: stdout is its message channel, and it must not touch
+    // the data folder, register a workspace or start a server.
+    if browser::native_host_requested(&args) {
+        return browser::native_host::main().await;
+    }
     if let Some((typo, command)) = misspelled_subcommand(&args) {
         use clap::CommandFactory;
         let prompt = shorthand_words(&args).join(" ");
@@ -1346,6 +1357,15 @@ async fn main() -> Result<()> {
         }
         Some(Command::Telemetry(args)) => {
             return usage_stats::run(&base_paths.data, base_paths.config_dir(), args).await;
+        }
+        Some(Command::Browser(args)) => {
+            return browser::run(
+                &base_paths.data,
+                &base_paths.cache,
+                cli.data_dir.as_deref(),
+                args,
+            )
+            .await;
         }
         _ => {}
     }
@@ -1420,7 +1440,7 @@ async fn main() -> Result<()> {
         Some(Command::Remote(args)) => remote_cloud::run(&paths, &workspace, project_config, args).await,
         Some(Command::Desktop) => desktop::run(&paths, &workspace, project_config).await,
         Some(Command::Login(_) | Command::Logout | Command::Account(_) | Command::Cloud(_)) => unreachable!("account command handled before project setup"),
-        Some(Command::Stats(_) | Command::Insights(_) | Command::Profile(_) | Command::Telemetry(_)) => unreachable!("standalone commands dispatched before runtime setup"),
+        Some(Command::Stats(_) | Command::Insights(_) | Command::Profile(_) | Command::Telemetry(_) | Command::Browser(_)) => unreachable!("standalone commands dispatched before runtime setup"),
         None => {
             interactive(
                 &paths,
@@ -1567,6 +1587,7 @@ impl Command {
     const fn name(&self) -> &'static str {
         match self {
             Self::Desktop => "desktop",
+            Self::Browser(_) => "browser",
             Self::Login(_) => "login",
             Self::Logout => "logout",
             Self::Account(_) => "account",
@@ -1752,6 +1773,7 @@ const GLOBAL_SCOPES: &[(&str, GlobalScope)] = &[
             "upgrade",
             "doctor",
             "logs",
+            "browser",
         ]),
     ),
     (
@@ -1768,6 +1790,7 @@ const GLOBAL_SCOPES: &[(&str, GlobalScope)] = &[
             "profile",
             "stats",
             "insights",
+            "browser",
         ]),
     ),
     ("log_level", GlobalScope::Except(STANDALONE_AND_REPORTS)),
@@ -1784,6 +1807,7 @@ const STANDALONE_AND_REPORTS: &[&str] = &[
     "profile",
     "stats",
     "insights",
+    "browser",
 ];
 
 /// The parser, with each command's help limited to the global options it
@@ -7630,6 +7654,7 @@ fn doctor(paths: &Paths) -> Result<()> {
     println!("rg: {}", ripgrep.display());
     println!("rg sha256: {}", haarness_ripgrep::SHA256);
     println!("data: {}", paths.data.display());
+    println!("{}", browser::doctor_line(&paths.data));
     println!("permissions: application-level policy (not an operating-system sandbox)");
     Ok(())
 }
@@ -8928,27 +8953,6 @@ fn migrate_legacy_workspace_database(paths: &Paths, destination: &Path) -> Resul
     }
     Ok(())
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct RuntimeDiscovery {
-    url: String,
-    token: String,
-    pid: u32,
-    /// Added after the first discovery format shipped. The live `/v1/info`
-    /// response remains authoritative for legacy files.
-    #[serde(default)]
-    workspace: Option<String>,
-    /// Identity of the executable that owns this local daemon. Package
-    /// versions do not change between development rebuilds, so version/schema
-    /// checks alone can otherwise attach a new client to stale server code.
-    #[serde(default)]
-    executable_fingerprint: Option<String>,
-    #[serde(default)]
-    access_fingerprint: Option<String>,
-    /// The OTLP traces endpoint the daemon exports to, if any. A client reusing
-    /// the daemon with different OTEL settings is told its spans go elsewhere.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    trace_endpoint: Option<String>,
-}
 #[derive(Clone, Debug)]
 struct LiveWorkspaceServer {
     discovery: RuntimeDiscovery,
@@ -8958,7 +8962,7 @@ fn write_runtime(paths: &Paths, value: &RuntimeDiscovery) -> Result<()> {
     write_private_json(&paths.runtime, value)
 }
 fn read_runtime(paths: &Paths) -> Result<RuntimeDiscovery> {
-    Ok(serde_json::from_slice(&fs::read(&paths.runtime)?)?)
+    rendezvous::read_runtime_file(&paths.runtime)
 }
 
 fn same_server(left: &str, right: &str) -> bool {
@@ -9060,36 +9064,7 @@ fn workspace_server_restarter(
 
 fn current_executable_fingerprint() -> Result<String> {
     let path = std::env::current_exe().context("cannot locate the Haarness executable")?;
-    let path = path.canonicalize().unwrap_or(path);
-    let metadata = fs::metadata(&path)
-        .with_context(|| format!("cannot inspect Haarness executable {}", path.display()))?;
-    let modified = metadata
-        .modified()
-        .context("Haarness executable modification time is unavailable")?
-        .duration_since(UNIX_EPOCH)
-        .context("Haarness executable modification time predates the Unix epoch")?
-        .as_nanos();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        Ok(format!(
-            "{}:{}:{}:{}:{}",
-            path.display(),
-            metadata.dev(),
-            metadata.ino(),
-            metadata.len(),
-            modified
-        ))
-    }
-    #[cfg(not(unix))]
-    {
-        Ok(format!(
-            "{}:{}:{}",
-            path.display(),
-            metadata.len(),
-            modified
-        ))
-    }
+    rendezvous::executable_fingerprint(&path)
 }
 
 /// Inspect the one live server associated with this data directory. Runtime
@@ -9267,12 +9242,6 @@ async fn replace_incompatible_workspace_server(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-}
-
-fn comparable_workspace(workspace: &Path) -> PathBuf {
-    workspace
-        .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf())
 }
 
 /// Ensure the default TUI/Desktop execution owner exists independently of
@@ -9551,27 +9520,6 @@ fn resolved_credentials(value: &BTreeMap<String, serde_json::Value>) -> HashMap<
 #[cfg(test)]
 fn write_auth(paths: &Paths, value: &BTreeMap<String, serde_json::Value>) -> Result<()> {
     write_private_json(&paths.auth, value)
-}
-fn write_private_json(path: &Path, value: &impl Serialize) -> Result<()> {
-    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-    let mut options = fs::OpenOptions::new();
-    options.create_new(true).write(true);
-    let mut file = options.open(&temporary)?;
-    set_private(&file)?;
-    file.write_all(&serde_json::to_vec_pretty(value)?)?;
-    file.sync_all()?;
-    fs::rename(temporary, path)?;
-    Ok(())
-}
-#[cfg(unix)]
-fn set_private(file: &fs::File) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-#[cfg(not(unix))]
-fn set_private(_file: &fs::File) -> Result<()> {
-    Ok(())
 }
 /// Write a session archive in full or not at all: a private temporary file
 /// beside the target, then a hard link (which refuses an existing file) or,
