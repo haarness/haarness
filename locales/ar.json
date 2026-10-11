@@ -2218,7 +2218,6 @@
   "Agents may not use Chrome": "لا يُسمح للوكلاء باستخدام Chrome",
   "Agents can use your own Chrome — with your sign-ins — through the Haarness for Chrome extension. Each new site asks first.": "يمكن للوكلاء استخدام متصفح Chrome الخاص بك — مع جلسات تسجيل الدخول — عبر إضافة Haarness for Chrome. يُطلب إذنك أولًا لكل موقع جديد.",
   "You are connected over SSH. Chrome works with projects on the computer where Chrome runs.": "أنت متصل عبر SSH. يعمل Chrome مع المشاريع الموجودة على الحاسوب الذي يعمل عليه Chrome.",
-  "This terminal reaches the project from another computer. Chrome works with projects on the computer where Chrome runs.": "تصل هذه الطرفية إلى المشروع من حاسوب آخر. يعمل Chrome مع المشاريع الموجودة على الحاسوب الذي يعمل عليه Chrome.",
   "On that computer, run {command}, or open Settings → Browser → Chrome in Haarness Desktop.": "على ذلك الحاسوب، شغّل {command} أو افتح الإعدادات ← المتصفح ← Chrome في Haarness Desktop.",
   "Checking this computer…": "جارٍ فحص هذا الحاسوب…",
   "Could not set up Chrome": "تعذّر إعداد Chrome",
@@ -2250,7 +2249,6 @@
   "Open the Haarness for Chrome page in the Chrome Web Store:": "افتح صفحة Haarness for Chrome في سوق Chrome الإلكتروني:",
   "Click Add to Chrome": "انقر «إضافة إلى Chrome»",
   "Pin Haarness to the toolbar": "ثبّت Haarness في شريط الأدوات",
-  "This build of Haarness has no Haarness for Chrome extension to load.": "لا يتضمن هذا الإصدار من Haarness إضافة Haarness for Chrome لتحميلها.",
   "Open {page} in {browser}": "افتح {page} في {browser}",
   "or {page} in {browser}": "أو {page} في {browser}",
   "Turn on Developer mode (keep it on)": "فعّل «وضع المطوّر» (وأبقِه مفعّلًا)",
@@ -2382,5 +2380,14 @@
   "Versions": "الإصدارات",
   "Extension folder": "مجلد الامتداد",
   "Update ready": "التحديث جاهز",
-  "Something went wrong.": "حدث خطأ ما."
+  "Something went wrong.": "حدث خطأ ما.",
+  "Agent browser control is off": "تحكم الوكيل في المتصفح متوقف",
+  "Agents can't use any browser in this project, Chrome included. Turn on Agent browser control in Haarness Desktop (Settings → Browser), or set browser.policy.enabled to true in your Haarness config.": "لا يمكن للوكلاء استخدام أي متصفح في هذا المشروع، بما في ذلك Chrome. شغّل تحكم الوكيل في المتصفح في Haarness Desktop (الإعدادات ← المتصفح)، أو اضبط browser.policy.enabled على true في إعدادات Haarness.",
+  "This project's settings turn Chrome off": "إعدادات هذا المشروع توقف Chrome",
+  "Agents can still use Chrome in your other projects. To use it here, remove browser.chrome.enabled: false from this project's Haarness config.": "لا يزال بإمكان الوكلاء استخدام Chrome في مشاريعك الأخرى. لاستخدامه هنا، أزل browser.chrome.enabled: false من إعدادات Haarness لهذا المشروع.",
+  "This terminal can't set up Chrome for this project. Chrome works with projects on the computer where Chrome runs.": "لا يمكن لهذه الطرفية إعداد Chrome لهذا المشروع. يعمل Chrome مع المشاريع الموجودة على الحاسوب الذي يعمل عليه Chrome.",
+  "This Haarness installation doesn't include Haarness for Chrome. Set it up from Haarness Desktop (Settings → Browser → Chrome), then press Enter here.": "لا يتضمن تثبيت Haarness هذا الإضافة Haarness for Chrome. أعدّها من Haarness Desktop (الإعدادات ← المتصفح ← Chrome)، ثم اضغط Enter هنا.",
+  "Chrome is turned off for this project.": "Chrome متوقف في هذا المشروع.",
+  "{category}: {decision} by default": "{category}: {decision} افتراضيًا",
+  "{category} on {origin}: {decision}": "{category} على {origin}: {decision}"
 }

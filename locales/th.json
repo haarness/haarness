@@ -2218,7 +2218,6 @@
   "Agents may not use Chrome": "เอเจนต์ใช้ Chrome ไม่ได้",
   "Agents can use your own Chrome — with your sign-ins — through the Haarness for Chrome extension. Each new site asks first.": "เอเจนต์ใช้ Chrome ของคุณเองได้ พร้อมบัญชีที่ลงชื่อเข้าใช้ไว้ ผ่านส่วนขยาย Haarness for Chrome เว็บไซต์ใหม่แต่ละแห่งจะถามก่อนเสมอ",
   "You are connected over SSH. Chrome works with projects on the computer where Chrome runs.": "คุณเชื่อมต่อผ่าน SSH อยู่ Chrome ใช้ได้กับโปรเจกต์บนคอมพิวเตอร์ที่ Chrome ทำงานอยู่",
-  "This terminal reaches the project from another computer. Chrome works with projects on the computer where Chrome runs.": "เทอร์มินัลนี้เข้าถึงโปรเจกต์จากคอมพิวเตอร์เครื่องอื่น Chrome ใช้ได้กับโปรเจกต์บนคอมพิวเตอร์ที่ Chrome ทำงานอยู่",
   "On that computer, run {command}, or open Settings → Browser → Chrome in Haarness Desktop.": "บนคอมพิวเตอร์เครื่องนั้น ให้รัน {command} หรือเปิด การตั้งค่า → เบราว์เซอร์ → Chrome ใน Haarness Desktop",
   "Checking this computer…": "กำลังตรวจสอบคอมพิวเตอร์เครื่องนี้…",
   "Could not set up Chrome": "ตั้งค่า Chrome ไม่สำเร็จ",
@@ -2250,7 +2249,6 @@
   "Open the Haarness for Chrome page in the Chrome Web Store:": "เปิดหน้า Haarness for Chrome ใน Chrome เว็บสโตร์:",
   "Click Add to Chrome": "คลิก “เพิ่มใน Chrome”",
   "Pin Haarness to the toolbar": "ปักหมุด Haarness ไว้ที่แถบเครื่องมือ",
-  "This build of Haarness has no Haarness for Chrome extension to load.": "Haarness รุ่นนี้ไม่มีส่วนขยาย Haarness for Chrome ให้โหลด",
   "Open {page} in {browser}": "เปิด {page} ใน {browser}",
   "or {page} in {browser}": "หรือ {page} ใน {browser}",
   "Turn on Developer mode (keep it on)": "เปิด “โหมดนักพัฒนาซอฟต์แวร์” (เปิดค้างไว้)",
@@ -2382,5 +2380,14 @@
   "Versions": "เวอร์ชัน",
   "Extension folder": "โฟลเดอร์ส่วนขยาย",
   "Update ready": "พร้อมอัปเดต",
-  "Something went wrong.": "เกิดข้อผิดพลาด"
+  "Something went wrong.": "เกิดข้อผิดพลาด",
+  "Agent browser control is off": "การควบคุมเบราว์เซอร์โดยเอเจนต์ปิดอยู่",
+  "Agents can't use any browser in this project, Chrome included. Turn on Agent browser control in Haarness Desktop (Settings → Browser), or set browser.policy.enabled to true in your Haarness config.": "เอเจนต์ใช้เบราว์เซอร์ใดก็ไม่ได้ในโปรเจกต์นี้ รวมถึง Chrome เปิดการควบคุมเบราว์เซอร์โดยเอเจนต์ใน Haarness Desktop (การตั้งค่า → เบราว์เซอร์) หรือตั้ง browser.policy.enabled เป็น true ในการกำหนดค่า Haarness",
+  "This project's settings turn Chrome off": "การตั้งค่าของโปรเจกต์นี้ปิด Chrome",
+  "Agents can still use Chrome in your other projects. To use it here, remove browser.chrome.enabled: false from this project's Haarness config.": "เอเจนต์ยังใช้ Chrome ในโปรเจกต์อื่นของคุณได้ หากต้องการใช้ที่นี่ ให้ลบ browser.chrome.enabled: false ออกจากการกำหนดค่า Haarness ของโปรเจกต์นี้",
+  "This terminal can't set up Chrome for this project. Chrome works with projects on the computer where Chrome runs.": "เทอร์มินัลนี้ตั้งค่า Chrome สำหรับโปรเจกต์นี้ไม่ได้ Chrome ใช้ได้กับโปรเจกต์บนคอมพิวเตอร์ที่ Chrome ทำงานอยู่",
+  "This Haarness installation doesn't include Haarness for Chrome. Set it up from Haarness Desktop (Settings → Browser → Chrome), then press Enter here.": "การติดตั้ง Haarness นี้ไม่มี Haarness for Chrome ตั้งค่าจาก Haarness Desktop (การตั้งค่า → เบราว์เซอร์ → Chrome) แล้วกด Enter ที่นี่",
+  "Chrome is turned off for this project.": "Chrome ถูกปิดสำหรับโปรเจกต์นี้",
+  "{category}: {decision} by default": "{category}: {decision} เป็นค่าเริ่มต้น",
+  "{category} on {origin}: {decision}": "{category} บน {origin}: {decision}"
 }

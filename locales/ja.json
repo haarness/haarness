@@ -2218,7 +2218,6 @@
   "Agents may not use Chrome": "エージェントは Chrome を使えません",
   "Agents can use your own Chrome — with your sign-ins — through the Haarness for Chrome extension. Each new site asks first.": "エージェントは Haarness for Chrome 拡張機能を通じて、ログイン状態のままあなたの Chrome を使えます。新しいサイトでは毎回先に確認します。",
   "You are connected over SSH. Chrome works with projects on the computer where Chrome runs.": "SSH 経由で接続しています。Chrome は、Chrome が動いているコンピューター上のプロジェクトで使えます。",
-  "This terminal reaches the project from another computer. Chrome works with projects on the computer where Chrome runs.": "このターミナルは別のコンピューターからプロジェクトに接続しています。Chrome は、Chrome が動いているコンピューター上のプロジェクトで使えます。",
   "On that computer, run {command}, or open Settings → Browser → Chrome in Haarness Desktop.": "そのコンピューターで {command} を実行するか、Haarness Desktop で 設定 → ブラウザ → Chrome を開いてください。",
   "Checking this computer…": "このコンピューターを確認中…",
   "Could not set up Chrome": "Chrome をセットアップできませんでした",
@@ -2250,7 +2249,6 @@
   "Open the Haarness for Chrome page in the Chrome Web Store:": "Chrome ウェブストアで Haarness for Chrome のページを開きます:",
   "Click Add to Chrome": "「Chrome に追加」をクリックします",
   "Pin Haarness to the toolbar": "Haarness をツールバーに固定します",
-  "This build of Haarness has no Haarness for Chrome extension to load.": "この Haarness のビルドには、読み込める Haarness for Chrome 拡張機能がありません。",
   "Open {page} in {browser}": "{browser} で {page} を開きます",
   "or {page} in {browser}": "または {browser} で {page}",
   "Turn on Developer mode (keep it on)": "「デベロッパー モード」をオンにします（オンのままにしてください）",
@@ -2382,5 +2380,14 @@
   "Versions": "バージョン",
   "Extension folder": "拡張機能のフォルダ",
   "Update ready": "更新の準備完了",
-  "Something went wrong.": "問題が発生しました。"
+  "Something went wrong.": "問題が発生しました。",
+  "Agent browser control is off": "エージェントのブラウザ制御がオフです",
+  "Agents can't use any browser in this project, Chrome included. Turn on Agent browser control in Haarness Desktop (Settings → Browser), or set browser.policy.enabled to true in your Haarness config.": "このプロジェクトでは、エージェントは Chrome を含むどのブラウザも使えません。Haarness Desktop の 設定 → ブラウザ で「エージェントのブラウザ制御」をオンにするか、Haarness の設定で browser.policy.enabled を true にしてください。",
+  "This project's settings turn Chrome off": "このプロジェクトの設定で Chrome がオフになっています",
+  "Agents can still use Chrome in your other projects. To use it here, remove browser.chrome.enabled: false from this project's Haarness config.": "ほかのプロジェクトでは、エージェントは引き続き Chrome を使えます。ここで使うには、このプロジェクトの Haarness 設定から browser.chrome.enabled: false を削除してください。",
+  "This terminal can't set up Chrome for this project. Chrome works with projects on the computer where Chrome runs.": "このターミナルからは、このプロジェクト用に Chrome を設定できません。Chrome は、Chrome が動いているコンピューター上のプロジェクトで使えます。",
+  "This Haarness installation doesn't include Haarness for Chrome. Set it up from Haarness Desktop (Settings → Browser → Chrome), then press Enter here.": "この Haarness のインストールには Haarness for Chrome が含まれていません。Haarness Desktop の 設定 → ブラウザ → Chrome で設定してから、ここで Enter キーを押してください。",
+  "Chrome is turned off for this project.": "このプロジェクトでは Chrome がオフになっています。",
+  "{category}: {decision} by default": "{category}: 既定で{decision}",
+  "{category} on {origin}: {decision}": "{origin} の{category}: {decision}"
 }
