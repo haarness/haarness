@@ -4,12 +4,16 @@ import { browserData, recordBrowserVisit, recordBrowserDownload } from "./browse
 import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 import { authorizationHeaders } from "@haarness/sdk";
-import { Schema } from "effect";
-import { Browser } from "./browser/rpc";
+import {
+  Browser,
+  decodeAction,
+  decodeCommand,
+  encodeOutcome,
+} from "@haarness/browser-driver/rpc";
 import { createBrowserPage, type BrowserPage } from "./browser-chromium";
 import { createBrowserNetwork, type BrowserNetwork } from "./browser/network";
-import { browserFailure } from "./browser/errors";
-import { destinationOrigin, normalizeURL } from "./browser/policy";
+import { browserFailure } from "@haarness/browser-driver/errors";
+import { destinationOrigin, normalizeURL } from "@haarness/browser-driver/policy";
 import { connections } from "./runtime";
 import { data, persist } from "./store";
 import { translate } from "../localization";
@@ -510,9 +514,7 @@ export function createBrowserHost(
           .then(async () => {
             let outcome: Browser.Outcome;
             try {
-              const command = Schema.decodeUnknownSync(Browser.Command)(
-                message.command,
-              );
+              const command = decodeCommand(message.command);
               if (command.policy) entry.access = {
                 policy: command.policy as BrowserPolicy,
                 approved: new Set((command.target?.resources ?? (command.action.type === "tabs.open" ? [normalizeURL(command.action.url ?? "about:blank")] : [])).map(destinationOrigin).filter((origin): origin is string => !!origin)),
@@ -534,7 +536,7 @@ export function createBrowserHost(
                 JSON.stringify({
                   type: "result",
                   id: message.id,
-                  outcome: Schema.encodeSync(Browser.Outcome)(outcome),
+                  outcome: encodeOutcome(outcome),
                 }),
               );
           });
@@ -599,7 +601,7 @@ export function createBrowserHost(
       const e = entries.get(key(connection, thread));
       if (!e) throw new Error("The browser moved to its new conversation; try again there.");
       // UI controls have a deliberately small surface; agent operations use server permissions.
-      const action = Schema.decodeUnknownSync(Browser.Action)(raw);
+      const action = decodeAction(raw);
       if (
         ![
           "tabs.list",

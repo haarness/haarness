@@ -79,13 +79,13 @@ const snapshot = await client.callBrowserTool(threadId, {
 }, { timeoutMs: 90_000 });
 ```
 
-The catalog is generated from the same bounded schemas used by Desktop:
+The catalog is generated from the same bounded schemas the browser hosts decode with, in the shared driver (`packages/browser-driver`); CI fails when it is out of date:
 
 ```sh
-cd apps/desktop
-node --import tsx scripts/browser-contract.ts
-npm run typecheck
-npm run test:e2e -- browser.spec.ts
+npm --prefix packages/browser-driver run contract
+npm --prefix packages/browser-driver test
+npm --prefix apps/desktop run typecheck
+npm --prefix apps/desktop run test:e2e -- browser.spec.ts
 ```
 
 The Electron suite uses disposable Git repositories and actual native Chromium views. Optional live verification uses a real model and an attached tmux TUI: `HAARNESS_BROWSER_LIVE=1`. Local test credentials stay in process memory. Set `HAARNESS_BROWSER_EVIDENCE` to retain test artifacts.
@@ -99,7 +99,7 @@ HAARNESS_BROWSER_PROMPTS=1 HAARNESS_BROWSER_EVIDENCE=/tmp/browser-language \
 
 It defaults to `gpt-5.6-luna`, which both an API key and a ChatGPT sign-in can run; set `HAARNESS_BROWSER_MODEL` to test another compatible OpenAI model. Live runs make billable model requests.
 
-Chromium control, diagnostics, profiling and proxy code include MIT-licensed components; see [third-party notices](../apps/desktop/src/main/browser/THIRD-PARTY-NOTICES.md).
+Chromium control, diagnostics, profiling and proxy code include MIT-licensed components; see the third-party notices of the [shared driver](../packages/browser-driver/THIRD-PARTY-NOTICES.md) and [Desktop](../apps/desktop/src/main/browser/THIRD-PARTY-NOTICES.md).
 
 The OpenAI Responses adapter explicitly preserves optional tool arguments instead of allowing automatic strict-mode schema normalization. Haarness still validates arguments locally before permission checks. See [OpenAI function calling](https://developers.openai.com/api/docs/guides/function-calling#strict-mode).
 

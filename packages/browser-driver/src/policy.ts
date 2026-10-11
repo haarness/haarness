@@ -62,19 +62,23 @@ export function navigationResources(
   return twin ? [first, twin] : [first];
 }
 
+export type SiteDecision = "allow" | "ask" | "deny";
+
 /**
  * Picks the rule that applies to an origin. Exact origins take priority;
  * otherwise the most specific subdomain rule (`https://*.example.com`) wins;
  * otherwise the defaults. Works for any set of categories (Desktop's three,
- * Chrome's four with scripts).
+ * Chrome's four with scripts), taken from the defaults.
  */
-export function browserSiteAccess<Access extends object>(
+export function browserSiteAccess<Category extends string>(
   policy: {
-    defaults: Access;
-    sites: readonly (NoInfer<Access> & { origin: string })[];
+    defaults: Record<Category, SiteDecision>;
+    sites: readonly (Record<NoInfer<Category>, SiteDecision> & {
+      origin: string;
+    })[];
   },
   origin: string,
-): Access {
+): Record<Category, SiteDecision> {
   const match = (pattern: string) => {
     if (pattern === origin) return true;
     const index = pattern.indexOf("*.");
