@@ -577,7 +577,7 @@ test("sidebar section menus rename, merge, cancel removal, and retain project me
   await expect(titles(section("Personal"))).toHaveCount(3);
   await section("Personal").getByRole("button", { name: "Section options for Personal", exact: true }).click();
   await item("Remove section").click();
-  await remove.getByRole("button", { name: "Confirm", exact: true }).click();
+  await remove.getByRole("button", { name: "Remove section", exact: true }).click();
   await expect(page.locator(".project-section")).toHaveCount(0);
   await reload();
   await expect(titles()).toHaveText(["beta", "Client app", "gamma"]);
@@ -667,8 +667,8 @@ test("sidebar removing a section's last project hides its heading and reopening 
   await pin("alpha");
   await options("alpha");
   await item("Remove project").click();
-  await page.getByRole("dialog", { name: "Remove this project from the sidebar?", exact: true })
-    .getByRole("button", { name: "Confirm", exact: true }).click();
+  await page.getByRole("dialog", { name: "Remove alpha from the sidebar?", exact: true })
+    .getByRole("button", { name: "Remove project", exact: true }).click();
   await expect(project("alpha")).toHaveCount(0);
   await expect(section("Clients")).toHaveCount(0);
   await expect(titles()).toHaveText(["beta"]);

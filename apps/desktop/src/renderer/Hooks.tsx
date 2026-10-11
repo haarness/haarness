@@ -214,6 +214,7 @@ export function Hooks() {
                             await confirm(
                               t("Remove hook?"),
                               hook.handler.command,
+                              { submit: t("Remove hook"), danger: true },
                             )
                           )
                             await mutate({

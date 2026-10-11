@@ -79,7 +79,9 @@ export function SourceForm(props: {
           ? t(
               "Extensions run trusted JavaScript or TypeScript with access to your files and network.",
             )
-          : t("Choose where to install from.")
+          : props.kind === "marketplace"
+            ? t("Choose the folder or Git repository that hosts the marketplace. Its plugins can then be installed from Registered marketplace.")
+            : t("Choose where to install from.")
       }
       submit={
         props.kind === "marketplace"

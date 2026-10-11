@@ -78,7 +78,7 @@ async function files(page: Page) {
 async function switchProject(desktop: Fixture) {
   await choose(desktop.app, desktop.b); await button(desktop.page, "Open another project").click();
   const confirm = desktop.page.getByRole("dialog", { name: "Discard unsaved file edits?" });
-  if (await confirm.isVisible()) await confirm.getByRole("button", { name: "Confirm", exact: true }).click();
+  if (await confirm.isVisible()) await confirm.getByRole("button", { name: "Discard edits", exact: true }).click();
   await expect(desktop.page.locator(".titlebar")).toContainText("project-b");
   await expect(desktop.page.locator(".application")).toHaveAttribute("data-project-ready", "true");
 }
@@ -148,7 +148,7 @@ test("audit: a workspace switch discards stale reads, writes and search results"
   await page.getByRole("textbox", { name: "Find files", exact: true }).fill("beta");
   await expect(page.locator(".file-tree")).toContainText("beta.txt");
   await choose(app, desktop.b); await button(page, "Open another project").click();
-  await page.getByRole("dialog", { name: "Discard unsaved file edits?" }).getByRole("button", { name: "Confirm" }).click();
+  await page.getByRole("dialog", { name: "Discard unsaved file edits?" }).getByRole("button", { name: "Discard edits" }).click();
   await expect(page.locator(".titlebar")).toContainText("project-b");
   await expect(page.getByRole("textbox", { name: "Find files", exact: true })).toHaveValue("");
   await expect(page.locator(".file-tree")).not.toContainText("beta.txt");

@@ -367,7 +367,7 @@ function General() {
           }
           options={[
             { value: "light", label: t("Light") },
-            { value: "system", label: t("Auto") },
+            { value: "system", label: t("System") },
             { value: "dark", label: t("Dark") },
           ]}
         />
@@ -666,6 +666,7 @@ function Servers() {
                       await confirm(
                         t("Remove this server?"),
                         t("This removes the saved connection and its projects from Desktop. Conversation history and running tasks on the server are preserved."),
+                        { submit: t("Remove server"), danger: true },
                       )
                     )
                       await app.removeServer(item.id);
@@ -743,6 +744,7 @@ function Projects() {
                       t(
                         "Conversation history, running tasks and the saved server connection are preserved.",
                       ),
+                      { submit: t("Forget project"), danger: true },
                     )
                   )
                     await app.forgetProject(item.id);
@@ -792,7 +794,9 @@ function Providers() {
             </h3>
             <p class="muted">
               {connected().length
-                ? t("Sign in to another provider or add a key. Keys stay on this Haarness server.")
+                ? app.state.connection?.remote
+                  ? t("Sign in to another provider or add a key. Keys stay on this Haarness server.")
+                  : t("Sign in to another provider or add a key. Keys stay on this computer.")
                 : t("Sign in with a ChatGPT subscription, or paste an API key from OpenAI, Anthropic, Google and more.")}
             </p>
           </div>
@@ -1126,6 +1130,7 @@ function Assets(props: { kind: string; cli: Cli }) {
                       await confirm(
                         t(item.customized ? "Reset {name}" : "Remove {name}", { name: item.name }),
                         t(item.scope === "local" ? assetCopy[kind()].removeProject : assetCopy[kind()].removeAll),
+                        { submit: item.customized ? t("Reset") : t("Remove"), danger: true },
                       )
                     ) {
                       await app.native({
@@ -1375,7 +1380,7 @@ function Plugins() {
           {t("Install plugin")}
         </button>
         <button onClick={() => setInstalling("marketplace")}>
-          {t("Marketplaces")}
+          {t("Register marketplace")}
         </button>
       </div>
       <Show when={installing()} keyed>
@@ -1427,7 +1432,7 @@ function Plugins() {
               <button
                 onClick={() =>
                   app.run(async () => {
-                    if (await confirm(t("Remove plugin?"), plugin.name))
+                    if (await confirm(t("Remove plugin?"), plugin.name, { submit: t("Remove plugin"), danger: true }))
                       await action("remove", plugin.name);
                   })
                 }
@@ -1571,6 +1576,7 @@ function Extensions(props: { cli: Cli }) {
                       await confirm(
                         t("Remove extension?"),
                         t("Unregister {name}. Source files are preserved.", { name: entry.name ?? entry.source }),
+                        { submit: t("Remove extension"), danger: true },
                       )
                     ) {
                       await props.cli([
@@ -1645,7 +1651,7 @@ function Profiles(props: { cli: Cli }) {
                 "--dry-run",
                 "--json",
               ]);
-              if (await confirm(t("Restore profile?"), stringify(preview)))
+              if (await confirm(t("Restore profile?"), stringify(preview), { submit: t("Restore profile") }))
                 await props.cli(["profile", "restore", path, "--json"]);
             })
           }
@@ -1668,10 +1674,18 @@ function Profiles(props: { cli: Cli }) {
             label: t(item.label),
             run: () =>
               void app.run(async () => {
+                // Every catalog action needs the same server, so offer the last one.
+                const last = await window.haarness.storage("profile-catalog:v1");
                 const input = await ask(
                   t(item.label),
                   [
-                    { name: "url", label: t("HTTPS URL"), required: true },
+                    {
+                      name: "url",
+                      label: t("Catalog server URL"),
+                      value: typeof last === "string" ? last : "",
+                      placeholder: "https://haarness.example.com",
+                      required: true,
+                    },
                     ...(item.command === "cloud-list"
                       ? []
                       : [
@@ -1694,9 +1708,13 @@ function Profiles(props: { cli: Cli }) {
                         ]
                       : []),
                   ],
-                  { submit: t(item.label) },
+                  {
+                    description: t("Profiles are shared through the catalog of a Haarness server you run. Enter its address; Haarness signs in with the token in HAARNESS_PROFILE_TOKEN."),
+                    submit: t(item.label),
+                  },
                 );
                 if (!input) return;
+                await window.haarness.storage("profile-catalog:v1", input.url.trim());
                 const args = [
                   "profile",
                   item.command,
@@ -1765,6 +1783,7 @@ function About() {
                   await confirm(
                     t("Install update?"),
                     t("Haarness will restart. Save your file edits before continuing."),
+                    { submit: t("Restart & install") },
                   )
                 )
                   await window.haarness.update("install");

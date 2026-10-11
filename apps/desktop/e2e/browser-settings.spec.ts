@@ -1015,7 +1015,7 @@ test("browsing history and downloads can be searched, saved, removed, and cleare
     exact: true,
   });
   await confirmation
-    .getByRole("button", { name: "Confirm", exact: true })
+    .getByRole("button", { name: "Clear browsing data", exact: true })
     .click();
   await expect
     .poll(async () =>

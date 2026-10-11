@@ -338,6 +338,7 @@ export function BrowserSettings() {
                 t(
                   "Close this project’s browser tabs and clear their browsing data on this desktop. Files saved separately and conversation attachments remain.",
                 ),
+                { submit: t("Clear browsing data"), danger: true },
               )) &&
               connection === app.state.connection?.id
             )
@@ -426,6 +427,7 @@ export function BrowserSettings() {
                       : t(
                           "Remove this project’s retained downloads. Files saved separately remain.",
                         ),
+                    { submit: t("Clear history"), danger: true },
                   )) &&
                   connection === app.state.connection?.id
                 )

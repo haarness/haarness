@@ -1684,7 +1684,7 @@ test("whole rows reorder silently, project titles expand, and sessions have one 
     exact: true,
   });
   await expect(
-    catalog.getByRole("textbox", { name: "HTTPS URL", exact: true }),
+    catalog.getByRole("textbox", { name: "Catalog server URL", exact: true }),
   ).toBeVisible();
   await expect(
     catalog.getByRole("combobox", { name: "Action", exact: true }),
@@ -1701,10 +1701,10 @@ test("the project menu pins, renames, files under a section, reveals, archives c
     page.getByRole("button", { name: `Project options for ${name}`, exact: true });
   const item = (name: string | RegExp) =>
     page.getByRole("menuitem", { name, exact: typeof name === "string" });
-  const confirmDialog = (title: string) =>
+  const confirmDialog = (title: string, action: string) =>
     page
       .getByRole("dialog", { name: title, exact: true })
-      .getByRole("button", { name: "Confirm", exact: true });
+      .getByRole("button", { name: action, exact: true });
   const headings = page.locator(".project-list .project-heading");
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
 
@@ -1761,7 +1761,7 @@ test("the project menu pins, renames, files under a section, reveals, archives c
     .getByRole("button", { name: "Section options for Client work", exact: true })
     .click();
   await item("Remove section").click();
-  await confirmDialog("Remove section Client work?").click();
+  await confirmDialog("Remove section Client work?", "Remove section").click();
   await expect(renamedSection).toHaveCount(0);
   await expect(renamed.locator(".project-heading")).toHaveText("Client app");
 
@@ -1791,7 +1791,7 @@ test("the project menu pins, renames, files under a section, reveals, archives c
   await expect(renamed.getByRole("button", { name: titles[1], exact: true })).toBeVisible();
   await options("Client app").click();
   await item("Archive chats").click();
-  await confirmDialog("Archive all chats in Client app?").click();
+  await confirmDialog("Archive all chats in Client app?", "Archive chats").click();
   for (const title of titles)
     await expect(renamed.getByRole("button", { name: title, exact: true })).toHaveCount(0);
   await expect
@@ -1832,7 +1832,7 @@ test("the project menu pins, renames, files under a section, reveals, archives c
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
   await options("remove-project").click();
   await item("Remove project").click();
-  await confirmDialog("Remove this project from the sidebar?").click();
+  await confirmDialog("Remove remove-project from the sidebar?", "Remove project").click();
   await expect(other).toHaveCount(0);
   await original.locator(".project-heading").click();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
@@ -1947,7 +1947,7 @@ test("sidebar sections keep drag and keyboard ordering inside and across groups,
   await item("Remove section").click();
   await page
     .getByRole("dialog", { name: "Remove section Clients?", exact: true })
-    .getByRole("button", { name: "Confirm", exact: true })
+    .getByRole("button", { name: "Remove section", exact: true })
     .click();
   await expect(clients).toHaveCount(0);
   await expect(unfiled).toHaveCount(0);
@@ -3332,8 +3332,8 @@ test("signing in with a code connects OpenAI end to end and can be disconnected"
   expect(await settings.innerText()).not.toContain("fixture-access");
   await block.getByRole("button", { name: "Disconnect", exact: true }).click();
   await page
-    .getByRole("dialog", { name: "Disconnect provider?", exact: true })
-    .getByRole("button", { name: "Confirm", exact: true })
+    .getByRole("dialog", { name: "Disconnect OpenAI?", exact: true })
+    .getByRole("button", { name: "Disconnect", exact: true })
     .click();
   await expect(block).toContainText("Not connected");
   expect(
@@ -4207,7 +4207,7 @@ test("file editing protects unsaved drafts and conflicting external changes", as
   await expect(page.locator("dialog:not(.settings-dialog):not(.palette-dialog)")).toContainText("Discard unsaved changes");
   await page
     .locator("dialog:not(.settings-dialog):not(.palette-dialog)")
-    .getByRole("button", { name: "Confirm", exact: true })
+    .getByRole("button", { name: "Discard changes", exact: true })
     .click();
   const reply = await page.evaluate(async (workspace) => {
     const id = "local:" + workspace;
@@ -4994,7 +4994,7 @@ test("all modal surfaces dismiss on outside clicks without closing parents or su
   await expect(settings).toBeVisible();
   await card.getByRole("button", { name: "Remove", exact: true }).click();
   await confirmation
-    .getByRole("button", { name: "Confirm", exact: true })
+    .getByRole("button", { name: "Remove schedule", exact: true })
     .click();
   await expect(card).toHaveCount(0);
   expect(jobs()).toEqual(originalJobs);
@@ -5458,7 +5458,7 @@ test("schedule pickers, native execution and grouped conversations work end to e
     await renamed.getByRole("button", { name: "Remove", exact: true }).click();
     await page
       .locator("dialog:not(.settings-dialog):not(.palette-dialog)")
-      .getByRole("button", { name: "Confirm", exact: true })
+      .getByRole("button", { name: "Remove schedule", exact: true })
       .click();
     await expect(renamed).toHaveCount(0);
     expect(jobs().some((job) => job.id === id)).toBe(false);
@@ -6521,7 +6521,7 @@ test("worktree view groups sessions, isolates drafts and terminals, and manages 
     .click();
   await page
     .getByRole("dialog", { name: "Remove worktree?", exact: true })
-    .getByRole("button", { name: "Confirm", exact: true })
+    .getByRole("button", { name: "Remove worktree", exact: true })
     .click();
   await expect(page.locator(".error-banner")).toContainText("active tasks");
   expect((await request<unknown[]>("listPermissions")).length).toBe(1);
@@ -6665,7 +6665,7 @@ test("worktree view groups sessions, isolates drafts and terminals, and manages 
   await action("Remove worktree…");
   await page
     .getByRole("dialog", { name: "Remove worktree?", exact: true })
-    .getByRole("button", { name: "Confirm", exact: true })
+    .getByRole("button", { name: "Remove worktree", exact: true })
     .click();
   await expect(page.locator(".error-banner")).toContainText("local changes");
   await expect(tree).toBeVisible();
@@ -6691,7 +6691,7 @@ test("worktree view groups sessions, isolates drafts and terminals, and manages 
   await action("Remove worktree…");
   await page
     .getByRole("dialog", { name: "Remove worktree?", exact: true })
-    .getByRole("button", { name: "Confirm", exact: true })
+    .getByRole("button", { name: "Remove worktree", exact: true })
     .click();
   await expect(tree).toHaveCount(0);
   expect(
@@ -6838,7 +6838,7 @@ test("worktree discovery, missing checkouts and inactive-project menus retain th
     .click();
   await page
     .getByRole("dialog", { name: "Remove worktree?", exact: true })
-    .getByRole("button", { name: "Confirm", exact: true })
+    .getByRole("button", { name: "Remove worktree", exact: true })
     .click();
   await expect(discovered).toHaveCount(0);
   expect(
@@ -9406,7 +9406,7 @@ test("install source forms switch fields, browse, recover from errors and regist
     }),
   );
   await settings
-    .getByRole("button", { name: "Marketplaces", exact: true })
+    .getByRole("button", { name: "Register marketplace", exact: true })
     .click();
   form = page.getByRole("dialog", {
     name: "Register a marketplace",
@@ -10603,7 +10603,7 @@ test("hooks settings execute configured commands and preserve stale editor draft
     await settings.getByRole("button", { name: "Hooks", exact: true }).click();
     await card.getByRole("button", { name: "Remove hook", exact: true }).click();
     changedAt = Date.now();
-    await page.getByRole("dialog", { name: "Remove hook?", exact: true }).getByRole("button", { name: "Confirm", exact: true }).click();
+    await page.getByRole("dialog", { name: "Remove hook?", exact: true }).getByRole("button", { name: "Remove hook", exact: true }).click();
     await expect(card).not.toBeVisible();
     await reloaded(changedAt);
     await settings.getByRole("button", { name: "Close settings" }).click();
@@ -10663,7 +10663,7 @@ test("memory dialog manages project files, retains conflicting edits and reloads
   await memory.getByRole("button", { name: "Edit memory desktop-memory-proof", exact: true }).click();
   await expect(edit.getByLabel("Memory content", { exact: true })).toHaveValue(/External memory edit\./);
   await edit.getByRole("button", { name: "Delete memory", exact: true }).click();
-  await page.getByRole("dialog", { name: "Delete memory?", exact: true }).getByRole("button", { name: "Confirm", exact: true }).click();
+  await page.getByRole("dialog", { name: "Delete memory?", exact: true }).getByRole("button", { name: "Delete memory", exact: true }).click();
   await expect(edit).not.toBeVisible();
   await expect(memory.getByRole("button", { name: "Edit memory desktop-memory-proof", exact: true })).not.toBeVisible();
   expect(await readFile(path, "utf8").catch(() => "missing")).toBe("missing");

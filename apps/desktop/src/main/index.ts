@@ -1109,6 +1109,10 @@ function createWindow() {
   const state = data().values.window as
     | { width?: number; height?: number }
     | undefined;
+  // Paint the window in the appearance the page is about to use, so a
+  // light system does not flash dark before the renderer loads.
+  const theme = data().preferences.theme;
+  const dark = theme === "dark" || (theme === "system" && nativeTheme.shouldUseDarkColors);
   const win = new BrowserWindow({
     show: process.env.HAARNESS_DESKTOP_TEST !== "1",
     width: state?.width ?? 1420,
@@ -1116,7 +1120,7 @@ function createWindow() {
     minWidth: 900,
     minHeight: 640,
     title: "Haarness",
-    backgroundColor: "#151413",
+    backgroundColor: dark ? "#151413" : "#fdfcfa",
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
     trafficLightPosition: { x: 18, y: 17 },
     webPreferences: {

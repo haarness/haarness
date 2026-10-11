@@ -162,6 +162,42 @@
 .connect-key .field {
   margin: 0;
 }
+.connect-other {
+  margin-top: var(--s3);
+}
+.connect-other > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  list-style: none;
+  font-size: var(--ui-sm);
+  border-radius: var(--r-sm);
+}
+.connect-other > summary:hover {
+  color: var(--text);
+}
+.connect-other > summary .icon {
+  transition: transform var(--fast) var(--ease);
+}
+.connect-other[open] > summary .icon {
+  transform: rotate(90deg);
+}
+:root[dir="rtl"] .connect-other:not([open]) > summary .icon {
+  transform: scaleX(-1);
+}
+.connect-other > p {
+  font-size: var(--ui-sm);
+  line-height: 1.6;
+  margin: var(--s2) 0 0;
+}
+.connect-other code {
+  font-size: var(--ui-sm);
+}
+/* Getting a key is the step before pasting one, so it leads the footer. */
+.connect-create-key {
+  margin-inline-end: auto;
+  gap: var(--s1);
+}
 .connect-key footer,
 .connect-login footer,
 .connect-dialog > footer {

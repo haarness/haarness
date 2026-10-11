@@ -67,7 +67,8 @@ export function Explorer() {
       !hasEdits() ||
       (await confirm(
         t("Discard unsaved file edits?"),
-        t("Save your files before changing working folders, or confirm to discard these edits."),
+        t("Save your files before changing working folders, or discard these edits."),
+        { submit: t("Discard edits"), danger: true },
       )),
   );
   const beforeUnload = (event: BeforeUnloadEvent) => {
@@ -388,6 +389,7 @@ export function Explorer() {
       !(await confirm(
         t("Discard unsaved changes?"),
         t("{path} has changes that have not been saved.", { path }),
+        { submit: t("Discard changes"), danger: true },
       ))
     )
       return;
@@ -468,7 +470,7 @@ export function Explorer() {
     const value = file(), id = app.state.connection?.id;
     const generation = workspaceGeneration;
     const intent = selectionGeneration;
-    if (!value?.pin || !id || !await confirm(t("Restore preview version?"), t("The current file is backed up before this version replaces it."))) return;
+    if (!value?.pin || !id || !await confirm(t("Restore preview version?"), t("The current file is backed up before this version replaces it."), { submit: t("Restore version") })) return;
     const current = await window.haarness.files<FileContent>(id, "read", { path: value.path }).catch(() => undefined);
     await window.haarness.files(id, "restore", { path: value.path, hash: value.pin, revision: current?.revision ?? emptyHash });
     if (generation === workspaceGeneration && intent === selectionGeneration) await open(value.path, { preview: true });
@@ -477,7 +479,7 @@ export function Explorer() {
     const value = file();
     const id = app.state.connection?.id;
     const generation = workspaceGeneration;
-    if (!value || !id || !(await confirm(t("Delete this file?"), t("{path} will be deleted from the workspace.", { path: value.path })))) return;
+    if (!value || !id || !(await confirm(t("Delete this file?"), t("{path} will be deleted from the workspace.", { path: value.path }), { submit: t("Delete file"), danger: true }))) return;
     await pendingSaves.get(value.editor);
     if (generation !== workspaceGeneration) return;
     await window.haarness.files(id, "action", { action: "delete", path: value.path, confirm: true });

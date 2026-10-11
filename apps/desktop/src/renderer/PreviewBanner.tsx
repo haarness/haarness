@@ -137,6 +137,7 @@ export function PreviewBanner(props: { metadata: unknown }) {
       !(await confirm(
         t("Restore preview version?"),
         t("The current file is backed up before this version replaces it. Unsaved editor changes are kept."),
+        { submit: t("Restore version") },
       ))
     )
       return;

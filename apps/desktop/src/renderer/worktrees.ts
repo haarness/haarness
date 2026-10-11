@@ -162,6 +162,7 @@ export async function removeWorktree(
       location.checkout.exists
         ? t("Remove “{name}”. Dirty worktrees and running tasks are protected.", { name: location.checkout.name })
         : t("Remove the missing checkout's registration. Conversation history is retained."),
+      { submit: t("Remove worktree"), danger: true },
     ))
   )
     return;

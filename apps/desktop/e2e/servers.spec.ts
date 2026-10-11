@@ -421,7 +421,7 @@ test("server switching scopes projects and chats, restores selection, and preser
   await page
     .locator("dialog[open]")
     .last()
-    .getByRole("button", { name: "Confirm", exact: true })
+    .getByRole("button", { name: "Forget project", exact: true })
     .click();
   await expect(pane).toContainText("No projects yet");
   const saved = await page.evaluate(() => window.haarness.boot());
@@ -544,7 +544,7 @@ test("legacy remote connections migrate independently and empty local selection 
   await page
     .locator("dialog[open]")
     .last()
-    .getByRole("button", { name: "Confirm", exact: true })
+    .getByRole("button", { name: "Remove server", exact: true })
     .click();
   await expect(finalPane).not.toContainText("Renamed server");
   const saved = await page.evaluate(() => window.haarness.boot());
@@ -1683,7 +1683,7 @@ for (const connectionMode of ["local", "remote"] as const) {
         await expect(form.getByLabel(bodyLabel, { exact: true })).toHaveValue(`Updated ${connectionMode} ${name} instructions.`);
         await form.getByRole("button", { name: "Cancel", exact: true }).click();
         await entry().getByRole("button", { name: "Reset to default", exact: true }).click();
-        await page.getByRole("dialog", { name: `Reset ${name}`, exact: true }).getByRole("button", { name: "Confirm", exact: true }).click();
+        await page.getByRole("dialog", { name: `Reset ${name}`, exact: true }).getByRole("button", { name: "Reset", exact: true }).click();
         await expect(entry().getByRole("button", { name: "Reset to default", exact: true })).toHaveCount(0);
         await entry().getByRole("button", { name: "Edit", exact: true }).click();
         form = page.getByRole("dialog", { name: `Edit ${kind}`, exact: true });

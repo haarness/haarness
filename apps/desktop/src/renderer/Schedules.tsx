@@ -118,7 +118,7 @@ export function Schedules(props: {
                 disabled={busy()}
                 onClick={() =>
                   app.run(async () => {
-                    if (await confirm(t("Remove schedule?"), item.name))
+                    if (await confirm(t("Remove schedule?"), item.name, { submit: t("Remove schedule"), danger: true }))
                       await change(["schedule", "remove", item.id]);
                   })
                 }

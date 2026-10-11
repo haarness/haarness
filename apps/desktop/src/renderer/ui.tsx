@@ -2,6 +2,7 @@ import { language, t } from "./i18n";
 import { Select } from "./Select";
 import { For, Show, createSignal, onMount, type JSX } from "solid-js";
 import { Icon, type IconName, type IconSize } from "./icons";
+import { errorText } from "./error-text";
 export { Icon, type IconName } from "./icons";
 /**
  * The one icon-only control. It owns the hit area (`--icon-button`), the
@@ -49,6 +50,8 @@ interface Form {
   description?: string;
   fields: Field[];
   submit: string;
+  /** The submit removes, deletes or discards something: style it as such. */
+  danger?: boolean;
   onSubmit?: (value: Record<string, string>) => Promise<unknown>;
   resolve: (value: Record<string, string> | null) => void;
 }
@@ -61,7 +64,7 @@ const [form, setForm] = createSignal<Form | null>(null);
 export function ask(
   title: string,
   fields: Field[],
-  options: { description?: string; submit?: string; onSubmit?: Form["onSubmit"] } = {},
+  options: { description?: string; submit?: string; danger?: boolean; onSubmit?: Form["onSubmit"] } = {},
 ) {
   return new Promise<Record<string, string> | null>((resolve) =>
     setForm({
@@ -70,12 +73,22 @@ export function ask(
       description: options.description,
       onSubmit: options.onSubmit,
       submit: options.submit ?? "Save",
+      danger: options.danger,
       resolve,
     }),
   );
 }
-export async function confirm(title: string, description: string) {
-  return !!(await ask(title, [], { description, submit: "Confirm" }));
+/**
+ * Ask before an action. The submit names the action ("Remove project",
+ * "Disconnect"), never a bare "Confirm", and `danger` marks one that removes,
+ * deletes or discards something.
+ */
+export async function confirm(
+  title: string,
+  description: string,
+  options: { submit: string; danger?: boolean },
+) {
+  return !!(await ask(title, [], { description, ...options }));
 }
 
 /** Dismiss only a complete backdrop click, never a drag out of the panel. */
@@ -245,12 +258,16 @@ export function Forms() {
                 }}
               </For>
               </fieldset>
-              <Show when={error()}><p class="notice-inline" role="alert">{error()}</p></Show>
+              <Show when={error()}><ErrorNotice class="notice-inline" error={error()} /></Show>
               <footer>
                 <button type="button" onClick={() => finish(null)}>
                   {t("Cancel")}
                 </button>
-                <button type="submit" class="primary" disabled={busy()}>
+                <button
+                  type="submit"
+                  class={current.danger ? "danger-action" : "primary"}
+                  disabled={busy()}
+                >
                   {t(current.submit)}
                 </button>
               </footer>
@@ -259,6 +276,31 @@ export function Forms() {
         );
       }}
     </Show>
+  );
+}
+/**
+ * A failure in words: a title when one helps, then what happened. Copy that
+ * stands in for the server's own text keeps that text as the tooltip.
+ */
+export function ErrorNotice(props: {
+  error: unknown;
+  class?: string;
+  ref?: (element: HTMLParagraphElement) => void;
+  focusable?: boolean;
+}) {
+  const text = () => errorText(props.error);
+  const say = (value: string) => (text().known ? t(value) : value);
+  return (
+    <p
+      ref={props.ref}
+      class={props.class ?? "form-error"}
+      role="alert"
+      tabindex={props.focusable ? -1 : undefined}
+      title={text().detail}
+    >
+      <Show when={text().title}>{(title) => <strong>{say(title())}</strong>}</Show>
+      {say(text().message)}
+    </p>
   );
 }
 export const Empty = (props: {
