@@ -23,8 +23,7 @@ The starter is named after its folder (`./my-extension` becomes `my_extension`;
 `--name` chooses another), so it registers `ext__my_extension__greet`. Ask
 Haarness to greet someone and it can call the tool. Registered tools also appear
 in `/tools` and the REST tool catalog, with source `extension:my_extension`;
-ordinary availability controls and lazy
-tool loading apply.
+ordinary availability controls and lazy tool loading apply.
 
 The generated extension needs no SDK download or build step:
 

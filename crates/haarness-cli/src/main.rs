@@ -89,7 +89,7 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
     /// Project folder to work in (default: the current folder).
-    #[arg(long, global = true, default_value = ".")]
+    #[arg(long, global = true, default_value = ".", hide_default_value = true)]
     workspace: PathBuf,
     /// Override Haarness's data/config/cache root. Primarily used by isolated
     /// installations and native schedule runners.
@@ -905,7 +905,7 @@ enum SessionCommand {
         /// Chat id.
         id: Uuid,
     },
-    /// Copy a chat into a new one you can take elsewhere.
+    /// Copy a chat into a new one, to continue it in another direction.
     Fork {
         /// Chat id.
         id: Uuid,
@@ -8432,12 +8432,12 @@ fn haarness_filter(level: &str) -> String {
     filter
 }
 
-/// `haarness logs`: show the log directory and files, or tail the newest.
 /// A count and its noun: `1 model`, `3 models`.
 fn plural(count: usize, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
 
+/// `haarness logs`: show the log directory and files, or tail the newest.
 fn logs_command(paths: &Paths, tail: Option<usize>) -> Result<()> {
     let logs = paths.data.join("logs");
     let mut files: Vec<_> = fs::read_dir(&logs)
