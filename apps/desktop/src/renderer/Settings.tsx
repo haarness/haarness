@@ -1711,6 +1711,7 @@ function Profiles(props: { cli: Cli }) {
                   {
                     description: t("Profiles are shared through the catalog of a Haarness server you run. Enter its address; Haarness signs in with the token in HAARNESS_PROFILE_TOKEN."),
                     submit: t(item.label),
+                    danger: item.command === "cloud-delete",
                   },
                 );
                 if (!input) return;

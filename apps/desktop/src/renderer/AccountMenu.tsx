@@ -65,6 +65,8 @@ export function AccountMenu(props: {
 }) {
   const app = useApp();
   const [account, setAccount] = createSignal<Account>({ loggedIn: false });
+  // Until the first status answer, "signed out" is only the default.
+  let statusKnown = false;
   const permits = (scope: string) => account().authKind !== "api_key" || account().scopes?.includes(scope);
   const [open, setOpen] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
@@ -95,6 +97,7 @@ export function AccountMenu(props: {
     const result = await window.haarness.account({ action: "status" });
     if (!alive) return;
     setAccount(result);
+    statusKnown = true;
     if (result.loggedIn && open() && (result.authKind !== "api_key" || result.scopes?.includes("models:read"))) {
       try {
         const catalog = await window.haarness.account({ action: "routers" });
@@ -225,8 +228,16 @@ export function AccountMenu(props: {
         onClick={() => {
           show();
           // The card already said what Cloud gives; signed out, it goes
-          // straight to the browser rather than to a second pitch.
-          if (props.models && !account().loggedIn) void signIn();
+          // straight to the browser rather than to a second pitch. A click
+          // before the first status answer waits for it, so a signed-in
+          // account never starts another sign-in.
+          if (props.models)
+            void (statusKnown ? Promise.resolve() : refresh()).then(
+              () => {
+                if (!account().loggedIn && !signingIn()) void signIn();
+              },
+              () => {},
+            );
         }}
       >
         <Show
