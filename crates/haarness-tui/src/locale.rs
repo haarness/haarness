@@ -118,6 +118,48 @@ impl Language {
                 text.replace(&format!("{{{name}}}"), value)
             })
     }
+
+    /// Languages written right to left. The terminal grid itself stays left
+    /// to right; a bidi-aware terminal reorders the text inside each row.
+    ///
+    /// Haarness does not wrap hints in bidi isolates (U+2066…U+2069) or
+    /// marks (U+200E): the native renderer gives each of those zero-width
+    /// characters a cell of its own, while the terminal gives it none, so
+    /// every mark would shift the rest of the row by a cell.
+    pub const fn is_rtl(self) -> bool {
+        matches!(self, Self::Arabic)
+    }
+
+    /// Translated key hints ("enter select", "esc close"), joined the way
+    /// dialog footers join them.
+    pub fn hints(self, keys: &[&str]) -> String {
+        keys.iter()
+            .map(|key| self.text(key))
+            .collect::<Vec<_>>()
+            .join("  \u{00b7}  ")
+    }
+
+    /// A list position ("1–7 of 61") followed by key hints, as a picker's
+    /// footer reads.
+    pub fn range_hints(self, from: usize, to: usize, total: usize, keys: &[&str]) -> String {
+        let range = if total == 0 {
+            self.text("0 of 0").to_owned()
+        } else {
+            self.format(
+                "{from}–{to} of {total}",
+                &[
+                    ("from", &from.to_string()),
+                    ("to", &to.to_string()),
+                    ("total", &total.to_string()),
+                ],
+            )
+        };
+        if keys.is_empty() {
+            range
+        } else {
+            format!("{range}  \u{00b7}  {}", self.hints(keys))
+        }
+    }
 }
 
 static DICTIONARIES: LazyLock<HashMap<&'static str, HashMap<String, String>>> =
@@ -197,5 +239,131 @@ mod tests {
                 "untranslated diagnostic"
             );
         }
+    }
+
+    /// Read the Rust string literal that opens at `start`, decoding the
+    /// escapes interface text uses.
+    fn literal_at(source: &str, start: usize) -> Option<(String, usize)> {
+        let mut chars = source[start..].char_indices();
+        if chars.next()?.1 != '"' {
+            return None;
+        }
+        let mut value = String::new();
+        while let Some((index, character)) = chars.next() {
+            match character {
+                '"' => return Some((value, start + index + 1)),
+                '\\' => match chars.next()?.1 {
+                    'n' => value.push('\n'),
+                    'u' => {
+                        let mut hex = String::new();
+                        for (_, digit) in chars.by_ref() {
+                            match digit {
+                                '{' => {}
+                                '}' => break,
+                                digit => hex.push(digit),
+                            }
+                        }
+                        value.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
+                    }
+                    other => value.push(other),
+                },
+                character => value.push(character),
+            }
+        }
+        None
+    }
+
+    /// A key handed to `text`, `format` or a hint list as a literal shows
+    /// English in every language unless the catalog has it.
+    #[test]
+    fn literal_interface_keys_are_in_the_catalog() {
+        fn sources(directory: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    sources(&path, out);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        sources(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        let mut missing = Vec::new();
+        for path in files {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if name == "locale.rs" || name == "tests.rs" || name.ends_with("_tests.rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            let mut keys = Vec::new();
+            for call in [".text(\"", ".format(\""] {
+                for (index, _) in source.match_indices(call) {
+                    if let Some((key, _)) = literal_at(&source, index + call.len() - 1) {
+                        keys.push(key);
+                    }
+                }
+            }
+            for call in ["hints(&[", "range(&[", "hints(\n"] {
+                for (index, _) in source.match_indices(call) {
+                    let end = source[index..]
+                        .find(']')
+                        .map_or(source.len(), |end| index + end);
+                    let mut cursor = index;
+                    while let Some(offset) = source[cursor..end].find('"') {
+                        let Some((key, next)) = literal_at(&source, cursor + offset) else {
+                            break;
+                        };
+                        keys.push(key);
+                        cursor = next;
+                    }
+                }
+            }
+            for key in keys {
+                // Date patterns are formats, not words.
+                if !key.contains('%') && !DICTIONARIES["en"].contains_key(&key) {
+                    missing.push(format!("{name}: {key}"));
+                }
+            }
+        }
+        assert!(missing.is_empty(), "{missing:#?}");
+    }
+
+    #[test]
+    fn footers_join_translated_hints_after_the_list_position() {
+        let english =
+            Language::English.range_hints(1, 7, 61, &["\u{2191}\u{2193} navigate", "esc close"]);
+        assert_eq!(
+            english,
+            "1–7 of 61  \u{b7}  \u{2191}\u{2193} navigate  \u{b7}  esc close"
+        );
+        assert_eq!(Language::English.range_hints(1, 0, 0, &[]), "0 of 0");
+        assert_eq!(
+            Language::French.hints(&["Enter to apply", "Escape to cancel"]),
+            format!(
+                "{}  \u{b7}  {}",
+                Language::French.text("Enter to apply"),
+                Language::French.text("Escape to cancel")
+            )
+        );
+    }
+
+    /// Why hints carry no bidi isolates: the native renderer stores a
+    /// zero-width mark in a cell of its own, so the next span, placed by
+    /// display width, overwrites the glyph after the mark. When this starts
+    /// failing, the renderer handles zero-width marks and Arabic hint rows
+    /// can be isolated (TA20).
+    #[test]
+    fn native_renderer_still_gives_a_bidi_mark_a_cell() {
+        let mut renderer = haarness_opentui::Renderer::new(20, 2, true).unwrap();
+        let white = haarness_opentui::Color::rgb(255, 255, 255);
+        let drawn = renderer.snapshot_lines(&[haarness_opentui::Line::new(vec![
+            haarness_opentui::Span::new("ab\u{2066}cd", white),
+            haarness_opentui::Span::new("|", white),
+        ])]);
+        assert!(drawn.starts_with("ab\u{2066}c|"), "{drawn:?}");
     }
 }

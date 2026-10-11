@@ -1425,7 +1425,10 @@ fn long_mention_paths_keep_their_file_name_visible() {
         .lines()
         .find(|line| line.contains('›'))
         .unwrap_or_else(|| panic!("no highlighted mention row:\n{text}"));
-    assert!(row.contains("dropped image.png"), "file name clipped away: {row}");
+    assert!(
+        row.contains("dropped image.png"),
+        "file name clipped away: {row}"
+    );
     assert!(row.contains('…'), "{row}");
     assert!(text.contains("Delegate to agent"), "{text}");
 }
@@ -16918,5 +16921,86 @@ fn a_lost_server_says_what_this_client_does_about_it() {
         status(&app).contains("server stopped · restart failed · retrying"),
         "{}",
         status(&app)
+    );
+}
+
+#[test]
+fn arabic_placeholder_keeps_the_cursor_out_of_its_text() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.language = crate::locale::Language::Arabic;
+    let placeholder = app.language.text("Ask anything…").to_owned();
+    let lines = app.lines((100, 30));
+    let row = lines
+        .iter()
+        .find(|line| line.text().contains(&placeholder))
+        .unwrap_or_else(|| panic!("{:#?}", lines.iter().map(Line::text).collect::<Vec<_>>()));
+    // A bidi-aware terminal reverses the Arabic placeholder in place; the
+    // cursor is a blank cell of its own just before it, so it stays at the
+    // edge instead of landing on a letter in the middle of the word.
+    let at = row
+        .spans
+        .iter()
+        .position(|span| span.text == placeholder)
+        .expect("placeholder drawn as one run");
+    assert_eq!(row.spans[at - 1].text, " ");
+    // No zero-width bidi marks reach the native renderer, which would give
+    // each one a cell (see locale::tests).
+    for line in &lines {
+        assert!(line.width() <= 100, "{}", line.text());
+        assert!(
+            !line
+                .text()
+                .contains(['\u{200e}', '\u{2066}', '\u{2068}', '\u{2069}']),
+            "{}",
+            line.text()
+        );
+    }
+    // Left-to-right languages keep the cursor on the placeholder's first letter.
+    app.language = crate::locale::Language::French;
+    let lines = app.lines((100, 30));
+    let first = app
+        .language
+        .text("Ask anything…")
+        .chars()
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.spans.iter().any(|span| span.text == first)),
+        "{:#?}",
+        lines.iter().map(Line::text).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn dialog_chrome_and_command_descriptions_read_from_the_catalog() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.language = crate::locale::Language::French;
+    // Built-in descriptions are looked up by their English text at render
+    // time, so every one of them must be a catalog key.
+    for entry in app.filtered_slash_entries("") {
+        if let Some(spec) = COMMANDS.iter().find(|spec| spec.name == entry.name) {
+            assert_eq!(entry.description, app.language.text(spec.description));
+        }
+    }
+    app.open_overlay(crate::state::Overlay::Commands);
+    let text = app
+        .lines((100, 30))
+        .iter()
+        .map(Line::text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for key in ["Type to filter", "esc close", "↑↓ navigate", "enter select"] {
+        assert!(text.contains(app.language.text(key)), "{key}: {text}");
+    }
+    // The notice after /language names the setting with its capital, in
+    // every language, rather than the lowercase status key.
+    assert_eq!(
+        crate::commands::language_notice(crate::locale::Language::English),
+        "Language: en"
     );
 }

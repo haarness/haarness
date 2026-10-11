@@ -39,7 +39,11 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
                 .into_iter()
                 .map(|model| {
                     let active = model == format!("{}/{}", app.thread.provider, app.thread.model);
-                    let status = if active { "active" } else { "" };
+                    let status = if active {
+                        app.language.text("active")
+                    } else {
+                        ""
+                    };
                     let detail = model_detail(app, &model, status);
                     (app.model_label(&model), detail)
                 })
@@ -72,7 +76,7 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
                     (
                         format!("{name} · {variant}"),
                         if active {
-                            "active".into()
+                            app.language.text("active").into()
                         } else {
                             String::new()
                         },
@@ -117,9 +121,12 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
                         .iter()
                         .map(|path| {
                             if let Some(agent) = path.strip_prefix("agent://") {
-                                (format!("@{agent}"), "Delegate to agent".into())
+                                (
+                                    format!("@{agent}"),
+                                    app.language.text("Delegate to agent").into(),
+                                )
                             } else if path.ends_with('/') {
-                                (path.clone(), "Folder".into())
+                                (path.clone(), app.language.text("Folder").into())
                             } else {
                                 // A path says what it is; "File snapshot" on
                                 // every row only pushed the paths apart.
@@ -157,7 +164,10 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
         return lines;
     }
     if rows.is_empty() {
-        lines.push(line("  No matches", theme.muted));
+        lines.push(line(
+            format!("  {}", app.language.text("No matches")),
+            theme.muted,
+        ));
         return lines;
     }
     let visible = rows.len().min(7).min(max_height - 1);
@@ -179,7 +189,10 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
         let body = if description.is_empty() {
             // A bare path gets the whole row, and an over-long one keeps
             // its end: the file name is what tells two rows apart.
-            format!("  {marker} {}", leading_ellipsis(&label, width.saturating_sub(5)))
+            format!(
+                "  {marker} {}",
+                leading_ellipsis(&label, width.saturating_sub(5))
+            )
         } else {
             let label = single_line(&label, label_width);
             format!(
@@ -368,7 +381,11 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
                 .into_iter()
                 .map(|model| {
                     let current = model == format!("{}/{}", app.thread.provider, app.thread.model);
-                    let status = if current { "active" } else { "" };
+                    let status = if current {
+                        app.language.text("active")
+                    } else {
+                        ""
+                    };
                     SelectorRow::new(
                         format!(
                             "{}{}",
@@ -792,9 +809,12 @@ fn search_row(app: &App) -> Line {
             ..
         }
     ) {
-        let mut spans = vec![Span::new("Key  ", theme.muted)];
+        let mut spans = vec![Span::new(
+            format!("{}  ", app.language.text("Key")),
+            theme.muted,
+        )];
         if app.overlay_filter.is_empty() {
-            spans.push(Span::new("paste it here", theme.muted));
+            spans.push(Span::new(app.language.text("paste it here"), theme.muted));
         } else {
             spans.push(Span::new(
                 "•".repeat(app.overlay_filter.chars().count().min(40)),
@@ -837,25 +857,25 @@ fn search_row(app: &App) -> Line {
     if app.overlay_filter.is_empty() {
         if let Some((label, placeholder)) = prompt {
             return Line::new(vec![
-                Span::new(format!("{label}  "), theme.muted),
-                Span::new(placeholder, theme.muted),
+                Span::new(format!("{}  ", app.language.text(label)), theme.muted),
+                Span::new(app.language.text(placeholder), theme.muted),
                 Span::new("▌", theme.primary),
             ]);
         }
         return Line::new(vec![
-            Span::new("Type to filter", theme.muted),
+            Span::new(app.language.text("Type to filter"), theme.muted),
             Span::new("▌", theme.primary),
         ]);
     }
     if let Some((label, _)) = prompt {
         return Line::new(vec![
-            Span::new(format!("{label}  "), theme.muted),
+            Span::new(format!("{}  ", app.language.text(label)), theme.muted),
             Span::new(app.overlay_filter.clone(), theme.text),
             Span::new("▌", theme.primary),
         ]);
     }
     Line::new(vec![
-        Span::new("Search  ", theme.muted),
+        Span::new(format!("{}  ", app.language.text("Search")), theme.muted),
         Span::new(app.overlay_filter.clone(), theme.text),
         Span::new("▌", theme.primary),
     ])
@@ -871,20 +891,31 @@ fn empty_row(app: &App) -> Line {
         }
     ) {
         return line(
-            "Enter to apply · Ctrl+U to clear · Escape to cancel",
+            app.language
+                .hints(&["Enter to apply", "Ctrl+U to clear", "Escape to cancel"]),
             theme.muted,
         );
     }
     if app.overlay_filter.is_empty() {
-        return line("Nothing to choose from", theme.muted);
+        return line(app.language.text("Nothing to choose from"), theme.muted);
     }
+    // The query is the user's own text; only the words around it translate.
+    let template = app.language.text("No match for {query}");
+    let (before, after) = template.split_once("{query}").unwrap_or((template, ""));
     Line::new(vec![
-        Span::new("No match for ", theme.muted),
+        Span::new(before.to_owned(), theme.muted),
         Span::new(
             format!("\u{201c}{}\u{201d}", app.overlay_filter),
             theme.text,
         ),
-        Span::new("  \u{00b7}  backspace to widen", theme.muted),
+        Span::new(after.to_owned(), theme.muted),
+        Span::new(
+            format!(
+                "  \u{00b7}  {}",
+                app.language.hints(&["backspace to widen"])
+            ),
+            theme.muted,
+        ),
     ])
 }
 
@@ -932,91 +963,30 @@ fn selector_window(
 }
 
 fn selector_footer(app: &App, start: usize, end: usize, total: usize) -> String {
-    let range = if total == 0 {
-        "0 of 0".to_owned()
-    } else {
-        format!("{}\u{2013}{end} of {total}", start + 1)
+    use crate::state::OptionsKind;
+    let language = app.language;
+    let range = |keys: &[&str]| language.range_hints(start + 1, end, total, keys);
+    let kind = match &app.overlay {
+        Overlay::Threads => return range(&["enter resume", "\u{2192} actions"]),
+        Overlay::Models => return range(&["ctrl+f favorite", "enter select"]),
+        Overlay::Options { kind, .. } => *kind,
+        _ => return range(&["\u{2191}\u{2193} navigate", "enter select"]),
     };
-    if matches!(app.overlay, Overlay::Threads) {
-        format!("{range}  \u{00b7}  enter resume  \u{00b7}  \u{2192} actions")
-    } else if matches!(app.overlay, Overlay::Models) {
-        format!("{range}  ·  ctrl+f favorite  ·  enter select")
-    } else if matches!(
-        app.overlay,
-        Overlay::Options {
-            kind: crate::state::OptionsKind::Workspaces,
-            ..
+    match kind {
+        OptionsKind::Workspaces => range(&["enter actions", "type to filter"]),
+        OptionsKind::WorkspaceCreateName => language.hints(&["enter continue", "esc cancel"]),
+        OptionsKind::WorkspaceCreateBase => range(&["enter choose", "esc back", "type to filter"]),
+        OptionsKind::WorkspaceCreateCustomBase => language.hints(&["enter check", "esc back"]),
+        OptionsKind::WorkspaceActions
+        | OptionsKind::WorkspaceResetConfirmation
+        | OptionsKind::WorkspaceRemoveConfirmation => range(&["enter select", "esc back"]),
+        OptionsKind::WorkflowDashboard => range(&["enter run / actions", "\u{2192} inspect"]),
+        OptionsKind::ConnectApiKey => {
+            language.hints(&["enter connect", "ctrl+u clear", "esc back"])
         }
-    ) {
-        format!("{range}  \u{00b7}  enter actions  \u{00b7}  type to filter")
-    } else if matches!(
-        app.overlay,
-        Overlay::Options {
-            kind: crate::state::OptionsKind::WorkspaceCreateName,
-            ..
-        }
-    ) {
-        "enter continue  ·  esc cancel".into()
-    } else if matches!(
-        app.overlay,
-        Overlay::Options {
-            kind: crate::state::OptionsKind::WorkspaceCreateBase,
-            ..
-        }
-    ) {
-        format!("{range}  ·  enter choose  ·  esc back  ·  type to filter")
-    } else if matches!(
-        app.overlay,
-        Overlay::Options {
-            kind: crate::state::OptionsKind::WorkspaceCreateCustomBase,
-            ..
-        }
-    ) {
-        "enter check  ·  esc back".into()
-    } else if matches!(
-        app.overlay,
-        Overlay::Options {
-            kind: crate::state::OptionsKind::WorkspaceActions
-                | crate::state::OptionsKind::WorkspaceResetConfirmation
-                | crate::state::OptionsKind::WorkspaceRemoveConfirmation,
-            ..
-        }
-    ) {
-        format!("{range}  \u{00b7}  enter select  \u{00b7}  esc back")
-    } else if matches!(
-        app.overlay,
-        Overlay::Options {
-            kind: crate::state::OptionsKind::WorkflowDashboard,
-            ..
-        }
-    ) {
-        format!("{range}  \u{00b7}  enter run / actions  \u{00b7}  \u{2192} inspect")
-    } else if matches!(
-        app.overlay,
-        Overlay::Options {
-            kind: crate::state::OptionsKind::ConnectApiKey,
-            ..
-        }
-    ) {
-        "enter connect  ·  ctrl+u clear  ·  esc back".into()
-    } else if matches!(
-        app.overlay,
-        Overlay::Options {
-            kind: crate::state::OptionsKind::ConnectMethod,
-            ..
-        }
-    ) {
-        format!("{range}  ·  enter choose  ·  esc back")
-    } else if matches!(
-        app.overlay,
-        Overlay::Options {
-            kind: crate::state::OptionsKind::ConnectProvider,
-            ..
-        }
-    ) {
-        format!("{range}  ·  enter connect  ·  type to filter")
-    } else {
-        format!("{range}  \u{00b7}  \u{2191}\u{2193} navigate  \u{00b7}  enter select")
+        OptionsKind::ConnectMethod => range(&["enter choose", "esc back"]),
+        OptionsKind::ConnectProvider => range(&["enter connect", "type to filter"]),
+        _ => range(&["\u{2191}\u{2193} navigate", "enter select"]),
     }
 }
 
@@ -1025,7 +995,7 @@ fn selector_footer(app: &App, start: usize, end: usize, total: usize) -> String 
 /// running workflow's phase, agents, and log tail move while you watch.
 /// Footer builders differ per target: a run scrolls its report, a definition
 /// advertises that Enter launches it.
-type Footer = fn(usize, usize) -> String;
+type Footer = fn(crate::locale::Language, usize, usize) -> String;
 
 fn workflow_dialog(
     app: &App,
@@ -1035,6 +1005,7 @@ fn workflow_dialog(
 ) -> TaggedLines {
     let card = ModalCard::new(app, width);
     let content = card.content_width();
+    let language = app.language;
     let (title, body, footer): (String, Vec<Line>, Footer) = match target {
         crate::state::WorkflowTarget::Run(id) => match app
             .workflow_runs
@@ -1042,25 +1013,31 @@ fn workflow_dialog(
             .find(|candidate| candidate.id == *id)
         {
             Some(run) => (
-                format!("Workflow · {}", run.workflow_name),
+                language.format("Workflow · {name}", &[("name", &run.workflow_name)]),
                 crate::view::workflow::run_body(app, run, content),
                 crate::view::workflow::run_footer,
             ),
             None => (
-                "Workflow run".to_owned(),
-                vec![line("This run is no longer cached.", app.theme.muted)],
+                language.text("Workflow run").to_owned(),
+                vec![line(
+                    language.text("This run is no longer cached."),
+                    app.theme.muted,
+                )],
                 crate::view::workflow::run_footer,
             ),
         },
         crate::state::WorkflowTarget::Invalid(index) => match app.workflow_invalid.get(*index) {
             Some(invalid) => (
-                "Invalid workflow".to_owned(),
+                language.text("Invalid workflow").to_owned(),
                 crate::view::workflow::invalid_body(app, invalid, content),
                 crate::view::workflow::invalid_footer,
             ),
             None => (
-                "Invalid workflow".to_owned(),
-                vec![line("This file is no longer listed.", app.theme.muted)],
+                language.text("Invalid workflow").to_owned(),
+                vec![line(
+                    language.text("This file is no longer listed."),
+                    app.theme.muted,
+                )],
                 crate::view::workflow::invalid_footer,
             ),
         },
@@ -1070,14 +1047,17 @@ fn workflow_dialog(
             .find(|candidate| candidate.invocation == *invocation)
         {
             Some(definition) => (
-                format!("Workflow · /{}", definition.invocation),
+                language.format(
+                    "Workflow · {name}",
+                    &[("name", &format!("/{}", definition.invocation))],
+                ),
                 crate::view::workflow::definition_body(app, definition, content),
                 crate::view::workflow::definition_footer,
             ),
             None => (
-                "Workflow".to_owned(),
+                language.text("Workflow").to_owned(),
                 vec![line(
-                    "This definition is no longer listed.",
+                    language.text("This definition is no longer listed."),
                     app.theme.muted,
                 )],
                 crate::view::workflow::definition_footer,
@@ -1099,7 +1079,7 @@ fn workflow_dialog(
         out.push(card.row(row, false));
     }
     out.push(card.separator());
-    out.push(card.footer(&footer(end.saturating_sub(start), total)));
+    out.push(card.footer(&footer(language, end.saturating_sub(start), total)));
     out.push(card.bottom());
     out
 }
@@ -1276,27 +1256,32 @@ fn preface_rows(app: &App, width: usize, cap: usize) -> Vec<Line> {
 /// server has seen the browser come back yet.
 fn login_dialog(app: &App, width: usize, max_height: usize) -> TaggedLines {
     let theme = &app.theme;
+    let language = app.language;
     let card = ModalCard::new(app, width);
     let content = card.content_width();
     let Some(login) = app.connect.login.as_ref() else {
         let mut out = TaggedLines::default();
         out.push(card.top());
-        out.push(card.header("Sign in"));
+        out.push(card.header(language.text("Sign in")));
         out.push(card.separator());
-        out.push(card.row(line("No sign-in is running", theme.muted), false));
+        out.push(card.row(
+            line(language.text("No sign-in is running"), theme.muted),
+            false,
+        ));
         out.push(card.bottom());
         return out;
     };
+    let name = [("name", login.name.as_str())];
     let title = match login.state {
-        crate::connect::LoginState::Pending => format!("Sign in to {}", login.name),
-        crate::connect::LoginState::Connected => format!("Connected {}", login.name),
-        crate::connect::LoginState::Failed(_) => format!("Could not connect {}", login.name),
+        crate::connect::LoginState::Pending => language.format("Sign in to {name}", &name),
+        crate::connect::LoginState::Connected => language.format("Connected {name}", &name),
+        crate::connect::LoginState::Failed(_) => language.format("Could not connect {name}", &name),
     };
     let mut body: Vec<Line> = Vec::new();
     let step = |number: &str, text: &str| {
         Line::new(vec![
             Span::new(format!("{number}  "), theme.muted),
-            Span::new(text.to_owned(), theme.text),
+            Span::new(language.text(text).to_owned(), theme.text),
         ])
     };
     match &login.state {
@@ -1326,7 +1311,8 @@ fn login_dialog(app: &App, width: usize, max_height: usize) -> TaggedLines {
                 Span::new(format!("{frame} "), theme.primary),
                 Span::new(
                     format!(
-                        "Waiting for you to finish in the browser… {}",
+                        "{} {}",
+                        language.text("Waiting for you to finish in the browser…"),
                         if waited >= 60 {
                             format!("{}m {:02}s", waited / 60, waited % 60)
                         } else {
@@ -1338,12 +1324,18 @@ fn login_dialog(app: &App, width: usize, max_height: usize) -> TaggedLines {
             ]));
         }
         crate::connect::LoginState::Connected => {
-            body.push(line(format!("{} is ready to use.", login.name), theme.text));
+            body.push(line(
+                language.format("{name} is ready to use.", &name),
+                theme.text,
+            ));
         }
         crate::connect::LoginState::Failed(error) => {
             body.extend(wrap_panel_text(error, content, "", theme.danger));
             body.push(Line::empty());
-            body.push(line("Enter to try again, or Esc to go back.", theme.muted));
+            body.push(line(
+                language.text("Enter to try again, or Esc to go back."),
+                theme.muted,
+            ));
         }
     }
     let cap = max_height.saturating_sub(6).max(1);
@@ -1356,14 +1348,15 @@ fn login_dialog(app: &App, width: usize, max_height: usize) -> TaggedLines {
         out.push(card.row(row, false));
     }
     out.push(card.separator());
-    out.push(card.footer(match login.state {
+    let keys: &[&str] = match login.state {
         crate::connect::LoginState::Pending if login.code.is_empty() => {
-            "c copy link  ·  o open browser  ·  esc cancel"
+            &["c copy link", "o open browser", "esc cancel"]
         }
-        crate::connect::LoginState::Pending => "c copy code  ·  o open browser  ·  esc cancel",
-        crate::connect::LoginState::Connected => "enter continue",
-        crate::connect::LoginState::Failed(_) => "enter retry  ·  esc back",
-    }));
+        crate::connect::LoginState::Pending => &["c copy code", "o open browser", "esc cancel"],
+        crate::connect::LoginState::Connected => &["enter continue"],
+        crate::connect::LoginState::Failed(_) => &["enter retry", "esc back"],
+    };
+    out.push(card.footer(&language.hints(keys)));
     out.push(card.bottom());
     out
 }
@@ -1382,22 +1375,24 @@ fn remote_control_dialog(app: &App, width: usize, max_height: usize) -> TaggedLi
     let busy = remote.busy().filter(|_| current);
     let state = share.map_or("", |share| share.state.as_str());
     let spin = crate::view::span::spinner(app.tick).to_string();
+    let language = app.language;
     let heading = |glyph: String, color: haarness_opentui::Color, label: &str| {
         Line::new(vec![
             Span::new(format!("{glyph} "), color),
-            Span::new(label.to_owned(), theme.text).with_attributes(attr::BOLD),
+            Span::new(language.text(label).to_owned(), theme.text).with_attributes(attr::BOLD),
         ])
     };
+    let note = |text: &str| language.text(text).to_owned();
     let mut status = Vec::new();
     let mut notes: Vec<(String, haarness_opentui::Color)> = Vec::new();
-    let mut footer = "esc close";
+    let mut footer: &[&str] = &["esc close"];
     let live = matches!(state, "on" | "connecting");
-    let explain = "This chat keeps running here, with this computer's files and model keys.";
+    let explain = note("This chat keeps running here, with this computer's files and model keys.");
     match (busy, state) {
         (Some(Action::Stop), _) => status.push(heading(spin, theme.primary, "Stopping…")),
         (Some(Action::Start), _) if !live => {
             status.push(heading(spin, theme.primary, "Sharing this chat…"));
-            notes.push(("Connecting it to Haarness Cloud.".into(), theme.muted));
+            notes.push((note("Connecting it to Haarness Cloud."), theme.muted));
         }
         _ if remote.failure.is_some() && current => {
             status.push(heading(
@@ -1406,7 +1401,7 @@ fn remote_control_dialog(app: &App, width: usize, max_height: usize) -> TaggedLi
                 "Could not update sharing",
             ));
             notes.push((remote.failure.clone().unwrap_or_default(), theme.danger));
-            footer = "enter try again  ·  esc close";
+            footer = &["enter try again", "esc close"];
         }
         (_, "on" | "connecting") => {
             status.push(if state == "on" {
@@ -1418,23 +1413,26 @@ fn remote_control_dialog(app: &App, width: usize, max_height: usize) -> TaggedLi
                 status.push(line(chat, theme.text));
             }
             if let Some(computer) = share.and_then(|share| share.computer.as_deref()) {
-                status.push(line(format!("on {computer}"), theme.muted));
+                status.push(line(
+                    language.format("on {computer}", &[("computer", computer)]),
+                    theme.muted,
+                ));
             }
             notes.push((
-                "Scan the code with your phone, or open the link in any browser signed in to Haarness Cloud.".into(),
+                note("Scan the code with your phone, or open the link in any browser signed in to Haarness Cloud."),
                 theme.text,
             ));
-            notes.push((explain.into(), theme.muted));
-            footer = "o open  ·  c copy link  ·  s stop sharing  ·  esc close";
+            notes.push((explain.clone(), theme.muted));
+            footer = &["o open", "c copy link", "s stop sharing", "esc close"];
         }
         (_, "off") => {
             status.push(heading("○".into(), theme.muted, "Not shared"));
             notes.push((
-                "Continue this chat from your phone or any browser.".into(),
+                note("Continue this chat from your phone or any browser."),
                 theme.text,
             ));
-            notes.push((explain.into(), theme.muted));
-            footer = "enter share this chat  ·  esc close";
+            notes.push((explain.clone(), theme.muted));
+            footer = &["enter share this chat", "esc close"];
         }
         (_, "stopped") => {
             status.push(heading(
@@ -1442,8 +1440,8 @@ fn remote_control_dialog(app: &App, width: usize, max_height: usize) -> TaggedLi
                 theme.muted,
                 "Sharing stopped from Haarness Cloud",
             ));
-            notes.push(("Share again for a new link.".into(), theme.text));
-            footer = "enter share again  ·  esc close";
+            notes.push((note("Share again for a new link."), theme.text));
+            footer = &["enter share again", "esc close"];
         }
         (_, "signed_out") => {
             status.push(heading(
@@ -1452,11 +1450,11 @@ fn remote_control_dialog(app: &App, width: usize, max_height: usize) -> TaggedLi
                 "Sign in to Haarness Cloud",
             ));
             notes.push((
-                "Sign in to continue this chat from your phone or any browser.".into(),
+                note("Sign in to continue this chat from your phone or any browser."),
                 theme.text,
             ));
-            notes.push((explain.into(), theme.muted));
-            footer = "enter sign in  ·  esc close";
+            notes.push((explain, theme.muted));
+            footer = &["enter sign in", "esc close"];
         }
         _ => status.push(heading(spin, theme.primary, "Checking…")),
     }
@@ -1519,13 +1517,13 @@ fn remote_control_dialog(app: &App, width: usize, max_height: usize) -> TaggedLi
     body.truncate(max_height.saturating_sub(5).max(1));
     let mut out = TaggedLines::default();
     out.push(card.top());
-    out.push(card.header("Remote control"));
+    out.push(card.header(language.text("Remote control")));
     out.push(card.separator());
     for row in body {
         out.push(row);
     }
     out.push(card.separator());
-    out.push(card.footer(footer));
+    out.push(card.footer(&language.hints(footer)));
     out.push(card.bottom());
     out
 }
@@ -1613,7 +1611,13 @@ fn panel_dialog(
         body.extend(rows.into_iter().map(|row| (row, tag)));
     }
     if body.is_empty() {
-        body.push((line("No information available", app.theme.muted), None));
+        body.push((
+            line(
+                app.language.text("No information available"),
+                app.theme.muted,
+            ),
+            None,
+        ));
     }
     let total = body.len();
     let cap = max_height.saturating_sub(6).max(1);
@@ -1634,9 +1638,18 @@ fn panel_dialog(
         }
     }
     out.push(card.separator());
+    let rows = app.language.format(
+        "Rows {from}–{to} of {total}",
+        &[
+            ("from", &(start + 1).to_string()),
+            ("to", &end.to_string()),
+            ("total", &total.to_string()),
+        ],
+    );
     out.push(card.footer(&format!(
-        "Rows {}\u{2013}{end} of {total}  \u{00b7}  pgup/pgdn scroll",
-        start + 1,
+        "{}  \u{00b7}  {}",
+        rows,
+        app.language.hints(&["pgup/pgdn scroll"])
     )));
     out.push(card.bottom());
     out
@@ -1754,11 +1767,14 @@ fn diff_dialog(
     let card = ModalCard::new(app, width);
     let content_width = card.content_width();
     let mut body = vec![
-        line("Widen the terminal to review", app.theme.accent),
+        line(
+            app.language.text("Widen the terminal to review"),
+            app.theme.accent,
+        ),
         Line::empty(),
     ];
     if viewer.files.is_empty() {
-        body.push(line("No changes", app.theme.muted));
+        body.push(line(app.language.text("No changes"), app.theme.muted));
     }
     for file in &viewer.files {
         let counts = format!("+{} −{}", file.additions, file.deletions);
@@ -1788,10 +1804,16 @@ fn diff_dialog(
         out.push(card.row(row, false));
     }
     out.push(card.separator());
+    let count = viewer.files.len().to_string();
+    let files = if viewer.files.len() == 1 {
+        app.language.format("{count} file", &[("count", &count)])
+    } else {
+        app.language.format("{count} files", &[("count", &count)])
+    };
     out.push(card.footer(&format!(
-        "{} file{}  ·  esc closes",
-        viewer.files.len(),
-        if viewer.files.len() == 1 { "" } else { "s" },
+        "{}  ·  {}",
+        files,
+        app.language.hints(&["esc close"])
     )));
     out.push(card.bottom());
     out
@@ -1847,9 +1869,9 @@ impl<'a> ModalCard<'a> {
 
     fn header(&self, title: &str) -> Line {
         let hint = if self.content_width() >= 24 {
-            escape_hint(self.app)
+            self.app.language.hints(&[escape_hint(self.app)])
         } else {
-            ""
+            String::new()
         };
         let title = single_line(title, self.content_width().saturating_sub(hint.width() + 2));
         let fill = self

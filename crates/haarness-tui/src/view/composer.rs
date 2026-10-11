@@ -956,7 +956,16 @@ fn input_rows(app: &App, width: usize) -> Vec<Line> {
         if app.shell_mode {
             spans.push(Span::new("! ", theme.accent).with_attributes(attr::BOLD));
         }
-        let mut characters = app.language.text(placeholder).chars();
+        let placeholder = app.language.text(placeholder);
+        if app.language.is_rtl() {
+            // A bidi-aware terminal reverses a right-to-left placeholder in
+            // place, which would carry a cursor drawn on its first letter to
+            // the middle of the row. The cursor gets a cell of its own.
+            spans.push(cursor_span(" ".to_owned(), app));
+            spans.push(Span::new(placeholder.to_owned(), theme.muted));
+            return vec![clamp(spans, width)];
+        }
+        let mut characters = placeholder.chars();
         let head = characters
             .next()
             .map_or_else(|| " ".to_owned(), String::from);
