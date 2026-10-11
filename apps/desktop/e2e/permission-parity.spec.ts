@@ -55,10 +55,14 @@ test("repository approval is explicit, survives reload, and follows linked workt
   await page.getByRole("button",{name:"Project options for primary",exact:true}).click();
   await page.getByRole("menuitem",{name:"Enable worktree view",exact:true}).click();
   await session();await send('!tool bash {"command":"git status --porcelain"}');
-  await expect.poll(async()=>(await api("listThreads")).length).toBeGreaterThan(0);await idle();
+  await expect.poll(async()=>(await api("listThreads")).length).toBeGreaterThan(0);
+  // The chat exists before its turn does, so "no active turn" can come too
+  // early; wait for the command's result instead.
+  const threads=await api("listThreads");
+  await expect.poll(async()=>(await api("listItems",threads[0].id)).some((i:any)=>i.data.type==="tool_result"&&i.data.is_error===false),{timeout:30000}).toBe(true);
+  await idle();
   await expect(page.getByRole("button",{name:"Allow once",exact:true})).toHaveCount(0);
-  const threads=await api("listThreads");const items=await api("listItems",threads[0].id);
-  expect(items.some((i:any)=>i.data.type==="tool_result"&&i.data.is_error===false)).toBe(true);
+  const items=await api("listItems",threads[0].id);
   expect(items.some((i:any)=>i.data.type==="permission_request")).toBe(false);
   await proof("worktree-without-repeat-prompt");
 });
