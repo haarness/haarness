@@ -542,7 +542,10 @@ async fn shell_env_hooks_add_variables_without_touching_bash_arguments() {
     let stdout = result.output.metadata["stdout"].as_str().unwrap();
     let (hook, path) = stdout.split_once('|').unwrap();
     assert_eq!(hook, format!("from-hook:{}", fixture.root.display()));
-    assert!(!path.is_empty(), "the inherited environment must survive hook variables");
+    assert!(
+        !path.is_empty(),
+        "the inherited environment must survive hook variables"
+    );
     let items = fixture
         .run(vec![vec![call(
             "env",
@@ -553,14 +556,18 @@ async fn shell_env_hooks_add_variables_without_touching_bash_arguments() {
     let outputs: Vec<_> = items
         .iter()
         .filter_map(|item| match &item.data {
-            ItemData::ToolResult { output, is_error, .. } => Some((output.clone(), *is_error)),
+            ItemData::ToolResult {
+                output, is_error, ..
+            } => Some((output.clone(), *is_error)),
             _ => None,
         })
         .collect();
     assert_eq!(outputs.len(), 1, "{items:?}");
     assert!(!outputs[0].1, "{}", outputs[0].0);
     assert!(
-        outputs[0].0.contains(&format!("from-hook:{}", fixture.root.display())),
+        outputs[0]
+            .0
+            .contains(&format!("from-hook:{}", fixture.root.display())),
         "{}",
         outputs[0].0
     );

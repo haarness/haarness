@@ -10503,13 +10503,20 @@ async fn auto_approves_once_without_a_prompt_and_review_asks() {
         )
         .await
         .unwrap();
-    assert_eq!(wait_done(&runtime, &turn).await.status, TurnStatus::Completed);
-    assert_eq!(std::fs::read_to_string(workspace.join("auto.txt")).unwrap(), "hi");
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("auto.txt")).unwrap(),
+        "hi"
+    );
     let items = runtime.items(thread.id, None).await.unwrap();
     assert!(
-        !items
-            .iter()
-            .any(|item| matches!(item.data, haarness_protocol::ItemData::PermissionRequest { .. })),
+        !items.iter().any(|item| matches!(
+            item.data,
+            haarness_protocol::ItemData::PermissionRequest { .. }
+        )),
         "Auto must not show a prompt"
     );
     // Auto answers once; it never remembers a rule.
@@ -10542,7 +10549,10 @@ async fn auto_approves_once_without_a_prompt_and_review_asks() {
         .await
         .unwrap();
     wait_done(&runtime, &turn).await;
-    assert_eq!(std::fs::read_to_string(workspace.join("auto.txt")).unwrap(), "hi");
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("auto.txt")).unwrap(),
+        "hi"
+    );
 
     // A change made from a stale view is refused.
     let stale = runtime
@@ -10560,8 +10570,10 @@ async fn auto_approves_once_without_a_prompt_and_review_asks() {
 
 #[tokio::test]
 async fn turning_auto_on_answers_requests_already_waiting() {
-    let workspace =
-        std::env::temp_dir().join(format!("haarness-approval-release-{}", uuid::Uuid::now_v7()));
+    let workspace = std::env::temp_dir().join(format!(
+        "haarness-approval-release-{}",
+        uuid::Uuid::now_v7()
+    ));
     tokio::fs::create_dir_all(&workspace).await.unwrap();
     let (_store, runtime) = workspace_runtime(&workspace);
     let thread = echo_thread(&runtime).await;
@@ -10591,7 +10603,10 @@ async fn turning_auto_on_answers_requests_already_waiting() {
         )
         .await
         .unwrap();
-    assert_eq!(wait_done(&runtime, &turn).await.status, TurnStatus::Completed);
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
     assert!(workspace.join("waiting.txt").exists());
     // Another chat in Review keeps its prompt.
     let pending = runtime.pending_permissions();
@@ -10638,7 +10653,10 @@ async fn delegated_agents_follow_the_chats_mode_and_forks_keep_their_own() {
         .start_turn(thread.id, turn_request(&tasks_prompt(1, "true")))
         .await
         .unwrap();
-    assert_eq!(wait_done(&runtime, &turn).await.status, TurnStatus::Completed);
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
     assert!(runtime.pending_permissions().is_empty());
     let child = runtime
         .list_threads(true)
@@ -10685,10 +10703,7 @@ async fn delegated_agents_follow_the_chats_mode_and_forks_keep_their_own() {
         set(child.id, haarness_protocol::ApprovalModeSetting::Auto).await,
         Err(haarness_core::CoreError::Conflict(_))
     ));
-    let fork = runtime
-        .fork_thread(thread.id, None, None)
-        .await
-        .unwrap();
+    let fork = runtime.fork_thread(thread.id, None, None).await.unwrap();
     assert_eq!(
         runtime.approval_mode(fork.id).await.unwrap().mode,
         haarness_protocol::ApprovalMode::Review

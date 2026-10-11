@@ -367,9 +367,20 @@ mod tests {
             )
             .is_err()
         );
-        for event in ["SessionStart", "SessionEnd", "TurnEnd", "Notification", "FileChanged", "ConfigChange"] {
+        for event in [
+            "SessionStart",
+            "SessionEnd",
+            "TurnEnd",
+            "Notification",
+            "FileChanged",
+            "ConfigChange",
+        ] {
             assert!(
-                validated(&json!({"event":event,"command":"echo ok","timeout":60}), None).is_ok(),
+                validated(
+                    &json!({"event":event,"command":"echo ok","timeout":60}),
+                    None
+                )
+                .is_ok(),
                 "{event}"
             );
         }

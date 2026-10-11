@@ -810,7 +810,10 @@ pub(crate) fn redact(text: &str) -> String {
 /// Native tools whose successful completion changes workspace files, with
 /// the argument that names the file. Shell commands are not inspected.
 fn changed_file(tool: &str, arguments: &Value) -> Option<String> {
-    if !matches!(tool, "write" | "edit" | "multiedit" | "notebook_edit" | "notebookedit") {
+    if !matches!(
+        tool,
+        "write" | "edit" | "multiedit" | "notebook_edit" | "notebookedit"
+    ) {
         return None;
     }
     arguments
@@ -1396,10 +1399,8 @@ mod tests {
     }
 
     async fn captured(block: Value, run: impl AsyncFnOnce(&ConfiguredHooks)) -> Vec<Value> {
-        let root = std::env::temp_dir().join(format!(
-            "haarness-lifecycle-hooks-{}",
-            uuid::Uuid::now_v7()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("haarness-lifecycle-hooks-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
         let log = root.join("events.jsonl");
         let mut block = block;
@@ -1453,7 +1454,13 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["SessionStart", "SessionEnd", "TurnEnd", "Notification", "ConfigChange"]
+            [
+                "SessionStart",
+                "SessionEnd",
+                "TurnEnd",
+                "Notification",
+                "ConfigChange"
+            ]
         );
         assert_eq!(events[0]["source"], "startup");
         assert_eq!(events[0]["agent"], "build");
@@ -1508,13 +1515,31 @@ mod tests {
             json!({"FileChanged": [{"matcher": "Write|Edit"}]}),
             async |hooks| {
                 hooks
-                    .post_tool_use(thread, "write", &json!({"path":"src/lib.rs","content":"x"}), "ok", false)
+                    .post_tool_use(
+                        thread,
+                        "write",
+                        &json!({"path":"src/lib.rs","content":"x"}),
+                        "ok",
+                        false,
+                    )
                     .await;
                 hooks
-                    .post_tool_use(thread, "edit", &json!({"path":"README.md","old":"a","new":"b"}), "failed", true)
+                    .post_tool_use(
+                        thread,
+                        "edit",
+                        &json!({"path":"README.md","old":"a","new":"b"}),
+                        "failed",
+                        true,
+                    )
                     .await;
                 hooks
-                    .post_tool_use(thread, "bash", &json!({"command":"touch other"}), "ok", false)
+                    .post_tool_use(
+                        thread,
+                        "bash",
+                        &json!({"command":"touch other"}),
+                        "ok",
+                        false,
+                    )
                     .await;
                 hooks
                     .post_tool_use(thread, "read", &json!({"path":"src/lib.rs"}), "ok", false)

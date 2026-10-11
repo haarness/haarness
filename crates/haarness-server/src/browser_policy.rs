@@ -53,8 +53,13 @@ impl BrowserPolicy {
         }
         let mut origins = std::collections::HashSet::new();
         for site in &mut self.sites {
-            let wildcard = site.origin.starts_with("https://*.") || site.origin.starts_with("http://*.");
-            let parseable = if wildcard { site.origin.replacen("*.", "haarness-wildcard.", 1) } else { site.origin.clone() };
+            let wildcard =
+                site.origin.starts_with("https://*.") || site.origin.starts_with("http://*.");
+            let parseable = if wildcard {
+                site.origin.replacen("*.", "haarness-wildcard.", 1)
+            } else {
+                site.origin.clone()
+            };
             let url = url::Url::parse(&parseable).map_err(|_| {
                 CoreError::Invalid("Use a complete http:// or https:// site origin".into())
             })?;
@@ -69,7 +74,9 @@ impl BrowserPolicy {
                 return Err(CoreError::Invalid("Site rules use an exact HTTP(S) origin, including its port, without a path or credentials; only a leading *. subdomain wildcard is supported".into()));
             }
             site.origin = url.origin().ascii_serialization();
-            if wildcard { site.origin = site.origin.replacen("haarness-wildcard.", "*.", 1); }
+            if wildcard {
+                site.origin = site.origin.replacen("haarness-wildcard.", "*.", 1);
+            }
             if !origins.insert(site.origin.clone()) {
                 return Err(CoreError::Invalid(
                     "A rule for this site already exists".into(),
@@ -95,7 +102,11 @@ impl BrowserPolicy {
         let access = self
             .sites
             .iter()
-            .filter(|site| origin.as_ref().is_some_and(|origin| matches_origin(&site.origin, origin)))
+            .filter(|site| {
+                origin
+                    .as_ref()
+                    .is_some_and(|origin| matches_origin(&site.origin, origin))
+            })
             .max_by_key(|site| (usize::from(!site.origin.contains('*')), site.origin.len()))
             .map(|site| &site.access)
             .unwrap_or(&self.defaults);
@@ -109,9 +120,16 @@ impl BrowserPolicy {
 
 /// Wildcards include subdomains only and preserve scheme and port boundaries.
 fn matches_origin(pattern: &str, origin: &str) -> bool {
-    if pattern == origin { return true; }
-    let Some((prefix, suffix)) = pattern.split_once("*.") else { return false; };
-    origin.strip_prefix(prefix).is_some_and(|host| host.strip_suffix(suffix).is_some_and(|subdomain| subdomain.ends_with('.') && subdomain.len() > 1))
+    if pattern == origin {
+        return true;
+    }
+    let Some((prefix, suffix)) = pattern.split_once("*.") else {
+        return false;
+    };
+    origin.strip_prefix(prefix).is_some_and(|host| {
+        host.strip_suffix(suffix)
+            .is_some_and(|subdomain| subdomain.ends_with('.') && subdomain.len() > 1)
+    })
 }
 
 #[cfg(test)]
@@ -119,14 +137,35 @@ mod tests {
     use super::*;
     #[test]
     fn wildcard_subdomains_are_scoped_and_exact_rules_win() {
-        let mut policy=BrowserPolicy::default();
-        policy.defaults.browsing=PermissionDecision::Deny;
-        policy.sites.push(BrowserSite {origin:"https://*.example.test:443".into(),access:BrowserAccess::default()});
-        let mut denied=BrowserAccess::default();denied.browsing=PermissionDecision::Deny;
-        policy.sites.push(BrowserSite {origin:"https://private.example.test".into(),access:denied});
+        let mut policy = BrowserPolicy::default();
+        policy.defaults.browsing = PermissionDecision::Deny;
+        policy.sites.push(BrowserSite {
+            origin: "https://*.example.test:443".into(),
+            access: BrowserAccess::default(),
+        });
+        let mut denied = BrowserAccess::default();
+        denied.browsing = PermissionDecision::Deny;
+        policy.sites.push(BrowserSite {
+            origin: "https://private.example.test".into(),
+            access: denied,
+        });
         policy.validate().unwrap();
-        for url in ["https://a.example.test/path","https://a.b.example.test"] {assert_eq!(policy.decision("navigate",url),PermissionDecision::Allow);}
-        for url in ["https://example.test","https://private.example.test","https://a.example.test.evil","http://a.example.test","https://a.example.test:444"] {assert_eq!(policy.decision("navigate",url),PermissionDecision::Deny,"{url}");}
+        for url in ["https://a.example.test/path", "https://a.b.example.test"] {
+            assert_eq!(policy.decision("navigate", url), PermissionDecision::Allow);
+        }
+        for url in [
+            "https://example.test",
+            "https://private.example.test",
+            "https://a.example.test.evil",
+            "http://a.example.test",
+            "https://a.example.test:444",
+        ] {
+            assert_eq!(
+                policy.decision("navigate", url),
+                PermissionDecision::Deny,
+                "{url}"
+            );
+        }
     }
     #[test]
     fn rules_match_origins_not_prefixes_and_default_ports_are_normalized() {

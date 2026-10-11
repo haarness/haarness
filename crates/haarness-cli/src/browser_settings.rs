@@ -30,7 +30,10 @@ fn snapshot(project_config: bool, global: &Path, workspace: &Path, scope: &str) 
     let mut selected = None;
     let mut source = "default";
     let mut hash = Sha256::new();
-    for path in layers(global, workspace).into_iter().filter(|path| project_config || files(global).contains(path)) {
+    for path in layers(global, workspace)
+        .into_iter()
+        .filter(|path| project_config || files(global).contains(path))
+    {
         hash.update(path.to_string_lossy().as_bytes());
         match fs::read(&path) {
             Ok(bytes) => hash.update(bytes),
@@ -61,7 +64,12 @@ pub(super) fn load(project_config: bool, global: &Path, workspace: &Path) -> Res
         snapshot(project_config, global, workspace, "project")?["policy"].clone(),
     )?)
 }
-pub(super) fn request(project_config: bool, global: &Path, workspace: &Path, input: &Value) -> Result<Value> {
+pub(super) fn request(
+    project_config: bool,
+    global: &Path,
+    workspace: &Path,
+    input: &Value,
+) -> Result<Value> {
     let scope = input["scope"].as_str().unwrap_or("project");
     let action = input["action"].as_str().unwrap_or("get");
     ensure!(
@@ -85,8 +93,10 @@ pub(super) fn request(project_config: bool, global: &Path, workspace: &Path, inp
         fs2::FileExt::lock_exclusive(&lock)?;
         Some(lock)
     };
-    ensure!(project_config || scope == "global" || action == "get",
-        "Project configuration is disabled for this server. Choose Global scope to change this setting.");
+    ensure!(
+        project_config || scope == "global" || action == "get",
+        "Project configuration is disabled for this server. Choose Global scope to change this setting."
+    );
     let before = snapshot(project_config, global, workspace, scope)?;
     if action != "get" {
         ensure!(
@@ -139,7 +149,8 @@ mod tests {
         let first = request(true, &global, &workspace, &json!({"scope":"global"})).unwrap();
         let mut policy = BrowserPolicy::default();
         policy.enabled = false;
-        let disabled = request(true,
+        let disabled = request(
+            true,
             &global,
             &workspace,
             &json!({"scope":"global","action":"set","revision":first["revision"],"policy":policy}),
@@ -147,7 +158,8 @@ mod tests {
         .unwrap();
         assert!(!load(true, &global, &workspace).unwrap().enabled);
         assert!(
-            request(true,
+            request(
+                true,
                 &global,
                 &workspace,
                 &json!({"action":"set","revision":first["revision"],"policy":policy})
@@ -155,14 +167,16 @@ mod tests {
             .is_err()
         );
         policy.enabled = true;
-        let enabled = request(true,
+        let enabled = request(
+            true,
             &global,
             &workspace,
             &json!({"action":"set","revision":disabled["revision"],"policy":policy}),
         )
         .unwrap();
         assert!(load(true, &global, &workspace).unwrap().enabled);
-        request(true,
+        request(
+            true,
             &global,
             &workspace,
             &json!({"action":"reset","revision":enabled["revision"]}),

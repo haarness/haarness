@@ -66,7 +66,10 @@ impl App {
             } else {
                 haarness_protocol::ApprovalModeSetting::Review
             },
-            revision: self.approval_mode.as_ref().map(|info| info.revision.clone()),
+            revision: self
+                .approval_mode
+                .as_ref()
+                .map(|info| info.revision.clone()),
         };
         match client.set_approval_mode(self.thread.id, &request).await {
             Ok(info) => {

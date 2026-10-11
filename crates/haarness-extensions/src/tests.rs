@@ -62,7 +62,10 @@ export default () => ({apiVersion:1, name:'large', tools:Object.fromEntries(
 ",
     );
     let extensions = Extensions::load(&config, root.path()).await.unwrap();
-    let tools = extensions.wrap_tools(Arc::new(EmptyToolRegistry)).await.unwrap();
+    let tools = extensions
+        .wrap_tools(Arc::new(EmptyToolRegistry))
+        .await
+        .unwrap();
     assert_eq!(tools.list().len(), 80);
     assert!(tools.get("ext__large__tool_79").is_some());
 }
@@ -71,7 +74,10 @@ export default () => ({apiVersion:1, name:'large', tools:Object.fromEntries(
 async fn typed_tools_hooks_state_and_schema_use_real_bun() {
     let (root, config) = fixture(GOOD);
     let extensions = Extensions::load(&config, root.path()).await.unwrap();
-    let tools = extensions.wrap_tools(Arc::new(EmptyToolRegistry)).await.unwrap();
+    let tools = extensions
+        .wrap_tools(Arc::new(EmptyToolRegistry))
+        .await
+        .unwrap();
     let tool = tools.get("ext__fixture__greet").unwrap();
     assert!(tool.side_effectful());
     assert!(
@@ -213,7 +219,10 @@ async fn tool_exceptions_do_not_poison_the_extension() {
         "let count=0; export default {apiVersion:1,name:'fixture',tools:{call:{description:'call',parameters:{type:'object'},execute(){if(++count===1)throw new Error('expected failure');return 'RECOVERED'}}}}",
     );
     let extensions = Extensions::load(&config, root.path()).await.unwrap();
-    let tools = extensions.wrap_tools(Arc::new(EmptyToolRegistry)).await.unwrap();
+    let tools = extensions
+        .wrap_tools(Arc::new(EmptyToolRegistry))
+        .await
+        .unwrap();
     let tool = tools.get("ext__fixture__call").unwrap();
     assert!(
         tool.execute(json!({}), context(root.path()))
@@ -240,7 +249,10 @@ async fn timeout_kills_host_without_replaying_side_effects() {
     // headroom for a loaded build host while still bounding the infinite loop.
     config.timeout_ms = 2_000;
     let extensions = Extensions::load(&config, root.path()).await.unwrap();
-    let tools = extensions.wrap_tools(Arc::new(EmptyToolRegistry)).await.unwrap();
+    let tools = extensions
+        .wrap_tools(Arc::new(EmptyToolRegistry))
+        .await
+        .unwrap();
     let tool = tools.get("ext__fixture__call").unwrap();
     assert!(
         tool.execute(json!({}), context(root.path()))
@@ -269,7 +281,10 @@ async fn cancellation_and_crashes_are_contained() {
             "export default {{apiVersion:1,name:'fixture',tools:{{call:{{description:'call',parameters:{{type:'object'}},async execute(){{{body};return ''}}}}}}}}"
         ));
         let extensions = Extensions::load(&config, root.path()).await.unwrap();
-        let tools = extensions.wrap_tools(Arc::new(EmptyToolRegistry)).await.unwrap();
+        let tools = extensions
+            .wrap_tools(Arc::new(EmptyToolRegistry))
+            .await
+            .unwrap();
         let tool = tools.get("ext__fixture__call").unwrap();
         let context = context(root.path());
         let cancel = context.cancel.clone();
@@ -304,7 +319,10 @@ async fn oversized_tool_output_is_bounded() {
         "export default {apiVersion:1,name:'fixture',tools:{call:{description:'call',parameters:{type:'object'},execute(){return 'x'.repeat(3*1024*1024)}}}}",
     );
     let extensions = Extensions::load(&config, root.path()).await.unwrap();
-    let tools = extensions.wrap_tools(Arc::new(EmptyToolRegistry)).await.unwrap();
+    let tools = extensions
+        .wrap_tools(Arc::new(EmptyToolRegistry))
+        .await
+        .unwrap();
     assert!(
         tools
             .get("ext__fixture__call")
@@ -324,7 +342,10 @@ async fn cancelling_a_tool_terminates_its_spawned_process_group() {
         "import {writeFileSync} from 'node:fs'; export default {apiVersion:1,name:'fixture',tools:{call:{description:'call',parameters:{type:'object'},async execute(_,ctx){const child=Bun.spawn(['sh','-c','exec sleep 60']);writeFileSync(ctx.workspace+'/child.pid',String(child.pid));await new Promise(()=>{});return ''}}}}",
     );
     let extensions = Extensions::load(&config, root.path()).await.unwrap();
-    let tools = extensions.wrap_tools(Arc::new(EmptyToolRegistry)).await.unwrap();
+    let tools = extensions
+        .wrap_tools(Arc::new(EmptyToolRegistry))
+        .await
+        .unwrap();
     let tool = tools.get("ext__fixture__call").unwrap();
     let context = context(root.path());
     let cancel = context.cancel.clone();
@@ -350,17 +371,39 @@ async fn cancelling_a_tool_terminates_its_spawned_process_group() {
 
 #[tokio::test]
 async fn separate_deadlines_and_larger_payloads_are_configurable() {
-    let (root, mut config)=fixture("export default async () => {await Bun.sleep(50);return {apiVersion:1,name:'fixture',tools:{call:{description:'call',parameters:{type:'object'},async execute(){await Bun.sleep(50);return 'x'.repeat(3*1024*1024)}}}}}");
-    config.timeout_ms=1;
-    config.init_timeout_ms=Some(2000);
-    config.tool_timeout_ms=Some(0);
-    config.hook_timeout_ms=Some(100);
-    config.payload_max_bytes=4*1024*1024;
-    let extensions=Extensions::load(&config,root.path()).await.unwrap();
-    let tools=extensions.wrap_tools(Arc::new(EmptyToolRegistry)).await.unwrap();
-    assert_eq!(tools.get("ext__fixture__call").unwrap().execute(json!({}),context(root.path())).await.unwrap().text.len(),3*1024*1024);
-    config.init_timeout_ms=Some(1);
-    assert!(Extensions::load(&config,root.path()).await.err().unwrap().to_string().contains("initialization timed out"));
+    let (root, mut config) = fixture(
+        "export default async () => {await Bun.sleep(50);return {apiVersion:1,name:'fixture',tools:{call:{description:'call',parameters:{type:'object'},async execute(){await Bun.sleep(50);return 'x'.repeat(3*1024*1024)}}}}}",
+    );
+    config.timeout_ms = 1;
+    config.init_timeout_ms = Some(2000);
+    config.tool_timeout_ms = Some(0);
+    config.hook_timeout_ms = Some(100);
+    config.payload_max_bytes = 4 * 1024 * 1024;
+    let extensions = Extensions::load(&config, root.path()).await.unwrap();
+    let tools = extensions
+        .wrap_tools(Arc::new(EmptyToolRegistry))
+        .await
+        .unwrap();
+    assert_eq!(
+        tools
+            .get("ext__fixture__call")
+            .unwrap()
+            .execute(json!({}), context(root.path()))
+            .await
+            .unwrap()
+            .text
+            .len(),
+        3 * 1024 * 1024
+    );
+    config.init_timeout_ms = Some(1);
+    assert!(
+        Extensions::load(&config, root.path())
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("initialization timed out")
+    );
 }
 
 const LIFECYCLE: &str = r"
@@ -428,7 +471,11 @@ async fn lifecycle_params_env_and_permission_hooks_reach_extensions() {
     let turn = TurnId::new();
     hooks.session_start(thread, "build").await;
     hooks
-        .turn_end(thread, turn, &json!({"agent":"build","finishReason":"stop"}))
+        .turn_end(
+            thread,
+            turn,
+            &json!({"agent":"build","finishReason":"stop"}),
+        )
         .await;
     hooks.session_end(thread, "archived").await;
     let compaction: haarness_protocol::Item = serde_json::from_value(json!({
@@ -528,13 +575,17 @@ async fn lifecycle_params_env_and_permission_hooks_reach_extensions() {
         "command.execute.before",
         "shell.env",
     ] {
-        assert!(events.lines().any(|line| line == expected), "{expected} missing from {events}");
+        assert!(
+            events.lines().any(|line| line == expected),
+            "{expected} missing from {events}"
+        );
     }
 }
 
 #[tokio::test]
 async fn unsupported_hooks_and_malformed_results_are_rejected() {
-    let (root, config) = fixture("export default {apiVersion:1,name:'fixture',hooks:{'bogus.hook'(){}}}");
+    let (root, config) =
+        fixture("export default {apiVersion:1,name:'fixture',hooks:{'bogus.hook'(){}}}");
     assert!(
         Extensions::load(&config, root.path())
             .await

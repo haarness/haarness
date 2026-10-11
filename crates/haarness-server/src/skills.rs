@@ -67,8 +67,13 @@ impl FilesystemSkillRegistry {
             let first = matches.next()?;
             matches.next().is_none().then_some(first)
         })?;
-        let canonical = catalog.iter().find(|(_, entry)| entry.path == skill.path)?.0;
-        if self.disabled.read().contains(canonical) { return None; }
+        let canonical = catalog
+            .iter()
+            .find(|(_, entry)| entry.path == skill.path)?
+            .0;
+        if self.disabled.read().contains(canonical) {
+            return None;
+        }
         Some((skill.path.clone(), skill.trusted, skill.body.clone()))
     }
 }

@@ -51,10 +51,10 @@ impl AnthropicProvider {
             client: reqwest::Client::new(),
             id: "anthropic".into(),
             name: "Anthropic".into(),
-            endpoint: std::env::var("ANTHROPIC_BASE_URL")
-                .map_or_else(|_| "https://api.anthropic.com/v1/messages".into(), |base| {
-                    messages_endpoint(&base)
-                }),
+            endpoint: std::env::var("ANTHROPIC_BASE_URL").map_or_else(
+                |_| "https://api.anthropic.com/v1/messages".into(),
+                |base| messages_endpoint(&base),
+            ),
             api_key: std::env::var("ANTHROPIC_API_KEY")
                 .ok()
                 .map(SecretString::from),

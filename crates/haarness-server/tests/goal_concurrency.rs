@@ -625,7 +625,11 @@ async fn criteria_approval_applies_to_the_latest_same_goal_snapshot() {
     let state = runtime.goal_state(thread.id).await.unwrap().unwrap();
     // The approval applies to the latest snapshot: its 321 tokens plus the
     // two each later round reports, never the stale snapshot plus those.
-    assert!((321..1_000).contains(&state.tokens_used), "{}", state.tokens_used);
+    assert!(
+        (321..1_000).contains(&state.tokens_used),
+        "{}",
+        state.tokens_used
+    );
     assert!(state.time_used_seconds >= 17);
     assert_eq!(state.criteria.len(), 2);
     assert!(!state.needs_criteria);

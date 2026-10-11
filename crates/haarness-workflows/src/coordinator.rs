@@ -23,8 +23,8 @@ use haarness_protocol::{
 use haarness_workflow_catalog::{CatalogError, WorkflowCatalog};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
-use tracing::Instrument as _;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use crate::{
     ExecutionErrorKind, HostCall, HostError, HostNotice, HostNoticeMethod, HostRequestMethod,

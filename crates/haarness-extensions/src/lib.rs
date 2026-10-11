@@ -257,7 +257,10 @@ impl Process {
             .read_until(b'\n', &mut response)
             .await?;
         if response.len() > self.payload_max_bytes {
-            bail!("extension response exceeds {} bytes", self.payload_max_bytes);
+            bail!(
+                "extension response exceeds {} bytes",
+                self.payload_max_bytes
+            );
         }
         let value: Value = serde_json::from_slice(&response)
             .context("invalid extension response (do not write directly to stdout)")?;
@@ -285,8 +288,11 @@ fn unpack(value: Value) -> Result<Value> {
 }
 
 async fn deadline(milliseconds: u64) {
-    if milliseconds == 0 { std::future::pending::<()>().await; }
-    else { tokio::time::sleep(Duration::from_millis(milliseconds)).await; }
+    if milliseconds == 0 {
+        std::future::pending::<()>().await;
+    } else {
+        tokio::time::sleep(Duration::from_millis(milliseconds)).await;
+    }
 }
 
 struct Host {
@@ -298,7 +304,11 @@ struct Host {
 }
 impl Host {
     async fn call(&self, request: Value, cancel: &CancellationToken) -> CoreResult<Value> {
-        let timeout_ms = if request["method"] == "tool" { self.tool_timeout_ms } else { self.hook_timeout_ms };
+        let timeout_ms = if request["method"] == "tool" {
+            self.tool_timeout_ms
+        } else {
+            self.hook_timeout_ms
+        };
         let operation = async {
             let mut slot = self.process.lock().await;
             // Take ownership: cancellation, timeout or a dropped caller kills the process.
@@ -391,7 +401,8 @@ impl Extensions {
                 bail!("extension source must be an absolute path");
             }
             let source = entrypoint(&entry.source)?;
-            let mut process = Process::spawn(workspace, config.log_stderr, config.payload_max_bytes)?;
+            let mut process =
+                Process::spawn(workspace, config.log_stderr, config.payload_max_bytes)?;
             let manifest = tokio::select! {
                 () = deadline(config.init_timeout_ms.unwrap_or(config.timeout_ms)) => bail!("extension initialization timed out"),
                 result = process.exchange(json!({"method":"load","source":source,"context":{"workspace":workspace,"extension":source,"options":entry.options}})) => result?,
@@ -479,7 +490,9 @@ impl Extensions {
                     if let Some(description) = value["description"].as_str() {
                         description.clone_into(&mut current.description);
                     }
-                    if let Some(parameters) = value.get("parameters").filter(|value| value.is_object()) {
+                    if let Some(parameters) =
+                        value.get("parameters").filter(|value| value.is_object())
+                    {
                         current.input_schema = parameters.clone();
                     }
                 }
@@ -496,8 +509,9 @@ impl Extensions {
                         definition.name
                     );
                 }
-                jsonschema::validator_for(&current.input_schema)
-                    .with_context(|| format!("invalid tool.definition schema for {}", definition.name))?;
+                jsonschema::validator_for(&current.input_schema).with_context(|| {
+                    format!("invalid tool.definition schema for {}", definition.name)
+                })?;
                 overrides.insert(definition.name.clone(), current);
             }
         }
@@ -616,9 +630,15 @@ impl Tool for RedefinedTool {
         thread: ThreadId,
         cancel: CancellationToken,
     ) -> CoreResult<Value> {
-        self.inner.prepare_arguments(arguments, thread, cancel).await
+        self.inner
+            .prepare_arguments(arguments, thread, cancel)
+            .await
     }
-    fn permission_constraint(&self, arguments: &Value, operation: &str) -> Option<PermissionDecision> {
+    fn permission_constraint(
+        &self,
+        arguments: &Value,
+        operation: &str,
+    ) -> Option<PermissionDecision> {
         self.inner.permission_constraint(arguments, operation)
     }
     async fn execute(&self, arguments: Value, context: ToolContext) -> CoreResult<ToolOutput> {
@@ -824,7 +844,10 @@ impl HookPort for CombinedHooks {
             }
             if let Some(options) = value["options"].as_object() {
                 for (key, value) in options {
-                    request.parameters.options.insert(key.clone(), value.clone());
+                    request
+                        .parameters
+                        .options
+                        .insert(key.clone(), value.clone());
                 }
             }
         }
@@ -833,7 +856,10 @@ impl HookPort for CombinedHooks {
             if let Some(headers) = value["headers"].as_object() {
                 for (name, value) in headers {
                     if let Some(value) = value.as_str() {
-                        request.parameters.headers.insert(name.clone(), value.to_owned());
+                        request
+                            .parameters
+                            .headers
+                            .insert(name.clone(), value.to_owned());
                     }
                 }
             }
@@ -844,13 +870,21 @@ impl HookPort for CombinedHooks {
         if let Some(inner) = &self.inner {
             inner.session_start(thread, agent).await;
         }
-        self.observe("session.start", json!({"threadId":thread,"agent":agent,"directory":self.extensions.workspace})).await;
+        self.observe(
+            "session.start",
+            json!({"threadId":thread,"agent":agent,"directory":self.extensions.workspace}),
+        )
+        .await;
     }
     async fn session_end(&self, thread: ThreadId, reason: &str) {
         if let Some(inner) = &self.inner {
             inner.session_end(thread, reason).await;
         }
-        self.observe("session.end", json!({"threadId":thread,"reason":reason,"directory":self.extensions.workspace})).await;
+        self.observe(
+            "session.end",
+            json!({"threadId":thread,"reason":reason,"directory":self.extensions.workspace}),
+        )
+        .await;
     }
     async fn post_compact(&self, thread: ThreadId, trigger: &str, item: &haarness_protocol::Item) {
         if let Some(inner) = &self.inner {
@@ -906,7 +940,9 @@ impl HookPort for CombinedHooks {
         arguments: &str,
     ) -> HookDecision {
         let prior = if let Some(inner) = &self.inner {
-            inner.command_execute_before(thread, command, arguments).await
+            inner
+                .command_execute_before(thread, command, arguments)
+                .await
         } else {
             HookDecision::default()
         };
@@ -924,7 +960,10 @@ impl HookPort for CombinedHooks {
             BTreeMap::new()
         };
         for host in &self.extensions.hosts {
-            match host.hook("shell.env", json!({"threadId":thread,"cwd":cwd})).await {
+            match host
+                .hook("shell.env", json!({"threadId":thread,"cwd":cwd}))
+                .await
+            {
                 Ok(value) => {
                     if let Some(map) = value["env"].as_object() {
                         for (key, value) in map {

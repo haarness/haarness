@@ -278,7 +278,10 @@ pub fn load_layers(
         if let Some(content) =
             instruction_files::read_with_imports(&file, workspace, &mut import_budget, trusted)
         {
-            segments.push(instruction_files::segment(&file.display().to_string(), &content));
+            segments.push(instruction_files::segment(
+                &file.display().to_string(),
+                &content,
+            ));
         }
     }
     for url in urls {
@@ -286,7 +289,9 @@ pub fn load_layers(
             Ok(body) if !body.trim().is_empty() => {
                 segments.push(instruction_files::segment(&url, &body));
             }
-            Ok(_) => layers.notices.push(format!("remote instructions {url} are empty")),
+            Ok(_) => layers
+                .notices
+                .push(format!("remote instructions {url} are empty")),
             Err(error) => layers
                 .notices
                 .push(format!("skipped remote instructions {url}: {error}")),
@@ -297,9 +302,7 @@ pub fn load_layers(
         layers.instructions = Some(assembled);
     }
     let disabled = std::mem::take(&mut layers.disabled_agents);
-    layers
-        .agents
-        .retain(|agent| !disabled.contains(&agent.id));
+    layers.agents.retain(|agent| !disabled.contains(&agent.id));
     layers.disabled_agents = disabled;
     layers
 }
@@ -321,7 +324,11 @@ fn claude_directories(home: Option<&Path>, workspace: &Path, trust: bool) -> Vec
 
 /// Expand a configured path: `~/` against the home directory, relative
 /// paths against the workspace.
-pub(super) fn expand_configured_path(entry: &str, home: Option<&Path>, workspace: &Path) -> Option<PathBuf> {
+pub(super) fn expand_configured_path(
+    entry: &str,
+    home: Option<&Path>,
+    workspace: &Path,
+) -> Option<PathBuf> {
     if let Some(rest) = entry.strip_prefix("~/") {
         return home.map(|home| home.join(rest));
     }
@@ -458,11 +465,7 @@ pub(super) fn fetch_url(url: &str, cap: usize) -> Result<Vec<u8>, String> {
                 return Err(format!("body exceeds {cap} bytes"));
             }
             let mut body = Vec::new();
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(|error| error.to_string())?
-            {
+            while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
                 body.extend_from_slice(&chunk);
                 if body.len() > cap {
                     return Err(format!("body exceeds {cap} bytes"));
@@ -592,7 +595,13 @@ fn remote_cache_key(base: &str) -> String {
         .trim_end_matches('/');
     let key: String = stripped
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
         .take(100)
         .collect();
     let key = key.trim_matches('-').to_owned();
@@ -772,7 +781,11 @@ fn apply_json_config(layers: &mut JsonLayers, path: &Path, trusted: bool) {
             if entry.is_empty() {
                 continue;
             }
-            if !layers.instruction_sources.iter().any(|known| known == entry) {
+            if !layers
+                .instruction_sources
+                .iter()
+                .any(|known| known == entry)
+            {
                 layers.instruction_sources.push(entry.to_owned());
             }
         }
@@ -819,7 +832,10 @@ fn apply_json_config(layers: &mut JsonLayers, path: &Path, trusted: bool) {
                     permissions: agent_permissions(
                         entry.get("permission").or_else(|| entry.get("permissions")),
                     ),
-                    hidden: entry.get("hidden").and_then(Value::as_bool).unwrap_or(false),
+                    hidden: entry
+                        .get("hidden")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                     color: entry
                         .get("color")
                         .and_then(Value::as_str)
@@ -1445,7 +1461,10 @@ fn discover_agents_with(
             {
                 front.insert("tools".into(), allowed);
             }
-            if front.get("model").is_some_and(|model| model.trim() == "inherit") {
+            if front
+                .get("model")
+                .is_some_and(|model| model.trim() == "inherit")
+            {
                 front.remove("model");
             }
         }
@@ -1477,7 +1496,11 @@ fn discover_agents_with(
             agents.retain(|agent| agent.id != id);
             continue;
         }
-        let number = |key: &str| front.get(key).and_then(|raw| raw.trim().parse::<f32>().ok());
+        let number = |key: &str| {
+            front
+                .get(key)
+                .and_then(|raw| raw.trim().parse::<f32>().ok())
+        };
         upsert_agent(
             agents,
             CustomAgent {
@@ -1770,18 +1793,16 @@ mod tests {
                     }
                 }
                 let head = String::from_utf8_lossy(&request);
-                let path = head
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap_or("/")
-                    .to_owned();
+                let path = head.split_whitespace().nth(1).unwrap_or("/").to_owned();
                 let response = match routes.iter().find(|(route, _)| *route == path) {
                     Some((_, body)) => format!(
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     ),
-                    None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                        .to_owned(),
+                    None => {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_owned()
+                    }
                 };
                 let _ = stream.write_all(response.as_bytes());
             }
@@ -1791,29 +1812,52 @@ mod tests {
 
     #[test]
     fn cloud_session_defaults_are_portable_and_project_overrides_still_win() {
-        let root = std::env::temp_dir().join(format!("haarness-cloud-config-{}", uuid::Uuid::now_v7()));
+        let root =
+            std::env::temp_dir().join(format!("haarness-cloud-config-{}", uuid::Uuid::now_v7()));
         let config = root.join("config");
         let workspace = root.join("workspace");
         fs::create_dir_all(&config).unwrap();
         fs::create_dir_all(workspace.join(".haarness/cloud/skills/review")).unwrap();
         fs::write(config.join("haarness.json"), r#"{"model":"router/global"}"#).unwrap();
-        fs::write(workspace.join(".haarness/cloud/haarness.json"), r#"{
+        fs::write(
+            workspace.join(".haarness/cloud/haarness.json"),
+            r#"{
             "model":"router/cloud", "default_agent":"cloud-agent",
             "agent":{"cloud-agent":{"prompt":"cloud instructions"}},
             "mcp":{"docs":{"url":"https://docs.example/mcp"}},
             "skills":{"paths":[".haarness/cloud/skills"]}
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
         let loaded = load_layers(&config, None, &workspace, true, &[]);
         assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
         assert_eq!(loaded.model.as_deref(), Some("cloud"));
         assert_eq!(loaded.default_agent.as_deref(), Some("cloud-agent"));
-        assert_eq!(loaded.mcp["docs"].url.as_deref(), Some("https://docs.example/mcp"));
-        assert!(loaded.agents.iter().any(|agent| agent.prompt == "cloud instructions"));
-        assert_eq!(configured_skill_paths(&loaded.native, None, &workspace), vec![workspace.join(".haarness/cloud/skills")]);
-        fs::write(workspace.join("haarness.json"), r#"{"model":"router/project","mcp":{"docs":{"url":"https://project.example/mcp"}}}"#).unwrap();
+        assert_eq!(
+            loaded.mcp["docs"].url.as_deref(),
+            Some("https://docs.example/mcp")
+        );
+        assert!(
+            loaded
+                .agents
+                .iter()
+                .any(|agent| agent.prompt == "cloud instructions")
+        );
+        assert_eq!(
+            configured_skill_paths(&loaded.native, None, &workspace),
+            vec![workspace.join(".haarness/cloud/skills")]
+        );
+        fs::write(
+            workspace.join("haarness.json"),
+            r#"{"model":"router/project","mcp":{"docs":{"url":"https://project.example/mcp"}}}"#,
+        )
+        .unwrap();
         let overridden = load_layers(&config, None, &workspace, true, &[]);
         assert_eq!(overridden.model.as_deref(), Some("project"));
-        assert_eq!(overridden.mcp["docs"].url.as_deref(), Some("https://project.example/mcp"));
+        assert_eq!(
+            overridden.mcp["docs"].url.as_deref(),
+            Some("https://project.example/mcp")
+        );
         let disabled = load_layers(&config, None, &workspace, false, &[]);
         assert_eq!(disabled.model.as_deref(), Some("global"));
         assert!(disabled.mcp.is_empty());
@@ -1881,14 +1925,16 @@ mod tests {
             "ABSOLUTE_RULES",
             "REMOTE_RULES",
         ] {
-            assert_eq!(instructions.matches(expected).count(), 1, "{expected}\n{instructions}");
+            assert_eq!(
+                instructions.matches(expected).count(),
+                1,
+                "{expected}\n{instructions}"
+            );
         }
         assert!(instructions.contains(&format!("<instructions source=\"{base}/remote.md\">")));
         assert!(
-            layers
-                .notices
-                .iter()
-                .any(|notice| notice.contains("skipped remote instructions http://127.0.0.1:1/unreachable.md")),
+            layers.notices.iter().any(|notice| notice
+                .contains("skipped remote instructions http://127.0.0.1:1/unreachable.md")),
             "{:?}",
             layers.notices
         );
@@ -1903,9 +1949,16 @@ mod tests {
                 "AGENTS.md".to_owned(),
             ]
         );
-        assert!(layers.instruction_files.contains(&workspace.join("docs/app.md")));
+        assert!(
+            layers
+                .instruction_files
+                .contains(&workspace.join("docs/app.md"))
+        );
         // Local files land before remote bodies.
-        assert!(instructions.find("ABSOLUTE_RULES").unwrap() < instructions.find("REMOTE_RULES").unwrap());
+        assert!(
+            instructions.find("ABSOLUTE_RULES").unwrap()
+                < instructions.find("REMOTE_RULES").unwrap()
+        );
 
         // Without project configuration, relative entries are not globbed.
         let global_only = load_layers(&config, Some(&home), &workspace, false, &[]);
@@ -1955,7 +2008,11 @@ mod tests {
         fs::write(workspace.join(".claude/CLAUDE.md"), "WORKSPACE_CLAUDE").unwrap();
         fs::write(workspace.join("CONTEXT.md"), "WORKSPACE_CONTEXT_LOSES").unwrap();
         fs::write(project.join(".claude/commands/deploy.md"), "CLAUDE_DEPLOY").unwrap();
-        fs::write(project.join(".haarness/commands/deploy.md"), "NATIVE_DEPLOY").unwrap();
+        fs::write(
+            project.join(".haarness/commands/deploy.md"),
+            "NATIVE_DEPLOY",
+        )
+        .unwrap();
         fs::write(project.join(".claude/commands/lint.md"), "CLAUDE_LINT").unwrap();
         fs::write(
             project.join(".claude/agents/fixer.md"),
@@ -1974,11 +2031,19 @@ mod tests {
         assert!(off.errors.is_empty(), "{:?}", off.errors);
         let instructions = off.instructions.clone().unwrap();
         assert!(instructions.contains("PROJECT_AGENTS"));
-        for absent in ["HOME_CLAUDE", "PROJECT_LOCAL", "WORKSPACE_CLAUDE", "CONTEXT"] {
+        for absent in [
+            "HOME_CLAUDE",
+            "PROJECT_LOCAL",
+            "WORKSPACE_CLAUDE",
+            "CONTEXT",
+        ] {
             assert!(!instructions.contains(absent), "{absent}");
         }
         assert_eq!(
-            off.commands.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            off.commands
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["deploy"]
         );
         assert!(off.agents.is_empty());
@@ -1992,13 +2057,34 @@ mod tests {
         let instructions = load_layers(&config, Some(&home), &workspace, true, &[])
             .instructions
             .unwrap();
-        for expected in ["HOME_CLAUDE", "PROJECT_AGENTS", "PROJECT_LOCAL", "WORKSPACE_CLAUDE"] {
-            assert_eq!(instructions.matches(expected).count(), 1, "{expected}\n{instructions}");
+        for expected in [
+            "HOME_CLAUDE",
+            "PROJECT_AGENTS",
+            "PROJECT_LOCAL",
+            "WORKSPACE_CLAUDE",
+        ] {
+            assert_eq!(
+                instructions.matches(expected).count(),
+                1,
+                "{expected}\n{instructions}"
+            );
         }
-        assert!(!instructions.contains("PROJECT_CLAUDE_LOSES"), "AGENTS.md wins in its directory");
-        assert!(!instructions.contains("WORKSPACE_CONTEXT_LOSES"), ".claude/CLAUDE.md wins over CONTEXT.md");
-        assert!(instructions.find("HOME_CLAUDE").unwrap() < instructions.find("PROJECT_AGENTS").unwrap());
-        assert!(instructions.find("PROJECT_AGENTS").unwrap() < instructions.find("PROJECT_LOCAL").unwrap());
+        assert!(
+            !instructions.contains("PROJECT_CLAUDE_LOSES"),
+            "AGENTS.md wins in its directory"
+        );
+        assert!(
+            !instructions.contains("WORKSPACE_CONTEXT_LOSES"),
+            ".claude/CLAUDE.md wins over CONTEXT.md"
+        );
+        assert!(
+            instructions.find("HOME_CLAUDE").unwrap()
+                < instructions.find("PROJECT_AGENTS").unwrap()
+        );
+        assert!(
+            instructions.find("PROJECT_AGENTS").unwrap()
+                < instructions.find("PROJECT_LOCAL").unwrap()
+        );
 
         // Every category, with the master switch respected.
         fs::write(
@@ -2008,12 +2094,29 @@ mod tests {
         .unwrap();
         let on = load_layers(&config, Some(&home), &workspace, true, &[]);
         assert!(on.errors.is_empty(), "{:?}", on.errors);
-        let command = |name: &str| on.commands.iter().find(|c| c.name == name).map(|c| c.template.as_str());
-        assert_eq!(command("deploy"), Some("NATIVE_DEPLOY"), "native resources win");
+        let command = |name: &str| {
+            on.commands
+                .iter()
+                .find(|c| c.name == name)
+                .map(|c| c.template.as_str())
+        };
+        assert_eq!(
+            command("deploy"),
+            Some("NATIVE_DEPLOY"),
+            "native resources win"
+        );
         assert_eq!(command("lint"), Some("CLAUDE_LINT"));
         assert_eq!(command("home-cmd"), Some("HOME_COMMAND"));
-        assert!(on.commands.iter().any(|c| c.name == "home-skill" && c.template.contains("HOME_SKILL")));
-        assert!(on.commands.iter().any(|c| c.name == "project-skill" && c.template.contains("PROJECT_SKILL")));
+        assert!(
+            on.commands
+                .iter()
+                .any(|c| c.name == "home-skill" && c.template.contains("HOME_SKILL"))
+        );
+        assert!(
+            on.commands
+                .iter()
+                .any(|c| c.name == "project-skill" && c.template.contains("PROJECT_SKILL"))
+        );
         let scout = on.agents.iter().find(|a| a.id == "scout").expect("scout");
         assert_eq!(scout.color.as_deref(), Some("error"));
         assert_eq!(scout.model, None, "inherit means no pin");
@@ -2022,7 +2125,11 @@ mod tests {
         assert_eq!(scout.tools.get("grep"), Some(&true));
         let fixer = on.agents.iter().find(|a| a.id == "fixer").expect("fixer");
         assert_eq!(fixer.color.as_deref(), Some("#123abc"));
-        assert_eq!(fixer.model.as_deref(), Some("sonnet"), "aliases resolve at dispatch");
+        assert_eq!(
+            fixer.model.as_deref(),
+            Some("sonnet"),
+            "aliases resolve at dispatch"
+        );
         assert_eq!(fixer.tools.get("edit"), Some(&true));
         assert_eq!(fixer.tools.get("bash"), Some(&true));
 
@@ -2099,7 +2206,15 @@ mod tests {
         assert_eq!(json_agent.variant.as_deref(), Some("deep"));
         let forked = layers.commands.iter().find(|c| c.name == "forked").unwrap();
         assert!(forked.execution.fork);
-        assert!(!layers.commands.iter().find(|c| c.name == "inline").unwrap().execution.fork);
+        assert!(
+            !layers
+                .commands
+                .iter()
+                .find(|c| c.name == "inline")
+                .unwrap()
+                .execution
+                .fork
+        );
 
         // Markdown fields alone.
         fs::remove_file(workspace.join("haarness.json")).unwrap();
@@ -2143,8 +2258,18 @@ mod tests {
         .unwrap();
         let layers = load_layers(&config, Some(&home), &workspace, true, &[]);
         assert!(layers.errors.is_empty(), "{:?}", layers.errors);
-        assert!(layers.commands.iter().any(|c| c.name == "deploy" && c.template == "TEAM_DEPLOY"));
-        assert!(layers.commands.iter().any(|c| c.name == "audit" && c.template == "HOME_AUDIT"));
+        assert!(
+            layers
+                .commands
+                .iter()
+                .any(|c| c.name == "deploy" && c.template == "TEAM_DEPLOY")
+        );
+        assert!(
+            layers
+                .commands
+                .iter()
+                .any(|c| c.name == "audit" && c.template == "HOME_AUDIT")
+        );
         assert_eq!(
             configured_skill_paths(&layers.native, Some(&home), &workspace),
             vec![workspace.join("./team-skills"), home.join("skills")]
@@ -2161,21 +2286,35 @@ mod tests {
                     {"name":"missing"}
                 ]}"#,
             ),
-            ("/skills/remote-a/SKILL.md", "---\nname: remote-a\ndescription: Remote A\n---\nREMOTE_A"),
+            (
+                "/skills/remote-a/SKILL.md",
+                "---\nname: remote-a\ndescription: Remote A\n---\nREMOTE_A",
+            ),
             ("/skills/remote-a/reference.md", "REFERENCE"),
-            ("/direct/remote-b.md", "---\nname: remote-b\ndescription: Remote B\n---\nREMOTE_B"),
+            (
+                "/direct/remote-b.md",
+                "---\nname: remote-b\ndescription: Remote B\n---\nREMOTE_B",
+            ),
         ]);
-        let host = pull_remote_skills(&cache, &format!("{base}/skills")).unwrap().expect("host root");
+        let host = pull_remote_skills(&cache, &format!("{base}/skills"))
+            .unwrap()
+            .expect("host root");
         assert!(host.starts_with(&cache));
         assert_eq!(
             fs::read_to_string(host.join("remote-a/SKILL.md")).unwrap(),
             "---\nname: remote-a\ndescription: Remote A\n---\nREMOTE_A"
         );
-        assert_eq!(fs::read_to_string(host.join("remote-a/reference.md")).unwrap(), "REFERENCE");
+        assert_eq!(
+            fs::read_to_string(host.join("remote-a/reference.md")).unwrap(),
+            "REFERENCE"
+        );
         assert!(host.join("remote-b/SKILL.md").is_file());
         assert!(!host.join("missing/SKILL.md").exists());
         assert!(!cache.join("escape").exists());
-        assert!(!host.join("SKILL.md").exists(), "parent traversal is rejected");
+        assert!(
+            !host.join("SKILL.md").exists(),
+            "parent traversal is rejected"
+        );
         let mut commands = Vec::new();
         discover_skill_commands(&mut commands, &host, None);
         let mut names = commands.iter().map(|c| c.name.as_str()).collect::<Vec<_>>();

@@ -327,10 +327,18 @@ mod tests {
         let file = std::fs::File::create(&image).unwrap();
         file.set_len(11 * 1024 * 1024).unwrap();
         assert!(paths_from_paste(image.to_str().unwrap()).unwrap().is_some());
-        assert!(inline_sources(vec![image.display().to_string()]).await.is_ok());
+        assert!(
+            inline_sources(vec![image.display().to_string()])
+                .await
+                .is_ok()
+        );
         file.set_len(20 * 1024 * 1024 + 1).unwrap();
         assert!(paths_from_paste(image.to_str().unwrap()).is_err());
-        assert!(inline_sources(vec![image.display().to_string()]).await.is_err());
+        assert!(
+            inline_sources(vec![image.display().to_string()])
+                .await
+                .is_err()
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

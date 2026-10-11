@@ -1140,7 +1140,10 @@ impl AgentRuntime {
         }
     }
 
-    pub fn with_repository_approvals(mut self, store: Arc<dyn crate::RepositoryApprovalStore>) -> CoreResult<Self> {
+    pub fn with_repository_approvals(
+        mut self,
+        store: Arc<dyn crate::RepositoryApprovalStore>,
+    ) -> CoreResult<Self> {
         *self.repository_rules.lock() = store.load()?;
         self.repository_approvals = Some(store);
         Ok(self)
@@ -1481,7 +1484,8 @@ impl AgentRuntime {
         let tools = request
             .preview
             .map(|preview| HashMap::from([("preview".into(), preview)]));
-        self.queue_input_with_options(thread_id, request, false, tools).await
+        self.queue_input_with_options(thread_id, request, false, tools)
+            .await
     }
 
     pub async fn input_queue(&self, id: ThreadId) -> CoreResult<haarness_protocol::InputQueue> {
@@ -2153,7 +2157,9 @@ impl AgentRuntime {
                     ProviderEvent::ReasoningDelta(_) => {}
                     ProviderEvent::Finished { reason } => {
                         finished = true;
-                        if let Some(error) = ProviderEvent::finish_error(&reason) { return Err(error); }
+                        if let Some(error) = ProviderEvent::finish_error(&reason) {
+                            return Err(error);
+                        }
                     }
                     ProviderEvent::Usage {
                         input_tokens: input,
@@ -3122,9 +3128,13 @@ impl AgentRuntime {
             )));
         }
         let thread = self.repository.get_thread(thread_id).await?;
-        if let Some(store) = &self.repository_approvals { *self.repository_rules.lock() = store.load()?; }
+        if let Some(store) = &self.repository_approvals {
+            *self.repository_rules.lock() = store.load()?;
+        }
         let mut engine = components.config.permission_defaults(&thread.agent, name);
-        for rule in self.repository_rules.lock().iter().cloned() { engine.add_repository_grant(rule); }
+        for rule in self.repository_rules.lock().iter().cloned() {
+            engine.add_repository_grant(rule);
+        }
         for rule in components.config.base_rules.iter().cloned() {
             engine.add_rule(rule);
         }
@@ -3209,7 +3219,9 @@ impl AgentRuntime {
                 "denied by a PreToolUse hook".into(),
             ));
         }
-        arguments = tool.prepare_arguments(arguments, thread_id, cancel.clone()).await?;
+        arguments = tool
+            .prepare_arguments(arguments, thread_id, cancel.clone())
+            .await?;
         let confirmed_revert = self.repository.confirm_revert(thread_id).await?;
         let thread = if confirmed_revert {
             self.repository.get_thread(thread_id).await?
@@ -3263,7 +3275,9 @@ impl AgentRuntime {
         // are split, patches expand to touched paths, and external paths form
         // an independent permission group.
         let mut allowed: Result<(), String> = Ok(());
-        if let Some(store) = &self.repository_approvals { *self.repository_rules.lock() = store.load()?; }
+        if let Some(store) = &self.repository_approvals {
+            *self.repository_rules.lock() = store.load()?;
+        }
         let plans = ask_plans(name, &arguments, &self.workspace);
         let authorized_external_paths = plans
             .iter()
@@ -3274,13 +3288,15 @@ impl AgentRuntime {
             let mut asked = Vec::new();
             for pattern in &plan.patterns {
                 let constraint = tool.permission_constraint(&arguments, &plan.operation(pattern));
-                match constrained_permission(engine.evaluate(&plan.operation(pattern)), constraint) {
+                match constrained_permission(engine.evaluate(&plan.operation(pattern)), constraint)
+                {
                     PermissionDecision::Deny => {
                         allowed = Err(plan.operation(pattern));
                         break;
                     }
                     PermissionDecision::Ask
-                        if hook_permission == Some(PermissionDecision::Allow) && constraint != Some(PermissionDecision::Ask) => {}
+                        if hook_permission == Some(PermissionDecision::Allow)
+                            && constraint != Some(PermissionDecision::Ask) => {}
                     PermissionDecision::Ask => asked.push(pattern.clone()),
                     PermissionDecision::Allow => {}
                 }
@@ -3288,12 +3304,22 @@ impl AgentRuntime {
             if allowed.is_err() || asked.is_empty() {
                 continue;
             }
-            pending_plans.push(AskPlan { permission: plan.permission, patterns: asked, always: plan.always, external_paths: Vec::new() });
+            pending_plans.push(AskPlan {
+                permission: plan.permission,
+                patterns: asked,
+                always: plan.always,
+                external_paths: Vec::new(),
+            });
         }
         for plan in combine_browser_approvals(name, pending_plans) {
-            if allowed.is_err() { break; }
+            if allowed.is_err() {
+                break;
+            }
             let asked = &plan.patterns;
-            let forced = asked.iter().any(|pattern| tool.permission_constraint(&arguments, &plan.operation(pattern)) == Some(PermissionDecision::Ask));
+            let forced = asked.iter().any(|pattern| {
+                tool.permission_constraint(&arguments, &plan.operation(pattern))
+                    == Some(PermissionDecision::Ask)
+            });
             let operation = if asked.len() == 1 {
                 format!("{}:{}", plan.permission, asked[0])
             } else {
@@ -3312,7 +3338,10 @@ impl AgentRuntime {
             self.permissions.insert(
                 id.clone(),
                 PendingPermission {
-                    repository_scope: self.repository_approvals.as_ref().map(|store| store.identity().to_owned()),
+                    repository_scope: self
+                        .repository_approvals
+                        .as_ref()
+                        .map(|store| store.identity().to_owned()),
                     forced,
                     operation: operation.clone(),
                     permission: plan.permission.clone(),
@@ -3570,9 +3599,13 @@ impl AgentRuntime {
             .remove(id)
             .ok_or_else(|| CoreError::NotFound(format!("permission {id}")))?;
         let allowed = match reply.decision {
-            decision if pending.forced && !matches!(decision, PermissionReplyDecision::Reject) => true,
+            decision if pending.forced && !matches!(decision, PermissionReplyDecision::Reject) => {
+                true
+            }
             PermissionReplyDecision::Once => true,
-            PermissionReplyDecision::Always | PermissionReplyDecision::AlwaysWorkspace | PermissionReplyDecision::AlwaysRepository => {
+            PermissionReplyDecision::Always
+            | PermissionReplyDecision::AlwaysWorkspace
+            | PermissionReplyDecision::AlwaysRepository => {
                 // Persist the generalized rules (`bash:git status *`), not
                 // the literal command — so `git status` stays silent after
                 // an always on `git status --short`. Legacy prompts without
@@ -3595,20 +3628,35 @@ impl AgentRuntime {
                     PermissionReplyDecision::AlwaysWorkspace => {
                         let mut result = Ok(());
                         for rule in &rules {
-                            if let Err(error) = self.repository.save_permission_rule(&self.workspace.display().to_string(), rule).await { result = Err(error); break; }
+                            if let Err(error) = self
+                                .repository
+                                .save_permission_rule(&self.workspace.display().to_string(), rule)
+                                .await
+                            {
+                                result = Err(error);
+                                break;
+                            }
                         }
                         result
                     }
-                    PermissionReplyDecision::AlwaysRepository => {
-                        match &self.repository_approvals {
-                            Some(store) => store.save(&rules).and_then(|()| { *self.repository_rules.lock() = store.load()?; Ok(()) }),
-                            None => Err(CoreError::Invalid("Repository approvals require a Git workspace".into())),
-                        }
-                    }
+                    PermissionReplyDecision::AlwaysRepository => match &self.repository_approvals {
+                        Some(store) => store.save(&rules).and_then(|()| {
+                            *self.repository_rules.lock() = store.load()?;
+                            Ok(())
+                        }),
+                        None => Err(CoreError::Invalid(
+                            "Repository approvals require a Git workspace".into(),
+                        )),
+                    },
                     _ => Ok(()),
                 };
-                if let Err(error) = persistence { self.permissions.insert(id.to_owned(), pending); return Err(error); }
-                if !matches!(reply.decision, PermissionReplyDecision::AlwaysRepository) { self.session_rules.lock().extend(rules.iter().cloned()); }
+                if let Err(error) = persistence {
+                    self.permissions.insert(id.to_owned(), pending);
+                    return Err(error);
+                }
+                if !matches!(reply.decision, PermissionReplyDecision::AlwaysRepository) {
+                    self.session_rules.lock().extend(rules.iter().cloned());
+                }
                 // Any other pending prompt now covered by the new rules
                 // resolves immediately — three parallel children asking for
                 // the same command need one answer, not three.
@@ -3660,7 +3708,10 @@ impl AgentRuntime {
     }
 
     /// The approval mode that applies to a chat, with what decided it.
-    pub async fn approval_mode(&self, id: ThreadId) -> CoreResult<haarness_protocol::ApprovalModeInfo> {
+    pub async fn approval_mode(
+        &self,
+        id: ThreadId,
+    ) -> CoreResult<haarness_protocol::ApprovalModeInfo> {
         self.approval_modes.effective(id).await
     }
 
@@ -3891,7 +3942,12 @@ impl AgentRuntime {
         let config = self.components().config.clone();
         profiles.retain(|profile| !config.disabled_agents.contains(&profile.id));
         for profile in &mut profiles {
-            profile.max_subagents = if config.execution.subagent_depth == 0 || profile.max_subagents == 0 { 0 } else { u8::try_from(config.execution.subagent_concurrency).unwrap_or(u8::MAX) };
+            profile.max_subagents =
+                if config.execution.subagent_depth == 0 || profile.max_subagents == 0 {
+                    0
+                } else {
+                    u8::try_from(config.execution.subagent_concurrency).unwrap_or(u8::MAX)
+                };
         }
         profiles
     }
@@ -3958,7 +4014,12 @@ impl AgentRuntime {
     async fn apply_chat_turn_settings(&self, thread_id: ThreadId, request: &mut StartTurnRequest) {
         let mut settings = self.chat_turn_settings(thread_id).await;
         let mut changed = false;
-        match request.tools.as_ref().and_then(|tools| tools.get("preview")).copied() {
+        match request
+            .tools
+            .as_ref()
+            .and_then(|tools| tools.get("preview"))
+            .copied()
+        {
             Some(preview) if settings.preview != Some(preview) => {
                 settings.preview = Some(preview);
                 changed = true;
@@ -3976,7 +4037,9 @@ impl AgentRuntime {
         if !request.synthetic
             && (!settings.recorded || settings.reasoning_effort != request.reasoning_effort)
         {
-            settings.reasoning_effort.clone_from(&request.reasoning_effort);
+            settings
+                .reasoning_effort
+                .clone_from(&request.reasoning_effort);
             settings.recorded = true;
             changed = true;
         }
@@ -4129,8 +4192,15 @@ impl AgentRuntime {
         }
         let thread = self.repository.get_thread(thread_id).await?;
         let effective_agent = request.agent.as_deref().unwrap_or(&thread.agent);
-        if components.config.disabled_agents.iter().any(|name| name == effective_agent) {
-            return Err(CoreError::Invalid(format!("Agent is disabled: {effective_agent}")));
+        if components
+            .config
+            .disabled_agents
+            .iter()
+            .any(|name| name == effective_agent)
+        {
+            return Err(CoreError::Invalid(format!(
+                "Agent is disabled: {effective_agent}"
+            )));
         }
         if self.custom_agent(effective_agent).is_none()
             && !crate::builtin_profiles()
@@ -4444,35 +4514,41 @@ impl AgentRuntime {
             .and_then(|agent| agent.model)
             .or_else(|| components.config.small_model.clone());
         let fallback = (turn.provider.clone(), turn.model.clone());
-        tokio::spawn(async move {
-            let guard = job;
-            // Titling owns neither turn admission nor a tool/permission slot.
-            // A transient auxiliary failure must not fail or delay the task.
-            for attempt in 0..3 {
-                if attempt > 0 {
-                    tokio::time::sleep(std::time::Duration::from_secs(1 << (attempt - 1))).await;
-                }
-                match auto_title(
-                    &repository,
-                    &providers,
-                    &events,
-                    guard.thread_id,
-                    small_model.clone(),
-                    fallback.clone(),
-                )
-                .await
-                {
-                    Ok(()) => return,
-                    Err(error) => tracing::debug!(error = %error, attempt, "auto-title failed"),
+        tokio::spawn(
+            async move {
+                let guard = job;
+                // Titling owns neither turn admission nor a tool/permission slot.
+                // A transient auxiliary failure must not fail or delay the task.
+                for attempt in 0..3 {
+                    if attempt > 0 {
+                        tokio::time::sleep(std::time::Duration::from_secs(1 << (attempt - 1)))
+                            .await;
+                    }
+                    match auto_title(
+                        &repository,
+                        &providers,
+                        &events,
+                        guard.thread_id,
+                        small_model.clone(),
+                        fallback.clone(),
+                    )
+                    .await
+                    {
+                        Ok(()) => return,
+                        Err(error) => tracing::debug!(error = %error, attempt, "auto-title failed"),
+                    }
                 }
             }
-        }.in_current_span());
+            .in_current_span(),
+        );
     }
 
     fn permission_boundary(&self, agent: &str) -> Vec<PermissionRule> {
         let components = self.components();
         let mut engine = components.config.permission_defaults(agent, "");
-        for rule in self.repository_rules.lock().iter().cloned() { engine.add_repository_grant(rule); }
+        for rule in self.repository_rules.lock().iter().cloned() {
+            engine.add_repository_grant(rule);
+        }
         for rule in components.config.base_rules.iter().cloned() {
             engine.add_rule(rule);
         }
@@ -4752,7 +4828,10 @@ struct TurnToolInvoker {
 #[async_trait::async_trait]
 impl crate::ToolInvoker for TurnToolInvoker {
     fn parallel_safe(&self, name: &str, arguments: &serde_json::Value) -> bool {
-        self.runner.tools.get(name).is_some_and(|tool| tool.parallel_safe(arguments))
+        self.runner
+            .tools
+            .get(name)
+            .is_some_and(|tool| tool.parallel_safe(arguments))
     }
     fn activate_skill_permissions(&self, execution: &haarness_protocol::DefinitionExecution) {
         let expand = |s: &String| {
@@ -5094,13 +5173,18 @@ impl PendingPermission {
     }
     /// Every asked pattern is covered by some rule in `rules`.
     fn covered_by(&self, rules: &[PermissionRule]) -> bool {
-        !self.forced && self.patterns.iter().all(|pattern| {
-            let operation = if self.permission == "multiple" { pattern.clone() } else { format!("{}:{pattern}", self.permission) };
-            rules.iter().any(|rule| {
-                rule.decision == PermissionDecision::Allow
-                    && crate::permissions::wildcard_match(&rule.pattern, &operation)
+        !self.forced
+            && self.patterns.iter().all(|pattern| {
+                let operation = if self.permission == "multiple" {
+                    pattern.clone()
+                } else {
+                    format!("{}:{pattern}", self.permission)
+                };
+                rules.iter().any(|rule| {
+                    rule.decision == PermissionDecision::Allow
+                        && crate::permissions::wildcard_match(&rule.pattern, &operation)
+                })
             })
-        })
     }
 }
 
@@ -5172,8 +5256,10 @@ impl RunnerTask {
             // so the retry operates on a stable queue and later input waits for
             // a fresh turn.
             let retryable = result.as_ref().is_err_and(|error_value| {
-                !matches!(error_value, CoreError::Cancelled | CoreError::ProviderBlocked(_))
-                    && !is_provider_usage_limit(error_value)
+                !matches!(
+                    error_value,
+                    CoreError::Cancelled | CoreError::ProviderBlocked(_)
+                ) && !is_provider_usage_limit(error_value)
             });
             if retryable && self.has_unconsumed_queued().await {
                 result = Arc::clone(&self).run_inner().await;
@@ -6053,12 +6139,15 @@ impl RunnerTask {
                     .into_iter()
                     .filter(|tool| {
                         self.tool_enabled(&tool.name)
-                            && !(self.depth >= self.config.execution.subagent_depth && tool.name == "task")
+                            && !(self.depth >= self.config.execution.subagent_depth
+                                && tool.name == "task")
                             && !permission_engine.disables_tool(&tool.name)
                             && (goal_for_request.is_some() || !is_goal_tool(&tool.name))
                     })
                     .collect::<Vec<_>>();
-                if !tool_round_limit_reached && eligible_tools.iter().any(|tool| tool.name == "preview") {
+                if !tool_round_limit_reached
+                    && eligible_tools.iter().any(|tool| tool.name == "preview")
+                {
                     system.push_str(include_str!("preview.txt"));
                 }
                 let mut lazy_settings = self.config.lazy_tools.clone();
@@ -6342,9 +6431,16 @@ impl RunnerTask {
                             // Integers, not the strings an exported u64 becomes.
                             let count = |tokens: u64| i64::try_from(tokens).unwrap_or(i64::MAX);
                             provider_span.record("gen_ai.usage.input_tokens", count(input_tokens));
-                            provider_span.record("gen_ai.usage.output_tokens", count(output_tokens));
-                            provider_span.record("gen_ai.usage.cache_read.input_tokens", count(cache_read_tokens));
-                            provider_span.record("gen_ai.usage.cache_creation.input_tokens", count(cache_write_tokens));
+                            provider_span
+                                .record("gen_ai.usage.output_tokens", count(output_tokens));
+                            provider_span.record(
+                                "gen_ai.usage.cache_read.input_tokens",
+                                count(cache_read_tokens),
+                            );
+                            provider_span.record(
+                                "gen_ai.usage.cache_creation.input_tokens",
+                                count(cache_write_tokens),
+                            );
                             usage = Some((
                                 input_tokens,
                                 output_tokens,
@@ -6356,7 +6452,9 @@ impl RunnerTask {
                         ProviderEvent::Finished { reason } => {
                             finished = true;
                             provider_span.record("gen_ai.response.finish_reasons", reason.as_str());
-                            if let Some(error) = ProviderEvent::finish_error(&reason) { blocked = Some(error); }
+                            if let Some(error) = ProviderEvent::finish_error(&reason) {
+                                blocked = Some(error);
+                            }
                         }
                     }
                 }
@@ -6373,7 +6471,8 @@ impl RunnerTask {
                     && (!text.is_empty() || !reasoning.is_empty() || !calls.is_empty());
                 self.flush_reasoning_segment(&mut reasoning).await?;
                 if blocked.is_some() {
-                    self.flush_assistant_segment(&mut text, &mut goal_turn_assistant_text).await?;
+                    self.flush_assistant_segment(&mut text, &mut goal_turn_assistant_text)
+                        .await?;
                 } else if let Some(schema) = self.output_schema.as_ref() {
                     // Final output alongside tool calls is premature: run the
                     // calls and ask for the final answer again afterwards.
@@ -6458,9 +6557,13 @@ impl RunnerTask {
                 if let Some(error) = blocked {
                     for (call_id, name, _) in calls {
                         self.publish_item(ItemData::ToolResult {
-                            call_id, name, output: error.to_string(), is_error: true,
+                            call_id,
+                            name,
+                            output: error.to_string(),
+                            is_error: true,
                             metadata: serde_json::Value::Null,
-                        }).await?;
+                        })
+                        .await?;
                     }
                     if matches!(error, CoreError::ProviderIncomplete(_)) && recoveries < 3 {
                         recoveries += 1;
@@ -6711,11 +6814,28 @@ impl RunnerTask {
                     }
                 }
                 for (index, (call_id, name, arguments)) in calls.iter().cloned().enumerate() {
-                    if !task_handles.contains_key(&index) && self.tools.get(&name).is_some_and(|tool| tool.parallel_safe(&arguments)) {
-                        for (offset, (id, tool, args)) in calls.iter().enumerate().skip(index).take(self.config.execution.read_parallelism) {
-                            if !self.tools.get(tool).is_some_and(|tool| tool.parallel_safe(args)) { break; }
+                    if !task_handles.contains_key(&index)
+                        && self
+                            .tools
+                            .get(&name)
+                            .is_some_and(|tool| tool.parallel_safe(&arguments))
+                    {
+                        for (offset, (id, tool, args)) in calls
+                            .iter()
+                            .enumerate()
+                            .skip(index)
+                            .take(self.config.execution.read_parallelism)
+                        {
+                            if !self
+                                .tools
+                                .get(tool)
+                                .is_some_and(|tool| tool.parallel_safe(args))
+                            {
+                                break;
+                            }
                             let this = Arc::clone(&self);
-                            let (id, tool, args, agent) = (id.clone(), tool.clone(), args.clone(), agent.to_owned());
+                            let (id, tool, args, agent) =
+                                (id.clone(), tool.clone(), args.clone(), agent.to_owned());
                             task_handles.insert(offset, tokio::spawn(async move { this.execute_call(&agent, &id, &tool, args).await }.in_current_span()));
                         }
                     }
@@ -6962,7 +7082,14 @@ impl RunnerTask {
     }
 
     fn tool_enabled(&self, name: &str) -> bool {
-        if name == "preview" && self.request.tools.as_ref().and_then(|tools| tools.get(name)) != Some(&true) {
+        if name == "preview"
+            && self
+                .request
+                .tools
+                .as_ref()
+                .and_then(|tools| tools.get(name))
+                != Some(&true)
+        {
             return false;
         }
         if !turn_tool_enabled(self.request.tools.as_ref(), name) {
@@ -7514,9 +7641,13 @@ impl RunnerTask {
             ));
         }
         if let Some(tool) = &tool {
-            arguments = tool.prepare_arguments(arguments, self.thread.id, self.cancel.clone()).await?;
+            arguments = tool
+                .prepare_arguments(arguments, self.thread.id, self.cancel.clone())
+                .await?;
         }
-        if let Some(store) = &self.repository_approvals { *self.repository_rules.lock() = store.load()?; }
+        if let Some(store) = &self.repository_approvals {
+            *self.repository_rules.lock() = store.load()?;
+        }
         let plans = ask_plans(name, &arguments, &self.workspace);
         let authorized_external_paths = plans
             .iter()
@@ -7536,7 +7667,9 @@ impl RunnerTask {
                     ));
                 }
                 let evaluation = engine.evaluate_detailed(&plan.operation(pattern));
-                let constraint = tool.as_ref().and_then(|tool| tool.permission_constraint(&arguments, &plan.operation(pattern)));
+                let constraint = tool.as_ref().and_then(|tool| {
+                    tool.permission_constraint(&arguments, &plan.operation(pattern))
+                });
                 match constrained_permission(evaluation.decision, constraint) {
                     PermissionDecision::Deny => {
                         let rule = evaluation.matched.unwrap_or_else(|| "policy".into());
@@ -7548,11 +7681,12 @@ impl RunnerTask {
                     }
                     // A hook pre-approval skips the prompt (never a deny).
                     PermissionDecision::Ask
-                        if constraint != Some(PermissionDecision::Ask) && (hook_permission == Some(PermissionDecision::Allow)
-                            || (evaluation.matched.is_none()
-                                && PermissionEngine::new(self.skill_rules.lock().clone())
-                                    .evaluate(&plan.operation(pattern))
-                                    == PermissionDecision::Allow)) => {}
+                        if constraint != Some(PermissionDecision::Ask)
+                            && (hook_permission == Some(PermissionDecision::Allow)
+                                || (evaluation.matched.is_none()
+                                    && PermissionEngine::new(self.skill_rules.lock().clone())
+                                        .evaluate(&plan.operation(pattern))
+                                        == PermissionDecision::Allow)) => {}
                     PermissionDecision::Ask => asked.push(pattern.clone()),
                     PermissionDecision::Allow => {}
                 }
@@ -7567,8 +7701,14 @@ impl RunnerTask {
             }
         }
         for plan in combine_browser_approvals(name, pending_plans) {
-            let forced = plan.patterns.iter().any(|pattern| tool.as_ref().and_then(|tool| tool.permission_constraint(&arguments, &plan.operation(pattern))) == Some(PermissionDecision::Ask));
-            let resolution = self.ask_permission(agent, &plan, &arguments, forced).await?;
+            let forced = plan.patterns.iter().any(|pattern| {
+                tool.as_ref().and_then(|tool| {
+                    tool.permission_constraint(&arguments, &plan.operation(pattern))
+                }) == Some(PermissionDecision::Ask)
+            });
+            let resolution = self
+                .ask_permission(agent, &plan, &arguments, forced)
+                .await?;
             if !resolution.allowed {
                 let message = match resolution.feedback {
                     Some(feedback) if !feedback.trim().is_empty() => format!(
@@ -7693,9 +7833,16 @@ impl RunnerTask {
         self.permission_engine_for_tool_with_rules(agent, "", session_rules)
     }
 
-    fn permission_engine_for_tool_with_rules(&self, agent: &str, tool: &str, session_rules: &[PermissionRule]) -> PermissionEngine {
+    fn permission_engine_for_tool_with_rules(
+        &self,
+        agent: &str,
+        tool: &str,
+        session_rules: &[PermissionRule],
+    ) -> PermissionEngine {
         let mut engine = self.config.permission_defaults(agent, tool);
-        for rule in self.repository_rules.lock().iter().cloned() { engine.add_repository_grant(rule); }
+        for rule in self.repository_rules.lock().iter().cloned() {
+            engine.add_repository_grant(rule);
+        }
         for rule in self.config.base_rules.iter().cloned() {
             engine.add_rule(rule);
         }
@@ -7796,10 +7943,11 @@ impl RunnerTask {
         {
             let session_rules = self.session_rules.lock();
             let refreshed = self.permission_engine_with_session_rules(agent, &session_rules);
-            if !forced && plan.patterns.iter().all(|pattern| {
-                refreshed.evaluate(&plan.operation(pattern))
-                    == PermissionDecision::Allow
-            }) {
+            if !forced
+                && plan.patterns.iter().all(|pattern| {
+                    refreshed.evaluate(&plan.operation(pattern)) == PermissionDecision::Allow
+                })
+            {
                 return Ok(PermissionResolution {
                     allowed: true,
                     feedback: None,
@@ -7815,7 +7963,10 @@ impl RunnerTask {
             self.permissions.insert(
                 id.clone(),
                 PendingPermission {
-                    repository_scope: self.repository_approvals.as_ref().map(|store| store.identity().to_owned()),
+                    repository_scope: self
+                        .repository_approvals
+                        .as_ref()
+                        .map(|store| store.identity().to_owned()),
                     forced,
                     operation: operation.clone(),
                     permission: plan.permission.clone(),
@@ -8322,8 +8473,12 @@ impl RunnerTask {
         };
         // Separate pools per depth prevent parents holding every slot while
         // waiting for children. Total capacity is bounded by depth * concurrency.
-        let slots = self.subagents.lock().entry((self.depth, self.config.execution.subagent_concurrency))
-            .or_insert_with(|| Arc::new(Semaphore::new(self.config.execution.subagent_concurrency))).clone();
+        let slots = self
+            .subagents
+            .lock()
+            .entry((self.depth, self.config.execution.subagent_concurrency))
+            .or_insert_with(|| Arc::new(Semaphore::new(self.config.execution.subagent_concurrency)))
+            .clone();
         let permit = tokio::select! {
             permit = slots.acquire_owned() => permit.map_err(|_| CoreError::Cancelled)?,
             () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
@@ -9412,25 +9567,58 @@ fn compaction_provider_context(
 }
 
 fn attachment_summary(sources: &[String]) -> String {
-    sources.iter().map(|source| {
-        if let Some(data) = source.strip_prefix("data:") {
-            let header = data.split(',').next().unwrap_or_default();
-            let mime = header.split(';').next().unwrap_or("media");
-            let name = header.split(';').find_map(|part| part.strip_prefix("name="));
-            format!("{} ({})", name.unwrap_or("inline attachment").chars().take(256).collect::<String>(), mime.chars().take(128).collect::<String>())
-        } else { source.chars().take(512).collect() }
-    }).collect::<Vec<_>>().join(", ")
+    sources
+        .iter()
+        .map(|source| {
+            if let Some(data) = source.strip_prefix("data:") {
+                let header = data.split(',').next().unwrap_or_default();
+                let mime = header.split(';').next().unwrap_or("media");
+                let name = header
+                    .split(';')
+                    .find_map(|part| part.strip_prefix("name="));
+                format!(
+                    "{} ({})",
+                    name.unwrap_or("inline attachment")
+                        .chars()
+                        .take(256)
+                        .collect::<String>(),
+                    mime.chars().take(128).collect::<String>()
+                )
+            } else {
+                source.chars().take(512).collect()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn compaction_message(message: ProviderMessage) -> ProviderMessage {
     match message {
-        ProviderMessage::Media { role, content, attachments } => ProviderMessage::Text {
+        ProviderMessage::Media {
             role,
-            content: format!("{content}\n[Attachments omitted during compaction: {}]", attachment_summary(&attachments)),
+            content,
+            attachments,
+        } => ProviderMessage::Text {
+            role,
+            content: format!(
+                "{content}\n[Attachments omitted during compaction: {}]",
+                attachment_summary(&attachments)
+            ),
         },
-        ProviderMessage::ToolResult { call_id, name, output, is_error, attachments } if !attachments.is_empty() => ProviderMessage::ToolResult {
-            call_id, name, is_error,
-            output: format!("{output}\n[Attachments omitted during compaction: {}]", attachment_summary(&attachments)),
+        ProviderMessage::ToolResult {
+            call_id,
+            name,
+            output,
+            is_error,
+            attachments,
+        } if !attachments.is_empty() => ProviderMessage::ToolResult {
+            call_id,
+            name,
+            is_error,
+            output: format!(
+                "{output}\n[Attachments omitted during compaction: {}]",
+                attachment_summary(&attachments)
+            ),
             attachments: Vec::new(),
         },
         message => message,
@@ -9693,7 +9881,11 @@ struct AskPlan {
 
 impl AskPlan {
     fn operation(&self, pattern: &str) -> String {
-        if self.permission == "multiple" { pattern.to_owned() } else { format!("{}:{pattern}", self.permission) }
+        if self.permission == "multiple" {
+            pattern.to_owned()
+        } else {
+            format!("{}:{pattern}", self.permission)
+        }
     }
     fn always_rules(&self) -> Vec<String> {
         self.always
@@ -9705,14 +9897,25 @@ impl AskPlan {
 
 /// One browser action receives one decision, while preserving every underlying gate.
 fn combine_browser_approvals(name: &str, plans: Vec<AskPlan>) -> Vec<AskPlan> {
-    if !name.starts_with("browser_") || plans.len() < 2 { return plans; }
-    let mut combined = AskPlan { permission: "multiple".into(), patterns: Vec::new(), always: Vec::new(), external_paths: Vec::new() };
+    if !name.starts_with("browser_") || plans.len() < 2 {
+        return plans;
+    }
+    let mut combined = AskPlan {
+        permission: "multiple".into(),
+        patterns: Vec::new(),
+        always: Vec::new(),
+        external_paths: Vec::new(),
+    };
     for plan in plans {
-        combined.patterns.extend(plan.patterns.iter().map(|pattern| plan.operation(pattern)));
+        combined
+            .patterns
+            .extend(plan.patterns.iter().map(|pattern| plan.operation(pattern)));
         combined.always.extend(plan.always_rules());
     }
-    combined.patterns.sort(); combined.patterns.dedup();
-    combined.always.sort(); combined.always.dedup();
+    combined.patterns.sort();
+    combined.patterns.dedup();
+    combined.always.sort();
+    combined.always.dedup();
     vec![combined]
 }
 
@@ -9724,14 +9927,28 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
     if name == "agent_switch" {
         // Hex keeps glob syntax in custom agent names literal. Session identity also
         // prevents a repository-level remembered answer from approving other chats.
-        let agent = arguments["agent"].as_str().unwrap_or_default().as_bytes()
-            .iter().map(|byte| format!("{byte:02x}")).collect::<String>();
-        let scope = arguments["__agentSwitch"]["threadId"].as_str().unwrap_or("unprepared");
+        let agent = arguments["agent"]
+            .as_str()
+            .unwrap_or_default()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let scope = arguments["__agentSwitch"]["threadId"]
+            .as_str()
+            .unwrap_or("unprepared");
         let pattern = format!("{scope}:{agent}");
-        return vec![AskPlan { permission: name.into(), patterns: vec![pattern.clone()],
-            always: vec![pattern], external_paths: Vec::new() }];
+        return vec![AskPlan {
+            permission: name.into(),
+            patterns: vec![pattern.clone()],
+            always: vec![pattern],
+            external_paths: Vec::new(),
+        }];
     }
-    if matches!(name, "cloud_agent_manage" | "cloud_agent_session" | "cloud_chat" | "cloud_schedule") {
+    if matches!(
+        name,
+        "cloud_agent_manage" | "cloud_agent_session" | "cloud_chat" | "cloud_schedule"
+    ) {
         let action = arguments["action"].as_str().unwrap_or("unknown");
         let target = arguments["sessionId"]
             .as_str()
@@ -9751,14 +9968,53 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         }];
     }
     if name.starts_with("browser_") {
-        let resources = arguments["__browser"]["target"]["resources"].as_array().map(|values| values.iter().filter_map(|v| v.as_str()).map(str::to_owned).collect::<Vec<_>>()).unwrap_or_default();
-        let targets = if resources.is_empty() { vec!["inventory".into()] } else { resources };
-        let patterns = targets.into_iter().map(|url| format!("{}:{url}", name.trim_start_matches("browser_"))).collect::<Vec<_>>();
-        let mut plans = vec![AskPlan { permission: "browser".into(), always: patterns.clone(), patterns, external_paths: Vec::new() }];
-        let remember = arguments["__browser"]["remember"].as_array().into_iter().flatten().filter_map(|v| v.as_str()).map(str::to_owned).collect::<Vec<_>>();
-        if !remember.is_empty() { plans.push(AskPlan { permission: "browser_site".into(), patterns: remember.clone(), always: remember, external_paths: Vec::new() }); }
+        let resources = arguments["__browser"]["target"]["resources"]
+            .as_array()
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let targets = if resources.is_empty() {
+            vec!["inventory".into()]
+        } else {
+            resources
+        };
+        let patterns = targets
+            .into_iter()
+            .map(|url| format!("{}:{url}", name.trim_start_matches("browser_")))
+            .collect::<Vec<_>>();
+        let mut plans = vec![AskPlan {
+            permission: "browser".into(),
+            always: patterns.clone(),
+            patterns,
+            external_paths: Vec::new(),
+        }];
+        let remember = arguments["__browser"]["remember"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if !remember.is_empty() {
+            plans.push(AskPlan {
+                permission: "browser_site".into(),
+                patterns: remember.clone(),
+                always: remember,
+                external_paths: Vec::new(),
+            });
+        }
         if matches!(name, "browser_files_upload" | "browser_files_drop") {
-            for path in arguments["paths"].as_array().into_iter().flatten().filter_map(|v| v.as_str()) {
+            for path in arguments["paths"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str())
+            {
                 plans.extend(ask_plans("read", &json!({"path":path}), workspace));
             }
         }
@@ -9926,15 +10182,32 @@ mod switch_permission_tests {
     use super::*;
     #[test]
     fn remembered_switches_match_only_the_exact_session_and_agent() {
-        let plan = |thread: &str, agent: &str| ask_plans("agent_switch", &json!({
-            "agent": agent, "__agentSwitch": {"threadId": thread},
-        }), Path::new("/workspace")).remove(0);
+        let plan = |thread: &str, agent: &str| {
+            ask_plans(
+                "agent_switch",
+                &json!({
+                    "agent": agent, "__agentSwitch": {"threadId": thread},
+                }),
+                Path::new("/workspace"),
+            )
+            .remove(0)
+        };
         let original = plan("session-one", "review*?\\agent");
         let mut engine = PermissionEngine::default();
         engine.approve_always(original.always_rules()[0].clone());
-        assert_eq!(engine.evaluate(&original.operation(&original.patterns[0])), PermissionDecision::Allow);
-        for other in [plan("session-two", "review*?\\agent"), plan("session-one", "reviewXX/agent"), plan("session-one", "build")] {
-            assert_eq!(engine.evaluate(&other.operation(&other.patterns[0])), PermissionDecision::Ask);
+        assert_eq!(
+            engine.evaluate(&original.operation(&original.patterns[0])),
+            PermissionDecision::Allow
+        );
+        for other in [
+            plan("session-two", "review*?\\agent"),
+            plan("session-one", "reviewXX/agent"),
+            plan("session-one", "build"),
+        ] {
+            assert_eq!(
+                engine.evaluate(&other.operation(&other.patterns[0])),
+                PermissionDecision::Ask
+            );
         }
     }
 }
@@ -10983,20 +11256,52 @@ mod tests {
     fn inline_media_does_not_trigger_text_compaction_or_leak_base64_into_summaries() {
         let source = "data:image/png;name=screen.png;base64,".to_owned() + &"A".repeat(100_000);
         let items = vec![
-            item(1, ItemData::UserMessage { text: "Inspect this".into(), attachments: vec![source.clone()], queued: false, synthetic: false }),
-            item(2, ItemData::ToolResult { call_id: "image".into(), name: "read".into(), output: "Image loaded".into(), is_error: false, metadata: json!({"attachments":[source.clone()]}) }),
+            item(
+                1,
+                ItemData::UserMessage {
+                    text: "Inspect this".into(),
+                    attachments: vec![source.clone()],
+                    queued: false,
+                    synthetic: false,
+                },
+            ),
+            item(
+                2,
+                ItemData::ToolResult {
+                    call_id: "image".into(),
+                    name: "read".into(),
+                    output: "Image loaded".into(),
+                    is_error: false,
+                    metadata: json!({"attachments":[source.clone()]}),
+                },
+            ),
         ];
         // Two unreadable images at the family's cap, not 100k base64 chars of text.
         assert!(tokens::context(&items, Tokenizer::ClaudeLegacy).tokens < 4_000);
         let messages = vec![
-            ProviderMessage::Media { role: "user".into(), content: "Inspect this".into(), attachments: vec![source.clone()] },
-            ProviderMessage::ToolResult { call_id: "image".into(), name: "read".into(), output: "Image loaded".into(), is_error: false, attachments: vec![source] },
-        ].into_iter().map(super::compaction_message).collect::<Vec<_>>();
+            ProviderMessage::Media {
+                role: "user".into(),
+                content: "Inspect this".into(),
+                attachments: vec![source.clone()],
+            },
+            ProviderMessage::ToolResult {
+                call_id: "image".into(),
+                name: "read".into(),
+                output: "Image loaded".into(),
+                is_error: false,
+                attachments: vec![source],
+            },
+        ]
+        .into_iter()
+        .map(super::compaction_message)
+        .collect::<Vec<_>>();
         let serialized = serde_json::to_string(&messages).unwrap();
         assert!(serialized.len() < 1000);
         assert!(serialized.contains("screen.png (image/png)"));
         assert!(!serialized.contains("base64"));
-        assert!(matches!(&messages[1], ProviderMessage::ToolResult { attachments, .. } if attachments.is_empty()));
+        assert!(
+            matches!(&messages[1], ProviderMessage::ToolResult { attachments, .. } if attachments.is_empty())
+        );
     }
 
     #[test]
@@ -11418,15 +11723,33 @@ mod tests {
     #[test]
     fn cloud_permissions_are_scoped_to_action_and_target() {
         for (name, args, target) in [
-            ("cloud_agent_session", json!({"action":"ask","sessionId":"session-id"}), "session-id"),
-            ("cloud_agent_manage", json!({"action":"get","id":"agent-id"}), "agent-id"),
-            ("cloud_agent_session", json!({"action":"create","cloudAgentId":"agent-id"}), "agent-id"),
+            (
+                "cloud_agent_session",
+                json!({"action":"ask","sessionId":"session-id"}),
+                "session-id",
+            ),
+            (
+                "cloud_agent_manage",
+                json!({"action":"get","id":"agent-id"}),
+                "agent-id",
+            ),
+            (
+                "cloud_agent_session",
+                json!({"action":"create","cloudAgentId":"agent-id"}),
+                "agent-id",
+            ),
         ] {
             let plans = super::ask_plans(name, &args, std::path::Path::new("/workspace"));
             assert_eq!(plans.len(), 1);
             assert_eq!(plans[0].permission, name);
-            assert_eq!(plans[0].patterns, vec![format!("{}:{target}", args["action"].as_str().unwrap())]);
-            assert_eq!(plans[0].always, vec![format!("{}:*", args["action"].as_str().unwrap())]);
+            assert_eq!(
+                plans[0].patterns,
+                vec![format!("{}:{target}", args["action"].as_str().unwrap())]
+            );
+            assert_eq!(
+                plans[0].always,
+                vec![format!("{}:*", args["action"].as_str().unwrap())]
+            );
             assert!(plans[0].external_paths.is_empty());
         }
     }
@@ -11477,13 +11800,24 @@ mod tests {
 
     #[test]
     fn browser_permissions_cover_captured_urls_and_upload_paths() {
-        let plans = super::ask_plans("browser_files_upload", &json!({
-            "paths":["/tmp/upload.txt"],
-            "__browser":{"target":{"resources":["https://example.test/form"]}}
-        }), std::path::Path::new("/workspace"));
+        let plans = super::ask_plans(
+            "browser_files_upload",
+            &json!({
+                "paths":["/tmp/upload.txt"],
+                "__browser":{"target":{"resources":["https://example.test/form"]}}
+            }),
+            std::path::Path::new("/workspace"),
+        );
         assert_eq!(plans[0].permission, "browser");
-        assert_eq!(plans[0].patterns, vec!["files_upload:https://example.test/form"]);
-        assert!(plans.iter().any(|plan| plan.permission == "external_directory"));
+        assert_eq!(
+            plans[0].patterns,
+            vec!["files_upload:https://example.test/form"]
+        );
+        assert!(
+            plans
+                .iter()
+                .any(|plan| plan.permission == "external_directory")
+        );
         assert!(plans.iter().any(|plan| plan.permission == "read"));
     }
 
@@ -11915,10 +12249,17 @@ mod prepared_usage_tests {
     }
 }
 
-fn constrained_permission(base: PermissionDecision, constraint: Option<PermissionDecision>) -> PermissionDecision {
+fn constrained_permission(
+    base: PermissionDecision,
+    constraint: Option<PermissionDecision>,
+) -> PermissionDecision {
     match (base, constraint) {
-        (PermissionDecision::Deny, _) | (_, Some(PermissionDecision::Deny)) => PermissionDecision::Deny,
-        (PermissionDecision::Ask, _) | (_, Some(PermissionDecision::Ask)) => PermissionDecision::Ask,
+        (PermissionDecision::Deny, _) | (_, Some(PermissionDecision::Deny)) => {
+            PermissionDecision::Deny
+        }
+        (PermissionDecision::Ask, _) | (_, Some(PermissionDecision::Ask)) => {
+            PermissionDecision::Ask
+        }
         _ => PermissionDecision::Allow,
     }
 }

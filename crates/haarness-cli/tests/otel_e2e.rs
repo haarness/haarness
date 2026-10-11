@@ -342,7 +342,10 @@ async fn one_run_is_one_trace_with_errors_usage_and_no_content() {
     std::fs::write(workspace.join("README.md"), "# readme\n").expect("write readme");
     let otel = [
         ("OTEL_EXPORTER_OTLP_ENDPOINT", format!("http://{collector}")),
-        ("OTEL_EXPORTER_OTLP_HEADERS", "x-collector-key=SENTINEL_KEY".to_owned()),
+        (
+            "OTEL_EXPORTER_OTLP_HEADERS",
+            "x-collector-key=SENTINEL_KEY".to_owned(),
+        ),
         ("OTEL_BSP_SCHEDULE_DELAY", "25".to_owned()),
     ];
     let prompt = r#"!multi [{"name":"read","arguments":{"path":"README.md"}},{"name":"read","arguments":{"path":"SENTINEL_MISSING.txt"}},{"name":"bash","arguments":{"command":"printenv > env.txt"}},{"name":"task","arguments":{"description":"child","prompt":"SENTINEL_CHILD","agent":"general"}}]"#;
@@ -350,7 +353,15 @@ async fn one_run_is_one_trace_with_errors_usage_and_no_content() {
         Duration::from_secs(60),
         isolated(&directory.0, &workspace)
             .envs(otel.clone())
-            .args(["--yolo", "run", "--provider", "echo", "--model", "echo-1", prompt])
+            .args([
+                "--yolo",
+                "run",
+                "--provider",
+                "echo",
+                "--model",
+                "echo-1",
+                prompt,
+            ])
             .output(),
     )
     .await
@@ -397,7 +408,11 @@ async fn one_run_is_one_trace_with_errors_usage_and_no_content() {
     assert_eq!(parent_of(request), Some("haarness.client.turn"));
     let tools: Vec<&Span> = named("execute_tool read").collect();
     assert_eq!(tools.len(), 2);
-    assert!(tools.iter().all(|tool| in_run(tool) && parent_of(tool) == Some("invoke_agent build")));
+    assert!(
+        tools
+            .iter()
+            .all(|tool| in_run(tool) && parent_of(tool) == Some("invoke_agent build"))
+    );
     let failed = tools
         .iter()
         .find(|tool| tool.status.as_ref().is_some_and(|status| status.code == 2))
@@ -416,7 +431,13 @@ async fn one_run_is_one_trace_with_errors_usage_and_no_content() {
     // Polling reads stay out of traces, and nothing the person wrote leaves with one.
     assert!(!spans.iter().any(|span| span.name == "GET /v1/turns/{id}"));
     let exported = format!("{spans:?}");
-    for sentinel in ["SENTINEL_KEY", "SENTINEL_MISSING", "SENTINEL_CHILD", "README.md", "printenv"] {
+    for sentinel in [
+        "SENTINEL_KEY",
+        "SENTINEL_MISSING",
+        "SENTINEL_CHILD",
+        "README.md",
+        "printenv",
+    ] {
         assert!(!exported.contains(sentinel), "{sentinel} was exported");
     }
 }

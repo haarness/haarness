@@ -42,11 +42,20 @@ impl Default for ExecutionSettings {
 
 impl ExecutionSettings {
     pub fn validate(&self) -> crate::CoreResult<()> {
-        if self.subagent_concurrency == 0 || self.read_parallelism == 0 || self.media_max_bytes == 0 {
-            return Err(crate::CoreError::Invalid("execution concurrency and media_max_bytes must be positive".into()));
+        if self.subagent_concurrency == 0 || self.read_parallelism == 0 || self.media_max_bytes == 0
+        {
+            return Err(crate::CoreError::Invalid(
+                "execution concurrency and media_max_bytes must be positive".into(),
+            ));
         }
-        if self.plan_read_tools.iter().any(|name| !name.starts_with("ext__") || name.contains(['*', '?', ':'])) {
-            return Err(crate::CoreError::Invalid("execution.plan_read_tools must contain exact ext__ tool names".into()));
+        if self
+            .plan_read_tools
+            .iter()
+            .any(|name| !name.starts_with("ext__") || name.contains(['*', '?', ':']))
+        {
+            return Err(crate::CoreError::Invalid(
+                "execution.plan_read_tools must contain exact ext__ tool names".into(),
+            ));
         }
         Ok(())
     }
@@ -57,11 +66,24 @@ mod tests {
     use super::*;
     #[test]
     fn defaults_and_unlimited_budgets_are_explicit_and_validated() {
-        let settings:ExecutionSettings=serde_json::from_str(r#"{"shell_timeout_ms":0,"code_timeout_ms":0,"code_max_calls":0,"subagent_depth":3}"#).unwrap();
+        let settings: ExecutionSettings = serde_json::from_str(
+            r#"{"shell_timeout_ms":0,"code_timeout_ms":0,"code_max_calls":0,"subagent_depth":3}"#,
+        )
+        .unwrap();
         settings.validate().unwrap();
-        assert_eq!(settings.media_max_bytes,20*1024*1024);
-        for bad in [r#"{"read_parallelism":0}"#,r#"{"subagent_concurrency":0}"#,r#"{"media_max_bytes":0}"#,r#"{"plan_read_tools":["ext__*"]}"#] {
-            assert!(serde_json::from_str::<ExecutionSettings>(bad).unwrap().validate().is_err());
+        assert_eq!(settings.media_max_bytes, 20 * 1024 * 1024);
+        for bad in [
+            r#"{"read_parallelism":0}"#,
+            r#"{"subagent_concurrency":0}"#,
+            r#"{"media_max_bytes":0}"#,
+            r#"{"plan_read_tools":["ext__*"]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ExecutionSettings>(bad)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
         }
         assert!(serde_json::from_str::<ExecutionSettings>(r#"{"shell_timout_ms":0}"#).is_err());
     }
@@ -75,11 +97,32 @@ mod tests {
     }
     #[test]
     fn plan_observation_and_explicit_extension_allowance_preserve_mutation_ceiling() {
-        let mut config=crate::RuntimeConfig::default();
-        config.execution.plan_read_tools.push("ext__search__query".into());
-        let engine=config.permission_defaults("plan","");
-        for tool in ["browser_tabs_list","browser_snapshot","browser_screenshot","browser_find","ext__search__query"] {assert!(!engine.disables_tool(tool),"{tool}");}
-        for tool in ["browser_evaluate","browser_click","browser_files_upload","ext__other__write"] {assert!(engine.disables_tool(tool),"{tool}");}
-        assert_eq!(engine.evaluate("edit:src/main.rs"),crate::PermissionDecision::Deny);
+        let mut config = crate::RuntimeConfig::default();
+        config
+            .execution
+            .plan_read_tools
+            .push("ext__search__query".into());
+        let engine = config.permission_defaults("plan", "");
+        for tool in [
+            "browser_tabs_list",
+            "browser_snapshot",
+            "browser_screenshot",
+            "browser_find",
+            "ext__search__query",
+        ] {
+            assert!(!engine.disables_tool(tool), "{tool}");
+        }
+        for tool in [
+            "browser_evaluate",
+            "browser_click",
+            "browser_files_upload",
+            "ext__other__write",
+        ] {
+            assert!(engine.disables_tool(tool), "{tool}");
+        }
+        assert_eq!(
+            engine.evaluate("edit:src/main.rs"),
+            crate::PermissionDecision::Deny
+        );
     }
 }

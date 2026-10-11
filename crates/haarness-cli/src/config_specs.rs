@@ -44,7 +44,10 @@ pub struct Declarations {
 pub enum Resolution {
     Entry(Entry),
     /// A registry package that `haarness extension install` has not fetched.
-    Pending { package: String, install: String },
+    Pending {
+        package: String,
+        install: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,7 +99,10 @@ fn is_path_spec(spec: &str) -> bool {
 fn looks_like_version(suffix: &str) -> bool {
     suffix.is_empty()
         || suffix.starts_with(|c: char| c.is_ascii_digit() || "^~><=*".contains(c))
-        || matches!(suffix, "latest" | "next" | "beta" | "alpha" | "canary" | "x")
+        || matches!(
+            suffix,
+            "latest" | "next" | "beta" | "alpha" | "canary" | "x"
+        )
 }
 
 /// Whether a `plugin` entry names a JavaScript package/path
@@ -125,11 +131,10 @@ fn extension_spec(item: &Value) -> Option<(String, Value)> {
         Value::String(spec) if !spec.trim().is_empty() => Some((spec.clone(), Value::Null)),
         Value::Array(tuple) => match tuple.as_slice() {
             [Value::String(spec)] if !spec.trim().is_empty() => Some((spec.clone(), Value::Null)),
-            [Value::String(spec), options @ (Value::Object(_) | Value::Null)]
-                if !spec.trim().is_empty() =>
-            {
-                Some((spec.clone(), options.clone()))
-            }
+            [
+                Value::String(spec),
+                options @ (Value::Object(_) | Value::Null),
+            ] if !spec.trim().is_empty() => Some((spec.clone(), options.clone())),
             _ => None,
         },
         _ => None,
@@ -168,15 +173,17 @@ pub fn parse(value: &Value, file: &Path) -> Declarations {
             for (index, item) in items.iter().enumerate() {
                 let spec = match item {
                     Value::String(spec) => Some((spec.clone(), true)),
-                    Value::Object(object) => object
-                        .get("spec")
-                        .and_then(Value::as_str)
-                        .map(|spec| {
+                    Value::Object(object) => {
+                        object.get("spec").and_then(Value::as_str).map(|spec| {
                             (
                                 spec.to_owned(),
-                                object.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+                                object
+                                    .get("enabled")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(true),
                             )
-                        }),
+                        })
+                    }
                     _ => None,
                 };
                 match spec {
@@ -361,7 +368,9 @@ pub fn pending_plugins(data: &Path, declared: &[PluginSpec]) -> Vec<PluginSpec> 
         .filter(|plugin| {
             let (name, market) = plugin_reference(&plugin.spec);
             !installed.get(&name).is_some_and(|record| {
-                market.as_deref().is_none_or(|market| market == record.marketplace)
+                market
+                    .as_deref()
+                    .is_none_or(|market| market == record.marketplace)
             })
         })
         .cloned()
@@ -432,17 +441,37 @@ mod tests {
             }),
             file,
         );
-        let extensions: Vec<_> = parsed.extensions.iter().map(|item| item.spec.as_str()).collect();
+        let extensions: Vec<_> = parsed
+            .extensions
+            .iter()
+            .map(|item| item.spec.as_str())
+            .collect();
         assert_eq!(
             extensions,
-            ["./ext/index.ts", "@team/reviewer@1.0.0", "file:///abs/plugin.js", "example-notify", "@scope/pkg@^2", "pkg@1.2.3"]
+            [
+                "./ext/index.ts",
+                "@team/reviewer@1.0.0",
+                "file:///abs/plugin.js",
+                "example-notify",
+                "@scope/pkg@^2",
+                "pkg@1.2.3"
+            ]
         );
         assert_eq!(parsed.extensions[1].options, json!({"strict": true}));
         assert_eq!(parsed.extensions[0].file, file);
-        let plugins: Vec<_> = parsed.plugins.iter().map(|item| (item.spec.as_str(), item.enabled)).collect();
+        let plugins: Vec<_> = parsed
+            .plugins
+            .iter()
+            .map(|item| (item.spec.as_str(), item.enabled))
+            .collect();
         assert_eq!(
             plugins,
-            [("reviewer@internal", true), ("linter@internal", false), ("docs@marketplace", true), ("market/name", true)]
+            [
+                ("reviewer@internal", true),
+                ("linter@internal", false),
+                ("docs@marketplace", true),
+                ("market/name", true)
+            ]
         );
         assert_eq!(parsed.notices.len(), 3, "{:?}", parsed.notices);
         assert!(parsed.notices[0].contains("extensions[2]"));
@@ -450,8 +479,14 @@ mod tests {
         assert!(parsed.notices[2].contains("plugins[2]"));
         assert_eq!(classify("name@latest"), Kind::Extension);
         assert_eq!(classify("name@internal"), Kind::Plugin);
-        assert_eq!(plugin_reference("linter@internal"), ("linter".into(), Some("internal".into())));
-        assert_eq!(plugin_reference("internal/linter"), ("linter".into(), Some("internal".into())));
+        assert_eq!(
+            plugin_reference("linter@internal"),
+            ("linter".into(), Some("internal".into()))
+        );
+        assert_eq!(
+            plugin_reference("internal/linter"),
+            ("linter".into(), Some("internal".into()))
+        );
         assert_eq!(plugin_reference("linter"), ("linter".into(), None));
         assert_eq!(npm_package_name("@scope/pkg@^2"), "@scope/pkg");
         assert_eq!(npm_package_name("pkg"), "pkg");
@@ -463,38 +498,92 @@ mod tests {
         let config_dir = root.join("config");
         let data = root.join("data");
         fs::create_dir_all(config_dir.join("ext")).unwrap();
-        fs::write(config_dir.join("ext/index.ts"), "export default {apiVersion:1,name:'local'};").unwrap();
+        fs::write(
+            config_dir.join("ext/index.ts"),
+            "export default {apiVersion:1,name:'local'};",
+        )
+        .unwrap();
         let file = config_dir.join("haarness.json");
-        let local = ExtensionSpec { spec: "./ext".into(), options: json!({"k":1}), file: file.clone() };
+        let local = ExtensionSpec {
+            spec: "./ext".into(),
+            options: json!({"k":1}),
+            file: file.clone(),
+        };
         let Resolution::Entry(entry) = resolve_extension(&local, &data).unwrap() else {
             panic!("local path must resolve");
         };
-        assert_eq!(entry.source, config_dir.join("ext/index.ts").canonicalize().unwrap());
+        assert_eq!(
+            entry.source,
+            config_dir.join("ext/index.ts").canonicalize().unwrap()
+        );
         assert_eq!(entry.options, json!({"k":1}));
         assert!(entry.enabled);
-        let url = ExtensionSpec { spec: format!("file://{}", config_dir.join("ext/index.ts").display()), options: Value::Null, file: file.clone() };
-        assert!(matches!(resolve_extension(&url, &data).unwrap(), Resolution::Entry(_)));
-        let missing = ExtensionSpec { spec: "./missing.ts".into(), options: Value::Null, file: file.clone() };
+        let url = ExtensionSpec {
+            spec: format!("file://{}", config_dir.join("ext/index.ts").display()),
+            options: Value::Null,
+            file: file.clone(),
+        };
+        assert!(matches!(
+            resolve_extension(&url, &data).unwrap(),
+            Resolution::Entry(_)
+        ));
+        let missing = ExtensionSpec {
+            spec: "./missing.ts".into(),
+            options: Value::Null,
+            file: file.clone(),
+        };
         assert!(resolve_extension(&missing, &data).is_err());
 
-        let package = ExtensionSpec { spec: "@team/reviewer@1.0.0".into(), options: json!({"strict":true}), file: file.clone() };
-        let Resolution::Pending { package: name, install } = resolve_extension(&package, &data).unwrap() else {
+        let package = ExtensionSpec {
+            spec: "@team/reviewer@1.0.0".into(),
+            options: json!({"strict":true}),
+            file: file.clone(),
+        };
+        let Resolution::Pending {
+            package: name,
+            install,
+        } = resolve_extension(&package, &data).unwrap()
+        else {
             panic!("uninstalled packages are pending");
         };
         assert_eq!(name, "@team/reviewer");
-        assert_eq!(install, "haarness extension install npm:@team/reviewer@1.0.0");
+        assert_eq!(
+            install,
+            "haarness extension install npm:@team/reviewer@1.0.0"
+        );
         for id in ["0190-old", "0191-new"] {
-            let module = data.join("extensions/packages").join(id).join("node_modules/@team/reviewer");
+            let module = data
+                .join("extensions/packages")
+                .join(id)
+                .join("node_modules/@team/reviewer");
             fs::create_dir_all(&module).unwrap();
-            fs::write(module.join("package.json"), format!("{{\"name\":\"@team/reviewer\",\"main\":\"{id}.js\"}}")).unwrap();
-            fs::write(module.join(format!("{id}.js")), "export default {apiVersion:1,name:'reviewer'};").unwrap();
+            fs::write(
+                module.join("package.json"),
+                format!("{{\"name\":\"@team/reviewer\",\"main\":\"{id}.js\"}}"),
+            )
+            .unwrap();
+            fs::write(
+                module.join(format!("{id}.js")),
+                "export default {apiVersion:1,name:'reviewer'};",
+            )
+            .unwrap();
         }
         let Resolution::Entry(entry) = resolve_extension(&package, &data).unwrap() else {
             panic!("installed packages resolve");
         };
-        assert!(entry.source.ends_with("0191-new/node_modules/@team/reviewer/0191-new.js"), "{}", entry.source.display());
+        assert!(
+            entry
+                .source
+                .ends_with("0191-new/node_modules/@team/reviewer/0191-new.js"),
+            "{}",
+            entry.source.display()
+        );
         assert_eq!(entry.options, json!({"strict":true}));
-        let bad = ExtensionSpec { spec: "npm:../escape".into(), options: Value::Null, file };
+        let bad = ExtensionSpec {
+            spec: "npm:../escape".into(),
+            options: Value::Null,
+            file,
+        };
         assert!(resolve_extension(&bad, &data).is_err());
         fs::remove_dir_all(root).unwrap();
     }
@@ -507,7 +596,11 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
         let bundle = root.join("bundle");
         fs::create_dir_all(bundle.join(".claude-plugin")).unwrap();
-        fs::write(bundle.join(".claude-plugin/plugin.json"), r#"{"name":"linter","version":"1.0.0"}"#).unwrap();
+        fs::write(
+            bundle.join(".claude-plugin/plugin.json"),
+            r#"{"name":"linter","version":"1.0.0"}"#,
+        )
+        .unwrap();
         plugins::install(&paths.data, &bundle.display().to_string()).unwrap();
         fs::write(
             workspace.join("haarness.json"),
@@ -516,23 +609,60 @@ mod tests {
         .unwrap();
         let declared = declarations(paths.config_dir(), &workspace, true);
         assert_eq!(declared.plugins.len(), 3);
-        let pending: Vec<_> = pending_plugins(&paths.data, &declared.plugins).into_iter().map(|plugin| plugin.spec).collect();
+        let pending: Vec<_> = pending_plugins(&paths.data, &declared.plugins)
+            .into_iter()
+            .map(|plugin| plugin.spec)
+            .collect();
         assert_eq!(pending, ["reviewer@internal", "docs@marketplace"]);
-        assert_eq!(disabled_plugins(paths.config_dir(), &workspace, true), BTreeSet::from(["linter".to_owned()]));
-        assert!(disabled_plugins(paths.config_dir(), &workspace, false).is_empty(), "untrusted projects declare nothing");
-        assert!(plugins::all_enabled_roots(&paths.data, paths.config_dir(), &workspace, true).is_empty());
-        assert_eq!(plugins::all_enabled_roots(&paths.data, paths.config_dir(), &workspace, false).len(), 1);
+        assert_eq!(
+            disabled_plugins(paths.config_dir(), &workspace, true),
+            BTreeSet::from(["linter".to_owned()])
+        );
+        assert!(
+            disabled_plugins(paths.config_dir(), &workspace, false).is_empty(),
+            "untrusted projects declare nothing"
+        );
+        assert!(
+            plugins::all_enabled_roots(&paths.data, paths.config_dir(), &workspace, true)
+                .is_empty()
+        );
+        assert_eq!(
+            plugins::all_enabled_roots(&paths.data, paths.config_dir(), &workspace, false).len(),
+            1
+        );
         let infos = plugins::plugin_infos(&paths.data, paths.config_dir(), &workspace, true);
         assert_eq!(infos.len(), 1);
-        assert!(!infos[0].enabled, "configuration disables discovery and the listing agrees");
+        assert!(
+            !infos[0].enabled,
+            "configuration disables discovery and the listing agrees"
+        );
         let notices = startup_notices(&paths, &workspace, true);
-        assert!(notices.iter().any(|notice| notice.contains("plugin reviewer@internal") && notice.contains("haarness plugin install reviewer@internal")), "{notices:?}");
-        assert!(notices.iter().any(|notice| notice.contains("extension package example-notify") && notice.contains("haarness extension install npm:example-notify")), "{notices:?}");
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice.contains("plugin reviewer@internal")
+                    && notice.contains("haarness plugin install reviewer@internal")),
+            "{notices:?}"
+        );
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice.contains("extension package example-notify")
+                    && notice.contains("haarness extension install npm:example-notify")),
+            "{notices:?}"
+        );
         let layers = jsonconfig::load_layers(paths.config_dir(), None, &workspace, true, &[]);
         assert!(layers.errors.is_empty(), "{:?}", layers.errors);
         fs::write(workspace.join("haarness.json"), r#"{"extensions":[42]}"#).unwrap();
         let layers = jsonconfig::load_layers(paths.config_dir(), None, &workspace, true, &[]);
-        assert!(layers.notices.iter().any(|notice| notice.contains("extensions[0]")), "{:?}", layers.notices);
+        assert!(
+            layers
+                .notices
+                .iter()
+                .any(|notice| notice.contains("extensions[0]")),
+            "{:?}",
+            layers.notices
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
