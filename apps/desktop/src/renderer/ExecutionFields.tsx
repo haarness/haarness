@@ -37,7 +37,7 @@ export function ExecutionFields(props: {
             value={props.agent ?? ""}
             disabled={props.disabled}
             options={[
-              { value: "", label: t("Use session agent") },
+              { value: "", label: t("Use chat agent") },
               ...agents().map((agent) => ({
                 value: agent.id,
                 label: agent.name || agent.id,
@@ -66,7 +66,7 @@ export function ExecutionFields(props: {
           onEffortChange={props.setVariant}
           disabled={props.disabled}
           options={[
-            { value: "", label: t("Use session model") },
+            { value: "", label: t("Use chat model") },
             ...models(),
             ...(props.model &&
             !models().some((model) => model.value === props.model)

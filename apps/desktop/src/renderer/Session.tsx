@@ -604,7 +604,7 @@ export function Session() {
     queue.editing()
       ? t("Save queued message")
       : showStop()
-        ? t("Stop session")
+        ? t("Stop response")
         : t("Send message");
   // The name stays "Send"; the tooltip says what sending does mid-work.
   const sendHint = () =>
@@ -757,7 +757,7 @@ export function Session() {
     return [
       {
         key: "focus-composer",
-        group: "Conversation actions",
+        group: "Chat actions",
         name: t("Focus message composer"),
         keywords: "write draft input",
         icon: "compose",
@@ -770,7 +770,7 @@ export function Session() {
         ? [
             {
               key: "dictation",
-              group: "Conversation actions",
+              group: "Chat actions",
               name: voice.active() ? t("Stop dictation") : t("Start dictation"),
               keywords: "microphone voice speech transcribe",
               icon: "mic" as const,
@@ -785,7 +785,7 @@ export function Session() {
         ? [
             {
               key: "remote-control",
-              group: "Conversation actions",
+              group: "Chat actions",
               name: t("Remote control"),
               detail: `${t("Continue this chat from your phone or any browser")} · /remote-control`,
               keywords: "remote control share phone mobile cloud qr rc dc",
@@ -798,7 +798,7 @@ export function Session() {
         ? [
             {
               key: "stop-turn",
-              group: "Conversation actions",
+              group: "Chat actions",
               name: t("Stop response"),
               keywords: "interrupt cancel turn",
               icon: "stop" as const,
@@ -1006,7 +1006,7 @@ export function Session() {
     }
   }
   const ForkDivider = () => (
-    <div class="fork-origin" role="note" aria-label={t("Conversation origin")}>
+    <div class="fork-origin" role="note" aria-label={t("Chat origin")}>
       <button
         class="fork-origin-link"
         disabled={!forkSource()}
@@ -1125,7 +1125,7 @@ export function Session() {
       if (!state.connection || !state.selected)
         throw new Error(t("Send a first message, then share the chat with /remote-control."));
       if (thread()?.isSubagent)
-        throw new Error(t("Share the conversation that started this agent; its agents come with it."));
+        throw new Error(t("Share the chat that started this agent; its agents come with it."));
       change("");
       app.openRemoteControl(action);
       return;
@@ -1415,7 +1415,7 @@ export function Session() {
         // Room for the outline from the first prompt, so text never moves when it appears.
         "with-outline": !empty(),
       }}
-      aria-label={t("Conversation")}
+      aria-label={t("Chat")}
     >
       <Show when={fileDrop.dragging()}>
         <div class="chat-file-drop-hint" role="status">{t("Drop files to attach")}</div>
@@ -1444,7 +1444,7 @@ export function Session() {
       </Show>
       <Show when={controls.busy()}>
         <div class="conversation-history-notice" role="status">
-          {t("Updating conversation history…")}
+          {t("Updating chat history…")}
         </div>
       </Show>
       <Show when={archived()}>
@@ -1461,7 +1461,7 @@ export function Session() {
           class="transcript"
           ref={scrolling}
           tabIndex={0}
-          aria-label={t("Conversation history")}
+          aria-label={t("Chat history")}
           onScroll={onScroll}
           onFocusIn={onHistoryFocus}
           onWheel={(event) => {
@@ -1520,7 +1520,7 @@ export function Session() {
                 </Show>
               </h2>
               <Show when={project()}>
-                <div class="suggestions" aria-label={t("Conversation starters")}>
+                <div class="suggestions" aria-label={t("Chat starters")}>
                   <For each={projectStarters}>
                     {(item) => (
                       <button
@@ -1788,7 +1788,7 @@ export function Session() {
                 }
                 placeholder={
                   !project()
-                    ? t("Choose a project to start a conversation")
+                    ? t("Choose a project to start a chat")
                     : active()
                       ? t("Send a follow-up message…")
                       : state.selected
@@ -2431,7 +2431,7 @@ function Permission(props: {
             class="ghost prompt-link"
             onClick={() => app.run(() => app.choose(props.permission.threadId))}
           >
-            {t("View agent session")}
+            {t("View agent chat")}
           </button>
         </Show>
       </header>
@@ -2496,7 +2496,7 @@ function Permission(props: {
           <button
             disabled={answered()}
             onClick={() => decide("auto")}
-            title={t("Allow this request once and enable Auto for this conversation and its agents")}
+            title={t("Allow this request once and enable Auto for this chat and its agents")}
           >
             {t("Allow once + Auto")}
           </button>

@@ -23,7 +23,7 @@ Clients connected to an older server keep the earlier client-side behaviour desc
 
 ## Desktop
 
-- Use the shield control at the left of the composer, or search for **Enable Auto approvals** / **Switch approvals to Review**.
+- Use the shield control at the left of the composer, which reads **Review** or **Auto**, or search for **Enable Auto approvals** / **Switch approvals to Review**. Its tooltip says what Review asks about by default: edits and commands inside the project run without asking.
 - With a conversation open, the control changes that conversation's mode on its server. From a child agent view it applies only to that child and its descendants; the parent and siblings keep their mode. A parent set to Review keeps its agents in Review.
 - On a new chat, the control sets the mode for new chats Desktop starts in that workspace/checkout. It applies to chats Desktop creates, not to chats started by the TUI, a phone or the API.
 - **Allow once + Auto** answers the visible request first and enables Auto only after the reply succeeds and the view/mode has not changed.

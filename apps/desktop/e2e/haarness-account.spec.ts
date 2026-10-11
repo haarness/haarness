@@ -207,7 +207,7 @@ test("Haarness account signs in through a browser, discovers Cloud models, and s
         await page.getByRole("button", { name: "Send message", exact: true }).click();
         await expect(page.locator(".message.assistant").filter({ hasText: marker })).toBeVisible({ timeout: 120000 });
         await expect(page.getByRole("button", { name: "Stop", exact: true })).toHaveCount(0, { timeout: 120000 });
-        await page.getByRole("button", { name: "New session", exact: true }).click();
+        await page.getByRole("button", { name: "New chat", exact: true }).click();
       }
       expect(cloud.models.find((m: any) => m.id === "openai/gpt-4.1").reasoningEfforts).toEqual([]);
       // Image-only models (Nano Banana) are not chat models.

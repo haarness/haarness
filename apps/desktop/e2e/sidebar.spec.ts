@@ -272,7 +272,7 @@ test("sidebar direct Electron input reorders sessions from text, status and arch
     for (const [handle, destination, expected] of [
       [".session-title", "Two", ["Three", "One", "Two"]],
       [".session-status", "Three", ["One", "Three", "Two"]],
-      ['button[aria-label="Archive session One"]', "Two", ["Three", "Two", "One"]],
+      ['button[aria-label="Archive chat One"]', "Two", ["Three", "Two", "One"]],
     ] as const) {
       const row = list.locator(".session-row").filter({ has: page.getByRole("button", { name: "One", exact: true }) });
       await electronDrag(row.locator(handle), list.getByRole("button", { name: destination, exact: true }));
@@ -598,7 +598,7 @@ test("sidebar flat and project session orders stay independent through archive, 
   await expect(flat().locator(".session-title")).toHaveText(["Two", "One"]);
   await flat().getByRole("button", { name: "One", exact: true }).dragTo(flat().getByRole("button", { name: "Two", exact: true }));
   await expect(flat().locator(".session-title")).toHaveText(["One", "Two"]);
-  await flat().getByRole("button", { name: "Archive session One", exact: true }).click();
+  await flat().getByRole("button", { name: "Archive chat One", exact: true }).click();
   await expect(flat().locator(".session-title")).toHaveText(["Two"]);
   await expect.poll(() => alpha.getThread(one.id).then(thread => thread.archived)).toBe(true);
   await alpha.updateThread(one.id, { archived: false });
@@ -627,7 +627,7 @@ test("sidebar an archived chat says so in the chat; Restore or a new message ret
   await row().click();
   await expect(page.locator(".transcript")).toContainText("first thought");
   await expect(notice).toHaveCount(0);
-  await project("alpha").getByRole("button", { name: "Archive session Shelved idea", exact: true }).click();
+  await project("alpha").getByRole("button", { name: "Archive chat Shelved idea", exact: true }).click();
   await expect(row()).toHaveCount(0);
   await expect.poll(() => alpha.getThread(thread.id).then(value => value.archived)).toBe(true);
 

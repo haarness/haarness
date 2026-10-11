@@ -192,7 +192,7 @@ export function BrowserSettings() {
     <div class="browser-settings">
       <p class="muted">
         {t(
-          "Manage browser behavior and agent access. Each conversation has a separate browser; localhost uses the connected project’s server.",
+          "Manage browser behavior and agent access. Each chat has a separate browser; localhost uses the connected project’s server.",
         )}
       </p>
       <div class="browser-settings-scope" data-setting="Browser settings scope">
@@ -254,7 +254,7 @@ export function BrowserSettings() {
       <h3>{t("General")}</h3>
       <Row
         title="Web link destination"
-        description="Where web links in conversations open. Applies to this desktop."
+        description="Where web links in chats open. Applies to this desktop."
       >
         <Select
           aria-label={t("Web link destination")}
@@ -326,7 +326,7 @@ export function BrowserSettings() {
       </Row>
       <Row
         title="Browsing data"
-        description="Clear this project’s tabs, cookies, site storage, cache, history, and retained downloads on this desktop. Saved files and conversation attachments remain."
+        description="Clear this project’s tabs, cookies, site storage, cache, history, and retained downloads on this desktop. Saved files and chat attachments remain."
       >
         <button
           disabled={!app.state.connection || dataBusy()}
@@ -336,7 +336,7 @@ export function BrowserSettings() {
               (await confirm(
                 t("Clear browsing data?"),
                 t(
-                  "Close this project’s browser tabs and clear their browsing data on this desktop. Files saved separately and conversation attachments remain.",
+                  "Close this project’s browser tabs and clear their browsing data on this desktop. Files saved separately and chat attachments remain.",
                 ),
                 { submit: t("Clear browsing data"), danger: true },
               )) &&
@@ -564,7 +564,7 @@ export function BrowserSettings() {
           {t("Remember site approvals")}{" "}
           <small>
             {t(
-              "Allow a site for this session or folder. Turn off to require approval for every action.",
+              "Allow a site for this chat or folder. Turn off to require approval for every action.",
             )}
           </small>
         </span>
@@ -665,7 +665,7 @@ export function BrowserSettings() {
       </div>
       <p class="muted">
         {t(
-          "Logins are temporary and separate for each conversation. Restarting Desktop or reconnecting the project clears them. Camera, microphone, and device access are blocked.",
+          "Logins are temporary and separate for each chat. Restarting Desktop or reconnecting the project clears them. Camera, microphone, and device access are blocked.",
         )}
       </p>
     </div>

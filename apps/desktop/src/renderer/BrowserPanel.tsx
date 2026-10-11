@@ -399,7 +399,7 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
                 : t("Open a tab now. It will follow you into your next chat.")}
             </p>
             <small>
-              {state.selected ? t("Each conversation has its own browser.") : t("Tabs follow you into your next chat.")}{" "}
+              {state.selected ? t("Each chat has its own browser.") : t("Tabs follow you into your next chat.")}{" "}
               {t("Localhost uses this project’s server.")}
             </small>
           </div>

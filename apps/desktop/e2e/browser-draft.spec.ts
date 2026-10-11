@@ -471,7 +471,7 @@ test("a real model reads the page carried into its new conversation", async () =
     );
 });
 test("another new chat gets its own tabs and restart restores its URLs without a phantom conversation", async () => {
-  await page.getByRole("button", { name: "New session", exact: true }).click();
+  await page.getByRole("button", { name: "New chat", exact: true }).click();
   await showBrowser();
   expect((await inventory()).tabs).toHaveLength(0);
   await panel()

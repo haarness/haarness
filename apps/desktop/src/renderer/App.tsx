@@ -69,7 +69,7 @@ const panelChoices: {
   {
     name: "Context",
     icon: "chart",
-    detail: "Inspect conversation tokens, cache and context",
+    detail: "Inspect chat tokens, cache and context",
     shortcut: "context",
   },
 ];
@@ -89,6 +89,7 @@ const Explorer = lazy(() =>
   import("./Explorer").then((module) => ({ default: module.Explorer })),
 );
 import { Review } from "./Review";
+import { chatTitle } from "./chat-title";
 const TerminalPanel = lazy(() =>
   import("./Terminal").then((module) => ({ default: module.TerminalPanel })),
 );
@@ -265,10 +266,10 @@ export function App() {
       );
     const actions: SearchEntry[] = [
       {key:"browser",group:"Project panels",name:t("Open browser"),keywords:"web website Chromium tabs",icon:"web",hint:hint("browser", "Mod+Shift+B"),disabled:!connected,action:()=>openDock("browser")},
-      {key:"memory",group:"Conversation actions",name:t("Manage memory"),keywords:"project memory index",icon:"layers",disabled:!connected,action:()=>set("memoryOpen",true)},
+      {key:"memory",group:"Chat actions",name:t("Manage memory"),keywords:"project memory index",icon:"layers",disabled:!connected,action:()=>set("memoryOpen",true)},
       {
         key: "permission-mode",
-        group: "Conversation actions",
+        group: "Chat actions",
         name: app.isAutoApproval()
           ? t("Switch approvals to Review")
           : t("Enable Auto approvals"),
@@ -280,8 +281,8 @@ export function App() {
       {
         key: "new",
         group: "Commands",
-        name: t("New session"),
-        keywords: "new chat conversation",
+        name: t("New chat"),
+        keywords: "new chat conversation session",
         icon: "compose",
         hint: hint("new"),
         action: newChat,
@@ -372,7 +373,7 @@ export function App() {
       {
         key: "chat",
         group: "Commands",
-        name: t("Return to conversation"),
+        name: t("Return to chat"),
         keywords: "back chat session",
         icon: "chat",
         disabled: !connected,
@@ -403,7 +404,7 @@ export function App() {
       {
         key: "import",
         group: "Commands",
-        name: t("Import session archive"),
+        name: t("Import chat archive"),
         keywords: "restore history",
         icon: "download",
         disabled: !connected,
@@ -412,7 +413,7 @@ export function App() {
           if (archive) {
             await app.api("importSessionArchive", { archive });
             await app.refresh();
-            app.notify(t("Session archive imported"));
+            app.notify(t("Chat archive imported"));
           }
         },
       },
@@ -438,24 +439,24 @@ export function App() {
       actions.push(
         {
           key: "conversation-context",
-          group: "Conversation actions",
-          name: t("View conversation context"),
+          group: "Chat actions",
+          name: t("View chat context"),
           keywords: "usage tokens cache cost breakdown",
           icon: "chart",
           action: () => openDock("context"),
         },
         {
           key: "rename",
-          group: "Conversation actions",
-          name: t("Rename session"),
+          group: "Chat actions",
+          name: t("Rename chat"),
           icon: "edit",
           detail: current.title,
           action: () => renameSession(app, current),
         },
         {
           key: "fork",
-          group: "Conversation actions",
-          name: t("Fork session"),
+          group: "Chat actions",
+          name: t("Fork chat"),
           icon: "fork",
           detail: current.title,
           action: async () => {
@@ -470,8 +471,8 @@ export function App() {
         },
         {
           key: "archive",
-          group: "Conversation actions",
-          name: current.archived ? t("Restore session") : t("Archive session"),
+          group: "Chat actions",
+          name: current.archived ? t("Restore chat") : t("Archive chat"),
           icon: current.archived ? "restore" : "archive",
           detail: current.title,
           action: async () => {
@@ -483,8 +484,8 @@ export function App() {
         },
         {
           key: "close-chat",
-          group: "Conversation actions",
-          name: t("Close conversation tab"),
+          group: "Chat actions",
+          name: t("Close chat tab"),
           icon: "close",
           detail: current.title,
           action: () => app.closeTab(current.id),
@@ -711,7 +712,7 @@ export function App() {
           </div>
           <nav class="primary-nav" aria-label={t("Main navigation")}>
             <button
-              aria-label={t("New session")}
+              aria-label={t("New chat")}
               class="new-session"
               onClick={() => app.run(newChat)}
             >
@@ -856,7 +857,7 @@ export function App() {
                 <div class="session-bar">
                   <Show when={selected()?.isSubagent && selected()?.parentId}>
                     <Button
-                      label={t("Back to parent conversation")}
+                      label={t("Back to parent chat")}
                       icon="chevron"
                       class="parent-conversation"
                       onClick={() =>
@@ -880,7 +881,7 @@ export function App() {
                           <span
                             class="session-bar-name"
                             title={
-                              (selected()!.title || t("Untitled session")) +
+                              chatTitle(selected()!.title) +
                               "\n" +
                               t("Double-click to rename")
                             }
@@ -888,7 +889,7 @@ export function App() {
                               app.run(() => renameSession(app, selected()!))
                             }
                           >
-                            {selected()!.title || t("Untitled session")}
+                            {chatTitle(selected()!.title)}
                           </span>
                         </Show>
                       </div>
@@ -901,7 +902,7 @@ export function App() {
                             class="workspace-tab"
                             {...sessionTabs.dropProps(
                               id,
-                              t("session tab"),
+                              t("chat tab"),
                               "x",
                             )}
                             classList={{
@@ -913,22 +914,25 @@ export function App() {
                             <button
                               role="tab"
                               aria-selected={id === state.selected}
-                              title={
+                              title={chatTitle(
                                 state.threads.find((thread) => thread.id === id)
-                                  ?.title
-                              }
+                                  ?.title,
+                              )}
                               onClick={() => app.run(() => app.choose(id))}
                             >
                               <Show when={running(id)}>
                                 <span class="session-status running" />
                               </Show>
-                              {state.threads.find(
-                                (thread) => thread.id === id,
-                              )?.title ?? t("Session")}
+                              <Show
+                                when={state.threads.find((thread) => thread.id === id)}
+                                fallback={t("Chat")}
+                              >
+                                {(thread) => chatTitle(thread().title)}
+                              </Show>
                             </button>
                             <Button
                               icon="close"
-                              label={t("Close session tab")}
+                              label={t("Close chat tab")}
                               onClick={() => app.run(() => app.closeTab(id))}
                             />
                           </div>
@@ -940,12 +944,12 @@ export function App() {
                     <Show when={selected()}>
                       <SessionActions
                         thread={selected()!}
-                        label={t("Session actions")}
+                        label={t("Chat actions")}
                       />
                     </Show>
                     <Button
                       icon="plus"
-                      label={t("New session tab")}
+                      label={t("New chat tab")}
                       onClick={() => app.run(newChat)}
                     />
                   </div>
@@ -956,7 +960,7 @@ export function App() {
                   <ChatLoading
                     label={
                       state.openingChat || state.loadingChat
-                        ? t("Loading conversation…")
+                        ? t("Loading chat…")
                         : state.openingProject ? t("Opening project…") : t("Loading…")
                     }
                   />
@@ -1046,7 +1050,7 @@ export function App() {
                   aria-label={t("Open a project panel")}
                 >
                   <h2>{t("Your tools, alongside chat")}</h2>
-                  <p>{t("Open what you need without leaving the conversation.")}</p>
+                  <p>{t("Open what you need without leaving the chat.")}</p>
                   <For each={panelChoices}>
                     {(item) => (
                       <button

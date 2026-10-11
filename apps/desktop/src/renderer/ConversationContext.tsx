@@ -106,12 +106,12 @@ export function ConversationContext() {
       ["Cache write tokens", totals()?.cacheWriteTokens],
     ] as const;
   return (
-    <section class="conversation-context" aria-label={t("Conversation context")}>
+    <section class="conversation-context" aria-label={t("Chat context")}>
       <header>
-        <h2>{t("Conversation context")}</h2>
+        <h2>{t("Chat context")}</h2>
         <Button
           icon="refresh"
-          label={t("Refresh conversation context")}
+          label={t("Refresh chat context")}
           disabled={loading() || !thread()}
           onClick={() => setRefresh((value) => value + 1)}
         />
@@ -119,7 +119,7 @@ export function ConversationContext() {
       <Show
         when={thread()}
         fallback={
-          <p>{t("Select a conversation to inspect its context and usage.")}</p>
+          <p>{t("Select a chat to inspect its context and usage.")}</p>
         }
       >
         <p class="context-title">{thread()!.title}</p>
@@ -218,7 +218,7 @@ export function ConversationContext() {
                 <dl class="context-breakdown">
                   <div><dt>{t("System instructions")}</dt><dd>{tokenNumber(prompt().system_tokens)}</dd></div>
                   <div><dt>{t("Tool definitions")}</dt><dd>{tokenNumber(prompt().tool_tokens)}</dd></div>
-                  <div><dt>{t("Conversation history")}</dt><dd>{tokenNumber(prompt().history_tokens)}</dd></div>
+                  <div><dt>{t("Chat history")}</dt><dd>{tokenNumber(prompt().history_tokens)}</dd></div>
                   <Show when={prompt().media_tokens}>
                     <div><dt>{t("Media")}</dt><dd>{tokenNumber(prompt().media_tokens)}</dd></div>
                   </Show>
@@ -274,8 +274,8 @@ export function ConversationContext() {
             </p>
           </Show>
         </section>
-        <section aria-label={t("Conversation usage totals")} aria-busy={loading()}>
-          <h3>{t("Conversation totals")}</h3>
+        <section aria-label={t("Chat usage totals")} aria-busy={loading()}>
+          <h3>{t("Chat totals")}</h3>
           <p class="context-note">
             {t("Cumulative reported usage across requests, including undone and compacted history. This is not the current context size.")}
           </p>

@@ -16,7 +16,7 @@ async function choose(path:string,first=false) {
   await expect(page.locator(".titlebar")).toContainText(path.split("/").at(-1)!);
 }
 async function api(method:string,...args:any[]):Promise<any> {return page.evaluate(({connection,method,args})=>window.haarness.api(connection,method,args),{connection:"local:"+current,method,args});}
-async function session() {await page.getByRole("button",{name:"New session",exact:true}).click();await expect(page.getByRole("textbox",{name:"Message",exact:true})).toBeVisible();}
+async function session() {await page.getByRole("button",{name:"New chat",exact:true}).click();await expect(page.getByRole("textbox",{name:"Message",exact:true})).toBeVisible();}
 async function send(text:string) {const box=page.getByRole("textbox",{name:"Message",exact:true});await box.fill(text.startsWith("/")?text:" "+text);await page.getByRole("button",{name:/Send message|Send guidance/}).click();}
 async function idle() {await expect.poll(async()=>(await api("activeTurns")).length,{timeout:30000}).toBe(0);}
 async function proof(name:string) {await page.screenshot({path:test.info().outputPath(name+".png")});await test.info().attach(name,{body:await page.locator("body").innerText(),contentType:"text/plain"});}
@@ -92,7 +92,7 @@ test("larger media survives a real drop, draft reload and server submission",asy
     bytes.set(Uint8Array.from(png,c=>c.charCodeAt(0)));
     const data=new DataTransfer();data.items.add(new File([bytes],"large-parity.png",{type:"image/png"}));return data;
   });
-  await page.getByRole("region",{name:"Conversation",exact:true}).dispatchEvent("drop",{dataTransfer:transfer});
+  await page.getByRole("region",{name:"Chat",exact:true}).dispatchEvent("drop",{dataTransfer:transfer});
   await expect(page.getByRole("button",{name:"Remove large-parity.png",exact:true})).toBeVisible();
   await page.reload();
   await expect(page.getByRole("button",{name:"Remove large-parity.png",exact:true})).toBeVisible();

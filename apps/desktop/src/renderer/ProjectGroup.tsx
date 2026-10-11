@@ -20,6 +20,7 @@ import { createOrdering, createOrderDropTarget } from "./Sortable";
 import { Button, Icon, ask, confirm, type IconName } from "./ui";
 import { SessionActions } from "./SessionActions";
 import { createFileDrop } from "./file-drop";
+import { chatTitle } from "./chat-title";
 
 function ProjectGroup(props: {
   project: DesktopProject;
@@ -316,7 +317,7 @@ function ProjectGroup(props: {
                         name: props.project.label,
                       }),
                       t(
-                        "Conversation history, running tasks and the saved server connection are preserved.",
+                        "Chat history, running tasks and the saved server connection are preserved.",
                       ),
                       { submit: t("Remove project"), danger: true },
                     )
@@ -553,7 +554,7 @@ function LocationGroup(props: { project: DesktopProject; location: Recent }) {
           fallback={
             <p class="sessions-empty">
               {t(
-                "Restore the folder at its original path to reopen these conversations.",
+                "Restore the folder at its original path to reopen these chats.",
               )}
             </p>
           }
@@ -635,7 +636,7 @@ export function SessionList(props: {
             state.panel === "chat";
           const sort = order.dropProps(
             key,
-            t("session {name}", { name: row().thread.title }),
+            t("chat {name}", { name: chatTitle(row().thread.title) }),
           );
           /* Under a project heading only a worktree or extra folder needs
              naming. In the flat list every row names its project, and a
@@ -682,7 +683,7 @@ export function SessionList(props: {
                     .join(". ") || undefined
                 }
                 aria-current={selected()}
-                title={row().thread.title || t("Untitled session")}
+                title={chatTitle(row().thread.title)}
                 onClick={() =>
                   app.run(() =>
                     app.chooseProjectSession(
@@ -702,7 +703,7 @@ export function SessionList(props: {
                 />
                 <span class="session-label">
                   <span class="session-title">
-                    {row().thread.title || t("Untitled session")}
+                    {chatTitle(row().thread.title)}
                   </span>
                   <Show when={place()}>
                     {(where) => (
@@ -741,7 +742,7 @@ export function SessionList(props: {
             ? ""
             : loading()
               ? t("Opening…")
-              : t("No conversations yet.")}
+              : t("No chats yet.")}
         </p>
       </Show>
       <For each={failures()}>
@@ -844,7 +845,7 @@ function ScheduledSessions(props: { rows: Conversation[] }) {
   });
   return (
     <Show when={groups().length}>
-      <section class="scheduled-sessions" aria-label={t("Scheduled conversations")}>
+      <section class="scheduled-sessions" aria-label={t("Scheduled chats")}>
         <button
           class="scheduled-heading"
           aria-expanded={expanded()}
@@ -921,7 +922,7 @@ function ScheduledSessions(props: { rows: Conversation[] }) {
                                   time: label(),
                                 })}
                                 aria-current={active()}
-                                title={row().thread.title}
+                                title={chatTitle(row().thread.title)}
                                 onClick={() =>
                                   app.run(() =>
                                     app.chooseProjectSession(
@@ -970,7 +971,7 @@ function ScheduledSessions(props: { rows: Conversation[] }) {
                             }))
                           }
                         >
-                          {t("Show more conversations")}
+                          {t("Show more chats")}
                         </button>
                       </Show>
                     </div>

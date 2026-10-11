@@ -78,7 +78,7 @@ export const settingsControls = [
   ["general", "Language", "locale translation english japanese french display language"],
   ["general", "Appearance", "dark light auto system mode"],
   ["general", "Theme", "color colours palette"],
-  ["general", "Conversation text size", "chat font message size"],
+  ["general", "Chat text size", "chat font message size"],
   ["general", "Terminal text size", "terminal font size"],
   ["general", "Task notifications", "alerts notify background"],
   ["general", "Compact tool activity", "collapse expand tool output arguments"],

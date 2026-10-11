@@ -730,7 +730,7 @@ test("opening a chat shows the centered loading mark without home flashes and ig
     await firstRow.click();
     await expect.poll(() => arrived).toBe(1);
     const loading = page.getByRole("status", {
-      name: "Loading conversation…",
+      name: "Loading chat…",
       exact: true,
     });
     await expect(loading).toBeVisible();
@@ -755,7 +755,7 @@ test("opening a chat shows the centered loading mark without home flashes and ig
       (window as any).watchNavigation = false;
     });
     await page
-      .getByRole("button", { name: "New session", exact: true })
+      .getByRole("button", { name: "New chat", exact: true })
       .click();
     gate = new Promise<void>((resolve) => {
       release = resolve;
