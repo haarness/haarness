@@ -1,0 +1,377 @@
+/* The welcome and options page. Logical properties only: it runs right to left in Arabic. */
+@import url("./base.css");
+
+body {
+  background: var(--page);
+}
+.grow {
+  flex: 1;
+  min-width: 0;
+}
+.small {
+  font-size: var(--ui-sm);
+}
+.loading {
+  display: grid;
+  place-items: center;
+  padding: var(--s9) 0;
+}
+
+/* ---------------------------------------------------------------- top bar */
+.top {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: color-mix(in srgb, var(--page) 88%, transparent);
+  backdrop-filter: blur(12px);
+  border-block-end: 1px solid var(--hairline);
+}
+.top-inner {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: var(--s3) var(--s6);
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+.brand {
+  font-size: var(--ui-lg);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.brand-tile {
+  display: block;
+  flex: none;
+}
+
+/* ------------------------------------------------------------------- page */
+.page {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: var(--s8) var(--s6) var(--s9);
+}
+.hero {
+  max-width: 680px;
+  margin-block-end: var(--s7);
+}
+.lead {
+  margin-block-start: var(--s3);
+  font-size: var(--title-sm);
+  line-height: var(--lh-read);
+  color: var(--muted);
+}
+.columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: var(--s7) var(--s8);
+  align-items: start;
+}
+.main-column,
+.side-column {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.main-column {
+  gap: var(--s8);
+}
+.side-column {
+  gap: var(--s4);
+}
+@media (max-width: 880px) {
+  .columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .page {
+    padding: var(--s6) var(--s4) var(--s8);
+  }
+}
+
+/* ------------------------------------------------------------------ cards */
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  padding: var(--s5);
+  border-radius: var(--r-xl);
+  border: 1px solid var(--hairline);
+  background: var(--surface);
+}
+.card h2 {
+  font-size: var(--ui-lg);
+}
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+}
+.section h2 {
+  margin-block-end: var(--s4);
+}
+
+/* ------------------------------------------------------------------ steps */
+.steps {
+  padding: var(--s5) var(--s6) var(--s6);
+}
+.step-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.step {
+  position: relative;
+  display: flex;
+  gap: var(--s3);
+  padding-block-end: var(--s5);
+}
+.step:last-child {
+  padding-block-end: 0;
+}
+/* The line that joins one step to the next. */
+.step:not(:last-child)::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 13px;
+  inset-block-start: 30px;
+  inset-block-end: 4px;
+  width: 1px;
+  background: var(--hairline);
+}
+.step-mark {
+  flex: none;
+  width: 27px;
+  height: 27px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: var(--ui-sm);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  border: 1px solid color-mix(in srgb, var(--muted) 40%, transparent);
+  background: var(--page);
+}
+.step.done .step-mark {
+  color: var(--page);
+  background: var(--green);
+  border-color: transparent;
+}
+.step-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding-block-start: 3px;
+}
+.step-body h3 {
+  font-size: var(--ui-lg);
+  line-height: 1.5;
+}
+.step.done .step-body h3 {
+  color: var(--muted);
+}
+.step-body p {
+  color: var(--muted);
+  font-size: var(--ui);
+  line-height: var(--lh-read);
+}
+.step-body .copy-field {
+  max-width: 420px;
+}
+
+/* --------------------------------------------------------------- features */
+.features {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s6) var(--s7);
+}
+@media (max-width: 640px) {
+  .features {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.features li {
+  display: flex;
+  gap: var(--s3);
+}
+.feature-icon {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-md);
+  display: grid;
+  place-items: center;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.features h3 {
+  font-size: var(--ui-lg);
+  margin-block: 5px var(--s1);
+}
+.features p {
+  color: var(--muted);
+  font-size: var(--ui);
+  line-height: var(--lh-read);
+}
+
+/* ---------------------------------------------------------- troubleshooting */
+.help {
+  margin: 0;
+  display: grid;
+  grid-template-columns: minmax(160px, 200px) minmax(0, 1fr);
+  border-block-start: 1px solid var(--hairline);
+}
+.help dt,
+.help dd {
+  margin: 0;
+  padding: var(--s3) 0;
+  border-block-end: 1px solid var(--hairline);
+  font-size: var(--ui);
+  line-height: var(--lh-read);
+}
+.help dt {
+  font-weight: 600;
+  padding-inline-end: var(--s4);
+}
+.help dd {
+  color: var(--muted);
+}
+.help-command {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.help-command .copy-field {
+  max-width: 320px;
+}
+@media (max-width: 640px) {
+  .help {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .help dt {
+    border-block-end: 0;
+    padding-block-end: 0;
+  }
+}
+
+/* --------------------------------------------------------------- settings */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+.field + .field {
+  padding-block-start: var(--s3);
+  border-block-start: 1px solid var(--hairline);
+}
+.field label {
+  font-size: var(--ui);
+  font-weight: 550;
+}
+.field-help {
+  font-size: var(--ui-sm);
+  color: var(--muted);
+  line-height: 1.5;
+}
+.field.toggle {
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s4);
+}
+.field.toggle > div {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0);
+}
+.field.toggle input {
+  margin-block-start: 1px;
+}
+
+/* --------------------------------------------------------------- projects */
+.projects {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+.projects li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+}
+.projects li > .icon {
+  margin-block-start: 2px;
+  color: var(--muted);
+}
+.project-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.project-name {
+  font-size: var(--ui);
+  font-weight: 600;
+}
+.project-path,
+.path {
+  font-family: var(--mono);
+  font-size: var(--ui-xs);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-error {
+  font-size: var(--ui-sm);
+  color: var(--danger);
+}
+.pill.small {
+  height: 20px;
+  padding: 0 var(--s1);
+  font-size: var(--ui-xs);
+  gap: 5px;
+}
+.pill.small .dot {
+  width: 6px;
+  height: 6px;
+}
+
+/* --------------------------------------------------------------- versions */
+.versions {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--s1) var(--s4);
+  font-size: var(--ui);
+}
+.versions dt {
+  color: var(--muted);
+}
+.versions dd {
+  margin: 0;
+  text-align: end;
+  font-family: var(--mono);
+  font-size: var(--ui-sm);
+}
+.folder {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-block-start: var(--s2);
+  border-block-start: 1px solid var(--hairline);
+}
+.folder .path {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}

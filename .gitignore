@@ -10,4 +10,7 @@ node_modules/
 /apps/desktop/resources/
 /apps/desktop/test-results/
 /apps/desktop/playwright-report/
+/apps/browser-extension/dist/
+/apps/browser-extension/test-results/
+/apps/browser-extension/playwright-report/
 /dist/releases/

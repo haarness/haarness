@@ -8,6 +8,9 @@
     "desktop:test": "npm --prefix apps/desktop test && npm --prefix apps/desktop run test:e2e",
     "desktop:package": "npm --prefix apps/desktop run package",
     "driver:test": "npm --prefix packages/browser-driver run typecheck && npm --prefix packages/browser-driver test && npm --prefix packages/browser-driver run contract:check",
-    "driver:contract": "npm --prefix packages/browser-driver run contract"
+    "driver:contract": "npm --prefix packages/browser-driver run contract",
+    "extension:install": "npm --prefix apps/browser-extension ci",
+    "extension:build": "npm --prefix apps/browser-extension run build",
+    "extension:test": "npm --prefix apps/browser-extension test && npm --prefix apps/browser-extension run test:e2e"
   }
 }
