@@ -335,15 +335,19 @@ impl Scheduler {
         validate_trigger(&trigger)?;
         validate_model(input.model.as_deref())?;
         let workspace = canonical_directory(&input.workspace)?;
+        let name = match input
+            .name
+            .or_else(|| parsed.and_then(|value| value.name))
+            .filter(|value| !value.trim().is_empty())
+        {
+            Some(name) => name,
+            None => self.unused_name(&title_from_prompt(&prompt))?,
+        };
         let timestamp = Utc::now();
         let schedule = Schedule {
             id: Uuid::now_v7(),
             backend: self.backend,
-            name: input
-                .name
-                .or_else(|| parsed.and_then(|value| value.name))
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| title_from_prompt(&prompt)),
+            name,
             workspace,
             prompt,
             model: clean(input.model),
@@ -465,6 +469,23 @@ impl Scheduler {
             .list()?
             .into_iter()
             .find(|schedule| schedule.id.to_string() == reference || schedule.name == reference))
+    }
+
+    /// A name made from the prompt never blocks a schedule: the same prompt
+    /// again, here or in another project, becomes "check deps 2".
+    fn unused_name(&self, base: &str) -> Result<String> {
+        let taken: Vec<String> = self.list()?.into_iter().map(|other| other.name).collect();
+        // One of the first len + 1 names is free.
+        Ok((1..=taken.len() + 1)
+            .map(|count| {
+                if count == 1 {
+                    base.to_owned()
+                } else {
+                    format!("{base} {count}")
+                }
+            })
+            .find(|name| !taken.contains(name))
+            .expect("one of them is free"))
     }
 
     /// Names double as references (`haarness schedule run <name>`), so two
@@ -2020,15 +2041,28 @@ mod tests {
     fn schedule_names_are_unique_because_they_are_references() {
         let (root, scheduler) = fixture(Backend::Launchd);
         let first = create(&scheduler, &root, Trigger::Interval { seconds: 3600 });
+        // A name someone chose is refused when taken.
         let error = scheduler
             .create(CreateSchedule {
-                request: Some("every day at 8am to repo summary".into()),
+                request: Some("schedule named \"repo summary\" every day at 8am to x".into()),
                 workspace: root.join("workspace"),
                 enabled: true,
                 ..CreateSchedule::default()
             })
             .unwrap_err();
         assert!(error.to_string().contains("already exists"), "{error}");
+        // A name made from the prompt is numbered instead.
+        for expected in ["repo summary 2", "repo summary 3"] {
+            let numbered = scheduler
+                .create(CreateSchedule {
+                    request: Some("every day at 8am to repo summary".into()),
+                    workspace: root.join("workspace"),
+                    enabled: true,
+                    ..CreateSchedule::default()
+                })
+                .unwrap();
+            assert_eq!(numbered.name, expected);
+        }
         let second = scheduler
             .create(CreateSchedule {
                 name: Some("other".into()),
