@@ -1,6 +1,7 @@
 //! Elegant server-driven terminal client rendered through OpenTUI.
 
 pub mod api;
+mod chrome;
 mod commands;
 mod config;
 mod connect;
@@ -931,6 +932,7 @@ async fn run_with_client(
                     }
                 }
                 app.poll_remote_control(&client);
+                app.poll_chrome(&client);
                 if app.goal_refresh_needed && app.tick.is_multiple_of(10) {
                     hydrate_goal_snapshot(&mut app, &client).await;
                     app.reveal_goal_completion();

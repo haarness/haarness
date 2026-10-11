@@ -394,6 +394,8 @@ pub enum Overlay {
     ProviderLogin,
     /// `/remote-control`; the state lives in `App::remote`.
     RemoteControl,
+    /// `/chrome`; the state lives in `App::chrome`.
+    Chrome,
 }
 
 /// What the workflow inspector is showing: a durable run, or a definition you
@@ -504,7 +506,8 @@ impl Overlay {
             | Self::Diff(_)
             | Self::Workflow { .. }
             | Self::ProviderLogin
-            | Self::RemoteControl => false,
+            | Self::RemoteControl
+            | Self::Chrome => false,
         }
     }
 }
@@ -580,6 +583,8 @@ pub struct App {
     pub(crate) connect: crate::connect::ConnectFlow,
     /// `/remote-control`: whether this chat is shared through Haarness Cloud.
     pub(crate) remote: crate::remote_control::RemoteControl,
+    /// `/chrome`: whether agents can use the person's own Chrome.
+    pub(crate) chrome: crate::chrome::Chrome,
     pub thread: Thread,
     pub threads: Vec<Thread>,
     /// Whether the current session catalog includes archived conversations.
@@ -982,6 +987,7 @@ impl App {
             management: crate::management::Management::default(),
             connect: crate::connect::ConnectFlow::default(),
             remote: crate::remote_control::RemoteControl::default(),
+            chrome: crate::chrome::Chrome::default(),
             pending_server: None,
             original_client: None,
             keybindings: crate::keybindings::load().unwrap_or_default(),
@@ -2233,7 +2239,10 @@ impl App {
             Overlay::Models => self.filtered_models().len(),
             Overlay::Agents => self.filtered_agents().len(),
             Overlay::Themes => self.filtered_themes().len(),
-            Overlay::Workflow { .. } | Overlay::ProviderLogin | Overlay::RemoteControl => 0,
+            Overlay::Workflow { .. }
+            | Overlay::ProviderLogin
+            | Overlay::RemoteControl
+            | Overlay::Chrome => 0,
             Overlay::Options { ref entries, .. } => self.filtered_options(entries).len(),
             Overlay::None | Overlay::Panel { .. } | Overlay::Diff(_) => self
                 .slash_suggestions()
@@ -2638,7 +2647,8 @@ impl App {
             | Overlay::Diff(_)
             | Overlay::Workflow { .. }
             | Overlay::ProviderLogin
-            | Overlay::RemoteControl => None,
+            | Overlay::RemoteControl
+            | Overlay::Chrome => None,
         }
     }
 }
