@@ -623,6 +623,10 @@ pub struct App {
     pub auto_permissions_seen: std::collections::HashMap<String, bool>,
     /// The server applies Auto itself, for every client.
     pub approval_server: bool,
+    /// Launched with `--yolo`: this TUI answers every request its open
+    /// conversation raises once, and its turns approve their own. The server
+    /// is not a yolo server, so other clients' chats still ask.
+    pub yolo: bool,
     pub approval_mode: Option<haarness_protocol::ApprovalModeInfo>,
     /// True while the approval card owns the keyboard: its hotkeys answer the
     /// first pending permission and the composer draws no cursor. Ctrl+G and
@@ -918,6 +922,7 @@ impl App {
             auto_permissions: false,
             auto_permissions_seen: std::collections::HashMap::new(),
             approval_server: false,
+            yolo: false,
             approval_mode: None,
             permission_focus: false,
             confirm_always: None,

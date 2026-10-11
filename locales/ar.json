@@ -1619,6 +1619,7 @@
   "Review · asks before risky steps · ctrl+y for Auto": "المراجعة · تسأل قبل الخطوات الخطرة · ctrl+y للتلقائي",
   "approvals: review": "الموافقات: المراجعة",
   "approvals: auto": "الموافقات: التلقائي",
+  "approvals: --yolo": "الموافقات: --yolo",
   "Answer the approval above · ctrl+g to type": "أجب عن طلب الموافقة أعلاه · ctrl+g للكتابة",
   "Haarness needs approval": "يحتاج Haarness إلى موافقة",
   "Approval pending": "موافقة معلّقة",

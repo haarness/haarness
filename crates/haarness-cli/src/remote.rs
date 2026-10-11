@@ -90,7 +90,7 @@ impl WorkspaceHost for Host {
             });
         }
         let paths = self.paths.scoped(&workspace.id, false)?;
-        let discovery = ensure_workspace_server(&paths, &path, self.trust, false).await?;
+        let discovery = ensure_workspace_server(&paths, &path, self.trust).await?;
         Ok(WorkspaceTarget {
             url: discovery.url,
             token: discovery.token,

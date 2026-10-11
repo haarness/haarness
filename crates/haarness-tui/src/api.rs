@@ -211,6 +211,9 @@ pub struct ApiClient {
     server_restarter: Option<ServerRestarter>,
     upload_attachments: bool,
     local_workspace_switching: bool,
+    /// `haarness --yolo`: approve this client's own requests, never the
+    /// server's (see [`ApiClient::with_auto_approve`]).
+    auto_approve: bool,
     pty_events: tokio::sync::broadcast::Sender<PtyClientEvent>,
     pty_connections: Arc<Mutex<HashMap<PtyId, PtyClientConnection>>>,
 }
@@ -335,6 +338,7 @@ impl ApiClient {
             server_restarter: None,
             upload_attachments: false,
             local_workspace_switching: false,
+            auto_approve: false,
             pty_events,
             pty_connections: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -356,6 +360,22 @@ impl ApiClient {
     pub fn with_server_restarter(mut self, restarter: ServerRestarter) -> Self {
         self.server_restarter = Some(restarter);
         self
+    }
+
+    /// `haarness --yolo` for one terminal: every turn this client starts
+    /// approves its own requests once (`autoApprove`), and the TUI answers
+    /// the rest in the conversation it shows. The server stays as it was, so
+    /// other chats keep asking and nothing is approved after the TUI closes
+    /// but the turns it started.
+    #[must_use]
+    pub fn with_auto_approve(mut self, auto_approve: bool) -> Self {
+        self.auto_approve = auto_approve;
+        self
+    }
+
+    #[must_use]
+    pub fn auto_approves(&self) -> bool {
+        self.auto_approve
     }
 
     /// Refresh a remote ticket without enabling local project switching.
@@ -1376,6 +1396,7 @@ impl ApiClient {
         // prompt is one trace from the client through every model and tool call.
         let span = tracing::info_span!("haarness.client.turn", "otel.kind" = "client");
         async {
+            request.auto_approve |= self.auto_approve;
             request.attachments = self.attachments(request.attachments).await?;
             Ok(self
                 .request(reqwest::Method::POST, &format!("/v1/threads/{id}/turns"))

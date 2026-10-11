@@ -1619,6 +1619,7 @@
   "Review · asks before risky steps · ctrl+y for Auto": "Revue · demande avant les étapes risquées · ctrl+y pour l’automatique",
   "approvals: review": "approbations : Revue",
   "approvals: auto": "approbations : Automatique",
+  "approvals: --yolo": "approbations : --yolo",
   "Answer the approval above · ctrl+g to type": "Répondez à l’approbation ci-dessus · ctrl+g pour écrire",
   "Haarness needs approval": "Haarness a besoin d’une approbation",
   "Approval pending": "Approbation en attente",

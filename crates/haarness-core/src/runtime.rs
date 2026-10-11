@@ -7734,10 +7734,11 @@ impl RunnerTask {
         let always_rules = plan.always_rules();
         let automatic = self.config.auto_approve || self.request.auto_approve;
         if automatic && !forced {
-            // A --yolo daemon approves and remembers, exactly as an "always"
-            // answer would, so repeated commands stay silent even mid-run. A
-            // single turn's flag (a schedule, `run --yolo`, ACP) approves once:
-            // its rules would otherwise reach every chat on this daemon.
+            // A `serve --yolo` server approves and remembers, exactly as an
+            // "always" answer would, so repeated commands stay silent even
+            // mid-run. A single turn's flag (a schedule, `run --yolo`, ACP, a
+            // `--yolo` terminal UI) approves once: its rules would otherwise
+            // reach every chat on this server.
             if self.config.auto_approve {
                 let mut session = self.session_rules.lock();
                 for pattern in &always_rules {

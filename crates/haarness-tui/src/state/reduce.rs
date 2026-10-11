@@ -130,6 +130,39 @@ impl App {
         false
     }
 
+    /// `--yolo`: answer a request in the conversation this TUI shows once,
+    /// as `haarness run --yolo` does for its run. A request that must ask
+    /// every time (no Always choice) still gets its card.
+    async fn yolo_permission(&mut self, id: &str, eligible: bool, client: &ApiClient) -> bool {
+        if !self.yolo || !eligible {
+            return false;
+        }
+        if let Some(approved) = self.auto_permissions_seen.get(id) {
+            return *approved;
+        }
+        let reply = client.reply_permission(
+            id,
+            haarness_protocol::PermissionReply {
+                decision: haarness_protocol::PermissionReplyDecision::Once,
+                feedback: None,
+            },
+        );
+        let approved = matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), reply).await,
+            Ok(Ok(()))
+        );
+        self.auto_permissions_seen.insert(id.to_owned(), approved);
+        if !approved {
+            self.show_toast(
+                None,
+                "Auto approval failed · review the request manually".into(),
+                ToastVariant::Warning,
+                std::time::Duration::from_secs(5),
+            );
+        }
+        approved
+    }
+
     pub async fn hydrate_permissions(
         &mut self,
         requests: Vec<PendingPermissionInfo>,
@@ -140,15 +173,22 @@ impl App {
         for request in requests {
             let eligible = request.allow_always != Some(false)
                 && !matches!(request.permission.as_str(), "instruction_import");
+            let in_conversation = request.root_thread_id == Some(self.root_thread_id)
+                || request.thread_id == self.thread.id;
+            if in_conversation
+                && self
+                    .yolo_permission(&request.permission_id, eligible, client)
+                    .await
+            {
+                continue;
+            }
             if self
                 .auto_permission(&request.permission_id, eligible, client)
                 .await
             {
                 continue;
             }
-            if request.root_thread_id == Some(self.root_thread_id)
-                || request.thread_id == self.thread.id
-            {
+            if in_conversation {
                 pending.push(request);
             }
         }
@@ -171,6 +211,11 @@ impl App {
                     event.payload["permission"].as_str(),
                     Some("instruction_import")
                 );
+            let in_conversation = event.thread_id == Some(self.thread.id)
+                || event.root_thread_id == Some(self.root_thread_id);
+            if in_conversation && self.yolo_permission(id, eligible, client).await {
+                return Ok(());
+            }
             if self.auto_permission(id, eligible, client).await {
                 return Ok(());
             }

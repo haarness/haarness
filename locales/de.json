@@ -1619,6 +1619,7 @@
   "Review · asks before risky steps · ctrl+y for Auto": "Überprüfung · fragt vor riskanten Schritten · ctrl+y für Automatik",
   "approvals: review": "Freigaben: Überprüfung",
   "approvals: auto": "Freigaben: Automatik",
+  "approvals: --yolo": "Freigaben: --yolo",
   "Answer the approval above · ctrl+g to type": "Beantworte die Freigabe oben · ctrl+g zum Tippen",
   "Haarness needs approval": "Haarness braucht eine Freigabe",
   "Approval pending": "Freigabe ausstehend",
