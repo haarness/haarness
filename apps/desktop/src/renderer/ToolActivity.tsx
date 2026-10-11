@@ -20,6 +20,7 @@ import {
   toolName,
   toolOutput,
   toolFailed,
+  toolVerb,
   routineEditOutput,
   changeRows,
   changeStats,
@@ -75,15 +76,18 @@ export function ToolActivity(props: {
     (status() === "running" || (status() === "pending" && !props.settled));
   // The verb tells the row's state: "Writing" while it runs or waits for
   // approval, "Wrote" once done, "Tried to write" when the tool errored or
-  // was refused. A command that ran and exited non-zero still "Ran".
-  const verb = () =>
-    props.result
+  // was refused. A command that ran and exited non-zero still "Ran". The
+  // forms are English keys; a batch's label arrives already translated.
+  const verb = () => {
+    const form = props.result
       ? props.result.is_error
         ? shape().attempt
         : shape().verb
       : props.settled
         ? shape().attempt
         : shape().doing;
+    return batch().length ? form : toolVerb(form);
+  };
   const changes = createMemo(() =>
     toolChanges(toolName(props.name), props.args, props.result),
   );
@@ -152,7 +156,7 @@ export function ToolActivity(props: {
                   fallback={
                     <div class="tool-console">
                       <div class="tool-console-label">
-                        {input().label}
+                        {t(input().label)}
                         <Show when={input().context}>
                           <span>{input().context}</span>
                         </Show>

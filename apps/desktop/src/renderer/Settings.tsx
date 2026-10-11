@@ -393,7 +393,7 @@ function General() {
               return (
                 <button
                   class="theme-option"
-                  aria-label={t("{name} theme", { name: theme.name })}
+                  aria-label={t("{name} theme", { name: t(theme.name) })}
                   aria-pressed={app.state.preferences.palette === theme.id}
                   title={t(theme.description)}
                   onClick={() =>
@@ -424,7 +424,7 @@ function General() {
                     </span>
                   </span>
                   <span class="theme-option-label">
-                    {theme.name}
+                    {t(theme.name)}
                     <Show when={app.state.preferences.palette === theme.id}>
                       <Icon name="check" size="sm" />
                     </Show>

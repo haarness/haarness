@@ -37,9 +37,20 @@
   flex: none;
   min-width: 46px;
 }
+/* macOS draws the traffic lights at the window's physical top left in every
+   language. Left to right, the sidebar toggle's toolbar sits there and keeps
+   them clear; right to left it moves to the far right, so the title bar
+   itself keeps the corner free and the side-panel buttons stay out of it. */
 .application[data-platform="darwin"] .window-toolbar {
   padding-left: 78px;
   min-width: 116px;
+}
+:root[dir="rtl"] .application[data-platform="darwin"] .titlebar {
+  padding-left: 78px;
+}
+:root[dir="rtl"] .application[data-platform="darwin"] .window-toolbar {
+  padding-left: var(--s2);
+  min-width: 46px;
 }
 .titlebar-session {
   min-width: 0;

@@ -84,6 +84,10 @@ kbd {
   color: var(--muted);
   white-space: nowrap;
   letter-spacing: 0.04em;
+  /* A shortcut reads left to right in every language: in Arabic, "⌘ N"
+     must not turn into "N ⌘". Isolated, so it cannot reorder its sentence. */
+  direction: ltr;
+  unicode-bidi: isolate;
 }
 
 /* ------------------------------------------------------------------ buttons */

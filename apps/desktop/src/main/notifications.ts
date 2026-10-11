@@ -26,7 +26,13 @@ export function createNotifications(input: {
   policy?: () => { completionNotifications: "background" | "always" | "never"; permissionNotifications: boolean; questionNotifications: boolean };
   create: (options: { title: string; body: string }) => NativeNotification;
   open: (target: NotificationTarget, owner: number) => void;
+  /** The interface language's text for an English catalog key. */
+  translate?: (key: string) => string;
 }) {
+  const say = (key: string, values: Record<string, string> = {}) =>
+    (input.translate?.(key) ?? key).replace(/\{(\w+)\}/g, (match, name: string) =>
+      Object.hasOwn(values, name) ? values[name] : match,
+    );
   const claimed = new Set<string>();
   const visible = new Map<NativeNotification, string>();
   const revisions = new Map<string, number>();
@@ -112,14 +118,14 @@ export function createNotifications(input: {
     // "New chat") is not a name: Desktop calls that chat untitled.
     const kind = untitledKind(conversation?.title);
     const name = !conversation
-      ? "Chat " + root.slice(0, 8)
+      ? say("Chat {id}", { id: root.slice(0, 8) })
       : kind === "chat"
-        ? "Untitled chat"
+        ? say("Untitled chat")
         : kind === "fork"
-          ? "Fork of untitled chat"
+          ? say("Fork of untitled chat")
           : conversation.title;
     const notification = input.create({
-      title: `Haarness — ${title}`,
+      title: `Haarness — ${say(title)}`,
       body: `${name} · ${label}`,
     });
     const target = { connection, thread: root };

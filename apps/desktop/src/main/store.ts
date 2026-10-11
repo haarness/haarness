@@ -1,4 +1,4 @@
-import { displayLanguage, parseLanguage } from "../localization";
+import { displayLanguage, parseLanguage, translate } from "../localization";
 import type { ServerAuth } from "@haarness/sdk";
 import { z } from "zod";
 import { app, safeStorage } from "electron";
@@ -189,7 +189,13 @@ export async function preferences(input: Partial<Preferences>) {
     new Set(shortcuts.map((value) => value.toLowerCase())).size !==
       shortcuts.length
   )
-    throw new Error("Use unique shortcuts such as Mod+Shift+E.");
+    // Shown as is in Settings, so it speaks the language Settings is in.
+    throw new Error(
+      translate(
+        state.preferences.language,
+        "Use unique shortcuts such as Mod+Shift+E.",
+      ),
+    );
   state.preferences = candidate;
   await persist();
   return candidate;

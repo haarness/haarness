@@ -1369,7 +1369,7 @@ export function Session() {
       | Extract<T.ItemData, { type: "tool_call" }>
       | undefined;
     if (tool) return toolActivity(tool.name, tool.arguments);
-    return stream()?.text ? "Writing a reply" : "Thinking";
+    return stream()?.text ? t("Writing a reply") : t("Thinking");
   });
   /**
    * Where the next message will run. Each choice says which checkout it is and

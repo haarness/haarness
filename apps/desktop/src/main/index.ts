@@ -35,7 +35,7 @@ import {
   type WorkspaceOperationResponse,
 } from "@haarness/sdk";
 import { z } from "zod";
-import type { DesktopEvent, Recent, NotificationTarget } from "../shared";
+import type { Connection, DesktopEvent, Recent, NotificationTarget } from "../shared";
 import { serverKey } from "../servers";
 import { mergeProjectCatalog, projectKey } from "../projects";
 import {
@@ -145,6 +145,7 @@ const notifications = createNotifications({
   focused: () =>
     [...windows].some((win) => !win.isDestroyed() && win.isFocused()),
   create: (options) => new Notification(options),
+  translate: say,
   open: (target, owner) => {
     const win =
       [...windows].find((win) => win.id === owner) ??
@@ -222,8 +223,12 @@ function watchNotifications(id: string, owner: number) {
         cursor = event.eventId;
         retry = 0;
         void notifications
-          .receive(id, item.view.label, watch.owner, event, (thread) =>
-            client.getThread(thread),
+          .receive(
+            id,
+            projectLabel(connections.get(id)?.view ?? item.view),
+            watch.owner,
+            event,
+            (thread) => client.getThread(thread),
           )
           .catch(() => {});
       }
@@ -237,6 +242,18 @@ function watchNotifications(id: string, owner: number) {
       );
   }
   void listen();
+}
+/** The name the sidebar shows for a project: its name from Edit project,
+ * else the catalog's. Read when a notification goes out, so a rename since
+ * the project was opened is already in it. */
+function projectLabel(view: Connection) {
+  const presentation = data().values["project-presentation:v1"] as
+    | { projects?: Record<string, { name?: unknown } | undefined> }
+    | undefined;
+  const name = presentation?.projects?.[projectKey(view)]?.name;
+  return typeof name === "string" && name.trim()
+    ? name.trim()
+    : (view.project?.name ?? view.label);
 }
 function forgetNotifications(id: string) {
   notificationWatches.get(id)?.stop();
