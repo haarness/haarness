@@ -74,10 +74,11 @@ export function FormDialog(props: {
         </header>
         {/* Clear a failed save on click, not pointerdown: dropping the alert
             shrinks the dialog, which re-centres, so the pointer would come up
-            outside the control it pressed and the click would be lost. */}
+            outside the control it pressed and the click would be lost. The
+            capture phase also sees pickers, whose trigger stops the click. */}
         <fieldset
           disabled={locked()}
-          onClick={() => setError("")}
+          on:click={{ handleEvent: () => setError(""), capture: true }}
           onKeyDown={() => setError("")}
         >
           {props.children(locked)}
