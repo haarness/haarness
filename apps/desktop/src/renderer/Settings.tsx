@@ -664,7 +664,7 @@ function Servers() {
                   app.run(async () => {
                     if (
                       await confirm(
-                        t("Remove this server?"),
+                        t("Remove server {name}?", { name: item.label }),
                         t("This removes the saved connection and its projects from Desktop. Chat history and running tasks on the server are preserved."),
                         { submit: t("Remove server"), danger: true },
                       )
@@ -740,7 +740,7 @@ function Projects() {
                 app.run(async () => {
                   if (
                     await confirm(
-                      t("Forget this project?"),
+                      t("Forget project {name}?", { name: item.label }),
                       t(
                         "Chat history, running tasks and the saved server connection are preserved.",
                       ),

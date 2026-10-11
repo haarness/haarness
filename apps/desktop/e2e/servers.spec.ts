@@ -542,8 +542,7 @@ test("legacy remote connections migrate independently and empty local selection 
   const finalPane = await settings("Servers");
   await finalPane.getByRole("button", { name: "Remove", exact: true }).click();
   await page
-    .locator("dialog[open]")
-    .last()
+    .getByRole("dialog", { name: "Remove server Renamed server?", exact: true })
     .getByRole("button", { name: "Remove server", exact: true })
     .click();
   await expect(finalPane).not.toContainText("Renamed server");
