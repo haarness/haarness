@@ -241,6 +241,24 @@ test("a popup from an agent tab joins its chat; one bound for a blocked site is 
   assert.equal(h.fake.tabsById.has(blocked.id), false);
 });
 
+test("a tab a background agent tab opens joins its chat, whatever Chrome names as its opener", async () => {
+  const h = await boot();
+  h.start();
+  h.attach();
+  const { live } = await h.open("https://a.example/");
+  const mine = h.fake.createTab({ url: "https://mine.example/", active: true });
+  // Chrome names the active tab as opener, but groups the new tab with the tab that opened it.
+  const popup = h.fake.createTab({ url: "", openerTabId: mine.id, source: live.id });
+  await h.until((message) => message.type === "to-server" && message.message.state?.tabs.length === 2);
+  assert.equal(h.host.debug.registry.owner(popup.id)?.entry.thread, THREAD);
+  assert.equal(h.host.debug.registry.owner(mine.id), undefined);
+  // A browser page opened in the group (the user's "New tab in group") is not the agent's.
+  const page = h.fake.createTab({ url: "chrome://newtab/", source: live.id });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(h.host.debug.registry.owner(page.id), undefined);
+  assert.equal(h.fake.tabsById.get(page.id)!.groupId, -1);
+});
+
 test("the page may not follow a redirect to a site this chat was not allowed", async () => {
   const h = await boot();
   h.start();

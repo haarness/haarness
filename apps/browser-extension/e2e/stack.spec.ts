@@ -267,3 +267,146 @@ async function evaluateAllowed(stack: Stack, thread: Awaited<ReturnType<Stack["t
   if (!done) await stack.answer(thread, "always");
   return call.done;
 }
+
+test("a Chrome site asks even in Auto mode, and Allow in this chat covers only that chat", async ({ stack }) => {
+  const thread = await stack.thread("Auto chat");
+  await stack.api.setApprovalMode(thread.id, { mode: "auto" });
+  const call = stack.call(thread, "browser_tabs_open", { url: stack.site.url("shop", "/"), browser: "chrome" });
+  const prompt = await stack.answer(thread, "always");
+  expect(prompt.explicit).toBe(true);
+  const tab = value<Tab>(await call.done);
+  // Allowed in this chat: no further prompt for the site.
+  expect(value<Tab>(await stack.tool(thread, "browser_navigate", { tabID: tab.id, url: stack.site.url("shop", "/form") })).title).toBe("Order form");
+
+  // Another chat asks again.
+  const other = await stack.thread("Another chat");
+  const second = stack.call(other, "browser_tabs_open", { url: stack.site.url("shop", "/"), browser: "chrome" });
+  const asked = await stack.answer(other, "reject");
+  expect(asked.patterns).toContain(`chrome-browsing:${other.id}:${stack.site.origin("shop")}`);
+  expect(failed(await second.done)).toBeTruthy();
+});
+
+test.describe("with every tool allowed in the project's configuration", () => {
+  test.use({ projectConfig: '[defaults]\nprovider = "echo"\nmodel = "echo-1"\n[permissions]\n"*" = "allow"\nbrowser_site = "allow"\n' });
+
+  test("Chrome sites still ask, and Allow once covers one call", async ({ stack }) => {
+    const thread = await stack.thread("Configured chat");
+    const call = stack.call(thread, "browser_tabs_open", { url: stack.site.url("shop", "/"), browser: "chrome" });
+    expect((await stack.answer(thread, "once")).explicit).toBe(true);
+    const tab = value<Tab>(await call.done);
+    const again = stack.call(thread, "browser_navigate", { tabID: tab.id, url: stack.site.url("shop", "/form") });
+    await stack.answer(thread, "once");
+    expect(value<Tab>(await again.done).title).toBe("Order form");
+  });
+});
+
+test("a blocked site is refused, and a redirect to a blocked or unapproved site is stopped", async ({ stack }) => {
+  const read = (await stack.api.manageResource("browser-settings", { action: "get", scope: "global" })) as { data: { revision: string } };
+  const all = (decision: string) => ({ browsing: decision, downloads: decision, uploads: decision, scripts: decision });
+  await stack.api.manageResource("browser-settings", {
+    action: "set",
+    scope: "global",
+    revision: read.data.revision,
+    chrome: {
+      enabled: true,
+      defaultBrowser: "auto",
+      defaults: all("ask"),
+      sites: [{ origin: stack.site.origin("blocked"), ...all("deny") }],
+    },
+  });
+  const thread = await stack.thread("Blocked sites");
+  expect(failed(await stack.tool(thread, "browser_tabs_open", { url: stack.site.url("blocked", "/"), browser: "chrome" }))).toMatch(/denied|blocked|not allowed/i);
+  expect(stack.site.requests.some((request) => request.host === "blocked.test")).toBe(false);
+
+  const tab = await open(stack, thread, stack.site.url("shop", "/"));
+  // shop.test is allowed in this chat, but the redirect lands on a site it is not.
+  const unapproved = failed(
+    await stack.tool(thread, "browser_navigate", { tabID: tab.id, url: stack.site.url("shop", `/redirect?to=${encodeURIComponent(stack.site.url("other", "/"))}`) }),
+  );
+  expect(unapproved).toContain(stack.site.origin("other"));
+  expect(unapproved).toContain("Call browser_navigate with that URL to ask the user, or choose another site.");
+  expect(stack.site.requests.some((request) => request.host === "other.test")).toBe(false);
+  const blocked = failed(
+    await stack.tool(thread, "browser_navigate", { tabID: tab.id, url: stack.site.url("shop", `/redirect?to=${encodeURIComponent(stack.site.url("blocked", "/"))}`) }),
+  );
+  expect(blocked).toContain(stack.site.origin("blocked"));
+  expect(stack.site.requests.some((request) => request.host === "blocked.test")).toBe(false);
+  // The tab never shows either site.
+  const list = value<{ tabs: Tab[] }>(await stack.tool(thread, "browser_tabs_list", {}));
+  expect(list.tabs[0].url).not.toMatch(/other\.test|blocked\.test/);
+});
+
+test("Chrome's own pages are off limits even in an agent tab", async ({ stack }) => {
+  const thread = await stack.thread("Restricted");
+  const tab = await open(stack, thread, stack.site.url("shop", "/"));
+  // The user takes the tab to a browser page.
+  const page = await stack.page(tab.id);
+  await page.goto("chrome://version").catch(() => {});
+  await expect.poll(() => page.url()).toBe("chrome://version/");
+  expect(failed(await stack.tool(thread, "browser_snapshot", { tabID: tab.id }))).toContain(
+    "Haarness cannot control this Chrome page (browser, extension and file pages are off limits). Navigate the tab to an http(s) site.",
+  );
+});
+
+test("an upload reaches the site from the file the bridge staged", async ({ stack }) => {
+  const thread = await stack.thread("Send the notes");
+  const tab = await open(stack, thread, stack.site.url("shop", "/upload"));
+  const snapshot = value<{ content: string }>(await stack.tool(thread, "browser_snapshot", { tabID: tab.id }));
+  const input = snapshot.content.split("\n").find((line) => /@e\d+ \[button\]/.test(line) && !/Upload/.test(line));
+  expect(input, snapshot.content).toBeTruthy();
+  const call = stack.call(thread, "browser_files_upload", { tabID: tab.id, ref: input!.match(/@e\d+/)![0], paths: ["notes.txt"] });
+  const prompt = await stack.answer(thread, "once");
+  expect(prompt.patterns!.join(" ")).toContain(`chrome-uploads:${thread.id}:${stack.site.origin("shop")}`);
+  value(await call.done);
+  await expect.poll(() => stack.site.uploads).toEqual([{ name: "notes.txt", body: "Upload me 日本\n" }]);
+  const page = await stack.page(tab.id);
+  await expect(page.locator("#uploaded")).toHaveText("Uploaded notes.txt");
+});
+
+test("a download the agent started is listed for its tab and handed over once allowed", async ({ stack }) => {
+  const thread = await stack.thread("Fetch the report");
+  const tab = await open(stack, thread, stack.site.url("shop", "/downloads"));
+  const snapshot = value<{ content: string }>(await stack.tool(thread, "browser_snapshot", { tabID: tab.id }));
+  value(await stack.tool(thread, "browser_click", { tabID: tab.id, ref: ref(snapshot, "Get the report") }));
+  let files: { id: string; name: string; state: string }[] = [];
+  await expect
+    .poll(async () => {
+      files = value<{ files: typeof files }>(await stack.tool(thread, "browser_files_list", { tabID: tab.id })).files;
+      return files.map((file) => file.state);
+    })
+    .toEqual(["completed"]);
+  const call = stack.call(thread, "browser_files_get", { tabID: tab.id, fileID: files[0].id });
+  const prompt = await stack.answer(thread, "once");
+  expect(prompt.patterns).toEqual([`chrome-downloads:${thread.id}:${stack.site.origin("shop")}`]);
+  const saved = value<{ files: { path: string; workspaceRelativePath?: string; bytes: number }[] }>(await call.done);
+  const [file] = saved.files;
+  expect(file.bytes).toBe("Quarterly report from the fixture".length);
+  const { readFileSync } = await import("node:fs");
+  expect(readFileSync(file.path, "utf8")).toBe("Quarterly report from the fixture");
+  // A download the user starts in their own tab is never the agent's.
+  const mine = await stack.context.newPage();
+  await mine.goto(stack.site.url("shop", "/downloads"));
+  await mine.click("#report");
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  expect(value<{ files: unknown[] }>(await stack.tool(thread, "browser_files_list", { tabID: tab.id })).files).toHaveLength(1);
+});
+
+test("a window the agent's page opens joins the chat's group", async ({ stack }) => {
+  const thread = await stack.thread("Follow the popup");
+  const tab = await open(stack, thread, stack.site.url("shop", "/popup"));
+  const snapshot = value<{ content: string }>(await stack.tool(thread, "browser_snapshot", { tabID: tab.id }));
+  value(await stack.tool(thread, "browser_click", { tabID: tab.id, ref: ref(snapshot, "Open window") }));
+  let tabs: Tab[] = [];
+  await expect
+    .poll(async () => {
+      tabs = value<{ tabs: Tab[] }>(await stack.tool(thread, "browser_tabs_list", {})).tabs;
+      return tabs.map((entry) => entry.title).sort();
+    })
+    .toEqual(["Popped window", "Popup opener"]);
+  const popped = tabs.find((entry) => entry.title === "Popped window")!;
+  const groups = await stack.worker.evaluate(() => chrome.tabGroups.query({}));
+  expect(groups).toHaveLength(1);
+  const grouped = await stack.worker.evaluate((groupId) => chrome.tabs.query({ groupId }), groups[0].id);
+  expect(grouped).toHaveLength(2);
+  expect(value<{ content: string }>(await stack.tool(thread, "browser_snapshot", { tabID: popped.id })).content).toContain("Opened by the page.");
+});
