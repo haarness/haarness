@@ -2,8 +2,8 @@
 
 The unpublished [TypeScript and Python SDKs](../sdks/README.md) expose all
 registered API operations. Their [complete operation inventory](../sdks/OPERATIONS.md)
-and [generated OpenAPI document](../sdks/openapi.json) include routes and
-server-local request/response shapes beyond the live protocol schema export.
+and [generated OpenAPI document](../sdks/openapi.json) describe every route; a
+running server's `/openapi.json` serves the same routes with its live schemas.
 
 Portable profile catalog endpoints are documented in [Profiles](PROFILES.md#api)
 and `/openapi.json`. Uploads store immutable archives without applying server
@@ -223,7 +223,9 @@ token/time budgets, continuation limits, multi-select/custom criteria approval,
 criteria evidence checks, and provider-limit transitions. Goal objectives are
 bounded to 4,000 characters with an explicit `[truncated]` marker.
 
-`/openapi.json` is generated from `haarness-protocol` and is the desktop-client compatibility contract.
+`/openapi.json` combines the live `haarness-protocol` schemas with every route
+from the generated [sdks/openapi.json](../sdks/openapi.json), and is the
+desktop-client compatibility contract.
 
 `GET /v1/commands` is the authoritative executable slash-command registry.
 Names resolve case-insensitively and collisions use one explicit precedence:

@@ -114,6 +114,7 @@ def specification():
                     "threads": arr(ref("Thread")),
                     "created": arr(S),
                     "merged": arr(S),
+                    "restored": arr(S),
                 },
                 ("root", "threads", "created", "merged"),
             ),
