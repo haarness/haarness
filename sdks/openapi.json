@@ -4742,6 +4742,12 @@
             },
             "type": "array"
           },
+          "restored": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "root": {
             "$ref": "#/components/schemas/Thread"
           },

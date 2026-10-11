@@ -420,6 +420,15 @@ async fn health() -> Json<Value> {
     Json(json!({"status":"ok"}))
 }
 async fn openapi() -> Json<Value> {
+    Json(openapi_document())
+}
+
+/// Every route, as `sdks/generate.py` describes it from the route table and
+/// this server's schemas. Only some handlers carry utoipa annotations, so
+/// without it the live document would leave out threads, turns and events.
+const ROUTE_REFERENCE: &str = include_str!("../../../sdks/openapi.json");
+
+fn openapi_document() -> Value {
     let mut document = ApiDoc::openapi();
     document.merge(AnalyticsApi::openapi());
     document.merge(crate::profiles::ProfilesApi::openapi());
@@ -428,7 +437,31 @@ async fn openapi() -> Json<Value> {
     document.merge(crate::browser::BrowserApi::openapi());
     document.merge(ManagementApi::openapi());
     document.merge(crate::remote::HostApi::openapi());
-    Json(serde_json::to_value(document).expect("OpenAPI serializes"))
+    let mut document = serde_json::to_value(document).expect("OpenAPI serializes");
+    let reference: Value =
+        serde_json::from_str(ROUTE_REFERENCE).expect("sdks/openapi.json is valid JSON");
+    // Annotated paths and live schemas win; the reference fills the gaps.
+    for (section, field) in [("paths", None), ("components", Some("schemas"))] {
+        let (Some(source), Some(target)) = (
+            reference
+                .get(section)
+                .and_then(|value| field.map_or(Some(value), |field| value.get(field)))
+                .and_then(Value::as_object),
+            document
+                .get_mut(section)
+                .and_then(|value| match field {
+                    Some(field) => value.get_mut(field),
+                    None => Some(value),
+                })
+                .and_then(Value::as_object_mut),
+        ) else {
+            continue;
+        };
+        for (key, value) in source {
+            target.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    document
 }
 
 #[derive(OpenApi)]
@@ -2285,6 +2318,40 @@ impl IntoResponse for ApiFailure {
             }),
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod openapi_tests {
+    use serde_json::Value;
+
+    #[test]
+    fn the_live_document_describes_every_route_and_resolves_every_schema() {
+        let document = super::openapi_document();
+        let paths = document["paths"].as_object().unwrap();
+        for path in [
+            "/healthz",
+            "/openapi.json",
+            "/v1/threads",
+            "/v1/threads/{id}/turns",
+            "/v1/events",
+            "/v1/providers",
+            "/v1/permissions",
+            "/v1/profiles",
+        ] {
+            assert!(paths.contains_key(path), "{path} missing");
+        }
+        let reference: Value = serde_json::from_str(super::ROUTE_REFERENCE).unwrap();
+        assert!(paths.len() >= reference["paths"].as_object().unwrap().len());
+        let schemas = document["components"]["schemas"].as_object().unwrap();
+        let text = document.to_string();
+        for reference in text.split("\"#/components/schemas/").skip(1) {
+            let name = &reference[..reference.find('"').unwrap()];
+            assert!(
+                schemas.contains_key(name),
+                "{name} is referenced but missing"
+            );
+        }
     }
 }
 
