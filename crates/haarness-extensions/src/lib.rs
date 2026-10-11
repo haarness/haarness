@@ -403,7 +403,10 @@ impl Extensions {
                 .to_owned();
             validate_name(&name)?;
             if result.hosts.iter().any(|host| host.name == name) {
-                bail!("duplicate extension name: {name}");
+                bail!(
+                    "duplicate extension name: {name}; another installed extension already uses it, so change `name` in {}",
+                    source.display()
+                );
             }
             let host = Arc::new(Host {
                 process: Mutex::new(Some(process)),
