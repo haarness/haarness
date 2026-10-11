@@ -1689,7 +1689,13 @@ pub(super) fn write_entries(
             ),
         }
     }
-    fs::create_dir_all(path.parent().context("configuration parent")?)?;
+    let parent = path.parent().context("configuration parent")?;
+    fs::create_dir_all(parent)?;
+    // Writers lock the folder itself: a lock file beside a project's
+    // haarness.json would be left behind in the person's repository.
+    #[cfg(unix)]
+    let lock = fs::File::open(parent)?;
+    #[cfg(not(unix))]
     let lock = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -2428,6 +2434,40 @@ mod tests {
                 .unwrap()
                 .contains("// personal setting")
         );
+        // Nothing but the configuration is left in the folder (a project's
+        // root): no lock or temporary file.
+        let names: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["haarness.jsonc"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_json_writes_keep_every_entry() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-json-race-{}", uuid::Uuid::now_v7()));
+        let path = root.join("haarness.json");
+        let writers: Vec<_> = (0..8)
+            .map(|index| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    write_entry(
+                        &path,
+                        "mcp",
+                        &format!("server{index}"),
+                        Some(serde_json::json!({"command":"true"})),
+                    )
+                    .unwrap();
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let value = read_json(&path).unwrap().unwrap();
+        assert_eq!(value["mcp"].as_object().unwrap().len(), 8);
         fs::remove_dir_all(root).unwrap();
     }
 
