@@ -1,6 +1,7 @@
 import test from "node:test";
 import { cursorLabelKeys } from "../src/main/browser/agent-cursor";
 import { errorTextKeys } from "../src/renderer/error-text";
+import { activityKeys, toolVerbKey, toolVerbKeys } from "../src/renderer/transcript";
 import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import { defaults } from "../src/shared";
@@ -56,7 +57,7 @@ test("translations preserve every interpolation field in every language", () => 
 // (and the menu's own `t()`), so their literals get the same check.
 test("every main-process dialog and menu key is in the shared catalog", async () => {
   const missing = new Set<string>();
-  for (const name of ["index.ts", "browser-data.ts"]) {
+  for (const name of ["index.ts", "browser-data.ts", "store.ts", "notifications.ts"]) {
     const source = await readFile(new URL(`../src/main/${name}`, import.meta.url), "utf8");
     for (const [, key] of source.matchAll(/\b(?:say|t)\(\s*"((?:[^"\\]|\\.)*)"/g))
       if (!Object.hasOwn(dictionaries.en, key)) missing.add(`${name}: ${key}`);
@@ -78,6 +79,10 @@ test("every renderer t() key is in the shared catalog", async () => {
     for (const [row] of source.matchAll(/<(?:Row|SettingRow)\b[^>]*>/g))
       for (const [, key] of row.matchAll(/\b(?:title|description)="([^"]*)"/g))
         if (!Object.hasOwn(dictionaries.en, key)) missing.add(`${name}: ${key}`);
+    // Menu items, select options and form choices are labelled from literals
+    // that their render site or the shared form dialog translates.
+    for (const [, key] of source.matchAll(/\blabel:\s*"((?:[^"\\]|\\.)*)"/g))
+      if (!Object.hasOwn(dictionaries.en, key)) missing.add(`${name}: ${key}`);
   }
   assert.deepEqual([...missing], []);
 });
@@ -192,8 +197,23 @@ test("keys translated through a variable are in the catalog", () => {
     // Reasoning level names from `reasoning.ts`, and the sidebar's waiting badges from state.tsx.
     "Model default", "None", "Minimal", "Low", "Medium", "High", "Extra high", "Max",
     "Needs approval", "Needs an answer",
-    // Theme descriptions from `themes.ts`, shown as the swatch tooltip.
+    // Theme names and descriptions from `themes.ts`, shown on the swatch.
+    ...themes.map((theme) => theme.name),
     ...themes.map((theme) => theme.description),
+    // Tool rows, the activity line and batch labels, from `transcript.ts`.
+    ...toolVerbKeys.map(toolVerbKey),
+    ...activityKeys,
+    "Working through several steps", "Using {tool}",
+    "Shell", "File", "Files", "Search", "Web page", "Code", "Tool",
+    // Built-in server commands, whose descriptions Desktop translates.
+    "Browse and manage durable workflows", "Set or manage a persistent autonomous goal",
+    // Settings › General switches, from their title/description tuples.
+    "Task notifications", "Enable desktop notifications. Choose which alerts appear below.",
+    "Compact tool activity", "Keep commands and tool output folded until you open them.",
+    "Show reasoning", "Display the reasoning supplied by your selected model.",
+    "Wrap editor lines", "Keep long lines within the editor width.",
+    // Desktop notification titles, chosen by event in `notifications.ts`.
+    "Task finished", "Task failed", "Approval needed", "Answer needed",
     // Plain readings of an "always" rule's catch-all, from `everyRequest`.
     "Every command", "Every file edit", "Every file read", "Every web page", "Every workflow",
     // Helper labels and built-in slash command descriptions.

@@ -20,6 +20,9 @@ import {
   routineEditOutput,
   changeRows,
   changeStats,
+  toolVerb,
+  toolVerbKey,
+  toolVerbKeys,
 } from "../src/renderer/transcript";
 import { lines } from "../src/renderer/diff";
 
@@ -408,4 +411,19 @@ test("browser steps read as what happened in the page, never as element refs", (
   assert.equal(describeTool("browser_scroll", { deltaY: -400 }).target, "up");
   assert.equal(describeTool("browser_tabs_list", {}).verb, "Listed tabs");
   assert.equal(describeTool("browser_lighthouse", {}).verb, "Browser · lighthouse");
+});
+
+test("tool verbs are whole catalog keys, with their own keys where a word already means something else", () => {
+  // "Read" the permission and "Running" the status are other catalog keys,
+  // so the tool row has keys of its own and English still reads the same.
+  assert.equal(toolVerbKey("Read"), "Read (tool step)");
+  assert.equal(toolVerbKey("Running"), "Running (tool step)");
+  assert.equal(toolVerb("Read"), "Read");
+  assert.equal(toolVerb("Running"), "Running");
+  assert.equal(toolVerb("Ran"), "Ran");
+  // A failed step is one phrase, never "Tried to " + a verb.
+  assert.ok(toolVerbKeys.includes("Tried to run"));
+  assert.ok(toolVerbKeys.includes("Tried to take a screenshot"));
+  // An unknown tool is named by itself.
+  assert.equal(toolVerb("my_mcp_tool"), "my_mcp_tool");
 });

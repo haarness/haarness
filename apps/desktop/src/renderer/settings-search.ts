@@ -39,7 +39,7 @@ export function createSettingsSearch(
     group: "Settings",
     name: t(name),
     icon: "settings",
-    detail: `Settings › ${t(settingsTitles[section])}`,
+    detail: `${t("Settings")} › ${t(settingsTitles[section])}`,
     keywords: name + " " + keywords,
     destination: "settings",
     action: () => app.openSettings(section, target),
@@ -159,6 +159,8 @@ export function createSettingsSearch(
     ...settingsControls.map(([section, title, keywords]) =>
       entry(section, title, title, keywords),
     ),
+    // "Shortcut: New chat" is one sentence in the catalog, so a language
+    // can order the two words its own way. Search still matches the English.
     ...Object.entries(app.state.preferences.shortcuts).map(([name, value]) => ({
       ...entry(
         "shortcuts",
@@ -166,6 +168,7 @@ export function createSettingsSearch(
         "shortcut:" + name,
         `${value} keyboard hotkey keybind customize`,
       ),
+      name: t("Shortcut: {name}", { name: t(shortcutTitles[name] ?? name) }),
       group: "Shortcuts",
       hint: shortcutLabel(value, app.state.platform),
     })),
@@ -176,6 +179,7 @@ export function createSettingsSearch(
       ["Close dialog", "Escape"],
     ].map(([name, value]) => ({
       ...entry("shortcuts", "Shortcut: " + name, name, value),
+      name: t("Shortcut: {name}", { name: t(name) }),
       group: "Shortcuts",
       hint: shortcutLabel(value, app.state.platform),
     })),

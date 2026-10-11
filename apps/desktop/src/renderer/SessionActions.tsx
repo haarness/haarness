@@ -79,7 +79,7 @@ export function SessionActions(props: {
           { label: t("Rename"), icon: "edit", run: () => void action("Rename") },
           { label: t("Fork"), icon: "fork", run: () => void action("Fork") },
           {
-            label: props.thread.archived ? "Unarchive" : "Archive",
+            label: props.thread.archived ? t("Unarchive") : t("Archive"),
             icon: props.thread.archived ? "restore" : "archive",
             run: () =>
               void action(props.thread.archived ? "Unarchive" : "Archive"),

@@ -320,3 +320,36 @@ test("forgetting a project or disposing drops completions still in their grace",
   await tick();
   assert.equal(f.shown.length, 0);
 });
+
+test("titles and stand-in chat names speak the interface language", async () => {
+  const shown: { title: string; body: string }[] = [];
+  const center = createNotifications({
+    enabled: () => true,
+    focused: () => false,
+    translate: (key) => `«${key}»`,
+    create(options) {
+      return Object.assign(new EventEmitter(), options, {
+        show() {
+          shown.push(options);
+        },
+        close() {},
+      });
+    },
+    open: () => {},
+  });
+  const untitled = center.receive("a", "Renamed project", 1, event(), async () =>
+    ({ title: "New thread", id: "conversation" }) as Thread,
+  );
+  await tick();
+  await untitled;
+  assert.deepEqual(shown[0], {
+    title: "Haarness — «Task finished»",
+    body: "«Untitled chat» · Renamed project",
+  });
+  const missing = center.receive("a", "Renamed project", 1, event({ eventId: 2 }), async () => {
+    throw new Error("offline");
+  });
+  await tick();
+  await missing;
+  assert.equal(shown[1].body, "«Chat conversa» · Renamed project");
+});

@@ -8,6 +8,7 @@
 import type { IconName } from "./icons";
 import type { FileDiff, Item } from "@haarness/sdk";
 import { lines, type DiffLine } from "./diff";
+import { language, t } from "./i18n";
 
 /** Provider call IDs can repeat in another turn; output belongs to one call. */
 export function toolResult(items: Item[], call?: Item, boundary = Infinity) {
@@ -40,10 +41,13 @@ export interface ToolShape {
   target: string;
 }
 type Verbs = { verb: string; doing: string; attempt: string };
-const verbs = (verb: string, doing: string, base: string): Verbs => ({
+/** The three forms are English catalog keys, translated where the row
+ * renders (`toolVerb`). Each is a whole phrase: "Tried to " + a verb would
+ * not translate. */
+const verbs = (verb: string, doing: string, attempt: string): Verbs => ({
   verb,
   doing,
-  attempt: "Tried to " + base,
+  attempt,
 });
 /**
  * Haarness's own tools are named, so they get the exact verb a reader expects.
@@ -51,23 +55,23 @@ const verbs = (verb: string, doing: string, base: string): Verbs => ({
  * and if even that fails the tool's own name is the honest label.
  */
 const namedTools: Record<string, { icon: IconName } & Verbs> = {
-  bash: { icon: "terminal", ...verbs("Ran", "Running", "run") },
-  read: { icon: "file-text", ...verbs("Read", "Reading", "read") },
-  write: { icon: "edit", ...verbs("Wrote", "Writing", "write") },
-  edit: { icon: "edit", ...verbs("Edited", "Editing", "edit") },
-  multiedit: { icon: "edit", ...verbs("Edited", "Editing", "edit") },
-  apply_patch: { icon: "edit", ...verbs("Edited", "Editing", "edit") },
-  list: { icon: "folder", ...verbs("Listed", "Listing", "list") },
-  glob: { icon: "search", ...verbs("Matched", "Matching", "match") },
-  grep: { icon: "search", ...verbs("Searched", "Searching", "search") },
-  webfetch: { icon: "web", ...verbs("Fetched", "Fetching", "fetch") },
-  task: { icon: "agents", ...verbs("Delegated", "Delegating", "delegate") },
-  skill: { icon: "book", ...verbs("Used", "Using", "use") },
-  question: { icon: "question", ...verbs("Asked", "Asking", "ask") },
-  todo: { icon: "todo", ...verbs("Updated the plan", "Updating the plan", "update the plan") },
-  todowrite: { icon: "todo", ...verbs("Updated the plan", "Updating the plan", "update the plan") },
-  todoread: { icon: "todo", ...verbs("Checked the plan", "Checking the plan", "check the plan") },
-  batch: { icon: "layers", ...verbs("Ran a batch", "Running a batch", "run a batch") },
+  bash: { icon: "terminal", ...verbs("Ran", "Running", "Tried to run") },
+  read: { icon: "file-text", ...verbs("Read", "Reading", "Tried to read") },
+  write: { icon: "edit", ...verbs("Wrote", "Writing", "Tried to write") },
+  edit: { icon: "edit", ...verbs("Edited", "Editing", "Tried to edit") },
+  multiedit: { icon: "edit", ...verbs("Edited", "Editing", "Tried to edit") },
+  apply_patch: { icon: "edit", ...verbs("Edited", "Editing", "Tried to edit") },
+  list: { icon: "folder", ...verbs("Listed", "Listing", "Tried to list") },
+  glob: { icon: "search", ...verbs("Matched", "Matching", "Tried to match") },
+  grep: { icon: "search", ...verbs("Searched", "Searching", "Tried to search") },
+  webfetch: { icon: "web", ...verbs("Fetched", "Fetching", "Tried to fetch") },
+  task: { icon: "agents", ...verbs("Delegated", "Delegating", "Tried to delegate") },
+  skill: { icon: "book", ...verbs("Used", "Using", "Tried to use") },
+  question: { icon: "question", ...verbs("Asked", "Asking", "Tried to ask") },
+  todo: { icon: "todo", ...verbs("Updated the plan", "Updating the plan", "Tried to update the plan") },
+  todowrite: { icon: "todo", ...verbs("Updated the plan", "Updating the plan", "Tried to update the plan") },
+  todoread: { icon: "todo", ...verbs("Checked the plan", "Checking the plan", "Tried to check the plan") },
+  batch: { icon: "layers", ...verbs("Ran a batch", "Running a batch", "Tried to run a batch") },
 };
 const toolKind = (name: string) =>
   /bash|shell|exec|command/.test(name)
@@ -84,13 +88,13 @@ const toolKind = (name: string) =>
               ? "agent"
               : "other";
 const kindShape: Record<string, { icon: IconName } & Verbs> = {
-  run: { icon: "terminal", ...verbs("Ran", "Running", "run") },
-  edit: { icon: "edit", ...verbs("Edited", "Editing", "edit") },
-  read: { icon: "file-text", ...verbs("Read", "Reading", "read") },
-  search: { icon: "search", ...verbs("Searched", "Searching", "search") },
-  web: { icon: "web", ...verbs("Fetched", "Fetching", "fetch") },
-  agent: { icon: "agents", ...verbs("Delegated", "Delegating", "delegate") },
-  other: { icon: "tools", ...verbs("Used", "Using", "use") },
+  run: { icon: "terminal", ...verbs("Ran", "Running", "Tried to run") },
+  edit: { icon: "edit", ...verbs("Edited", "Editing", "Tried to edit") },
+  read: { icon: "file-text", ...verbs("Read", "Reading", "Tried to read") },
+  search: { icon: "search", ...verbs("Searched", "Searching", "Tried to search") },
+  web: { icon: "web", ...verbs("Fetched", "Fetching", "Tried to fetch") },
+  agent: { icon: "agents", ...verbs("Delegated", "Delegating", "Tried to delegate") },
+  other: { icon: "tools", ...verbs("Used", "Using", "Tried to use") },
 };
 export function describeTool(name: string, args: unknown): ToolShape {
   name = toolName(name);
@@ -104,12 +108,13 @@ export function describeTool(name: string, args: unknown): ToolShape {
     return {
       ...known,
       target:
-        record.pattern +
-        (typeof record.path === "string" ? ` in ${record.path}` : ""),
+        typeof record.path === "string"
+          ? t("{pattern} in {path}", { pattern: record.pattern, path: record.path })
+          : record.pattern,
     };
   if (name === "list" && ["", ".", "./"].includes(toolTarget(args)))
     // The root has no name of its own; "." would only make a reader pause.
-    return { ...known, target: "the project folder" };
+    return { ...known, target: t("the project folder") };
   if (name === "apply_patch" && typeof record?.input === "string") {
     // The envelope is instructions for the tool; the reader wants the files.
     const files = patchFiles(record.input).map((file) => file.path);
@@ -135,33 +140,73 @@ export function describeTool(name: string, args: unknown): ToolShape {
  * reader, so the target is the URL, text, value or key when there is one.
  */
 const browserVerbs: Record<string, Verbs> = {
-  navigate: verbs("Opened", "Opening", "open"),
-  tabs_open: verbs("Opened a tab", "Opening a tab", "open a tab"),
-  tabs_close: verbs("Closed a tab", "Closing a tab", "close a tab"),
-  tabs_focus: verbs("Switched tabs", "Switching tabs", "switch tabs"),
-  tabs_list: verbs("Listed tabs", "Listing tabs", "list tabs"),
-  snapshot: verbs("Read the page", "Reading the page", "read the page"),
-  find: verbs("Searched the page", "Searching the page", "search the page"),
-  click: verbs("Clicked", "Clicking", "click"),
-  hover: verbs("Pointed at an element", "Pointing at an element", "point at an element"),
-  drag: verbs("Dragged", "Dragging", "drag"),
-  fill: verbs("Typed", "Typing", "type"),
-  fill_form: verbs("Filled in a form", "Filling in a form", "fill in a form"),
-  select: verbs("Selected", "Selecting", "select"),
-  press: verbs("Pressed", "Pressing", "press"),
-  scroll: verbs("Scrolled", "Scrolling", "scroll"),
-  wait: verbs("Waited", "Waiting", "wait"),
-  screenshot: verbs("Took a screenshot", "Taking a screenshot", "take a screenshot"),
-  evaluate: verbs("Ran a page script", "Running a page script", "run a page script"),
-  back: verbs("Went back", "Going back", "go back"),
-  forward: verbs("Went forward", "Going forward", "go forward"),
-  reload: verbs("Reloaded the page", "Reloading the page", "reload the page"),
-  stop: verbs("Stopped loading", "Stopping loading", "stop loading"),
-  dialog: verbs("Handled a dialog", "Handling a dialog", "handle a dialog"),
-  console: verbs("Read the console", "Reading the console", "read the console"),
-  network_list: verbs("Listed network requests", "Listing network requests", "list network requests"),
-  network_get: verbs("Read a network request", "Reading a network request", "read a network request"),
+  navigate: verbs("Opened", "Opening", "Tried to open"),
+  tabs_open: verbs("Opened a tab", "Opening a tab", "Tried to open a tab"),
+  tabs_close: verbs("Closed a tab", "Closing a tab", "Tried to close a tab"),
+  tabs_focus: verbs("Switched tabs", "Switching tabs", "Tried to switch tabs"),
+  tabs_list: verbs("Listed tabs", "Listing tabs", "Tried to list tabs"),
+  snapshot: verbs("Read the page", "Reading the page", "Tried to read the page"),
+  find: verbs("Searched the page", "Searching the page", "Tried to search the page"),
+  click: verbs("Clicked", "Clicking", "Tried to click"),
+  hover: verbs("Pointed at an element", "Pointing at an element", "Tried to point at an element"),
+  drag: verbs("Dragged", "Dragging", "Tried to drag"),
+  fill: verbs("Typed", "Typing", "Tried to type"),
+  fill_form: verbs("Filled in a form", "Filling in a form", "Tried to fill in a form"),
+  select: verbs("Selected", "Selecting", "Tried to select"),
+  press: verbs("Pressed", "Pressing", "Tried to press"),
+  scroll: verbs("Scrolled", "Scrolling", "Tried to scroll"),
+  wait: verbs("Waited", "Waiting", "Tried to wait"),
+  screenshot: verbs("Took a screenshot", "Taking a screenshot", "Tried to take a screenshot"),
+  evaluate: verbs("Ran a page script", "Running a page script", "Tried to run a page script"),
+  back: verbs("Went back", "Going back", "Tried to go back"),
+  forward: verbs("Went forward", "Going forward", "Tried to go forward"),
+  reload: verbs("Reloaded the page", "Reloading the page", "Tried to reload the page"),
+  stop: verbs("Stopped loading", "Stopping loading", "Tried to stop loading"),
+  dialog: verbs("Handled a dialog", "Handling a dialog", "Tried to handle a dialog"),
+  console: verbs("Read the console", "Reading the console", "Tried to read the console"),
+  network_list: verbs("Listed network requests", "Listing network requests", "Tried to list network requests"),
+  network_get: verbs("Read a network request", "Reading a network request", "Tried to read a network request"),
 };
+const checkVerbs = verbs("Checked", "Checking", "Tried to check");
+const uncheckVerbs = verbs("Unchecked", "Unchecking", "Tried to uncheck");
+/** Catalog keys a tool row can show, for the catalog guard. */
+export const toolVerbKeys = [
+  ...new Set(
+    [
+      ...Object.values(namedTools),
+      ...Object.values(kindShape),
+      ...Object.values(browserVerbs),
+      checkVerbs,
+      uncheckVerbs,
+    ].flatMap(({ verb, doing, attempt }) => [verb, doing, attempt]),
+  ),
+];
+/** These verbs are already catalog keys in another sense ("Read" the
+ * permission, "Running" the status), so a tool row has keys of its own. */
+const toolVerbKeyOverrides: Record<string, string> = {
+  Read: "Read (tool step)",
+  Running: "Running (tool step)",
+  Selected: "Selected (tool step)",
+};
+export const toolVerbKey = (verb: string) => toolVerbKeyOverrides[verb] ?? verb;
+/** A tool row's verb in the interface language. Unknown tools are named by
+ * the tool itself, which no catalog has, so they pass through unchanged. */
+export const toolVerb = (verb: string) => t(toolVerbKey(verb));
+/** Phrases after the first continue one sentence, so they start in lower
+ * case (German nouns keep their capitals). English keeps the comma list the
+ * activity line has always shown; other languages join with their own word
+ * for "and". */
+function phraseList(phrases: string[]) {
+  const code = language();
+  const parts = phrases.map((phrase, index) =>
+    index && code !== "de"
+      ? phrase.charAt(0).toLocaleLowerCase(code) + phrase.slice(1)
+      : phrase,
+  );
+  return code === "en"
+    ? parts.join(", ")
+    : new Intl.ListFormat(code, { type: "conjunction" }).format(parts);
+}
 function describeBrowser(action: string, record?: Record<string, unknown>): ToolShape {
   const text = (value: unknown) =>
     typeof value === "string" && value.trim() ? value.replace(/\s+/g, " ").trim() : "";
@@ -176,14 +221,14 @@ function describeBrowser(action: string, record?: Record<string, unknown>): Tool
           : action === "find" || action === "wait"
             ? quoted(record?.text ?? record?.query)
             : action === "scroll" && typeof record?.deltaY === "number"
-              ? record.deltaY < 0 ? "up" : "down"
+              ? record.deltaY < 0 ? t("up") : t("down")
               : text(record?.url);
   const fallback = "Browser · " + action.replaceAll("_", " ");
   const forms =
     action === "check"
       ? record?.checked === false
-        ? verbs("Unchecked", "Unchecking", "uncheck")
-        : verbs("Checked", "Checking", "check")
+        ? uncheckVerbs
+        : checkVerbs
       : (browserVerbs[action] ?? { verb: fallback, doing: fallback, attempt: fallback });
   return { icon: "web", ...forms, target };
 }
@@ -324,29 +369,56 @@ export function batchSteps(args: unknown, result?: ToolResult): BatchStep[] {
     };
   });
 }
+/** What a finished batch did, as English catalog keys. */
+const batchDone = {
+  list: "Listed files",
+  plan: "Updated the plan",
+  run: "Ran commands",
+  read: "Read files",
+  edit: "Edited files",
+  search: "Searched files",
+  web: "Fetched pages",
+  agent: "Delegated tasks",
+  other: "Used tools",
+} as const;
+/** What a running batch is doing. */
+const batchDoing = {
+  list: "Listing files",
+  plan: "Updating the plan",
+  run: "Running commands",
+  read: "Reading files",
+  edit: "Editing files",
+  search: "Searching files",
+  web: "Reading web pages",
+  agent: "Working with agents",
+  other: "Using tools",
+} as const;
+/** What a single running tool is doing; any other tool is named. */
+const toolDoing = {
+  run: "Running a command",
+  read: "Reading files",
+  edit: "Editing files",
+  search: "Searching files",
+  web: "Reading a web page",
+  agent: "Working with an agent",
+} as const;
+/** The activity keys reached through the tables above, for the catalog guard. */
+export const activityKeys = [
+  ...new Set([
+    ...Object.values(batchDone),
+    ...Object.values(batchDoing),
+    ...Object.values(toolDoing),
+  ]),
+];
+const batchGroup = (tool: string) => {
+  const name = toolName(tool);
+  if (name === "list") return "list";
+  if (["todo", "todowrite", "todoread"].includes(name)) return "plan";
+  return toolKind(name);
+};
 export function batchLabel(steps: BatchStep[]) {
-  const actions = [
-    ...new Set(
-      steps.map((step) => {
-        const name = toolName(step.name);
-        if (name === "list") return "Listed files";
-        if (["todo", "todowrite", "todoread"].includes(name))
-          return "Updated the plan";
-        return {
-          run: "Ran commands",
-          read: "Read files",
-          edit: "Edited files",
-          search: "Searched files",
-          web: "Fetched pages",
-          agent: "Delegated tasks",
-          other: "Used tools",
-        }[toolKind(name)];
-      }),
-    ),
-  ];
-  return actions
-    .map((action, index) => (index ? action.toLowerCase() : action))
-    .join(", ");
+  const actions = [...new Set(steps.map((step) => batchDone[batchGroup(step.name)]))];
+  return phraseList(actions.map((action) => t(action)));
 }
 export function toolTarget(args: unknown): string {
   if (!args || typeof args !== "object") return "";
@@ -609,37 +681,12 @@ function batchTools(name: string, args?: unknown): string[] {
 export function toolActivity(name: string, args?: unknown): string {
   const inner = batchTools(name, args);
   if (inner.length) {
-    const phrases = [
-      ...new Set(
-        inner.map((tool) => {
-          const value = toolName(tool);
-          if (value === "list") return "Listing files";
-          if (["todo", "todowrite", "todoread"].includes(value))
-            return "Updating the plan";
-          return {
-            run: "Running commands",
-            read: "Reading files",
-            edit: "Editing files",
-            search: "Searching files",
-            web: "Reading web pages",
-            agent: "Working with agents",
-            other: "Using tools",
-          }[toolKind(value)];
-        }),
-      ),
-    ];
-    return phrases
-      .map((phrase, index) => (index ? phrase.toLowerCase() : phrase))
-      .join(", ");
+    const phrases = [...new Set(inner.map((tool) => batchDoing[batchGroup(tool)]))];
+    return phraseList(phrases.map((phrase) => t(phrase)));
   }
-  if (toolName(name) === "batch") return "Working through several steps";
-  return {
-    run: "Running a command",
-    read: "Reading files",
-    edit: "Editing files",
-    search: "Searching files",
-    web: "Reading a web page",
-    agent: "Working with an agent",
-    other: "Using " + name,
-  }[toolKind(name)];
+  if (toolName(name) === "batch") return t("Working through several steps");
+  const kind = toolKind(name);
+  return kind === "other"
+    ? t("Using {tool}", { tool: name })
+    : t(toolDoing[kind]);
 }
