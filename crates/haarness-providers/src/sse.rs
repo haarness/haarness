@@ -16,7 +16,15 @@ pub(crate) fn transport_error(mut error: reqwest::Error) -> CoreError {
         url.set_query(None);
         url.set_fragment(None);
     }
-    CoreError::Provider(error.to_string())
+    // reqwest's own text names the URL but not why it failed ("Connection
+    // refused"), which decides whether a retry can help.
+    let cause = std::iter::successors(std::error::Error::source(&error), |cause| cause.source())
+        .last()
+        .map(ToString::to_string);
+    CoreError::Provider(match cause {
+        Some(cause) => format!("{error}: {cause}"),
+        None => error.to_string(),
+    })
 }
 
 pub fn json_stream(response: reqwest::Response, cancel: CancellationToken) -> JsonStream {

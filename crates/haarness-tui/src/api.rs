@@ -705,7 +705,8 @@ impl ApiClient {
             .json(&request)
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -737,7 +738,8 @@ impl ApiClient {
             )
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -763,7 +765,8 @@ impl ApiClient {
         self.request(reqwest::Method::DELETE, &format!("/v1/workflows/runs/{id}"))
             .send()
             .await?
-            .error_for_status()?;
+            .checked()
+            .await?;
         Ok(())
     }
     pub async fn goal(
@@ -786,7 +789,8 @@ impl ApiClient {
             .json(action)
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -800,7 +804,8 @@ impl ApiClient {
             .json(&body)
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -840,7 +845,8 @@ impl ApiClient {
             )
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -853,7 +859,8 @@ impl ApiClient {
             .json(&request)
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -867,7 +874,8 @@ impl ApiClient {
             .json(&request)
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -885,7 +893,8 @@ impl ApiClient {
             .json(&request)
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -899,7 +908,8 @@ impl ApiClient {
             .json(&request)
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -919,7 +929,8 @@ impl ApiClient {
             .json(request)
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -931,7 +942,8 @@ impl ApiClient {
             )
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -943,7 +955,8 @@ impl ApiClient {
             )
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -974,7 +987,8 @@ impl ApiClient {
             .json(&ToolSettingsUpdate { enabled })
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -987,7 +1001,8 @@ impl ApiClient {
             .json(&LazyToolSettingsUpdate { mode })
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -1009,7 +1024,8 @@ impl ApiClient {
             .json(arguments)
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -1033,7 +1049,8 @@ impl ApiClient {
             .json(&serde_json::json!({"uri": uri}))
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -1059,7 +1076,8 @@ impl ApiClient {
             .json(arguments)
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -1081,7 +1099,8 @@ impl ApiClient {
             )
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -1164,7 +1183,8 @@ impl ApiClient {
             .json(&serde_json::json!({ "command": command }))
             .send()
             .await?
-            .error_for_status()?;
+            .checked()
+            .await?;
         Ok(())
     }
     pub async fn ptys(&self) -> Result<Vec<PtyInfo>> {
@@ -1313,7 +1333,8 @@ impl ApiClient {
             .json(&request)
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -1332,7 +1353,8 @@ impl ApiClient {
                 .json(&request)
                 .send()
                 .await?
-                .error_for_status()?
+                .checked()
+                .await?
                 .json()
                 .await?)
         }
@@ -1350,7 +1372,8 @@ impl ApiClient {
             .json(&request)
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -1359,7 +1382,8 @@ impl ApiClient {
             .request(reqwest::Method::POST, &format!("/v1/turns/{id}/interrupt"))
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -1380,14 +1404,16 @@ impl ApiClient {
         self.request(reqwest::Method::POST, &path)
             .send()
             .await?
-            .error_for_status()?;
+            .checked()
+            .await?;
         Ok(())
     }
     pub async fn shutdown_server(&self) -> Result<()> {
         self.request(reqwest::Method::POST, "/v1/shutdown")
             .send()
             .await?
-            .error_for_status()?;
+            .checked()
+            .await?;
         Ok(())
     }
     /// Every unanswered permission prompt on the server — used to repopulate
@@ -1432,6 +1458,7 @@ impl ApiClient {
             .json(&action)
             .send()
             .await?
+            // The queue tells a 409 (it moved on) apart by reqwest's status.
             .error_for_status()?
             .json()
             .await?)
@@ -1447,7 +1474,8 @@ impl ApiClient {
             .json(&request)
             .send()
             .await?
-            .error_for_status()?
+            .checked()
+            .await?
             .json()
             .await?)
     }
@@ -1470,6 +1498,7 @@ impl ApiClient {
             .json(request)
             .send()
             .await?
+            // The caller tells a 409 (changed elsewhere) apart by reqwest's status.
             .error_for_status()?
             .json()
             .await?)
@@ -1479,7 +1508,8 @@ impl ApiClient {
             .json(&reply)
             .send()
             .await?
-            .error_for_status()?;
+            .checked()
+            .await?;
         Ok(())
     }
     pub async fn reply_question(&self, id: &str, reply: QuestionReply) -> Result<()> {
@@ -1487,7 +1517,8 @@ impl ApiClient {
             .json(&reply)
             .send()
             .await?
-            .error_for_status()?;
+            .checked()
+            .await?;
         Ok(())
     }
 
@@ -1596,7 +1627,7 @@ impl ApiClient {
                     let _ = self.pty_events.send(PtyClientEvent::Exited(id));
                     return;
                 }
-                Err(error) if error.to_string().contains("404") => {
+                Err(error) if refusal_status(&error) == Some(reqwest::StatusCode::NOT_FOUND) => {
                     let _ = self.pty_events.send(PtyClientEvent::Exited(id));
                     return;
                 }
@@ -1737,9 +1768,42 @@ impl ApiClient {
     }
 }
 
+/// A request the Haarness server refused. It reads as the server's own
+/// message (`invalid request: Unknown agent: nope`), not reqwest's status
+/// line, whose URL carries the daemon's port and record ids. Callers that
+/// branch on the outcome read `status` and `code`.
+#[derive(Debug)]
+pub struct ApiRefusal {
+    pub status: reqwest::StatusCode,
+    pub code: Option<String>,
+    pub message: String,
+}
+
+impl std::fmt::Display for ApiRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ApiRefusal {}
+
+/// The HTTP status of a refused request, whichever way it was checked.
+#[must_use]
+pub fn refusal_status(error: &anyhow::Error) -> Option<reqwest::StatusCode> {
+    error
+        .downcast_ref::<ApiRefusal>()
+        .map(|refusal| refusal.status)
+        .or_else(|| {
+            error
+                .downcast_ref::<reqwest::Error>()
+                .and_then(reqwest::Error::status)
+        })
+}
+
 /// Preserve the server's structured error instead of reducing every failure
-/// to reqwest's generic "HTTP status client error". Paths are safe to show;
-/// query strings and authorization headers are deliberately excluded.
+/// to reqwest's generic "HTTP status client error". A body without one (an
+/// older server, a proxy) names the status and path; query strings and
+/// authorization headers are deliberately excluded.
 async fn checked_response(response: reqwest::Response) -> Result<reqwest::Response> {
     let status = response.status();
     if status.is_success() {
@@ -1750,17 +1814,38 @@ async fn checked_response(response: reqwest::Response) -> Result<reqwest::Respon
         .text()
         .await
         .context("read Haarness API error response")?;
-    let detail = serde_json::from_str::<haarness_protocol::ApiError>(&body)
-        .map(|error| format!("{}: {}", error.code, error.message))
-        .unwrap_or_else(|_| {
+    let refusal = match serde_json::from_str::<haarness_protocol::ApiError>(&body) {
+        Ok(error) => ApiRefusal {
+            status,
+            code: Some(error.code),
+            message: error.message,
+        },
+        Err(_) => {
             let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
-            if compact.is_empty() {
-                "server returned no error details".into()
+            let detail = if compact.is_empty() {
+                "no error details".into()
             } else {
-                compact.chars().take(512).collect()
+                compact.chars().take(512).collect::<String>()
+            };
+            ApiRefusal {
+                status,
+                code: None,
+                message: format!("Haarness server answered HTTP {status} for {path}: {detail}"),
             }
-        });
-    anyhow::bail!("HTTP {status} from {path}: {detail}")
+        }
+    };
+    Err(refusal.into())
+}
+
+/// `error_for_status`, keeping the server's message: see `checked_response`.
+trait CheckedStatus {
+    async fn checked(self) -> Result<reqwest::Response>;
+}
+
+impl CheckedStatus for reqwest::Response {
+    async fn checked(self) -> Result<reqwest::Response> {
+        checked_response(self).await
+    }
 }
 
 /// W3C trace context for the caller's current span, so the server's spans join
@@ -1972,41 +2057,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_errors_include_status_path_and_structured_server_message() {
+    async fn api_errors_read_as_the_server_message_and_keep_their_status() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            let mut chunk = [0_u8; 1024];
-            loop {
-                let read = socket.read(&mut chunk).await.unwrap();
-                request.extend_from_slice(&chunk[..read]);
-                if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
+            let mut requests = Vec::new();
+            for (status, body) in [
+                (
+                    "404 Not Found",
+                    r#"{"code":"missing_route","message":"workspace history API is unavailable","retryable":false}"#,
+                ),
+                ("502 Bad Gateway", "upstream\n  went away"),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                loop {
+                    let read = socket.read(&mut chunk).await.unwrap();
+                    request.extend_from_slice(&chunk[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
                 }
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                requests.push(String::from_utf8(request).unwrap());
             }
-            let body = r#"{"code":"missing_route","message":"workspace history API is unavailable","retryable":false}"#;
-            let response = format!(
-                "HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            socket.write_all(response.as_bytes()).await.unwrap();
-            String::from_utf8(request).unwrap()
+            requests
         });
 
         let client = ApiClient::new(&format!("http://{address}"), "test-token").unwrap();
-        let error = client.vcs_diff("working").await.unwrap_err().to_string();
-
-        assert!(error.contains("HTTP 404 Not Found"), "{error}");
-        assert!(error.contains("/v1/vcs/diff"), "{error}");
-        assert!(
-            error.contains("missing_route: workspace history API is unavailable"),
-            "{error}"
+        let error = client.vcs_diff("working").await.unwrap_err();
+        assert_eq!(error.to_string(), "workspace history API is unavailable");
+        assert_eq!(
+            super::refusal_status(&error),
+            Some(reqwest::StatusCode::NOT_FOUND)
         );
-        let request = server.await.unwrap();
-        assert!(request.starts_with("GET /v1/vcs/diff?mode=working "));
-        assert!(!error.contains("test-token"));
+        assert_eq!(
+            error
+                .downcast_ref::<super::ApiRefusal>()
+                .and_then(|refusal| refusal.code.as_deref()),
+            Some("missing_route")
+        );
+
+        // A body without the structured error names the status and path,
+        // never the daemon's address or token.
+        let error = client.agents().await.unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "Haarness server answered HTTP 502 Bad Gateway for /v1/agents: upstream went away"
+        );
+        let requests = server.await.unwrap();
+        assert!(requests[0].starts_with("GET /v1/vcs/diff?mode=working "));
+        assert!(!error.contains("test-token") && !error.contains(&address.to_string()));
     }
 
     #[tokio::test]

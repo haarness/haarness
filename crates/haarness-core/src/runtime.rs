@@ -586,6 +586,10 @@ const LONGEST_ADVISED_WAIT: std::time::Duration = std::time::Duration::from_secs
 /// short wait (Gemini's free tier allows a few requests a minute) is waited out.
 fn retry_delay(error: &CoreError, attempt: u8) -> Option<std::time::Duration> {
     if is_provider_transient(error) {
+        // One retry covers a local server that is still starting.
+        if attempt > 1 && refused_on_this_machine(error) {
+            return None;
+        }
         return Some(std::time::Duration::from_secs(1 << attempt.min(4)));
     }
     if !is_provider_usage_limit(error) {
@@ -727,8 +731,18 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
         || lower.contains("connection refused")
         || lower.contains("dns")
     {
-        return "Could not reach the provider. Check the network connection and provider endpoint, then retry."
-            .into();
+        let place = request_host(raw)
+            .map(|host| format!(" at {host}"))
+            .unwrap_or_default();
+        let reason = if lower.contains("connection refused") {
+            " (connection refused)"
+        } else {
+            ""
+        };
+        return format!(
+            "Could not reach {}{place}{reason}. Check the network connection and provider endpoint, then retry.",
+            provider.unwrap_or("the provider")
+        );
     }
     if lower.contains("timed out") || lower.contains("timeout") {
         return "The provider did not respond in time. Try again.".into();
@@ -775,6 +789,38 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
             .into();
     }
     format!("Provider error: {}", clean_error_text(raw, 600))
+}
+
+/// The host and port in reqwest's "error sending request for url (…)".
+fn request_host(raw: &str) -> Option<String> {
+    let (_, rest) = raw.split_once("for url (")?;
+    let url = url::Url::parse(rest.split(')').next()?).ok()?;
+    let host = url.host_str()?;
+    Some(match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    })
+}
+
+/// A refused connection to this machine: nothing listens on that port, and
+/// waiting does not usually change that the way it does for a remote blip.
+fn refused_on_this_machine(error: &CoreError) -> bool {
+    let CoreError::Provider(message) = error else {
+        return false;
+    };
+    message.to_ascii_lowercase().contains("connection refused")
+        && request_host(message).is_some_and(|host| {
+            let host = host
+                .rsplit_once(':')
+                .filter(|(_, port)| port.bytes().all(|byte| byte.is_ascii_digit()))
+                .map_or(host.as_str(), |(host, _)| host);
+            host == "localhost"
+                || host
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        })
 }
 
 fn provider_error_fields(raw: &str) -> Option<(String, Option<String>, Option<String>)> {
@@ -11651,8 +11697,31 @@ mod tests {
             super::user_facing_error(&CoreError::Provider(
                 "error sending request for url (https://api.example.test/v1)".into()
             )),
-            "Could not reach the provider. Check the network connection and provider endpoint, then retry."
+            "Could not reach the provider at api.example.test. Check the network connection and provider endpoint, then retry."
         );
+        let refused = CoreError::Provider(
+            "error sending request for url (http://127.0.0.1:9/v1/chat/completions): Connection refused (os error 61)"
+                .into(),
+        );
+        assert_eq!(
+            super::describe_error(&refused, Some("Local models")),
+            "Could not reach Local models at 127.0.0.1:9 (connection refused). Check the network connection and provider endpoint, then retry."
+        );
+        // A refused local port is retried once (a server still starting),
+        // not for half a minute; a remote one keeps its backoff.
+        assert!(super::retry_delay(&refused, 1).is_some());
+        assert!(super::retry_delay(&refused, 2).is_none());
+        let remote = CoreError::Provider(
+            "error sending request for url (https://api.example.test/v1): Connection refused"
+                .into(),
+        );
+        assert!(super::retry_delay(&remote, 3).is_some());
+        assert!(super::refused_on_this_machine(&CoreError::Provider(
+            "error sending request for url (http://localhost:1234/v1): connection refused".into()
+        )));
+        assert!(super::refused_on_this_machine(&CoreError::Provider(
+            "error sending request for url (http://[::1]:1234/v1): connection refused".into()
+        )));
         assert_eq!(
             super::user_facing_error(&CoreError::Provider("HTTP 429: insufficient_quota".into())),
             "Provider rate limit or quota reached. Wait and retry, or check the account quota."
