@@ -1004,7 +1004,9 @@ function Assets(props: { kind: string; cli: Cli }) {
   // Agents and skills can be switched off without deleting them. The server
   // keeps that state apart from the definitions, so read it alongside them.
   const [enabled, setEnabled] = createSignal<Record<string, boolean>>({});
+  let latest = 0;
   async function refresh() {
+    const request = ++latest;
     const [list, state] = await Promise.all([
       app.native<AssetRow[]>({
         action: "asset",
@@ -1021,6 +1023,9 @@ function Assets(props: { kind: string; cli: Cli }) {
             )
             .catch(() => undefined),
     ]);
+    // The pane serves agents, commands and skills in turn: a slower answer
+    // for the section shown before must not replace this one.
+    if (request !== latest) return;
     setRows(list);
     setEnabled(
       Object.fromEntries(
