@@ -174,6 +174,30 @@ test("the extension's own reload keeps the chats' tabs, but a stale hand-over is
   assert.deepEqual(third.host.debug.registry.all(), []);
 });
 
+test("a Stop outlasts the extension's own reload even when the tab registry could not be saved", async () => {
+  const first = await boot();
+  first.start();
+  first.host.events.stopAll();
+  await first.until((message) => message.type === "status" && message.stopped === true);
+  // Session storage refuses the registry (its quota is full)…
+  const session = first.fake.chrome.storage.session;
+  const write = session.set;
+  session.set = async (values: Record<string, unknown>) => {
+    if ("registry" in values) throw new Error("QUOTA_BYTES quota exceeded");
+    return write(values);
+  };
+  // …when an update arrives: the reload still hands the Stop over.
+  assert.deepEqual(await first.host.request({ type: "reload" }), { ok: true });
+  session.set = write;
+  first.host.dispose();
+  first.fake.stores.session.clear();
+  const second = await boot({ reuse: first.fake });
+  assert.equal(second.host.snapshot().stopped, true);
+  assert.equal(second.sent.at(-1)!.stopped, true, "the new bridge hears stopped in hello");
+  second.start();
+  assert.equal((await second.command({ action: { type: "tabs.list" } })).outcome.code, "stopped-by-user");
+});
+
 test("new tabs open in the background, in one group per chat named after it; a subagent gets its own", async () => {
   const h = await boot();
   h.start();

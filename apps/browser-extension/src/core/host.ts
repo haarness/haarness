@@ -187,9 +187,12 @@ export function createHost(options: HostOptions) {
     const handoff = await platform.local.get<Handoff | null>("handoff");
     if (!handoff) return;
     await platform.local.set("handoff", null);
-    const fresh = platform.now() - handoff.at < HANDOFF_MS;
-    if (!fresh || !handoff.registry || (await platform.session.get("registry")) !== undefined) return;
-    await platform.session.set("registry", handoff.registry);
+    if (platform.now() - handoff.at >= HANDOFF_MS) return;
+    // Session storage that survived is newer than any hand-over.
+    const kept = await Promise.all(["registry", "refSeed", "stopped"].map((name) => platform.session.get(name)));
+    if (kept.some((value) => value !== undefined)) return;
+    // The Stop and ref seed are handed over even when the registry could not be saved.
+    if (handoff.registry) await platform.session.set("registry", handoff.registry);
     await platform.session.set("refSeed", handoff.refSeed);
     await platform.session.set("stopped", handoff.stopped);
   }
