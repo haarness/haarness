@@ -400,7 +400,12 @@ impl Service {
                     PermissionOption::new("once", "Allow once", PermissionOptionKind::AllowOnce),
                     PermissionOption::new(
                         "always",
-                        "Allow while Haarness is running",
+                        // A site in the user's Chrome is approved for this chat only.
+                        if payload["explicit"] == true {
+                            "Allow in this chat"
+                        } else {
+                            "Allow while Haarness is running"
+                        },
                         PermissionOptionKind::AllowAlways,
                     ),
                     PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),

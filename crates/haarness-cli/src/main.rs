@@ -4754,6 +4754,21 @@ impl RunWatch {
                 decision,
                 feedback: None,
             };
+            if self.approver == Approver::Nobody && pending.explicit {
+                // A site in the user's Chrome: neither a rule nor --yolo
+                // answers it, only a person.
+                let _ = client.interrupt_session(root, false).await;
+                let _ = client
+                    .reply_permission(
+                        &pending.permission_id,
+                        reply(PermissionReplyDecision::Reject),
+                    )
+                    .await;
+                anyhow::bail!(
+                    "Stopped: the agent asked to use {} in Chrome, which always needs a person. Answer in the TUI or Desktop, or allow the site under Settings → Browser → Chrome.",
+                    chrome_sites(&pending).join(", ")
+                );
+            }
             if self.approver == Approver::Nobody && pending.allow_always == Some(false) {
                 // Neither a rule nor --yolo answers this kind of request.
                 let _ = client.interrupt_session(root, false).await;
@@ -4781,7 +4796,9 @@ impl RunWatch {
                     "Stopped: the agent asked to {request}, and nobody can approve that in this run. Allow it with a permission rule, or run again with --yolo to approve every request."
                 );
             }
-            let decision = if self.ask(&request).await? {
+            let decision = if pending.explicit {
+                self.ask_explicit(&request).await?
+            } else if self.ask(&request).await? {
                 PermissionReplyDecision::Once
             } else {
                 PermissionReplyDecision::Reject
@@ -4818,6 +4835,33 @@ impl RunWatch {
             answer.trim().to_ascii_lowercase().as_str(),
             "y" | "yes"
         ))
+    }
+
+    /// A site in the user's Chrome: allow it for this chat, once, or not.
+    async fn ask_explicit(&self, request: &str) -> Result<PermissionReplyDecision> {
+        let _paused = self.activity.as_ref().map(RunActivity::pause);
+        eprint!("The agent asks to {request}.\n[y] allow in this chat / [o] once / [N] ");
+        let _ = io::stderr().flush();
+        let answer = tokio::task::spawn_blocking(|| {
+            let mut line = String::new();
+            if io::stdin().is_terminal() {
+                io::stdin().read_line(&mut line)?;
+            } else {
+                io::BufRead::read_line(&mut io::BufReader::new(answer_terminal()?), &mut line)?;
+            }
+            io::Result::Ok(line)
+        })
+        .await??;
+        Ok(explicit_answer(&answer))
+    }
+}
+
+/// `[y] allow in this chat / [o] once / [N]`: anything else refuses.
+fn explicit_answer(answer: &str) -> PermissionReplyDecision {
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => PermissionReplyDecision::Always,
+        "o" | "once" => PermissionReplyDecision::Once,
+        _ => PermissionReplyDecision::Reject,
     }
 }
 
@@ -4863,9 +4907,44 @@ async fn approve_once(
 }
 
 /// Whether `--yolo` may answer a request: not one that always asks (a Cloud
-/// action that spends money, a tool that requires approval each time).
+/// action that spends money, a tool that requires approval each time), and
+/// never a site in the user's Chrome, which only a person answers.
 fn yolo_answers(pending: &haarness_protocol::PendingPermissionInfo) -> bool {
-    pending.allow_always != Some(false)
+    pending.allow_always != Some(false) && !pending.explicit
+}
+
+/// What a Chrome approval asks, one phrase per site and kind of access:
+/// patterns read `[browser_site:]chrome-<kind>:<chat>:<origin>`.
+fn chrome_requests(pending: &haarness_protocol::PendingPermissionInfo) -> Vec<(String, String)> {
+    let mut requests = Vec::new();
+    for pattern in &pending.patterns {
+        let pattern = pattern.strip_prefix("browser_site:").unwrap_or(pattern);
+        let Some((kind, rest)) = pattern
+            .strip_prefix("chrome-")
+            .and_then(|rest| rest.split_once(':'))
+        else {
+            continue;
+        };
+        let Some((_, origin)) = rest.split_once(':') else {
+            continue;
+        };
+        let request = (kind.to_owned(), origin.to_owned());
+        if !requests.contains(&request) {
+            requests.push(request);
+        }
+    }
+    requests
+}
+
+/// The sites a Chrome approval names.
+fn chrome_sites(pending: &haarness_protocol::PendingPermissionInfo) -> Vec<String> {
+    let mut sites: Vec<String> = Vec::new();
+    for (_, origin) in chrome_requests(pending) {
+        if !sites.contains(&origin) {
+            sites.push(origin);
+        }
+    }
+    sites
 }
 
 /// The terminal a run's approvals are typed into when stdin carries piped
@@ -4880,6 +4959,20 @@ fn answer_terminal() -> io::Result<fs::File> {
 
 /// A permission prompt in a few words: the kind of access, then on what.
 fn describe_permission(pending: &haarness_protocol::PendingPermissionInfo) -> String {
+    if pending.explicit {
+        let phrases: Vec<String> = chrome_requests(pending)
+            .into_iter()
+            .map(|(kind, origin)| match kind.as_str() {
+                "downloads" => format!("send downloads from {origin} in Chrome to the agent"),
+                "uploads" => format!("upload files to {origin} in Chrome"),
+                "scripts" => format!("run scripts on {origin} in Chrome"),
+                _ => format!("use {origin} in Chrome"),
+            })
+            .collect();
+        if !phrases.is_empty() {
+            return phrases.join(" and ");
+        }
+    }
     let category = if pending.permission.is_empty() {
         pending
             .operation
@@ -11570,6 +11663,150 @@ mod tests {
         assert!(super::yolo_answers(&pending(None)));
         assert!(super::yolo_answers(&pending(Some(true))));
         assert!(!super::yolo_answers(&pending(Some(false))));
+        let mut chrome = pending(None);
+        chrome.explicit = true;
+        assert!(!super::yolo_answers(&chrome));
+    }
+
+    /// `--yolo` never answers a site in the user's Chrome; with nobody at the
+    /// terminal the run stops and says who can.
+    #[tokio::test]
+    async fn a_yolo_run_leaves_chrome_sites_to_a_person() {
+        use axum::{Json, Router, extract::Path, routing::get};
+
+        let root = ThreadId::new();
+        let request = haarness_protocol::PendingPermissionInfo {
+            allow_always: None,
+            explicit: true,
+            repository_scope: None,
+            permission_id: "chrome".into(),
+            operation: format!("browser_site:chrome-browsing:{root}:https://mail.example.test"),
+            detail: serde_json::Value::Null,
+            permission: "browser_site".into(),
+            patterns: vec![format!("chrome-browsing:{root}:https://mail.example.test")],
+            always_patterns: vec![format!(
+                "browser_site:chrome-browsing:{root}:https://mail.example.test"
+            )],
+            thread_id: root,
+            root_thread_id: Some(root),
+            turn_id: None,
+            agent: None,
+            created_at: chrono::Utc::now(),
+        };
+        let replies = Arc::new(std::sync::Mutex::new(
+            Vec::<(String, serde_json::Value)>::new(),
+        ));
+        let app = Router::new()
+            .route(
+                "/v1/questions",
+                get(|| async { Json(serde_json::json!([])) }),
+            )
+            .route(
+                "/v1/permissions",
+                get(move || {
+                    let request = request.clone();
+                    async move { Json(vec![request]) }
+                }),
+            )
+            .route(
+                "/v1/permissions/{id}",
+                axum::routing::post({
+                    let replies = replies.clone();
+                    move |Path(id): Path<String>, Json(body): Json<serde_json::Value>| async move {
+                        replies.lock().unwrap().push((id, body));
+                        axum::http::StatusCode::NO_CONTENT
+                    }
+                }),
+            )
+            .fallback(|| async { axum::http::StatusCode::NO_CONTENT });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = haarness_tui::api::ApiClient::new(&url, "token").unwrap();
+        // Another client may answer: a scheduled run waits for it.
+        RunWatch {
+            approver: Approver::OtherClients,
+            yolo: true,
+            activity: None,
+        }
+        .answer(&client, root)
+        .await
+        .unwrap();
+        assert!(replies.lock().unwrap().is_empty());
+        let error = RunWatch {
+            approver: Approver::Nobody,
+            yolo: true,
+            activity: None,
+        }
+        .answer(&client, root)
+        .await
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            error,
+            "Stopped: the agent asked to use https://mail.example.test in Chrome, which always needs a person. Answer in the TUI or Desktop, or allow the site under Settings → Browser → Chrome."
+        );
+        let replies = replies.lock().unwrap().clone();
+        assert_eq!(replies.len(), 1, "{replies:?}");
+        assert_eq!(
+            replies[0].1["decision"],
+            serde_json::to_value(haarness_protocol::PermissionReplyDecision::Reject).unwrap()
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn chrome_approvals_read_per_site_and_answer_for_this_chat_once_or_not() {
+        let thread = ThreadId::new();
+        let mut pending: haarness_protocol::PendingPermissionInfo =
+            serde_json::from_value(serde_json::json!({
+                "permissionId": "p",
+                "operation": "multiple: …",
+                "permission": "multiple",
+                "explicit": true,
+                "patterns": [
+                    "browser:navigate:https://mail.example.test",
+                    format!("browser_site:chrome-browsing:{thread}:https://mail.example.test"),
+                    format!("browser_site:chrome-browsing:{thread}:https://www.mail.example.test"),
+                ],
+                "threadId": thread,
+                "createdAt": "2026-10-12T00:00:00Z",
+            }))
+            .unwrap();
+        assert_eq!(
+            describe_permission(&pending),
+            "use https://mail.example.test in Chrome and use https://www.mail.example.test in Chrome"
+        );
+        pending.permission = "browser_site".into();
+        pending.patterns = vec![
+            format!("chrome-scripts:{thread}:https://app.example.test"),
+            format!("chrome-downloads:{thread}:https://app.example.test"),
+            format!("chrome-uploads:{thread}:https://app.example.test"),
+        ];
+        assert_eq!(
+            describe_permission(&pending),
+            "run scripts on https://app.example.test in Chrome and send downloads from https://app.example.test in Chrome to the agent and upload files to https://app.example.test in Chrome"
+        );
+        assert_eq!(
+            super::chrome_sites(&pending),
+            vec!["https://app.example.test"]
+        );
+        assert!(matches!(
+            super::explicit_answer("y\n"),
+            super::PermissionReplyDecision::Always
+        ));
+        assert!(matches!(
+            super::explicit_answer(" O "),
+            super::PermissionReplyDecision::Once
+        ));
+        assert!(matches!(
+            super::explicit_answer("\n"),
+            super::PermissionReplyDecision::Reject
+        ));
+        assert!(matches!(
+            super::explicit_answer("always"),
+            super::PermissionReplyDecision::Reject
+        ));
     }
 
     /// A workflow's agents ask at any moment. A request that shows up while
