@@ -120,19 +120,23 @@ export function createSession(transport: ChromeTransport, deps: SessionDeps): Ch
       const patterns = fetchPatterns(context.policy);
       const frame = await mainFrame();
       let blocked: Extract<FetchDecision, { action: "block" }> | undefined;
+      /** Whether the tab's own page was blocked (it is then taken off the site), not just a resource in it. */
+      let leave = false;
       const sessions = new Set<string | undefined>([undefined]);
       const enable = (session: string | undefined) =>
         transport.send("Fetch.enable", { patterns }, session).then(() => {
           sessions.add(session);
         });
       const offPaused = transport.on("Fetch.requestPaused", (event, session) => {
-        const decision = decideRequest(context, {
+        const request = {
           url: event.request.url + (event.request.urlFragment ?? ""),
           resourceType: event.resourceType,
           mainFrame: !session && event.frameId === frame,
-        });
+        };
+        const decision = decideRequest(context, request);
         if (decision.action === "block") {
           blocked ??= decision;
+          if (request.mainFrame && request.resourceType === "Document") leave = true;
           void transport.send("Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" }, session).catch(() => {});
         } else void transport.send("Fetch.continueRequest", { requestId: event.requestId }, session).catch(() => {});
       });
@@ -154,12 +158,13 @@ export function createSession(transport: ChromeTransport, deps: SessionDeps): Ch
         offChild();
         await Promise.all([...sessions].map((session) => transport.send("Fetch.disable", {}, session).catch(() => {})));
       }
-      if (!blocked) {
+      if (!leave) {
         const decision = landing(context, await landed());
-        if (decision.action === "block") blocked = decision;
+        if (decision.action === "block") [blocked, leave] = [decision, true];
       }
       if (blocked) {
-        await blank();
+        // A blocked frame or resource fails the command, as on Desktop, but leaves the allowed page as it is.
+        if (leave) await blank();
         throw new HostError("site-blocked", blockedMessage(blocked));
       }
       watch(context);

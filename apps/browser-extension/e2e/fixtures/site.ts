@@ -116,7 +116,7 @@ export async function startSite(): Promise<TestSite> {
       case "/popped":
         return html(page("Popped window", "<p>Opened by the page.</p>"));
       case "/frame":
-        return html(page("Framed", `<iframe id="inner" src="${origin("other")}/inner" width="400" height="120"></iframe>`));
+        return html(page("Framed", `<iframe id="inner" src="${origin(url.searchParams.get("inner") ?? "other")}/inner" width="400" height="120"></iframe>`));
       case "/inner":
         return html(`<!doctype html><title>Inner</title><label>Inner field <input id="inner-field"></label><button type="button">Inner button</button>`);
       case "/later":
