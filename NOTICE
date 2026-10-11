@@ -13,6 +13,9 @@ The upstream notices are kept beside the code they cover:
 - Desktop browser control, diagnostics, profiling and proxy code
   (apps/desktop/src/main/browser) — MIT License,
   see apps/desktop/src/main/browser/THIRD-PARTY-NOTICES.md
+- Haarness for Chrome (apps/browser-extension) bundles the shared browser
+  driver (packages/browser-driver), which carries the same MIT-licensed code;
+  its notices ship inside the extension build
 
 Rust crates and npm/Python packages pulled in as dependencies are distributed
 under their own licenses, recorded in Cargo.lock and the package lockfiles.
