@@ -51,7 +51,7 @@ export function createSurface(transport: ChromeTransport, deps: SurfaceDeps): Pa
     }),
   ];
   refresh();
-  const entry = (delta: -1 | 1) => history?.entries[history.currentIndex + delta];
+  const entry = (delta: -1 | 1) => history?.entries?.[history.currentIndex + delta];
   const index = (delta: -1 | 1) => (history ? history.currentIndex + delta : delta);
 
   const surface: PageSurface & { dispose(): void } = {

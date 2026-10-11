@@ -24,7 +24,8 @@ export interface SessionDeps {
 /** How long a main-frame navigation right after a command is still checked against the chat's rules. */
 const BACKSTOP_MS = 2_000;
 const LOAD_TIMEOUT_MS = 30_000;
-const IFRAMES_ONLY = [{ type: "iframe", exclude: false }, { exclude: true }];
+/** How long a command waits for the session's service-worker and prerender settings (a dialog can hold them). */
+const ISOLATION_WAIT_MS = 2_000;
 
 export type ChromeTabSession = TabSession & { dispose(): void };
 
@@ -39,6 +40,13 @@ export function createSession(transport: ChromeTransport, deps: SessionDeps): Ch
   let backstop: (() => void) | undefined;
 
   const enabled = transport.send("Page.enable").catch(() => {});
+  // Agent tabs skip service workers and prerendering for the whole debugging
+  // session. Sent once: like other page calls they wait while a JavaScript
+  // dialog is open, and a command must not.
+  const isolated = Promise.all([
+    transport.send("Network.setBypassServiceWorker", { bypass: true }).catch(() => {}),
+    transport.send("Page.setPrerenderingAllowed", { isAllowed: false }).catch(() => {}),
+  ]);
   const mainFrame = async () => (main ??= (await transport.send("Page.getFrameTree")).frameTree.frame.id);
 
   const offs = [
@@ -68,10 +76,13 @@ export function createSession(transport: ChromeTransport, deps: SessionDeps): Ch
     await transport.send("Page.navigate", { url: "about:blank" }).catch(() => {});
   }
 
+  /**
+   * The URL the tab committed. Read from chrome.tabs, which answers while a
+   * JavaScript dialog holds the page; the page's own CDP calls wait for it.
+   */
   async function landed() {
     try {
-      const tree = await transport.send("Page.getFrameTree");
-      return tree.frameTree.frame.url + (tree.frameTree.frame.urlFragment ?? "");
+      return (await chrome.tabs.get(tabId)).url || deps.cache.url;
     } catch {
       return deps.cache.url;
     }
@@ -134,12 +145,7 @@ export function createSession(transport: ChromeTransport, deps: SessionDeps): Ch
         // Await every enable before the command's first input.
         await enable(undefined);
         await Promise.all(transport.children().map((child) => enable(child).catch(() => {})));
-        if (!page)
-          await transport
-            .send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true, filter: IFRAMES_ONLY })
-            .catch(() => {});
-        await transport.send("Network.setBypassServiceWorker", { bypass: true }).catch(() => {});
-        await transport.send("Page.setPrerenderingAllowed", { isAllowed: false }).catch(() => {});
+        await Promise.race([isolated, new Promise((resolve) => setTimeout(resolve, ISOLATION_WAIT_MS))]);
         result = await work();
       } catch (error) {
         failure = error;
