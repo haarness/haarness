@@ -594,6 +594,9 @@ pub(crate) fn sync_extension(source: Option<&Path>, target: &Path) -> Result<()>
 }
 
 const NOT_INCLUDED: &str = "Haarness for Chrome is not included in this installation. Set it up from Haarness Desktop (Settings → Browser → Chrome).";
+/// After `remove`, the extension may still be in Chrome; what is gone is
+/// Chrome's way to start Haarness.
+const REMOVED: &str = "Chrome cannot start Haarness: `haarness browser remove` turned that off. Run `haarness browser setup` to use Chrome again.";
 
 pub(crate) fn setup(context: &Context, options: &SetupOptions) -> Result<Report> {
     let files = ChromeFiles::new(&context.data, context.os);
@@ -802,9 +805,7 @@ pub(crate) fn setup_command(data: &Path, data_dir: Option<&Path>, args: &SetupAr
         eprintln!("Warning: {warning}");
     }
     if report.removed {
-        println!(
-            "Haarness for Chrome was removed with `haarness browser remove`. Run `haarness browser setup` to set it up again."
-        );
+        println!("{REMOVED}");
         return Ok(());
     }
     let registered: Vec<&str> = report
@@ -868,9 +869,7 @@ pub(crate) async fn status_command(data: &Path, cache: &Path, json: bool) -> Res
         return print_json(&report);
     }
     if report.removed {
-        println!(
-            "Haarness for Chrome was removed. Run `haarness browser setup` to use Chrome again."
-        );
+        println!("{REMOVED}");
         return Ok(());
     }
     let registered: Vec<&str> = report
@@ -884,6 +883,11 @@ pub(crate) async fn status_command(data: &Path, cache: &Path, json: bool) -> Res
     } else {
         println!("Chrome can start Haarness ({}).", list(&registered));
     }
+    for browser in report.browsers.iter().filter(|browser| !browser.supported) {
+        if let Some(note) = &browser.note {
+            println!("{}: {note}", browser.name);
+        }
+    }
     match &report.extension {
         Some(extension) => println!(
             "Haarness for Chrome {}: {}",
@@ -891,8 +895,15 @@ pub(crate) async fn status_command(data: &Path, cache: &Path, json: bool) -> Res
         ),
         None => println!("Haarness for Chrome is not copied here yet."),
     }
+    println!("{}", connected_summary(&connections));
+    Ok(())
+}
+
+/// `status`'s line on the browsers connected to live servers, saying which
+/// the person paused or stopped (agents cannot use those).
+fn connected_summary(connections: &[Value]) -> String {
     let mut connected = Vec::new();
-    for connection in &connections {
+    for connection in connections {
         let project = connection["workspace"]
             .as_str()
             .and_then(|workspace| Path::new(workspace).file_name())
@@ -902,15 +913,20 @@ pub(crate) async fn status_command(data: &Path, cache: &Path, json: bool) -> Res
             if let Some(label) = host["label"].as_str() {
                 let _ = write!(name, " ({label})");
             }
-            connected.push(format!("{name} · {project}"));
+            let _ = write!(name, " · {project}");
+            if host["stopped"] == true {
+                name.push_str(" · stopped in Chrome");
+            } else if host["paused"] == true {
+                name.push_str(" · paused in Chrome");
+            }
+            connected.push(name);
         }
     }
     if connected.is_empty() {
-        println!("No Chrome is connected to a project right now.");
+        "No Chrome is connected to a project right now.".into()
     } else {
-        println!("Connected: {}", connected.join(", "));
+        format!("Connected: {}", connected.join(", "))
     }
-    Ok(())
 }
 
 pub(crate) fn remove_command(data: &Path, all: bool, json: bool) -> Result<()> {
@@ -1496,6 +1512,25 @@ mod tests {
                 .iter()
                 .any(|key| key.starts_with("HKCU\\Software\\Google\\Chrome"))
         );
+    }
+
+    #[test]
+    fn status_says_which_connected_browsers_agents_cannot_use() {
+        let host = |label: &str, paused: bool, stopped: bool| json!({"name":"Google Chrome","label":label,"paused":paused,"stopped":stopped});
+        let connections = [json!({
+            "workspace": "/work/shop",
+            "hosts": [host("Work", false, false), host("Home", true, false), host("Test", true, true)],
+        })];
+        assert_eq!(
+            connected_summary(&connections),
+            "Connected: Google Chrome (Work) · shop, Google Chrome (Home) · shop · paused in Chrome, Google Chrome (Test) · shop · stopped in Chrome"
+        );
+        assert_eq!(
+            connected_summary(&[]),
+            "No Chrome is connected to a project right now."
+        );
+        // The extension outlives `remove`; only Chrome's way in is gone.
+        assert!(REMOVED.starts_with("Chrome cannot start Haarness"));
     }
 
     #[test]
