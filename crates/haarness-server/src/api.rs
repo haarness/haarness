@@ -1193,13 +1193,25 @@ async fn configure_mcp(
     Path(name): Path<String>,
     Json(config): Json<McpConfigureRequest>,
 ) -> ApiResult<Json<McpServerInfo>> {
-    Ok(Json(state.mcp.configure(&name, config).await?))
+    Ok(Json(
+        state
+            .mcp
+            .configure(&name, config)
+            .await
+            .map_err(ApiFailure::plain)?,
+    ))
 }
 async fn reconnect_mcp(
     State(state): State<ServerState>,
     Path(name): Path<String>,
 ) -> ApiResult<Json<McpServerInfo>> {
-    Ok(Json(state.mcp.reconnect(&name).await?))
+    Ok(Json(
+        state
+            .mcp
+            .reconnect(&name)
+            .await
+            .map_err(ApiFailure::plain)?,
+    ))
 }
 async fn disconnect_mcp(
     State(state): State<ServerState>,

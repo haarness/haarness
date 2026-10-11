@@ -1189,6 +1189,13 @@ fn parse_cron_field(field: &str, min: u32, max: u32) -> Result<CronField> {
         });
     }
     let mut values = Vec::new();
+    let number = |text: &str| {
+        text.parse::<u32>().map_err(|_| {
+            anyhow::anyhow!(
+                "cron field \"{field}\": use numbers from {min} to {max}; names such as MON or JAN are not supported"
+            )
+        })
+    };
     for chunk in field.split(',') {
         let (base, step) = chunk.split_once('/').map_or((chunk, 1), |(base, step)| {
             (base, step.parse::<u32>().unwrap_or(0))
@@ -1199,9 +1206,9 @@ fn parse_cron_field(field: &str, min: u32, max: u32) -> Result<CronField> {
         let (start, end) = if base == "*" {
             (min, max)
         } else if let Some((start, end)) = base.split_once('-') {
-            (start.parse::<u32>()?, end.parse::<u32>()?)
+            (number(start)?, number(end)?)
         } else {
-            let value = base.parse::<u32>()?;
+            let value = number(base)?;
             (value, value)
         };
         if start < min || end > max || start > end {
@@ -1513,6 +1520,16 @@ fn windows_argument(value: &OsStr) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cron_name_is_refused_with_the_numbers_to_use() {
+        let error = parse_cron("0 9 * * MON").err().unwrap().to_string();
+        assert_eq!(
+            error,
+            "cron field \"MON\": use numbers from 0 to 7; names such as MON or JAN are not supported"
+        );
+        assert!(parse_cron("0 9 * * 1-5").is_ok());
+    }
 
     fn fixture(backend: Backend) -> (PathBuf, Scheduler) {
         let root = std::env::temp_dir().join(format!("haarness-scheduler-{}", Uuid::now_v7()));

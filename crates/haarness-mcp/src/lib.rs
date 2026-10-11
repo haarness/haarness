@@ -411,7 +411,9 @@ impl NativeMcpRegistry {
                             if let Some((_, path)) = resolved {
                                 command.env("PATH", path);
                             }
-                            let transport = process::Process::new(command).map_err(mcp_error)?;
+                            let transport = process::Process::new(command).map_err(|error| {
+                                CoreError::Tool(format!("cannot start {program}: {error}"))
+                            })?;
                             let client =
                                 handler.clone().serve(transport).await.map_err(mcp_error)?;
                             let tools = client.list_all_tools().await.map_err(mcp_error)?;
@@ -913,12 +915,14 @@ async fn activate_remote(
                         AuthClient::new(http, manager),
                         transport_config,
                     ),
+                    url,
                 )
                 .await
             } else {
                 activate_streamable(
                     handler.clone(),
                     StreamableHttpClientTransport::with_client(http, transport_config),
+                    url,
                 )
                 .await
             }
@@ -926,6 +930,7 @@ async fn activate_remote(
             activate_streamable(
                 handler.clone(),
                 StreamableHttpClientTransport::with_client(http, transport_config),
+                url,
             )
             .await
         };
@@ -944,6 +949,7 @@ async fn activate_remote(
 async fn activate_streamable<T, E, A>(
     handler: CatalogClient,
     transport: T,
+    url: &str,
 ) -> Result<(Vec<ToolDefinition>, mpsc::Sender<WorkerCommand>), ActivationError>
 where
     T: IntoTransport<RoleClient, E, A>,
@@ -957,7 +963,7 @@ where
                 error.auth_challenge().map(str::to_owned),
             ));
         }
-        Err(error) => return Err(ActivationError::Core(mcp_error(error))),
+        Err(error) => return Err(ActivationError::Core(initialize_error(&error, url))),
     };
     let tools = client
         .list_all_tools()
@@ -1114,8 +1120,15 @@ fn manager_store(name: &str, auth_dir: Option<&Path>) -> FileCredentialStore {
     FileCredentialStore::new(root.join(format!("mcp-{encoded}.json")))
 }
 
+/// The failure as a person reads it, without the `tool error:` category.
 fn concise_error(error: &CoreError) -> String {
-    error.to_string().chars().take(512).collect()
+    match error {
+        CoreError::Tool(message) => message.clone(),
+        other => other.to_string(),
+    }
+    .chars()
+    .take(512)
+    .collect()
 }
 
 async fn activate_legacy_sse(
@@ -1401,6 +1414,21 @@ fn count_mcp_attachment(encoded: &str, total: &mut usize) -> CoreResult<()> {
     }
     Ok(())
 }
+/// A server that could not be reached reads as that, with the innermost
+/// reason ("Connection refused"), not as rmcp's transport type names.
+fn initialize_error(error: &(dyn std::error::Error + 'static), url: &str) -> CoreError {
+    let text = error.to_string();
+    if text.contains("error sending request") {
+        if let Some(cause) = std::iter::successors(Some(error), |error| error.source()).last()
+            && !std::ptr::addr_eq(cause, error)
+        {
+            return CoreError::Tool(format!("cannot reach {url}: {cause}"));
+        }
+        return CoreError::Tool(format!("cannot reach {url}"));
+    }
+    mcp_error(text)
+}
+
 fn mcp_error(error: impl std::fmt::Display) -> CoreError {
     CoreError::Tool(error.to_string())
 }
@@ -1774,6 +1802,42 @@ mod tests {
                 .send(json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string())
                 .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn a_stdio_server_that_cannot_start_names_its_program() {
+        let registry = NativeMcpRegistry::default();
+        let error = registry
+            .configure(
+                "broken",
+                McpConfigureRequest {
+                    transport: "stdio".into(),
+                    command: Some("/nonexistent/mcp-server".into()),
+                    args: Vec::new(),
+                    env: BTreeMap::new(),
+                    cwd: None,
+                    url: None,
+                    headers: BTreeMap::new(),
+                    headers_helper: None,
+                    timeout_ms: Some(2_000),
+                    oauth: None,
+                    oauth_client_id: None,
+                    oauth_scopes: Vec::new(),
+                    enabled: true,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, CoreError::Tool(message) if message.starts_with("cannot start /nonexistent/mcp-server: ")),
+            "{error}"
+        );
+        let listed = registry.list().await.unwrap();
+        let detail = listed[0].detail.as_deref().unwrap_or_default();
+        assert!(
+            detail.starts_with("connection failed: cannot start /nonexistent/mcp-server"),
+            "{detail}"
+        );
     }
 
     #[tokio::test]

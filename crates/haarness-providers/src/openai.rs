@@ -237,14 +237,11 @@ impl OpenAiProvider {
         if let Some(key) = &self.api_key {
             return Ok(RequestAuth::Api(key.expose_secret().to_owned()));
         }
-        let store = self
-            .auth_store
-            .as_ref()
-            .ok_or_else(|| CoreError::Provider("OpenAI is not authenticated".into()))?;
+        let store = self.auth_store.as_ref().ok_or_else(not_authenticated)?;
         let mut credential = store
             .get("openai")
             .map_err(provider_error)?
-            .ok_or_else(|| CoreError::Provider("OpenAI is not authenticated".into()))?;
+            .ok_or_else(not_authenticated)?;
         if credential.api_key().is_some() {
             return request_auth_from_credential(&credential, &self.oauth);
         }
@@ -886,6 +883,15 @@ fn response_usage(event: &Value) -> Option<ProviderEvent> {
 fn number(value: &Value, key: &str) -> u64 {
     value.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
+
+/// Like the other providers' errors, this one says how to connect.
+fn not_authenticated() -> CoreError {
+    CoreError::Provider(
+        "OpenAI is not authenticated; run `haarness auth login openai`, or set OPENAI_API_KEY"
+            .into(),
+    )
+}
+
 fn provider_error(error: impl std::fmt::Display) -> CoreError {
     CoreError::Provider(error.to_string())
 }

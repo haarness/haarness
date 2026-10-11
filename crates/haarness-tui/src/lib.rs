@@ -39,7 +39,10 @@ use std::{path::PathBuf, time::Duration};
 
 use crate::api::{ApiClient, EndpointResolver};
 use crate::input::{AppAction, handle_key};
-use crate::state::{App, ToastVariant, default_connected_model};
+/// The model a new chat starts on when none is configured; `haarness run`
+/// picks the same way.
+pub use crate::state::default_connected_model;
+use crate::state::{App, ToastVariant};
 use crate::terminal::TerminalGuard;
 
 /// Pick the page-clear color independently from component surfaces. In auto
