@@ -2181,8 +2181,22 @@ async fn change_input_queue(
 async fn reply_permission(
     State(state): State<ServerState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(reply): Json<PermissionReply>,
 ) -> ApiResult<StatusCode> {
+    // A published chat's viewers may not let agents into the owner's Chrome.
+    if crate::remote_scope::root(&headers).is_some()
+        && state
+            .runtime
+            .pending_permissions()
+            .iter()
+            .any(|pending| pending.permission_id == id && pending.explicit)
+    {
+        return Err(ApiFailure(
+            CoreError::PermissionDenied("explicit approval".into()),
+            Some("Answer this on the computer running Chrome.".into()),
+        ));
+    }
     state.runtime.reply_permission(&id, reply).await?;
     Ok(StatusCode::NO_CONTENT)
 }
