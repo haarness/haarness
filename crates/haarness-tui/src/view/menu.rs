@@ -141,7 +141,8 @@ pub fn menu_lines(app: &App, width: usize, max_height: usize) -> TaggedLines {
         | Overlay::Diff(_)
         | Overlay::Workflow { .. }
         | Overlay::ProviderLogin
-        | Overlay::RemoteControl => {
+        | Overlay::RemoteControl
+        | Overlay::Chrome => {
             return TaggedLines::default();
         }
     };
@@ -353,6 +354,9 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
     if matches!(app.overlay, Overlay::RemoteControl) {
         return Some(remote_control_dialog(app, width, max_height));
     }
+    if matches!(app.overlay, Overlay::Chrome) {
+        return Some(chrome_dialog(app, width, max_height));
+    }
 
     let (title, rows): (&str, Vec<SelectorRow>) = match app.overlay {
         Overlay::Commands => (
@@ -522,7 +526,8 @@ pub fn dialog_lines(app: &App, width: usize, max_height: usize) -> Option<Tagged
         | Overlay::Diff(_)
         | Overlay::Workflow { .. }
         | Overlay::ProviderLogin
-        | Overlay::RemoteControl => {
+        | Overlay::RemoteControl
+        | Overlay::Chrome => {
             unreachable!()
         }
     };
@@ -1526,6 +1531,575 @@ fn remote_control_dialog(app: &App, width: usize, max_height: usize) -> TaggedLi
     out.push(card.footer(&language.hints(footer)));
     out.push(card.bottom());
     out
+}
+
+/// `/chrome`: whether agents can use the person's own Chrome, and the one
+/// next step while they cannot yet (set it up, add the extension, open
+/// Chrome, resume it there), above the two settings people change here.
+fn chrome_dialog(app: &App, width: usize, max_height: usize) -> TaggedLines {
+    use crate::chrome::{LocalAction, Unavailable, View};
+    const ABOUT: &str = "Agents can use your own Chrome — with your sign-ins — through the Haarness for Chrome extension. Each new site asks first.";
+    let theme = &app.theme;
+    let language = app.language;
+    let card = ModalCard::new(app, width);
+    let content = card.content_width();
+    let chrome = &app.chrome;
+    let spin = crate::view::span::spinner(app.tick).to_string();
+    let heading = |glyph: &str, color: haarness_opentui::Color, label: String| {
+        Line::new(vec![
+            Span::new(format!("{glyph} "), color),
+            Span::new(label, theme.text).with_attributes(attr::BOLD),
+        ])
+    };
+    // A paragraph: a blank row, then the text wrapped to the card.
+    let paragraph = |body: &mut Vec<Line>, text: &str, color: haarness_opentui::Color| {
+        body.push(Line::empty());
+        body.extend(wrap_panel_text(text, content, "", color));
+    };
+    let mut body: Vec<Line> = Vec::new();
+    let mut footer: Vec<&str> = Vec::new();
+    match chrome.view() {
+        View::Checking => {
+            body.push(heading(
+                &spin,
+                theme.primary,
+                language.text("Checking…").into(),
+            ));
+        }
+        View::Unavailable(Unavailable::Remote) => {
+            body.push(heading(
+                "○",
+                theme.muted,
+                language.text("Not available in this chat").into(),
+            ));
+            paragraph(
+                &mut body,
+                language.text("Chrome works with projects on the computer where Chrome runs. Open this project on that computer to use it."),
+                theme.text,
+            );
+        }
+        View::Unavailable(Unavailable::Unsupported) => {
+            body.push(heading(
+                "○",
+                theme.muted,
+                language.text("This server cannot use Chrome").into(),
+            ));
+            paragraph(
+                &mut body,
+                language.text("Update Haarness, then restart this project's server."),
+                theme.text,
+            );
+        }
+        View::Unavailable(Unavailable::Failed(error)) => {
+            body.push(heading(
+                "✕",
+                theme.danger,
+                language.text("Could not reach the server").into(),
+            ));
+            paragraph(&mut body, error, theme.danger);
+            footer.push("enter try again");
+        }
+        View::Off => {
+            body.push(heading(
+                "○",
+                theme.muted,
+                language.text("Agents may not use Chrome").into(),
+            ));
+            paragraph(&mut body, language.text(ABOUT), theme.text);
+            footer.push("enter turn on");
+        }
+        View::Connected(hosts) => {
+            chrome_connected(app, hosts, content, &mut body);
+            footer.push("enter refresh");
+        }
+        View::Elsewhere => {
+            body.push(heading(
+                "○",
+                theme.muted,
+                language.text("Not connected").into(),
+            ));
+            paragraph(
+                &mut body,
+                language.text(if crate::connect::over_ssh() {
+                    "You are connected over SSH. Chrome works with projects on the computer where Chrome runs."
+                } else {
+                    "This terminal reaches the project from another computer. Chrome works with projects on the computer where Chrome runs."
+                }),
+                theme.text,
+            );
+            paragraph(
+                &mut body,
+                &language.format(
+                    "On that computer, run {command}, or open Settings → Browser → Chrome in Haarness Desktop.",
+                    &[("command", crate::chrome::SETUP_COMMAND)],
+                ),
+                theme.muted,
+            );
+            footer.extend(["c copy command", "enter refresh"]);
+        }
+        View::LocalChecking => {
+            body.push(heading(
+                &spin,
+                theme.primary,
+                language.text("Checking this computer…").into(),
+            ));
+        }
+        View::LocalFailed(action, error) => {
+            body.push(heading(
+                "✕",
+                theme.danger,
+                language
+                    .text(if action == LocalAction::Setup {
+                        "Could not set up Chrome"
+                    } else {
+                        "Could not check Chrome on this computer"
+                    })
+                    .into(),
+            ));
+            paragraph(&mut body, language.text(error), theme.danger);
+            footer.extend(["enter try again", "c copy command"]);
+        }
+        View::SettingUp => {
+            body.push(heading(
+                &spin,
+                theme.primary,
+                language.text("Setting up Chrome…").into(),
+            ));
+            paragraph(
+                &mut body,
+                language.text("Letting Chrome start Haarness on this computer."),
+                theme.muted,
+            );
+        }
+        View::NotSetUp { removed } => {
+            body.push(heading(
+                "○",
+                theme.muted,
+                language.text("Not set up").into(),
+            ));
+            paragraph(&mut body, language.text(ABOUT), theme.text);
+            paragraph(
+                &mut body,
+                language.text(if removed {
+                    "Haarness was removed from Chrome on this computer. Press Enter to set it up again."
+                } else {
+                    "Press Enter to let Chrome start Haarness on this computer."
+                }),
+                theme.muted,
+            );
+            footer.push("enter set up");
+        }
+        View::Waiting(setup) => {
+            let reconnecting = matches!(
+                &chrome.hosts,
+                Some(Ok(hosts)) if hosts.chrome.ever_connected
+            );
+            if reconnecting {
+                // It worked before: Chrome is closed, or the extension is off.
+                body.push(heading(
+                    "○",
+                    theme.muted,
+                    language.text("Not connected").into(),
+                ));
+                paragraph(
+                    &mut body,
+                    language.text("Open Chrome; Haarness connects within a few seconds."),
+                    theme.text,
+                );
+            } else {
+                body.push(heading(
+                    &spin,
+                    theme.primary,
+                    language.text("Waiting for Chrome…").into(),
+                ));
+                chrome_steps(app, setup, content, &mut body);
+            }
+            for browser in setup.unsupported() {
+                let note = browser
+                    .note
+                    .as_deref()
+                    .unwrap_or_else(|| language.text("not supported"));
+                paragraph(
+                    &mut body,
+                    &format!("{} · {note}", browser.name),
+                    theme.muted,
+                );
+            }
+            for warning in &setup.warnings {
+                paragraph(&mut body, warning, theme.muted);
+            }
+            if chrome.web_store_url().is_some() {
+                footer.push("o open web store");
+            } else if chrome.extension_path().is_some() {
+                footer.push("c copy path");
+            }
+            footer.push("enter check again");
+        }
+    }
+    footer.push("esc close");
+    if matches!(chrome.hosts, Some(Ok(_))) {
+        chrome_settings_rows(app, content, &mut body);
+    }
+    body.truncate(max_height.saturating_sub(6).max(1));
+    let mut out = TaggedLines::default();
+    out.push(card.top());
+    out.push(card.header(language.text("Chrome")));
+    out.push(card.separator());
+    for row in body {
+        out.push(card.row(row, false));
+    }
+    out.push(card.separator());
+    out.push(card.footer(&language.hints(&footer)));
+    out.push(card.bottom());
+    out
+}
+
+/// Which browsers are connected, whether the person paused or stopped
+/// Haarness there, and what this chat has open.
+fn chrome_connected(
+    app: &App,
+    hosts: &[crate::chrome::Host],
+    content: usize,
+    body: &mut Vec<Line>,
+) {
+    let theme = &app.theme;
+    let language = app.language;
+    let heading = |glyph: &str, color: haarness_opentui::Color, label: String| {
+        Line::new(vec![
+            Span::new(format!("{glyph} "), color),
+            Span::new(label, theme.text).with_attributes(attr::BOLD),
+        ])
+    };
+    let stopped = hosts.iter().all(|host| host.stopped);
+    let paused = !stopped && hosts.iter().all(|host| host.paused || host.stopped);
+    if stopped {
+        body.push(heading(
+            "✕",
+            theme.danger,
+            language.text("Stopped in Chrome").into(),
+        ));
+    } else if paused {
+        body.push(heading(
+            "◐",
+            theme.accent,
+            language.text("Paused in Chrome").into(),
+        ));
+    } else if let [host] = hosts {
+        body.push(heading(
+            "●",
+            theme.success(),
+            language.format("Connected · {browser}", &[("browser", &host.title())]),
+        ));
+    } else {
+        body.push(heading(
+            "●",
+            theme.success(),
+            language.format(
+                "{count} browsers connected",
+                &[("count", &hosts.len().to_string())],
+            ),
+        ));
+    }
+    // One browser was named above; several each get a row of their own.
+    for host in hosts {
+        let state = if host.stopped {
+            language.text("stopped")
+        } else if host.paused {
+            language.text("paused")
+        } else {
+            ""
+        };
+        let version = host.extension_version.as_deref().map(|version| {
+            language.format("Haarness for Chrome {version}", &[("version", version)])
+        });
+        let text = if hosts.len() == 1 {
+            version.unwrap_or_default()
+        } else {
+            [Some(host.title()), version, Some(state.to_owned())]
+                .into_iter()
+                .flatten()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · ")
+        };
+        if !text.is_empty() {
+            body.extend(wrap_panel_text(&text, content, "  ", theme.muted));
+        }
+    }
+    body.push(Line::empty());
+    if stopped {
+        body.extend(wrap_panel_text(
+            language.text("You stopped Haarness in Chrome. Click Resume on the Haarness button in Chrome's toolbar to let agents back in."),
+            content,
+            "",
+            theme.text,
+        ));
+        return;
+    }
+    if paused {
+        body.extend(wrap_panel_text(
+            language.text("Resume it from the Haarness button in Chrome's toolbar."),
+            content,
+            "",
+            theme.text,
+        ));
+        return;
+    }
+    let tabs = app.chrome.thread_tabs(app.thread.id);
+    let text = match tabs {
+        0 => language
+            .text("Try it: ask an agent to open a website in Chrome.")
+            .to_owned(),
+        1 => language.text("This chat has 1 tab in Chrome.").to_owned(),
+        count => language.format(
+            "This chat has {count} tabs in Chrome.",
+            &[("count", &count.to_string())],
+        ),
+    };
+    body.extend(wrap_panel_text(&text, content, "", theme.text));
+    body.extend(wrap_panel_text(
+        language
+            .text("Agents work only in their own tab groups, and each new site asks you first."),
+        content,
+        "",
+        theme.muted,
+    ));
+}
+
+/// How to add Haarness for Chrome once Chrome can start Haarness: from the
+/// Web Store when it is listed there, otherwise by loading the unpacked
+/// folder in every browser setup registered, with the path to paste.
+fn chrome_steps(app: &App, setup: &crate::chrome::Setup, content: usize, body: &mut Vec<Line>) {
+    let theme = &app.theme;
+    let language = app.language;
+    let chrome = &app.chrome;
+    let step = |body: &mut Vec<Line>, number: usize, text: &str| {
+        let rows = textwrap::wrap(text, content.saturating_sub(3).max(10));
+        for (index, row) in rows.into_iter().enumerate() {
+            let lead = if index == 0 {
+                format!("{number}  ")
+            } else {
+                "   ".to_owned()
+            };
+            body.push(Line::new(vec![
+                Span::new(lead, theme.muted),
+                Span::new(row.into_owned(), theme.text),
+            ]));
+        }
+    };
+    let detail = |body: &mut Vec<Line>, text: &str, color: haarness_opentui::Color| {
+        body.extend(wrap_panel_text(text, content, "   ", color));
+    };
+    body.push(Line::empty());
+    if let Some(url) = chrome.web_store_url() {
+        body.extend(wrap_panel_text(
+            language.text("Chrome can start Haarness. Now add Haarness for Chrome:"),
+            content,
+            "",
+            theme.text,
+        ));
+        body.push(Line::empty());
+        step(
+            body,
+            1,
+            language.text("Open the Haarness for Chrome page in the Chrome Web Store:"),
+        );
+        detail(body, url, theme.primary);
+        step(body, 2, language.text("Click Add to Chrome"));
+        step(body, 3, language.text("Pin Haarness to the toolbar"));
+        return;
+    }
+    let Some(path) = chrome.extension_path() else {
+        body.extend(wrap_panel_text(
+            language.text("This build of Haarness has no Haarness for Chrome extension to load."),
+            content,
+            "",
+            theme.danger,
+        ));
+        return;
+    };
+    body.extend(wrap_panel_text(
+        language.text("Chrome can start Haarness. Now add Haarness for Chrome:"),
+        content,
+        "",
+        theme.text,
+    ));
+    body.push(Line::empty());
+    let page = |browser: &crate::chrome::SetupBrowser| {
+        browser
+            .extensions_page
+            .clone()
+            .unwrap_or_else(|| "chrome://extensions".into())
+    };
+    let mut browsers = setup.ready();
+    if let Some(first) = browsers.next() {
+        step(
+            body,
+            1,
+            &language.format(
+                "Open {page} in {browser}",
+                &[("page", &page(first)), ("browser", &first.name)],
+            ),
+        );
+    }
+    for other in browsers {
+        detail(
+            body,
+            &language.format(
+                "or {page} in {browser}",
+                &[("page", &page(other)), ("browser", &other.name)],
+            ),
+            theme.muted,
+        );
+    }
+    step(
+        body,
+        2,
+        language.text("Turn on Developer mode (keep it on)"),
+    );
+    // macOS's file picker takes a typed path after ⌘⇧G; GTK's and
+    // Windows' after Ctrl+L.
+    let keys = if cfg!(target_os = "macos") {
+        "⌘⇧G"
+    } else {
+        "Ctrl+L"
+    };
+    step(
+        body,
+        3,
+        &language.format(
+            "Click Load unpacked, press {keys} and paste this path:",
+            &[("keys", keys)],
+        ),
+    );
+    detail(body, path, theme.primary);
+    step(body, 4, language.text("Pin Haarness to the toolbar"));
+    body.push(Line::empty());
+    body.extend(wrap_panel_text(
+        language.text("Already added? Open Chrome; Haarness connects within a few seconds."),
+        content,
+        "",
+        theme.muted,
+    ));
+}
+
+/// The two Chrome settings this dialog changes, with their keys. They apply
+/// to every project on this computer, as Chrome itself does.
+fn chrome_settings_rows(app: &App, content: usize, body: &mut Vec<Line>) {
+    use crate::chrome::Change;
+    let theme = &app.theme;
+    let language = app.language;
+    let chrome = &app.chrome;
+    let Some((enabled, default_browser)) = chrome.access() else {
+        return;
+    };
+    let saving = chrome.saving();
+    let rows = [
+        (
+            language.text("Let agents use Chrome"),
+            language.text(if enabled { "On" } else { "Off" }),
+            "e",
+            matches!(saving, Some(Change::Enabled(_))),
+        ),
+        (
+            language.text("Browser for new agent tabs"),
+            language.text(crate::chrome::default_browser_label(default_browser)),
+            "d",
+            matches!(saving, Some(Change::DefaultBrowser(_))),
+        ),
+    ];
+    let label_width = rows
+        .iter()
+        .map(|(label, ..)| label.width())
+        .max()
+        .unwrap_or_default()
+        .min(content / 2);
+    // Every value either row can show, so the keys stay in one column as the
+    // values change under them.
+    let value_width = ["On", "Off"]
+        .into_iter()
+        .chain(
+            crate::chrome::DEFAULT_BROWSERS
+                .iter()
+                .map(|browser| crate::chrome::default_browser_label(browser)),
+        )
+        .map(|value| language.text(value).width())
+        .max()
+        .unwrap_or_default()
+        .min(content.saturating_sub(label_width + 6));
+    body.push(Line::empty());
+    for (label, value, key, busy) in rows {
+        let label = single_line(label, label_width);
+        let value = single_line(value, value_width);
+        let mut spans = vec![
+            Span::new(
+                format!("{label}{}", " ".repeat(label_width - label.width() + 3)),
+                theme.text,
+            ),
+            Span::new(value.clone(), theme.text).with_attributes(attr::BOLD),
+            Span::new(
+                " ".repeat(value_width.saturating_sub(value.width()) + 3),
+                theme.muted,
+            ),
+        ];
+        if busy {
+            spans.push(Span::new(
+                format!(
+                    "{} {}",
+                    crate::view::span::spinner(app.tick),
+                    language.text("Saving…")
+                ),
+                theme.primary,
+            ));
+        } else {
+            spans.push(Span::new(key, theme.muted));
+        }
+        body.push(Line::new(spans));
+    }
+    if default_browser == "auto" || !crate::chrome::DEFAULT_BROWSERS.contains(&default_browser) {
+        body.extend(wrap_panel_text(
+            language.text("Haarness browser when this chat is open in Desktop, otherwise Chrome"),
+            content,
+            &" ".repeat((label_width + 3).min(content / 2)),
+            theme.muted,
+        ));
+    }
+    if let Some(settings) = chrome
+        .settings
+        .as_ref()
+        .filter(|settings| !settings.restrictions.is_empty())
+    {
+        body.push(Line::empty());
+        body.extend(wrap_panel_text(
+            language.text("Restricted by this project's settings:"),
+            content,
+            "",
+            theme.muted,
+        ));
+        for restriction in &settings.restrictions {
+            body.extend(wrap_panel_text(
+                &format!("· {restriction}"),
+                content,
+                "  ",
+                theme.muted,
+            ));
+        }
+    }
+    if let Some(error) = &chrome.settings_error {
+        body.push(Line::empty());
+        body.extend(wrap_panel_text(
+            language.text(error),
+            content,
+            "",
+            theme.danger,
+        ));
+    }
+    body.extend(wrap_panel_text(
+        language.text("Chrome settings apply to every project on this computer."),
+        content,
+        "",
+        theme.muted,
+    ));
 }
 
 /// A QR code in half blocks: each cell holds two modules, the upper one in

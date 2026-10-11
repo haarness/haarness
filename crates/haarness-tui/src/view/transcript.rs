@@ -1297,10 +1297,32 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     }
                     String::new()
                 });
+                // A browser call that ran in the person's own Chrome acts with
+                // their sign-ins, which is worth a word on the row. Until the
+                // result says where it ran, the call's own choice stands in.
+                let chrome = name.starts_with("browser_")
+                    && result.map_or_else(
+                        || arguments.get("browser").and_then(serde_json::Value::as_str),
+                        |item| match &item.data {
+                            ItemData::ToolResult { metadata, .. } => {
+                                metadata.get("browser").and_then(serde_json::Value::as_str)
+                            }
+                            _ => None,
+                        },
+                    ) == Some("chrome");
+                let browser = if chrome {
+                    format!("  ·  {}", app.language.text("Chrome"))
+                } else {
+                    String::new()
+                };
                 // The status suffix must survive truncation: a row that ends
                 // in a lone "f" instead of "failed" reads as a rendering bug.
                 let argument_budget = width
-                    .saturating_sub(12 + progress.chars().count() + suffix.chars().count())
+                    .saturating_sub(
+                        12 + progress.chars().count()
+                            + suffix.chars().count()
+                            + browser.chars().count(),
+                    )
                     .max(16);
                 let argument = if name == "workflow" {
                     format!(" {}", workflow_argument(arguments))
@@ -1318,6 +1340,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     Span::new(marker, color),
                     Span::new(name.clone(), theme.text),
                     Span::new(format!("{argument}{suffix}"), color),
+                    Span::new(browser, theme.muted),
                     Span::new(progress, theme.muted),
                     Span::new(disclosure, theme.muted),
                 ]);

@@ -64,6 +64,16 @@ impl PermissionChoice {
         {
             return vec![Self::Once, Self::Reject];
         }
+        // Chrome site access is granted to one chat, never to a folder or a
+        // repository, and never by switching the chat to Auto. Allowing it
+        // in this chat is the answer people mean, so it comes first and is
+        // what a bare Enter picks.
+        if app
+            .first_pending_permission()
+            .is_some_and(|pending| pending.explicit)
+        {
+            return vec![Self::Always, Self::Once, Self::Reject];
+        }
         let mut choices = Self::ALL.to_vec();
         if app
             .first_pending_permission()
@@ -95,6 +105,17 @@ impl PermissionChoice {
             Self::Workspace => "This folder",
             Self::Repository => "Repository",
             Self::Reject => "Reject",
+        }
+    }
+
+    /// The chip's words for an `explicit` (Chrome site access) request, where
+    /// Always means "in this chat" and a no is a denial of that site.
+    #[must_use]
+    pub const fn label_for(self, explicit: bool) -> &'static str {
+        match self {
+            Self::Always if explicit => "Allow in this chat",
+            Self::Reject if explicit => "Deny",
+            other => other.label(),
         }
     }
 
@@ -373,6 +394,8 @@ pub enum Overlay {
     ProviderLogin,
     /// `/remote-control`; the state lives in `App::remote`.
     RemoteControl,
+    /// `/chrome`; the state lives in `App::chrome`.
+    Chrome,
 }
 
 /// What the workflow inspector is showing: a durable run, or a definition you
@@ -483,7 +506,8 @@ impl Overlay {
             | Self::Diff(_)
             | Self::Workflow { .. }
             | Self::ProviderLogin
-            | Self::RemoteControl => false,
+            | Self::RemoteControl
+            | Self::Chrome => false,
         }
     }
 }
@@ -537,6 +561,10 @@ pub struct Toast {
     pub approval: bool,
 }
 
+/// A context estimate keyed by the shown thread's item count, last sequence
+/// and undo boundary, with the tokens it came to.
+pub type ContextEstimate = ((usize, u64, Option<u64>), u64);
+
 #[allow(clippy::struct_excessive_bools)] // independent UI toggles, not a state machine
 pub struct App {
     pub input_queue: haarness_protocol::InputQueue,
@@ -555,6 +583,8 @@ pub struct App {
     pub(crate) connect: crate::connect::ConnectFlow,
     /// `/remote-control`: whether this chat is shared through Haarness Cloud.
     pub(crate) remote: crate::remote_control::RemoteControl,
+    /// `/chrome`: whether agents can use the person's own Chrome.
+    pub(crate) chrome: crate::chrome::Chrome,
     pub thread: Thread,
     pub threads: Vec<Thread>,
     /// Whether the current session catalog includes archived conversations.
@@ -693,7 +723,7 @@ pub struct App {
     pub last_transcript_len: std::cell::Cell<usize>,
     /// Context estimate of the shown thread, keyed by its item count, last
     /// sequence and undo boundary; the meters read it every frame.
-    pub context_tokens: std::cell::Cell<Option<((usize, u64, Option<u64>), u64)>>,
+    pub context_tokens: std::cell::Cell<Option<ContextEstimate>>,
     /// Server identity (version, workspace, git branch) for the header/home.
     pub server_info: Option<haarness_protocol::ServerInfo>,
     /// Render tick (~5/s) driving the working spinner.
@@ -957,6 +987,7 @@ impl App {
             management: crate::management::Management::default(),
             connect: crate::connect::ConnectFlow::default(),
             remote: crate::remote_control::RemoteControl::default(),
+            chrome: crate::chrome::Chrome::default(),
             pending_server: None,
             original_client: None,
             keybindings: crate::keybindings::load().unwrap_or_default(),
@@ -2208,7 +2239,10 @@ impl App {
             Overlay::Models => self.filtered_models().len(),
             Overlay::Agents => self.filtered_agents().len(),
             Overlay::Themes => self.filtered_themes().len(),
-            Overlay::Workflow { .. } | Overlay::ProviderLogin | Overlay::RemoteControl => 0,
+            Overlay::Workflow { .. }
+            | Overlay::ProviderLogin
+            | Overlay::RemoteControl
+            | Overlay::Chrome => 0,
             Overlay::Options { ref entries, .. } => self.filtered_options(entries).len(),
             Overlay::None | Overlay::Panel { .. } | Overlay::Diff(_) => self
                 .slash_suggestions()
@@ -2613,7 +2647,8 @@ impl App {
             | Overlay::Diff(_)
             | Overlay::Workflow { .. }
             | Overlay::ProviderLogin
-            | Overlay::RemoteControl => None,
+            | Overlay::RemoteControl
+            | Overlay::Chrome => None,
         }
     }
 }

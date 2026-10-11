@@ -16328,6 +16328,9 @@ mod messages_tests;
 #[path = "completion_tests.rs"]
 mod completion_tests;
 
+#[path = "chrome_tests.rs"]
+mod chrome_tests;
+
 fn remote_control_text(app: &App, size: (u32, u32)) -> String {
     app.lines(size)
         .iter()

@@ -75,11 +75,19 @@ pub(crate) async fn answer_permission(
     if choice == 'r' && pending.repository_scope.is_none() {
         return Ok(());
     }
+    // Chrome site access is answered for this chat or this once: no folder
+    // or repository rule, and no Auto. Allowing it in this chat covers one
+    // site in one conversation, which the card already names in full, so it
+    // takes a single press.
+    let explicit = pending.explicit;
+    if explicit && matches!(choice, 'w' | 'r' | 'u') {
+        return Ok(());
+    }
     let id = pending.permission_id.clone();
     let lead = crate::view::approval::staged_lead(choice, pending);
     // A legacy prompt without patterns stages too: the rule it stores is the
     // subject itself, which the card already shows.
-    if matches!(choice, 'a' | 'w' | 'r' | 'u') && app.confirm_always != Some(choice) {
+    if matches!(choice, 'a' | 'w' | 'r' | 'u') && !explicit && app.confirm_always != Some(choice) {
         app.confirm_always = Some(choice);
         // Confirm is the panel's first chip, so a bare Enter commits.
         app.permission_selection = 0;
@@ -136,11 +144,13 @@ const STAGED_READ_TIME: std::time::Duration = std::time::Duration::from_millis(4
 /// A printable key while the approval card owns the keyboard. Returns false
 /// when the key is not an answer, which means the user is typing a message.
 ///
-/// `y` and `n` answer at once. Everything else a letter does here can be
-/// undone (`h`/`l` move the selection; `a`/`w`/`r`/`u` only stage their
-/// answer), so those letters are remembered: when the next key shows they
-/// began a word ("update…", "always…", "hello"), they move to the composer
-/// with it and nothing is answered. A choice staged by a letter is confirmed
+/// `y` and `n` answer at once, and so does `a` on a Chrome site request
+/// (`explicit`), whose answer for this chat covers one site. Everything else
+/// a letter does here can be undone (`h`/`l` move the selection;
+/// `a`/`w`/`r`/`u` only stage their answer), so those letters are
+/// remembered: when the next key shows they began a word ("update…",
+/// "always…", "hello"), they move to the composer with it and nothing is
+/// answered. A choice staged by a letter is confirmed
 /// only by that letter again once it could be read (or Enter): typed at
 /// speed, "www…" or "uuid" are words, not a folder rule or Auto.
 async fn permission_letter(app: &mut App, client: &ApiClient, letter: char) -> Result<bool> {
@@ -1502,6 +1512,21 @@ async fn handle_overlay_key(app: &mut App, key: KeyEvent, client: &ApiClient) ->
                 app.copy_remote_control_link();
             }
             KeyCode::Char('s') => app.stop_remote_control(client),
+            _ => {}
+        }
+        return Ok(AppAction::Continue);
+    }
+    if matches!(app.overlay, Overlay::Chrome) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Ok(AppAction::Continue);
+        }
+        match key.code {
+            KeyCode::Esc => app.close_overlay(),
+            KeyCode::Enter => app.chrome_primary(client),
+            KeyCode::Char('e') => app.toggle_chrome(client),
+            KeyCode::Char('d') => app.cycle_chrome_browser(client),
+            KeyCode::Char('c') => app.copy_chrome_detail(),
+            KeyCode::Char('o') => app.open_chrome_store(),
             _ => {}
         }
         return Ok(AppAction::Continue);
