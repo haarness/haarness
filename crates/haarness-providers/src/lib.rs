@@ -744,6 +744,23 @@ pub fn compatible_preset(id: &str) -> Option<&'static CompatiblePreset> {
         .find(|preset| preset.id == id || preset.aliases.contains(&id))
 }
 
+/// The id a provider is listed under when `id` names it, by that id or by
+/// another of its preset's ids (`together` is Together AI's `togetherai`).
+/// An unlisted preset alias becomes the preset's own id; any other id is
+/// returned as given.
+#[must_use]
+pub fn listed_provider_id(id: &str, listed: impl Fn(&str) -> bool) -> &str {
+    if listed(id) {
+        return id;
+    }
+    compatible_preset(id).map_or(id, |preset| {
+        std::iter::once(preset.id)
+            .chain(preset.aliases.iter().copied())
+            .find(|candidate| listed(candidate))
+            .unwrap_or(preset.id)
+    })
+}
+
 /// Provider ids Haarness defines itself: native providers, local runtimes and
 /// compatible presets (with their aliases). A credential stored for one of
 /// them belongs to that provider's own endpoint.
@@ -1158,5 +1175,35 @@ mod tests {
         let together = super::compatible_preset("togetherai").unwrap();
         let legacy_ids = HashSet::from(["together".to_owned()]);
         assert!(super::preset_id_in(&legacy_ids, together));
+    }
+
+    #[test]
+    fn a_preset_alias_names_the_provider_the_server_lists() {
+        let listed = |ids: &'static [&'static str]| move |id: &str| ids.contains(&id);
+        let presets: &'static [&str] =
+            &["togetherai", "fireworks-ai", "novita-ai", "openai", "echo"];
+        for (alias, id) in [
+            ("together", "togetherai"),
+            ("fireworks", "fireworks-ai"),
+            ("novita", "novita-ai"),
+            ("togetherai", "togetherai"),
+            ("openai", "openai"),
+        ] {
+            assert_eq!(super::listed_provider_id(alias, listed(presets)), id);
+        }
+        // A configured provider under the alias keeps it.
+        assert_eq!(
+            super::listed_provider_id("together", listed(&["together"])),
+            "together"
+        );
+        assert_eq!(
+            super::listed_provider_id("togetherai", listed(&["together"])),
+            "together"
+        );
+        assert_eq!(
+            super::listed_provider_id("together", listed(&[])),
+            "togetherai"
+        );
+        assert_eq!(super::listed_provider_id("nope", listed(presets)), "nope");
     }
 }
