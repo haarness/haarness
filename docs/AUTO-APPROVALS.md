@@ -1,5 +1,7 @@
 # Automatic approvals
 
+> **User guide:** [Permissions and approvals](https://haarness.ai/docs/security/permissions). This page has the engineering detail.
+
 Each chat is in **Auto** or **Review**, independently from `--yolo`.
 Auto approves eligible permission requests **once**; it never adds an Always rule or changes the server's permission configuration. Explicit denies, agent permission ceilings and `PermissionRequest` hooks still win. Questions remain manual.
 

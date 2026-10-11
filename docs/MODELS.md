@@ -1,5 +1,7 @@
 # Model catalogs
 
+> **User guide:** [Choose a provider and model](https://haarness.ai/docs/providers/overview). This page has the engineering detail.
+
 Live discovery determines which models are available. A successful list replaces
 previous membership, including when the provider returns an empty list. Static
 entries do not resurrect models removed from a live response. The embedded catalog
@@ -71,7 +73,7 @@ New since the last update: Claude Sonnet 5.5 and Haiku 5.5, GPT-6.1 Sol, Gemini
 Nano Banana 2.1, Mistral Large 4 and Kimi K3. Each fact below was checked
 against the provider's docs and, where a request could settle it, a direct API
 probe. The record and the live results are in
-[the model-support audit](audits/2026-10-10-model-support.md).
+[the model-support audit](records/2026-10-10-model-support.md).
 
 | Provider | Change |
 | --- | --- |
@@ -161,4 +163,4 @@ models and failed turns produce a failing exit status; they are never reported a
 passes. API-key-only options can differ from a ChatGPT subscription's live list.
 
 The results and account limitations for this update are recorded in
-[the model-support audit](audits/2026-09-23-model-support.md).
+[the model-support audit](records/2026-09-23-model-support.md).

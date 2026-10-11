@@ -1,5 +1,7 @@
 # Server API v1
 
+> **User guides:** [Your first API call](https://haarness.ai/docs/server/api), [Connect safely](https://haarness.ai/docs/server/authentication). This page has the engineering detail.
+
 The unpublished [TypeScript and Python SDKs](../sdks/README.md) expose all
 registered API operations. Their [complete operation inventory](../sdks/OPERATIONS.md)
 and [generated OpenAPI document](../sdks/openapi.json) describe every route; a
@@ -340,5 +342,5 @@ this against the server host origin, outside a project gateway path. The public
 HTML route needs no bearer token. Links expire and can be revoked through the
 authenticated sharing manager. Sharing does not publish session credentials,
 attachments or a restorable archive. Preview text itself must be reviewed for
-secrets. See [interactive parity and verification](TUI-PARITY-IMPLEMENTATION.md)
+secrets. See [interactive parity and verification](records/2026-09-12-tui-parity.md)
 for client workflows, permission handling and verification evidence.

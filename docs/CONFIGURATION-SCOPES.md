@@ -1,5 +1,7 @@
 # Configuration and resource scopes
 
+> **User guides:** [Configure Haarness](https://haarness.ai/docs/cli/configuration), [Data and storage](https://haarness.ai/docs/security/data-and-storage). This page has the engineering detail.
+
 Haarness separates user configuration, project overrides, persistent runtime data, transient cache, and application state. Desktop, CLI, TUI, daemon, and management tools resolve these locations through the CLI composition root; Electron does not own a separate agent configuration.
 
 ## Locations

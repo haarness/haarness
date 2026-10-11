@@ -1,5 +1,7 @@
 # Side questions with `/btw`
 
+> **User guide:** [Ask a side question](https://haarness.ai/docs/tui/messages#ask-a-side-question). This page has the engineering detail.
+
 `/btw <question>` asks the active session's provider a question using a snapshot
 of the current conversation. It reuses the main request's prepared system,
 tool schemas, model settings, and settled conversation prefix, including

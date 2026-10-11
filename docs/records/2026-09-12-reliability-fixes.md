@@ -68,7 +68,7 @@ and no call is replayed. The identity includes effective configuration and OAuth
 credentials as a digest. Servers using dynamic header helpers do not retain
 offline schemas. A failed `tools/list_changed` refresh discards old schemas too.
 
-See [Side questions](SIDE-QUESTIONS.md) for snapshot limits and cold-session
+See [Side questions](../SIDE-QUESTIONS.md) for snapshot limits and cold-session
 behavior. This adaptation does not add automatic continuation of interrupted
 turns after a server crash; the existing explicit-resume behavior is retained.
 

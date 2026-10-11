@@ -1,5 +1,7 @@
 # Permissions and execution settings
 
+> **User guides:** [Permissions and approvals](https://haarness.ai/docs/security/permissions), [Execution budgets](https://haarness.ai/docs/security/execution-budgets). This page has the engineering detail.
+
 Haarness uses one runtime policy for Desktop, attached TUI, CLI, workflows and nested tools. Ordinary workspace tools already run without approval. These settings reduce repeated prompts and let longer tasks finish while retaining explicit denials, cancellation and ordered writes.
 
 ## Choose what an approval remembers
