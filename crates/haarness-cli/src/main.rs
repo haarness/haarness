@@ -1,5 +1,6 @@
 mod account;
 mod acp;
+mod browser;
 mod browser_settings;
 mod capability_state;
 mod config_specs;
@@ -146,6 +147,8 @@ enum Command {
     /// Private, versioned desktop bridge. Requests are read from standard input.
     #[command(hide = true)]
     Desktop,
+    /// Use your own Chrome with Haarness: set up, check or remove Haarness for Chrome.
+    Browser(browser::BrowserArgs),
     /// Manage trusted TypeScript/JavaScript runtime extensions.
     #[command(visible_alias = "extensions")]
     Extension(extensions::ExtensionArgs),
@@ -1308,6 +1311,11 @@ struct ScheduleUpdateArgs {
 async fn main() -> Result<()> {
     quiet_closed_stdout();
     let args = std::env::args_os().collect::<Vec<_>>();
+    // Chrome's bridge: stdout is its message channel, and it must not touch
+    // the data folder, register a workspace or start a server.
+    if browser::native_host_requested(&args) {
+        return browser::native_host::main().await;
+    }
     if let Some((typo, command)) = misspelled_subcommand(&args) {
         use clap::CommandFactory;
         let prompt = shorthand_words(&args).join(" ");
@@ -1349,6 +1357,15 @@ async fn main() -> Result<()> {
         }
         Some(Command::Telemetry(args)) => {
             return usage_stats::run(&base_paths.data, base_paths.config_dir(), args).await;
+        }
+        Some(Command::Browser(args)) => {
+            return browser::run(
+                &base_paths.data,
+                &base_paths.cache,
+                cli.data_dir.as_deref(),
+                args,
+            )
+            .await;
         }
         _ => {}
     }
@@ -1423,7 +1440,7 @@ async fn main() -> Result<()> {
         Some(Command::Remote(args)) => remote_cloud::run(&paths, &workspace, project_config, args).await,
         Some(Command::Desktop) => desktop::run(&paths, &workspace, project_config).await,
         Some(Command::Login(_) | Command::Logout | Command::Account(_) | Command::Cloud(_)) => unreachable!("account command handled before project setup"),
-        Some(Command::Stats(_) | Command::Insights(_) | Command::Profile(_) | Command::Telemetry(_)) => unreachable!("standalone commands dispatched before runtime setup"),
+        Some(Command::Stats(_) | Command::Insights(_) | Command::Profile(_) | Command::Telemetry(_) | Command::Browser(_)) => unreachable!("standalone commands dispatched before runtime setup"),
         None => {
             interactive(
                 &paths,
@@ -1570,6 +1587,7 @@ impl Command {
     const fn name(&self) -> &'static str {
         match self {
             Self::Desktop => "desktop",
+            Self::Browser(_) => "browser",
             Self::Login(_) => "login",
             Self::Logout => "logout",
             Self::Account(_) => "account",
@@ -1755,6 +1773,7 @@ const GLOBAL_SCOPES: &[(&str, GlobalScope)] = &[
             "upgrade",
             "doctor",
             "logs",
+            "browser",
         ]),
     ),
     (
@@ -1771,6 +1790,7 @@ const GLOBAL_SCOPES: &[(&str, GlobalScope)] = &[
             "profile",
             "stats",
             "insights",
+            "browser",
         ]),
     ),
     ("log_level", GlobalScope::Except(STANDALONE_AND_REPORTS)),
@@ -1787,6 +1807,7 @@ const STANDALONE_AND_REPORTS: &[&str] = &[
     "profile",
     "stats",
     "insights",
+    "browser",
 ];
 
 /// The parser, with each command's help limited to the global options it
@@ -7521,6 +7542,7 @@ fn doctor(paths: &Paths) -> Result<()> {
     println!("rg: {}", ripgrep.display());
     println!("rg sha256: {}", haarness_ripgrep::SHA256);
     println!("data: {}", paths.data.display());
+    println!("{}", browser::doctor_line(&paths.data));
     println!("permissions: application-level policy (not an operating-system sandbox)");
     Ok(())
 }
