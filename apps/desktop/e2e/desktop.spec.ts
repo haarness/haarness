@@ -10619,7 +10619,8 @@ test("one remote server opens isolated projects with live events, files, termina
     expect((await client.listThreads()).some(thread => thread.title.includes("remote-second-project-proof"))).toBe(false);
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     await settings.getByRole("button", { name: "Providers", exact: true }).click();
-    await settings.getByRole("button", { name: "Add custom provider", exact: true }).click();
+    // A remote server draws this page itself, with the TUI's wording.
+    await settings.getByRole("button", { name: "Add a custom endpoint", exact: true }).click();
     await settings.getByLabel("Provider ID", { exact: true }).fill("remote-manager-fixture");
     await settings.getByLabel("Display name", { exact: true }).fill("Remote manager fixture");
     await settings.getByLabel("Endpoint URL (HTTPS or local HTTP)", { exact: true }).fill("http://127.0.0.1:1/v1");
