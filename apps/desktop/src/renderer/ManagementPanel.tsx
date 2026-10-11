@@ -349,12 +349,14 @@ export function ManagementPanel(props: {
                     >
                       {t("Cancel")}
                     </button>
+                    {/* The server asks first only before a destructive
+                        entry, so the button repeats that entry's action. */}
                     <button
                       type="button"
-                      class="primary"
+                      class="danger-action"
                       onClick={() => void request(entry.request)}
                     >
-                      {t("Confirm")}
+                      {entry.label.charAt(0).toUpperCase() + entry.label.slice(1)}
                     </button>
                   </div>
                 </div>
