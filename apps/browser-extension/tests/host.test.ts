@@ -659,6 +659,41 @@ test("approvals from the popup reach the bridge, and only explicit Chrome ones a
   assert.deepEqual(await answer, { ok: true });
 });
 
+test("failures the popup and welcome page show are interface keys, translated where they render", async () => {
+  const h = await boot();
+  h.start();
+  h.attach();
+  await h.open("about:blank");
+  const key = h.host.snapshot().chats[0].key;
+  assert.deepEqual(await h.host.request({ type: "show-tabs", key: "missing" }), { ok: false, error: "This chat has no tabs here." });
+  const answer = (error: string) => {
+    const reply = h.host.request({ type: "answer", server: "server-1", permission: "p1", decision: "always" });
+    void h.until((message) => message.type === "answer").then(() =>
+      h.fake.port.deliver({ type: "answered", server: "server-1", permission: "p1", ok: false, error }),
+    );
+    return reply;
+  };
+  assert.deepEqual(await answer("Chrome can only answer a Chrome approval that is waiting."), {
+    ok: false,
+    error: "This approval is no longer waiting.",
+  });
+  // Haarness's own text, which has no key, is the reason in a translated sentence.
+  assert.deepEqual(await answer("Permission not found"), {
+    ok: false,
+    error: "Haarness could not do that: {reason}",
+    values: { reason: "Permission not found" },
+  });
+  // The project's server went away.
+  h.fake.port.deliver({
+    type: "servers",
+    servers: [{ id: "server-1", workspace: WORKSPACE, name: "acme", version: "0.1.1", state: "error", error: "restart this project's Haarness server" }],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(h.host.snapshot().projects[0].error, "Restart this project's Haarness server.");
+  h.fake.port.deliver({ type: "servers", servers: [] });
+  assert.deepEqual(await h.host.request({ type: "stop-chat", key }), { ok: false, error: "This project is not connected." });
+});
+
 test("a newer copy on disk reloads the extension once, when nothing is running", async () => {
   const h = await boot();
   h.fake.port.deliver({ type: "bridge", protocol: 1, version: "0.1.2", uploadsRoot: "/tmp", extension: { path: "/x", version: "0.1.2" } });

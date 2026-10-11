@@ -263,7 +263,7 @@ function Projects(props: { snapshot: UiSnapshot }) {
                     {project.workspace}
                   </span>
                   <Show when={project.state === "error" && project.error}>
-                    {(error) => <span class="project-error">{error()}</span>}
+                    {(error) => <span class="project-error">{t(error())}</span>}
                   </Show>
                 </div>
                 <span class={"pill small " + (project.state === "connected" ? "connected" : project.state === "error" ? "stopped" : "connecting")}>

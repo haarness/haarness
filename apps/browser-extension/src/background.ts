@@ -3,8 +3,8 @@
  * Every listener is registered synchronously below, before anything awaits.
  */
 import { createHost } from "./core/host";
-import { loadDictionary, lookup, parseLanguage, type Dictionary } from "./core/i18n";
-import type { UiRequest, UiResponse } from "./core/ui";
+import { key, loadDictionary, lookup, parseLanguage, type Dictionary } from "./core/i18n";
+import { failure, type UiRequest, type UiResponse } from "./core/ui";
 import { createChromePlatform } from "./platform/chrome";
 
 const read = (path: string) => fetch(chrome.runtime.getURL(path)).then((response) => response.json());
@@ -33,7 +33,7 @@ chrome.runtime.onConnect.addListener((port) => {
       }
     };
     void host.request(message.request).then(reply, (error: unknown) =>
-      reply({ ok: false, error: error instanceof Error ? error.message : String(error) }),
+      reply(failure(key("Haarness could not do that: {reason}"), { reason: error instanceof Error ? error.message : String(error) })),
     );
   });
   port.onDisconnect.addListener(stop);

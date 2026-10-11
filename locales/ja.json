@@ -2382,5 +2382,17 @@
   "Versions": "バージョン",
   "Extension folder": "拡張機能のフォルダ",
   "Update ready": "更新の準備完了",
-  "Something went wrong.": "問題が発生しました。"
+  "Something went wrong.": "問題が発生しました。",
+  "This project is not connected.": "このプロジェクトは接続されていません。",
+  "This approval is no longer waiting.": "この承認はもう待機していません。",
+  "Haarness did not answer.": "Haarness から応答がありませんでした。",
+  "Haarness is not reachable.": "Haarness に接続できません。",
+  "Haarness could not do that: {reason}": "Haarness はこの操作を実行できませんでした：{reason}",
+  "Restart this project's Haarness server.": "このプロジェクトの Haarness サーバーを再起動してください。",
+  "This project's Haarness server does not accept Chrome. Restart it without --anonymous.": "このプロジェクトの Haarness サーバーは Chrome を受け付けていません。--anonymous を付けずに再起動してください。",
+  "This project's Haarness server is not reachable.": "このプロジェクトの Haarness サーバーに接続できません。",
+  "This project's Haarness server did not answer in time.": "このプロジェクトの Haarness サーバーが時間内に応答しませんでした。",
+  "This chat has no tabs here.": "このチャットにはここにタブがありません。",
+  "Haarness for Chrome restarted. Try again.": "Haarness for Chrome が再起動しました。もう一度お試しください。",
+  "Haarness for Chrome is restarting. Try again.": "Haarness for Chrome は再起動中です。もう一度お試しください。"
 }

@@ -2382,5 +2382,17 @@
   "Versions": "Versioner",
   "Extension folder": "Udvidelsesmappe",
   "Update ready": "Opdatering klar",
-  "Something went wrong.": "Noget gik galt."
+  "Something went wrong.": "Noget gik galt.",
+  "This project is not connected.": "Dette projekt er ikke forbundet.",
+  "This approval is no longer waiting.": "Denne godkendelse venter ikke længere.",
+  "Haarness did not answer.": "Haarness svarede ikke.",
+  "Haarness is not reachable.": "Haarness kan ikke nås.",
+  "Haarness could not do that: {reason}": "Haarness kunne ikke gøre det: {reason}",
+  "Restart this project's Haarness server.": "Genstart dette projekts Haarness-server.",
+  "This project's Haarness server does not accept Chrome. Restart it without --anonymous.": "Dette projekts Haarness-server accepterer ikke Chrome. Genstart den uden --anonymous.",
+  "This project's Haarness server is not reachable.": "Dette projekts Haarness-server kan ikke nås.",
+  "This project's Haarness server did not answer in time.": "Dette projekts Haarness-server svarede ikke i tide.",
+  "This chat has no tabs here.": "Denne chat har ingen faner her.",
+  "Haarness for Chrome restarted. Try again.": "Haarness for Chrome blev genstartet. Prøv igen.",
+  "Haarness for Chrome is restarting. Try again.": "Haarness for Chrome genstarter. Prøv igen."
 }

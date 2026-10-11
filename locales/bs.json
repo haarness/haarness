@@ -2382,5 +2382,17 @@
   "Versions": "Verzije",
   "Extension folder": "Mapa proširenja",
   "Update ready": "Ažuriranje spremno",
-  "Something went wrong.": "Nešto nije u redu."
+  "Something went wrong.": "Nešto nije u redu.",
+  "This project is not connected.": "Ovaj projekat nije povezan.",
+  "This approval is no longer waiting.": "Ovo odobrenje više ne čeka.",
+  "Haarness did not answer.": "Haarness nije odgovorio.",
+  "Haarness is not reachable.": "Haarness nije dostupan.",
+  "Haarness could not do that: {reason}": "Haarness to nije mogao uraditi: {reason}",
+  "Restart this project's Haarness server.": "Ponovo pokrenite Haarness server ovog projekta.",
+  "This project's Haarness server does not accept Chrome. Restart it without --anonymous.": "Haarness server ovog projekta ne prihvata Chrome. Ponovo ga pokrenite bez --anonymous.",
+  "This project's Haarness server is not reachable.": "Haarness server ovog projekta nije dostupan.",
+  "This project's Haarness server did not answer in time.": "Haarness server ovog projekta nije odgovorio na vrijeme.",
+  "This chat has no tabs here.": "Ovaj razgovor ovdje nema kartica.",
+  "Haarness for Chrome restarted. Try again.": "Haarness for Chrome je ponovo pokrenut. Pokušajte ponovo.",
+  "Haarness for Chrome is restarting. Try again.": "Haarness for Chrome se ponovo pokreće. Pokušajte ponovo."
 }
