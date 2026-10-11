@@ -36,9 +36,10 @@ Normal Send steers active work; **Queue** or **Alt+Enter** saves a follow-up unt
      reason. Keys are stored by the Haarness server in its owner-only `auth.json`, never in the
      project.
 4. **Send your first message.** Desktop confirms the connection (for example **OpenAI is
-   connected**) and the composer picks one of that provider's models. Type in the message box and press Enter (**Settings → General → Send
-   message with** can make it Cmd/Ctrl+Enter). The chat is named from your first message;
-   **Rename chat** in the chat's menu changes the name.
+   connected**) and the composer picks one of that provider's models. Type in the message box
+   and press Enter (**Settings → General → Send message with** can make it Cmd/Ctrl+Enter). The
+   chat is named from your first message; to change the name, choose **Rename** in the **Chat
+   actions** menu above the chat, or search for **Rename chat**.
 5. **Answer approvals, or switch to Auto.** The shield pill at the left of the composer reads
    **Review** (the default) or **Auto**, and applies to the open chat on its server, so the TUI
    and other windows see the same mode. In Review, edits and commands inside the project run

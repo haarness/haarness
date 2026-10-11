@@ -24,7 +24,8 @@ curl -fsSL https://app.haarness.ai/install.sh | HAARNESS_PRODUCT=desktop sh
 
 On Windows, run `irm https://app.haarness.ai/install.ps1 | iex` in PowerShell (set
 `$env:HAARNESS_PRODUCT='desktop'` first for Desktop). `haarness doctor` checks the install. To
-build from source instead, see [Build from source](#build-from-source).
+build from source instead, see [Build from source](#build-from-source). Full guide:
+[Install Haarness](https://haarness.ai/docs/start/install).
 
 ### 2. Connect a provider
 
@@ -48,16 +49,19 @@ haarness auth set anthropic   # asks for an API key; a piped key works too
 ```
 
 Provider environment variables such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` work as well.
+Full guide: [Connect a provider](https://haarness.ai/docs/start/connect-a-provider).
 
 ### 3. Your first chat
 
 **Terminal UI.** Type your request at **Ask anything…** and press Enter. `/` lists commands, `@`
 attaches files or hands work to an agent, and `!` runs a shell command. Quitting leaves running
-work on the server; `haarness -c` continues the last chat.
+work on the server; `haarness -c` continues the last chat. Full guide:
+[Your first chat](https://haarness.ai/docs/start/first-session).
 
 **Desktop.** Choose **Open project** and pick a folder. The **Welcome to Haarness** dialog
 connects Haarness Cloud or a provider; then type in the message box and press Enter. See the
-[Desktop first run](docs/DESKTOP.md#first-run).
+[Desktop first run](docs/DESKTOP.md#first-run) and the full guide,
+[Install and first run](https://haarness.ai/docs/desktop/install).
 
 **Approvals.** Each chat is in **Review** (the default) or **Auto**, stored on the server and
 shared by every client attached to it: **Ctrl+Y** in the TUI or the shield pill in Desktop's
@@ -65,13 +69,18 @@ composer changes the open chat, and the choice survives quitting. In Review, edi
 inside the project run without asking; Haarness asks before leaving the project, reading secrets
 such as `.env`, switching agents, generating paid media, opening a new site in Desktop's browser
 or repeating a failing step, plus anything your own rules set to ask. Auto answers those requests
-itself, except Haarness Cloud actions that spend money or delete something, which always ask. In
-the TUI, answer a request with `y` (allow once), `a` (always), `w` (always in this folder), `r`
-(always in this repository), `u` (once, then Auto) or `n` (reject); `a`, `w`, `r` and `u` first
-show what they grant, and Enter or the same key again confirms. An "always" answer saves the
-rule shown on the card, which is a pattern: approving `rm -rf build` allows every `rm` command.
-**Always** applies to every chat on that server until it stops; **This folder** and
-**Repository** are saved and apply after restarts. See
+itself, except Haarness Cloud actions that spend money or delete something, which always ask.
+
+In the TUI, answer a request with a key:
+
+- `y` **Allow once**, or `n` **Reject**.
+- `a` **Always**: every chat on this server, until the server stops.
+- `w` **This folder** or `r` **Repository**: saved, so they still apply after a restart.
+- `u` **Once + Auto**: allow this one and switch the chat to Auto.
+
+`a`, `w`, `r` and `u` first show what they grant; Enter or the same key again confirms. An
+"always" answer saves the rule shown on the card, which is a pattern: approving `rm -rf build`
+allows every `rm` command. See
 [Permissions and approvals](https://haarness.ai/docs/security/permissions).
 
 ### 4. Run without the UI
