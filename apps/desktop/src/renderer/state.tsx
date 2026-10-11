@@ -58,7 +58,12 @@ import {
 import { createProjectOverview } from "./project-overview";
 import { checkAttachments, fileAttachments, type Attachment } from "./media";
 import type { SearchEntry } from "./search";
-import { commandNote, type CommandNote } from "./command-result";
+import {
+  commandNote,
+  followRun,
+  latestRun,
+  type CommandNote,
+} from "./command-result";
 import {
   readOrdering,
   orderedIds,
@@ -208,6 +213,9 @@ function createApp() {
   let lastCursor = 0,
     lastInstance = "",
     forceSnapshot = true;
+  /** Recent workflow runs as last updated, for a command answer that
+   * arrives after its run moved on. */
+  const workflowRuns = new Map<string, T.WorkflowRun>();
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
   let leaveSettings: () => Promise<boolean> = async () => true;
   let leaveWorkspace: () => Promise<boolean> = async () => true;
@@ -1562,14 +1570,24 @@ function createApp() {
       ...(effort ? { reasoningEffort: effort } : {}),
     };
     if (pending.method === "executeCommand" && command) {
-      const note = commandNote(
-        text,
-        await targetApi<T.CommandExecutionResponse>("executeCommand", thread.id, {
+      const response = await targetApi<T.CommandExecutionResponse>(
+        "executeCommand",
+        thread.id,
+        {
           name: command[1],
           tools: { preview: true },
           arguments: promptWithContext(command[2], context),
           requestId: pending.requestId,
-        }),
+        },
+      );
+      const note = commandNote(
+        text,
+        response.kind === "workflow_run"
+          ? {
+              ...response,
+              run: latestRun(response.run, workflowRuns.get(response.run.id)),
+            }
+          : response,
       );
       if (note) set("commandNotes", noteKey, note);
     } else await targetApi(pending.method, thread.id, input);
@@ -1733,6 +1751,19 @@ function createApp() {
       // A /goal command already showing this message keeps its own title.
       if (message && state.commandNotes[key]?.text !== message)
         set("commandNotes", key, { title: "/goal", text: message });
+    }
+    // A workflow command's answer follows its run to the end.
+    const workflowRun = envelope.type === "workflow.updated"
+      ? (envelope.payload as { info?: T.WorkflowRun }).info
+      : undefined;
+    if (workflowRun) {
+      workflowRuns.delete(workflowRun.id);
+      workflowRuns.set(workflowRun.id, workflowRun);
+      if (workflowRuns.size > 64)
+        workflowRuns.delete(workflowRuns.keys().next().value!);
+      for (const [key, note] of Object.entries(state.commandNotes))
+        if (note?.run === workflowRun.id)
+          set("commandNotes", key, followRun(note, workflowRun));
     }
     if (envelope.type === "approval_mode.changed")
       rememberApprovalMode(
