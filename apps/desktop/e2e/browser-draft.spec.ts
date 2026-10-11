@@ -264,6 +264,9 @@ test("new-chat screen opens and navigates real browser tabs without creating a c
   await expect
     .poll(async () => (await inventory()).tabs[0]?.url)
     .toBe(siteURL + "/");
+  // Enter hands focus to the page, and the field shows where it landed.
+  await expect(address).not.toBeFocused();
+  await expect(address).toHaveValue(siteURL + "/");
   originalTab = (await inventory()).tabs[0].id;
   await native(
     'document.getElementById("name").value="before-chat 日本";document.cookie="draft_login=kept;path=/";localStorage.setItem("draft","kept");window.draftProof="same page"',
