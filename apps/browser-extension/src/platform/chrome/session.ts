@@ -19,10 +19,20 @@ export interface SessionDeps {
   attribution: ReturnType<typeof createAttribution>;
   uploadsRoot(): string | null;
   cursor(): boolean;
+  now(): number;
 }
+
+/** The agent command a download belongs to. */
+type Owner = { server: string; thread: string; command: string };
 
 /** How long a main-frame navigation right after a command is still checked against the chat's rules. */
 const BACKSTOP_MS = 2_000;
+/**
+ * How long after a command a download its tab begins is still that
+ * command's: a server answers "Export" with an attachment after the click
+ * has returned.
+ */
+const DOWNLOAD_GRACE_MS = 10_000;
 const LOAD_TIMEOUT_MS = 30_000;
 /** How long a command waits for the session's service-worker and prerender settings (a dialog can hold them). */
 const ISOLATION_WAIT_MS = 2_000;
@@ -31,7 +41,9 @@ export type ChromeTabSession = TabSession & { dispose(): void };
 
 export function createSession(transport: ChromeTransport, deps: SessionDeps): ChromeTabSession {
   const tabId = transport.tabId;
-  let command: { server: string; thread: string; command: string } | undefined;
+  let command: Owner | undefined;
+  /** The tab's last command, until downloads it set off no longer count as its. */
+  let last: { owner: Owner; until: number } | undefined;
   let after: (() => Promise<void>)[] = [];
   let page: Page | undefined;
   let surface: ReturnType<typeof createSurface> | undefined;
@@ -51,10 +63,11 @@ export function createSession(transport: ChromeTransport, deps: SessionDeps): Ch
 
   const offs = [
     transport.on("Page.downloadWillBegin", (event) => {
-      if (!command) return;
+      const owner = command ?? (last && deps.now() < last.until ? last.owner : undefined);
+      if (!owner) return;
       const origin = destinationOrigin(event.url);
       const resources = [...(page?.sources() ?? []), ...(origin ? [origin] : [])];
-      deps.attribution.began({ url: event.url, tabId, name: event.suggestedFilename, resources, ...command });
+      deps.attribution.began({ url: event.url, tabId, name: event.suggestedFilename, resources, ...owner });
     }),
     // The driver counts documents: a main-frame navigation to a new document expires its refs.
     transport.on("Page.frameStartedNavigating", (event, session) => {
@@ -187,6 +200,7 @@ export function createSession(transport: ChromeTransport, deps: SessionDeps): Ch
       command = current;
     },
     async end() {
+      if (command) last = { owner: command, until: deps.now() + DOWNLOAD_GRACE_MS };
       command = undefined;
       const pending = after;
       after = [];

@@ -408,6 +408,32 @@ test("a download the agent started is listed for its tab and handed over once al
   expect(value<{ files: unknown[] }>(await stack.tool(thread, "browser_files_list", { tabID: tab.id })).files).toHaveLength(1);
 });
 
+test("a download the page starts only after the click returned is still the agent's", async ({ stack }) => {
+  const thread = await stack.thread("Export the data");
+  const tab = await open(stack, thread, stack.site.url("shop", "/downloads"));
+  const snapshot = value<{ content: string }>(await stack.tool(thread, "browser_snapshot", { tabID: tab.id }));
+  value(await stack.tool(thread, "browser_click", { tabID: tab.id, ref: ref(snapshot, "Export") }));
+  // The page waits 2 s for the server to build the file: the click came back first.
+  expect(stack.site.requests.some((request) => request.path === "/export.csv")).toBe(false);
+  let files: { id: string; name: string; state: string }[] = [];
+  await expect
+    .poll(
+      async () => {
+        const listed = await stack.tool(thread, "browser_files_list", { tabID: tab.id });
+        // The download's navigation starting between the call's check and its run asks for a new call.
+        if (listed.isError && /target changed/.test(listed.output)) return [];
+        files = value<{ files: typeof files }>(listed).files;
+        return files.map((file) => [file.name, file.state]);
+      },
+      { timeout: 20_000 },
+    )
+    .toEqual([["export.csv", "completed"]]);
+  const call = stack.call(thread, "browser_files_get", { tabID: tab.id, fileID: files[0].id });
+  expect((await stack.answer(thread, "once")).patterns).toEqual([`chrome-downloads:${thread.id}:${stack.site.origin("shop")}`]);
+  const [file] = value<{ files: { path: string }[] }>(await call.done).files;
+  expect(readFileSync(file.path, "utf8")).toBe("id,total\n1,42\n");
+});
+
 test("a window the agent's page opens joins the chat's group", async ({ stack }) => {
   const thread = await stack.thread("Follow the popup");
   const tab = await open(stack, thread, stack.site.url("shop", "/popup"));

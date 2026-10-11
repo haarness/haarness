@@ -1,9 +1,9 @@
 /**
- * Chrome's side of download attribution. A page under an agent command
- * reports `Page.downloadWillBegin` (see session.ts); when Chrome's download
- * item for that URL appears within 5 s it becomes a file of that tab, and when
- * it completes the bridge is told the path it may read. Every other download is
- * the user's and is ignored.
+ * Chrome's side of download attribution. A page under an agent command, or
+ * up to 10 s after one, reports `Page.downloadWillBegin` (see session.ts);
+ * when Chrome's download item for that URL appears within 5 s it becomes a
+ * file of that tab, and when it completes the bridge is told the path it may
+ * read. Every other download is the user's and is ignored.
  */
 import { fileID, type FileID } from "../../core/browser";
 import { destinationOrigin } from "../../core/policy";

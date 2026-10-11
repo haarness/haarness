@@ -408,6 +408,48 @@ function recordingPage(calls: string[]): CreatePage {
   });
 }
 
+test("a download the page begins just after a click returned is still that click's, for 10 s", async () => {
+  const calls: string[] = [];
+  const h = await boot({ createPage: recordingPage(calls) });
+  h.start();
+  h.attach();
+  const { tab, live } = await h.open("https://a.example/");
+  const items = new Map<number, object>();
+  (h.fake.chrome.downloads as { search: unknown }).search = async ({ id }: { id: number }) => [items.get(id)];
+  const download = (id: number, name: string) => {
+    const url = `https://a.example/${name}`;
+    // The server answers the click with an attachment after the click returned.
+    h.fake.chrome.debugger.onEvent.emit({ tabId: live.id }, "Page.downloadWillBegin", { frameId: "f", guid: `g${id}`, url, suggestedFilename: name });
+    const item = { id, url, finalUrl: url, filename: `/Users/me/Downloads/${name}`, fileSize: 3, mime: "text/csv", startTime: new Date().toISOString() };
+    items.set(id, item);
+    h.fake.chrome.downloads.onCreated.emit(item);
+    h.fake.chrome.downloads.onChanged.emit({ id, state: { current: "complete", previous: "in_progress" } });
+  };
+  const click = await h.command({ action: { type: "click", tabID: tab.id, ref: "@e1" }, policy: ask, target: { resources: ["https://a.example"], key: "k" } });
+  assert.equal(click.outcome.type, "success");
+  const id = h.sent.findLast((message) => message.type === "to-server" && message.message.type === "result")!.message.id;
+  download(1, "export.csv");
+  assert.deepEqual(await h.until((message) => message.type === "download"), {
+    type: "download",
+    server: "server-1",
+    thread: THREAD,
+    command: id,
+    path: "/Users/me/Downloads/export.csv",
+    url: "https://a.example/export.csv",
+  });
+  // Long after the command, a download the page starts (or the user's own) is not the agent's.
+  const now = Date.now;
+  Date.now = () => now() + 11_000;
+  try {
+    const from = h.sent.length;
+    download(2, "later.csv");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(h.sent.slice(from).filter((message) => message.type === "download"), []);
+  } finally {
+    Date.now = now;
+  }
+});
+
 test("pages Haarness may not control, opaque pages and Chrome-less tools are refused", async () => {
   const calls: string[] = [];
   const h = await boot({ createPage: recordingPage(calls) });

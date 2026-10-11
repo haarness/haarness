@@ -85,7 +85,7 @@ export interface TabSession {
    * session tells the page about main-frame navigations itself.
    */
   page(create: CreatePage, options: Omit<PageOptions, "files" | "input">): Page;
-  /** A command starts: downloads it begins are attributed to it. */
+  /** A command starts: downloads the tab begins until 10 s after it ends are attributed to it. */
   begin(command: { server: string; thread: string; command: string }): void;
   /** The command finished: undo what it borrowed (a tab shown for a capture). */
   end(): Promise<void>;
