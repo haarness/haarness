@@ -2389,5 +2389,6 @@
   "This Haarness installation doesn't include Haarness for Chrome. Set it up from Haarness Desktop (Settings → Browser → Chrome), then press Enter here.": "การติดตั้ง Haarness นี้ไม่มี Haarness for Chrome ตั้งค่าจาก Haarness Desktop (การตั้งค่า → เบราว์เซอร์ → Chrome) แล้วกด Enter ที่นี่",
   "Chrome is turned off for this project.": "Chrome ถูกปิดสำหรับโปรเจกต์นี้",
   "{category}: {decision} by default": "{category}: {decision} เป็นค่าเริ่มต้น",
-  "{category} on {origin}: {decision}": "{category} บน {origin}: {decision}"
+  "{category} on {origin}: {decision}": "{category} บน {origin}: {decision}",
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "การควบคุมเบราว์เซอร์โดยเอเจนต์ปิดอยู่ เอเจนต์จึงใช้ Chrome ในโปรเจกต์นี้ไม่ได้ เปิดได้ที่ด้านบนของหน้านี้"
 }

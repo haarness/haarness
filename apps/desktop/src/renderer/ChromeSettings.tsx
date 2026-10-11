@@ -1,4 +1,4 @@
-import { t } from "./i18n";
+import { splitAround, t } from "./i18n";
 import {
   For,
   Match,
@@ -7,6 +7,7 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  on,
   onCleanup,
   untrack,
 } from "solid-js";
@@ -17,13 +18,18 @@ import { Icon } from "./ui";
 import { ChromeSetupDialog } from "./ChromeSetupDialog";
 import {
   CHROME_CAPABILITY,
+  chromeBlockedBy,
   chromeConnection,
   chromeFields,
+  chromeRestrictions,
   editableChromeSettings,
+  turnsChromeOff,
   type ChromeAccess,
+  type ChromeAccessReport,
   type ChromeField,
   type ChromeHost,
   type ChromeHosts,
+  type ChromeRestrictionLine,
   type ChromeSettings,
   type ChromeSettingsView,
 } from "../chrome";
@@ -67,6 +73,9 @@ export function ChromeSettingsSection(props: {
   const editable = () => available() && !!props.view && !props.busy;
   const settings = createMemo(() => editableChromeSettings(props.view));
   const [hosts, setHosts] = createSignal<ChromeHost[]>([]);
+  /** The server's word on Chrome in this project, and the switch as it
+   * stood when the server was asked. */
+  const [access, setAccess] = createSignal<ChromeAccessReport & { asked: boolean }>();
   const [setupOpen, setSetupOpen] = createSignal(false);
   const [origin, setOrigin] = createSignal("");
   const status = createMemo(() => chromeConnection(hosts()));
@@ -94,15 +103,22 @@ export function ChromeSettingsSection(props: {
     if (!connection || !available() || inFlight) return;
     inFlight = true;
     polled = Date.now();
+    const asked = untrack(() => settings().enabled);
     try {
       const value = await window.haarness.api<ChromeHosts>(
         connection,
         "listBrowserHosts",
         [],
       );
-      if (connection === app.state.connection?.id) setHosts(value.hosts ?? []);
+      if (connection === app.state.connection?.id) {
+        setHosts(value.hosts ?? []);
+        setAccess(value.chrome ? { ...value.chrome, asked } : undefined);
+      }
     } catch {
-      if (connection === app.state.connection?.id) setHosts([]);
+      if (connection === app.state.connection?.id) {
+        setHosts([]);
+        setAccess(undefined);
+      }
     } finally {
       inFlight = false;
     }
@@ -111,8 +127,23 @@ export function ChromeSettingsSection(props: {
     void app.state.connection?.id;
     void available();
     setHosts([]);
+    setAccess(undefined);
     untrack(() => void loadHosts());
   });
+  // A changed switch changes what the server says about this project.
+  createEffect(on(() => settings().enabled, () => void loadHosts(), { defer: true }));
+  const restrictions = createMemo(() => chromeRestrictions(props.view));
+  /** What keeps Chrome off here although the switch is on. */
+  const blocked = createMemo(() =>
+    chromeBlockedBy(access(), settings().enabled, restrictions()),
+  );
+  /** The project's restrictions, including that it turns Chrome off when
+   * the server says so but did not list it. */
+  const restrictionLines = createMemo((): ChromeRestrictionLine[] =>
+    blocked() === "project" && !restrictions().some(turnsChromeOff)
+      ? [{ kind: "off" }, ...restrictions()]
+      : restrictions(),
+  );
   const timer = setInterval(() => {
     const every = linked() ? CONNECTED_REFRESH : WAITING_REFRESH;
     if (Date.now() - polled >= every) void loadHosts();
@@ -126,6 +157,54 @@ export function ChromeSettingsSection(props: {
   }
   // Each cell names itself in full, so a reader hears which table and site
   // a decision belongs to, and no sentence is assembled from fragments.
+  const fieldLabel = (field: string) => {
+    switch (field) {
+      case "browsing":
+        return t("Browsing");
+      case "downloads":
+        return t("Downloads");
+      case "uploads":
+        return t("Uploads");
+      case "scripts":
+        return t("Scripts");
+    }
+    return field;
+  };
+  const decisionLabel = (decision: string) => {
+    switch (decision) {
+      case "allow":
+        return t("Always allow");
+      case "ask":
+        return t("Requires approval");
+      case "deny":
+        return t("Block");
+    }
+    return decision;
+  };
+  /** One restriction in the reader's language; a site keeps its own
+   * left-to-right run inside a right-to-left sentence. */
+  const restrictionText = (line: ChromeRestrictionLine) => {
+    switch (line.kind) {
+      case "off":
+        return t("Chrome is turned off for this project.");
+      case "default":
+        return t("{category}: {decision} by default", {
+          category: fieldLabel(line.category),
+          decision: decisionLabel(line.decision),
+        });
+      case "site":
+        return splitAround(
+          t("{category} on {origin}: {decision}", {
+            category: fieldLabel(line.category),
+            decision: decisionLabel(line.decision),
+          }),
+          () => <bdi>{line.origin}</bdi>,
+          "{origin}",
+        );
+      case "text":
+        return line.text;
+    }
+  };
   const cellLabel = (site: string | undefined, field: ChromeField) => {
     if (site === undefined)
       switch (field) {
@@ -184,15 +263,22 @@ export function ChromeSettingsSection(props: {
           </p>
         </Match>
       </Switch>
-      <Show when={available() && props.view?.projectRestrictions.length}>
+      <Show when={available() && restrictionLines().length}>
         <div class="notice-inline chrome-note">
           <span>
             <strong>{t("Restricted by this project’s settings")}</strong>
-            <For each={props.view!.projectRestrictions}>
-              {(restriction) => <span class="chrome-restriction">{restriction}</span>}
+            <For each={restrictionLines()}>
+              {(restriction) => (
+                <span class="chrome-restriction">{restrictionText(restriction)}</span>
+              )}
             </For>
           </span>
         </div>
+      </Show>
+      <Show when={available() && blocked() === "browser-control"}>
+        <p class="notice-inline chrome-note chrome-blocked">
+          {t("Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.")}
+        </p>
       </Show>
       <Row
         title="Chrome"

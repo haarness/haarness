@@ -158,6 +158,11 @@ interface Fake {
   setup: { ok: true; value: unknown } | { ok: false; error: string };
   setupCalls: number;
   reveals: number;
+  /** Keeps Chrome off under an on switch, as agent browser control or a
+   * project does. */
+  blockedBy?: "browser-control" | "project" | null;
+  /** Answer as a server from before `globalEnabled` and `blockedBy`. */
+  legacy?: boolean;
 }
 async function installBridgeStub() {
   await app.evaluate(({ ipcMain }) => {
@@ -196,9 +201,17 @@ async function installBridgeStub() {
           value: {
             hosts: current.hosts.map((host) => ({ ...host, threadTabs: thread ? (current.threadTabs[thread] ?? 0) : 0 })),
             chrome: {
-              enabled: current.view.settings.enabled,
+              enabled: (current.view.globalSettings ?? current.view.settings).enabled && !current.blockedBy,
               defaultBrowser: current.view.settings.defaultBrowser,
               everConnected: current.hosts.length > 0,
+              ...(current.legacy
+                ? {}
+                : {
+                    globalEnabled: (current.view.globalSettings ?? current.view.settings).enabled,
+                    blockedBy: (current.view.globalSettings ?? current.view.settings).enabled
+                      ? (current.blockedBy ?? null)
+                      : null,
+                  }),
             },
           },
         };
@@ -299,6 +312,8 @@ async function startStub(change: Partial<Fake> = {}) {
     setup: { ok: true, value: setupReport },
     setupCalls: 0,
     reveals: 0,
+    blockedBy: null,
+    legacy: false,
     ...change,
   });
   await reload();
@@ -589,6 +604,111 @@ test("the Chrome section and setup read right to left in Arabic, with paths kept
   await dialog.getByRole("button", { name: "إغلاق", exact: true }).click();
   await page.evaluate(() => window.haarness.preferences({ language: "en" }));
   await expect.poll(() => page.evaluate(() => document.documentElement.dir)).toBe("ltr");
+  await closeSettings();
+  expect(errors).toEqual([]);
+});
+
+test("Chrome off under an on switch says why, and project restrictions read in the reader's language", async () => {
+  const restricted = {
+    settings: defaults(),
+    globalSettings: defaults(),
+    projectRestrictions: ["Scripts: Block by default", "Downloads on https://bank.example: Ask"],
+    restrictions: [
+      { kind: "default" as const, category: "scripts" as const, decision: "deny" as const },
+      { kind: "site" as const, origin: "https://bank.example", category: "downloads" as const, decision: "ask" as const },
+    ],
+  };
+  await startStub({ hosts: [chromeHost()], blockedBy: "browser-control", view: restricted });
+  await openSettings();
+  const content = settings().locator(".settings-content");
+  const toggle = settings().getByRole("switch", { name: "Let agents use Chrome", exact: true });
+  // The switch shows the shared setting, which is on; the note says what
+  // keeps Chrome off here and where to change it.
+  await expect(toggle).toBeChecked();
+  await expect(content.locator(".chrome-blocked")).toHaveText(
+    "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.",
+  );
+  const notice = settings().locator(".chrome-note", { hasText: "Restricted by this project’s settings" });
+  await expect(notice.locator(".chrome-restriction")).toHaveText([
+    "Scripts: Block by default",
+    "Downloads on https://bank.example: Requires approval",
+  ]);
+  await content.locator(".chrome-blocked").scrollIntoViewIfNeeded();
+  await snap("chrome-blocked-browser-control.png", settings());
+  // Turning the switch off is a different story: nothing else to explain.
+  await toggle.uncheck();
+  await expect.poll(async () => (await fake()).saves.at(-1)?.chrome.enabled).toBe(false);
+  await expect(content.locator(".chrome-blocked")).toHaveCount(0);
+  await toggle.check();
+  await expect.poll(async () => (await fake()).saves.at(-1)?.chrome.enabled).toBe(true);
+  await expect(content.locator(".chrome-blocked")).toBeVisible();
+
+  // A project that turns Chrome off says so in its restrictions, even when
+  // the server named the cause without listing it.
+  await stub({ blockedBy: "project", view: { ...restricted, globalSettings: defaults(), settings: defaults(), restrictions: [] } });
+  await closeSettings();
+  await openSettings();
+  await expect(notice.locator(".chrome-restriction")).toHaveText(["Chrome is turned off for this project."]);
+  await expect(content.locator(".chrome-blocked")).toHaveCount(0);
+
+  // An older server says only that Chrome is off: its restrictions tell
+  // the causes apart, and its sentences show as they came.
+  await stub({ blockedBy: "browser-control", legacy: true, view: { ...restricted, restrictions: undefined } });
+  await closeSettings();
+  await openSettings();
+  await expect(content.locator(".chrome-blocked")).toBeVisible();
+  await expect(notice.locator(".chrome-restriction")).toHaveText([
+    "Scripts: Block by default",
+    "Downloads on https://bank.example: Ask",
+  ]);
+
+  // Translated, with the site kept as its own left-to-right run in Arabic.
+  await stub({ blockedBy: null, legacy: false, view: restricted });
+  await closeSettings();
+  await page.evaluate(() => window.haarness.preferences({ language: "ja" }));
+  await page.getByRole("button", { name: "設定", exact: true }).click();
+  const pane = page.locator("dialog.settings-dialog");
+  await pane.getByRole("button", { name: "ブラウザ", exact: true }).click();
+  await expect(pane.locator(".chrome-restriction")).toHaveText([
+    "スクリプト: 既定でブロック",
+    "https://bank.example のダウンロード: 承認が必要",
+  ]);
+  await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
+  await expect.poll(() => page.evaluate(() => document.documentElement.dir)).toBe("rtl");
+  await expect(pane.locator(".chrome-restriction").nth(1)).toHaveText("التنزيلات على https://bank.example: يتطلب موافقة");
+  expect(await pane.locator(".chrome-restriction bdi").evaluate((bdi) => getComputedStyle(bdi).unicodeBidi)).toBe("isolate");
+  await pane.locator(".chrome-restriction").first().scrollIntoViewIfNeeded();
+  await snap("chrome-restrictions-ar.png", pane);
+  await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+  await expect.poll(() => page.evaluate(() => document.documentElement.dir)).toBe("ltr");
+  await closeSettings();
+  expect(errors).toEqual([]);
+});
+
+test("setup with nothing to add says so once, in Desktop's own words", async () => {
+  await startStub({
+    setup: {
+      ok: true,
+      value: {
+        ...setupReport,
+        extension: null,
+        warnings: [
+          "Haarness for Chrome is not included in this installation. Set it up from Haarness Desktop (Settings → Browser → Chrome).",
+          "A separate Haarness data folder is in use (/tmp/x), so Chrome will work with that folder's projects only.",
+        ],
+      },
+    },
+  });
+  await openSettings();
+  await settings().getByRole("button", { name: "Set up Chrome…", exact: true }).click();
+  await expect(setupDialog()).toContainText("This Haarness installation doesn’t include Haarness for Chrome.");
+  await expect(setupDialog()).not.toContainText("is not included in this installation");
+  // Other notes from the command still show.
+  await expect(setupDialog().locator(".chrome-warning")).toHaveText([
+    "A separate Haarness data folder is in use (/tmp/x), so Chrome will work with that folder's projects only.",
+  ]);
+  await setupDialog().getByRole("button", { name: "Close", exact: true }).click();
+  await expect(setupDialog()).toHaveCount(0);
   await closeSettings();
   expect(errors).toEqual([]);
 });
@@ -959,6 +1079,48 @@ test("[Chrome server] Chrome rows write browser.chrome to the global file, and a
   await choose("Chrome default uploads", "Requires approval");
   await choose("Browser for new agent tabs", "Automatic");
   await expect.poll(async () => (await readGlobal()).browser?.chrome?.defaultBrowser).toBe("auto");
+  await closeSettings();
+  expect(errors).toEqual([]);
+});
+
+test("[Chrome server] Settings says what keeps Chrome off: this project, or agent browser control", async () => {
+  test.skip(!chromeServer, "Needs a server with browser-extension.v1; runs once the server side is integrated.");
+  const hosts = async () =>
+    ((await client.listBrowserHosts()) as unknown as { chrome?: { enabled: boolean; globalEnabled?: boolean; blockedBy?: string | null } })
+      .chrome;
+  test.skip(
+    (await hosts())?.globalEnabled === undefined,
+    "Needs a server that reports globalEnabled and blockedBy; runs once the server side is integrated.",
+  );
+  const projectFile = join(directory, ".haarness", "haarness.json");
+  const content = () => settings().locator(".settings-content");
+  const notice = () => settings().locator(".chrome-note", { hasText: "Restricted by this project’s settings" });
+  await writeFile(projectFile, JSON.stringify({ browser: { chrome: { enabled: false } } }));
+  try {
+    await expect.poll(async () => (await hosts())?.blockedBy).toBe("project");
+    await openSettings();
+    await expect(settings().getByRole("switch", { name: "Let agents use Chrome", exact: true })).toBeChecked();
+    await expect(notice().locator(".chrome-restriction")).toHaveText(["Chrome is turned off for this project."]);
+    await expect(content().locator(".chrome-blocked")).toHaveCount(0);
+  } finally {
+    await rm(projectFile, { force: true });
+  }
+  await expect.poll(async () => (await hosts())?.enabled).toBe(true);
+  await closeSettings();
+  await openSettings();
+  await expect(notice()).toHaveCount(0);
+  const control = settings().getByRole("switch", { name: "Agent browser control", exact: true });
+  await expect(control).toBeChecked();
+  await control.uncheck();
+  try {
+    await expect.poll(async () => (await hosts())?.blockedBy).toBe("browser-control");
+    await expect(content().locator(".chrome-blocked")).toBeVisible({ timeout: 25_000 });
+    await expect(settings().getByRole("switch", { name: "Let agents use Chrome", exact: true })).toBeChecked();
+  } finally {
+    await control.check();
+  }
+  await expect.poll(async () => (await hosts())?.enabled).toBe(true);
+  await expect(content().locator(".chrome-blocked")).toHaveCount(0, { timeout: 25_000 });
   await closeSettings();
   expect(errors).toEqual([]);
 });

@@ -2389,5 +2389,6 @@
   "This Haarness installation doesn't include Haarness for Chrome. Set it up from Haarness Desktop (Settings → Browser → Chrome), then press Enter here.": "此 Haarness 安裝不包含 Haarness for Chrome。請在 Haarness Desktop 的 設定 → 瀏覽器 → Chrome 中完成設定，然後在這裡按 Enter。",
   "Chrome is turned off for this project.": "此專案已關閉 Chrome。",
   "{category}: {decision} by default": "{category}：預設{decision}",
-  "{category} on {origin}: {decision}": "{origin} 上的{category}：{decision}"
+  "{category} on {origin}: {decision}": "{origin} 上的{category}：{decision}",
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "代理程式瀏覽器控制已關閉，因此代理程式不能在此專案中使用 Chrome。請在此頁頂端將其開啟。"
 }

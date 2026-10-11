@@ -2389,5 +2389,6 @@
   "This Haarness installation doesn't include Haarness for Chrome. Set it up from Haarness Desktop (Settings → Browser → Chrome), then press Enter here.": "Bu Haarness kurulumu Haarness for Chrome'u içermiyor. Haarness Desktop'tan (Ayarlar → Tarayıcı → Chrome) kurun, ardından burada Enter'a basın.",
   "Chrome is turned off for this project.": "Chrome bu proje için kapalı.",
   "{category}: {decision} by default": "{category}: varsayılan olarak {decision}",
-  "{category} on {origin}: {decision}": "{origin} üzerinde {category}: {decision}"
+  "{category} on {origin}: {decision}": "{origin} üzerinde {category}: {decision}",
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Ajanın tarayıcı denetimi kapalı, bu yüzden ajanlar bu projede Chrome'u kullanamaz. Bu sayfanın üst kısmından açın."
 }

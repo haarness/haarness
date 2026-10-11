@@ -2389,5 +2389,6 @@
   "This Haarness installation doesn't include Haarness for Chrome. Set it up from Haarness Desktop (Settings → Browser → Chrome), then press Enter here.": "이 Haarness 설치에는 Haarness for Chrome이 포함되어 있지 않습니다. Haarness Desktop의 설정 → 브라우저 → Chrome에서 설정한 다음 여기서 Enter를 누르세요.",
   "Chrome is turned off for this project.": "이 프로젝트에서는 Chrome이 꺼져 있습니다.",
   "{category}: {decision} by default": "{category}: 기본값 {decision}",
-  "{category} on {origin}: {decision}": "{origin}의 {category}: {decision}"
+  "{category} on {origin}: {decision}": "{origin}의 {category}: {decision}",
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "에이전트 브라우저 제어가 꺼져 있어 이 프로젝트에서 에이전트가 Chrome을 사용할 수 없습니다. 이 페이지 맨 위에서 켜세요."
 }
