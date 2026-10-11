@@ -486,6 +486,28 @@ async fn a_published_chat_cannot_answer_chrome_sites() {
         body["message"],
         "Answer this on the computer running Chrome."
     );
+    let info: Value = client
+        .get(format!("http://{}/v1/info", handle.address))
+        .bearer_auth("chrome-token")
+        .header("x-haarness-remote-thread", thread.id.to_string())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(info.get("pid").is_none(), "{info}");
+    // Nor can they reach Chrome's hosts or endpoint.
+    for path in ["/v1/browser/hosts", "/v1/browser/extension/host?version=1"] {
+        let denied = client
+            .get(format!("http://{}{path}", handle.address))
+            .bearer_auth("chrome-token")
+            .header("x-haarness-remote-thread", thread.id.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN, "{path}");
+    }
     assert_eq!(runtime.pending_permissions().len(), 1);
     let answered = client
         .post(&url)

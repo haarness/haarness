@@ -66,7 +66,7 @@ impl BrowserPolicy {
         if self.enabled {
             Ok(())
         } else {
-            Err(CoreError::PermissionDenied("Agent browser control is disabled in Settings → Browser. Ask the user to enable it; do not retry browser tools.".into()))
+            Err(CoreError::PermissionDenied("Agent browser control is disabled in Settings → Browser (or /chrome in the TUI). Ask the user to enable it; do not retry browser tools.".into()))
         }
     }
     pub fn decision(&self, method: &str, resource: &str) -> PermissionDecision {
