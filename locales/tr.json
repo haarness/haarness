@@ -2218,7 +2218,6 @@
   "Agents may not use Chrome": "Ajanlar Chrome'u kullanamaz",
   "Agents can use your own Chrome — with your sign-ins — through the Haarness for Chrome extension. Each new site asks first.": "Ajanlar, Haarness for Chrome uzantısı aracılığıyla kendi Chrome'unuzu oturum açtığınız hesaplarla kullanabilir. Her yeni site önce izin ister.",
   "You are connected over SSH. Chrome works with projects on the computer where Chrome runs.": "SSH üzerinden bağlısınız. Chrome, Chrome'un çalıştığı bilgisayardaki projelerle çalışır.",
-  "This terminal reaches the project from another computer. Chrome works with projects on the computer where Chrome runs.": "Bu terminal projeye başka bir bilgisayardan erişiyor. Chrome, Chrome'un çalıştığı bilgisayardaki projelerle çalışır.",
   "On that computer, run {command}, or open Settings → Browser → Chrome in Haarness Desktop.": "O bilgisayarda {command} komutunu çalıştırın veya Haarness Desktop'ta Ayarlar → Tarayıcı → Chrome'u açın.",
   "Checking this computer…": "Bu bilgisayar denetleniyor…",
   "Could not set up Chrome": "Chrome kurulamadı",
@@ -2250,7 +2249,6 @@
   "Open the Haarness for Chrome page in the Chrome Web Store:": "Chrome Web Mağazası'nda Haarness for Chrome sayfasını açın:",
   "Click Add to Chrome": "“Chrome'a ekle”yi tıklayın",
   "Pin Haarness to the toolbar": "Haarness'ı araç çubuğuna sabitleyin",
-  "This build of Haarness has no Haarness for Chrome extension to load.": "Haarness'ın bu sürümünde yüklenecek Haarness for Chrome uzantısı yok.",
   "Open {page} in {browser}": "{browser} içinde {page} adresini açın",
   "or {page} in {browser}": "veya {browser} içinde {page}",
   "Turn on Developer mode (keep it on)": "“Geliştirici modu”nu açın (açık bırakın)",
@@ -2395,5 +2393,15 @@
   "This project's Haarness server did not answer in time.": "Bu projenin Haarness sunucusu zamanında yanıt vermedi.",
   "This chat has no tabs here.": "Bu sohbetin burada sekmesi yok.",
   "Haarness for Chrome restarted. Try again.": "Haarness for Chrome yeniden başlatıldı. Yeniden deneyin.",
-  "Haarness for Chrome is restarting. Try again.": "Haarness for Chrome yeniden başlatılıyor. Yeniden deneyin."
+  "Haarness for Chrome is restarting. Try again.": "Haarness for Chrome yeniden başlatılıyor. Yeniden deneyin.",
+  "Agent browser control is off": "Ajanın tarayıcı denetimi kapalı",
+  "Agents can't use any browser in this project, Chrome included. Turn on Agent browser control in Haarness Desktop (Settings → Browser), or set browser.policy.enabled to true in your Haarness config.": "Ajanlar bu projede Chrome dahil hiçbir tarayıcıyı kullanamaz. Haarness Desktop'ta (Ayarlar → Tarayıcı) ajanın tarayıcı denetimini açın veya Haarness yapılandırmanızda browser.policy.enabled değerini true yapın.",
+  "This project's settings turn Chrome off": "Bu projenin ayarları Chrome'u kapatıyor",
+  "Agents can still use Chrome in your other projects. To use it here, remove browser.chrome.enabled: false from this project's Haarness config.": "Ajanlar diğer projelerinizde Chrome'u kullanmaya devam edebilir. Burada kullanmak için bu projenin Haarness yapılandırmasından browser.chrome.enabled: false satırını kaldırın.",
+  "This terminal can't set up Chrome for this project. Chrome works with projects on the computer where Chrome runs.": "Bu terminal bu proje için Chrome'u kuramaz. Chrome, Chrome'un çalıştığı bilgisayardaki projelerle çalışır.",
+  "This Haarness installation doesn't include Haarness for Chrome. Set it up from Haarness Desktop (Settings → Browser → Chrome), then press Enter here.": "Bu Haarness kurulumu Haarness for Chrome'u içermiyor. Haarness Desktop'tan (Ayarlar → Tarayıcı → Chrome) kurun, ardından burada Enter'a basın.",
+  "Chrome is turned off for this project.": "Chrome bu proje için kapalı.",
+  "{category}: {decision} by default": "{category}: varsayılan olarak {decision}",
+  "{category} on {origin}: {decision}": "{origin} üzerinde {category}: {decision}",
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Ajanın tarayıcı denetimi kapalı, bu yüzden ajanlar bu projede Chrome'u kullanamaz. Bu sayfanın üst kısmından açın."
 }

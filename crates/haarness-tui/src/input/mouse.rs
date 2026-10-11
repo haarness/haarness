@@ -24,7 +24,7 @@ pub async fn handle_mouse(
                 }
             } else if let Overlay::Diff(viewer) = &mut app.overlay {
                 viewer.scroll_by(-3);
-            } else if matches!(app.overlay, Overlay::Panel { .. }) {
+            } else if matches!(app.overlay, Overlay::Panel { .. } | Overlay::Chrome) {
                 app.overlay_scroll = app.overlay_scroll.saturating_sub(3);
             } else {
                 app.scroll(3);
@@ -38,7 +38,7 @@ pub async fn handle_mouse(
                 }
             } else if let Overlay::Diff(viewer) = &mut app.overlay {
                 viewer.scroll_by(3);
-            } else if matches!(app.overlay, Overlay::Panel { .. }) {
+            } else if matches!(app.overlay, Overlay::Panel { .. } | Overlay::Chrome) {
                 app.overlay_scroll = app
                     .overlay_scroll
                     .saturating_add(3)

@@ -2218,7 +2218,6 @@
   "Agents may not use Chrome": "Agenti ne smiju koristiti Chrome",
   "Agents can use your own Chrome — with your sign-ins — through the Haarness for Chrome extension. Each new site asks first.": "Agenti mogu koristiti vaš Chrome — s vašim prijavama — putem proširenja Haarness for Chrome. Svaka nova stranica prvo traži dozvolu.",
   "You are connected over SSH. Chrome works with projects on the computer where Chrome runs.": "Povezani ste putem SSH-a. Chrome radi s projektima na računaru na kojem se Chrome izvršava.",
-  "This terminal reaches the project from another computer. Chrome works with projects on the computer where Chrome runs.": "Ovaj terminal pristupa projektu s drugog računara. Chrome radi s projektima na računaru na kojem se Chrome izvršava.",
   "On that computer, run {command}, or open Settings → Browser → Chrome in Haarness Desktop.": "Na tom računaru pokrenite {command} ili otvorite Postavke → Preglednik → Chrome u aplikaciji Haarness Desktop.",
   "Checking this computer…": "Provjera ovog računara…",
   "Could not set up Chrome": "Postavljanje Chromea nije uspjelo",
@@ -2250,7 +2249,6 @@
   "Open the Haarness for Chrome page in the Chrome Web Store:": "Otvorite stranicu Haarness for Chrome u Chrome web trgovini:",
   "Click Add to Chrome": "Kliknite „Dodaj u Chrome“",
   "Pin Haarness to the toolbar": "Zakačite Haarness na alatnu traku",
-  "This build of Haarness has no Haarness for Chrome extension to load.": "Ova verzija Haarnessa nema proširenje Haarness for Chrome za učitavanje.",
   "Open {page} in {browser}": "Otvorite {page} u pregledniku {browser}",
   "or {page} in {browser}": "ili {page} u pregledniku {browser}",
   "Turn on Developer mode (keep it on)": "Uključite „Način rada za programere“ (ostavite ga uključenim)",
@@ -2395,5 +2393,15 @@
   "This project's Haarness server did not answer in time.": "Haarness server ovog projekta nije odgovorio na vrijeme.",
   "This chat has no tabs here.": "Ovaj razgovor ovdje nema kartica.",
   "Haarness for Chrome restarted. Try again.": "Haarness for Chrome je ponovo pokrenut. Pokušajte ponovo.",
-  "Haarness for Chrome is restarting. Try again.": "Haarness for Chrome se ponovo pokreće. Pokušajte ponovo."
+  "Haarness for Chrome is restarting. Try again.": "Haarness for Chrome se ponovo pokreće. Pokušajte ponovo.",
+  "Agent browser control is off": "Kontrola preglednika od strane agenta je isključena",
+  "Agents can't use any browser in this project, Chrome included. Turn on Agent browser control in Haarness Desktop (Settings → Browser), or set browser.policy.enabled to true in your Haarness config.": "Agenti u ovom projektu ne mogu koristiti nijedan preglednik, pa ni Chrome. Uključite kontrolu preglednika od strane agenta u aplikaciji Haarness Desktop (Postavke → Preglednik) ili postavite browser.policy.enabled na true u konfiguraciji Haarnessa.",
+  "This project's settings turn Chrome off": "Postavke ovog projekta isključuju Chrome",
+  "Agents can still use Chrome in your other projects. To use it here, remove browser.chrome.enabled: false from this project's Haarness config.": "Agenti i dalje mogu koristiti Chrome u vašim drugim projektima. Da biste ga koristili ovdje, uklonite browser.chrome.enabled: false iz Haarness konfiguracije ovog projekta.",
+  "This terminal can't set up Chrome for this project. Chrome works with projects on the computer where Chrome runs.": "Ovaj terminal ne može postaviti Chrome za ovaj projekat. Chrome radi s projektima na računaru na kojem se Chrome izvršava.",
+  "This Haarness installation doesn't include Haarness for Chrome. Set it up from Haarness Desktop (Settings → Browser → Chrome), then press Enter here.": "Ova instalacija Haarnessa ne uključuje Haarness for Chrome. Postavite ga iz aplikacije Haarness Desktop (Postavke → Preglednik → Chrome), a zatim ovdje pritisnite Enter.",
+  "Chrome is turned off for this project.": "Chrome je isključen za ovaj projekat.",
+  "{category}: {decision} by default": "{category}: {decision} prema zadanim postavkama",
+  "{category} on {origin}: {decision}": "{category} na {origin}: {decision}",
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Kontrola preglednika od strane agenta je isključena, pa agenti ne mogu koristiti Chrome u ovom projektu. Uključite je na vrhu ove stranice."
 }

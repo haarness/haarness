@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { z } from "zod";
-import type { ChromeSetupInfo } from "../chrome";
+import { chromeLaunchSetupAllowed, type ChromeSetupInfo } from "../chrome";
 import { environment, executable } from "./runtime";
 
 /**
@@ -130,12 +130,6 @@ export async function revealChromeExtension() {
  * test runs never touch the user's real Chrome registration.
  */
 export function setupChromeOnLaunch() {
-  if (
-    !app.isPackaged ||
-    process.env.HAARNESS_DESKTOP_TEST ||
-    process.env.HAARNESS_DATA_DIR ||
-    process.env.HAARNESS_DESKTOP_DATA
-  )
-    return;
+  if (!chromeLaunchSetupAllowed(app.isPackaged, process.env)) return;
   void chromeSetup("setup", ["--quiet", "--if-missing"]).catch(() => {});
 }

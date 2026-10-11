@@ -201,11 +201,11 @@ Settings → Browser also supports **Remember site approvals** and leading subdo
 Settings → Browser has a **Chrome** group after the general rows, headed "Chrome settings apply to every project on this computer.":
 
 - **Chrome** shows the connection ("Connected · Google Chrome", "2 browsers connected", "Not connected", "Paused in Chrome", "Stopped in Chrome") and opens **Set up Chrome…** or **Manage…**.
-- **Let agents use Chrome** turns Chrome on or off for agents.
+- **Let agents use Chrome** turns Chrome on or off for agents in every project. When Chrome is still off here, the group says why: agent browser control is off (with a note pointing to that switch), or the project's settings turn Chrome off.
 - **Browser for new agent tabs**: **Automatic** (the Haarness browser when the chat is open in Desktop, otherwise Chrome), **Haarness browser** or **Chrome**.
 - **Chrome site permissions**: Site, Browsing, Downloads, Uploads and Scripts, with a **Default** row and **Add site**; site rules follow the same origin syntax as Agent site permissions. "Blocked sites in Agent site permissions are blocked in Chrome too."
 
-The rows are disabled, with the reason, when the server lacks `browser-extension.v1` or the project is remote ("Chrome works with projects on this computer."). When project configuration made Chrome stricter, the group says "Restricted by this project's settings". The TUI's `/chrome` changes the same two settings with `e` and `d`.
+The rows are disabled, with the reason, when the server lacks `browser-extension.v1` or the project is remote ("Chrome works with projects on this computer."). When project configuration made Chrome stricter, the group says "Restricted by this project's settings" and lists each restriction in the reader's language. The TUI's `/chrome` changes the same two settings with `e` and `d`, and says the same about what keeps Chrome off.
 
 They are stored as `browser.chrome`, a sibling of `browser.policy`, so older daemons that reject unknown `browser.policy` fields keep working:
 
