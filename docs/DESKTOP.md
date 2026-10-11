@@ -49,7 +49,8 @@ Normal Send steers active work; **Queue** or **Alt+Enter** saves a follow-up unt
    **Allow once + Auto**, **Always for this folder** (in a Git repository, **Always allow**
    offers the folder or the whole repository) and **Deny**. Auto answers those requests once by
    itself for the chat and its agents; Cloud actions that spend money or delete something still
-   ask. See [Automatic approvals](AUTO-APPROVALS.md).
+   ask, and so does a site set to **Requires approval** unless **Remember site approvals** is on.
+   See [Automatic approvals](AUTO-APPROVALS.md).
 
 **Cmd+.** (Ctrl+. on Windows and Linux) switches the message box to the next agent and
 **Cmd+Shift+.** to the previous one; change them in **Settings → Keyboard shortcuts**.
