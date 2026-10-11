@@ -67,8 +67,9 @@ export function restoreSummary(plan: RestorePlan): {
 
 /**
  * The confirmed restore. It replaces existing files only when the preview
- * listed some, so a file that appeared since the preview stops it instead of
- * being overwritten unseen.
+ * listed some: after a preview that replaced nothing, a file that appeared
+ * since stops the restore instead of being overwritten. After one that did
+ * replace files, any listed path is written, as the reader confirmed.
  */
 export function restoreArgs(source: string[], plan: RestorePlan) {
   return [
