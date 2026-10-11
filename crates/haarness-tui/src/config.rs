@@ -84,6 +84,9 @@ fn resolve_config_dir(
 /// than the folder everything else reads. `None` where the two agree, or when
 /// an explicit root makes the install self-contained.
 fn legacy_config_dir() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
     if std::env::var_os("HAARNESS_DATA_DIR").is_some()
         || std::env::var_os("HAARNESS_HOME").is_some_and(|value| !value.is_empty())
     {
@@ -129,12 +132,42 @@ fn adopt_legacy_files(target: &std::path::Path, legacy: &std::path::Path) {
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::unnecessary_wraps)] // same signature as outside tests, where it may be unknown
+fn current_config_dir() -> Option<PathBuf> {
+    Some(test_config_dir().to_path_buf())
+}
+
+#[cfg(not(test))]
 fn current_config_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()));
     resolve_config_dir(|key| std::env::var_os(key), home)
+}
+
+/// Unit tests keep the TUI's files in a folder of their own, so a test run
+/// never reads or rewrites the developer's state, history or drafts. Each
+/// run starts empty, and folders runs left more than six hours ago go.
+#[cfg(test)]
+fn test_config_dir() -> &'static std::path::Path {
+    static DIRECTORY: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
+        let base = std::env::temp_dir().join("haarness-tui-unit-tests");
+        let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(6 * 60 * 60);
+        for entry in std::fs::read_dir(&base).into_iter().flatten().flatten() {
+            if entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .is_ok_and(|modified| modified < stale)
+            {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+        base.join(format!("{}-{}", std::process::id(), uuid::Uuid::now_v7()))
+            .join("config")
+    });
+    &DIRECTORY
 }
 
 fn config_dir() -> Option<PathBuf> {
