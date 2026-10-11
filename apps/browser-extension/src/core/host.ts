@@ -62,6 +62,7 @@ const DOCUMENT_CHANGED =
 const IDLE_DETACH_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 const REF_STRIDE = 100_000;
+const REFUSAL_NOTE_MS = 120_000;
 
 export interface HostOptions {
   platform: Platform;
@@ -737,6 +738,7 @@ export function createHost(options: HostOptions) {
     if (!entry || registry.owner(tab.id)) return;
     const refusal = !/^https?:\/\//i.test(tab.url) ? "restricted" : entry.tabs.length >= MAX_TABS ? "full" : null;
     entry.refused = refusal;
+    entry.refusedAt = platform.now();
     if (refusal) {
       await platform.groups?.ungroup([tab.id]).catch(() => {});
       registry.save();
@@ -891,7 +893,8 @@ export function createHost(options: HostOptions) {
         tabs: entry.tabs.length,
         working,
         subagent: entry.parent !== null,
-        refused: entry.refused,
+        // The note explains a tab that just bounced out of the group; it fades after two minutes.
+        refused: entry.refused && platform.now() - (entry.refusedAt ?? 0) < REFUSAL_NOTE_MS ? entry.refused : null,
       })),
       approvals,
       settings,
@@ -962,7 +965,7 @@ export function createHost(options: HostOptions) {
         return { ok: true };
       case "settings": {
         const before = settings;
-        settings = { ...settings, ...message.settings, label: (message.settings.label ?? settings.label).slice(0, 64) };
+        settings = { ...settings, ...message.settings, label: (message.settings.label ?? settings.label).trim().slice(0, 64) };
         await platform.local.set("settings", settings);
         platform.setCursor(settings.cursor);
         if (before.language !== settings.language) options.language?.(settings.language);
