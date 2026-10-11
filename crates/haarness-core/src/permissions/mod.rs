@@ -290,6 +290,41 @@ fn normalize_rule_aliases(mut rule: PermissionRule) -> PermissionRule {
     rule
 }
 
+/// Site approvals in the user's own Chrome carry this prefix. Their patterns
+/// name the chat (`browser_site:chrome-browsing:<thread>:<origin>`), so an
+/// "Allow in this chat" answer never reaches another chat.
+pub const EXPLICIT_GRANT_PREFIX: &str = "browser_site:chrome-";
+
+/// Whether a person already answered this explicit operation with an
+/// "always" in this server's session. Configured rules never count: a `*` or
+/// `browser_site:*` allow, project rules and custom agents can only deny it.
+#[must_use]
+pub fn explicit_granted(grants: &[PermissionRule], operation: &str) -> bool {
+    grants
+        .iter()
+        .rev()
+        .find(|rule| rule.pattern.starts_with(EXPLICIT_GRANT_PREFIX) && rule.pattern == operation)
+        .is_some_and(|rule| rule.decision == PermissionDecision::Allow)
+}
+
+/// An explicit operation's decision: a configured or ceiling deny (or a
+/// tool's deny constraint) refuses it, an answered grant allows it, and
+/// anything else asks a person.
+#[must_use]
+pub fn explicit_decision(
+    configured: PermissionDecision,
+    constraint: Option<PermissionDecision>,
+    granted: bool,
+) -> PermissionDecision {
+    if configured == PermissionDecision::Deny || constraint == Some(PermissionDecision::Deny) {
+        PermissionDecision::Deny
+    } else if granted {
+        PermissionDecision::Allow
+    } else {
+        PermissionDecision::Ask
+    }
+}
+
 fn rule(pattern: &str, decision: PermissionDecision) -> PermissionRule {
     PermissionRule {
         pattern: pattern.into(),

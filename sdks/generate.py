@@ -237,6 +237,10 @@ def specification():
         ),
         "FileSearchQuery": obj({"q": S, "limit": N}, ("q",)),
         "HostOptions": obj({"version": {"type": "integer", "enum": [1, 2]}}),
+        "ExtensionHostOptions": obj(
+            {"version": {"type": "integer", "enum": [1]}}, ("version",)
+        ),
+        "BrowserHostsQuery": obj({"thread": S}),
         "FileQuery": obj({"path": S, "hidden": B}),
         "PreviewVersionQuery": obj({"path": S, "hash": S}, ("path", "hash")),
         "Browse": obj({"path": S, "prefix": S, "hidden": B, "limit": N, "after": S}),
@@ -293,7 +297,12 @@ def specification():
         if name == "read_shared_session":
             operation["response"] = S
             operation["textResponse"] = True
-        if name in ("connect_pty", "connect_browser_host", "connect_draft_browser_host"):
+        if name in (
+            "connect_pty",
+            "connect_browser_host",
+            "connect_draft_browser_host",
+            "connect_browser_extension_host",
+        ):
             operation["stream"] = "websocket"
         if name == "events":
             operation["stream"] = "sse"

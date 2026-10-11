@@ -57,6 +57,14 @@ type Case = {
   tui?: boolean;
   check: (proof: Proof) => Promise<void>;
 };
+/** Tabs once Desktop's browser is attached, else -1: servers answer a tab
+ * list without a browser too, naming which browsers the chat can use. */
+function attachedTabs(state: any): number {
+  const haarness = state.browsers?.find(
+    (entry: any) => entry.browser === "haarness",
+  );
+  return haarness?.available === false ? -1 : state.tabs.length;
+}
 async function tool(thread: Thread, name: string, args: object = {}) {
   const result = await client.callBrowserTool(
     thread.id,
@@ -609,7 +617,7 @@ async function activate(thread: Thread) {
   await expect
     .poll(async () => {
       try {
-        return (await tool(thread, "tabs_list")).tabs.length;
+        return attachedTabs(await tool(thread, "tabs_list"));
       } catch {
         return -1;
       }

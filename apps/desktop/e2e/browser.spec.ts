@@ -40,6 +40,14 @@ const binary = resolve(
 );
 test.describe.configure({ mode: "serial" });
 const html = `<!doctype html><html lang="en"><head><title>Browser fixture</title><meta name="description" content="Haarness browser integration fixture"><meta name="viewport" content="width=device-width"></head><body style="font:18px system-ui;background:#edf2ff;color:#14213d;padding:25px"><h1>Haarness browser fixture</h1><form id="form"><label>Name <input id="name" name="name"></label><label>Tier <select id="tier"><option value="one">One</option><option value="two">Two</option></select></label><label><input type="checkbox" id="agree"> Agree</label><button>Submit order</button></form><p id="result" role="status">Ready</p><label>Upload document<input type="file" id="upload"></label><p id="uploaded"></p><a href="/download" download="fixture.txt">Download fixture</a><button onclick="window.open('/popup')">Open popup</button><iframe title="Child form" src="/frame"></iframe><p id="socket">Connecting socket</p><script>form.onsubmit=e=>{e.preventDefault();result.textContent='Saved '+nameInput.value+' '+tier.value+' '+agree.checked;fetch('/api',{method:'POST',body:nameInput.value})};const nameInput=document.getElementById('name');upload.onchange=async()=>uploaded.textContent=await upload.files[0].text();console.log('fixture console ready');const socket=new WebSocket(location.origin.replace('http','ws')+'/ws');socket.onmessage=e=>document.getElementById('socket').textContent=e.data;</script></body></html>`;
+/** Tabs once Desktop's browser is attached, else -1: servers answer a tab
+ * list without a browser too, naming which browsers the chat can use. */
+function attachedTabs(state: any): number {
+  const haarness = state.browsers?.find(
+    (entry: any) => entry.browser === "haarness",
+  );
+  return haarness?.available === false ? -1 : state.tabs.length;
+}
 async function tool(
   name: string,
   args: object = {},
@@ -83,7 +91,7 @@ async function select(value: Thread) {
   await expect
     .poll(async () => {
       try {
-        return (await tool("tabs_list", {}, value)).value.tabs.length;
+        return attachedTabs((await tool("tabs_list", {}, value)).value);
       } catch {
         return -1;
       }
@@ -515,7 +523,7 @@ test("conversation isolation, restore, close and blocked schemes are enforced", 
   await expect
     .poll(async () => {
       try {
-        return (await tool("tabs_list")).value.tabs.length;
+        return attachedTabs((await tool("tabs_list")).value);
       } catch {
         return 0;
       }
@@ -572,7 +580,9 @@ test("remote workspace browser uses the routed authenticated server for files an
   await expect
     .poll(async () => {
       try {
-        return (await tool("tabs_list", {}, target, base)).value.tabs.length;
+        return attachedTabs(
+          (await tool("tabs_list", {}, target, base)).value,
+        );
       } catch {
         return -1;
       }
@@ -639,7 +649,7 @@ test("real model operates the browser and receives a screenshot attachment", asy
   await expect
     .poll(async () => {
       try {
-        return (await tool("tabs_list", {}, live)).value.tabs.length;
+        return attachedTabs((await tool("tabs_list", {}, live)).value);
       } catch {
         return -1;
       }
@@ -767,7 +777,7 @@ test("browser permissions bind the target across an approval and survive configu
   await expect
     .poll(async () => {
       try {
-        return (await tool("tabs_list", {}, approval)).value.tabs.length;
+        return attachedTabs((await tool("tabs_list", {}, approval)).value);
       } catch {
         return -1;
       }
@@ -867,7 +877,7 @@ test("application restart restores tab URLs, invalidates old refs and reconnects
   await expect
     .poll(async () => {
       try {
-        return (await tool("tabs_list")).value.tabs.length;
+        return attachedTabs((await tool("tabs_list")).value);
       } catch {
         return -1;
       }

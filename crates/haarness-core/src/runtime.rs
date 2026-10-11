@@ -3287,15 +3287,30 @@ impl AgentRuntime {
         for plan in plans {
             let mut asked = Vec::new();
             for pattern in &plan.patterns {
-                let constraint = tool.permission_constraint(&arguments, &plan.operation(pattern));
-                match constrained_permission(engine.evaluate(&plan.operation(pattern)), constraint)
-                {
+                let operation = plan.operation(pattern);
+                let constraint = tool.permission_constraint(&arguments, &operation);
+                let explicit = tool.explicit_approval(&arguments, &operation);
+                let decision = if explicit {
+                    crate::permissions::explicit_decision(
+                        engine.evaluate(&operation),
+                        constraint,
+                        crate::permissions::explicit_granted(
+                            &self.session_rules.lock(),
+                            &operation,
+                        ),
+                    )
+                } else {
+                    constrained_permission(engine.evaluate(&operation), constraint)
+                };
+                match decision {
                     PermissionDecision::Deny => {
-                        allowed = Err(plan.operation(pattern));
+                        allowed = Err(operation);
                         break;
                     }
+                    // A hook pre-approval never answers what only a person may.
                     PermissionDecision::Ask
-                        if hook_permission == Some(PermissionDecision::Allow)
+                        if !explicit
+                            && hook_permission == Some(PermissionDecision::Allow)
                             && constraint != Some(PermissionDecision::Ask) => {}
                     PermissionDecision::Ask => asked.push(pattern.clone()),
                     PermissionDecision::Allow => {}
@@ -3320,6 +3335,12 @@ impl AgentRuntime {
                 tool.permission_constraint(&arguments, &plan.operation(pattern))
                     == Some(PermissionDecision::Ask)
             });
+            let explicit_operations: Vec<String> = asked
+                .iter()
+                .map(|pattern| plan.operation(pattern))
+                .filter(|operation| tool.explicit_approval(&arguments, operation))
+                .collect();
+            let explicit = !explicit_operations.is_empty();
             let operation = if asked.len() == 1 {
                 format!("{}:{}", plan.permission, asked[0])
             } else {
@@ -3329,7 +3350,7 @@ impl AgentRuntime {
             // Same rule as model calls: a chat in Auto approves eligible
             // requests once, ordered with mode changes by the gate.
             let approval_gate = self.approval_modes.gate.lock().await;
-            if !forced && self.approval_modes.is_auto(thread_id).await {
+            if !forced && !explicit && self.approval_modes.is_auto(thread_id).await {
                 tracing::info!(thread = %thread_id, operation, "approved once (Auto)");
                 continue;
             }
@@ -3343,6 +3364,7 @@ impl AgentRuntime {
                         .as_ref()
                         .map(|store| store.identity().to_owned()),
                     forced,
+                    explicit_operations,
                     operation: operation.clone(),
                     permission: plan.permission.clone(),
                     patterns: asked.clone(),
@@ -3397,6 +3419,7 @@ impl AgentRuntime {
                     "permissionId": id,
                     "repositoryScope": self.repository_approvals.as_ref().map(|store| store.identity()),
                     "allowAlways": !forced,
+                    "explicit": explicit,
                     "operation": operation,
                     "detail": arguments,
                     "permission": plan.permission,
@@ -3598,8 +3621,25 @@ impl AgentRuntime {
             .permissions
             .remove(id)
             .ok_or_else(|| CoreError::NotFound(format!("permission {id}")))?;
-        let allowed = match reply.decision {
-            decision if pending.forced && !matches!(decision, PermissionReplyDecision::Reject) => {
+        // What only a person may approve lasts for this chat at most: the
+        // folder and repository choices act as "Allow in this chat", and only
+        // its chat-scoped site rules are remembered.
+        let explicit = !pending.explicit_operations.is_empty();
+        let decision = match reply.decision {
+            PermissionReplyDecision::AlwaysWorkspace
+            | PermissionReplyDecision::AlwaysRepository
+                if explicit =>
+            {
+                PermissionReplyDecision::Always
+            }
+            decision => decision,
+        };
+        let allowed = match decision {
+            decision
+                if pending.forced
+                    && !explicit
+                    && !matches!(decision, PermissionReplyDecision::Reject) =>
+            {
                 true
             }
             PermissionReplyDecision::Once => true,
@@ -3613,18 +3653,30 @@ impl AgentRuntime {
                 let mut rules: Vec<PermissionRule> = pending
                     .always_rules
                     .iter()
+                    .filter(|pattern| !explicit || pending.explicit_operations.contains(*pattern))
                     .map(|pattern| PermissionRule {
                         pattern: pattern.clone(),
                         decision: PermissionDecision::Allow,
                     })
                     .collect();
+                if explicit {
+                    // Ask again for every explicit operation the grant left out.
+                    for operation in &pending.explicit_operations {
+                        if !rules.iter().any(|rule| rule.pattern == *operation) {
+                            rules.push(PermissionRule {
+                                pattern: operation.clone(),
+                                decision: PermissionDecision::Allow,
+                            });
+                        }
+                    }
+                }
                 if rules.is_empty() {
                     rules.push(PermissionRule {
                         pattern: pending.operation.clone(),
                         decision: PermissionDecision::Allow,
                     });
                 }
-                let persistence = match reply.decision {
+                let persistence = match decision {
                     PermissionReplyDecision::AlwaysWorkspace => {
                         let mut result = Ok(());
                         for rule in &rules {
@@ -3654,7 +3706,7 @@ impl AgentRuntime {
                     self.permissions.insert(id.to_owned(), pending);
                     return Err(error);
                 }
-                if !matches!(reply.decision, PermissionReplyDecision::AlwaysRepository) {
+                if !matches!(decision, PermissionReplyDecision::AlwaysRepository) {
                     self.session_rules.lock().extend(rules.iter().cloned());
                 }
                 // Any other pending prompt now covered by the new rules
@@ -3747,7 +3799,11 @@ impl AgentRuntime {
             let waiting: Vec<String> = self
                 .permissions
                 .iter()
-                .filter(|entry| !entry.value().forced && auto.contains(&entry.value().thread_id))
+                .filter(|entry| {
+                    !entry.value().forced
+                        && entry.value().explicit_operations.is_empty()
+                        && auto.contains(&entry.value().thread_id)
+                })
                 .map(|entry| entry.key().clone())
                 .collect();
             for permission_id in waiting {
@@ -5049,6 +5105,9 @@ struct StatusState {
 struct PendingPermission {
     repository_scope: Option<String>,
     forced: bool,
+    /// The asked operations only a person may answer (Chrome sites). Auto,
+    /// `--yolo` and hooks never release them, and "always" covers this chat.
+    explicit_operations: Vec<String>,
     operation: String,
     /// Permission category (bash, edit, external_directory, …).
     permission: String,
@@ -5159,6 +5218,7 @@ impl PendingPermission {
             permission_id: id.to_owned(),
             repository_scope: self.repository_scope.clone(),
             allow_always: self.forced.then_some(false),
+            explicit: !self.explicit_operations.is_empty(),
             operation: self.operation.clone(),
             permission: self.permission.clone(),
             patterns: self.patterns.clone(),
@@ -5180,6 +5240,9 @@ impl PendingPermission {
                 } else {
                     format!("{}:{pattern}", self.permission)
                 };
+                if self.explicit_operations.contains(&operation) {
+                    return crate::permissions::explicit_granted(rules, &operation);
+                }
                 rules.iter().any(|rule| {
                     rule.decision == PermissionDecision::Allow
                         && crate::permissions::wildcard_match(&rule.pattern, &operation)
@@ -7670,7 +7733,22 @@ impl RunnerTask {
                 let constraint = tool.as_ref().and_then(|tool| {
                     tool.permission_constraint(&arguments, &plan.operation(pattern))
                 });
-                match constrained_permission(evaluation.decision, constraint) {
+                let explicit = tool.as_ref().is_some_and(|tool| {
+                    tool.explicit_approval(&arguments, &plan.operation(pattern))
+                });
+                let decision = if explicit {
+                    crate::permissions::explicit_decision(
+                        evaluation.decision,
+                        constraint,
+                        crate::permissions::explicit_granted(
+                            &self.session_rules.lock(),
+                            &plan.operation(pattern),
+                        ),
+                    )
+                } else {
+                    constrained_permission(evaluation.decision, constraint)
+                };
+                match decision {
                     PermissionDecision::Deny => {
                         let rule = evaluation.matched.unwrap_or_else(|| "policy".into());
                         return Err(CoreError::PermissionDenied(format!(
@@ -7679,9 +7757,11 @@ impl RunnerTask {
                             plan.operation(pattern)
                         )));
                     }
-                    // A hook pre-approval skips the prompt (never a deny).
+                    // A hook pre-approval skips the prompt (never a deny), but
+                    // never answers what only a person may.
                     PermissionDecision::Ask
-                        if constraint != Some(PermissionDecision::Ask)
+                        if !explicit
+                            && constraint != Some(PermissionDecision::Ask)
                             && (hook_permission == Some(PermissionDecision::Allow)
                                 || (evaluation.matched.is_none()
                                     && PermissionEngine::new(self.skill_rules.lock().clone())
@@ -7706,8 +7786,17 @@ impl RunnerTask {
                     tool.permission_constraint(&arguments, &plan.operation(pattern))
                 }) == Some(PermissionDecision::Ask)
             });
+            let explicit: Vec<String> = plan
+                .patterns
+                .iter()
+                .map(|pattern| plan.operation(pattern))
+                .filter(|operation| {
+                    tool.as_ref()
+                        .is_some_and(|tool| tool.explicit_approval(&arguments, operation))
+                })
+                .collect();
             let resolution = self
-                .ask_permission(agent, &plan, &arguments, forced)
+                .ask_permission(agent, &plan, &arguments, forced, explicit)
                 .await?;
             if !resolution.allowed {
                 let message = match resolution.feedback {
@@ -7813,6 +7902,18 @@ impl RunnerTask {
         Ok(output)
     }
 
+    /// A turn nobody can answer: it approves its own requests and may not ask
+    /// questions (a schedule, or a workflow agent it started). A `--yolo`
+    /// terminal UI or `haarness run --yolo` still has a person to ask.
+    fn unattended(&self) -> bool {
+        self.request.auto_approve
+            && self
+                .request
+                .tools
+                .as_ref()
+                .is_some_and(|tools| tools.get("question") == Some(&false))
+    }
+
     /// The effective permission engine for this turn: agent defaults →
     /// configured rules → session approvals, bounded by ceilings (the plan
     /// agent's write boundary, and for child agents the parent's ruleset).
@@ -7872,6 +7973,7 @@ impl RunnerTask {
         plan: &AskPlan,
         detail: &serde_json::Value,
         forced: bool,
+        explicit_operations: Vec<String>,
     ) -> CoreResult<PermissionResolution> {
         let operation = if plan.patterns.len() == 1 {
             format!("{}:{}", plan.permission, plan.patterns[0])
@@ -7879,8 +7981,17 @@ impl RunnerTask {
             format!("{}: {}", plan.permission, plan.patterns.join("  "))
         };
         let always_rules = plan.always_rules();
+        let explicit = !explicit_operations.is_empty();
+        // A run nobody watches (a schedule) cannot get a person's answer:
+        // fail now instead of waiting forever.
+        if explicit && self.unattended() {
+            return Err(CoreError::PermissionDenied(format!(
+                "Chrome needs the user's approval for {} and this run cannot ask. Ask the user to allow it in an interactive chat, then retry.",
+                explicit_origins(&explicit_operations)
+            )));
+        }
         let automatic = self.config.auto_approve || self.request.auto_approve;
-        if automatic && !forced {
+        if automatic && !forced && !explicit {
             // A `serve --yolo` server approves and remembers, exactly as an
             // "always" answer would, so repeated commands stay silent even
             // mid-run. A single turn's flag (a schedule, `run --yolo`, ACP, a
@@ -7912,7 +8023,7 @@ impl RunnerTask {
                 });
             }
             match decision.permission {
-                Some(PermissionDecision::Allow) if !forced => {
+                Some(PermissionDecision::Allow) if !forced && !explicit => {
                     return Ok(PermissionResolution {
                         allowed: true,
                         feedback: None,
@@ -7933,7 +8044,7 @@ impl RunnerTask {
         // The gate orders this with a mode change: either Auto is visible
         // here, or the change sees the registered prompt and releases it.
         let approval_gate = self.approval_modes.gate.lock().await;
-        let auto = !forced && self.approval_modes.is_auto(self.thread.id).await;
+        let auto = !forced && !explicit && self.approval_modes.is_auto(self.thread.id).await;
         // Re-evaluate while holding the same lock used to install an Always
         // rule, and register the prompt before releasing it. This closes the
         // late-sibling race: either the new rule is already visible and no
@@ -7945,7 +8056,13 @@ impl RunnerTask {
             let refreshed = self.permission_engine_with_session_rules(agent, &session_rules);
             if !forced
                 && plan.patterns.iter().all(|pattern| {
-                    refreshed.evaluate(&plan.operation(pattern)) == PermissionDecision::Allow
+                    let operation = plan.operation(pattern);
+                    if explicit_operations.contains(&operation) {
+                        refreshed.evaluate(&operation) != PermissionDecision::Deny
+                            && crate::permissions::explicit_granted(&session_rules, &operation)
+                    } else {
+                        refreshed.evaluate(&operation) == PermissionDecision::Allow
+                    }
                 })
             {
                 return Ok(PermissionResolution {
@@ -7968,6 +8085,7 @@ impl RunnerTask {
                         .as_ref()
                         .map(|store| store.identity().to_owned()),
                     forced,
+                    explicit_operations,
                     operation: operation.clone(),
                     permission: plan.permission.clone(),
                     patterns: plan.patterns.clone(),
@@ -8001,7 +8119,8 @@ impl RunnerTask {
             json!({
                 "permissionId": id,
                 "repositoryScope": self.repository_approvals.as_ref().map(|store| store.identity()),
-                    "allowAlways": !forced,
+                "allowAlways": !forced,
+                "explicit": explicit,
                 "operation": operation,
                 "detail": detail,
                 "permission": plan.permission,
@@ -9893,6 +10012,23 @@ impl AskPlan {
             .map(|pattern| self.operation(pattern))
             .collect()
     }
+}
+
+/// The sites named by explicit Chrome operations
+/// (`browser_site:chrome-<category>:<thread>:<origin>`), for messages.
+fn explicit_origins(operations: &[String]) -> String {
+    let mut origins: Vec<&str> = operations
+        .iter()
+        .map(|operation| {
+            operation
+                .strip_prefix(crate::permissions::EXPLICIT_GRANT_PREFIX)
+                .and_then(|rest| rest.split_once(':'))
+                .and_then(|(_, rest)| rest.split_once(':'))
+                .map_or(operation.as_str(), |(_, origin)| origin)
+        })
+        .collect();
+    origins.dedup();
+    origins.join(", ")
 }
 
 /// One browser action receives one decision, while preserving every underlying gate.

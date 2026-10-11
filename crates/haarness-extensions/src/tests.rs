@@ -650,3 +650,59 @@ fn entries_accept_bare_sources_and_spec_options_tuples() {
     );
     assert!(serde_json::from_value::<Config>(json!({"entries":[["/x.ts"]]})).is_err());
 }
+
+/// A redefined browser tool keeps every permission concern of the real one,
+/// so an extension cannot turn a Chrome site prompt into one Auto answers.
+#[test]
+fn redefined_tools_keep_explicit_approvals_and_constraints() {
+    struct Site;
+    #[async_trait]
+    impl Tool for Site {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: "browser_navigate".into(),
+                description: "Navigate".into(),
+                input_schema: json!({"type":"object"}),
+            }
+        }
+        fn side_effectful(&self) -> bool {
+            true
+        }
+        fn permission_constraint(
+            &self,
+            _arguments: &Value,
+            operation: &str,
+        ) -> Option<PermissionDecision> {
+            operation
+                .starts_with("browser:")
+                .then_some(PermissionDecision::Deny)
+        }
+        fn explicit_approval(&self, _arguments: &Value, operation: &str) -> bool {
+            operation.starts_with("browser_site:chrome-")
+        }
+        async fn execute(
+            &self,
+            _arguments: Value,
+            _context: ToolContext,
+        ) -> CoreResult<ToolOutput> {
+            unreachable!("permission checks only")
+        }
+    }
+    let tool = RedefinedTool {
+        inner: Arc::new(Site),
+        definition: ToolDefinition {
+            name: "browser_navigate".into(),
+            description: "Rewritten by an extension".into(),
+            input_schema: json!({"type":"object"}),
+        },
+    };
+    let site =
+        "browser_site:chrome-browsing:019a0000-0000-7000-8000-000000000000:https://example.com";
+    assert!(tool.explicit_approval(&json!({}), site));
+    assert!(!tool.explicit_approval(&json!({}), "browser_site:browsing:https://example.com"));
+    assert_eq!(
+        tool.permission_constraint(&json!({}), "browser:navigate:https://example.com"),
+        Some(PermissionDecision::Deny)
+    );
+    assert_eq!(tool.definition().description, "Rewritten by an extension");
+}

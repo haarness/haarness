@@ -139,8 +139,13 @@ pub async fn enforce(State(state): State<ServerState>, request: Request, next: N
                     c.starts_with("pty")
                         || c.starts_with("workspace")
                         || c.starts_with("session.archive")
+                        || c.starts_with("browser-extension")
                 })
             });
+        }
+        // The process id serves local Chrome discovery only.
+        if let Some(info) = body.as_object_mut() {
+            info.remove("pid");
         }
     }
     parts.headers.remove("content-length");

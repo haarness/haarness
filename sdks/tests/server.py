@@ -184,6 +184,77 @@ class Fixture:
                 assert not worker.is_alive(), "Browser fixture did not close"
                 assert not errors, errors
 
+    @contextmanager
+    def extension_host(self, thread_id, tab_id):
+        """Haarness for Chrome's side of the protocol: one profile holding one
+        tab of `thread_id`, answering tab lists. The extension owns Chrome proof."""
+        from websockets.sync.client import connect
+        from websockets.exceptions import ConnectionClosed
+        import uuid
+
+        url = self.url.replace("http://", "ws://", 1)
+        errors = []
+        calls = []
+        tab = {"id": tab_id, "url": "https://example.test/", "title": "Example",
+               "loading": False, "canGoBack": False, "canGoForward": False, "generation": 1}
+        with connect(
+            f"{url}/v1/browser/extension/host?version=1",
+            additional_headers={"Authorization": "Bearer " + self.token},
+        ) as socket:
+            attached = json.loads(socket.recv(timeout=10))
+            assert attached["type"] == "attached", attached
+            assert attached["server"]["workspace"] == str(self.workspace), attached
+            socket.send(json.dumps({
+                "type": "hello",
+                "browser": {"id": str(uuid.uuid4()), "kind": "chrome", "name": "Google Chrome",
+                            "label": "SDK", "version": "154.0.8037.98"},
+                "extension": {"version": "0.1.1"},
+                "paused": False, "stopped": False, "focusedAt": 1,
+            }))
+            socket.send(json.dumps({
+                "type": "state", "thread": thread_id,
+                "state": {"tabs": [tab], "focusedTabID": tab_id},
+            }))
+            # Messages are handled in order: the pong means the tab is known.
+            socket.send(json.dumps({"type": "ping"}))
+            assert json.loads(socket.recv(timeout=10))["type"] == "pong"
+
+            def respond():
+                try:
+                    for raw in socket:
+                        message = json.loads(raw)
+                        if message["type"] != "command":
+                            continue
+                        command = message["command"]
+                        assert message["thread"] == thread_id, message
+                        assert command["action"]["type"] == "tabs.list", command
+                        calls.append(command)
+                        value = (
+                            {"resources": [], "key": "inventory"}
+                            if command.get("inspect")
+                            else {"tabs": [tab], "focusedTabID": tab_id}
+                        )
+                        socket.send(json.dumps({
+                            "type": "result", "id": message["id"],
+                            "outcome": {"type": "success", "result": {
+                                "value": value, "files": [],
+                            }},
+                        }))
+                except ConnectionClosed:
+                    pass
+                except BaseException as error:
+                    errors.append(error)
+
+            worker = threading.Thread(target=respond, daemon=True)
+            worker.start()
+            try:
+                yield calls
+            finally:
+                socket.close()
+                worker.join(timeout=5)
+                assert not worker.is_alive(), "Extension fixture did not close"
+                assert not errors, errors
+
     def close(self):
         if self.process and self.process.poll() is None:
             self.process.terminate()
