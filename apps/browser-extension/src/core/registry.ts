@@ -34,8 +34,9 @@ export interface ThreadRecord {
   approved: string[];
   /** The latest site rules the server sent for this chat (for popups between commands). */
   policy: Policy | null;
-  /** Why the latest tab the user dragged in was not shared, if it was not. */
+  /** Why the latest tab the user dragged in was not shared, if it was not, and when. */
   refused: "restricted" | "full" | null;
+  refusedAt?: number;
   touchedAt: number;
 }
 

@@ -441,3 +441,27 @@ test("an older copy on disk (Haarness was downgraded) reloads once but is not of
   assert.equal(h.fake.reloads, 1);
   assert.equal(h.host.snapshot().update, null);
 });
+
+test("a new profile label reaches Haarness in a fresh hello once nothing is running", async () => {
+  const h = await boot();
+  h.start();
+  const before = h.fake.ports.length;
+  await h.host.request({ type: "settings", settings: { label: "  Work  " } });
+  assert.equal(h.fake.ports.length, before + 1);
+  assert.equal(h.fake.ports[before - 1].connected, false, "the old bridge is let go");
+  assert.equal(h.sent[0].browser.label, "Work");
+  assert.equal((h.fake.stores.local.get("settings") as { label: string }).label, "Work");
+});
+
+test("Show tabs is the one place Haarness brings a window forward, because the user asked", async () => {
+  const h = await boot();
+  h.start();
+  h.attach();
+  const { live } = await h.open("about:blank");
+  h.fake.windowIds.push(2);
+  h.fake.focused = 2;
+  const key = h.host.snapshot().chats[0].key;
+  assert.deepEqual(await h.host.request({ type: "show-tabs", key }), { ok: true });
+  assert.equal(h.fake.focused, live.windowId);
+  assert.equal(h.fake.tabsById.get(live.id)!.active, true);
+});
