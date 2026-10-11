@@ -492,6 +492,18 @@ html[dir="rtl"] .tool-target {
   font-size: var(--ui-xs);
   font-variant-numeric: tabular-nums;
 }
+/* A browser step in the user's own Chrome says so; it sits outside the
+   sweep, so it rests while the step runs. */
+.tool-chip {
+  flex: none;
+  padding: 0 var(--s1);
+  border-radius: var(--r-sm);
+  background: var(--hover);
+  color: var(--muted);
+  font-size: var(--ui-xs);
+  font-weight: 500;
+  line-height: 18px;
+}
 .tool-stat-add {
   color: var(--green);
 }
@@ -1693,6 +1705,20 @@ html[dir="rtl"] .tool-target {
 }
 .prompt-subject.prompt-detail {
   color: var(--muted);
+}
+/* An explicit Chrome request names each site it asks for, one per line. */
+.prompt-subject.chrome-approval {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0);
+  font-size: var(--ui);
+  white-space: normal;
+}
+.chrome-approval bdi,
+.chrome-approval code {
+  font-family: var(--mono);
+  font-size: var(--ui-sm);
 }
 /* The proposed change under an edit request: short enough to keep the
    composer in view, scrollable when the edit is long. */

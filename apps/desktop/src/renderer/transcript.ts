@@ -315,6 +315,21 @@ export interface ToolResult {
   is_error: boolean;
   metadata?: unknown;
 }
+/**
+ * The user's own Chrome, when a browser step ran there. The server reports
+ * the browser in the result; until a result arrives, or when the step failed
+ * before reaching a browser, a tab opened with `browser: "chrome"` says where
+ * it was going. A success without the report came from a server that has
+ * only the Haarness browser.
+ */
+export function ranInChrome(name: string, args: unknown, result?: ToolResult) {
+  if (!toolName(name).startsWith("browser_")) return false;
+  const reported = object(result?.metadata)?.browser;
+  if (reported === "chrome" || reported === "haarness")
+    return reported === "chrome";
+  if (result && !result.is_error) return false;
+  return object(args)?.browser === "chrome";
+}
 export function toolFailed(name: string, result?: ToolResult) {
   if (!result) return false;
   if (result.is_error) return true;

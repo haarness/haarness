@@ -3,6 +3,7 @@ import { createReviewStorage, type ReviewRequest } from "../review-drafts";
 import { browserLinkDestination } from "../browser-settings";
 import { browserData, removeBrowserData, saveBrowserDownload } from "./browser-data";
 import { createBrowserHost } from "./browser-host";
+import { chromeSetup, revealChromeExtension, setupChromeOnLaunch } from "./chrome-setup";
 import { createAttachmentDraftStorage } from "./attachment-drafts";
 import { translate } from "../localization";
 /** Native dialogs speak the language chosen in Settings, like the menus do. */
@@ -442,7 +443,7 @@ async function manageWorktree(owner: string, method: string, args: unknown[]) {
 }
 
 const apis = new Set(
-  `manageResource info analyticsStats analyticsInsights providers refreshProviders agents commands lspStatus formatterStatus toolCatalog updateLazyTools updateTool projects workspacesList createWorkspace workspaceRefs resolveWorkspaceRef getWorkspace removeWorkspace openWorkspace resetWorkspace cleanupWorkspace listPtys createPty getPty updatePty deletePty workflows workflowSource startWorkflow listWorkflowRuns getWorkflowRun deleteWorkflowRun waitWorkflowRun cancelWorkflowRun pauseWorkflowRun resumeWorkflowRun skills loadSkill plugins pluginAction mcpServers configureMcp reconnectMcp disconnectMcp mcpTools callMcpTool mcpResources mcpResourceTemplates readMcpResource mcpPrompts getMcpPrompt listThreads createThread getThread updateThread exportSessionArchive forkThread listItems listTodos activeTurn interruptThreadTree listBackgroundTasks promoteBackgroundTasks pendingQuestion startTurn executeCommand queueInput inputQueue changeInputQueue btw compact getGoal setGoal getApprovalMode setApprovalMode getLoop setLoop threadUsage revertThread unrevertThread lastTurnDiff lastTurnReview vcsDiff searchFiles importSessionArchive activeTurns getTurn interruptTurn waitTurn listPermissions replyPermission listQuestions replyQuestion shutdownServer health openapi listProfiles uploadProfile getProfile deleteProfile downloadProfile`.split(
+  `manageResource info analyticsStats analyticsInsights providers refreshProviders agents commands lspStatus formatterStatus toolCatalog updateLazyTools updateTool projects workspacesList createWorkspace workspaceRefs resolveWorkspaceRef getWorkspace removeWorkspace openWorkspace resetWorkspace cleanupWorkspace listPtys createPty getPty updatePty deletePty workflows workflowSource startWorkflow listWorkflowRuns getWorkflowRun deleteWorkflowRun waitWorkflowRun cancelWorkflowRun pauseWorkflowRun resumeWorkflowRun skills loadSkill plugins pluginAction mcpServers configureMcp reconnectMcp disconnectMcp mcpTools callMcpTool mcpResources mcpResourceTemplates readMcpResource mcpPrompts getMcpPrompt listThreads createThread getThread updateThread exportSessionArchive forkThread listItems listTodos activeTurn interruptThreadTree listBackgroundTasks promoteBackgroundTasks pendingQuestion startTurn executeCommand queueInput inputQueue changeInputQueue btw compact getGoal setGoal getApprovalMode setApprovalMode getLoop setLoop threadUsage revertThread unrevertThread lastTurnDiff lastTurnReview vcsDiff searchFiles importSessionArchive activeTurns getTurn interruptTurn waitTurn listPermissions replyPermission listQuestions replyQuestion shutdownServer health openapi listProfiles uploadProfile getProfile deleteProfile downloadProfile listBrowserHosts`.split(
     " ",
   ),
 );
@@ -1049,6 +1050,11 @@ function installHandlers() {
     throw new Error("Unknown window action");
   });
   handle("external", (_, url: string) => shell.openExternal(external(url)));
+  // Haarness for Chrome is set up on this computer, whichever project is open.
+  handle("chromeSetup", (_, action: unknown) =>
+    chromeSetup(z.enum(["setup", "status"]).parse(action)),
+  );
+  handle("chromeReveal", () => revealChromeExtension());
   handle("openLink", async (win, id: string | undefined, thread: string | undefined, raw: string) => {
     const url = external(raw);
     if (id && browserLinkDestination(url, data().preferences) === "browser") {
@@ -1418,6 +1424,7 @@ else {
       initialized = true;
       createWindow();
       void refreshProjects().catch(() => {});
+      setupChromeOnLaunch();
       if (app.isPackaged) app.setAsDefaultProtocolClient("haarness");
       powerMonitor.on("resume", () =>
         broadcast({ kind: "connection", data: "resume" }),

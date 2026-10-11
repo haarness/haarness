@@ -71,6 +71,12 @@ test("settings aliases cover browser and legacy controls using the global rankin
     ["terminal font", "Terminal text size"],
     ["restore archive", "Restore configuration"],
     ["disable automation", "Agent browser control"],
+    ["chrome", "Chrome"],
+    ["google edge brave", "Chrome"],
+    ["real profile signed in", "Chrome"],
+    ["turn off chrome", "Let agents use Chrome"],
+    ["new tabs", "Browser for new agent tabs"],
+    ["chrome scripts", "Chrome site permissions"],
   ]) {
     assert.equal(searchEntries(entries, query)[0]?.name, title, query);
   }

@@ -43,6 +43,8 @@ const bridge: Bridge = {
   openArchive: () => invoke("openArchive"),
   pick: (kind) => invoke("pick", kind),
   openExternal: (url) => invoke("external", url),
+  chromeSetup: (action) => invoke("chromeSetup", action),
+  chromeReveal: () => invoke("chromeReveal"),
   reveal: (connection, path) => invoke("reveal", connection, path),
   terminal: (connection, action, id, input) =>
     invoke("terminal", connection, action, id, input),

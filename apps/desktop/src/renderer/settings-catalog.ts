@@ -31,7 +31,7 @@ export const settingsTitles: Record<string, string> = {
 export const settingsKeywords: Record<string, string> = {
   general:
     "language locale translation english appearance theme font notifications reasoning editor enter preferences steer queue input delivery project global inherited usage statistics telemetry privacy",
-  browser: "web browser Chromium agent control enabled disabled localhost URL history downloads uploads cookies cache site permissions approval",
+  browser: "web browser Chromium agent control enabled disabled localhost URL history downloads uploads cookies cache site permissions approval chrome google edge brave extension real profile signed in accounts",
   shortcuts: "keyboard hotkey keybind key binding accelerators",
   servers: "connections remote host url token switch computer",
   projects: "folders workspace directory configuration forget open",
@@ -66,6 +66,10 @@ export const settingsControls = [
   ["browser", "Ask where to save downloads", "download location dialog destination"],
   ["browser", "Remember site approvals", "permission prompts remember session folder repository"],
   ["browser", "Agent site permissions", "allow deny block ask approval browsing uploads downloads sites origins exceptions"],
+  ["browser", "Chrome", "chrome google edge brave extension real profile signed in accounts set up connect install haarness for chrome"],
+  ["browser", "Let agents use Chrome", "chrome enable disable turn off agents real browser extension"],
+  ["browser", "Browser for new agent tabs", "default browser chrome haarness automatic choose where tabs open"],
+  ["browser", "Chrome site permissions", "chrome allow deny block ask approval scripts browsing uploads downloads sites origins signed in"],
   ["general", "Turn completion notifications", "task finished failed alerts always never unfocused background"],
   ["general", "Permission notifications", "approval needed alerts notify"],
   ["general", "Question notifications", "input answer needed alerts notify"],
