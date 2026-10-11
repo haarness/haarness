@@ -4,6 +4,7 @@
 //! Discovery, relay and file staging are transport-agnostic; framing and the
 //! host manifests are Chromium's.
 pub(crate) mod discovery;
+mod embedded;
 mod files;
 mod framing;
 mod manifest;
@@ -88,6 +89,11 @@ pub(crate) struct SetupArgs {
     /// Change nothing that already works; respect an earlier `browser remove`.
     #[arg(long)]
     pub(crate) if_missing: bool,
+    /// With a separate data folder (--data-dir, HAARNESS_DATA_DIR or
+    /// HAARNESS_HOME) and no --manifest-dir: register it with your own
+    /// browsers anyway, so your Chrome starts Haarness from that folder.
+    #[arg(long)]
+    pub(crate) use_isolated_data_for_chrome: bool,
 }
 
 /// Browsers setup can register with.
@@ -193,6 +199,7 @@ mod tests {
             "--json",
             "--quiet",
             "--if-missing",
+            "--use-isolated-data-for-chrome",
         ])
         .unwrap();
         let super::BrowserCommand::Setup(setup) = cli.command else {
@@ -202,7 +209,9 @@ mod tests {
             setup.browsers,
             [super::BrowserChoice::ChromeBeta, super::BrowserChoice::Edge]
         );
-        assert!(setup.json && setup.quiet && setup.if_missing);
+        assert!(
+            setup.json && setup.quiet && setup.if_missing && setup.use_isolated_data_for_chrome
+        );
         let cli = Cli::try_parse_from([
             "browser",
             "native-host",
