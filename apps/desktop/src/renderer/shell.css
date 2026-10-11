@@ -716,6 +716,13 @@ html[data-order-dragging] * {
 .session-bar-name:hover {
   background: var(--hover);
 }
+/* A chat title is often a Latin run. In Arabic it keeps its own direction,
+   so its start stays visible and a long one is cut at its end; a short one
+   still sits on the right, next to its status dot. */
+html[dir="rtl"] :is(.session-title, .session-bar-name) {
+  unicode-bidi: plaintext;
+  text-align: right;
+}
 .session-bar-actions {
   display: flex;
   align-items: center;

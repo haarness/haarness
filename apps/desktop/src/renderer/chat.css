@@ -274,6 +274,11 @@
 .markdown p {
   margin: var(--s3) 0;
 }
+/* In Arabic, a paragraph written left to right ("!tool glob …", an English
+   reply) takes its own direction, so "!tool" keeps its "!" at the start. */
+html[dir="rtl"] .markdown :is(p, li, h1, h2, h3, h4, h5, h6, th, td) {
+  unicode-bidi: plaintext;
+}
 .markdown ul,
 .markdown ol {
   margin: var(--s3) 0;
@@ -447,6 +452,14 @@
   font-family: var(--mono);
   font-size: var(--ui-sm);
   color: var(--muted);
+}
+/* In Arabic a target is usually a Latin run (a command, a path, a pattern).
+   It takes the direction of its own text, so "./run.sh" does not turn into
+   "run.sh/." and a long command is cut at its end, not its start; a short one
+   still sits against the verb. */
+html[dir="rtl"] .tool-target {
+  unicode-bidi: plaintext;
+  text-align: right;
 }
 /* The verb and its target share one box so a running step can sweep across
    both, the same motion the activity line and the agent card use. */
