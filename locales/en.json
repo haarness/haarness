@@ -2232,5 +2232,12 @@
   "Waiting for Chrome…": "Waiting for Chrome…",
   "Connected to {name}": "Connected to {name}",
   "Try it: ask an agent to open a website in Chrome.": "Try it: ask an agent to open a website in Chrome.",
-  "Haarness connects as soon as Chrome loads the extension.": "Haarness connects as soon as Chrome loads the extension."
+  "Haarness connects as soon as Chrome loads the extension.": "Haarness connects as soon as Chrome loads the extension.",
+  "Allow in Chrome": "Allow in Chrome",
+  "Allow in this chat": "Allow in this chat",
+  "Lasts for this chat until its Haarness server stops.": "Lasts for this chat until its Haarness server stops.",
+  "Use {origin} in Chrome": "Use {origin} in Chrome",
+  "Send downloads from {origin} in Chrome to the agent": "Send downloads from {origin} in Chrome to the agent",
+  "Upload files to {origin} in Chrome": "Upload files to {origin} in Chrome",
+  "Run scripts on {origin} in Chrome": "Run scripts on {origin} in Chrome"
 }

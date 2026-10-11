@@ -2232,5 +2232,12 @@
   "Waiting for Chrome…": "Chrome을 기다리는 중…",
   "Connected to {name}": "{name}에 연결됨",
   "Try it: ask an agent to open a website in Chrome.": "사용해 보세요: 에이전트에게 Chrome에서 웹사이트를 열어 달라고 요청하세요.",
-  "Haarness connects as soon as Chrome loads the extension.": "Chrome이 확장 프로그램을 로드하면 Haarness가 바로 연결됩니다."
+  "Haarness connects as soon as Chrome loads the extension.": "Chrome이 확장 프로그램을 로드하면 Haarness가 바로 연결됩니다.",
+  "Allow in Chrome": "Chrome에서 허용",
+  "Allow in this chat": "이 채팅에서 허용",
+  "Lasts for this chat until its Haarness server stops.": "Haarness 서버가 중지될 때까지 이 채팅에서 유지됩니다.",
+  "Use {origin} in Chrome": "Chrome에서 {origin} 사용",
+  "Send downloads from {origin} in Chrome to the agent": "Chrome에서 {origin}의 다운로드를 에이전트에게 보내기",
+  "Upload files to {origin} in Chrome": "Chrome에서 {origin}에 파일 업로드",
+  "Run scripts on {origin} in Chrome": "Chrome에서 {origin}에 스크립트 실행"
 }

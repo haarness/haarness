@@ -2232,5 +2232,12 @@
   "Waiting for Chrome…": "กำลังรอ Chrome…",
   "Connected to {name}": "เชื่อมต่อกับ {name} แล้ว",
   "Try it: ask an agent to open a website in Chrome.": "ลองเลย: ขอให้เอเจนต์เปิดเว็บไซต์ใน Chrome",
-  "Haarness connects as soon as Chrome loads the extension.": "Haarness จะเชื่อมต่อทันทีที่ Chrome โหลดส่วนขยาย"
+  "Haarness connects as soon as Chrome loads the extension.": "Haarness จะเชื่อมต่อทันทีที่ Chrome โหลดส่วนขยาย",
+  "Allow in Chrome": "อนุญาตใน Chrome",
+  "Allow in this chat": "อนุญาตในแชตนี้",
+  "Lasts for this chat until its Haarness server stops.": "ใช้ได้ในแชตนี้จนกว่าเซิร์ฟเวอร์ Haarness ของแชตจะหยุดทำงาน",
+  "Use {origin} in Chrome": "ใช้ {origin} ใน Chrome",
+  "Send downloads from {origin} in Chrome to the agent": "ส่งไฟล์ที่ดาวน์โหลดจาก {origin} ใน Chrome ให้เอเจนต์",
+  "Upload files to {origin} in Chrome": "อัปโหลดไฟล์ไปยัง {origin} ใน Chrome",
+  "Run scripts on {origin} in Chrome": "รันสคริปต์บน {origin} ใน Chrome"
 }

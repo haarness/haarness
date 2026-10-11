@@ -2232,5 +2232,12 @@
   "Waiting for Chrome…": "Venter på Chrome…",
   "Connected to {name}": "Forbundet til {name}",
   "Try it: ask an agent to open a website in Chrome.": "Prøv det: bed en agent om at åbne et websted i Chrome.",
-  "Haarness connects as soon as Chrome loads the extension.": "Haarness forbinder, så snart Chrome indlæser udvidelsen."
+  "Haarness connects as soon as Chrome loads the extension.": "Haarness forbinder, så snart Chrome indlæser udvidelsen.",
+  "Allow in Chrome": "Tillad i Chrome",
+  "Allow in this chat": "Tillad i denne chat",
+  "Lasts for this chat until its Haarness server stops.": "Gælder for denne chat, indtil dens Haarness-server stopper.",
+  "Use {origin} in Chrome": "Brug {origin} i Chrome",
+  "Send downloads from {origin} in Chrome to the agent": "Send downloads fra {origin} i Chrome til agenten",
+  "Upload files to {origin} in Chrome": "Upload filer til {origin} i Chrome",
+  "Run scripts on {origin} in Chrome": "Kør scripts på {origin} i Chrome"
 }

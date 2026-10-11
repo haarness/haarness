@@ -2232,5 +2232,12 @@
   "Waiting for Chrome…": "Čeka se Chrome…",
   "Connected to {name}": "Povezano s {name}",
   "Try it: ask an agent to open a website in Chrome.": "Isprobajte: zamolite agenta da otvori web stranicu u Chromeu.",
-  "Haarness connects as soon as Chrome loads the extension.": "Haarness se povezuje čim Chrome učita ekstenziju."
+  "Haarness connects as soon as Chrome loads the extension.": "Haarness se povezuje čim Chrome učita ekstenziju.",
+  "Allow in Chrome": "Dozvoli u Chromeu",
+  "Allow in this chat": "Dozvoli u ovom razgovoru",
+  "Lasts for this chat until its Haarness server stops.": "Važi za ovaj razgovor dok se njegov Haarness server ne zaustavi.",
+  "Use {origin} in Chrome": "Koristi {origin} u Chromeu",
+  "Send downloads from {origin} in Chrome to the agent": "Pošalji agentu preuzimanja sa {origin} u Chromeu",
+  "Upload files to {origin} in Chrome": "Otpremi datoteke na {origin} u Chromeu",
+  "Run scripts on {origin} in Chrome": "Pokreni skripte na {origin} u Chromeu"
 }
