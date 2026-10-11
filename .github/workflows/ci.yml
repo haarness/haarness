@@ -98,8 +98,11 @@ jobs:
           npm run extension:build
           npm --prefix apps/browser-extension test
       - name: Chrome extension end-to-end tests
-        # Chrome reads native messaging hosts from the registry on Windows, so the fake host runs on macOS and Linux.
+        # Chrome reads native messaging hosts from the registry on Windows, so these run on macOS and Linux.
+        # The full-stack project drives the release binary's daemon and bridge.
         if: runner.os != 'Windows'
+        env:
+          HAARNESS_BIN: ${{ github.workspace }}/target/release/haarness
         run: |
           cd apps/browser-extension
           npx playwright install ${{ runner.os == 'Linux' && '--with-deps' || '' }} chromium

@@ -57,6 +57,60 @@ export function haarnessBinary(): string | undefined {
   return built[0];
 }
 
+/** Chromium with the extension in `profile`, and the extension's service worker. */
+async function launchChromium(options: {
+  profile: string;
+  extension: string;
+  env: Record<string, string>;
+  install: StackOptions["install"];
+  downloads: string;
+}) {
+  const { profile, extension, env } = options;
+  // Developer mode is on, as unpacked installs require.
+  const preferences = join(profile, "Default", "Preferences");
+  if (!existsSync(preferences)) {
+    mkdirSync(dirname(preferences), { recursive: true });
+    writeFileSync(preferences, JSON.stringify({ extensions: { ui: { developer_mode: true } } }));
+  }
+  const executablePath = process.env.HAARNESS_E2E_CHROMIUM || (existsSync(LOCAL_CHROMIUM) ? LOCAL_CHROMIUM : undefined);
+  const unpacked = options.install === "unpacked";
+  const context = await chromium.launchPersistentContext(profile, {
+    ...(executablePath ? { executablePath } : { channel: "chromium" }),
+    headless: !process.env.HAARNESS_E2E_HEADED,
+    viewport: { width: 1200, height: 800 },
+    acceptDownloads: true,
+    downloadsPath: options.downloads,
+    ...(unpacked ? { ignoreDefaultArgs: ["--disable-extensions"] } : {}),
+    args: [
+      ...(unpacked
+        ? ["--enable-unsafe-extension-debugging"]
+        : [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`]),
+      "--silent-debugger-extension-api",
+      // Every *.test name is the fixture site, so one port serves several origins.
+      "--host-resolver-rules=MAP *.test 127.0.0.1",
+    ],
+    env,
+  });
+  // Like Load unpacked on chrome://extensions. Chrome disables a command-line
+  // extension that reloads itself; this one reloads like a real install.
+  if (unpacked) {
+    const browser = await context.browser()!.newBrowserCDPSession();
+    await browser.send("Extensions.loadUnpacked" as never, { path: extension } as never);
+    await browser.detach();
+  }
+  // Leave the page's JavaScript dialogs to Haarness; Playwright would dismiss them.
+  context.on("dialog", () => {});
+  const worker =
+    context.serviceWorkers().find((candidate) => candidate.url().startsWith(`chrome-extension://${EXTENSION_ID}/`)) ??
+    (await context.waitForEvent("serviceworker", {
+      predicate: (candidate) => candidate.url().startsWith(`chrome-extension://${EXTENSION_ID}/`),
+      timeout: 30_000,
+    }));
+  // HAARNESS_E2E_WORKER_LOG=1 prints the service worker's console.
+  if (process.env.HAARNESS_E2E_WORKER_LOG) worker.on("console", (message) => console.log("[worker]", message.text()));
+  return { context, worker };
+}
+
 export interface ToolCall {
   /** The tool's answer, once every prompt it raised was answered. */
   done: Promise<BrowserToolResponse>;
@@ -88,6 +142,8 @@ export interface Stack {
   stopDaemon(): void;
   /** Starts Chromium with the extension (again). */
   launch(): Promise<void>;
+  /** Another Chromium profile with the extension, registered for the bridge; closed with the test. */
+  second(name: string): Promise<{ context: BrowserContext; worker: Worker }>;
   close(): Promise<void>;
   /** Resolves once Chrome is connected to the daemon (and not paused). */
   connected(): Promise<void>;
@@ -161,6 +217,7 @@ export const test = base.extend<StackOptions & { stack: Stack }>({
     let context: BrowserContext | undefined;
     let worker: Worker | undefined;
     let daemon = false;
+    const seconds: BrowserContext[] = [];
 
     const stack: Stack = {
       bin: bin!,
@@ -245,49 +302,18 @@ export const test = base.extend<StackOptions & { stack: Stack }>({
         }
       },
       async launch() {
-        // Developer mode is on, as unpacked installs require: without it Chrome
-        // disables a command-line extension that reloads itself.
-        const preferences = join(profile, "Default", "Preferences");
-        if (!existsSync(preferences)) {
-          mkdirSync(dirname(preferences), { recursive: true });
-          writeFileSync(preferences, JSON.stringify({ extensions: { ui: { developer_mode: true } } }));
-        }
-        const executablePath = process.env.HAARNESS_E2E_CHROMIUM || (existsSync(LOCAL_CHROMIUM) ? LOCAL_CHROMIUM : undefined);
-        // The copy `haarness browser setup` made, which is what users load.
-        const unpacked = install === "unpacked";
-        context = await chromium.launchPersistentContext(profile, {
-          ...(executablePath ? { executablePath } : { channel: "chromium" }),
-          headless: !process.env.HAARNESS_E2E_HEADED,
-          viewport: { width: 1200, height: 800 },
-          acceptDownloads: true,
-          downloadsPath: downloads,
-          ...(unpacked ? { ignoreDefaultArgs: ["--disable-extensions"] } : {}),
-          args: [
-            ...(unpacked
-              ? ["--enable-unsafe-extension-debugging"]
-              : [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`]),
-            "--silent-debugger-extension-api",
-            // Every *.test name is the fixture site, so one port serves several origins.
-            "--host-resolver-rules=MAP *.test 127.0.0.1",
-          ],
+        ({ context, worker } = await launchChromium({ profile, extension, env, install, downloads }));
+      },
+      async second(name) {
+        const other = join(root, name);
+        execFileSync(bin!, ["browser", "setup", "--manifest-dir", join(other, "NativeMessagingHosts"), "--json"], {
           env,
+          stdio: "ignore",
+          timeout: 60_000,
         });
-        // Like Load unpacked on chrome://extensions: an extension that can reload itself.
-        if (unpacked) {
-          const browser = await context.browser()!.newBrowserCDPSession();
-          await browser.send("Extensions.loadUnpacked" as never, { path: extension } as never);
-          await browser.detach();
-        }
-        // Leave the page's JavaScript dialogs to Haarness; Playwright would dismiss them.
-        context.on("dialog", () => {});
-        worker =
-          context.serviceWorkers().find((candidate) => candidate.url().startsWith(`chrome-extension://${EXTENSION_ID}/`)) ??
-          (await context.waitForEvent("serviceworker", {
-            predicate: (candidate) => candidate.url().startsWith(`chrome-extension://${EXTENSION_ID}/`),
-            timeout: 30_000,
-          }));
-        // HAARNESS_E2E_WORKER_LOG=1 prints the service worker's console.
-        if (process.env.HAARNESS_E2E_WORKER_LOG) worker.on("console", (message) => console.log("[worker]", message.text()));
+        const launched = await launchChromium({ profile: other, extension, env, install, downloads: join(root, `${name}-downloads`) });
+        seconds.push(launched.context);
+        return launched;
       },
       async close() {
         const current = context;
@@ -334,6 +360,7 @@ export const test = base.extend<StackOptions & { stack: Stack }>({
       await stack.connected();
       await use(stack);
     } finally {
+      for (const other of seconds) await other.close().catch(() => {});
       await stack.close();
       stack.stopDaemon();
       await site.close();
