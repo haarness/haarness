@@ -5,6 +5,7 @@
 import type { CreatePage, Page, PageOptions } from "../../core/driver-contract";
 import type { createAttribution } from "../../core/downloads";
 import { CANCELLED, HostError } from "../../core/errors";
+import { destinationOrigin } from "../../core/policy";
 import { blockedMessage, decideRequest, fetchPatterns, landing, type FetchContext, type FetchDecision } from "../../core/fetch-policy";
 import type { TabSession } from "../../core/platform";
 import type { ChromeTransport } from "./cdp";
@@ -23,7 +24,8 @@ export interface SessionDeps {
 /** How long a main-frame navigation right after a command is still checked against the chat's rules. */
 const BACKSTOP_MS = 2_000;
 const LOAD_TIMEOUT_MS = 30_000;
-const IFRAMES_ONLY = [{ type: "iframe", exclude: false }, { exclude: true }];
+/** How long a command waits for the session's service-worker and prerender settings (a dialog can hold them). */
+const ISOLATION_WAIT_MS = 2_000;
 
 export type ChromeTabSession = TabSession & { dispose(): void };
 
@@ -38,11 +40,21 @@ export function createSession(transport: ChromeTransport, deps: SessionDeps): Ch
   let backstop: (() => void) | undefined;
 
   const enabled = transport.send("Page.enable").catch(() => {});
+  // Agent tabs skip service workers and prerendering for the whole debugging
+  // session. Sent once: like other page calls they wait while a JavaScript
+  // dialog is open, and a command must not.
+  const isolated = Promise.all([
+    transport.send("Network.setBypassServiceWorker", { bypass: true }).catch(() => {}),
+    transport.send("Page.setPrerenderingAllowed", { isAllowed: false }).catch(() => {}),
+  ]);
   const mainFrame = async () => (main ??= (await transport.send("Page.getFrameTree")).frameTree.frame.id);
 
   const offs = [
     transport.on("Page.downloadWillBegin", (event) => {
-      if (command) deps.attribution.began({ url: event.url, tabId, name: event.suggestedFilename, ...command });
+      if (!command) return;
+      const origin = destinationOrigin(event.url);
+      const resources = [...(page?.sources() ?? []), ...(origin ? [origin] : [])];
+      deps.attribution.began({ url: event.url, tabId, name: event.suggestedFilename, resources, ...command });
     }),
     // The driver counts documents: a main-frame navigation to a new document expires its refs.
     transport.on("Page.frameStartedNavigating", (event, session) => {
@@ -64,10 +76,13 @@ export function createSession(transport: ChromeTransport, deps: SessionDeps): Ch
     await transport.send("Page.navigate", { url: "about:blank" }).catch(() => {});
   }
 
+  /**
+   * The URL the tab committed. Read from chrome.tabs, which answers while a
+   * JavaScript dialog holds the page; the page's own CDP calls wait for it.
+   */
   async function landed() {
     try {
-      const tree = await transport.send("Page.getFrameTree");
-      return tree.frameTree.frame.url + (tree.frameTree.frame.urlFragment ?? "");
+      return (await chrome.tabs.get(tabId)).url || deps.cache.url;
     } catch {
       return deps.cache.url;
     }
@@ -105,19 +120,23 @@ export function createSession(transport: ChromeTransport, deps: SessionDeps): Ch
       const patterns = fetchPatterns(context.policy);
       const frame = await mainFrame();
       let blocked: Extract<FetchDecision, { action: "block" }> | undefined;
+      /** Whether the tab's own page was blocked (it is then taken off the site), not just a resource in it. */
+      let leave = false;
       const sessions = new Set<string | undefined>([undefined]);
       const enable = (session: string | undefined) =>
         transport.send("Fetch.enable", { patterns }, session).then(() => {
           sessions.add(session);
         });
       const offPaused = transport.on("Fetch.requestPaused", (event, session) => {
-        const decision = decideRequest(context, {
+        const request = {
           url: event.request.url + (event.request.urlFragment ?? ""),
           resourceType: event.resourceType,
           mainFrame: !session && event.frameId === frame,
-        });
+        };
+        const decision = decideRequest(context, request);
         if (decision.action === "block") {
           blocked ??= decision;
+          if (request.mainFrame && request.resourceType === "Document") leave = true;
           void transport.send("Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" }, session).catch(() => {});
         } else void transport.send("Fetch.continueRequest", { requestId: event.requestId }, session).catch(() => {});
       });
@@ -130,12 +149,7 @@ export function createSession(transport: ChromeTransport, deps: SessionDeps): Ch
         // Await every enable before the command's first input.
         await enable(undefined);
         await Promise.all(transport.children().map((child) => enable(child).catch(() => {})));
-        if (!page)
-          await transport
-            .send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true, filter: IFRAMES_ONLY })
-            .catch(() => {});
-        await transport.send("Network.setBypassServiceWorker", { bypass: true }).catch(() => {});
-        await transport.send("Page.setPrerenderingAllowed", { isAllowed: false }).catch(() => {});
+        await Promise.race([isolated, new Promise((resolve) => setTimeout(resolve, ISOLATION_WAIT_MS))]);
         result = await work();
       } catch (error) {
         failure = error;
@@ -144,12 +158,13 @@ export function createSession(transport: ChromeTransport, deps: SessionDeps): Ch
         offChild();
         await Promise.all([...sessions].map((session) => transport.send("Fetch.disable", {}, session).catch(() => {})));
       }
-      if (!blocked) {
+      if (!leave) {
         const decision = landing(context, await landed());
-        if (decision.action === "block") blocked = decision;
+        if (decision.action === "block") [blocked, leave] = [decision, true];
       }
       if (blocked) {
-        await blank();
+        // A blocked frame or resource fails the command, as on Desktop, but leaves the allowed page as it is.
+        if (leave) await blank();
         throw new HostError("site-blocked", blockedMessage(blocked));
       }
       watch(context);
@@ -165,7 +180,7 @@ export function createSession(transport: ChromeTransport, deps: SessionDeps): Ch
         cursor: deps.cursor,
         mainFrame,
       });
-      page = create(surface, transport, { ...options, files: deps.files, input: createFileInput(transport, deps.uploadsRoot) });
+      page = create(surface, transport, { ...options, files: deps.files, input: createFileInput(deps.uploadsRoot) });
       void mainFrame().catch(() => {});
       return page;
     },

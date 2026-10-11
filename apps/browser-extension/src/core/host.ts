@@ -11,18 +11,22 @@
  *   holds, every command fails with a code the server explains to the model.
  */
 import {
+  decodeHostCommand,
+  encodeHostOutcome,
   MAX_TABS,
   methods,
+  tabID,
+  type Action,
   type HostCommand,
   type HostResult,
-  type Method,
   type Outcome,
   type State,
   type Tab,
 } from "./browser";
 import { approvalLines, badgeText } from "./approvals";
 import { createBridge, RECONNECT_ALARM } from "./bridge";
-import { createPage as driverCreatePage, driverWired as defaultDriverWired, DRIVER_NOT_WIRED } from "./driver";
+import { isSensitiveHeader } from "@haarness/browser-driver/diagnostics";
+import { createPage as driverCreatePage, lastRef } from "./driver";
 import type { CreatePage, Page } from "./driver-contract";
 import { CANCELLED, failure, HostError, NOT_THIS_CHAT, TARGET_CHANGED } from "./errors";
 import type { FetchContext } from "./fetch-policy";
@@ -38,8 +42,7 @@ import {
   supportedInChrome,
   wwwTwin,
 } from "./policy";
-import { PROTOCOL, type Approval, type FromBridge, type ServerCommand, type ServerEntry, type ToBridge } from "./protocol";
-import { chromeNetworkResult } from "./network";
+import { PROTOCOL, type Approval, type FromBridge, type RawCommand, type ServerCommand, type ServerEntry, type ToBridge } from "./protocol";
 import { createQueues } from "./queue";
 import { createRegistry, threadKey, wireState, wireTab, type Snapshot, type TabRecord, type ThreadRecord } from "./registry";
 import { pill, type Connection } from "./status";
@@ -50,25 +53,25 @@ interface Server extends ServerEntry {
   attached?: { workspace: string; instance: string };
 }
 
-interface PageEntry {
-  page: Page;
-  /** The tab's generation when this page was created; the page counts from zero. */
-  base: number;
-}
-
 const OPEN_LIMIT = "Close a browser tab before opening more (32 maximum).";
-const DOCUMENT_CHANGED =
-  "The document changed before this operation ran. Call browser_snapshot and use fresh refs from that tab.";
 const IDLE_DETACH_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 15_000;
-const REF_STRIDE = 100_000;
 const REFUSAL_NOTE_MS = 120_000;
+/** How long a reload's hand-over stays valid for the instance that starts next. */
+const HANDOFF_MS = 60_000;
+
+/** This browser session's state, kept in storage.local across the extension's own reload. */
+interface Handoff {
+  at: number;
+  registry: unknown;
+  refSeed: number;
+  stopped: boolean;
+}
 
 export interface HostOptions {
   platform: Platform;
   /** The driver's page factory; tests pass a fake. */
   createPage?: CreatePage;
-  driverWired?: boolean;
   /** Translates the agent cursor's labels and the toolbar tooltip. */
   translate?(key: string): string;
   /** The user's interface language, at start and whenever it changes. */
@@ -78,7 +81,6 @@ export interface HostOptions {
 export function createHost(options: HostOptions) {
   const { platform } = options;
   const createPage = options.createPage ?? driverCreatePage;
-  const driverWired = options.driverWired ?? defaultDriverWired;
   const registry = createRegistry(
     {
       load: () => platform.session.get<Snapshot>("registry"),
@@ -89,7 +91,7 @@ export function createHost(options: HostOptions) {
   const queues = createQueues();
   const servers = new Map<string, Server>();
   const activity = new Map<string, { active: Set<string>; approvals: Approval[] }>();
-  const pages = new Map<number, PageEntry>();
+  const pages = new Map<number, Page>();
   const idle = new Map<string, ReturnType<typeof setTimeout>>();
   /** Tabs the agent is closing, so their removal is not read as the user's. */
   const closing = new Set<number>();
@@ -107,8 +109,12 @@ export function createHost(options: HostOptions) {
   let shortcut: string | null = null;
   let notifyTimer: ReturnType<typeof setTimeout> | undefined;
   let statusTimer: ReturnType<typeof setTimeout> | undefined;
-  /** Where the next page's element refs start (persisted for the browser session). */
-  let refSeed: number | undefined;
+  /**
+   * The last element ref the driver minted, persisted for the browser session:
+   * after a worker restart, new pages number their refs past it, so a ref the
+   * model kept from before never names a different element.
+   */
+  let refSeed = 0;
 
   const bridge = createBridge(platform, {
     hello,
@@ -131,6 +137,7 @@ export function createHost(options: HostOptions) {
   let started: Promise<void> | undefined;
   function start() {
     started ??= (async () => {
+      await takeHandoff();
       const [id, paused, saved, stopped, seed, focused, info] = await Promise.all([
         platform.local.get<string>("browserId"),
         platform.local.get<boolean>("paused"),
@@ -140,7 +147,7 @@ export function createHost(options: HostOptions) {
         platform.tabs.focusedWindow().catch(() => undefined),
         platform.browser().catch(() => browser),
       ]);
-      if (Number.isSafeInteger(seed) && seed! > 0) refSeed = seed;
+      if (Number.isSafeInteger(seed) && seed! > 0) refSeed = seed!;
       if (focused !== undefined) control.focusedAt = platform.now();
       browserId = typeof id === "string" && id ? id : platform.uuid();
       if (browserId !== id) await platform.local.set("browserId", browserId);
@@ -156,6 +163,35 @@ export function createHost(options: HostOptions) {
       bridge.connect();
     })();
     return started;
+  }
+
+  /**
+   * Chrome clears session storage when the extension reloads (to pick up an
+   * update), which would orphan every agent tab. The instance that reloads
+   * hands its state over through storage.local; the next one takes it back,
+   * only within a minute, so a browser restart never revives old tab ids.
+   */
+  async function reload() {
+    await registry.flush();
+    const handoff: Handoff = {
+      at: platform.now(),
+      registry: await platform.session.get("registry"),
+      refSeed: Math.max(refSeed, lastRef()),
+      stopped: control.stopped,
+    };
+    await platform.local.set("handoff", handoff);
+    platform.reload();
+  }
+
+  async function takeHandoff() {
+    const handoff = await platform.local.get<Handoff | null>("handoff");
+    if (!handoff) return;
+    await platform.local.set("handoff", null);
+    const fresh = platform.now() - handoff.at < HANDOFF_MS;
+    if (!fresh || !handoff.registry || (await platform.session.get("registry")) !== undefined) return;
+    await platform.session.set("registry", handoff.registry);
+    await platform.session.set("refSeed", handoff.refSeed);
+    await platform.session.set("stopped", handoff.stopped);
   }
 
   /** After a worker restart: forget tabs that closed or left their group while it was stopped. */
@@ -296,8 +332,8 @@ export function createHost(options: HostOptions) {
     const server = servers.get(serverId);
     const workspace = server?.attached?.workspace ?? server?.workspace;
     if (!workspace) {
-      const outcome = failure(message.command.action, new Error("Haarness for Chrome restarted. Call browser_tabs_list, then try again."));
-      bridge.send({ type: "to-server", server: serverId, message: { type: "result", id: message.id, outcome } });
+      const outcome = failure(actionOf(message.command), new Error("Haarness for Chrome restarted. Call browser_tabs_list, then try again."));
+      bridge.send({ type: "to-server", server: serverId, message: { type: "result", id: message.id, outcome: encode(message.command, outcome) } });
       return;
     }
     const entry = registry.ensure(workspace, message.thread);
@@ -306,8 +342,8 @@ export function createHost(options: HostOptions) {
     const key = threadKey(workspace, message.thread);
     clearTimeout(idle.get(key));
     const outcome = await queues.run(key, message.id, (signal) => run(serverId, entry, message, signal));
-    if (!message.command.inspect) sendState(serverId, entry);
-    bridge.send({ type: "to-server", server: serverId, message: { type: "result", id: message.id, outcome } });
+    if (message.command.inspect !== true) sendState(serverId, entry);
+    bridge.send({ type: "to-server", server: serverId, message: { type: "result", id: message.id, outcome: encode(message.command, outcome) } });
     idle.set(
       key,
       setTimeout(() => void release(entry), IDLE_DETACH_MS),
@@ -324,19 +360,20 @@ export function createHost(options: HostOptions) {
   async function release(entry: ThreadRecord) {
     if (queues.pending(threadKey(entry.workspace, entry.thread))) return;
     for (const tab of entry.tabs) {
-      pages.get(tab.tabId)?.page.dispose();
+      // The driver assumes a live debugger: the next command attaches again with a new page.
+      pages.get(tab.tabId)?.dispose();
       pages.delete(tab.tabId);
       await platform.debugger.detach(tab.tabId).catch(() => {});
     }
   }
 
   async function run(serverId: string, entry: ThreadRecord, message: ServerCommand, signal: AbortSignal): Promise<Outcome> {
-    const action = message.command.action;
+    const action = actionOf(message.command);
     try {
       if (control.stopped) throw new HostError("stopped-by-user");
       if (control.paused) throw new HostError("paused");
       if (signal.aborted) throw new Error(CANCELLED);
-      const result = await execute(serverId, entry, message, signal);
+      const result = await execute(serverId, entry, message.id, decode(message.command), signal);
       return { type: "success", result };
     } catch (error) {
       if (control.stopped) return failure(action, new HostError("stopped-by-user"));
@@ -345,20 +382,24 @@ export function createHost(options: HostOptions) {
     }
   }
 
-  async function execute(serverId: string, entry: ThreadRecord, message: ServerCommand, signal: AbortSignal): Promise<HostResult> {
-    const command = message.command;
+  async function execute(
+    serverId: string,
+    entry: ThreadRecord,
+    id: string,
+    command: HostCommand,
+    signal: AbortSignal,
+  ): Promise<HostResult> {
     const action = command.action;
-    if (!(methods as readonly string[]).includes(action.type)) throw new HostError("unsupported");
     if (command.policy) entry.policy = command.policy;
     const context = command.policy && !command.inspect ? approve(entry, command) : undefined;
-    const value = (value: unknown): HostResult => ({ value, files: [] });
+    const value = (value: unknown): HostResult => ({ value: value as HostResult["value"], files: [] });
 
     if (action.type === "tabs.list")
       return value(command.inspect ? { resources: [], key: "inventory" } : stateOf(entry));
     if (action.type === "tabs.open") {
       const url = normalizeURL(typeof action.url === "string" ? action.url : "about:blank");
       if (command.inspect) return value({ resources: openResources(url), key: "open" });
-      return value(await open(serverId, message, entry, url, action.focus === true, context, signal));
+      return value(await open(serverId, id, entry, url, action.focus === true, context, signal));
     }
     const record = entry.tabs.find((tab) => tab.id === action.tabID);
     if (!record) throw new Error(NOT_THIS_CHAT);
@@ -377,7 +418,7 @@ export function createHost(options: HostOptions) {
       registry.save();
       return value(tabOf(record));
     }
-    return page(serverId, message, entry, record, context, signal);
+    return page(serverId, id, command, entry, record, context, signal);
   }
 
   /** Remembers the origins this command was approved for, and returns the rules to enforce. */
@@ -402,7 +443,7 @@ export function createHost(options: HostOptions) {
 
   async function open(
     serverId: string,
-    message: ServerCommand,
+    id: string,
     entry: ThreadRecord,
     url: string,
     focus: boolean,
@@ -412,7 +453,7 @@ export function createHost(options: HostOptions) {
     if (entry.tabs.length >= MAX_TABS) throw new Error(OPEN_LIMIT);
     const live = await platform.tabs.create({ url: "about:blank", active: focus });
     const record: TabRecord = {
-      id: `tab_${platform.uuid()}`,
+      id: tabID(platform.uuid()),
       tabId: live.id,
       generation: 0,
       url: "about:blank",
@@ -427,7 +468,10 @@ export function createHost(options: HostOptions) {
     publish(entry);
     if (url !== "about:blank") {
       const session = await platform.debugger.session(live.id, record.id);
-      session.begin({ server: serverId, thread: entry.thread, command: message.id });
+      // As on Desktop, the page exists before its first load: it sees every
+      // frame the document attaches, and its console and requests, from the start.
+      await pageFor(entry, record, session).ready;
+      session.begin({ server: serverId, thread: entry.thread, command: id });
       try {
         if (context) await session.guard(context, signal, () => session.load(url, signal));
         else await session.load(url, signal);
@@ -441,76 +485,62 @@ export function createHost(options: HostOptions) {
 
   async function page(
     serverId: string,
-    message: ServerCommand,
+    id: string,
+    command: HostCommand,
     entry: ThreadRecord,
     record: TabRecord,
     context: FetchContext | undefined,
     signal: AbortSignal,
   ): Promise<HostResult> {
-    const command = message.command;
-    const method = command.action.type as Method;
+    const method = command.action.type;
     if (!supportedInChrome(method)) throw new HostError("unsupported");
     const live = await owned(entry, record);
     if (!/^https?:/i.test(live.url) && !allowedOnBlank(method)) throw new HostError("unsupported");
-    if (!driverWired) throw new Error(DRIVER_NOT_WIRED);
     const session = await platform.debugger.session(record.tabId, record.id);
     const current = pageFor(entry, record, session);
-    await current.page.ready;
-    const generation = command.generation === undefined ? undefined : command.generation - current.base;
-    if (generation !== undefined && generation < 0) throw new Error(DOCUMENT_CHANGED);
-    const forwarded: HostCommand = { ...command, generation };
-    if (command.inspect) return withTwin(method, await current.page.execute(forwarded, signal));
-    session.begin({ server: serverId, thread: entry.thread, command: message.id });
+    await current.ready;
     try {
-      const work = () => current.page.execute(forwarded, signal);
-      const result = context ? await session.guard(context, signal, work) : await work();
-      return method === "network.get" ? { ...result, value: chromeNetworkResult(result.value) } : result;
+      if (command.inspect) return await current.execute(command, signal);
+      session.begin({ server: serverId, thread: entry.thread, command: id });
+      try {
+        const work = () => current.execute(command, signal);
+        return context ? await session.guard(context, signal, work) : await work();
+      } finally {
+        await session.end();
+      }
     } finally {
-      await session.end();
+      saveRefSeed();
     }
   }
 
-  /** One approval covers both spellings of a site the agent navigates to. */
-  function withTwin(method: Method, result: HostResult): HostResult {
-    const target = result.value as { resources?: unknown } | null;
-    if (method !== "navigate" || !target || !Array.isArray(target.resources)) return result;
-    const twins = target.resources
-      .map((resource) => typeof resource === "string" && destinationOrigin(resource))
-      .map((origin) => origin && wwwTwin(origin))
-      .filter((twin): twin is string => !!twin && !(target.resources as unknown[]).includes(twin));
-    return twins.length ? { ...result, value: { ...target, resources: [...target.resources, ...twins] } } : result;
-  }
-
-  function pageFor(entry: ThreadRecord, record: TabRecord, session: TabSession): PageEntry {
+  function pageFor(entry: ThreadRecord, record: TabRecord, session: TabSession): Page {
     const existing = pages.get(record.tabId);
     if (existing) return existing;
-    const created: PageEntry = {
-      base: record.generation,
-      page: session.page(createPage, {
-        id: record.id,
-        refSeed: nextRefSeed(),
-        translate: options.translate,
-        publish() {
-          const state = pages.get(record.tabId) === created ? tabOf(record) : undefined;
-          if (!state) return;
-          Object.assign(record, { url: state.url, title: state.title, loading: state.loading, generation: state.generation });
-          registry.save();
-          publish(entry);
-        },
-      }),
-    };
+    const created: Page = session.page(createPage, {
+      id: record.id,
+      // The page goes on from the generation the server last saw for this tab.
+      generation: record.generation,
+      refSeed,
+      translate: options.translate,
+      // In the user's own browser requests carry the user's credentials.
+      diagnostics: { requestBodies: false, redactHeader: isSensitiveHeader },
+      publish() {
+        if (pages.get(record.tabId) !== created) return;
+        const state = created.state();
+        Object.assign(record, { url: state.url, title: state.title, loading: state.loading, generation: state.generation });
+        registry.save();
+        publish(entry);
+      },
+    });
     pages.set(record.tabId, created);
     return created;
   }
 
-  function nextRefSeed() {
-    // Each page numbers its refs from its own range, so a ref the model kept
-    // from before a worker restart never names a different element.
-    refSeed ??= 1 + Math.floor(Math.random() * 1_000) * REF_STRIDE;
-    const seed = refSeed;
-    refSeed = refSeed + REF_STRIDE > 2_000_000_000 ? 1 : refSeed + REF_STRIDE;
+  function saveRefSeed() {
+    const last = lastRef();
+    if (last <= refSeed) return;
+    refSeed = last;
     void platform.session.set("refSeed", refSeed);
-    return seed;
   }
 
   /** The live tab, if it is still this chat's and a page Haarness may control. */
@@ -530,7 +560,7 @@ export function createHost(options: HostOptions) {
 
   function forget(entry: ThreadRecord, record: TabRecord, revoke: boolean) {
     registry.removeTab(entry, record.id, revoke);
-    pages.get(record.tabId)?.page.dispose();
+    pages.get(record.tabId)?.dispose();
     pages.delete(record.tabId);
     void platform.debugger.detach(record.tabId).catch(() => {});
     publish(entry);
@@ -568,8 +598,7 @@ export function createHost(options: HostOptions) {
   function tabOf(record: TabRecord): Tab {
     const current = pages.get(record.tabId);
     if (!current) return wireTab(record);
-    const state = current.page.state();
-    return wireTab({ ...record, ...state, id: record.id, tabId: record.tabId, generation: current.base + state.generation });
+    return wireTab({ ...record, ...current.state(), id: record.id, tabId: record.tabId });
   }
 
   function stateOf(entry: ThreadRecord): State {
@@ -621,7 +650,7 @@ export function createHost(options: HostOptions) {
     },
     tabReplaced(added, removed) {
       void after(() => {
-        pages.get(removed)?.page.dispose();
+        pages.get(removed)?.dispose();
         pages.delete(removed);
         registry.replaceTab(removed, added);
       });
@@ -636,7 +665,7 @@ export function createHost(options: HostOptions) {
       }, 1_000);
     },
     debuggerDetached(tabId, reason) {
-      pages.get(tabId)?.page.dispose();
+      pages.get(tabId)?.dispose();
       pages.delete(tabId);
       if (reason === "canceled_by_user") void setStopped(true);
     },
@@ -656,12 +685,24 @@ export function createHost(options: HostOptions) {
     await work();
   }
 
-  /** A tab opened from an agent tab (a popup, a link in a new tab) belongs to the same chat. */
+  /**
+   * A tab opened from an agent tab (a popup, a link in a new tab) belongs to
+   * the same chat. Chrome puts such a tab in the group of the tab that opened
+   * it, so a tab created inside a chat's group is that chat's. `openerTabId`
+   * is only a fallback (no tab groups): when the opening page is in the
+   * background, as agent tabs usually are, Chrome names the window's active
+   * tab instead.
+   */
   async function adopt(tab: LiveTab) {
-    if (tab.openerTabId === undefined || registry.owner(tab.id)) return;
-    const opener = registry.owner(tab.openerTabId);
-    if (!opener) return;
-    const { entry } = opener;
+    if (registry.owner(tab.id)) return;
+    const grouped = platform.groups && tab.groupId >= 0 ? registry.byGroup(tab.groupId) : undefined;
+    const entry = grouped ?? (tab.openerTabId === undefined ? undefined : registry.owner(tab.openerTabId)?.entry);
+    if (!entry) return;
+    // A browser page (the user's "New tab in group") is never the agent's.
+    if (restricted(tab.url)) {
+      if (grouped) await share(tab, tab.groupId);
+      return;
+    }
     const origin = destinationOrigin(tab.url);
     if (origin && entry.policy && (!entry.policy.enabled || siteAccess(entry.policy, origin).browsing === "deny")) {
       closing.add(tab.id);
@@ -673,7 +714,7 @@ export function createHost(options: HostOptions) {
       return;
     }
     const record: TabRecord = {
-      id: `tab_${platform.uuid()}`,
+      id: tabID(platform.uuid()),
       tabId: tab.id,
       generation: 0,
       url: tab.url || "about:blank",
@@ -684,7 +725,7 @@ export function createHost(options: HostOptions) {
     };
     registry.addTab(entry, record);
     await join(entry, [tab.id]).catch(() => {});
-    if (platform.debugger.attached(opener.tab.tabId))
+    if (entry.tabs.some((other) => other.tabId !== tab.id && platform.debugger.attached(other.tabId)))
       await platform.debugger.session(tab.id, record.id).catch(() => undefined);
     publish(entry);
   }
@@ -746,7 +787,7 @@ export function createHost(options: HostOptions) {
       return;
     }
     registry.addTab(entry, {
-      id: `tab_${platform.uuid()}`,
+      id: tabID(platform.uuid()),
       tabId: tab.id,
       generation: 0,
       url: tab.url,
@@ -783,7 +824,7 @@ export function createHost(options: HostOptions) {
   /** Cancels every command and detaches from every tab. */
   async function letGo() {
     queues.cancelAll();
-    for (const current of pages.values()) current.page.dispose();
+    for (const current of pages.values()) current.dispose();
     pages.clear();
     await platform.debugger.detachAll().catch(() => {});
   }
@@ -818,7 +859,7 @@ export function createHost(options: HostOptions) {
       const tried = await platform.local.get<string>("reloadedFor");
       if (tried !== disk) {
         await platform.local.set("reloadedFor", disk);
-        platform.reload();
+        await reload();
         return;
       }
     }
@@ -958,7 +999,7 @@ export function createHost(options: HostOptions) {
         for (const current of registry.all()) if (current.tabs.length) await close(current, [...current.tabs], true);
         return { ok: true };
       case "reload":
-        platform.reload();
+        await reload();
         return { ok: true };
       case "retry":
         bridge.retry();
@@ -1021,6 +1062,35 @@ export function createHost(options: HostOptions) {
 }
 
 export type Host = ReturnType<typeof createHost>;
+
+/** The action a raw command names, for a failure outcome before (or without) decoding it. */
+function actionOf(command: RawCommand) {
+  return { type: command.action.type } as Pick<Action, "type">;
+}
+
+/**
+ * Decodes a server command with the driver's codec. A tool this extension
+ * does not know fails `unsupported` (a newer Haarness); anything else
+ * malformed fails plainly.
+ */
+function decode(command: RawCommand): HostCommand {
+  if (!(methods as readonly string[]).includes(command.action.type)) throw new HostError("unsupported");
+  try {
+    return decodeHostCommand(command);
+  } catch (error) {
+    const detail = (error instanceof Error ? error.message : String(error)).slice(0, 600);
+    throw new Error(`Haarness for Chrome could not read this command. Check the tool's arguments. Details: ${detail}`);
+  }
+}
+
+/** The outcome as JSON for the bridge; one that cannot be encoded becomes a failure. */
+function encode(command: RawCommand, outcome: Outcome): unknown {
+  try {
+    return encodeHostOutcome(outcome);
+  } catch (error) {
+    return encodeHostOutcome(failure(actionOf(command), new Error(`Haarness for Chrome could not send this result. ${String(error).slice(0, 400)}`)));
+  }
+}
 
 function basename(path: string) {
   return path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
