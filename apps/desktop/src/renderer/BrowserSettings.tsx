@@ -12,6 +12,8 @@ import { useApp } from "./state";
 import { Select } from "./Select";
 import { SettingRow as Row } from "./SettingRow";
 import { Icon, confirm } from "./ui";
+import { ChromeSettingsSection } from "./ChromeSettings";
+import type { ChromeSettings, ChromeSettingsView } from "../chrome";
 import type {
   BrowserAccess,
   BrowserData,
@@ -20,6 +22,8 @@ import type {
   BrowserSettingsValue,
 } from "../browser-settings";
 import "./browser-settings.css";
+/** A server with Chrome support adds Chrome's own (global) settings. */
+type SettingsValue = BrowserSettingsValue & { chrome?: ChromeSettingsView };
 const decisions = [
   { value: "allow", label: "Always allow" },
   { value: "ask", label: "Requires approval" },
@@ -30,7 +34,7 @@ export function BrowserSettings() {
   const [scope, setScope] = createSignal("project");
   const projectConfig = () => app.state.connection?.info.projectTrusted !== false;
   createEffect(() => { if (!projectConfig()) setScope("global"); });
-  const [value, setValue] = createSignal<BrowserSettingsValue>();
+  const [value, setValue] = createSignal<SettingsValue>();
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const [origin, setOrigin] = createSignal("");
@@ -62,7 +66,7 @@ export function BrowserSettings() {
     else setBusy(true);
     if (reset) setValue(undefined);
     try {
-      const result = await window.haarness.api<{ data: BrowserSettingsValue }>(
+      const result = await window.haarness.api<{ data: SettingsValue }>(
         connection,
         "manageResource",
         ["browser-settings", { ...input, scope: scope() }],
@@ -91,6 +95,43 @@ export function BrowserSettings() {
     } finally {
       if (background) refreshInFlight = false;
       else if (version === generation) setBusy(false);
+    }
+  }
+  /**
+   * Chrome's settings are saved whole and always to the global layer, then
+   * the pane re-reads its own scope: the shared revision changed, and the
+   * agent rows must keep showing the scope that is selected.
+   */
+  async function saveChrome(chrome: ChromeSettings) {
+    const connection = app.state.connection?.id;
+    if (!connection || !value()?.chrome || busy()) return false;
+    const version = ++generation;
+    setBusy(true);
+    const read = () =>
+      window.haarness.api<{ data: SettingsValue }>(connection, "manageResource", [
+        "browser-settings",
+        { action: "get", scope: scope() },
+      ]);
+    try {
+      await window.haarness.api(connection, "manageResource", [
+        "browser-settings",
+        { action: "set", chrome, revision: value()?.revision, scope: "global" },
+      ]);
+      const fresh = await read();
+      if (version === generation && connection === app.state.connection?.id) {
+        setValue(fresh.data);
+        setError("");
+      }
+      return true;
+    } catch (cause) {
+      if (version === generation) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+        const fresh = await read().catch(() => undefined);
+        if (version === generation && fresh) setValue(fresh.data);
+      }
+      return false;
+    } finally {
+      if (version === generation) setBusy(false);
     }
   }
   function update(change: (policy: BrowserPolicy) => void) {
@@ -551,6 +592,11 @@ export function BrowserSettings() {
           </Show>
         </section>
       </Show>
+      <ChromeSettingsSection
+        view={value()?.chrome}
+        busy={busy()}
+        save={saveChrome}
+      />
       <h3>{t("Agent site permissions")}</h3>
       <p class="muted">
         {t(

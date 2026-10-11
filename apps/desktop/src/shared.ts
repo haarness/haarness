@@ -256,6 +256,10 @@ export interface Bridge {
   openArchive(): Promise<unknown | null>;
   pick(kind: "file" | "directory"): Promise<string | null>;
   openExternal(url: string): Promise<void>;
+  /** Runs `haarness browser setup|status --json` on this computer. */
+  chromeSetup(action: "setup" | "status"): Promise<import("./chrome").ChromeSetupInfo>;
+  /** Shows the unpacked Haarness for Chrome folder the last report named. */
+  chromeReveal(): Promise<void>;
   reveal(connection: string, path?: string): Promise<void>;
   terminal(
     connection: string,
