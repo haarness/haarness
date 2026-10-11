@@ -6160,6 +6160,11 @@ test("slow project startup preserves the project index, drafts, and independent 
     '.project-group[aria-label="Project workspace"] .project-heading',
   );
   await primary.click();
+  // The slow project is still ready while the switch connects, and the
+  // reload below reopens whichever project was stored last.
+  await expect
+    .poll(() => page.evaluate(() => window.haarness.storage("active-project")))
+    .toBe("local:" + workspace);
   await expect(page.locator(".application")).toHaveAttribute(
     "data-project-ready",
     "true",
