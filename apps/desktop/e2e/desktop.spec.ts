@@ -801,12 +801,12 @@ test("the live plan stays above the composer, tracks progress, and follows the s
   ];
   // A live plan is only observable while its turn runs without asking
   // anything: a waiting prompt takes the plan's place. `stage` keeps the turn
-  // running on the provider's clock; `park` holds it on a question instead.
+  // running a minute (`finish` stops it); `park` holds it on a question.
   async function stage(items: typeof todos) {
     const turn = await client.startTurn(thread.id, {
       requestId: crypto.randomUUID(),
       text:
-        "!linger 12000 !multi " +
+        "!linger 60000 !multi " +
         JSON.stringify([{ name: "todowrite", arguments: { todos: items } }]),
     });
     const shape = (list: { content: string; status: string }[]) =>
