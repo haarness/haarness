@@ -99,7 +99,8 @@ export async function renameSession(
       {
         name: "title",
         label: t("Title"),
-        // Never the server's placeholder title ("New thread").
+        // Never the server's placeholder title ("New chat", or "New thread"
+        // from an older server).
         value: editableTitle(thread.title),
         placeholder: t("Untitled chat"),
         required: true,
