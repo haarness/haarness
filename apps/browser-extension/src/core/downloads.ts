@@ -1,17 +1,18 @@
 /**
  * Which Chrome downloads belong to an agent.
  *
- * Only a download that an agent tab began while one of its commands ran
- * (CDP `Page.downloadWillBegin`) is the agent's, and only once Chrome's own
- * download item for the same URL appears within 5 s. Anything else the user
- * downloads is never listed, read or announced.
+ * Only a download that an agent tab began while one of its commands ran, or
+ * within 10 s after it (a server answers a click with an attachment after the
+ * click returned), is the agent's (CDP `Page.downloadWillBegin`), and only once
+ * Chrome's own download item for the same URL appears within 5 s. Anything
+ * else the user downloads is never listed, read or announced.
  */
 
 export interface Started {
   url: string;
   at: number;
   tabId: number;
-  /** The agent command during which the page started it. */
+  /** The agent command during (or just after) which the page started it. */
   command: string;
   server: string;
   thread: string;

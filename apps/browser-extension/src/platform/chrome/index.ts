@@ -118,6 +118,7 @@ export function createChromePlatform() {
         attribution,
         uploadsRoot: () => uploadsRoot,
         cursor: () => cursor,
+        now: () => Date.now(),
       });
     },
   );
