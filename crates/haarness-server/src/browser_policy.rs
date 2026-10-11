@@ -66,7 +66,7 @@ impl BrowserPolicy {
         if self.enabled {
             Ok(())
         } else {
-            Err(CoreError::PermissionDenied("Agent browser control is disabled in Settings → Browser (or /chrome in the TUI). Ask the user to enable it; do not retry browser tools.".into()))
+            Err(CoreError::PermissionDenied("Agent browser control is disabled in Settings → Browser. Ask the user to enable it; do not retry browser tools.".into()))
         }
     }
     pub fn decision(&self, method: &str, resource: &str) -> PermissionDecision {
@@ -156,7 +156,8 @@ fn matches_origin(pattern: &str, origin: &str) -> bool {
 
 /// What Chrome's settings govern. Scripts (`browser_evaluate`) have their own
 /// decision, asked even on sites where browsing is allowed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ChromeCategory {
     Browsing,
     Downloads,
@@ -502,6 +503,61 @@ impl ChromePolicy {
     }
 }
 
+/// Why agents may not use Chrome although its own switch is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChromeBlock {
+    /// Agent browser control is off in some configuration layer.
+    BrowserControl,
+    /// A project's settings turn Chrome off.
+    Project,
+}
+
+/// One thing a project's settings tightened in Chrome, for clients to put
+/// into words.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ChromeRestriction {
+    /// The project turns Chrome off.
+    Off,
+    /// A stricter default for one category.
+    Default {
+        category: ChromeCategory,
+        decision: PermissionDecision,
+    },
+    /// A stricter decision for one category on one site.
+    Site {
+        origin: String,
+        category: ChromeCategory,
+        decision: PermissionDecision,
+    },
+}
+impl ChromeRestriction {
+    /// The restriction in English, for clients that show the server's words.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Off => "Chrome is turned off for this project.".to_owned(),
+            Self::Default { category, decision } => {
+                format!(
+                    "{}: {} by default",
+                    category.label(),
+                    decision_word(*decision)
+                )
+            }
+            Self::Site {
+                origin,
+                category,
+                decision,
+            } => format!(
+                "{} on {origin}: {}",
+                category.label(),
+                decision_word(*decision)
+            ),
+        }
+    }
+}
+
 /// Everything the broker reads from settings for one decision.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BrowserSettings {
@@ -510,6 +566,10 @@ pub struct BrowserSettings {
     /// The effective policy for the user's Chrome.
     pub chrome: ChromePolicy,
     pub default_browser: DefaultBrowser,
+    /// The user turned Chrome off (the global `browser.chrome.enabled`).
+    pub chrome_switched_off: bool,
+    /// Why Chrome is off although its own switch is on.
+    pub chrome_blocked_by: Option<ChromeBlock>,
 }
 impl From<BrowserPolicy> for BrowserSettings {
     fn from(policy: BrowserPolicy) -> Self {
@@ -644,6 +704,33 @@ fn fold(layers: &[Layer]) -> (ChromeAccess, Vec<ChromeSite>) {
     (ChromeAccess::from_decisions(decide(None)), sites)
 }
 
+/// Drop folded rules that decide nothing: a rule whose decisions equal what
+/// the rest of the list gives where it applies. Every origin keeps its
+/// decision, and a setting that changes no Chrome decision (a Haarness
+/// browser Allow or Ask rule, a Chrome rule repeating its default) leaves the
+/// policy, and with it every pending Chrome call, untouched.
+fn prune(defaults: ChromeAccess, mut sites: Vec<ChromeSite>) -> Vec<ChromeSite> {
+    let mut index = 0;
+    while index < sites.len() {
+        let at = representative(&sites[index].origin);
+        let rest = most_specific(
+            sites
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != index)
+                .map(|(_, site)| (site.origin.as_str(), site.access)),
+            &at,
+        )
+        .unwrap_or(defaults);
+        if rest == sites[index].access {
+            sites.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+    sites
+}
+
 /// Chrome's settings after layering: the global layer decides, a project
 /// can only tighten it, and blocks in any layer's shared `browser.policy`
 /// (or turning agent browser control off) apply to Chrome too.
@@ -653,8 +740,12 @@ pub struct ChromeLayering {
     pub settings: ChromeSettings,
     /// What an extension host enforces.
     pub policy: ChromePolicy,
-    /// What this project's settings tightened, in words.
-    pub restrictions: Vec<String>,
+    /// What this project's settings tightened.
+    pub restrictions: Vec<ChromeRestriction>,
+    /// The global layer's own switch (`browser.chrome.enabled`).
+    pub global_enabled: bool,
+    /// Why Chrome is off although the global switch is on.
+    pub blocked_by: Option<ChromeBlock>,
 }
 impl ChromeLayering {
     /// `global` is the global layer's `browser.chrome`, `projects` each
@@ -668,15 +759,24 @@ impl ChromeLayering {
         let global = global.and_then(ChromeSettings::lenient).unwrap_or_default();
         let global_layer = Layer::settings(&global);
         let project_layers: Vec<Layer> = projects.iter().map(Layer::project).collect();
-        let enabled = global.enabled
-            && projects
-                .iter()
-                .all(|project| project.get("enabled") != Some(&serde_json::Value::Bool(false)));
+        let project_off = projects
+            .iter()
+            .any(|project| project.get("enabled") == Some(&serde_json::Value::Bool(false)));
+        let enabled = global.enabled && !project_off;
+        let blocked_by = if !global.enabled {
+            None
+        } else if shared.iter().any(|policy| !policy.enabled) {
+            Some(ChromeBlock::BrowserControl)
+        } else if project_off {
+            Some(ChromeBlock::Project)
+        } else {
+            None
+        };
         let mut restrictions = Vec::new();
         if global.enabled && !enabled {
-            restrictions.push("Chrome is turned off for this project.".to_owned());
+            restrictions.push(ChromeRestriction::Off);
         }
-        let mut restrict = |restriction: String| {
+        let mut restrict = |restriction: ChromeRestriction| {
             if !restrictions.contains(&restriction) {
                 restrictions.push(restriction);
             }
@@ -686,11 +786,7 @@ impl ChromeLayering {
                 if let Some(decision) = layer.defaults[category.index()]
                     && strictness(decision) > strictness(global.defaults.get(category))
                 {
-                    restrict(format!(
-                        "{}: {} by default",
-                        category.label(),
-                        decision_word(decision)
-                    ));
+                    restrict(ChromeRestriction::Default { category, decision });
                 }
             }
             for (origin, decisions) in &layer.sites {
@@ -701,11 +797,11 @@ impl ChromeLayering {
                     if let Some(decision) = decisions[category.index()]
                         && strictness(decision) > strictness(current)
                     {
-                        restrict(format!(
-                            "{} on {origin}: {}",
-                            category.label(),
-                            decision_word(decision)
-                        ));
+                        restrict(ChromeRestriction::Site {
+                            origin: origin.clone(),
+                            category,
+                            decision,
+                        });
                     }
                 }
             }
@@ -728,12 +824,14 @@ impl ChromeLayering {
         let policy = ChromePolicy {
             enabled: enabled && shared.iter().all(|policy| policy.enabled),
             defaults,
-            sites,
+            sites: prune(defaults, sites),
         };
         Self {
             settings,
             policy,
             restrictions,
+            global_enabled: global.enabled,
+            blocked_by,
         }
     }
 }
@@ -912,9 +1010,102 @@ mod tests {
             enabled: false,
             ..BrowserPolicy::default()
         };
-        let layering = ChromeLayering::new(Some(&global), &[], &[off]);
+        let layering = ChromeLayering::new(Some(&global), &[], std::slice::from_ref(&off));
         assert!(!layering.policy.enabled);
         assert!(layering.settings.enabled);
+        assert!(layering.global_enabled);
+        assert_eq!(layering.blocked_by, Some(ChromeBlock::BrowserControl));
+        // With Chrome's own switch off, that switch is the reason.
+        let mut switched_off = global.clone();
+        switched_off["enabled"] = json!(false);
+        let layering =
+            ChromeLayering::new(Some(&switched_off), &[json!({"enabled":false})], &[off]);
+        assert!(!layering.global_enabled && !layering.policy.enabled);
+        assert_eq!(layering.blocked_by, None);
+    }
+
+    #[test]
+    fn rules_that_change_no_chrome_decision_leave_its_policy_alone() {
+        use PermissionDecision::{Ask, Deny};
+        use serde_json::json;
+        let global = json!({"enabled":true,"defaults":{"browsing":"ask","downloads":"ask","uploads":"ask","scripts":"ask"},"defaultBrowser":"auto","sites":[
+            {"origin":"https://*.example.com","browsing":"deny","downloads":"deny","uploads":"deny","scripts":"deny"},
+            {"origin":"https://docs.example.com","browsing":"allow","downloads":"ask","uploads":"ask","scripts":"ask"},
+        ]});
+        let mail = json!({"origin":"https://mail.example.org","browsing":"deny","downloads":"allow","uploads":"allow"});
+        let before = ChromeLayering::new(Some(&global), &[], &[shared(json!([mail]), "allow")]);
+        // Haarness browser Allow and Ask rules, added, changed or moved.
+        for sites in [
+            json!([mail, {"origin":"https://news.example.org","browsing":"allow","downloads":"allow","uploads":"allow"}]),
+            json!([mail, {"origin":"https://news.example.org","browsing":"ask","downloads":"ask","uploads":"allow"}]),
+            json!([
+                {"origin":"https://news.example.org","browsing":"allow","downloads":"allow","uploads":"allow"},
+                mail,
+                {"origin":"https://a.example.com","browsing":"allow","downloads":"allow","uploads":"allow"},
+            ]),
+        ] {
+            let after = ChromeLayering::new(Some(&global), &[], &[shared(sites.clone(), "allow")]);
+            assert_eq!(after.policy, before.policy, "{sites}");
+        }
+        // Nor does a Chrome rule that repeats what already applies.
+        let mut repeated = global.clone();
+        repeated["sites"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"origin":"https://b.example.com","browsing":"deny","downloads":"deny","uploads":"deny","scripts":"deny"}));
+        repeated["sites"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"origin":"https://plain.example.org","browsing":"ask","downloads":"ask","uploads":"ask","scripts":"ask"}));
+        let after = ChromeLayering::new(Some(&repeated), &[], &[shared(json!([mail]), "allow")]);
+        assert_eq!(after.policy, before.policy);
+        // A shared block still changes Chrome, and so does a shared Allow
+        // that lifts a shared default block where it applies.
+        let blocked = ChromeLayering::new(
+            Some(&global),
+            &[],
+            &[shared(
+                json!([mail, {"origin":"https://news.example.org","browsing":"deny","downloads":"allow","uploads":"allow"}]),
+                "allow",
+            )],
+        );
+        assert_ne!(blocked.policy, before.policy);
+        let open = ChromeLayering::new(
+            Some(&global),
+            &[],
+            &[shared(
+                json!([{"origin":"https://open.example.org","browsing":"allow","downloads":"allow","uploads":"allow"}]),
+                "deny",
+            )],
+        );
+        assert_eq!(
+            open.policy
+                .decision(ChromeCategory::Browsing, "https://open.example.org"),
+            Ask
+        );
+        assert_eq!(
+            open.policy
+                .decision(ChromeCategory::Browsing, "https://shut.example.org"),
+            Deny
+        );
+        // Every origin still decides as before.
+        for origin in [
+            "https://mail.example.org",
+            "https://news.example.org",
+            "https://docs.example.com",
+            "https://a.example.com",
+            "https://b.example.com",
+            "https://example.com",
+            "https://plain.example.org",
+        ] {
+            for category in ChromeCategory::ALL {
+                assert_eq!(
+                    after.policy.decision(category, origin),
+                    before.policy.decision(category, origin),
+                    "{origin}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -959,29 +1150,59 @@ mod tests {
             policy.decision(ChromeCategory::Browsing, "https://news.example"),
             Allow
         );
+        // Settings show every rule; the enforced policy drops the one that
+        // decides like the defaults.
+        let mut sites = policy.sites.clone();
+        sites.push(ChromeSite {
+            origin: "https://other.example".into(),
+            access: policy.defaults,
+        });
         assert_eq!(
             layering.settings,
             ChromeSettings {
                 enabled: true,
                 defaults: policy.defaults,
                 default_browser: DefaultBrowser::Auto,
-                sites: policy.sites.clone(),
+                sites,
             }
         );
+        let words = |layering: &ChromeLayering| -> Vec<String> {
+            layering
+                .restrictions
+                .iter()
+                .map(ChromeRestriction::describe)
+                .collect()
+        };
         assert_eq!(
-            layering.restrictions,
+            words(&layering),
             vec![
                 "Downloads: Block by default",
                 "Browsing on https://bank.example: Ask",
                 "Uploads on https://*.bank.example: Block",
             ]
         );
+        // Clients get the same restrictions as data, to put into words.
+        assert_eq!(
+            serde_json::to_value(&layering.restrictions).unwrap(),
+            json!([
+                {"kind":"default","category":"downloads","decision":"deny"},
+                {"kind":"site","origin":"https://bank.example","category":"browsing","decision":"ask"},
+                {"kind":"site","origin":"https://*.bank.example","category":"uploads","decision":"deny"},
+            ])
+        );
+        assert!(layering.global_enabled && layering.blocked_by.is_none());
         let layering = ChromeLayering::new(Some(&global), &[json!({"enabled":false})], &[]);
         assert!(!layering.policy.enabled && !layering.settings.enabled);
         assert_eq!(
-            layering.restrictions,
+            words(&layering),
             vec!["Chrome is turned off for this project."]
         );
+        assert_eq!(
+            serde_json::to_value(&layering.restrictions).unwrap(),
+            json!([{"kind":"off"}])
+        );
+        assert!(layering.global_enabled);
+        assert_eq!(layering.blocked_by, Some(ChromeBlock::Project));
         assert_eq!(
             layering
                 .policy

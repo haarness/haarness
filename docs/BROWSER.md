@@ -42,7 +42,7 @@ Nested calls retain ordinary permissions, hooks and cancellation. The parent `ex
 
 | Value | A new tab opens in |
 | --- | --- |
-| `auto` (default) | The Haarness browser when Desktop hosts this conversation; otherwise Chrome when it is available and the conversation is not a scheduled run; otherwise the call fails with the most specific reason |
+| `auto` (default) | The Haarness browser when Desktop hosts this conversation; otherwise Chrome when it is available and the conversation is not part of a scheduled run (the run itself, or a subagent, workflow or workflow agent it started); otherwise the call fails with the most specific reason, Chrome being turned off before Chrome not being connected |
 | `haarness` | The Haarness browser, or a failure that suggests `browser: "chrome"` |
 | `chrome` | Chrome, or a failure that says why (turned off, paused, stopped, not connected) |
 
@@ -99,7 +99,7 @@ Chrome pages are signed in as the user, so Chrome has stricter rules, all enforc
 - A site set to **Requires approval** raises an *explicit* approval for that origin and category. It is satisfied only by a person's answer: **Allow once** for the call, or **Allow in this chat**, which covers that origin and category in this conversation until the server stops. Auto mode, `--yolo` (server or client), hooks, configured permission rules (including `"*": "allow"` and `browser_site:*`), client auto-repliers and remote or published-chat clients never answer it. Configured rules can still deny.
 - A site set to **Always allow** under Chrome site permissions needs no answer; a site set to **Block** is refused.
 - `browser_evaluate` asks separately per origin (`scripts`), even on a site approved for browsing.
-- Unattended turns (schedules, `request.auto_approve`) fail at once instead of waiting: "Chrome needs the user's approval for &lt;origin&gt; and this run cannot ask. Ask the user to allow it in an interactive chat, then retry."
+- A scheduled run, and every subagent, workflow and workflow agent it starts, fails at once instead of waiting, in turns and in direct tool calls (workflow `tool()`, `POST /v1/threads/{id}/browser/tool`) alike: "Chrome needs the user's approval for &lt;origin&gt; and this run cannot ask. Ask the user to allow it in an interactive chat, then retry." A `--yolo` client (the TUI, `haarness run`, ACP) and the workflow agents it starts still ask: a person is there.
 - A **Block** in any layer's `browser.policy` (Agent site permissions) also blocks Chrome; its Allow and Ask rules do not apply to Chrome.
 - Inspect reports each document's security origin. Navigation and new tabs gate the URL's origin together with its `www.` twin, so one answer covers both. Screenshots and downloads are gated on the top-level document's origin (plus the download's redirect chain), not on every iframe; actions on an element use that frame's origin.
 - While a command runs, the extension refuses a main-frame load of a blocked origin, of a non-HTTP(S) URL, or of an origin needing approval that this conversation has not approved, and the model is told to navigate there directly to ask. Requests that workers and service workers make are not filtered.
@@ -122,10 +122,10 @@ Servers that have both the browser broker and management also advertise `browser
   ```json
   {"hosts":[{"kind":"chrome","browserId":"…","name":"Google Chrome","label":null,"version":"154.0.8037.98",
    "extensionVersion":"0.1.1","paused":false,"stopped":false,"connectedAt":"<RFC3339>","threads":2,"tabs":5,"threadTabs":1}],
-   "chrome":{"enabled":true,"defaultBrowser":"auto","everConnected":true}}
+   "chrome":{"enabled":true,"globalEnabled":true,"blockedBy":null,"defaultBrowser":"auto","everConnected":true}}
   ```
 
-  `threadTabs` counts the tabs of the conversation named by `thread`. Desktop's Settings and Browser panel, the TUI's `/chrome` and `haarness browser status` read it.
+  `threadTabs` counts the tabs of the conversation named by `thread`. `enabled` says whether agents may use Chrome now; `globalEnabled` is Chrome's own switch in the global settings; `blockedBy` says why Chrome is off although that switch is on: `"browser-control"` (agent browser control is off in some layer) or `"project"` (a project's `browser.chrome.enabled: false`), otherwise `null`. Desktop's Settings and Browser panel, the TUI's `/chrome` and `haarness browser status` read it.
 
 Remote-scoped access (published chats, remote control) is denied both endpoints; clients treat 403, 404 and 501 as "Chrome is not available here". The SDKs expose them as `connectBrowserExtensionHost` / `connect_browser_extension_host` and `listBrowserHosts` / `list_browser_hosts`.
 
@@ -226,11 +226,11 @@ They are stored as `browser.chrome`, a sibling of `browser.policy`, so older dae
 
 Parsing is lenient: unknown fields are ignored, unknown values fall back to defaults, and an unreadable `browser.chrome` logs a warning and uses the defaults without breaking `browser.policy`. At most 200 site rules are accepted.
 
-The global layer is authoritative. Project layers can only tighten it: a project `browser.chrome.enabled: false` turns Chrome off for that project, and project `defaults` and `sites` can only move a decision from allow to ask to deny, per category; every other project value is ignored. A deny in any layer's `browser.policy.sites` or `browser.policy.defaults` also applies to Chrome for that category (scripts follow browsing), and `browser.policy.enabled: false` turns Chrome off too. Allow and ask rules in `browser.policy` do not affect Chrome. **Remember site approvals** does not apply to Chrome.
+The global layer is authoritative. Project layers can only tighten it: a project `browser.chrome.enabled: false` turns Chrome off for that project, and project `defaults` and `sites` can only move a decision from allow to ask to deny, per category; every other project value is ignored. A deny in any layer's `browser.policy.sites` or `browser.policy.defaults` also applies to Chrome for that category (scripts follow browsing), and `browser.policy.enabled: false` turns Chrome off too. Allow and ask rules in `browser.policy` do not affect Chrome. **Remember site approvals** does not apply to Chrome. A Chrome call waiting for approval or running is cancelled only when a change alters a Chrome decision; editing a rule that decides nothing for Chrome (such as an Agent site permissions Allow) leaves it running.
 
 `manageResource("browser-settings", …)` carries Chrome alongside the shared policy:
 
-- `get` adds `chrome: {settings, globalSettings, projectRestrictions}`: the effective Chrome settings, the global layer (or `null`), and human-readable lines describing what project layers tightened.
+- `get` adds `chrome: {settings, globalSettings, restrictions, projectRestrictions}`: the effective Chrome settings, the global layer (or `null`), and what project layers tightened. `restrictions` lists it as data for clients to put into their own words: `{"kind":"off"}`, `{"kind":"default","category":"browsing"|"downloads"|"uploads"|"scripts","decision":"ask"|"deny"}` or `{"kind":"site","origin":"https://…","category":…,"decision":…}`. `projectRestrictions` holds the same in English, for older clients.
 - `set` accepts `{policy?, chrome?, revision, scope}`. `chrome` must be a complete `ChromeSettings` object and is always written to the global layer; clients send `scope: "global"`, and a request with `chrome` and `scope: "project"` is rejected with "Chrome settings apply to every project on this computer; save them globally."
 - `reset` accepts `parts: ["policy", "chrome"]`; without `parts` it resets only `policy`, as older clients expect.
 

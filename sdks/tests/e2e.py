@@ -179,6 +179,8 @@ def scenario(mode):
                 assert hosts["hosts"][0]["name"] == "Google Chrome", hosts
                 assert hosts["hosts"][0]["threadTabs"] == 1, hosts
                 assert hosts["chrome"]["everConnected"] is True, hosts
+                assert hosts["chrome"]["globalEnabled"] is True, hosts
+                assert hosts["chrome"]["blockedBy"] is None, hosts
                 listed = c("call_browser_tool", tid, {
                     "name": "browser_tabs_list", "arguments": {},
                 })
