@@ -76,6 +76,8 @@ export interface HostOptions {
   translate?(key: string): string;
   /** The user's interface language, at start and whenever it changes. */
   language?(code: string): void;
+  /** How long a chat's tabs stay attached after its last command (tests shorten it). */
+  idleMs?: number;
 }
 
 export function createHost(options: HostOptions) {
@@ -344,13 +346,14 @@ export function createHost(options: HostOptions) {
     rename(entry, message.title);
     const key = threadKey(workspace, message.thread);
     clearTimeout(idle.get(key));
+    idle.delete(key);
     const outcome = await queues.run(key, message.id, (signal) => run(serverId, entry, message, signal));
     if (message.command.inspect !== true) sendState(serverId, entry);
     bridge.send({ type: "to-server", server: serverId, message: { type: "result", id: message.id, outcome: encode(message.command, outcome) } });
-    idle.set(
-      key,
-      setTimeout(() => void release(entry), IDLE_DETACH_MS),
-    );
+    // One idle timer per chat, armed by the last of its commands to finish.
+    clearTimeout(idle.get(key));
+    idle.delete(key);
+    if (!queues.pending(key)) idle.set(key, setTimeout(() => void release(key, entry), options.idleMs ?? IDLE_DETACH_MS));
     if (restartWhenIdle && !queues.pending()) {
       restartWhenIdle = false;
       bridge.restart();
@@ -359,14 +362,17 @@ export function createHost(options: HostOptions) {
     refresh();
   }
 
-  /** No command for this chat in 30 s: let go of its tabs so Chrome's debugging bar can go away. */
-  async function release(entry: ThreadRecord) {
-    if (queues.pending(threadKey(entry.workspace, entry.thread))) return;
-    for (const tab of entry.tabs) {
-      // The driver assumes a live debugger: the next command attaches again with a new page.
-      pages.get(tab.tabId)?.dispose();
-      pages.delete(tab.tabId);
-      await platform.debugger.detach(tab.tabId).catch(() => {});
+  /**
+   * No command for this chat in 30 s: let go of its tabs so Chrome's debugging
+   * bar can go away. Their driver pages stay, so the refs of the model's last
+   * snapshot still work when its next command attaches again, however long it
+   * thought. A command that arrives meanwhile keeps the tabs not yet let go.
+   */
+  async function release(key: string, entry: ThreadRecord) {
+    idle.delete(key);
+    for (const tab of [...entry.tabs]) {
+      if (queues.pending(key) || idle.has(key)) return;
+      await platform.debugger.park(tab.tabId).catch(() => {});
     }
   }
 
@@ -655,6 +661,7 @@ export function createHost(options: HostOptions) {
       void after(() => {
         pages.get(removed)?.dispose();
         pages.delete(removed);
+        void platform.debugger.detach(removed).catch(() => {});
         registry.replaceTab(removed, added);
       });
     },
@@ -1066,7 +1073,21 @@ export function createHost(options: HostOptions) {
       bridge.close();
     },
     /** For tests and the e2e harness. */
-    debug: { registry, control, pages, servers, queues, settings: () => settings },
+    debug: {
+      registry,
+      control,
+      pages,
+      servers,
+      queues,
+      settings: () => settings,
+      attached: (tabId: number) => platform.debugger.attached(tabId),
+      /** Lets go of a chat's tabs now, as its idle timer would. */
+      release(key: string) {
+        const entry = registry.get(key);
+        clearTimeout(idle.get(key));
+        return entry ? release(key, entry) : Promise.resolve();
+      },
+    },
   };
 }
 

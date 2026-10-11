@@ -92,8 +92,16 @@ export interface TabSession {
 }
 
 export interface DebuggerPort {
+  /** The tab's session, attaching (again) when needed. */
   session(tabId: number, id: TabID): Promise<TabSession>;
+  /** Attached now. */
   attached(tabId: number): boolean;
+  /**
+   * Detaches while the chat is idle, keeping the session and its driver page
+   * (and so the model's refs) for the next `session()`. When it cannot keep
+   * them it lets go entirely and reports `debuggerDetached`.
+   */
+  park(tabId: number): Promise<void>;
   detach(tabId: number): Promise<void>;
   detachAll(): Promise<void>;
 }

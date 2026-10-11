@@ -627,18 +627,24 @@ test("a call in flight when the user quits Chrome fails with the recovery advice
   expect(list.browsers.find((entry) => entry.browser === "chrome")?.available).toBe(false);
 });
 
-test("after 30 s without commands the tab is let go, and the next command attaches a fresh page", async ({ stack }) => {
-  test.setTimeout(150_000);
+test("after 30 s without commands the tab is let go; the model's refs still work after, unless the user moved on", async ({ stack }) => {
+  test.setTimeout(180_000);
   const thread = await stack.thread("Idle for a while");
   const tab = await open(stack, thread, stack.site.url("shop", "/form"));
+  const page = await stack.page(tab.id);
   const first = value<{ content: string }>(await stack.tool(thread, "browser_snapshot", { tabID: tab.id }));
   const tabId = await chromeTab(stack, tab.id);
   // (chrome.debugger.getTargets would count Playwright's own attachment.)
-  const attached = () => stack.host((host, id) => host.debug.pages.has(id), tabId);
+  const attached = () => stack.host((host, id) => host.debug.attached(id), tabId);
   expect(await attached()).toBe(true);
   await expect.poll(attached, { timeout: 45_000, intervals: [1_000] }).toBe(false);
-  // The user moves on in that tab while Haarness is detached.
-  const page = await stack.page(tab.id);
+  // The model took its time: the refs of its last snapshot still work once Haarness attaches again.
+  value(await stack.tool(thread, "browser_fill", { tabID: tab.id, ref: ref(first, "Name"), text: "After a pause" }));
+  await expect.poll(() => page.locator("#name").inputValue()).toBe("After a pause");
+  expect(await attached()).toBe(true);
+
+  // Let go again; the user moves on in that tab meanwhile.
+  await expect.poll(attached, { timeout: 45_000, intervals: [1_000] }).toBe(false);
   await page.goto(stack.site.url("shop", "/"));
   await expect.poll(async () => value<{ tabs: Tab[] }>(await stack.tool(thread, "browser_tabs_list", {})).tabs[0].url).toBe(stack.site.url("shop", "/"));
   // A ref from before is stale; a new snapshot works on the new page.
@@ -647,6 +653,40 @@ test("after 30 s without commands the tab is let go, and the next command attach
   expect(snapshot.content).toContain("Welcome to shop.test.");
   value(await stack.tool(thread, "browser_click", { tabID: tab.id, ref: ref(snapshot, "Form") }));
   await expect.poll(() => page.url()).toBe(stack.site.url("shop", "/form"));
+});
+
+test("refs in a cross-site frame and the network log outlast the debugger letting go; a reload does not", async ({ stack }) => {
+  const thread = await stack.thread("Pause in a frame");
+  const tab = await open(stack, thread, stack.site.url("shop", "/frame"));
+  const page = await stack.page(tab.id);
+  await expect.poll(() => page.frames().length).toBe(2);
+  const inner = value<{ frames: { id: string; parentID?: string }[] }>(await stack.tool(thread, "browser_frames", { tabID: tab.id })).frames.find(
+    (frame) => frame.parentID,
+  )!;
+  const read = stack.call(thread, "browser_snapshot", { tabID: tab.id, frameID: inner.id });
+  await stack.answer(thread, "always");
+  const snapshot = value<{ content: string }>(await read.done);
+  const tabId = await chromeTab(stack, tab.id);
+  const key = await stack.host((host) => host.snapshot().chats[0].key);
+  const release = () => stack.host((host, chat) => host.debug.release(chat), key);
+  const attached = () => stack.host((host, id) => host.debug.attached(id), tabId);
+
+  await release();
+  expect(await attached()).toBe(false);
+  value(await stack.tool(thread, "browser_fill", { tabID: tab.id, ref: ref(snapshot, "Inner field"), text: "Still mine" }));
+  await expect.poll(() => page.frames()[1].locator("#inner-field").inputValue()).toBe("Still mine");
+  expect(await attached()).toBe(true);
+  const requests = value<{ requests: { url: string }[] }>(await stack.tool(thread, "browser_network_list", { tabID: tab.id })).requests;
+  expect(requests.map((request) => request.url)).toContain(stack.site.url("shop", "/frame"));
+
+  // The user reloads the page while Haarness is away: same URL, new document, no old refs.
+  await release();
+  await page.reload();
+  await expect.poll(() => page.frames().length).toBe(2);
+  expect(failed(await stack.tool(thread, "browser_fill", { tabID: tab.id, ref: ref(snapshot, "Inner field"), text: "Too late" }))).toMatch(
+    /stale|changed|snapshot/i,
+  );
+  expect(await page.frames()[1].locator("#inner-field").inputValue()).toBe("");
 });
 
 test("two Chrome profiles: a chat sticks to the profile holding its tabs, and each call reaches it", async ({ stack }) => {

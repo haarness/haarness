@@ -8,10 +8,10 @@ import { CANCELLED, HostError } from "../../core/errors";
 import { destinationOrigin } from "../../core/policy";
 import { blockedMessage, decideRequest, fetchPatterns, landing, type FetchContext, type FetchDecision } from "../../core/fetch-policy";
 import type { TabSession } from "../../core/platform";
-import type { ChromeTransport } from "./cdp";
+import type { ChromeTransport, ParkableSession } from "./cdp";
 import { createFileInput, type ChromeFileStore } from "./files";
 import { createSurface, type TabCache } from "./page";
-import { abortable } from "./wait";
+import { abortable, within } from "./wait";
 
 export interface SessionDeps {
   cache: TabCache;
@@ -36,8 +36,10 @@ const DOWNLOAD_GRACE_MS = 10_000;
 const LOAD_TIMEOUT_MS = 30_000;
 /** How long a command waits for the session's service-worker and prerender settings (a dialog can hold them). */
 const ISOLATION_WAIT_MS = 2_000;
+/** How long attaching again waits to learn whether the tab's document is still the one the page knows. */
+const RESUME_CHECK_MS = 1_000;
 
-export type ChromeTabSession = TabSession & { dispose(): void };
+export type ChromeTabSession = TabSession & ParkableSession;
 
 export function createSession(transport: ChromeTransport, deps: SessionDeps): ChromeTabSession {
   const tabId = transport.tabId;
@@ -48,8 +50,13 @@ export function createSession(transport: ChromeTransport, deps: SessionDeps): Ch
   let page: Page | undefined;
   let surface: ReturnType<typeof createSurface> | undefined;
   let main: string | undefined;
+  /** The loader of the top document the page knows. */
+  let loader: string | undefined;
   let started: string | undefined;
   let backstop: (() => void) | undefined;
+  let dialog = false;
+  /** While parked: a new document already expired the page's refs. */
+  let moved = false;
 
   const enabled = transport.send("Page.enable").catch(() => {});
   // Agent tabs skip service workers and prerendering for the whole debugging
@@ -59,7 +66,12 @@ export function createSession(transport: ChromeTransport, deps: SessionDeps): Ch
     transport.send("Network.setBypassServiceWorker", { bypass: true }).catch(() => {}),
     transport.send("Page.setPrerenderingAllowed", { isAllowed: false }).catch(() => {}),
   ]);
-  const mainFrame = async () => (main ??= (await transport.send("Page.getFrameTree")).frameTree.frame.id);
+  const mainFrame = async () => {
+    if (main) return main;
+    const { frame } = (await transport.send("Page.getFrameTree")).frameTree;
+    loader ??= frame.loaderId;
+    return (main ??= frame.id);
+  };
 
   const offs = [
     transport.on("Page.downloadWillBegin", (event) => {
@@ -78,9 +90,16 @@ export function createSession(transport: ChromeTransport, deps: SessionDeps): Ch
     transport.on("Page.frameNavigated", (event, session) => {
       if (session || event.frame.parentId) return;
       main = event.frame.id;
+      loader = event.frame.loaderId;
       // Chrome before 133 has no frameStartedNavigating; count the commit instead.
       if (event.frame.loaderId !== started) page?.navigationStarted();
       started = undefined;
+    }),
+    transport.on("Page.javascriptDialogOpening", (_event, session) => {
+      if (!session) dialog = true;
+    }),
+    transport.on("Page.javascriptDialogClosed", (_event, session) => {
+      if (!session) dialog = false;
     }),
   ];
 
@@ -205,6 +224,31 @@ export function createSession(transport: ChromeTransport, deps: SessionDeps): Ch
       const pending = after;
       after = [];
       for (const work of pending) await work().catch(() => {});
+    },
+    park() {
+      // The page would not hear the dialog close while detached, and would refuse every command.
+      if (dialog) return false;
+      backstop?.();
+      started = undefined;
+      moved = false;
+      return true;
+    },
+    navigated() {
+      if (moved) return;
+      moved = true;
+      page?.navigationStarted();
+    },
+    async resume() {
+      surface?.refresh();
+      // A document that changed while nothing watched has none of the page's refs, nor does
+      // one that cannot be checked now (a dialog holds the page).
+      const top = await within(
+        transport.send("Page.getFrameTree").then((tree) => tree.frameTree.frame),
+        RESUME_CHECK_MS,
+      );
+      if (!moved && (!top || top.loaderId !== loader)) page?.navigationStarted();
+      if (top) [main, loader] = [top.id, top.loaderId];
+      moved = false;
     },
     dispose() {
       backstop?.();

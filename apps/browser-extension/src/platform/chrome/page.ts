@@ -31,7 +31,7 @@ export interface SurfaceDeps {
   mainFrame(): Promise<string>;
 }
 
-export function createSurface(transport: ChromeTransport, deps: SurfaceDeps): PageSurface & { dispose(): void } {
+export function createSurface(transport: ChromeTransport, deps: SurfaceDeps): PageSurface & { refresh(): void; dispose(): void } {
   const tabId = transport.tabId;
   let history: History | undefined;
   let world: { frame: string; context: number } | undefined;
@@ -54,7 +54,7 @@ export function createSurface(transport: ChromeTransport, deps: SurfaceDeps): Pa
   const entry = (delta: -1 | 1) => history?.entries?.[history.currentIndex + delta];
   const index = (delta: -1 | 1) => (history ? history.currentIndex + delta : delta);
 
-  const surface: PageSurface & { dispose(): void } = {
+  const surface: PageSurface & { refresh(): void; dispose(): void } = {
     url: () => deps.cache.url,
     title: () => deps.cache.title,
     loading: () => deps.cache.loading,
@@ -115,6 +115,11 @@ export function createSurface(transport: ChromeTransport, deps: SurfaceDeps): Pa
         }
       },
       zoom: () => deps.cache.zoom || 1,
+    },
+    /** Attached again: the history and the cursor's world may have changed meanwhile. */
+    refresh() {
+      world = undefined;
+      refresh();
     },
     dispose() {
       for (const off of offs) off();

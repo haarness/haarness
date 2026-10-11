@@ -20,12 +20,12 @@ afterEach(() => {
   for (const host of hosts.splice(0)) host.dispose();
 });
 
-async function boot(options: { prepare?(fake: FakeChrome): void; createPage?: CreatePage; reuse?: FakeChrome } = {}) {
+async function boot(options: { prepare?(fake: FakeChrome): void; createPage?: CreatePage; reuse?: FakeChrome; idleMs?: number } = {}) {
   const fake = options.reuse ?? installChrome();
   if (options.reuse) (globalThis as unknown as { chrome: unknown }).chrome = fake.chrome;
   options.prepare?.(fake);
   const { platform, listen } = createChromePlatform();
-  const host = createHost({ platform, createPage: options.createPage });
+  const host = createHost({ platform, createPage: options.createPage, idleMs: options.idleMs });
   hosts.push(host);
   listen(host.events);
   await host.start();
@@ -448,6 +448,139 @@ test("a download the page begins just after a click returned is still that click
   } finally {
     Date.now = now;
   }
+});
+
+/** A driver page that logs its life (creation, commands, navigations, disposal); `delay` slows a command. */
+function loggingPage(log: string[], delay: (type: string) => number = () => 0): CreatePage {
+  return (surface, _cdp, options) => {
+    let generation = options.generation ?? 0;
+    log.push("create");
+    return {
+      ready: Promise.resolve(),
+      state: () => ({ id: options.id, url: surface.url(), title: "", loading: false, canGoBack: false, canGoForward: false, generation }),
+      sources: () => [],
+      async inspect() {
+        return { resources: [], key: "k" };
+      },
+      async execute(command) {
+        log.push(command.action.type);
+        await new Promise((resolve) => setTimeout(resolve, delay(command.action.type)));
+        return { value: { ok: true }, files: [] };
+      },
+      navigationStarted() {
+        generation++;
+        log.push("navigation");
+        options.publish();
+      },
+      dispose() {
+        log.push("dispose");
+      },
+    };
+  };
+}
+
+async function eventually(check: () => boolean, timeout = 2_000) {
+  const deadline = Date.now() + timeout;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error("It never happened");
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+}
+
+test("an idle chat lets go of its tabs but keeps their driver pages, so the model's refs outlast its thinking", async () => {
+  const log: string[] = [];
+  const h = await boot({ createPage: loggingPage(log), idleMs: 20 });
+  h.start();
+  h.attach();
+  const { tab, live } = await h.open("https://a.example/");
+  const page = h.host.debug.pages.get(live.id);
+  assert.equal((await h.command({ action: { type: "snapshot", tabID: tab.id } })).outcome.type, "success");
+  await eventually(() => !h.host.debug.attached(live.id));
+  assert.equal(h.fake.attached.has(live.id), false, "Chrome's debugging bar can go");
+  assert.equal(h.host.debug.pages.get(live.id), page, "the page and its refs stay");
+
+  // The model comes back: the same page runs its command on the same document.
+  const click = await h.command({ action: { type: "click", tabID: tab.id, ref: "@e1" } });
+  assert.equal(click.outcome.type, "success");
+  assert.equal(h.host.debug.attached(live.id), true);
+  assert.deepEqual(log, ["create", "navigation", "snapshot", "click"]);
+
+  // The user loads another page while Haarness is away: that page has none of the refs.
+  await eventually(() => !h.host.debug.attached(live.id));
+  await h.fake.chrome.tabs.update(live.id, { url: "https://a.example/next" });
+  assert.deepEqual(log.slice(4), ["navigation"]);
+  assert.equal(h.states().at(-1)!.message.state.tabs[0].generation, 2);
+  await h.command({ action: { type: "snapshot", tabID: tab.id } });
+  assert.deepEqual(log.slice(4), ["navigation", "snapshot"], "counted once, not again on attaching");
+
+  // A document Chrome did not report (or could not be checked) is caught on attaching again.
+  await eventually(() => !h.host.debug.attached(live.id));
+  h.fake.tabsById.get(live.id)!.loaderId = "loader-unseen";
+  await h.command({ action: { type: "snapshot", tabID: tab.id } });
+  assert.deepEqual(log.slice(6), ["navigation", "snapshot"]);
+  assert.equal(log.filter((entry) => entry === "create").length, 1);
+});
+
+test("a chat that goes idle with a JavaScript dialog open lets go of its page entirely", async () => {
+  const log: string[] = [];
+  const h = await boot({ createPage: loggingPage(log), idleMs: 20 });
+  h.start();
+  h.attach();
+  const { tab, live } = await h.open("https://a.example/");
+  await h.command({ action: { type: "snapshot", tabID: tab.id } });
+  h.fake.chrome.debugger.onEvent.emit({ tabId: live.id }, "Page.javascriptDialogOpening", { url: "https://a.example/", message: "Sure?", type: "confirm", hasBrowserHandler: true });
+  // Detached, the page would never hear the user close it.
+  await eventually(() => !h.host.debug.pages.has(live.id));
+  assert.equal(h.fake.attached.has(live.id), false);
+  assert.equal(log.at(-1), "dispose");
+  assert.equal((await h.command({ action: { type: "snapshot", tabID: tab.id } })).outcome.type, "success");
+  assert.equal(log.filter((entry) => entry === "create").length, 2);
+});
+
+test("one idle timer per chat: commands that overlapped do not let go of the tabs early", async () => {
+  const log: string[] = [];
+  const h = await boot({ createPage: loggingPage(log, (type) => (type === "wait" ? 100 : 0)), idleMs: 200 });
+  h.start();
+  h.attach();
+  const { tab, live } = await h.open("https://a.example/");
+  // Two calls for one chat at once (an inspect and an execute, say): the first finishes first.
+  await Promise.all([
+    h.command({ action: { type: "snapshot", tabID: tab.id } }),
+    h.command({ action: { type: "wait", tabID: tab.id, condition: "load" } }),
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const started = Date.now();
+  await h.command({ action: { type: "snapshot", tabID: tab.id } });
+  // A timer the first call left behind would fire 200 ms after it, about now.
+  await new Promise((resolve) => setTimeout(resolve, 100 - (Date.now() - started)));
+  assert.equal(h.host.debug.attached(live.id), true, "attached for 200 ms after the last command");
+  await eventually(() => !h.host.debug.attached(live.id));
+});
+
+test("a command that arrives while an idle chat is being let go keeps its tab", async () => {
+  const log: string[] = [];
+  const h = await boot({ createPage: loggingPage(log) });
+  h.start();
+  h.attach();
+  const tabs = [await h.open("https://a.example/1"), await h.open("https://a.example/2"), await h.open("https://a.example/3")];
+  for (const { tab } of tabs) await h.command({ action: { type: "snapshot", tabID: tab.id } });
+  // Chrome takes its time to detach.
+  const detach = h.fake.chrome.debugger.detach;
+  h.fake.chrome.debugger.detach = async (target: { tabId: number }) => {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return detach(target);
+  };
+  const key = h.host.snapshot().chats[0].key;
+  const releasing = h.host.debug.release(key);
+  const last = tabs[2];
+  const page = h.host.debug.pages.get(last.live.id);
+  const snapshot = await h.command({ action: { type: "snapshot", tabID: last.tab.id } });
+  await releasing;
+  assert.equal(snapshot.outcome.type, "success", JSON.stringify(snapshot.outcome));
+  assert.equal(h.host.debug.attached(tabs[0].live.id), false, "the tab being let go went");
+  assert.equal(h.host.debug.attached(last.live.id), true, "the tab in use stays");
+  assert.equal(h.host.debug.pages.get(last.live.id), page);
+  assert.equal(log.includes("dispose"), false);
 });
 
 test("pages Haarness may not control, opaque pages and Chrome-less tools are refused", async () => {
