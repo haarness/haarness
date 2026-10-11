@@ -170,7 +170,8 @@ export const Body = Schema.Union([
   }),
   Schema.Struct({
     state: Schema.Literal("unavailable"),
-    reason: Schema.Literals(["binary", "notCaptured", "backendUnavailable"]),
+    // omitted: the host never returns request bodies (Chrome, where they can carry the user's credentials).
+    reason: Schema.Literals(["binary", "notCaptured", "backendUnavailable", "omitted"]),
   }),
 ]).annotate({ identifier: "Browser.Body" });
 export type Body = typeof Body.Type;
