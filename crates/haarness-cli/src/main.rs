@@ -1867,20 +1867,28 @@ async fn models_command(
         Arc::new(CredentialStore::new(paths.auth.clone())),
     )
     .await;
+    let listed = providers.list();
+    // `haarness models together` lists Together AI (`togetherai`).
+    let filter = provider_filter.map(|filter| {
+        haarness_providers::listed_provider_id(
+            haarness_protocol::provider_storage_id(filter.trim()),
+            |id| listed.iter().any(|provider| provider.id == id),
+        )
+    });
     let mut found_provider = provider_filter.is_none();
-    for provider in providers.list().into_iter().filter(|provider| {
-        provider_filter
-            .is_none_or(|filter| provider.id == haarness_protocol::provider_storage_id(filter))
-    }) {
+    for provider in listed
+        .iter()
+        .filter(|provider| filter.is_none_or(|filter| provider.id == filter))
+    {
         found_provider = true;
-        for model in provider.models {
+        for model in &provider.models {
             println!(
                 "{}/{}",
                 haarness_protocol::provider_display_id(&provider.id),
                 model.id
             );
             if verbose {
-                println!("{}", serde_json::to_string_pretty(&model)?);
+                println!("{}", serde_json::to_string_pretty(model)?);
             }
         }
     }
@@ -3159,15 +3167,16 @@ async fn schedule_command(
         }
         ScheduleCommand::Add(args) => {
             let directory = args.directory.unwrap_or_else(|| workspace.to_path_buf());
-            if let Some(model) = &args.model {
-                check_schedule_model(paths, &directory, trust, model).await?;
-            }
+            let model = match args.model {
+                Some(model) => Some(check_schedule_model(paths, &directory, trust, &model).await?),
+                None => None,
+            };
             let schedule = scheduler.create(CreateSchedule {
                 name: args.name,
                 prompt: args.prompt,
                 request: args.natural,
                 workspace: directory,
-                model: args.model,
+                model,
                 agent: args.agent,
                 variant: args.variant,
                 trust_project: trust,
@@ -3177,17 +3186,13 @@ async fn schedule_command(
             })?;
             println!("{} {}", schedule.id, Scheduler::summary(&schedule));
         }
-        ScheduleCommand::Update(args) => {
-            if let Some(model) = args
-                .model
-                .as_deref()
-                .filter(|model| !model.trim().is_empty())
-            {
+        ScheduleCommand::Update(mut args) => {
+            if let Some(model) = args.model.clone().filter(|model| !model.trim().is_empty()) {
                 let directory = match &args.directory {
                     Some(directory) => directory.clone(),
                     None => scheduler.require(&args.reference)?.workspace,
                 };
-                check_schedule_model(paths, &directory, trust, model).await?;
+                args.model = Some(check_schedule_model(paths, &directory, trust, &model).await?);
             }
             let enabled = args
                 .enable
@@ -3362,16 +3367,18 @@ async fn schedule_command(
 
 /// A schedule runs unattended, maybe hours later, so a provider that does not
 /// exist is refused now. A model missing from a provider's list only warns:
-/// some providers serve more models than they list.
+/// some providers serve more models than they list. Returns the model to
+/// store: a preset's other id (`together/…`) becomes the id the provider is
+/// listed under, which is the one a run can find.
 async fn check_schedule_model(
     paths: &Paths,
     workspace: &Path,
     trust: bool,
     model: &str,
-) -> Result<()> {
+) -> Result<String> {
     // The scheduler itself explains the provider/model form.
     let Some((provider_id, model_id)) = model.trim().split_once('/') else {
-        return Ok(());
+        return Ok(model.to_owned());
     };
     let config = load_config(paths, workspace, trust)?;
     let credentials = resolved_credentials(&read_auth(paths).unwrap_or_default());
@@ -3382,12 +3389,12 @@ async fn check_schedule_model(
         Arc::new(CredentialStore::new(paths.auth.clone())),
     )
     .await;
+    let listed = providers.list();
     let storage_id = haarness_protocol::provider_storage_id(provider_id);
-    let Some(provider) = providers
-        .list()
-        .into_iter()
-        .find(|provider| provider.id == storage_id)
-    else {
+    let listed_id = haarness_providers::listed_provider_id(storage_id, |id| {
+        listed.iter().any(|provider| provider.id == id)
+    });
+    let Some(provider) = listed.iter().find(|provider| provider.id == listed_id) else {
         anyhow::bail!(
             "no provider named '{provider_id}' for --model {model}; run `haarness providers` to see the provider ids"
         );
@@ -3398,7 +3405,11 @@ async fn check_schedule_model(
             provider.name
         );
     }
-    Ok(())
+    Ok(if listed_id == storage_id {
+        model.to_owned()
+    } else {
+        format!("{listed_id}/{model_id}")
+    })
 }
 
 fn schedule_trigger(
@@ -4431,12 +4442,21 @@ async fn default_run_model_client(
 
 /// The provider and model `--provider`/`--model` name, checked against the
 /// server's providers. A bare model id belongs to the provider that offers
-/// it (a connected one first); a bare provider id means its first model.
+/// it (a connected one first); a bare provider id means its first model. A
+/// preset's other ids name it too (`together` is `togetherai`), and a
+/// provider that is not connected is refused before any chat exists.
 fn requested_run_model(
     provider: Option<&str>,
     model: Option<&str>,
     providers: &[haarness_protocol::ProviderInfo],
 ) -> Result<(String, String)> {
+    let listed_id = |id: &str| {
+        haarness_providers::listed_provider_id(
+            haarness_protocol::provider_storage_id(id.trim()),
+            |candidate| providers.iter().any(|info| info.id == candidate),
+        )
+        .to_owned()
+    };
     let by_connection = || {
         providers
             .iter()
@@ -4448,7 +4468,7 @@ fn requested_run_model(
         let model = info.models.first()?;
         Some((info.id.clone(), model.id.clone()))
     };
-    let chosen = match (provider, model.map(str::trim)) {
+    let mut chosen = match (provider, model.map(str::trim)) {
         (_, Some(model)) if model.contains('/') => {
             qualified_run_model(provider.unwrap_or_default(), model)?
         }
@@ -4456,18 +4476,22 @@ fn requested_run_model(
         (None, Some(model)) => by_connection()
             .find(|info| info.models.iter().any(|offered| offered.id == model))
             .map(|info| (info.id.clone(), model.to_owned()))
-            .or_else(|| first_model(haarness_protocol::provider_storage_id(model)))
+            .or_else(|| first_model(&listed_id(model)))
             .with_context(|| {
                 format!(
                     "No provider offers a model called {model}. Pass -m provider/model; `haarness models` lists them."
                 )
             })?,
         (Some(provider), None) => {
-            let id = haarness_protocol::provider_storage_id(provider.trim());
+            let id = listed_id(provider);
             let info = providers
                 .iter()
                 .find(|info| info.id == id)
-                .with_context(|| unavailable_provider(id))?;
+                .with_context(|| unavailable_provider(&id))?;
+            // A provider that is not connected lists no models yet.
+            if !info.authenticated {
+                anyhow::bail!(not_connected_provider(info));
+            }
             let model = info.models.first().with_context(|| {
                 format!("{} lists no models; pass --model as well", info.name)
             })?;
@@ -4475,10 +4499,27 @@ fn requested_run_model(
         }
         (None, None) => anyhow::bail!("pass --model, or --provider"),
     };
-    if !providers.is_empty() && !providers.iter().any(|info| info.id == chosen.0) {
-        anyhow::bail!(unavailable_provider(&chosen.0));
+    chosen.0 = listed_id(&chosen.0);
+    match providers.iter().find(|info| info.id == chosen.0) {
+        None if !providers.is_empty() => anyhow::bail!(unavailable_provider(&chosen.0)),
+        Some(info) if !info.authenticated => anyhow::bail!(not_connected_provider(info)),
+        _ => Ok(chosen),
     }
-    Ok(chosen)
+}
+
+/// What to run to connect a provider the command line chose.
+fn not_connected_provider(info: &haarness_protocol::ProviderInfo) -> String {
+    if info.id == "haarness" {
+        format!(
+            "{} is not connected. Sign in with `haarness login`, then run this again.",
+            info.name
+        )
+    } else {
+        format!(
+            "{} is not connected. Connect it with `haarness auth login {}`, then run this again.",
+            info.name, info.id
+        )
+    }
 }
 
 fn unavailable_provider(id: &str) -> String {
@@ -10925,9 +10966,9 @@ mod tests {
     #[test]
     fn run_models_resolve_against_the_providers_the_server_offers() {
         let providers = [
-            provider("openai", false, &["gpt-5.6"]),
+            provider("openai", true, &["gpt-5.6"]),
             provider("echo", true, &["echo-1", "echo-2"]),
-            provider("haarness", false, &["openai/gpt-6-sol"]),
+            provider("haarness", true, &["openai/gpt-6-sol"]),
         ];
         let chosen = |provider: Option<&str>, model: Option<&str>| {
             requested_run_model(provider, model, &providers).map_err(|error| error.to_string())
@@ -10973,6 +11014,69 @@ mod tests {
             chosen(None, Some("mystery"))
                 .unwrap_err()
                 .starts_with("No provider offers a model called mystery.")
+        );
+    }
+
+    #[test]
+    fn a_run_names_a_preset_by_any_of_its_ids_and_refuses_one_not_connected() {
+        let mut together = provider("togetherai", true, &["zai-org/GLM-5.1"]);
+        together.name = "Together AI".into();
+        let mut cloud = provider("haarness", false, &["openai/gpt-6-sol"]);
+        cloud.name = "Haarness Cloud".into();
+        let mut openai = provider("openai", false, &["gpt-5.6"]);
+        openai.name = "OpenAI".into();
+        let providers = [
+            together,
+            provider("fireworks-ai", true, &["kimi"]),
+            openai,
+            cloud,
+        ];
+        let chosen = |provider: Option<&str>, model: Option<&str>| {
+            requested_run_model(provider, model, &providers).map_err(|error| error.to_string())
+        };
+        assert_eq!(
+            chosen(Some("together"), None),
+            Ok(("togetherai".into(), "zai-org/GLM-5.1".into()))
+        );
+        assert_eq!(
+            chosen(None, Some("together/zai-org/GLM-5.1")),
+            Ok(("togetherai".into(), "zai-org/GLM-5.1".into()))
+        );
+        assert_eq!(
+            chosen(Some("together"), Some("x")),
+            Ok(("togetherai".into(), "x".into()))
+        );
+        assert_eq!(
+            chosen(None, Some("together")),
+            Ok(("togetherai".into(), "zai-org/GLM-5.1".into()))
+        );
+        assert_eq!(
+            chosen(None, Some("fireworks/kimi")),
+            Ok(("fireworks-ai".into(), "kimi".into()))
+        );
+        assert_eq!(
+            chosen(Some("openai"), None),
+            Err("OpenAI is not connected. Connect it with `haarness auth login openai`, then run this again.".into())
+        );
+        assert_eq!(
+            chosen(None, Some("gpt-5.6")),
+            Err("OpenAI is not connected. Connect it with `haarness auth login openai`, then run this again.".into())
+        );
+        assert_eq!(
+            requested_run_model(
+                Some("haarness-cloud"),
+                None,
+                &[ProviderInfo {
+                    models: Vec::new(),
+                    ..providers[3].clone()
+                }]
+            )
+            .map_err(|error| error.to_string()),
+            Err("Haarness Cloud is not connected. Sign in with `haarness login`, then run this again.".into())
+        );
+        assert_eq!(
+            chosen(None, Some("haarness-cloud/openai/gpt-6-sol")),
+            Err("Haarness Cloud is not connected. Sign in with `haarness login`, then run this again.".into())
         );
     }
 
