@@ -710,6 +710,7 @@
   "Saved, but the key could not be checked": "已保存，但无法验证密钥",
   "If chats then fail to authenticate, replace the key.": "如果之后对话无法通过身份验证，请更换密钥。",
   "Replace key": "更换密钥",
+  "Saved the {name} key, but it could not be checked": "已保存 {name} 密钥，但无法验证",
   "A key is already saved · paste a new one to replace it": "已保存密钥 · 粘贴新密钥即可替换",
   "Connect a provider to send your message": "连接提供商后即可发送你的消息",
   "Sign in to Haarness Cloud to choose a router": "登录 Haarness Cloud 以选择路由器",

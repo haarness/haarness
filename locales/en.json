@@ -710,6 +710,7 @@
   "Saved, but the key could not be checked": "Saved, but the key could not be checked",
   "If chats then fail to authenticate, replace the key.": "If chats then fail to authenticate, replace the key.",
   "Replace key": "Replace key",
+  "Saved the {name} key, but it could not be checked": "Saved the {name} key, but it could not be checked",
   "A key is already saved · paste a new one to replace it": "A key is already saved · paste a new one to replace it",
   "Connect a provider to send your message": "Connect a provider to send your message",
   "Sign in to Haarness Cloud to choose a router": "Sign in to Haarness Cloud to choose a router",

@@ -710,6 +710,7 @@
   "Saved, but the key could not be checked": "Sačuvano, ali ključ nije bilo moguće provjeriti",
   "If chats then fail to authenticate, replace the key.": "Ako razgovori zatim ne uspiju s autentifikacijom, zamijenite ključ.",
   "Replace key": "Zamijeni ključ",
+  "Saved the {name} key, but it could not be checked": "Ključ za {name} je sačuvan, ali ga nije bilo moguće provjeriti",
   "A key is already saved · paste a new one to replace it": "Ključ je već sačuvan · nalijepite novi da ga zamijenite",
   "Connect a provider to send your message": "Povežite pružaoca usluge da pošaljete poruku",
   "Sign in to Haarness Cloud to choose a router": "Prijavite se na Haarness Cloud da odaberete ruter",

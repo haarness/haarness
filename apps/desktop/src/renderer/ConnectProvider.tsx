@@ -265,7 +265,10 @@ export function ConnectProvider(props: {
     } catch {
       // The credential is saved; a slow catalog refresh must not hide that.
     }
-    if (!dialog.isConnected || !dialog.open) return;
+    // Closed while the server waited on the provider (up to 8 s): say it
+    // where the reader still looks, never as "connected".
+    if (!dialog.isConnected || !dialog.open)
+      return app.notify(t("Saved the {name} key, but it could not be checked", { name: provider.name }));
     setStep({ kind: "saved", provider, warning });
     queueMicrotask(() => doneButton?.focus());
   }

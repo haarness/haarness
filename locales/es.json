@@ -710,6 +710,7 @@
   "Saved, but the key could not be checked": "Se guardó, pero no se pudo comprobar la clave",
   "If chats then fail to authenticate, replace the key.": "Si después los chats no pueden autenticarse, reemplaza la clave.",
   "Replace key": "Reemplazar clave",
+  "Saved the {name} key, but it could not be checked": "Se guardó la clave de {name}, pero no se pudo comprobar",
   "A key is already saved · paste a new one to replace it": "Ya hay una clave guardada · pega una nueva para reemplazarla",
   "Connect a provider to send your message": "Conecta un proveedor para enviar tu mensaje",
   "Sign in to Haarness Cloud to choose a router": "Inicia sesión en Haarness Cloud para elegir un router",
