@@ -142,6 +142,24 @@ export function extensionsPage(info: ChromeSetupInfo) {
     ready.find((item) => item.browser === "chrome") ?? ready[0];
   return preferred?.extensionsPage || "chrome://extensions";
 }
+/**
+ * Whether Desktop may refresh Chrome's registration at launch. Only an
+ * installed Desktop on its usual data does: a test run, or one pointed at
+ * another data folder (`HAARNESS_DATA_DIR` or `HAARNESS_HOME`, which the CLI
+ * also treats as isolated), would point the user's real Chrome at that
+ * folder.
+ */
+export function chromeLaunchSetupAllowed(
+  packaged: boolean,
+  env: Readonly<Record<string, string | undefined>>,
+) {
+  return (
+    packaged &&
+    !["HAARNESS_DESKTOP_TEST", "HAARNESS_DATA_DIR", "HAARNESS_DESKTOP_DATA", "HAARNESS_HOME"].some(
+      (name) => !!env[name],
+    )
+  );
+}
 /** Only an https Web Store link is offered; anything else falls back to the
  * unpacked-extension steps. */
 export function webStoreLink(info: ChromeSetupInfo) {

@@ -5,6 +5,7 @@ import {
   chromeApproval,
   chromeApprovalLines,
   chromeConnection,
+  chromeLaunchSetupAllowed,
   chromeThreadTabs,
   defaultChromeSettings,
   editableChromeSettings,
@@ -198,4 +199,15 @@ test("a browser step carries a Chrome chip from its result, or from where it ask
   assert.equal(ranInChrome("browser_tabs_open", { browser: "chrome" }, { output: "{}", is_error: false }), false);
   assert.equal(ranInChrome("browser_tabs_open", { browser: "haarness" }), false);
   assert.equal(ranInChrome("webfetch", { browser: "chrome" }, { output: "", is_error: false, metadata: { browser: "chrome" } }), false);
+});
+
+test("launch setup leaves isolated and test runs alone", () => {
+  assert.equal(chromeLaunchSetupAllowed(true, {}), true);
+  assert.equal(chromeLaunchSetupAllowed(false, {}), false);
+  for (const name of ["HAARNESS_DESKTOP_TEST", "HAARNESS_DATA_DIR", "HAARNESS_DESKTOP_DATA", "HAARNESS_HOME"])
+    assert.equal(chromeLaunchSetupAllowed(true, { [name]: "/tmp/isolated" }), false, name);
+  // An empty variable is unset, as the CLI reads it.
+  assert.equal(chromeLaunchSetupAllowed(true, { HAARNESS_HOME: "" }), true);
+  // Ordinary XDG folders are not an isolated Haarness.
+  assert.equal(chromeLaunchSetupAllowed(true, { XDG_CONFIG_HOME: "/home/a/.config" }), true);
 });
