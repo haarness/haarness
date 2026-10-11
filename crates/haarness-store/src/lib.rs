@@ -556,11 +556,13 @@ impl ThreadRepository for SqliteStore {
         let thread = Thread {
             schedule: request.schedule,
             id: ThreadId::new(),
-            // A client may still send the placeholder it knows; store this
-            // server's word for it.
+            // A client may still send the placeholder it knows, or nothing but
+            // spaces; store this server's word for an untitled chat.
             title: request
                 .title
-                .filter(|title| !haarness_protocol::is_untitled_chat_title(title))
+                .filter(|title| {
+                    !title.trim().is_empty() && !haarness_protocol::is_untitled_chat_title(title)
+                })
                 .unwrap_or_else(|| haarness_protocol::UNTITLED_CHAT_TITLE.into()),
             parent_id: request.parent_id,
             is_subagent: request.parent_id.is_some(),
@@ -613,7 +615,11 @@ impl ThreadRepository for SqliteStore {
     ) -> CoreResult<Thread> {
         let mut current = self.get_thread(id).await?;
         if let Some(value) = request.title {
-            current.title = value;
+            current.title = if haarness_protocol::is_untitled_chat_title(&value) {
+                haarness_protocol::UNTITLED_CHAT_TITLE.into()
+            } else {
+                value
+            };
         }
         if let Some(value) = request.archived {
             current.archived = value;
@@ -1719,6 +1725,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sent.title, "New chat");
+        let spaces = store
+            .create_thread(CreateThreadRequest {
+                title: Some("   ".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(spaces.title, "New chat");
+        let renamed = store
+            .update_thread(
+                spaces.id,
+                UpdateThreadRequest {
+                    title: Some("New thread".into()),
+                    archived: None,
+                    agent: None,
+                    provider: None,
+                    model: None,
+                    ultracode: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(renamed.title, "New chat");
         let legacy = store
             .create_thread(CreateThreadRequest::default())
             .await
