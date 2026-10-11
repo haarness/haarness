@@ -751,8 +751,9 @@ export function createHost(options: HostOptions) {
       if (change.groupId >= 0) await share(tab, change.groupId);
       return;
     }
-    if (change.url !== undefined) {
+    if (change.url !== undefined && change.url !== record.url) {
       // Without a page watching navigations, any new URL may be a new document.
+      // (A new tab first reports the about:blank it was created with: not a navigation.)
       if (!pages.has(tabId)) record.generation++;
       record.url = change.url;
     }

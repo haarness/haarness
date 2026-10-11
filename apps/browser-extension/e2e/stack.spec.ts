@@ -44,7 +44,8 @@ test("opens a Chrome tab in a group named after the chat once the site and its w
   const response = await call.done;
   expect(response.metadata).toMatchObject({ browser: "chrome" });
   const tab = value<Tab>(response);
-  expect(tab).toMatchObject({ url, title: "Home of shop.test", browser: "chrome" });
+  // Loading the first page is one navigation: the tab's about:blank does not count.
+  expect(tab).toMatchObject({ url, title: "Home of shop.test", browser: "chrome", generation: 1 });
 
   const groups = await stack.worker.evaluate(() => chrome.tabGroups.query({}));
   expect(groups.map((group) => group.title)).toEqual(["Research trip"]);
@@ -65,6 +66,7 @@ test("opens a Chrome tab in a group named after the chat once the site and its w
   // The twin rode along with the first answer; another site asks again.
   const twin = value<Tab>(await stack.tool(thread, "browser_navigate", { tabID: tab.id, url: stack.site.url("www.shop", "/") }));
   expect(twin.title).toBe("Home of www.shop.test");
+  expect(twin.generation).toBe(2);
   const other = stack.call(thread, "browser_navigate", { tabID: tab.id, url: stack.site.url("other", "/") });
   const asked = await stack.answer(thread, "once");
   expect(asked.patterns).toEqual([
