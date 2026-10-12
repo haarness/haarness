@@ -459,6 +459,17 @@ impl ModelProvider for HaarnessCloudProvider {
     fn id(&self) -> &str {
         "haarness"
     }
+    /// The router transport marks an Anthropic model's prompt for caching
+    /// (`OpenAiCompatibleProvider::marks_prompt_cache`). The scope is the
+    /// signed-in identity's digest.
+    fn explicit_prompt_cache_scope(&self, model: &str) -> Option<String> {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        model
+            .starts_with("anthropic/")
+            .then(|| self.identity())
+            .flatten()
+            .map(|identity| URL_SAFE_NO_PAD.encode(identity))
+    }
     fn info(&self) -> ProviderInfo {
         let signed_in = self.client.config.signed_in();
         ProviderInfo {
