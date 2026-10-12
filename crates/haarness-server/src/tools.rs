@@ -2611,20 +2611,32 @@ impl Tool for BuiltinTool {
                 .await
             }
             Kind::List => {
-                let path = self.resolve_existing(string(&args, "path")?, &context)?;
-                let mut entries = tokio::fs::read_dir(path).await.map_err(tool_error)?;
+                let requested = string(&args, "path")?;
+                let path = self.resolve_existing(requested, &context)?;
+                let secrets = SecretFilter::new(&self.workspace, requested, &path);
+                let mut entries = tokio::fs::read_dir(&path).await.map_err(tool_error)?;
                 let mut names = Vec::new();
+                let mut skipped = 0;
                 while let Some(entry) = entries.next_entry().await.map_err(tool_error)? {
+                    let full = entry.path();
+                    // Folders stay listed; a secret-named file, or a link to
+                    // one, is left out and only counted.
+                    if !full.is_dir() && secrets.hides(&full) {
+                        skipped += 1;
+                        continue;
+                    }
                     names.push(entry.file_name().to_string_lossy().into_owned());
                 }
                 names.sort();
-                truncate_output(names.join("\n")).await
+                Ok(with_skipped(
+                    truncate_output(names.join("\n")).await?,
+                    skipped,
+                    false,
+                ))
             }
             Kind::Glob => {
-                let root = self.resolve_existing(
-                    args.get("path").and_then(Value::as_str).unwrap_or("."),
-                    &context,
-                )?;
+                let requested = args.get("path").and_then(Value::as_str).unwrap_or(".");
+                let root = self.resolve_existing(requested, &context)?;
                 if !root.is_dir() {
                     return Err(CoreError::Invalid(format!(
                         "glob path must be a directory: {}",
@@ -2635,37 +2647,72 @@ impl Tool for BuiltinTool {
                     .join(string(&args, "pattern")?)
                     .to_string_lossy()
                     .into_owned();
-                let values = glob::glob(&pattern)
+                let secrets = SecretFilter::new(&self.workspace, requested, &root);
+                let mut values = Vec::new();
+                let mut skipped = 0;
+                let mut partial = false;
+                for path in glob::glob(&pattern)
                     .map_err(tool_error)?
                     .filter_map(Result::ok)
                     .filter(|path| path.starts_with(&root))
-                    .map(|path| {
+                {
+                    if values.len() == 10_000 {
+                        partial = true;
+                        break;
+                    }
+                    // `*` matches dotfiles and `**` follows linked folders, so
+                    // each file is checked by where it really leads as well.
+                    if !path.is_dir() && secrets.hides(&path) {
+                        skipped += 1;
+                        continue;
+                    }
+                    values.push(
                         path.strip_prefix(&self.workspace)
                             .unwrap_or(&path)
                             .display()
-                            .to_string()
-                    })
-                    .take(10_000)
-                    .collect::<Vec<_>>();
-                truncate_output(values.join("\n")).await
+                            .to_string(),
+                    );
+                }
+                Ok(with_skipped(
+                    truncate_output(values.join("\n")).await?,
+                    skipped,
+                    partial,
+                ))
             }
             Kind::Grep => {
                 let regex = regex::Regex::new(string(&args, "pattern")?).map_err(tool_error)?;
-                let root = self.resolve_existing(
-                    args.get("path").and_then(Value::as_str).unwrap_or("."),
-                    &context,
-                )?;
+                let requested = args.get("path").and_then(Value::as_str).unwrap_or(".");
+                let root = self.resolve_existing(requested, &context)?;
+                let secrets = SecretFilter::new(&self.workspace, requested, &root);
+                // The walker searches a file it is given whatever its filters
+                // say, so a secret-named one, or a link to one, is left out
+                // here, before anything reads it.
+                if root.is_file() && secrets.hides(&root) {
+                    return Ok(with_skipped(output(String::new()), 1, false));
+                }
                 let mut matches = Vec::new();
+                let mut files = 0;
+                let mut skipped = 0;
+                let mut partial = false;
                 // Match ripgrep semantics: respect .gitignore,
                 // .ignore, repository excludes, hidden files, and parent
                 // ignore files instead of scanning dependency/build trees.
-                for entry in ignore::WalkBuilder::new(root)
+                // Links are not followed, so every file is where it is named.
+                for entry in ignore::WalkBuilder::new(&root)
                     .standard_filters(true)
                     .build()
                     .filter_map(Result::ok)
                     .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
-                    .take(20_000)
                 {
+                    if files == 20_000 {
+                        partial = true;
+                        break;
+                    }
+                    files += 1;
+                    if secrets.names_secret(entry.path()) {
+                        skipped += 1;
+                        continue;
+                    }
                     if let Ok(text) = std::fs::read_to_string(entry.path()) {
                         for (index, line) in text.lines().enumerate() {
                             if regex.is_match(line) {
@@ -2686,7 +2733,11 @@ impl Tool for BuiltinTool {
                         }
                     }
                 }
-                truncate_output(matches.join("\n")).await
+                Ok(with_skipped(
+                    truncate_output(matches.join("\n")).await?,
+                    skipped,
+                    partial,
+                ))
             }
             Kind::Write => {
                 let requested_path = string(&args, "path")?;
@@ -3071,6 +3122,90 @@ impl BuiltinTool {
         }
         Ok(path)
     }
+}
+
+/// Which files `grep`, `glob` and `list` leave out: those the built-in read
+/// rules ask about (`*.env` and `*.env.*`, except `*.env.example` and files
+/// inside a `node_modules` folder). An explicit read of one still asks.
+struct SecretFilter {
+    /// The canonical and the configured workspace. A path inside it is judged
+    /// workspace-relative, as search output and a follow-up read write it.
+    workspaces: [PathBuf; 2],
+    /// The canonical root the tool searches, and the same root as the model
+    /// named it, which may run through a link.
+    root: PathBuf,
+    named_root: PathBuf,
+}
+
+impl SecretFilter {
+    fn new(workspace: &Path, requested: &str, root: &Path) -> Self {
+        Self {
+            workspaces: [
+                workspace
+                    .canonicalize()
+                    .unwrap_or_else(|_| workspace.to_path_buf()),
+                workspace.to_path_buf(),
+            ],
+            root: root.to_path_buf(),
+            named_root: workspace.join(requested),
+        }
+    }
+
+    fn secret(&self, path: &Path) -> bool {
+        let relative = self
+            .workspaces
+            .iter()
+            .find_map(|workspace| path.strip_prefix(workspace).ok());
+        haarness_core::is_secret_path(relative.unwrap_or(path))
+    }
+
+    /// Whether `path`, beneath the searched root, is secret-named by its own
+    /// path or by the path the model named, such as a linked package under
+    /// `node_modules` whose real folder holds a `.env`.
+    fn names_secret(&self, path: &Path) -> bool {
+        self.secret(path)
+            || path.strip_prefix(&self.root).is_ok_and(|rest| {
+                self.secret(&if rest.as_os_str().is_empty() {
+                    self.named_root.clone()
+                } else {
+                    self.named_root.join(rest)
+                })
+            })
+    }
+
+    /// [`Self::names_secret`], or a link that leads to a secret-named file.
+    fn hides(&self, path: &Path) -> bool {
+        self.names_secret(path)
+            || std::fs::canonicalize(path)
+                .is_ok_and(|target| target != path && self.secret(&target))
+    }
+}
+
+/// Ends a search's output with how many secret-named files it left out, and
+/// records the count as `skipped`. The note follows any truncation so the
+/// model always sees it; `partial` means the search stopped at its result
+/// limit, so files it never reached went uncounted.
+fn with_skipped(mut output: ToolOutput, skipped: usize, partial: bool) -> ToolOutput {
+    if skipped == 0 {
+        return output;
+    }
+    let note = format!(
+        "(skipped {}{skipped} secret-named file{})",
+        if partial { "at least " } else { "" },
+        if skipped == 1 { "" } else { "s" }
+    );
+    output.text = if output.text.is_empty() {
+        format!("No files found\n\n{note}")
+    } else {
+        format!("{}\n\n{note}", output.text)
+    };
+    match &mut output.metadata {
+        Value::Object(metadata) => {
+            metadata.insert("skipped".into(), json!(skipped));
+        }
+        metadata => *metadata = json!({"skipped": skipped}),
+    }
+    output
 }
 
 fn string<'a>(value: &'a Value, key: &str) -> CoreResult<&'a str> {
@@ -5091,6 +5226,208 @@ export default workflow({
         assert!(result.text.contains("visible.txt"), "{}", result.text);
         assert!(!result.text.contains("ignored.txt"), "{}", result.text);
         assert!(!result.text.contains("hidden.txt"), "{}", result.text);
+        tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn search_tools_skip_secret_named_files() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-secrets-{}", uuid::Uuid::now_v7()));
+        for directory in [
+            ".git",
+            "node_modules/pkg",
+            "node_modules/@s",
+            "packages/pkg",
+        ] {
+            std::fs::create_dir_all(workspace.join(directory)).unwrap();
+        }
+        std::fs::create_dir_all(workspace.join("conf.env.d")).unwrap();
+        // Results name paths relative to the workspace only under its real path.
+        let workspace = workspace.canonicalize().unwrap();
+        // Every file holds the needle and its own name.
+        for file in [
+            ".env",
+            "prod.env",
+            "app.env.local",
+            ".env.example",
+            "c.env.example",
+            "d.txt",
+            "node_modules/pkg/e.env",
+            "conf.env.d/notes.txt",
+            "packages/pkg/prod.env",
+            "packages/pkg/index.ts",
+        ] {
+            std::fs::write(workspace.join(file), format!("needle {file}\n")).unwrap();
+        }
+        std::os::unix::fs::symlink(".env", workspace.join("notes.txt")).unwrap();
+        // A workspace package linked into node_modules keeps its own secrets.
+        std::os::unix::fs::symlink("../../packages/pkg", workspace.join("node_modules/@s/pkg"))
+            .unwrap();
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let run = |tool: &'static str, args: Value| {
+            let registry = &registry;
+            let context = ToolContext {
+                execution: Default::default(),
+                thread_id: ThreadId::new(),
+                turn_id: TurnId::new(),
+                workspace: workspace.clone(),
+                authorized_external_paths: Vec::new(),
+                cancel: CancellationToken::new(),
+                invoker: None,
+            };
+            async move {
+                registry
+                    .get(tool)
+                    .unwrap()
+                    .execute(args, context)
+                    .await
+                    .unwrap()
+            }
+        };
+        let none = |count: usize| {
+            format!(
+                "No files found\n\n(skipped {count} secret-named file{})",
+                if count == 1 { "" } else { "s" }
+            )
+        };
+
+        // A tree walk leaves secret-named files out and counts them; hidden
+        // files and links are not walked at all.
+        let grep = run("grep", json!({"pattern":"needle"})).await;
+        for kept in [
+            "d.txt:1:needle d.txt",
+            "c.env.example:1:",
+            "node_modules/pkg/e.env:1:",
+            "packages/pkg/index.ts:1:",
+        ] {
+            assert!(grep.text.contains(kept), "{kept}: {}", grep.text);
+        }
+        for secret in [
+            "needle prod.env",
+            "needle app.env.local",
+            "needle .env\n",
+            "needle conf.env.d",
+            "needle packages/pkg/prod.env",
+        ] {
+            assert!(!grep.text.contains(secret), "{secret}: {}", grep.text);
+        }
+        assert!(
+            grep.text.ends_with("\n\n(skipped 4 secret-named files)"),
+            "{}",
+            grep.text
+        );
+        assert_eq!(grep.metadata["skipped"], 4);
+        // A secret-named file named directly, or a link to one, is never read.
+        for path in [".env", "prod.env", "notes.txt", "conf.env.d"] {
+            let result = run("grep", json!({"pattern":"needle","path":path})).await;
+            assert_eq!(result.text, none(1), "{path}");
+            assert_eq!(result.metadata["skipped"], 1, "{path}");
+        }
+        for path in [".env.example", "node_modules/pkg/e.env"] {
+            let result = run("grep", json!({"pattern":"needle","path":path})).await;
+            assert!(result.text.contains(&format!("needle {path}")), "{path}");
+            assert!(result.metadata.is_null(), "{path}");
+        }
+        // A linked package is judged by its real folder too.
+        let linked = run(
+            "grep",
+            json!({"pattern":"needle","path":"node_modules/@s/pkg"}),
+        )
+        .await;
+        assert!(linked.text.contains("needle packages/pkg/index.ts"));
+        assert!(!linked.text.contains("needle packages/pkg/prod.env"));
+        assert!(linked.text.ends_with("(skipped 1 secret-named file)"));
+        // No match: still says what it skipped.
+        let empty = run("grep", json!({"pattern":"absent"})).await;
+        assert_eq!(empty.text, none(4));
+
+        // glob matches dotfiles, so the project's .env is counted here.
+        let glob = run("glob", json!({"pattern":"*"})).await;
+        let names = glob.text.lines().collect::<Vec<_>>();
+        for kept in [
+            ".env.example",
+            "c.env.example",
+            "d.txt",
+            "conf.env.d",
+            "node_modules",
+        ] {
+            assert!(names.contains(&kept), "{kept}: {}", glob.text);
+        }
+        for secret in [".env", "prod.env", "app.env.local", "notes.txt"] {
+            assert!(!names.contains(&secret), "{secret}: {}", glob.text);
+        }
+        assert!(glob.text.ends_with("\n\n(skipped 4 secret-named files)"));
+        assert_eq!(glob.metadata["skipped"], 4);
+        assert_eq!(run("glob", json!({"pattern":"*.env"})).await.text, none(2));
+        let nested = run("glob", json!({"pattern":"node_modules/**/*.env"})).await;
+        assert_eq!(
+            nested.text,
+            "node_modules/pkg/e.env\n\n(skipped 1 secret-named file)"
+        );
+
+        let list = run("list", json!({"path":"."})).await;
+        let names = list.text.lines().collect::<Vec<_>>();
+        for kept in [
+            ".env.example",
+            "c.env.example",
+            "d.txt",
+            "conf.env.d",
+            "packages",
+        ] {
+            assert!(names.contains(&kept), "{kept}: {}", list.text);
+        }
+        for secret in [".env", "prod.env", "app.env.local", "notes.txt"] {
+            assert!(!names.contains(&secret), "{secret}: {}", list.text);
+        }
+        assert!(list.text.ends_with("\n\n(skipped 4 secret-named files)"));
+        assert_eq!(list.metadata["skipped"], 4);
+        let package = run("list", json!({"path":"node_modules/pkg"})).await;
+        assert_eq!(package.text, "e.env");
+        let linked = run("list", json!({"path":"node_modules/@s/pkg"})).await;
+        assert_eq!(linked.text, "index.ts\n\n(skipped 1 secret-named file)");
+        assert_eq!(
+            run("list", json!({"path":"conf.env.d"})).await.text,
+            none(1)
+        );
+        tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_glob_stopped_at_its_limit_says_its_skip_count_is_a_lower_bound() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-glob-cap-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        // glob lists names in order, so a.env is met before the limit.
+        std::fs::write(workspace.join("a.env"), "").unwrap();
+        for index in 0..10_001 {
+            std::fs::write(workspace.join(format!("f{index:05}.txt")), "").unwrap();
+        }
+        let result = NativeToolRegistry::new(workspace.clone())
+            .get("glob")
+            .unwrap()
+            .execute(
+                json!({"pattern":"*"}),
+                ToolContext {
+                    execution: Default::default(),
+                    thread_id: ThreadId::new(),
+                    turn_id: TurnId::new(),
+                    workspace: workspace.clone(),
+                    authorized_external_paths: Vec::new(),
+                    cancel: CancellationToken::new(),
+                    invoker: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            result
+                .text
+                .ends_with("\n\n(skipped at least 1 secret-named file)"),
+            "{}",
+            &result.text[result.text.len().saturating_sub(300)..]
+        );
+        assert_eq!(result.metadata["skipped"], 1);
         tokio::fs::remove_dir_all(workspace).await.unwrap();
     }
 

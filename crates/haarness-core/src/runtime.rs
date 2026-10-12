@@ -10323,10 +10323,19 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
     .and_then(serde_json::Value::as_str)
     .unwrap_or("*")
     .to_owned();
+    // File reads and edits also meet the rules for the file they really
+    // open, after links and `..`: a link `notes.txt -> .env` still asks, and
+    // `node_modules/x/../../.env` is not a file inside node_modules.
+    let mut patterns = vec![target.clone()];
+    if matches!(name, "read" | "write" | "edit" | "multiedit")
+        && let Some(resolved) = resolved_file_pattern(workspace, &target)
+    {
+        patterns.push(resolved);
+    }
     // Reads generalize only to the exact path (an approved `.env` read must
     // not open every secret); mutations generalize wide.
     let always = if name == "read" {
-        vec![target.clone()]
+        patterns.clone()
     } else {
         vec!["*".into()]
     };
@@ -10336,11 +10345,49 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         } else {
             name.to_owned()
         },
-        patterns: vec![target],
+        patterns,
         always,
         external_paths: Vec::new(),
     });
     plans
+}
+
+/// The path a file tool opens for `target`, when links or `..` make it a
+/// different file from the one the path names. It is written the way the
+/// model wrote the target (workspace-relative when that was), so rules meet
+/// it in the same form; `None` when the target already names that file.
+fn resolved_file_pattern(workspace: &Path, target: &str) -> Option<String> {
+    if target.is_empty() || target == "*" {
+        return None;
+    }
+    let resolved = crate::permissions::resolve_permission_path(workspace, target);
+    let root = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let given = Path::new(target);
+    // `Path` equality ignores `.` components but keeps `..`, so a target
+    // with `..` always gets its resolved form checked too.
+    let named = if given.is_absolute() {
+        given
+            .strip_prefix(workspace)
+            .map_or_else(|_| given.to_path_buf(), |rest| root.join(rest))
+    } else {
+        root.join(given)
+    };
+    if resolved == named {
+        return None;
+    }
+    let pattern = match resolved.strip_prefix(&root) {
+        Ok(relative) if given.is_relative() => {
+            if relative.as_os_str().is_empty() {
+                ".".to_owned()
+            } else {
+                relative.to_string_lossy().into_owned()
+            }
+        }
+        _ => resolved.to_string_lossy().into_owned(),
+    };
+    (pattern != target).then_some(pattern)
 }
 
 #[cfg(test)]
@@ -12034,6 +12081,71 @@ mod tests {
         );
         assert_eq!(grep.last().unwrap().permission, "grep");
         assert_eq!(grep.last().unwrap().patterns, vec!["unsafe"]);
+    }
+
+    #[test]
+    fn file_permissions_also_meet_the_rules_for_the_file_really_opened() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-real-path-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(workspace.join("node_modules/pkg")).unwrap();
+        std::fs::write(workspace.join(".env"), "fixture").unwrap();
+        std::fs::write(workspace.join("node_modules/pkg/.env"), "fixture").unwrap();
+        std::fs::write(workspace.join("main.rs"), "fixture").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(".env", workspace.join("notes.txt")).unwrap();
+        let engine = crate::PermissionEngine::build_defaults();
+        let read = |path: &str| {
+            let plan = super::ask_plans("read", &json!({"path": path}), &workspace).remove(0);
+            assert_eq!(plan.permission, "read");
+            assert_eq!(plan.always, plan.patterns, "{path}");
+            let asks = plan.patterns.iter().any(|pattern| {
+                engine.evaluate(&plan.operation(pattern)) == crate::PermissionDecision::Ask
+            });
+            (plan.patterns, asks)
+        };
+        // A plain path is checked as written, once.
+        assert_eq!(read("main.rs"), (vec!["main.rs".to_owned()], false));
+        assert_eq!(read(".env"), (vec![".env".to_owned()], true));
+        assert_eq!(read("./main.rs"), (vec!["./main.rs".to_owned()], false));
+        // Files inside node_modules are read without asking...
+        assert_eq!(
+            read("node_modules/pkg/.env"),
+            (vec!["node_modules/pkg/.env".to_owned()], false)
+        );
+        // ...but `..` cannot make the project's .env look like one of them.
+        for path in ["node_modules/pkg/../../.env", "node_modules/../.env"] {
+            assert_eq!(read(path), (vec![path.to_owned(), ".env".to_owned()], true));
+        }
+        let absolute = workspace.join("node_modules/../.env");
+        let (patterns, asks) = read(absolute.to_str().unwrap());
+        assert!(asks);
+        assert_eq!(
+            patterns[1],
+            workspace
+                .canonicalize()
+                .unwrap()
+                .join(".env")
+                .display()
+                .to_string()
+        );
+        // A link is checked by its target too, and edits through it as well.
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                read("notes.txt"),
+                (vec!["notes.txt".to_owned(), ".env".to_owned()], true)
+            );
+            for (tool, args) in [
+                ("edit", json!({"path":"notes.txt","old":"a","new":"b"})),
+                ("write", json!({"path":"notes.txt","content":"b"})),
+            ] {
+                let plan = super::ask_plans(tool, &args, &workspace).remove(0);
+                assert_eq!(plan.permission, "edit");
+                assert_eq!(plan.patterns, vec!["notes.txt", ".env"]);
+                assert_eq!(plan.always, vec!["*"]);
+            }
+        }
+        std::fs::remove_dir_all(workspace).unwrap();
     }
 
     #[test]
