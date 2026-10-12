@@ -5282,6 +5282,56 @@ fn resolve_pending_question(
     Ok(())
 }
 
+/// The question tool's arguments, checked before the user sees anything.
+struct QuestionRequest<'a> {
+    prompt: &'a str,
+    choices: Vec<String>,
+    multiple: bool,
+    custom: bool,
+}
+
+fn question_request(arguments: &serde_json::Value) -> CoreResult<QuestionRequest<'_>> {
+    let prompt = arguments
+        .get("prompt")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| CoreError::Invalid("question.prompt is required".into()))?;
+    let choices: Vec<String> = arguments
+        .get("choices")
+        .and_then(serde_json::Value::as_array)
+        .map_or_else(Vec::new, |values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        });
+    let multiple = arguments
+        .get("multiple")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let custom = arguments
+        .get("custom")
+        .and_then(serde_json::Value::as_bool)
+        // Haarness questions always offer a free-form answer unless the
+        // caller explicitly disables it. This matters for choices such as
+        // "Share an error message": the label is an action, while the
+        // custom answer carries the actual error text.
+        .unwrap_or(true);
+    // With nothing to pick and nothing to type, no client can answer, and the
+    // turn would wait on the question until it is cancelled.
+    if choices.is_empty() && !custom {
+        return Err(CoreError::Invalid(
+            "question needs a way to answer it: give at least one choice, or leave custom (free-form answers) enabled".into(),
+        ));
+    }
+    Ok(QuestionRequest {
+        prompt,
+        choices,
+        multiple,
+        custom,
+    })
+}
+
 impl PendingPermission {
     fn info(&self, id: &str) -> PendingPermissionInfo {
         PendingPermissionInfo {
@@ -8396,32 +8446,12 @@ impl RunnerTask {
         Ok(format!("Todo list updated ({count} items)"))
     }
     async fn ask_question(&self, arguments: &serde_json::Value) -> CoreResult<String> {
-        let prompt = arguments
-            .get("prompt")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| CoreError::Invalid("question.prompt is required".into()))?;
-        let choices = arguments
-            .get("choices")
-            .and_then(serde_json::Value::as_array)
-            .map_or_else(Vec::new, |values| {
-                values
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .map(ToOwned::to_owned)
-                    .collect()
-            });
-        let multiple = arguments
-            .get("multiple")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        let custom = arguments
-            .get("custom")
-            .and_then(serde_json::Value::as_bool)
-            // Haarness questions always offer a free-form answer unless the
-            // caller explicitly disables it. This matters for choices such as
-            // "Share an error message": the label is an action, while the
-            // custom answer carries the actual error text.
-            .unwrap_or(true);
+        let QuestionRequest {
+            prompt,
+            choices,
+            multiple,
+            custom,
+        } = question_request(arguments)?;
         let id = uuid::Uuid::now_v7().to_string();
         let (sender, receiver) = oneshot::channel();
         self.publish_item(ItemData::Question {
@@ -10728,7 +10758,7 @@ mod tests {
 
     use super::{
         CoreError, EventBus, GoalLogicalTurnGuard, Item, ItemData, PendingQuestion,
-        ProviderMessage, parse_goal_criteria_selection, provider_messages,
+        ProviderMessage, parse_goal_criteria_selection, provider_messages, question_request,
         resolve_pending_question, subagent_title,
     };
 
@@ -10777,6 +10807,36 @@ mod tests {
             parse_goal_criteria_selection(&proposed, "Cancellation is observable").unwrap(),
             ["Cancellation is observable"]
         );
+    }
+
+    #[test]
+    fn question_without_choices_must_allow_a_free_form_answer() {
+        for arguments in [
+            json!({"prompt": "Name?", "custom": false}),
+            json!({"prompt": "Name?", "choices": [], "custom": false}),
+            // Labels that are not strings are dropped, leaving nothing to pick.
+            json!({"prompt": "Name?", "choices": [1, 2], "custom": false}),
+        ] {
+            let Err(CoreError::Invalid(message)) = question_request(&arguments) else {
+                panic!("{arguments} must be rejected");
+            };
+            assert!(message.contains("at least one choice"), "{message}");
+            assert!(message.contains("custom"), "{message}");
+        }
+
+        let open = json!({"prompt": "Name?"});
+        let open = question_request(&open).unwrap();
+        assert!(open.choices.is_empty());
+        assert!(open.custom);
+        let picked = json!({"prompt": "Color?", "choices": ["Green"], "custom": false});
+        let picked = question_request(&picked).unwrap();
+        assert_eq!(picked.choices, ["Green"]);
+        assert!(!picked.custom);
+        assert!(!picked.multiple);
+        assert!(matches!(
+            question_request(&json!({"choices": ["Green"]})),
+            Err(CoreError::Invalid(_))
+        ));
     }
 
     #[test]
