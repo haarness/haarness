@@ -24,6 +24,16 @@ haarness remote run --chat CHAT_ID --name "Shared investigation"      # foregrou
 
 Find the native chat ID in its URL or `haarness sessions list --json`. Attachments sent from Cloud clients may be images, PDFs, audio, video or text files (text is read into the message); other files are refused before the message is stored. Published chats include descendants and the project filesystem shared by all its chats; this is not a filesystem sandbox. The remote caller cannot enumerate/read/control other chat histories or host terminals. The machine checks this scope independently of the Cloud relay, and refuses publishing through an older runtime without scope enforcement.
 
+## What waits on you
+
+When Cloud lists `attention.v1` in the relay's `ready` frame, the connector tells it what waits on you, so Cloud can show it under **Needs you** and notify your phone without an open chat. A Cloud that does not list it receives nothing new (it would drop the connection on an unknown frame).
+
+Each `attention` frame carries the complete set of pending approvals and questions (at most 200; Cloud resolves anything left out) and the chats whose turn finished or failed in the last 15 minutes (at most 20, resent in every frame; Cloud keeps the first report of each turn). The first frame of every connection is sent even when nothing waits, once every running project has answered; after that a frame goes out only when something changed, at most every 300 ms, with a `revision` that grows within the connection.
+
+Only this leaves the computer: the ids of the approval, question, turn and chats, the project's workspace id and name, the chat title, the approval's category (`bash`, `edit`, `webfetch`, `mcp` for any MCP tool, …), whether it is a Chrome approval, whether a question takes a free-text answer, whether a chat is a scheduled run, and times. Commands, paths, URLs, approval patterns and details, question text and anything the model wrote stay on the computer; a phone reads them through the relay when it opens the chat, which is where it answers.
+
+The connector watches only project servers that already run. It finds them through their discovery records, as the Chrome bridge does, never through the host gateway, so it never starts, replaces or keeps a server running; a stopped server runs no turn, so nothing of it can wait on you. Projects closed for remote access are left out. A server started by a different Haarness build than the connector is reported with `actionable: false`: Cloud's request would have to replace it, which Haarness refuses while a turn runs, so it is answered on the computer. A turn counts as finished only for the chat a person started, not a helper agent's, and only when nothing else starts in that chat within about two seconds, so a goal or loop that carries on is not reported; stopped turns are not reported. A chat shared with `/remote-control` reports only its own chat tree, scoped by the server exactly as Cloud's requests to it are. When the connector reconnects (an OAuth sign-in reconnects about every ten minutes), it resumes each server's events where it left off, so a turn that finishes meanwhile is still reported.
+
 ## SDKs
 
 ```typescript

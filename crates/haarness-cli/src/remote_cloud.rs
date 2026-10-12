@@ -2,6 +2,7 @@
 use super::{
     Paths, ensure_workspace_server,
     reconnect::{Backoff, Link, Pacing},
+    remote_attention,
 };
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -20,6 +21,9 @@ use uuid::Uuid;
 const CHUNK: usize = 32 * 1024;
 const WINDOW: usize = 8;
 const MAX_BODY: usize = 16 * 1024 * 1024;
+/// Scopes a request to one published chat tree (`haarness-server`'s
+/// `remote_scope`): the server answers only for that chat and its children.
+pub(crate) const REMOTE_THREAD_HEADER: &str = "x-haarness-remote-thread";
 #[derive(Args)]
 pub struct RemoteArgs {
     #[command(subcommand)]
@@ -74,11 +78,22 @@ enum RemoteCommand {
 // Kept wire-compatible with cloud-contracts::remote::RelayFrame; protocol fixtures test both ends.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum Frame {
+pub(crate) enum Frame {
     Ready {
         version: u32,
+        /// Optional frames this relay accepts, such as `attention.v1`. A
+        /// relay that does not list one drops the socket when it arrives.
+        #[serde(default)]
+        features: Vec<String>,
     },
     CatalogChanged,
+    /// What waits on the person here, sent only to a relay announcing
+    /// `attention.v1` (see `remote_attention`).
+    Attention {
+        revision: u64,
+        items: Vec<remote_attention::Item>,
+        finished: Vec<remote_attention::Finished>,
+    },
     Open {
         id: Uuid,
         method: String,
@@ -379,6 +394,8 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
             });
             let _watcher = AbortTask(watcher);
             let mut shown_title = identity["title"].as_str().unwrap_or_default().to_owned();
+            let attention =
+                remote_attention::Context::new(paths, trust, remote_attention::Timing::default());
             let mut backoff = Backoff::new(Pacing::default());
             let mut rejected = None;
             let ended: Result<()> = async {
@@ -415,7 +432,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
                         .insert("authorization", format!("Bearer {bearer}").parse()?);
                     let link = tokio::select! {
                         () = stop.cancelled() => break,
-                        link = relay_link(handshake, &target, &http, backoff.pacing.stable) => link?,
+                        link = relay_link(handshake, &target, &http, backoff.pacing.stable, &attention) => link?,
                         () = follow_title(&client, &http, &target, id, &file, &mut shown_title) => continue,
                     };
                     if link == Link::Unauthorized {
@@ -532,14 +549,20 @@ impl std::fmt::Display for Unsupported {
 }
 impl std::error::Error for Unsupported {}
 const RELAY_VERSION: u64 = 1;
-/// The version a relay's first frame announces, when it is a `ready` frame.
-fn relay_version(frame: &str) -> Option<u64> {
+/// The version and optional features a relay's first frame announces, when
+/// it is a `ready` frame. Read loosely: a newer relay may say more.
+fn relay_ready(frame: &str) -> Option<(u64, Vec<String>)> {
     let frame = serde_json::from_str::<Value>(frame).ok()?;
-    if frame["type"] == "ready" {
-        frame["version"].as_u64()
-    } else {
-        None
+    if frame["type"] != "ready" {
+        return None;
     }
+    let features = frame["features"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|feature| feature.as_str().map(str::to_owned))
+        .collect();
+    Some((frame["version"].as_u64()?, features))
 }
 /// One connection to the relay, from the handshake until it ends. Only an
 /// answer that reconnecting cannot change is an error.
@@ -548,6 +571,7 @@ async fn relay_link(
     target: &Target,
     http: &reqwest::Client,
     stable: Duration,
+    attention: &Arc<remote_attention::Context>,
 ) -> Result<Link> {
     let attempt = tokio::time::timeout(
         Duration::from_secs(10),
@@ -585,7 +609,15 @@ async fn relay_link(
     println!("Remote host connected");
     let since = tokio::time::Instant::now();
     let mut served = false;
-    if let Err(error) = connected(socket, target.clone(), http.clone(), &mut served).await {
+    if let Err(error) = connected(
+        socket,
+        target.clone(),
+        http.clone(),
+        &mut served,
+        attention.clone(),
+    )
+    .await
+    {
         if error.is::<Unsupported>() {
             return Err(error);
         }
@@ -614,20 +646,41 @@ async fn connected(
     target: Target,
     http: reqwest::Client,
     served: &mut bool,
+    attention: Arc<remote_attention::Context>,
 ) -> Result<()> {
     let ready = tokio::time::timeout(Duration::from_secs(10), socket.next())
         .await?
         .context("Relay closed")??;
-    let version = match &ready {
-        Message::Text(value) => relay_version(value),
+    let ready = match &ready {
+        Message::Text(value) => relay_ready(value),
         _ => None,
     };
-    match version {
-        Some(RELAY_VERSION) => {}
-        Some(version) => return Err(Unsupported(version).into()),
+    let features = match ready {
+        Some((RELAY_VERSION, features)) => features,
+        Some((version, _)) => return Err(Unsupported(version).into()),
         None => anyhow::bail!("Relay did not announce its protocol"),
-    }
+    };
     let (send, mut outgoing) = mpsc::channel::<Frame>(128);
+    // An older relay drops the socket on a frame it does not know.
+    let _attention = features
+        .iter()
+        .any(|feature| feature == remote_attention::FEATURE)
+        .then(|| {
+            let scope = match target.thread {
+                Some(thread) => remote_attention::Scope::Chat {
+                    url: target.url.clone(),
+                    token: target.token.clone(),
+                    project: target.project.clone(),
+                    thread,
+                },
+                None => remote_attention::Scope::Host,
+            };
+            AbortTask(tokio::spawn(remote_attention::watch(
+                attention,
+                scope,
+                send.clone(),
+            )))
+        });
     let runtime_lost = tokio_util::sync::CancellationToken::new();
     let health = runtime_lost.clone();
     let health_target = target.clone();
@@ -859,7 +912,7 @@ async fn dispatch(
             }
         }
         if let Some(thread) = thread {
-            request = request.header("x-haarness-remote-thread", thread.to_string());
+            request = request.header(REMOTE_THREAD_HEADER, thread.to_string());
         }
         let response =
             tokio::time::timeout(Duration::from_secs(310), request.body(body).send()).await??;
@@ -896,7 +949,7 @@ fn account_query(client: &haarness_account::Client) -> String {
         .unwrap_or_default()
 }
 
-struct AbortTask(tokio::task::JoinHandle<()>);
+pub(crate) struct AbortTask(pub(crate) tokio::task::JoinHandle<()>);
 impl Drop for AbortTask {
     fn drop(&mut self) {
         self.0.abort();
@@ -1593,22 +1646,30 @@ mod tests {
         Serve,
         /// Announce another protocol version.
         Version(u64),
+        /// Announce these features, keep the socket and pass on every frame
+        /// the connector sends.
+        Record(&'static [&'static str]),
     }
-    /// A relay that plays one step per connection.
-    async fn fake_relay(script: Vec<Relay>) -> String {
+    /// A relay that plays one step per connection, and the frames recorded.
+    async fn fake_relay(script: Vec<Relay>) -> (String, mpsc::UnboundedReceiver<Value>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}/connect", listener.local_addr().unwrap());
+        let (recorded, frames) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             for step in script {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
-                let version = if let Relay::Version(version) = step {
-                    version
-                } else {
-                    1
+                let ready = match step {
+                    Relay::Version(version) => json!({"type":"ready","version":version}),
+                    Relay::Record(features) => {
+                        json!({"type":"ready","version":1,"features":features})
+                    }
+                    _ => json!({"type":"ready","version":1}),
                 };
-                let ready = json!({"type":"ready","version":version}).to_string();
-                socket.send(Message::Text(ready.into())).await.unwrap();
+                socket
+                    .send(Message::Text(ready.to_string().into()))
+                    .await
+                    .unwrap();
                 match step {
                     Relay::Hold(time) => tokio::time::sleep(time).await,
                     Relay::Serve => {
@@ -1626,12 +1687,47 @@ mod tests {
                             }
                         }
                     }
+                    Relay::Record(_) => {
+                        while let Some(Ok(message)) = socket.next().await {
+                            if let Message::Text(text) = message {
+                                let _ = recorded.send(serde_json::from_str(&text).unwrap());
+                            }
+                        }
+                    }
                     Relay::Drop | Relay::Version(_) => {}
                 }
                 let _ = socket.close(None).await;
             }
         });
-        url
+        (url, frames)
+    }
+    #[test]
+    fn a_ready_frame_announces_a_version_and_optional_features() {
+        assert_eq!(
+            relay_ready(r#"{"type":"ready","version":1}"#),
+            Some((1, vec![]))
+        );
+        assert_eq!(
+            relay_ready(
+                r#"{"type":"ready","version":1,"features":["attention.v1",7],"later":true}"#
+            ),
+            Some((1, vec!["attention.v1".to_owned()]))
+        );
+        assert_eq!(relay_ready(r#"{"type":"ready"}"#), None);
+        assert_eq!(relay_ready(r#"{"type":"open","version":1}"#), None);
+    }
+    /// Attention context for `paths`, with waits short enough for tests.
+    fn attention(paths: &Paths) -> Arc<remote_attention::Context> {
+        remote_attention::Context::new(
+            paths,
+            false,
+            remote_attention::Timing {
+                debounce: Duration::from_millis(50),
+                settle: Duration::from_millis(300),
+                scan: Duration::from_millis(100),
+                first: Duration::from_secs(5),
+            },
+        )
     }
     #[tokio::test]
     async fn a_relay_that_keeps_dropping_the_connection_is_retried_less_and_less_often() {
@@ -1665,13 +1761,16 @@ mod tests {
             Relay::Drop,
             Relay::Version(2),
         ]);
-        let relay = fake_relay(script).await;
+        let (relay, _) = fake_relay(script).await;
+        let root = std::env::temp_dir().join(format!("haarness-remote-backoff-{}", Uuid::now_v7()));
+        let attention = attention(&Paths::new(Some(&root)).unwrap());
         let connect = || {
             relay_link(
                 relay.as_str().into_client_request().unwrap(),
                 &target,
                 &http,
                 pacing.stable,
+                &attention,
             )
         };
 
@@ -1714,10 +1813,12 @@ mod tests {
             &target,
             &http,
             pacing.stable,
+            &attention,
         )
         .await
         .unwrap();
         assert_eq!(link, Link::Failed);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn a_connector_that_gave_up_says_why_in_the_chat_status() {
@@ -1784,5 +1885,559 @@ mod tests {
         }
         assert!(validate_path("/v1/host/workspaces/project/v1/info", &target, None).is_err());
         assert!(validate_path("/v1/host/workspaces/project/v1/info", &target, Some(chat)).is_ok());
+    }
+
+    /// What a fake Haarness server holds; the tests change it as they go.
+    #[derive(Default)]
+    struct FakeState {
+        permissions: Vec<Value>,
+        questions: Vec<Value>,
+        threads: HashMap<Uuid, Value>,
+        /// The turn `/threads/{id}/active` reports.
+        active: HashMap<Uuid, Value>,
+        /// A published chat's tree, for requests scoped to it.
+        tree: HashMap<Uuid, Vec<Uuid>>,
+        /// Every request's path and scope header.
+        requests: Vec<(String, Option<String>)>,
+        event_id: u64,
+    }
+    /// A Haarness server as the attention watcher sees it: a scope-aware
+    /// `/v1/permissions`, `/v1/questions`, chats and an event stream.
+    #[derive(Clone)]
+    struct FakeDaemon {
+        url: String,
+        instance: Uuid,
+        state: Arc<std::sync::Mutex<FakeState>>,
+        events: tokio::sync::broadcast::Sender<(Uuid, String)>,
+    }
+    impl FakeDaemon {
+        async fn start(workspace: &Path) -> Self {
+            use axum::{
+                Json, Router,
+                body::Body,
+                extract::{Path as Route, State},
+                http::{HeaderMap, StatusCode, Uri},
+                response::{IntoResponse, Response},
+                routing::get,
+            };
+            let (events, _) = tokio::sync::broadcast::channel(64);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let daemon = Self {
+                url: format!("http://{}", listener.local_addr().unwrap()),
+                instance: Uuid::now_v7(),
+                state: Arc::default(),
+                events,
+            };
+            let info = json!({"name":"haarness","version":"0.1.1","schemaVersion":"1",
+                "serverInstanceId":daemon.instance,"workspace":workspace,"pid":std::process::id(),
+                "projectTrusted":false,"capabilities":["remote-chat-scope.v1","workspace-history.v1","pty.v1"]});
+            let app = Router::new()
+                .route("/v1/info", get(move || async move { Json(info) }))
+                .route(
+                    "/v1/permissions",
+                    get(|State(daemon): State<FakeDaemon>, uri: Uri, headers: HeaderMap| async move {
+                        let visible = daemon.visible(&uri, &headers);
+                        rows(&daemon.state.lock().unwrap().permissions, visible.as_deref())
+                    }),
+                )
+                .route(
+                    "/v1/questions",
+                    get(|State(daemon): State<FakeDaemon>, uri: Uri, headers: HeaderMap| async move {
+                        let visible = daemon.visible(&uri, &headers);
+                        rows(&daemon.state.lock().unwrap().questions, visible.as_deref())
+                    }),
+                )
+                .route(
+                    "/v1/threads/{id}",
+                    get(
+                        |State(daemon): State<FakeDaemon>, Route(id): Route<Uuid>, uri: Uri, headers: HeaderMap| async move {
+                            if daemon.visible(&uri, &headers).is_some_and(|ids| !ids.contains(&id)) {
+                                return StatusCode::FORBIDDEN.into_response();
+                            }
+                            let thread = daemon.state.lock().unwrap().threads.get(&id).cloned();
+                            thread.map_or(StatusCode::NOT_FOUND.into_response(), |thread| {
+                                Json(thread).into_response()
+                            })
+                        },
+                    ),
+                )
+                .route(
+                    "/v1/threads/{id}/active",
+                    get(
+                        |State(daemon): State<FakeDaemon>, Route(id): Route<Uuid>, uri: Uri, headers: HeaderMap| async move {
+                            daemon.visible(&uri, &headers);
+                            let active = daemon.state.lock().unwrap().active.get(&id).cloned();
+                            Json(active.unwrap_or(Value::Null))
+                        },
+                    ),
+                )
+                .route(
+                    "/v1/events",
+                    get(|State(daemon): State<FakeDaemon>, uri: Uri, headers: HeaderMap| async move {
+                        let visible = daemon.visible(&uri, &headers);
+                        let receiver = daemon.events.subscribe();
+                        let live = futures::stream::unfold(receiver, move |mut receiver| {
+                            let visible = visible.clone();
+                            async move {
+                                loop {
+                                    match receiver.recv().await {
+                                        Ok((thread, frame))
+                                            if visible.as_ref().is_none_or(|ids| ids.contains(&thread)) =>
+                                        {
+                                            return Some((Ok::<_, std::convert::Infallible>(frame), receiver));
+                                        }
+                                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                                    }
+                                }
+                            }
+                        });
+                        let body = futures::stream::once(async { Ok(": connected\n\n".to_owned()) }).chain(live);
+                        Response::builder()
+                            .header("content-type", "text/event-stream")
+                            .body(Body::from_stream(body))
+                            .unwrap()
+                    }),
+                )
+                .with_state(daemon.clone());
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            daemon
+        }
+        /// The chats a request may see: all, or a published chat's tree.
+        /// Records the request.
+        fn visible(
+            &self,
+            uri: &axum::http::Uri,
+            headers: &axum::http::HeaderMap,
+        ) -> Option<Vec<Uuid>> {
+            let scope = headers
+                .get(REMOTE_THREAD_HEADER)
+                .map(|value| value.to_str().unwrap().to_owned());
+            let mut state = self.state.lock().unwrap();
+            state.requests.push((uri.path().to_owned(), scope.clone()));
+            let root = scope?.parse::<Uuid>().unwrap();
+            Some(state.tree.get(&root).cloned().unwrap_or_default())
+        }
+        fn emit(&self, kind: &str, thread: Uuid, root: Uuid, payload: Value) {
+            let mut state = self.state.lock().unwrap();
+            state.event_id += 1;
+            let id = state.event_id;
+            let envelope = json!({"schemaVersion":"1","serverInstanceId":self.instance,"eventId":id,
+                "type":kind,"threadId":thread,"rootThreadId":root,"turnId":null,"itemId":null,
+                "payload":payload,"createdAt":chrono::Utc::now()});
+            let _ = self.events.send((
+                thread,
+                format!("id: {id}\nevent: {kind}\ndata: {envelope}\n\n"),
+            ));
+        }
+        /// Write this server's discovery record, started by `executable`.
+        fn record(
+            &self,
+            paths: &Paths,
+            workspace_id: &str,
+            workspace: &Path,
+            executable: Option<String>,
+        ) {
+            let folder = paths.cache.join("workspaces").join(workspace_id);
+            std::fs::create_dir_all(&folder).unwrap();
+            let record = crate::rendezvous::RuntimeDiscovery {
+                url: self.url.clone(),
+                token: "fixture".into(),
+                pid: std::process::id(),
+                workspace: Some(workspace.display().to_string()),
+                executable_fingerprint: executable,
+                access_fingerprint: Some(
+                    haarness_server::auth::ServerAccess::Private.fingerprint("fixture"),
+                ),
+                trace_endpoint: None,
+            };
+            crate::write_private_json(&folder.join("runtime.json"), &record).unwrap();
+        }
+        fn target(&self, project: &str, thread: Option<Uuid>) -> Target {
+            Target {
+                url: self.url.clone(),
+                token: "fixture".into(),
+                project: project.into(),
+                thread,
+            }
+        }
+    }
+    /// Pending rows as a server lists them: all, or those of `visible` chats.
+    fn rows(rows: &[Value], visible: Option<&[Uuid]>) -> axum::Json<Value> {
+        axum::Json(Value::Array(
+            rows.iter()
+                .filter(|row| {
+                    visible.is_none_or(|ids| ids.iter().any(|id| row["threadId"] == json!(id)))
+                })
+                .cloned()
+                .collect(),
+        ))
+    }
+    fn chat(id: Uuid, title: &str) -> Value {
+        json!({"id":id,"title":title,"parentId":null,"archived":false,"agent":"build",
+            "provider":"echo","model":"echo-1","createdAt":chrono::Utc::now(),"updatedAt":chrono::Utc::now()})
+    }
+    fn pending_permission(id: &str, thread: Uuid, root: Uuid) -> Value {
+        json!({"permissionId":id,"operation":"bash:git push origin main","permission":"bash",
+            "detail":{"command":"git push origin main"},"patterns":["git push origin main"],
+            "alwaysPatterns":["bash:git push *"],"threadId":thread,"rootThreadId":root,
+            "turnId":Uuid::now_v7(),"explicit":false,"createdAt":chrono::Utc::now()})
+    }
+    fn pending_question(id: &str, thread: Uuid, root: Uuid) -> Value {
+        json!({"questionId":id,"prompt":"Which password should I use?","choices":[],"custom":true,
+            "threadId":thread,"rootThreadId":root,"createdAt":chrono::Utc::now()})
+    }
+    fn finished_turn(id: Uuid, thread: Uuid, status: &str) -> Value {
+        json!({"id":id,"threadId":thread,"requestId":Uuid::now_v7(),"status":status,"agent":"build",
+            "provider":"echo","model":"echo-1","error":null,
+            "createdAt":chrono::Utc::now(),"updatedAt":chrono::Utc::now()})
+    }
+    /// The next attention frame the relay recorded.
+    async fn next_attention(frames: &mut mpsc::UnboundedReceiver<Value>) -> Value {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let frame = frames.recv().await.expect("relay is recording");
+                if frame["type"] == "attention" {
+                    return frame;
+                }
+            }
+        })
+        .await
+        .expect("an attention frame arrives")
+    }
+    /// A data root with three registered projects: `home`, the connector's,
+    /// `other`, whose server an older build started, and `stopped`, which
+    /// has no server.
+    struct Computer {
+        root: std::path::PathBuf,
+        paths: Paths,
+        home: haarness_protocol::WorkspaceInfo,
+        other: haarness_protocol::WorkspaceInfo,
+        stopped: haarness_protocol::WorkspaceInfo,
+    }
+    impl Computer {
+        fn new() -> Self {
+            let root = crate::browser::discovery::tests::temp("remote-attention");
+            let base = Paths::new(Some(&root)).unwrap();
+            let manager = base.workspace_manager().unwrap();
+            let register = |name: &str| {
+                let folder = root.join(name);
+                std::fs::create_dir_all(&folder).unwrap();
+                manager.register_local(&folder).unwrap()
+            };
+            let (home, other, stopped) = (register("home"), register("other"), register("stopped"));
+            let paths = base.scoped(&home.id, false).unwrap();
+            Self {
+                root,
+                paths,
+                home,
+                other,
+                stopped,
+            }
+        }
+    }
+    #[tokio::test]
+    async fn a_relay_announcing_attention_hears_what_waits_on_every_running_project() {
+        let computer = Computer::new();
+        let home = FakeDaemon::start(Path::new(&computer.home.path)).await;
+        let other = FakeDaemon::start(Path::new(&computer.other.path)).await;
+        home.record(
+            &computer.paths,
+            &computer.home.id,
+            Path::new(&computer.home.path),
+            crate::current_executable_fingerprint().ok(),
+        );
+        other.record(
+            &computer.paths,
+            &computer.other.id,
+            Path::new(&computer.other.path),
+            Some("an-older-build".into()),
+        );
+        let (login, upgrade, helper, looping) = (
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+        );
+        {
+            let mut state = home.state.lock().unwrap();
+            state
+                .permissions
+                .push(pending_permission("perm-1", login, login));
+            state.threads.insert(login, chat(login, "Fix login"));
+            state.threads.insert(looping, chat(looping, "Keep going"));
+        }
+        {
+            let mut state = other.state.lock().unwrap();
+            state
+                .questions
+                .push(pending_question("question-1", helper, upgrade));
+            state.threads.insert(upgrade, chat(upgrade, "New chat"));
+        }
+        let (relay, mut frames) = fake_relay(vec![Relay::Record(&["attention.v1"])]).await;
+        let attention = attention(&computer.paths);
+        let target = home.target(&computer.home.id, None);
+        let http = reqwest::Client::new();
+        let link = tokio::spawn(async move {
+            relay_link(
+                relay.into_client_request().unwrap(),
+                &target,
+                &http,
+                Duration::from_secs(60),
+                &attention,
+            )
+            .await
+        });
+
+        let first = next_attention(&mut frames).await;
+        assert_eq!(first["revision"], 1);
+        assert_eq!(first["finished"], json!([]));
+        let items = first["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2, "{first}");
+        let permission = &items[0];
+        assert_eq!(permission["kind"], "permission");
+        assert_eq!(permission["id"], "perm-1");
+        assert_eq!(permission["projectId"], computer.home.id.as_str());
+        assert_eq!(permission["projectName"], "home");
+        assert_eq!(permission["rootThreadId"], json!(login));
+        assert_eq!(permission["chatTitle"], "Fix login");
+        assert_eq!(permission["category"], "bash");
+        assert_eq!(permission["actionable"], true);
+        let question = &items[1];
+        assert_eq!(question["kind"], "question");
+        assert_eq!(question["projectId"], computer.other.id.as_str());
+        assert_eq!(
+            (&question["threadId"], &question["rootThreadId"]),
+            (&json!(helper), &json!(upgrade))
+        );
+        assert_eq!(question["chatTitle"], Value::Null, "an untitled chat");
+        assert_eq!(question["custom"], true);
+        assert_eq!(question["category"], Value::Null);
+        // An older build's server would be replaced, not reused, so Cloud cannot answer it.
+        assert_eq!(question["actionable"], false);
+        let text = first.to_string();
+        for private in [
+            "git push",
+            "password",
+            "operation",
+            "patterns",
+            "detail",
+            "prompt",
+        ] {
+            assert!(
+                !text.contains(private),
+                "{private} left the computer: {text}"
+            );
+        }
+
+        // Answered on the computer: Cloud hears it is gone.
+        home.state.lock().unwrap().permissions.clear();
+        home.emit(
+            "permission.resolved",
+            login,
+            login,
+            json!({"permissionId":"perm-1","allowed":true}),
+        );
+        let resolved = next_attention(&mut frames).await;
+        assert_eq!(resolved["revision"], 2);
+        assert_eq!(resolved["items"].as_array().unwrap().len(), 1);
+
+        // A helper agent's turn, a turn a loop continues, and a root turn
+        // that stays finished: only the last one is reported.
+        let (helper_turn, continued, done) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        other.emit(
+            "turn.finished",
+            helper,
+            upgrade,
+            finished_turn(helper_turn, helper, "completed"),
+        );
+        home.state
+            .lock()
+            .unwrap()
+            .active
+            .insert(looping, finished_turn(Uuid::now_v7(), looping, "running"));
+        home.emit(
+            "turn.finished",
+            looping,
+            looping,
+            finished_turn(continued, looping, "completed"),
+        );
+        home.emit(
+            "turn.finished",
+            login,
+            login,
+            finished_turn(done, login, "failed"),
+        );
+        let finished = next_attention(&mut frames).await;
+        assert_eq!(
+            finished["finished"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|turn| (
+                    &turn["turnId"],
+                    &turn["threadId"],
+                    &turn["status"],
+                    &turn["chatTitle"],
+                    &turn["scheduled"]
+                ))
+                .collect::<Vec<_>>(),
+            [(
+                &json!(done),
+                &json!(login),
+                &json!("failed"),
+                &json!("Fix login"),
+                &json!(false)
+            )],
+            "{finished}"
+        );
+        // Nothing changes after: no further frame, and the turn is not reported twice.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        while let Ok(frame) = frames.try_recv() {
+            assert_ne!(frame["type"], "attention", "{frame}");
+        }
+        // Watching never started a server for the project that has none.
+        assert!(
+            !computer
+                .paths
+                .cache
+                .join("workspaces")
+                .join(&computer.stopped.id)
+                .join("runtime.json")
+                .exists()
+        );
+        link.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_relay_that_does_not_announce_attention_never_receives_it() {
+        let computer = Computer::new();
+        let home = FakeDaemon::start(Path::new(&computer.home.path)).await;
+        home.record(
+            &computer.paths,
+            &computer.home.id,
+            Path::new(&computer.home.path),
+            crate::current_executable_fingerprint().ok(),
+        );
+        let login = Uuid::now_v7();
+        home.state
+            .lock()
+            .unwrap()
+            .permissions
+            .push(pending_permission("perm-1", login, login));
+        let (relay, mut frames) = fake_relay(vec![Relay::Record(&[])]).await;
+        let attention = attention(&computer.paths);
+        let target = home.target(&computer.home.id, None);
+        let http = reqwest::Client::new();
+        let link = tokio::spawn(async move {
+            relay_link(
+                relay.into_client_request().unwrap(),
+                &target,
+                &http,
+                Duration::from_secs(60),
+                &attention,
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        home.emit(
+            "permission.resolved",
+            login,
+            login,
+            json!({"permissionId":"perm-1"}),
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!link.is_finished(), "the connection stays up");
+        while let Ok(frame) = frames.try_recv() {
+            assert_ne!(frame["type"], "attention", "{frame}");
+        }
+        assert!(
+            home.state.lock().unwrap().requests.is_empty(),
+            "nothing watched the server"
+        );
+        link.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_shared_chat_reports_only_its_own_tree() {
+        let computer = Computer::new();
+        let home = FakeDaemon::start(Path::new(&computer.home.path)).await;
+        let (shared, child, grandchild, unrelated) = (
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+        );
+        {
+            let mut state = home.state.lock().unwrap();
+            state.tree.insert(shared, vec![shared, child, grandchild]);
+            state.threads.insert(shared, chat(shared, "Shared work"));
+            state.threads.insert(unrelated, chat(unrelated, "Private"));
+            state
+                .permissions
+                .push(pending_permission("in-tree", grandchild, shared));
+            state
+                .permissions
+                .push(pending_permission("elsewhere", unrelated, unrelated));
+            state
+                .questions
+                .push(pending_question("asked-elsewhere", unrelated, unrelated));
+        }
+        let (relay, mut frames) = fake_relay(vec![Relay::Record(&["attention.v1"])]).await;
+        let attention = attention(&computer.paths);
+        let target = home.target(&computer.home.id, Some(shared));
+        let http = reqwest::Client::new();
+        let link = tokio::spawn(async move {
+            relay_link(
+                relay.into_client_request().unwrap(),
+                &target,
+                &http,
+                Duration::from_secs(60),
+                &attention,
+            )
+            .await
+        });
+        let first = next_attention(&mut frames).await;
+        let items = first["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "{first}");
+        assert_eq!(items[0]["id"], "in-tree");
+        assert_eq!(items[0]["threadId"], json!(grandchild));
+        assert_eq!(items[0]["rootThreadId"], json!(shared));
+        assert_eq!(items[0]["projectId"], computer.home.id.as_str());
+        assert_eq!(items[0]["projectName"], "home");
+        assert_eq!(items[0]["chatTitle"], "Shared work");
+        assert_eq!(items[0]["actionable"], true);
+
+        let done = Uuid::now_v7();
+        home.emit(
+            "turn.finished",
+            unrelated,
+            unrelated,
+            finished_turn(Uuid::now_v7(), unrelated, "completed"),
+        );
+        home.emit(
+            "turn.finished",
+            shared,
+            shared,
+            finished_turn(done, shared, "completed"),
+        );
+        let finished = next_attention(&mut frames).await;
+        let turns = finished["finished"].as_array().unwrap();
+        assert_eq!(turns.len(), 1, "{finished}");
+        assert_eq!(
+            (&turns[0]["turnId"], &turns[0]["threadId"]),
+            (&json!(done), &json!(shared))
+        );
+        // Every request was scoped to the shared chat, as Cloud's are.
+        let requests = home.state.lock().unwrap().requests.clone();
+        assert!(requests.iter().any(|(path, _)| path == "/v1/events"));
+        assert!(
+            requests
+                .iter()
+                .all(|(_, scope)| scope.as_deref() == Some(shared.to_string().as_str())),
+            "{requests:?}"
+        );
+        link.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
     }
 }

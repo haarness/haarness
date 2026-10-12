@@ -33,6 +33,7 @@ Run from the native repository:
 
 ```sh
 cargo test -p haarness-cli --bin haarness remote_cloud::tests
+cargo test -p haarness-cli --bin haarness remote_attention::tests
 cargo test -p haarness-server --test api published_remote_chat_cannot_read_or_control_other_conversations
 npm --prefix sdks/typescript run build
 npm --prefix sdks/typescript test

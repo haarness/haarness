@@ -250,6 +250,9 @@ pub(crate) struct Server {
     pub(crate) token: String,
     /// Accepts an extension host; otherwise listed as needing a restart.
     pub(crate) capable: bool,
+    /// The record it was found through. Its folder is the workspace id, and
+    /// it says which executable started the server.
+    pub(crate) record: std::sync::Arc<Record>,
 }
 
 impl Server {
@@ -338,6 +341,7 @@ fn judge(record: &Record, info: Info) -> Verdict {
         version: info.version,
         base: record.base.clone(),
         token: record.discovery.token.clone(),
+        record: std::sync::Arc::new(record.clone()),
     })
 }
 
