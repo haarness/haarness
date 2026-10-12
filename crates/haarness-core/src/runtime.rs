@@ -4027,6 +4027,17 @@ impl AgentRuntime {
         Ok(())
     }
 
+    /// The provider and model an agent or command definition's `model` value
+    /// runs on, resolved as a turn resolves it and preferring `preferred`.
+    /// `None` keeps the chat's model (`inherit`).
+    pub fn resolve_definition_model(
+        &self,
+        preferred: Option<&str>,
+        value: &str,
+    ) -> CoreResult<Option<(String, String)>> {
+        resolve_definition_model(self.components().providers.as_ref(), preferred, value)
+    }
+
     /// Agent profiles served to clients: built-ins plus user-defined agents.
     #[must_use]
     pub fn agent_profiles(&self) -> Vec<haarness_protocol::AgentProfile> {
@@ -9311,7 +9322,9 @@ fn subagent_model(
     };
     let resolved = match resolve_definition_model(registry, Some(parent_provider), configured) {
         Ok(value) => value,
-        Err(_) if matches!(configured, "sonnet" | "opus" | "haiku") => None,
+        // A family or bare Claude id names no provider, so a catalog without
+        // it means unavailable rather than misconfigured.
+        Err(_) if crate::definitions::unqualified_model(configured) => None,
         Err(error) => return Err(error),
     };
     if let Some((provider, model)) = resolved {
@@ -9348,25 +9361,47 @@ fn resolve_definition_model(
     if value.contains('/') {
         return qualified_agent_model("definition", value).map(Some);
     }
-    if !matches!(value, "sonnet" | "opus" | "haiku") {
-        return Err(CoreError::Invalid(format!(
-            "Unknown model alias {value}; use provider/model"
-        )));
-    }
+    let release = if crate::definitions::MODEL_FAMILIES.contains(&value) {
+        None
+    } else {
+        Some(crate::definitions::claude_release(value).ok_or_else(|| {
+            CoreError::Invalid(format!(
+                "Unknown model alias {value}; use provider/model, a model family (sonnet, opus, haiku, fable) or a Claude model id"
+            ))
+        })?)
+    };
+    // The chat's own provider first, then signed-in ones, so a catalog
+    // listed without credentials does not shadow a usable provider.
+    let listed = registry.list();
     let mut providers = preferred.into_iter().map(str::to_owned).collect::<Vec<_>>();
-    for provider in registry.list() {
+    for provider in listed
+        .iter()
+        .filter(|provider| provider.authenticated)
+        .chain(listed.iter().filter(|provider| !provider.authenticated))
+    {
         if !providers.contains(&provider.id) {
-            providers.push(provider.id);
+            providers.push(provider.id.clone());
         }
     }
     for provider in providers {
-        let mut models = registry
-            .models(&provider)
-            .into_iter()
-            .filter(|m| m.id.to_lowercase().contains(value))
-            .collect::<Vec<_>>();
-        models.sort_by(|a, b| b.id.cmp(&a.id));
-        if let Some(model) = models.first() {
+        let models = registry.models(&provider);
+        let model = match &release {
+            // A family is its newest release, by id.
+            None => models
+                .iter()
+                .filter(|m| m.id.to_lowercase().contains(value))
+                .max_by(|a, b| a.id.cmp(&b.id)),
+            // A release id matches the provider's spelling of the same release.
+            Some(release) => models
+                .iter()
+                .find(|m| m.id.eq_ignore_ascii_case(value))
+                .or_else(|| {
+                    models.iter().find(|m| {
+                        crate::definitions::claude_release(&m.id).as_ref() == Some(release)
+                    })
+                }),
+        };
+        if let Some(model) = model {
             return Ok(Some((provider, model.id.clone())));
         }
     }
@@ -10850,6 +10885,111 @@ mod tests {
             max_output_tokens: None,
             pricing: None,
         }
+    }
+
+    #[test]
+    fn definition_models_resolve_families_and_bare_claude_ids_against_catalogs() {
+        struct Catalog(Vec<haarness_protocol::ProviderInfo>);
+        impl crate::ProviderRegistry for Catalog {
+            fn get(&self, _: &str) -> Option<Arc<dyn crate::ModelProvider>> {
+                None
+            }
+            fn list(&self) -> Vec<haarness_protocol::ProviderInfo> {
+                self.0.clone()
+            }
+            fn models(&self, provider: &str) -> Vec<ModelInfo> {
+                self.0
+                    .iter()
+                    .find(|info| info.id == provider)
+                    .map(|info| info.models.clone())
+                    .unwrap_or_default()
+            }
+        }
+        let provider =
+            |id: &str, authenticated: bool, models: &[&str]| haarness_protocol::ProviderInfo {
+                id: id.into(),
+                name: id.into(),
+                authenticated,
+                models: models.iter().map(|id| model_info(id, 200_000)).collect(),
+            };
+        // Listed first but not signed in, as a catalog without credentials is.
+        let registry = Catalog(vec![
+            provider(
+                "anthropic",
+                false,
+                &[
+                    "claude-opus-5-5",
+                    "claude-sonnet-5-5",
+                    "claude-fable-5",
+                    "claude-fable-5-1",
+                ],
+            ),
+            provider(
+                "cloud",
+                true,
+                &[
+                    "anthropic/claude-opus-5.5",
+                    "anthropic/claude-sonnet-5.5",
+                    "openai/gpt-6.1-sol",
+                ],
+            ),
+            provider("bedrock", true, &["us.anthropic.claude-haiku-5-5-v1:0"]),
+        ]);
+        for (preferred, value, expected) in [
+            // The chat's own provider wins when it lists the release.
+            (
+                Some("anthropic"),
+                "claude-sonnet-5-5",
+                Some(("anthropic", "claude-sonnet-5-5")),
+            ),
+            // Otherwise a signed-in provider, in its own spelling of the release.
+            (
+                Some("bedrock"),
+                "claude-sonnet-5-5",
+                Some(("cloud", "anthropic/claude-sonnet-5.5")),
+            ),
+            (
+                None,
+                "claude-sonnet-5.5",
+                Some(("cloud", "anthropic/claude-sonnet-5.5")),
+            ),
+            (
+                None,
+                "claude-haiku-5-5",
+                Some(("bedrock", "us.anthropic.claude-haiku-5-5-v1:0")),
+            ),
+            (None, "opus", Some(("cloud", "anthropic/claude-opus-5.5"))),
+            // Only an unauthenticated catalog lists Fable, so the caller
+            // reports the sign-in it needs.
+            (None, "fable", Some(("anthropic", "claude-fable-5-1"))),
+            (None, "inherit", None),
+            (None, "acme/custom", Some(("acme", "custom"))),
+        ] {
+            assert_eq!(
+                super::resolve_definition_model(&registry, preferred, value).unwrap(),
+                expected.map(|(provider, model)| (provider.to_owned(), model.to_owned())),
+                "{value}"
+            );
+        }
+        for (value, error) in [
+            (
+                "claude-sonnet-9-9",
+                "No configured provider has a claude-sonnet-9-9 model",
+            ),
+            ("gpt-6.1-sol", "Unknown model alias gpt-6.1-sol"),
+            ("bad-alias", "Unknown model alias bad-alias"),
+        ] {
+            let message = super::resolve_definition_model(&registry, None, value)
+                .unwrap_err()
+                .to_string();
+            assert!(message.contains(error), "{message}");
+        }
+        assert!(crate::definitions::unqualified_model("fable"));
+        assert!(crate::definitions::unqualified_model("claude-opus-5-5"));
+        assert!(!crate::definitions::unqualified_model("my-claude-model"));
+        assert!(!crate::definitions::unqualified_model(
+            "anthropic/claude-opus-5-5"
+        ));
     }
 
     #[test]
