@@ -16,7 +16,7 @@ device for the run and removes it at the end.
 The browser/model proof is a separate pass; this test never prints credentials.
 """
 
-import asyncio, base64, hashlib, json, os, secrets, subprocess, threading
+import asyncio, base64, hashlib, json, os, secrets, shutil, subprocess, threading
 import time, uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -657,6 +657,82 @@ try:
     host.host_close(pid2)
     proof(
         "a second project's question is reported while its server runs, withdrawn while the project is closed, and its stopped server stays stopped"
+    )
+
+    # A project server started by another Haarness build (Desktop's own, say)
+    # is watched too, but Cloud cannot route an answer to it while its turn
+    # runs, so its request is marked as one to answer on the computer.
+    other_build = ROOT / "other-build" / "haarness"
+    other_build.parent.mkdir()
+    if subprocess.run(["cp", "-c", BIN, str(other_build)]).returncode != 0:
+        shutil.copy2(BIN, other_build)  # no copy-on-write clone here
+    elsewhere = project_folder("other-build-project")
+    started = json.loads(
+        subprocess.run(
+            [str(other_build), "--workspace", str(elsewhere), "desktop"],
+            env=env,
+            input='{"action":"connect"}',
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=120,
+        ).stdout
+    )
+    foreign = Haarness(started["url"], token=started["token"])
+    pid3 = until(
+        lambda: next(
+            (
+                w["id"]
+                for w in host.host_projects()["workspaces"]
+                if w["path"] == str(elsewhere)
+            ),
+            None,
+        ),
+        "the other build's project is not in the catalog",
+    )
+    foreign_chat = chat(foreign, "Started by another build")
+    foreign_turn = ask(foreign, foreign_chat["id"], "printf other > other-proof.txt")
+    request = pending(foreign, foreign_chat["id"])
+    row = until(
+        lambda: one(itemId=request["permissionId"]),
+        "the other build's approval was not reported",
+    )
+    expected = {
+        "projectId": pid3,
+        "chatTitle": "Started by another build",
+        "category": "bash",
+        "actionable": False,
+        "connected": True,
+    }
+    assert {k: row.get(k) for k in expected} == expected, row
+    if pushes:
+        alert = alerted(
+            request["permissionId"], "an approval only the computer can answer"
+        )
+        assert alert["aps"]["category"] == "haarness.view", alert  # no answer buttons
+    try:
+        host.workspace(pid3).reply_permission(
+            request["permissionId"], {"decision": "once"}
+        )
+    except ApiError as error:
+        assert error.status >= 400, error
+    else:
+        raise AssertionError("Cloud answered a server it was told it cannot reach")
+    assert any(
+        p["permissionId"] == request["permissionId"] for p in foreign.list_permissions()
+    )
+    reply(foreign, request)
+    completed(foreign_turn, foreign)
+    until(
+        lambda: not attention(itemId=request["permissionId"]),
+        "an answer given on the computer was not reported",
+    )
+    foreign.shutdown_server()
+    foreign.close()
+    other_build.unlink()
+    host.host_close(pid3)
+    proof(
+        "a project server from another Haarness build is reported, marked to answer on the computer"
     )
 
     # A network drop: the connector keeps running and reconnects by itself.
