@@ -3,6 +3,10 @@ from typing import cast, Union
 from . import cloud_types as T
 from .cloud_transport import Transport, AsyncTransport, RequestOptions
 class CloudApi(Transport):
+    def apple_app_site_association(self, *, options: RequestOptions | None = None) -> T.AppleAppSiteAssociation:
+        """GET /.well-known/apple-app-site-association."""
+        return cast("T.AppleAppSiteAssociation", self.request('GET', f'/.well-known/apple-app-site-association', binary_body=False, binary_response=False, options=options))
+
     def native_router_session(self, body: T.NativeRouterSessionRequest, *, options: RequestOptions | None = None) -> T.NativeRouterSessionResponse:
         """POST /api/v1/account/router-session."""
         return cast("T.NativeRouterSessionResponse", self.request('POST', f'/api/v1/account/router-session', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
@@ -78,6 +82,14 @@ class CloudApi(Transport):
     def rotate_account_api_key(self, id: str, query: T.RotateAccountApiKeyQuery | None = None, *, options: RequestOptions | None = None) -> T.CreatedAccountApiKeyResponse:
         """POST /api/v1/api-keys/{id}/rotate."""
         return cast("T.CreatedAccountApiKeyResponse", self.request('POST', f'/api/v1/api-keys/{self.segment(id)}/rotate', query=query, binary_body=False, binary_response=False, options=options))
+
+    def list_attention(self, query: T.ListAttentionQuery | None = None, *, options: RequestOptions | None = None) -> T.Page_AttentionItemDto:
+        """GET /api/v1/attention."""
+        return cast("T.Page_AttentionItemDto", self.request('GET', f'/api/v1/attention', query=query, binary_body=False, binary_response=False, options=options))
+
+    def dismiss_attention(self, id: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /api/v1/attention/{id}."""
+        return cast("None", self.request('DELETE', f'/api/v1/attention/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
 
     def list_budgets(self, query: T.ListBudgetsQuery | None = None, *, options: RequestOptions | None = None) -> T.Items_BudgetDto:
         """GET /api/v1/billing/budgets."""
@@ -306,6 +318,42 @@ class CloudApi(Transport):
     def patch_project(self, id: str, body: T.CreateProjectRequest, *, options: RequestOptions | None = None) -> T.ProjectDto:
         """PATCH /api/v1/projects/{id}."""
         return cast("T.ProjectDto", self.request('PATCH', f'/api/v1/projects/{self.segment(id)}', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def register_live_activity(self, activityId: str, body: T.RegisterLiveActivityRequest, *, options: RequestOptions | None = None) -> T.LiveActivityDto:
+        """PUT /api/v1/push/activities/{activityId}."""
+        return cast("T.LiveActivityDto", self.request('PUT', f'/api/v1/push/activities/{self.segment(activityId)}', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def delete_live_activity(self, activityId: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /api/v1/push/activities/{activityId}."""
+        return cast("None", self.request('DELETE', f'/api/v1/push/activities/{self.segment(activityId)}', binary_body=False, binary_response=False, options=options))
+
+    def list_push_devices(self, *, options: RequestOptions | None = None) -> T.PushDevicesResponse:
+        """GET /api/v1/push/devices."""
+        return cast("T.PushDevicesResponse", self.request('GET', f'/api/v1/push/devices', binary_body=False, binary_response=False, options=options))
+
+    def register_push_device(self, body: T.RegisterPushDeviceRequest, *, options: RequestOptions | None = None) -> T.PushDeviceDto:
+        """PUT /api/v1/push/devices/current."""
+        return cast("T.PushDeviceDto", self.request('PUT', f'/api/v1/push/devices/current', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def unregister_push_device(self, *, options: RequestOptions | None = None) -> None:
+        """DELETE /api/v1/push/devices/current."""
+        return cast("None", self.request('DELETE', f'/api/v1/push/devices/current', binary_body=False, binary_response=False, options=options))
+
+    def test_push_device(self, *, options: RequestOptions | None = None) -> None:
+        """POST /api/v1/push/devices/current/test."""
+        return cast("None", self.request('POST', f'/api/v1/push/devices/current/test', binary_body=False, binary_response=False, options=options))
+
+    def remove_push_device(self, id: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /api/v1/push/devices/{id}."""
+        return cast("None", self.request('DELETE', f'/api/v1/push/devices/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    def get_push_preferences(self, *, options: RequestOptions | None = None) -> T.PushPreferencesDto:
+        """GET /api/v1/push/preferences."""
+        return cast("T.PushPreferencesDto", self.request('GET', f'/api/v1/push/preferences', binary_body=False, binary_response=False, options=options))
+
+    def update_push_preferences(self, body: T.UpdatePushPreferencesRequest, *, options: RequestOptions | None = None) -> T.PushPreferencesDto:
+        """PATCH /api/v1/push/preferences."""
+        return cast("T.PushPreferencesDto", self.request('PATCH', f'/api/v1/push/preferences', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     def current_release(self, query: T.CurrentReleaseQuery | None = None, *, options: RequestOptions | None = None) -> T.ReleaseManifestResponse:
         """GET /api/v1/releases."""
@@ -704,6 +752,10 @@ class CloudApi(Transport):
         return cast("T.StripeWebhookAck", self.request('POST', f'/webhooks/stripe', body=body, content_type='text/plain', binary_body=False, binary_response=False, options=options))
 
 class AsyncCloudApi(AsyncTransport):
+    async def apple_app_site_association(self, *, options: RequestOptions | None = None) -> T.AppleAppSiteAssociation:
+        """GET /.well-known/apple-app-site-association."""
+        return cast("T.AppleAppSiteAssociation", await self.request('GET', f'/.well-known/apple-app-site-association', binary_body=False, binary_response=False, options=options))
+
     async def native_router_session(self, body: T.NativeRouterSessionRequest, *, options: RequestOptions | None = None) -> T.NativeRouterSessionResponse:
         """POST /api/v1/account/router-session."""
         return cast("T.NativeRouterSessionResponse", await self.request('POST', f'/api/v1/account/router-session', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
@@ -779,6 +831,14 @@ class AsyncCloudApi(AsyncTransport):
     async def rotate_account_api_key(self, id: str, query: T.RotateAccountApiKeyQuery | None = None, *, options: RequestOptions | None = None) -> T.CreatedAccountApiKeyResponse:
         """POST /api/v1/api-keys/{id}/rotate."""
         return cast("T.CreatedAccountApiKeyResponse", await self.request('POST', f'/api/v1/api-keys/{self.segment(id)}/rotate', query=query, binary_body=False, binary_response=False, options=options))
+
+    async def list_attention(self, query: T.ListAttentionQuery | None = None, *, options: RequestOptions | None = None) -> T.Page_AttentionItemDto:
+        """GET /api/v1/attention."""
+        return cast("T.Page_AttentionItemDto", await self.request('GET', f'/api/v1/attention', query=query, binary_body=False, binary_response=False, options=options))
+
+    async def dismiss_attention(self, id: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /api/v1/attention/{id}."""
+        return cast("None", await self.request('DELETE', f'/api/v1/attention/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
 
     async def list_budgets(self, query: T.ListBudgetsQuery | None = None, *, options: RequestOptions | None = None) -> T.Items_BudgetDto:
         """GET /api/v1/billing/budgets."""
@@ -1007,6 +1067,42 @@ class AsyncCloudApi(AsyncTransport):
     async def patch_project(self, id: str, body: T.CreateProjectRequest, *, options: RequestOptions | None = None) -> T.ProjectDto:
         """PATCH /api/v1/projects/{id}."""
         return cast("T.ProjectDto", await self.request('PATCH', f'/api/v1/projects/{self.segment(id)}', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def register_live_activity(self, activityId: str, body: T.RegisterLiveActivityRequest, *, options: RequestOptions | None = None) -> T.LiveActivityDto:
+        """PUT /api/v1/push/activities/{activityId}."""
+        return cast("T.LiveActivityDto", await self.request('PUT', f'/api/v1/push/activities/{self.segment(activityId)}', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def delete_live_activity(self, activityId: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /api/v1/push/activities/{activityId}."""
+        return cast("None", await self.request('DELETE', f'/api/v1/push/activities/{self.segment(activityId)}', binary_body=False, binary_response=False, options=options))
+
+    async def list_push_devices(self, *, options: RequestOptions | None = None) -> T.PushDevicesResponse:
+        """GET /api/v1/push/devices."""
+        return cast("T.PushDevicesResponse", await self.request('GET', f'/api/v1/push/devices', binary_body=False, binary_response=False, options=options))
+
+    async def register_push_device(self, body: T.RegisterPushDeviceRequest, *, options: RequestOptions | None = None) -> T.PushDeviceDto:
+        """PUT /api/v1/push/devices/current."""
+        return cast("T.PushDeviceDto", await self.request('PUT', f'/api/v1/push/devices/current', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def unregister_push_device(self, *, options: RequestOptions | None = None) -> None:
+        """DELETE /api/v1/push/devices/current."""
+        return cast("None", await self.request('DELETE', f'/api/v1/push/devices/current', binary_body=False, binary_response=False, options=options))
+
+    async def test_push_device(self, *, options: RequestOptions | None = None) -> None:
+        """POST /api/v1/push/devices/current/test."""
+        return cast("None", await self.request('POST', f'/api/v1/push/devices/current/test', binary_body=False, binary_response=False, options=options))
+
+    async def remove_push_device(self, id: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /api/v1/push/devices/{id}."""
+        return cast("None", await self.request('DELETE', f'/api/v1/push/devices/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+
+    async def get_push_preferences(self, *, options: RequestOptions | None = None) -> T.PushPreferencesDto:
+        """GET /api/v1/push/preferences."""
+        return cast("T.PushPreferencesDto", await self.request('GET', f'/api/v1/push/preferences', binary_body=False, binary_response=False, options=options))
+
+    async def update_push_preferences(self, body: T.UpdatePushPreferencesRequest, *, options: RequestOptions | None = None) -> T.PushPreferencesDto:
+        """PATCH /api/v1/push/preferences."""
+        return cast("T.PushPreferencesDto", await self.request('PATCH', f'/api/v1/push/preferences', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     async def current_release(self, query: T.CurrentReleaseQuery | None = None, *, options: RequestOptions | None = None) -> T.ReleaseManifestResponse:
         """GET /api/v1/releases."""

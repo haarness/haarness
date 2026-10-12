@@ -2,6 +2,7 @@
 
 | Python | TypeScript | HTTP |
 | --- | --- | --- |
+| `apple_app_site_association` | `appleAppSiteAssociation` | `GET /.well-known/apple-app-site-association` |
 | `native_router_session` | `nativeRouterSession` | `POST /api/v1/account/router-session` |
 | `list_accounts` | `listAccounts` | `GET /api/v1/accounts` |
 | `create_account` | `createAccount` | `POST /api/v1/accounts` |
@@ -21,6 +22,8 @@
 | `revoke_account_api_key` | `revokeAccountApiKey` | `DELETE /api/v1/api-keys/{id}` |
 | `update_account_api_key` | `updateAccountApiKey` | `PATCH /api/v1/api-keys/{id}` |
 | `rotate_account_api_key` | `rotateAccountApiKey` | `POST /api/v1/api-keys/{id}/rotate` |
+| `list_attention` | `listAttention` | `GET /api/v1/attention` |
+| `dismiss_attention` | `dismissAttention` | `DELETE /api/v1/attention/{id}` |
 | `list_budgets` | `listBudgets` | `GET /api/v1/billing/budgets` |
 | `create_budget` | `createBudget` | `POST /api/v1/billing/budgets` |
 | `delete_budget` | `deleteBudget` | `DELETE /api/v1/billing/budgets/{id}` |
@@ -79,6 +82,15 @@
 | `get_project` | `getProject` | `GET /api/v1/projects/{id}` |
 | `delete_project` | `deleteProject` | `DELETE /api/v1/projects/{id}` |
 | `patch_project` | `patchProject` | `PATCH /api/v1/projects/{id}` |
+| `register_live_activity` | `registerLiveActivity` | `PUT /api/v1/push/activities/{activityId}` |
+| `delete_live_activity` | `deleteLiveActivity` | `DELETE /api/v1/push/activities/{activityId}` |
+| `list_push_devices` | `listPushDevices` | `GET /api/v1/push/devices` |
+| `register_push_device` | `registerPushDevice` | `PUT /api/v1/push/devices/current` |
+| `unregister_push_device` | `unregisterPushDevice` | `DELETE /api/v1/push/devices/current` |
+| `test_push_device` | `testPushDevice` | `POST /api/v1/push/devices/current/test` |
+| `remove_push_device` | `removePushDevice` | `DELETE /api/v1/push/devices/{id}` |
+| `get_push_preferences` | `getPushPreferences` | `GET /api/v1/push/preferences` |
+| `update_push_preferences` | `updatePushPreferences` | `PATCH /api/v1/push/preferences` |
 | `current_release` | `currentRelease` | `GET /api/v1/releases` |
 | `download_release_artifact` | `downloadReleaseArtifact` | `GET /api/v1/releases/artifacts/{id}` |
 | `release_history` | `releaseHistory` | `GET /api/v1/releases/history` |
