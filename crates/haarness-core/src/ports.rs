@@ -448,6 +448,16 @@ pub trait ModelProvider: Send + Sync {
     async fn check_api_key(&self, _key: &str) -> KeyCheck {
         KeyCheck::Unsupported
     }
+    /// Who can read the prompt cache for `model`, when this provider writes
+    /// it explicitly (Anthropic `cache_control` breakpoints). Such an entry is
+    /// readable only once the response to the request that wrote it begins,
+    /// so the runtime holds back concurrent sibling requests until then. The
+    /// value fingerprints the endpoint and credentials and must not contain a
+    /// secret. `None`, the default: the provider caches automatically or not
+    /// at all.
+    fn explicit_prompt_cache_scope(&self, _model: &str) -> Option<String> {
+        None
+    }
     async fn stream(
         &self,
         request: ProviderRequest,
@@ -607,6 +617,18 @@ pub trait SnapshotStore: Send + Sync {
         before_snapshot_id: &str,
         after_snapshot_id: &str,
     ) -> CoreResult<Vec<haarness_protocol::FileDiff>>;
+    /// Whether two checkpoints record any different file. The default keeps
+    /// external snapshot adapters compatible.
+    async fn snapshots_differ(
+        &self,
+        before_snapshot_id: &str,
+        after_snapshot_id: &str,
+    ) -> CoreResult<bool> {
+        Ok(!self
+            .diff_snapshots(before_snapshot_id, after_snapshot_id)
+            .await?
+            .is_empty())
+    }
     /// Review metadata or one file. The default keeps external snapshot adapters compatible.
     async fn diff_review(
         &self,

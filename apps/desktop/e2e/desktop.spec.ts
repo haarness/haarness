@@ -2181,6 +2181,101 @@ test("file drops attach across the chat area and preserve text drop behavior", a
   await invalid.dispose();
 });
 
+/** A Cmd+V as the focused element receives it: synthetic, so nothing is
+ * inserted natively and only the app's own handling shows. */
+async function pasteFocused(data: { file?: string; text?: string }) {
+  await page.evaluate((data) => {
+    const transfer = new DataTransfer();
+    if (data.file) {
+      const bytes = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aQx8AAAAASUVORK5CYII="), (c) => c.charCodeAt(0));
+      transfer.items.add(new File([bytes], data.file, { type: "image/png" }));
+    }
+    if (data.text) transfer.setData("text/plain", data.text);
+    (document.activeElement ?? document.body).dispatchEvent(
+      new ClipboardEvent("paste", { clipboardData: transfer, bubbles: true, cancelable: true }),
+    );
+  }, data);
+}
+
+test("pastes reach the draft after removing an attachment and from anywhere in the chat", async () => {
+  await newSession();
+  const input = page.getByRole("textbox", { name: "Message", exact: true });
+  const chips = page.locator(".composer-attachments > span");
+  await input.click();
+  // Removing an attachment leaves the focus in the message box, so the next paste works.
+  for (const round of [1, 2]) {
+    await pasteFocused({ file: `pasted-${round}.png` });
+    const remove = page.getByRole("button", { name: `Remove pasted-${round}.png`, exact: true });
+    await expect(remove).toBeVisible();
+    await remove.click();
+    await expect(chips).toHaveCount(0);
+    await expect(input).toBeFocused();
+  }
+  // Removed from the keyboard, the button hands the focus back too.
+  await pasteFocused({ file: "keyboard.png" });
+  await page.getByRole("button", { name: "Remove keyboard.png", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  await expect(chips).toHaveCount(0);
+  await expect(input).toBeFocused();
+
+  await send("Paste target verification");
+  await expect(page.locator(".transcript")).toContainText("Echo: Paste target verification");
+  // The conversation has the focus after a click in it: files attach, text goes to the draft.
+  const transcript = page.locator(".transcript");
+  await transcript.focus();
+  await pasteFocused({ file: "from-transcript.png" });
+  await expect(page.getByRole("button", { name: "Remove from-transcript.png", exact: true })).toBeVisible();
+  await transcript.focus();
+  await pasteFocused({ text: "pasted words" });
+  await expect(input).toHaveValue("pasted words");
+  await expect(input).toBeFocused();
+  // With nothing focused, text lands at the caret.
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await pasteFocused({ text: " and more" });
+  await expect(input).toHaveValue("pasted words and more");
+  // A field of its own keeps its paste.
+  await page.keyboard.press("ControlOrMeta+f");
+  const find = page.locator(".conversation-find input");
+  await expect(find).toBeFocused();
+  await pasteFocused({ text: "find text", file: "find.png" });
+  await expect(input).toHaveValue("pasted words and more");
+  await expect(chips).toHaveCount(1);
+  await page.keyboard.press("Escape");
+  await input.fill("");
+  await send("Pasted files are sent once");
+  await expect(chips).toHaveCount(0);
+  await expect(page.locator('.transcript img[alt="Attached image"]')).toHaveCount(1);
+  expect(errors).toEqual([]);
+});
+
+test("sending from the new-chat screen keeps the message box and never shows the chat loading mark", async () => {
+  await newSession();
+  await page.evaluate(() => {
+    const seen = ((window as any).freshSend = { loading: false, hidden: false });
+    const check = () => {
+      if (document.querySelector(".chat-loading")) seen.loading = true;
+      const box = document.querySelector("[data-composer-input]");
+      if (!box?.getClientRects().length) seen.hidden = true;
+    };
+    const observer = new MutationObserver(check);
+    observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["style", "class"] });
+    (window as any).stopFreshSend = () => observer.disconnect();
+  });
+  const input = page.getByRole("textbox", { name: "Message", exact: true });
+  await input.fill("fresh-chat-first-message");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(page.locator(".transcript")).toContainText("Echo: fresh-chat-first-message");
+  await page.screenshot({ path: test.info().outputPath("new-chat-first-send.png") });
+  const seen = await page.evaluate(() => {
+    (window as any).stopFreshSend();
+    return (window as any).freshSend;
+  });
+  expect(seen).toEqual({ loading: false, hidden: false });
+  await expect(page.getByRole("status", { name: "Loading chat…", exact: true })).toHaveCount(0);
+  await expect(input).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
 test("sidebar file drops open the target session and keep attachments isolated", async () => {
   await newSession();
   await send("drop-source-session");
@@ -3971,6 +4066,77 @@ test("SSE chat fabric: live streaming, guidance, permissions, questions and inte
   );
   await page.getByRole("button", { name: "Stop response", exact: true }).click();
   await expect.poll(() => client.activeTurns().then((v) => v.length)).toBe(0);
+  expect(errors).toEqual([]);
+});
+
+test("an open-ended question opens in its answer field unless a draft is being typed, and Enter replies", async () => {
+  const thread = await client.createThread({
+    title: "Open-ended question focus",
+    provider: "echo",
+    model: "echo-1",
+  });
+  // Search opens it from whichever project an earlier test left current.
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness" }).fill(thread.title!);
+  await page.getByRole("option").filter({ hasText: thread.title! }).first().click();
+  await expect(page.locator(".session-bar-name, .workspace-tab.active")).toContainText(thread.title!);
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
+  const question = page.locator(".question");
+  const answer = question.getByRole("textbox", { name: "Answer", exact: true });
+  const ask = (input: Record<string, unknown>) =>
+    client.startTurn(thread.id, {
+      text: "!tool question " + JSON.stringify(input),
+      requestId: crypto.randomUUID(),
+    });
+  const settled = async () => {
+    await expect.poll(() => client.listQuestions().then((v) => v.length)).toBe(0);
+    await expect.poll(() => client.activeTurns().then((v) => v.length)).toBe(0);
+  };
+  await expect(composer).toBeEnabled();
+
+  // The message box stays in view during a question, but an empty one is idle.
+  await composer.focus();
+  await ask({ prompt: "What should the release be called?" });
+  await expect(question).toContainText("What should the release be called?");
+  await expect(answer).toBeFocused();
+  await page.screenshot({ path: test.info().outputPath("question-open-ended-focus.png") });
+  await page.keyboard.type("Aurora");
+  await page.keyboard.press("Enter");
+  await settled();
+  await expect(question).toHaveCount(0);
+  await expect(page.locator(".transcript")).toContainText("Aurora");
+
+  // A draft being typed keeps the focus, and Enter in it still sends nothing.
+  await composer.fill("half-written follow-up");
+  await ask({ prompt: "Which codename instead?" });
+  await expect(question).toContainText("Which codename instead?");
+  await expect(composer).toBeFocused();
+  await expect(answer).not.toBeFocused();
+  await answer.click();
+  await answer.press("Enter");
+  expect(await client.listQuestions()).toHaveLength(1);
+  await answer.fill("Borealis");
+  await answer.press("Enter");
+  await settled();
+  await expect(composer).toHaveValue("half-written follow-up");
+  await composer.fill("");
+
+  // With choices to pick, the dock waits for one; typed text still replies with Enter.
+  await composer.focus();
+  await ask({ prompt: "Pick a fixture color", choices: ["Green", "Blue"] });
+  await expect(question).toContainText("Pick a fixture color");
+  await expect(composer).toBeFocused();
+  await answer.fill("Teal");
+  await answer.press("Enter");
+  await settled();
+  await expect(page.locator(".transcript")).toContainText("Teal");
+
+  // A question nobody could answer is refused before it is shown.
+  await ask({ prompt: "Unanswerable", choices: [], custom: false });
+  await expect.poll(() => client.activeTurns().then((v) => v.length)).toBe(0);
+  await expect(question).toHaveCount(0);
+  expect(await client.listQuestions()).toHaveLength(0);
+  await expect(page.locator(".transcript")).toContainText("at least one choice");
   expect(errors).toEqual([]);
 });
 

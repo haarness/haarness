@@ -21,6 +21,10 @@ impl ModelProvider for Script {
     fn info(&self) -> ProviderInfo {
         let mut info = Echo.info();
         info.models[0].tools = true;
+        // A release named the way Claude Code agent files write it.
+        let mut claude = info.models[0].clone();
+        claude.id = "claude-sonnet-5-5".into();
+        info.models.push(claude);
         info.authenticated = self.authenticated;
         info
     }
@@ -559,21 +563,24 @@ async fn reliability_automatic_and_overflow_compaction_emit_hooks_after_commit()
 
 #[tokio::test]
 async fn reliability_fallback_preserves_explicit_models_and_surfaces_configuration_errors() {
-    for (configured, explicit, authenticated, expected_error) in [
+    for (configured, explicit, authenticated, expected) in [
         (
             "missing-provider/model",
             None,
             true,
-            Some("unknown provider"),
+            Err("unknown provider"),
         ),
-        ("echo/retired-model", None, false, Some("not authenticated")),
-        ("bad-alias", None, true, Some("Unknown model alias")),
+        ("echo/retired-model", None, false, Err("not authenticated")),
+        ("bad-alias", None, true, Err("Unknown model alias")),
         (
             "missing-provider/model",
             Some("echo/manual-model"),
             true,
-            None,
+            Ok("manual-model"),
         ),
+        // Claude Code agent files name a release without its provider, or a family.
+        ("claude-sonnet-5-5", None, true, Ok("claude-sonnet-5-5")),
+        ("sonnet", None, true, Ok("claude-sonnet-5-5")),
     ] {
         let mut args = serde_json::json!({"prompt":"child","agent":"reviewer"});
         if let Some(model) = explicit {
@@ -619,19 +626,22 @@ async fn reliability_fallback_preserves_explicit_models_and_surfaces_configurati
                 _ => None,
             })
             .unwrap();
-        assert!(!output.contains("Configured model"));
-        assert_eq!(is_error, expected_error.is_some());
-        if let Some(expected) = expected_error {
-            assert!(output.contains(expected), "{output}");
-        } else {
-            assert!(
+        assert!(
+            !output.contains("Configured model"),
+            "{configured}: {output}"
+        );
+        assert_eq!(is_error, expected.is_err(), "{configured}: {output}");
+        match expected {
+            Err(expected) => assert!(output.contains(expected), "{output}"),
+            Ok(model) => assert!(
                 provider
                     .requests
                     .lock()
                     .unwrap()
                     .iter()
-                    .any(|request| request.model == "manual-model")
-            );
+                    .any(|request| request.model == model),
+                "{configured} should run on {model}"
+            ),
         }
         std::fs::remove_dir_all(directory).unwrap();
     }

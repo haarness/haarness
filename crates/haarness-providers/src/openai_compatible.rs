@@ -123,6 +123,12 @@ impl OpenAiCompatibleProvider {
         self
     }
 
+    /// A Haarness router passes `cache_control` markers on to Anthropic
+    /// models; other upstreams would reject them (see `mark_prompt_cache`).
+    pub(crate) fn marks_prompt_cache(&self, model: &str) -> bool {
+        self.server_output_limit && model.starts_with("anthropic/")
+    }
+
     #[must_use]
     pub fn with_auth_store(mut self, auth_store: Option<Arc<CredentialStore>>) -> Self {
         self.auth_store = auth_store;
@@ -1131,6 +1137,15 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let request = self.client.get(format!("{base}/models")).headers(headers);
         crate::key_check::check(&self.name, request).await
     }
+    fn explicit_prompt_cache_scope(&self, model: &str) -> Option<String> {
+        self.marks_prompt_cache(model).then(|| {
+            crate::prompt_cache_scope(
+                &self.endpoint,
+                self.api_key.as_ref().map(ExposeSecret::expose_secret),
+                &self.headers,
+            )
+        })
+    }
     fn id(&self) -> &str {
         &self.id
     }
@@ -1259,7 +1274,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             }
         }
         messages.append(&mut tool_media);
-        if self.server_output_limit && model.starts_with("anthropic/") {
+        if self.marks_prompt_cache(&model) {
             mark_prompt_cache(&mut messages);
         }
         let mut requested_tools = request.tools;
@@ -2093,6 +2108,34 @@ mod tests {
         assert!(
             marked(&requests[1]).iter().all(|marked| !marked),
             "only Anthropic accepts cache_control"
+        );
+        // The runtime holds back concurrent siblings only where markers go out.
+        assert!(
+            provider
+                .explicit_prompt_cache_scope("anthropic/claude-sonnet-5.5")
+                .is_some()
+        );
+        assert!(
+            provider
+                .explicit_prompt_cache_scope("openai/gpt-6.1-sol")
+                .is_none()
+        );
+        let direct = OpenAiCompatibleProvider::new(CompatibleInstance {
+            id: "openrouter".into(),
+            name: "OpenRouter".into(),
+            base_url: format!("http://{address}"),
+            api_key: None,
+            models: vec!["anthropic/claude-sonnet-5.5".into()],
+            discover_models: false,
+            server_output_limit: false,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: true,
+            headers: crate::ProviderHeaders::default(),
+        });
+        assert!(
+            direct
+                .explicit_prompt_cache_scope("anthropic/claude-sonnet-5.5")
+                .is_none()
         );
     }
 

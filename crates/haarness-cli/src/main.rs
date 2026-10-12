@@ -2528,14 +2528,16 @@ fn validate_asset_name(name: &str, kind: &str) -> Result<()> {
 }
 
 fn validate_qualified_model(model: &str, kind: &str) -> Result<()> {
-    if matches!(model, "inherit" | "sonnet" | "opus" | "haiku") {
+    if model == "inherit" || haarness_core::definitions::unqualified_model(model) {
         return Ok(());
     }
     if model
         .split_once('/')
         .is_none_or(|(provider, model)| provider.trim().is_empty() || model.trim().is_empty())
     {
-        anyhow::bail!("{kind} model must use provider/model form");
+        anyhow::bail!(
+            "{kind} model must use provider/model form, a model family (sonnet, opus, haiku, fable) or a Claude model id"
+        );
     }
     Ok(())
 }
@@ -2649,7 +2651,17 @@ fn write_markdown_asset(
     for (name, value) in metadata.iter_mut() {
         if let Some(value) = value.filter(|value| !value.is_empty()) {
             use std::fmt::Write as _;
-            writeln!(content, "{name}: {}", one_line_metadata(value))?;
+            let value = one_line_metadata(value);
+            // JSON tools and permissions are YAML flow collections; other text
+            // that would not read back as written (`Fix: typo`) is quoted.
+            if serde_json::from_str::<serde_json::Value>(&value)
+                .is_ok_and(|value| value.is_object() || value.is_array())
+                || haarness_core::definitions::plain_value(&value)
+            {
+                writeln!(content, "{name}: {value}")?;
+            } else {
+                writeln!(content, "{name}: {}", serde_json::to_string(&value)?)?;
+            }
         }
     }
     content.push_str("---\n");
@@ -5715,7 +5727,12 @@ fn compose_runtime_sources(
         .iter()
         .filter(|(root, _, _)| root.starts_with(&remote_cache))
     {
-        jsonconfig::discover_skill_commands(&mut json_layers.commands, root, None);
+        jsonconfig::discover_skill_commands(
+            &mut json_layers.commands,
+            &mut json_layers.notices,
+            root,
+            None,
+        );
     }
 
     let mut workflow_catalog = WorkflowCatalog::for_workspace(workspace).with_project_config(trust);

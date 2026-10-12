@@ -214,6 +214,19 @@ Budget accessors are present for source compatibility, but Haarness
 does not yet impose a separate workflow-level monetary/token budget. Provider
 usage and the ordinary agent/tool limits still apply.
 
+Agents started together, as `parallel()` does, share one prompt prefix (tools
+and system prompt). Where a provider writes its prompt cache explicitly
+(Anthropic, a custom `anthropic-messages` endpoint, and Claude models through
+the Haarness Cloud router), a cache entry becomes readable only once the
+response to the request that wrote it begins. The first child request for a
+prefix therefore goes alone, and its siblings' first requests wait until its
+response starts streaming, so they read the prefix (0.1× input price) instead
+of each writing it again (1.25×). A sibling waits at most 20 seconds from the
+leader's start; a leader that fails, ends empty or is cancelled releases it at
+once, and its own cancellation ends the wait. Only the timing moves: request
+bytes are unchanged. Providers that cache automatically (OpenAI, Gemini) and
+Bedrock are never held back.
+
 ## Lifecycle and events
 
 Run states are `running`, `completed`, `failed`, `cancelled`, `paused`, and

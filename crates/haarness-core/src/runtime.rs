@@ -1002,10 +1002,19 @@ pub struct AgentRuntime {
     /// threads. They reset with the provider process by design.
     tool_promotions: Arc<ToolPromotions>,
     snapshots: Option<Arc<dyn crate::SnapshotStore>>,
+    /// Serializes undo and redo across every thread of the workspace: one
+    /// thread's conflict checks must not interleave with another's writes.
+    /// A runtime owns exactly one snapshot store, so this gate is per store.
+    /// Lock order: a thread's turn admission lock first, then this gate;
+    /// nothing holding the gate waits for an admission lock.
+    restore_gate: Arc<AsyncMutex<()>>,
     /// Threads whose queued prompts wait for the user: after Stop, or after a
     /// queued prompt's own turn failed. A new message or Send resumes them.
     queue_pauses: Arc<DashMap<ThreadId, ()>>,
     approval_modes: Arc<crate::approval_mode::ApprovalModes>,
+    /// Concurrent child agents' first requests for one prompt prefix: the
+    /// first goes alone so the others can read the cache it writes.
+    prefix_warmup: crate::prefix_warmup::PrefixWarmup,
 }
 
 #[derive(Clone)]
@@ -1135,8 +1144,10 @@ impl AgentRuntime {
             tool_execution_gates: Arc::new(DashMap::new()),
             tool_promotions: Arc::new(DashMap::new()),
             snapshots: None,
+            restore_gate: Arc::new(AsyncMutex::new(())),
             queue_pauses: Arc::new(DashMap::new()),
             approval_modes,
+            prefix_warmup: crate::prefix_warmup::PrefixWarmup::default(),
         }
     }
 
@@ -2706,6 +2717,8 @@ impl AgentRuntime {
     pub async fn revert(&self, id: ThreadId, sequence: Option<u64>) -> CoreResult<Thread> {
         let admission_lock = turn_admission_lock(&self.turn_admissions, id);
         let _admission_guard = admission_lock.lock().await;
+        // Held from the backup capture through the saved undo state.
+        let _restore_guard = self.restore_gate.lock().await;
         let snapshots = self
             .snapshots
             .as_ref()
@@ -2946,6 +2959,7 @@ impl AgentRuntime {
     pub async fn unrevert(&self, id: ThreadId) -> CoreResult<Thread> {
         let admission_lock = turn_admission_lock(&self.turn_admissions, id);
         let _admission_guard = admission_lock.lock().await;
+        let _restore_guard = self.restore_gate.lock().await;
         if self.active.contains_key(&id) {
             return Err(CoreError::Conflict(
                 "cannot unrevert while a turn is running".into(),
@@ -3036,8 +3050,9 @@ impl AgentRuntime {
         Ok(thread)
     }
 
-    /// Stable file changes for the latest completed mutation epoch. Unlike a
-    /// live Git diff this remains meaningful after unrelated later edits.
+    /// Stable file changes for the latest completed mutation epoch that
+    /// changed files and is not undone. Unlike a live Git diff this remains
+    /// meaningful after unrelated later edits.
     pub async fn diff_last_turn(
         &self,
         id: ThreadId,
@@ -3055,25 +3070,50 @@ impl AgentRuntime {
             .snapshots
             .as_ref()
             .ok_or_else(|| CoreError::Invalid("snapshots are disabled".into()))?;
+        // An undone turn stays in the transcript until new work confirms the
+        // undo, but its files are gone: only checkpoints before the undo
+        // boundary describe the workspace.
+        let undone = self
+            .repository
+            .get_thread(id)
+            .await?
+            .revert
+            .map(|state| state.sequence);
         let items = self.repository.list_items(id, None).await?;
-        if let Some((before, after)) = items.iter().rev().find_map(|item| match &item.data {
+        let kept = |item: &Item, boundary: Option<u64>| {
+            undone.is_none_or(|undone| boundary.map_or(item.sequence <= undone, |b| b < undone))
+        };
+        let pairs = items.iter().rev().filter_map(|item| match &item.data {
             ItemData::Snapshot {
                 snapshot_id,
+                boundary_sequence,
                 base_snapshot_id: Some(base),
                 ..
-            } => Some((base.clone(), snapshot_id.clone())),
+            } if kept(item, *boundary_sequence) => Some((base, snapshot_id)),
             _ => None,
-        }) {
-            return snapshots
-                .diff_review(&before, Some(&after), summary, path)
-                .await;
+        });
+        // The newest turn that changed files. A turn that only ran commands
+        // still records a pair (undo needs its boundary); it must not hide
+        // the edits before it.
+        let mut paired = false;
+        for (before, after) in pairs {
+            paired = true;
+            if snapshots.snapshots_differ(before, after).await? {
+                return snapshots
+                    .diff_review(before, Some(after), summary, path)
+                    .await;
+            }
+        }
+        if paired {
+            return Ok(Vec::new());
         }
         let legacy = items.iter().rev().find_map(|item| match &item.data {
             ItemData::Snapshot {
                 snapshot_id,
+                boundary_sequence,
                 base_snapshot_id: None,
                 ..
-            } => Some(snapshot_id.clone()),
+            } if kept(item, *boundary_sequence) => Some(snapshot_id.clone()),
             _ => None,
         });
         match legacy {
@@ -3987,6 +4027,17 @@ impl AgentRuntime {
         Ok(())
     }
 
+    /// The provider and model an agent or command definition's `model` value
+    /// runs on, resolved as a turn resolves it and preferring `preferred`.
+    /// `None` keeps the chat's model (`inherit`).
+    pub fn resolve_definition_model(
+        &self,
+        preferred: Option<&str>,
+        value: &str,
+    ) -> CoreResult<Option<(String, String)>> {
+        resolve_definition_model(self.components().providers.as_ref(), preferred, value)
+    }
+
     /// Agent profiles served to clients: built-ins plus user-defined agents.
     #[must_use]
     pub fn agent_profiles(&self) -> Vec<haarness_protocol::AgentProfile> {
@@ -4490,6 +4541,7 @@ impl AgentRuntime {
             last_tool_catalog: Mutex::new(None),
             config: components.config.clone(),
             snapshots: self.snapshots.clone(),
+            restore_gate: self.restore_gate.clone(),
             hooks: components.hooks.clone(),
             snapshot_boundary: user_item.sequence.saturating_sub(1),
             snapshot_state: AsyncMutex::new(TurnSnapshotState::new()),
@@ -4498,6 +4550,7 @@ impl AgentRuntime {
             queue_pauses: self.queue_pauses.clone(),
             approval_modes: self.approval_modes.clone(),
             answer_steer: AtomicBool::new(false),
+            prefix_warmup: self.prefix_warmup.clone(),
         });
         // A real message, or Send on a queued one, resumes a paused queue.
         if !task.request.synthetic {
@@ -4874,6 +4927,8 @@ struct RunnerTask {
     last_tool_catalog: Mutex<Option<ToolCatalogResponse>>,
     config: Arc<RuntimeConfig>,
     snapshots: Option<Arc<dyn crate::SnapshotStore>>,
+    /// The runtime's restore gate, passed on to handles built from this task.
+    restore_gate: Arc<AsyncMutex<()>>,
     hooks: Option<Arc<dyn crate::HookPort>>,
     snapshot_boundary: u64,
     snapshot_state: AsyncMutex<TurnSnapshotState>,
@@ -4886,6 +4941,7 @@ struct RunnerTask {
     approval_modes: Arc<crate::approval_mode::ApprovalModes>,
     /// Set when a stop leaves unread steering for a continuation to answer.
     answer_steer: AtomicBool,
+    prefix_warmup: crate::prefix_warmup::PrefixWarmup,
 }
 
 struct TurnToolInvoker {
@@ -5224,6 +5280,56 @@ fn resolve_pending_question(
     pending.publish_resolved(events, id, "answered");
     let _ = pending.sender.send(answer);
     Ok(())
+}
+
+/// The question tool's arguments, checked before the user sees anything.
+struct QuestionRequest<'a> {
+    prompt: &'a str,
+    choices: Vec<String>,
+    multiple: bool,
+    custom: bool,
+}
+
+fn question_request(arguments: &serde_json::Value) -> CoreResult<QuestionRequest<'_>> {
+    let prompt = arguments
+        .get("prompt")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| CoreError::Invalid("question.prompt is required".into()))?;
+    let choices: Vec<String> = arguments
+        .get("choices")
+        .and_then(serde_json::Value::as_array)
+        .map_or_else(Vec::new, |values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        });
+    let multiple = arguments
+        .get("multiple")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let custom = arguments
+        .get("custom")
+        .and_then(serde_json::Value::as_bool)
+        // Haarness questions always offer a free-form answer unless the
+        // caller explicitly disables it. This matters for choices such as
+        // "Share an error message": the label is an action, while the
+        // custom answer carries the actual error text.
+        .unwrap_or(true);
+    // With nothing to pick and nothing to type, no client can answer, and the
+    // turn would wait on the question until it is cancelled.
+    if choices.is_empty() && !custom {
+        return Err(CoreError::Invalid(
+            "question needs a way to answer it: give at least one choice, or leave custom (free-form answers) enabled".into(),
+        ));
+    }
+    Ok(QuestionRequest {
+        prompt,
+        choices,
+        multiple,
+        custom,
+    })
 }
 
 impl PendingPermission {
@@ -5982,6 +6088,10 @@ impl RunnerTask {
             let mut previous_stalled_goal_turn = None;
             let mut repeated_stalled_goal_turns = 0_u32;
             let mut tool_rounds = 0_u32;
+            // Only a turn's first provider request can share a prompt prefix
+            // with siblings started alongside it; later rounds read the cache
+            // the first one wrote.
+            let mut first_request = true;
             let mut logical_turn = GoalLogicalTurnGuard::new(
                 self.events.clone(),
                 self.thread.id,
@@ -6330,12 +6440,32 @@ impl RunnerTask {
                     "gen_ai.usage.cache_read.input_tokens" = tracing::field::Empty,
                     "gen_ai.usage.cache_creation.input_tokens" = tracing::field::Empty,
                 );
+                // Child agents started together (a workflow fan-out, a batch
+                // of task delegations) share a prompt prefix. Where a provider
+                // writes its cache explicitly, the first of them goes alone
+                // and the others wait for its response to begin, so they read
+                // the prefix instead of each writing it again.
+                let warmup_key = (std::mem::take(&mut first_request)
+                    && (self.depth > 0 || self.thread.is_subagent))
+                    .then(|| provider.explicit_prompt_cache_scope(&provider_request.model))
+                    .flatten()
+                    .map(|scope| {
+                        crate::prefix_warmup::PrefixKey::new(provider_id, &scope, &provider_request)
+                    });
+                let lead = match warmup_key {
+                    Some(key) => self.prefix_warmup.enter(key, &self.cancel).await?,
+                    None => None,
+                };
                 let stream_result = tokio::select! {
                     biased;
                     () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
                     result = provider
                         .stream(provider_request, self.cancel.clone())
                         .instrument(provider_span.clone()) => result,
+                };
+                let stream_result = match lead {
+                    Some(lead) => stream_result.map(|stream| lead.watch(stream)),
+                    None => stream_result,
                 };
                 let mut stream = match stream_result {
                     Ok(stream) => stream,
@@ -8316,32 +8446,12 @@ impl RunnerTask {
         Ok(format!("Todo list updated ({count} items)"))
     }
     async fn ask_question(&self, arguments: &serde_json::Value) -> CoreResult<String> {
-        let prompt = arguments
-            .get("prompt")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| CoreError::Invalid("question.prompt is required".into()))?;
-        let choices = arguments
-            .get("choices")
-            .and_then(serde_json::Value::as_array)
-            .map_or_else(Vec::new, |values| {
-                values
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .map(ToOwned::to_owned)
-                    .collect()
-            });
-        let multiple = arguments
-            .get("multiple")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        let custom = arguments
-            .get("custom")
-            .and_then(serde_json::Value::as_bool)
-            // Haarness questions always offer a free-form answer unless the
-            // caller explicitly disables it. This matters for choices such as
-            // "Share an error message": the label is an action, while the
-            // custom answer carries the actual error text.
-            .unwrap_or(true);
+        let QuestionRequest {
+            prompt,
+            choices,
+            multiple,
+            custom,
+        } = question_request(arguments)?;
         let id = uuid::Uuid::now_v7().to_string();
         let (sender, receiver) = oneshot::channel();
         self.publish_item(ItemData::Question {
@@ -8747,6 +8857,7 @@ impl RunnerTask {
             last_tool_catalog: Mutex::new(None),
             config: self.config.clone(),
             snapshots: self.snapshots.clone(),
+            restore_gate: self.restore_gate.clone(),
             hooks: self.hooks.clone(),
             snapshot_boundary: user.sequence.saturating_sub(1),
             snapshot_state: AsyncMutex::new(TurnSnapshotState::new()),
@@ -8755,6 +8866,7 @@ impl RunnerTask {
             queue_pauses: self.queue_pauses.clone(),
             approval_modes: self.approval_modes.clone(),
             answer_steer: AtomicBool::new(false),
+            prefix_warmup: self.prefix_warmup.clone(),
         });
         child_task.publish_task_update("running");
         let task = Arc::new(BackgroundTask {
@@ -8989,8 +9101,10 @@ impl RunnerTask {
             tool_execution_gates: self.tool_execution_gates.clone(),
             tool_promotions: self.tool_promotions.clone(),
             snapshots: self.snapshots.clone(),
+            restore_gate: self.restore_gate.clone(),
             queue_pauses: self.queue_pauses.clone(),
             approval_modes: self.approval_modes.clone(),
+            prefix_warmup: self.prefix_warmup.clone(),
         }
     }
 }
@@ -9238,7 +9352,9 @@ fn subagent_model(
     };
     let resolved = match resolve_definition_model(registry, Some(parent_provider), configured) {
         Ok(value) => value,
-        Err(_) if matches!(configured, "sonnet" | "opus" | "haiku") => None,
+        // A family or bare Claude id names no provider, so a catalog without
+        // it means unavailable rather than misconfigured.
+        Err(_) if crate::definitions::unqualified_model(configured) => None,
         Err(error) => return Err(error),
     };
     if let Some((provider, model)) = resolved {
@@ -9275,25 +9391,47 @@ fn resolve_definition_model(
     if value.contains('/') {
         return qualified_agent_model("definition", value).map(Some);
     }
-    if !matches!(value, "sonnet" | "opus" | "haiku") {
-        return Err(CoreError::Invalid(format!(
-            "Unknown model alias {value}; use provider/model"
-        )));
-    }
+    let release = if crate::definitions::MODEL_FAMILIES.contains(&value) {
+        None
+    } else {
+        Some(crate::definitions::claude_release(value).ok_or_else(|| {
+            CoreError::Invalid(format!(
+                "Unknown model alias {value}; use provider/model, a model family (sonnet, opus, haiku, fable) or a Claude model id"
+            ))
+        })?)
+    };
+    // The chat's own provider first, then signed-in ones, so a catalog
+    // listed without credentials does not shadow a usable provider.
+    let listed = registry.list();
     let mut providers = preferred.into_iter().map(str::to_owned).collect::<Vec<_>>();
-    for provider in registry.list() {
+    for provider in listed
+        .iter()
+        .filter(|provider| provider.authenticated)
+        .chain(listed.iter().filter(|provider| !provider.authenticated))
+    {
         if !providers.contains(&provider.id) {
-            providers.push(provider.id);
+            providers.push(provider.id.clone());
         }
     }
     for provider in providers {
-        let mut models = registry
-            .models(&provider)
-            .into_iter()
-            .filter(|m| m.id.to_lowercase().contains(value))
-            .collect::<Vec<_>>();
-        models.sort_by(|a, b| b.id.cmp(&a.id));
-        if let Some(model) = models.first() {
+        let models = registry.models(&provider);
+        let model = match &release {
+            // A family is its newest release, by id.
+            None => models
+                .iter()
+                .filter(|m| m.id.to_lowercase().contains(value))
+                .max_by(|a, b| a.id.cmp(&b.id)),
+            // A release id matches the provider's spelling of the same release.
+            Some(release) => models
+                .iter()
+                .find(|m| m.id.eq_ignore_ascii_case(value))
+                .or_else(|| {
+                    models.iter().find(|m| {
+                        crate::definitions::claude_release(&m.id).as_ref() == Some(release)
+                    })
+                }),
+        };
+        if let Some(model) = model {
             return Ok(Some((provider, model.id.clone())));
         }
     }
@@ -10323,10 +10461,19 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
     .and_then(serde_json::Value::as_str)
     .unwrap_or("*")
     .to_owned();
+    // File reads and edits also meet the rules for the file they really
+    // open, after links and `..`: a link `notes.txt -> .env` still asks, and
+    // `node_modules/x/../../.env` is not a file inside node_modules.
+    let mut patterns = vec![target.clone()];
+    if matches!(name, "read" | "write" | "edit" | "multiedit")
+        && let Some(resolved) = resolved_file_pattern(workspace, &target)
+    {
+        patterns.push(resolved);
+    }
     // Reads generalize only to the exact path (an approved `.env` read must
     // not open every secret); mutations generalize wide.
     let always = if name == "read" {
-        vec![target.clone()]
+        patterns.clone()
     } else {
         vec!["*".into()]
     };
@@ -10336,11 +10483,49 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         } else {
             name.to_owned()
         },
-        patterns: vec![target],
+        patterns,
         always,
         external_paths: Vec::new(),
     });
     plans
+}
+
+/// The path a file tool opens for `target`, when links or `..` make it a
+/// different file from the one the path names. It is written the way the
+/// model wrote the target (workspace-relative when that was), so rules meet
+/// it in the same form; `None` when the target already names that file.
+fn resolved_file_pattern(workspace: &Path, target: &str) -> Option<String> {
+    if target.is_empty() || target == "*" {
+        return None;
+    }
+    let resolved = crate::permissions::resolve_permission_path(workspace, target);
+    let root = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let given = Path::new(target);
+    // `Path` equality ignores `.` components but keeps `..`, so a target
+    // with `..` always gets its resolved form checked too.
+    let named = if given.is_absolute() {
+        given
+            .strip_prefix(workspace)
+            .map_or_else(|_| given.to_path_buf(), |rest| root.join(rest))
+    } else {
+        root.join(given)
+    };
+    if resolved == named {
+        return None;
+    }
+    let pattern = match resolved.strip_prefix(&root) {
+        Ok(relative) if given.is_relative() => {
+            if relative.as_os_str().is_empty() {
+                ".".to_owned()
+            } else {
+                relative.to_string_lossy().into_owned()
+            }
+        }
+        _ => resolved.to_string_lossy().into_owned(),
+    };
+    (pattern != target).then_some(pattern)
 }
 
 #[cfg(test)]
@@ -10573,7 +10758,7 @@ mod tests {
 
     use super::{
         CoreError, EventBus, GoalLogicalTurnGuard, Item, ItemData, PendingQuestion,
-        ProviderMessage, parse_goal_criteria_selection, provider_messages,
+        ProviderMessage, parse_goal_criteria_selection, provider_messages, question_request,
         resolve_pending_question, subagent_title,
     };
 
@@ -10622,6 +10807,36 @@ mod tests {
             parse_goal_criteria_selection(&proposed, "Cancellation is observable").unwrap(),
             ["Cancellation is observable"]
         );
+    }
+
+    #[test]
+    fn question_without_choices_must_allow_a_free_form_answer() {
+        for arguments in [
+            json!({"prompt": "Name?", "custom": false}),
+            json!({"prompt": "Name?", "choices": [], "custom": false}),
+            // Labels that are not strings are dropped, leaving nothing to pick.
+            json!({"prompt": "Name?", "choices": [1, 2], "custom": false}),
+        ] {
+            let Err(CoreError::Invalid(message)) = question_request(&arguments) else {
+                panic!("{arguments} must be rejected");
+            };
+            assert!(message.contains("at least one choice"), "{message}");
+            assert!(message.contains("custom"), "{message}");
+        }
+
+        let open = json!({"prompt": "Name?"});
+        let open = question_request(&open).unwrap();
+        assert!(open.choices.is_empty());
+        assert!(open.custom);
+        let picked = json!({"prompt": "Color?", "choices": ["Green"], "custom": false});
+        let picked = question_request(&picked).unwrap();
+        assert_eq!(picked.choices, ["Green"]);
+        assert!(!picked.custom);
+        assert!(!picked.multiple);
+        assert!(matches!(
+            question_request(&json!({"choices": ["Green"]})),
+            Err(CoreError::Invalid(_))
+        ));
     }
 
     #[test]
@@ -10730,6 +10945,111 @@ mod tests {
             max_output_tokens: None,
             pricing: None,
         }
+    }
+
+    #[test]
+    fn definition_models_resolve_families_and_bare_claude_ids_against_catalogs() {
+        struct Catalog(Vec<haarness_protocol::ProviderInfo>);
+        impl crate::ProviderRegistry for Catalog {
+            fn get(&self, _: &str) -> Option<Arc<dyn crate::ModelProvider>> {
+                None
+            }
+            fn list(&self) -> Vec<haarness_protocol::ProviderInfo> {
+                self.0.clone()
+            }
+            fn models(&self, provider: &str) -> Vec<ModelInfo> {
+                self.0
+                    .iter()
+                    .find(|info| info.id == provider)
+                    .map(|info| info.models.clone())
+                    .unwrap_or_default()
+            }
+        }
+        let provider =
+            |id: &str, authenticated: bool, models: &[&str]| haarness_protocol::ProviderInfo {
+                id: id.into(),
+                name: id.into(),
+                authenticated,
+                models: models.iter().map(|id| model_info(id, 200_000)).collect(),
+            };
+        // Listed first but not signed in, as a catalog without credentials is.
+        let registry = Catalog(vec![
+            provider(
+                "anthropic",
+                false,
+                &[
+                    "claude-opus-5-5",
+                    "claude-sonnet-5-5",
+                    "claude-fable-5",
+                    "claude-fable-5-1",
+                ],
+            ),
+            provider(
+                "cloud",
+                true,
+                &[
+                    "anthropic/claude-opus-5.5",
+                    "anthropic/claude-sonnet-5.5",
+                    "openai/gpt-6.1-sol",
+                ],
+            ),
+            provider("bedrock", true, &["us.anthropic.claude-haiku-5-5-v1:0"]),
+        ]);
+        for (preferred, value, expected) in [
+            // The chat's own provider wins when it lists the release.
+            (
+                Some("anthropic"),
+                "claude-sonnet-5-5",
+                Some(("anthropic", "claude-sonnet-5-5")),
+            ),
+            // Otherwise a signed-in provider, in its own spelling of the release.
+            (
+                Some("bedrock"),
+                "claude-sonnet-5-5",
+                Some(("cloud", "anthropic/claude-sonnet-5.5")),
+            ),
+            (
+                None,
+                "claude-sonnet-5.5",
+                Some(("cloud", "anthropic/claude-sonnet-5.5")),
+            ),
+            (
+                None,
+                "claude-haiku-5-5",
+                Some(("bedrock", "us.anthropic.claude-haiku-5-5-v1:0")),
+            ),
+            (None, "opus", Some(("cloud", "anthropic/claude-opus-5.5"))),
+            // Only an unauthenticated catalog lists Fable, so the caller
+            // reports the sign-in it needs.
+            (None, "fable", Some(("anthropic", "claude-fable-5-1"))),
+            (None, "inherit", None),
+            (None, "acme/custom", Some(("acme", "custom"))),
+        ] {
+            assert_eq!(
+                super::resolve_definition_model(&registry, preferred, value).unwrap(),
+                expected.map(|(provider, model)| (provider.to_owned(), model.to_owned())),
+                "{value}"
+            );
+        }
+        for (value, error) in [
+            (
+                "claude-sonnet-9-9",
+                "No configured provider has a claude-sonnet-9-9 model",
+            ),
+            ("gpt-6.1-sol", "Unknown model alias gpt-6.1-sol"),
+            ("bad-alias", "Unknown model alias bad-alias"),
+        ] {
+            let message = super::resolve_definition_model(&registry, None, value)
+                .unwrap_err()
+                .to_string();
+            assert!(message.contains(error), "{message}");
+        }
+        assert!(crate::definitions::unqualified_model("fable"));
+        assert!(crate::definitions::unqualified_model("claude-opus-5-5"));
+        assert!(!crate::definitions::unqualified_model("my-claude-model"));
+        assert!(!crate::definitions::unqualified_model(
+            "anthropic/claude-opus-5-5"
+        ));
     }
 
     #[test]
@@ -12034,6 +12354,71 @@ mod tests {
         );
         assert_eq!(grep.last().unwrap().permission, "grep");
         assert_eq!(grep.last().unwrap().patterns, vec!["unsafe"]);
+    }
+
+    #[test]
+    fn file_permissions_also_meet_the_rules_for_the_file_really_opened() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-real-path-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(workspace.join("node_modules/pkg")).unwrap();
+        std::fs::write(workspace.join(".env"), "fixture").unwrap();
+        std::fs::write(workspace.join("node_modules/pkg/.env"), "fixture").unwrap();
+        std::fs::write(workspace.join("main.rs"), "fixture").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(".env", workspace.join("notes.txt")).unwrap();
+        let engine = crate::PermissionEngine::build_defaults();
+        let read = |path: &str| {
+            let plan = super::ask_plans("read", &json!({"path": path}), &workspace).remove(0);
+            assert_eq!(plan.permission, "read");
+            assert_eq!(plan.always, plan.patterns, "{path}");
+            let asks = plan.patterns.iter().any(|pattern| {
+                engine.evaluate(&plan.operation(pattern)) == crate::PermissionDecision::Ask
+            });
+            (plan.patterns, asks)
+        };
+        // A plain path is checked as written, once.
+        assert_eq!(read("main.rs"), (vec!["main.rs".to_owned()], false));
+        assert_eq!(read(".env"), (vec![".env".to_owned()], true));
+        assert_eq!(read("./main.rs"), (vec!["./main.rs".to_owned()], false));
+        // Files inside node_modules are read without asking...
+        assert_eq!(
+            read("node_modules/pkg/.env"),
+            (vec!["node_modules/pkg/.env".to_owned()], false)
+        );
+        // ...but `..` cannot make the project's .env look like one of them.
+        for path in ["node_modules/pkg/../../.env", "node_modules/../.env"] {
+            assert_eq!(read(path), (vec![path.to_owned(), ".env".to_owned()], true));
+        }
+        let absolute = workspace.join("node_modules/../.env");
+        let (patterns, asks) = read(absolute.to_str().unwrap());
+        assert!(asks);
+        assert_eq!(
+            patterns[1],
+            workspace
+                .canonicalize()
+                .unwrap()
+                .join(".env")
+                .display()
+                .to_string()
+        );
+        // A link is checked by its target too, and edits through it as well.
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                read("notes.txt"),
+                (vec!["notes.txt".to_owned(), ".env".to_owned()], true)
+            );
+            for (tool, args) in [
+                ("edit", json!({"path":"notes.txt","old":"a","new":"b"})),
+                ("write", json!({"path":"notes.txt","content":"b"})),
+            ] {
+                let plan = super::ask_plans(tool, &args, &workspace).remove(0);
+                assert_eq!(plan.permission, "edit");
+                assert_eq!(plan.patterns, vec!["notes.txt", ".env"]);
+                assert_eq!(plan.always, vec!["*"]);
+            }
+        }
+        std::fs::remove_dir_all(workspace).unwrap();
     }
 
     #[test]

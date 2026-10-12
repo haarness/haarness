@@ -17,7 +17,8 @@ scroll through their changes.
 
 Working-tree and branch reviews read current Git data when refreshed. Last-turn
 review uses the captured before/after checkpoints, so later manual edits do not
-change a completed turn's diff. Copy patch also works for these snapshot diffs.
+change a completed turn's diff. It shows the newest turn that changed files and
+is not undone. Copy patch also works for these snapshot diffs.
 
 The UI retains at most 24 cached file bodies and approximately 24 MiB of UTF-16
 body text, in addition to the currently rendered files. It performs at most three
