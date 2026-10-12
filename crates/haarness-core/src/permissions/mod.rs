@@ -48,6 +48,34 @@ pub struct PermissionEngine {
     ceilings: Vec<PermissionRule>,
 }
 
+/// The built-in `read` rules for environment secrets, in order (last match
+/// wins). Packages ship `.env` files, often as test fixtures, so a file
+/// inside a `node_modules` folder is read without asking; `*` crosses `/`,
+/// so the two allows cover such a folder at any depth, in relative and
+/// absolute paths alike.
+const SECRET_READ_RULES: [(&str, PermissionDecision); 5] = [
+    ("*.env", PermissionDecision::Ask),
+    ("*.env.*", PermissionDecision::Ask),
+    ("*.env.example", PermissionDecision::Allow),
+    ("node_modules/*", PermissionDecision::Allow),
+    ("*/node_modules/*", PermissionDecision::Allow),
+];
+
+/// Whether the built-in read rules ask before reading this path, after `.`
+/// and `..` are resolved lexically. Search tools leave such a secret-named
+/// file out and only say how many they left out; an explicit read of one
+/// still asks. Configured rules play no part, so every search hides the same
+/// files.
+#[must_use]
+pub fn is_secret_path(path: &Path) -> bool {
+    let path = normalize_absolute(path);
+    let path = path.to_string_lossy();
+    SECRET_READ_RULES
+        .iter()
+        .rfind(|(pattern, _)| wildcard_match(pattern, &path))
+        .is_some_and(|(_, decision)| *decision == PermissionDecision::Ask)
+}
+
 impl PermissionEngine {
     #[must_use]
     pub fn new(rules: Vec<PermissionRule>) -> Self {
@@ -63,7 +91,7 @@ impl PermissionEngine {
     /// require approval, alongside explicit agent changes and generated media.
     #[must_use]
     pub fn build_defaults() -> Self {
-        Self::new(vec![
+        let mut rules = vec![
             rule("*", PermissionDecision::Allow),
             // Switching the active primary agent changes the governing prompt
             // and permissions for future turns, so require an explicit user
@@ -76,10 +104,13 @@ impl PermissionEngine {
             rule("doom_loop:*", PermissionDecision::Ask),
             rule("external_directory:*", PermissionDecision::Ask),
             rule("browser_site:*", PermissionDecision::Ask),
-            rule("read:*.env", PermissionDecision::Ask),
-            rule("read:*.env.*", PermissionDecision::Ask),
-            rule("read:*.env.example", PermissionDecision::Allow),
-        ])
+        ];
+        rules.extend(
+            SECRET_READ_RULES
+                .iter()
+                .map(|(pattern, decision)| rule(&format!("read:{pattern}"), *decision)),
+        );
+        Self::new(rules)
     }
 
     /// The plan agent gets the same base rules plus a write-denying ceiling
@@ -566,6 +597,40 @@ mod tests {
             engine.evaluate("read:app/.env.example"),
             PermissionDecision::Allow
         );
+        // Packages ship `.env` fixtures: a file inside a node_modules folder
+        // is read without asking, at any depth; look-alike folders still ask.
+        for path in [
+            "node_modules/bottleneck/.env",
+            "node_modules/.env",
+            "node_modules/a/node_modules/b/.env.local",
+            "packages/app/node_modules/pkg/test/.env.production",
+            "/project/node_modules/pkg/.env",
+        ] {
+            assert_eq!(
+                engine.evaluate(&format!("read:{path}")),
+                PermissionDecision::Allow,
+                "{path}"
+            );
+        }
+        for path in [
+            "mynode_modules/.env",
+            "node_modules.bak/.env",
+            "src/node_modules_x/.env",
+            "/project/mynode_modules/.env",
+        ] {
+            assert_eq!(
+                engine.evaluate(&format!("read:{path}")),
+                PermissionDecision::Ask,
+                "{path}"
+            );
+        }
+        // Configured rules come later and still cover them.
+        let mut configured = PermissionEngine::build_defaults();
+        configured.add_rule(rule("read:*.env", PermissionDecision::Deny));
+        assert_eq!(
+            configured.evaluate("read:node_modules/bottleneck/.env"),
+            PermissionDecision::Deny
+        );
         assert_eq!(
             engine.evaluate("external_directory:/tmp/*"),
             PermissionDecision::Ask
@@ -579,6 +644,42 @@ mod tests {
             engine.evaluate("media_generate:image:generate"),
             PermissionDecision::Ask
         );
+    }
+
+    #[test]
+    fn secret_paths_are_exactly_the_built_in_read_asks() {
+        let engine = PermissionEngine::build_defaults();
+        for path in [
+            ".env",
+            "prod.env",
+            "app.env.local",
+            "conf.env.d/notes.txt",
+            "/project/.env.production",
+            "c.env.example",
+            "d.txt",
+            "README.md",
+            ".env/bin/activate",
+            ".env/node_modules",
+            "node_modules/pkg/.env",
+            "/project/a/node_modules/pkg/.env.local",
+            "mynode_modules/.env",
+        ] {
+            assert_eq!(
+                is_secret_path(Path::new(path)),
+                engine.evaluate(&format!("read:{path}")) == PermissionDecision::Ask,
+                "{path}"
+            );
+        }
+        // `..` is resolved first, so a path that only passes through
+        // node_modules is judged by the file it reaches.
+        for path in [
+            "node_modules/../.env",
+            "node_modules/pkg/../../.env",
+            "/project/node_modules/x/../../.env",
+        ] {
+            assert!(is_secret_path(Path::new(path)), "{path}");
+        }
+        assert!(!is_secret_path(Path::new("conf.env.d/../src/main.rs")));
     }
 
     #[test]

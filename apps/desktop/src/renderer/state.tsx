@@ -42,7 +42,7 @@ import {
   type NotificationTarget,
 } from "../shared";
 import { cloudServers, localServer, serverKey, serverProjects } from "../servers";
-import { reduceEvent, type Live } from "./sync";
+import { freshChat, reduceEvent, type Live } from "./sync";
 import { themeColors } from "../themes";
 import {
   cleanProjectMeta,
@@ -493,7 +493,11 @@ function createApp() {
       journals.delete(journal);
     }
   }
-  async function choose(id: string, panel: State["panel"] = "chat") {
+  async function choose(
+    id: string,
+    panel: State["panel"] = "chat",
+    options: { fresh?: boolean } = {},
+  ) {
     if (state.selected === id) {
       set("panel", panel);
       return;
@@ -502,23 +506,27 @@ function createApp() {
     const connection = state.connection!.id;
     tabHistory = [...tabHistory.filter((tab) => tab !== id), id];
     batch(() => {
-      set("loadingChat", current);
+      // A chat created just now (see `freshChat`) has no history to load, so
+      // its composer stays in view while the first message goes out.
+      set("loadingChat", options.fresh ? 0 : current);
       set("selected", id);
       set("items", []);
       set("panel", panel);
       if (!state.tabs.includes(id)) set("tabs", (tabs) => [...tabs, id]);
     });
     try {
-      const items = await api<T.Item[]>("listItems", id);
-      if (current !== selection) return;
-      set(
-        "items",
-        [
-          ...new Map(
-            [...items, ...state.items].map((item) => [item.id, item]),
-          ).values(),
-        ].sort((a, b) => a.sequence - b.sequence),
-      );
+      if (!options.fresh) {
+        const items = await api<T.Item[]>("listItems", id);
+        if (current !== selection) return;
+        set(
+          "items",
+          [
+            ...new Map(
+              [...items, ...state.items].map((item) => [item.id, item]),
+            ).values(),
+          ].sort((a, b) => a.sequence - b.sequence),
+        );
+      }
       await window.haarness.storage("session:" + connection, id);
     } finally {
       if (state.loadingChat === current) set("loadingChat", 0);
@@ -1413,6 +1421,7 @@ function createApp() {
       "createThread",
       [options],
     );
+    const created = { at: Date.now(), stream: hydration };
     // A new chat starts in the mode chosen for new chats here. The server
     // keeps it, so other windows and the phone see the same mode.
     if (
@@ -1448,7 +1457,10 @@ function createApp() {
           try { await window.haarness.browserAdopt(connection, thread.id); }
           catch (error) { set("error", "Your browser remains on the new-chat screen: " + String(error)); }
         }
-        if (generation === current && selection === currentSelection) await choose(thread.id, panel);
+        if (generation === current && selection === currentSelection)
+          await choose(thread.id, panel, {
+            fresh: freshChat(created, Date.now(), hydration),
+          });
       }
     }
     return thread;

@@ -138,10 +138,11 @@ impl ManagementService {
         let source_path = source["path"]
             .as_str()
             .or_else(|| source.pointer("/execution/path").and_then(Value::as_str));
-        let mut front = source_path
-            .and_then(|path| fs::read_to_string(path).ok())
-            .map(|raw| parse_markdown(&raw).0)
-            .unwrap_or_default();
+        let mut front =
+            match source_path.and_then(|path| Some((path, fs::read_to_string(path).ok()?))) {
+                Some((path, raw)) => editable_markdown(&raw, Path::new(path))?.0,
+                None => BTreeMap::new(),
+            };
         if resource == "command" {
             if let Some(directory) = source
                 .pointer("/execution/directory")
@@ -315,7 +316,7 @@ impl ManagementService {
                 let name = required_string(input, "name")?;
                 let (target, scope) = self.resolve_skill(name, optional_scope(input)?)?;
                 let raw = fs::read_to_string(&target)?;
-                let (mut front, body) = parse_markdown(&raw);
+                let (mut front, body) = editable_markdown(&raw, &target)?;
                 if let Some(value) = optional_string(input, "description") {
                     front.insert("description".into(), value.into());
                 }
@@ -451,7 +452,7 @@ impl ManagementService {
                 validate_agent_fields(input)?;
                 let (target, scope) = self.resolve_agent(name, optional_scope(input)?)?;
                 let raw = fs::read_to_string(&target)?;
-                let (front, body) = parse_markdown(&raw);
+                let (front, body) = editable_markdown(&raw, &target)?;
                 let description = optional_string(input, "description")
                     .or_else(|| front.get("description").map(String::as_str))
                     .unwrap_or_default()
@@ -905,7 +906,7 @@ impl ManagementService {
                 let name = required_string(input, "name")?;
                 let (target, scope) = self.resolve_command(name, optional_scope(input)?)?;
                 let raw = fs::read_to_string(&target)?;
-                let (front, body) = parse_markdown(&raw);
+                let (front, body) = editable_markdown(&raw, &target)?;
                 let template = optional_string(input, "template").unwrap_or(body.trim());
                 write_command(&target, input, front, template)?;
                 changed_with_scope("edit", "command", name, &target, scope, false)
@@ -1386,17 +1387,28 @@ impl ManagementService {
             "agent '{target}' is subagent-only"
         );
         let previous = format!("{}/{}", current.provider, current.model);
+        // Name the model the next turn runs on, resolved as a turn resolves
+        // the agent's value: an alias shows its release, and `inherit` or no
+        // model shows the chat's own model, which clients present as no change.
+        let model = match profile.model.as_deref() {
+            Some(value) => runtime
+                .resolve_definition_model(Some(&current.provider), value)
+                .map_err(core_error)?
+                .map(|(provider, model)| format!("{provider}/{model}")),
+            None => None,
+        }
+        .unwrap_or_else(|| previous.clone());
         Ok(json!({
             "threadId": thread, "agent": target, "previousAgent": current.agent,
-            "model": profile.model.unwrap_or_else(|| previous.clone()), "previousModel": previous,
+            "model": model, "previousModel": previous,
         }))
     }
 
     async fn agent_switch(&self, input: &Value, context: &ToolContext) -> Result<Value> {
         // Approval binds the exact destination and model resolved before the prompt.
+        let details = self.switch_details(input, context.thread_id).await?;
         anyhow::ensure!(
-            input.get("__agentSwitch")
-                == Some(&self.switch_details(input, context.thread_id).await?),
+            input.get("__agentSwitch") == Some(&details),
             "Agent or model changed while awaiting approval. Request the switch again."
         );
         let runtime = self.runtime()?;
@@ -1419,9 +1431,11 @@ impl ManagementService {
         if current.agent == target {
             return Ok(json!({"status":"unchanged","agent":target}));
         }
-        let (provider, model) = profile
-            .model
-            .as_deref()
+        // Apply the approved model itself; the handoff turn below runs on it
+        // too rather than resolving the agent's alias again.
+        let (provider, model): (Option<String>, Option<String>) = details["model"]
+            .as_str()
+            .filter(|model| Some(*model) != details["previousModel"].as_str())
             .and_then(|value| value.split_once('/'))
             .map_or((None, None), |(provider, model)| {
                 (Some(provider.into()), Some(model.into()))
@@ -1433,8 +1447,8 @@ impl ManagementService {
                     title: None,
                     archived: None,
                     agent: Some(target.into()),
-                    provider,
-                    model,
+                    provider: provider.clone(),
+                    model: model.clone(),
                     ultracode: None,
                 },
             )
@@ -1469,8 +1483,8 @@ impl ManagementService {
                         synthetic: true,
                         auto_approve: false,
                         agent: Some(continuation_agent),
-                        provider: None,
-                        model: None,
+                        provider,
+                        model,
                         reasoning_effort: None,
                         tools: None,
                         command: None,
@@ -1905,6 +1919,25 @@ fn parse_markdown(content: &str) -> (BTreeMap<String, String>, &str) {
     haarness_core::definitions::markdown(content).unwrap_or_else(|_| (BTreeMap::new(), content))
 }
 
+/// The frontmatter an edit keeps. Rewriting a file whose frontmatter does not
+/// parse would drop its fields or turn the old block into body text, so the
+/// edit fails and the file stays as it is.
+fn editable_markdown<'a>(
+    content: &'a str,
+    path: &Path,
+) -> Result<(BTreeMap<String, String>, &'a str)> {
+    haarness_core::definitions::markdown(content).map_err(|error| {
+        let error = match error {
+            CoreError::Invalid(message) => message,
+            error => error.to_string(),
+        };
+        anyhow::anyhow!(
+            "{}: {error}. Nothing was changed; fix the frontmatter in the file, then try again.",
+            path.display()
+        )
+    })
+}
+
 fn write_markdown(path: &Path, front: &BTreeMap<String, String>, body: &str) -> Result<()> {
     if body.trim().is_empty() {
         bail!("markdown body must not be empty");
@@ -1918,11 +1951,8 @@ fn write_markdown(path: &Path, front: &BTreeMap<String, String>, body: &str) -> 
             content.push_str(": ");
             // JSON strings are valid YAML scalars; preserve multiline text,
             // colons and quotes instead of flattening or corrupting metadata.
-            if serde_json::from_str::<Value>(value).is_ok_and(|v| v.is_object() || v.is_array()) {
-                content.push_str(value);
-            } else if !value.contains(['\n', '\r'])
-                && haarness_core::definitions::markdown(&format!("---\nvalue: {value}\n---\n"))
-                    .is_ok_and(|(front, _)| front.get("value") == Some(value))
+            if serde_json::from_str::<Value>(value).is_ok_and(|v| v.is_object() || v.is_array())
+                || haarness_core::definitions::plain_value(value)
             {
                 content.push_str(value);
             } else {
@@ -3006,6 +3036,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn edits_keep_claude_code_frontmatter_and_leave_unparseable_files_unchanged() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-management-frontmatter-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let workspace = root.join("workspace");
+        for directory in [
+            workspace.join(".haarness/commands"),
+            workspace.join(".haarness/agents"),
+            workspace.join(".haarness/skills/broken"),
+        ] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        let service = ManagementService::new(
+            Paths::new(Some(&root.join("home"))).unwrap(),
+            workspace.clone(),
+            true,
+            Arc::new(FilesystemSkillRegistry::new(vec![(
+                workspace.join(".haarness/skills"),
+                true,
+            )])),
+            Arc::new(NativeMcpRegistry::default()),
+        );
+
+        // Claude Code writes these values unquoted; an edit keeps every field.
+        let export = workspace.join(".haarness/commands/export.md");
+        fs::write(
+            &export,
+            "---\ndescription: Export: one file\nargument-hint: [filename] [format]\nallowed-tools: Bash(git commit: *), Read\n---\nExport $1 as $2.\n",
+        )
+        .unwrap();
+        let detail = service
+            .command(&json!({"action":"get","name":"export"}))
+            .unwrap();
+        assert_eq!(detail["description"], "Export: one file");
+        assert_eq!(detail["argumentHint"], "[filename] [format]");
+        service
+            .command(&json!({"action":"edit","name":"export","template":"Export $1 now."}))
+            .unwrap();
+        let saved = fs::read_to_string(&export).unwrap();
+        // Written back as YAML any reader accepts, not in the repaired form.
+        assert!(
+            saved.contains("\nallowed-tools: \"Bash(git commit: *), Read\"\n"),
+            "{saved}"
+        );
+        assert!(
+            saved.contains("\nargument-hint: \"[filename] [format]\"\n"),
+            "{saved}"
+        );
+        let (front, body) = haarness_core::definitions::markdown(&saved).unwrap();
+        assert_eq!(front["description"], "Export: one file");
+        assert_eq!(front["argument-hint"], "[filename] [format]");
+        assert_eq!(front["allowed-tools"], "Bash(git commit: *), Read");
+        assert_eq!(body.trim(), "Export $1 now.");
+
+        // Frontmatter that still does not parse: the edit fails and the file
+        // keeps every byte, with or without a replacement body.
+        let broken =
+            "---\ndescription: Broken\nallowed-tools:\n  - Bash(git commit: *)\n---\nBody\n";
+        let command = workspace.join(".haarness/commands/broken.md");
+        let agent = workspace.join(".haarness/agents/broken.md");
+        let skill = workspace.join(".haarness/skills/broken/SKILL.md");
+        for path in [&command, &agent, &skill] {
+            fs::write(path, broken).unwrap();
+        }
+        let errors = [
+            service
+                .command(&json!({"action":"edit","name":"broken","template":"Replaced"}))
+                .unwrap_err(),
+            service
+                .command(&json!({"action":"edit","name":"broken","description":"Renamed"}))
+                .unwrap_err(),
+            service
+                .agent(&json!({"action":"edit","name":"broken","prompt":"Replaced"}))
+                .unwrap_err(),
+            service
+                .agent(&json!({"action":"edit","name":"broken","description":"Renamed"}))
+                .unwrap_err(),
+            service
+                .skill(&json!({"action":"edit","name":"broken","instructions":"Replaced"}))
+                .await
+                .unwrap_err(),
+            service
+                .skill(&json!({"action":"edit","name":"broken","description":"Renamed"}))
+                .await
+                .unwrap_err(),
+        ];
+        for (error, path) in errors
+            .iter()
+            .zip([&command, &command, &agent, &agent, &skill, &skill])
+        {
+            let error = error.to_string();
+            assert!(
+                error.starts_with(&format!(
+                    "{}: invalid definition frontmatter",
+                    path.display()
+                )) && error.contains("Nothing was changed"),
+                "{error}"
+            );
+        }
+        for path in [&command, &agent, &skill] {
+            assert_eq!(fs::read_to_string(path).unwrap(), broken);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn non_marketplace_managers_round_trip_real_files_and_queue_mcp_definitions() {
         let root = std::env::temp_dir().join(format!(
             "haarness-management-roundtrip-{}",
@@ -3574,6 +3711,125 @@ mod tests {
         let accepted = save("sk-good").await.unwrap();
         assert!(accepted["data"].get("warning").is_none(), "{accepted}");
         assert_eq!(stored().as_deref(), Some("sk-good"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    struct ClaudeCatalog;
+    #[async_trait]
+    impl haarness_core::ModelProvider for ClaudeCatalog {
+        fn id(&self) -> &str {
+            "acme"
+        }
+        fn info(&self) -> haarness_protocol::ProviderInfo {
+            let model = |id: &str| haarness_protocol::ModelInfo {
+                id: id.into(),
+                display_name: id.into(),
+                reasoning: false,
+                reasoning_efforts: Vec::new(),
+                images: false,
+                video: false,
+                tools: true,
+                context_window: None,
+                max_output_tokens: None,
+                pricing: None,
+            };
+            haarness_protocol::ProviderInfo {
+                id: "acme".into(),
+                name: "Acme".into(),
+                authenticated: true,
+                models: vec![model("claude-opus-5-5"), model("claude-sonnet-5-5")],
+            }
+        }
+        async fn stream(
+            &self,
+            _request: haarness_core::ProviderRequest,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> CoreResult<haarness_core::ProviderStream> {
+            Err(CoreError::Provider("unused".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_switch_discloses_and_applies_the_model_the_agent_resolves_to() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-agent-switch-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(root.join("project")).unwrap();
+        let service = ManagementService::new(
+            Paths::new(Some(&root.join("home"))).unwrap(),
+            root.join("project"),
+            true,
+            Arc::new(FilesystemSkillRegistry::new(vec![])),
+            Arc::new(NativeMcpRegistry::default()),
+        );
+        let runtime = Arc::new(AgentRuntime::new(
+            Arc::new(haarness_store::SqliteStore::open(root.join("haarness.db")).unwrap()),
+            Arc::new(haarness_core::StaticProviderRegistry::new(vec![
+                Arc::new(ClaudeCatalog) as Arc<dyn haarness_core::ModelProvider>,
+            ])),
+            Arc::new(haarness_core::EmptyToolRegistry),
+            haarness_core::EventBus::new(8),
+        ));
+        service.attach_runtime(&runtime);
+        let agent = |id: &str, model: &str| haarness_core::CustomAgent {
+            id: id.into(),
+            model: Some(model.into()),
+            ..Default::default()
+        };
+        runtime.replace_custom_agents(vec![
+            agent("pinned", "opus"),
+            agent("release", "claude-opus-5-5"),
+            agent("follows", "inherit"),
+        ]);
+        let thread = runtime
+            .create_thread(haarness_protocol::CreateThreadRequest {
+                provider: Some("acme".into()),
+                model: Some("claude-sonnet-5-5".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let details = |agent: &'static str| {
+            let service = &service;
+            async move {
+                service
+                    .switch_details(&json!({"agent": agent}), thread.id)
+                    .await
+                    .unwrap()
+            }
+        };
+        // An alias or bare release shows the model it resolves to.
+        for agent in ["pinned", "release"] {
+            let switch = details(agent).await;
+            assert_eq!(switch["model"], "acme/claude-opus-5-5", "{agent}");
+            assert_eq!(switch["previousModel"], "acme/claude-sonnet-5-5");
+        }
+        // `inherit` keeps the chat's model, so no change is claimed.
+        let follows = details("follows").await;
+        assert_eq!(follows["model"], follows["previousModel"]);
+
+        let context = ToolContext {
+            execution: haarness_core::ExecutionSettings::default(),
+            thread_id: thread.id,
+            turn_id: haarness_protocol::TurnId::new(),
+            workspace: root.join("project"),
+            authorized_external_paths: Vec::new(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            invoker: None,
+        };
+        let switch = details("pinned").await;
+        service
+            .agent_switch(&json!({"agent":"pinned","__agentSwitch":switch}), &context)
+            .await
+            .unwrap();
+        let switched = runtime.get_thread(thread.id).await.unwrap();
+        assert_eq!(
+            (
+                switched.agent.as_str(),
+                switched.provider.as_str(),
+                switched.model.as_str()
+            ),
+            ("pinned", "acme", "claude-opus-5-5")
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

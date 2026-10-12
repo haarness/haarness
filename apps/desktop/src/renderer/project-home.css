@@ -81,6 +81,13 @@
   gap: var(--s4);
   padding: var(--s7);
   color: var(--muted);
+  /* A quick chat switch never flashes the mark: it waits, then fades in. */
+  animation: chat-loading-appear 0.2s ease-out 0.35s both;
+}
+@keyframes chat-loading-appear {
+  from {
+    opacity: 0;
+  }
 }
 .chat-loading .start-mark {
   margin: 0;
@@ -95,6 +102,9 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .chat-loading {
+    animation-duration: 0s;
+  }
   .chat-loading .start-mark {
     animation: none;
   }
