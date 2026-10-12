@@ -70,6 +70,31 @@ impl ProviderHeaders {
     }
 }
 
+/// Who can read a provider's prompt cache, as a digest of its endpoint,
+/// credential and configured headers (which can carry a credential too), so
+/// requests for different accounts never group and no secret leaves the
+/// provider.
+pub(crate) fn prompt_cache_scope(
+    endpoint: &str,
+    credential: Option<&str>,
+    headers: &ProviderHeaders,
+) -> String {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use sha2::{Digest as _, Sha256};
+    let mut digest = Sha256::new();
+    let mut part = |bytes: &[u8]| {
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(bytes);
+    };
+    part(endpoint.as_bytes());
+    part(credential.unwrap_or_default().as_bytes());
+    for (name, value) in &headers.0 {
+        part(name.as_str().as_bytes());
+        part(value.as_bytes());
+    }
+    URL_SAFE_NO_PAD.encode(digest.finalize())
+}
+
 /// Merge hook-supplied request headers (`chat.headers`) into a transport
 /// header map. Invalid names or values are skipped, not fatal.
 pub(crate) fn apply_request_headers(headers: &mut HeaderMap, extra: &BTreeMap<String, String>) {

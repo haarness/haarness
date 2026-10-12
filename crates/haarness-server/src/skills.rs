@@ -131,8 +131,12 @@ fn catalog_for_roots(roots: &[(PathBuf, bool, Option<PathBuf>)]) -> BTreeMap<Str
     for (root, trusted, source_plugin) in roots {
         for path in skill_files(root, 0) {
             let body = std::fs::read_to_string(&path).unwrap_or_default();
-            let Ok((front, _)) = haarness_core::definitions::markdown(&body) else {
-                continue;
+            let front = match haarness_core::definitions::markdown(&body) {
+                Ok((front, _)) => front,
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), %error, "skipped skill whose frontmatter does not parse");
+                    continue;
+                }
             };
             let bare = haarness_core::definitions::skill_name(&front, &path);
             if bare.is_empty() {

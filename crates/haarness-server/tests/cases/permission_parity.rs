@@ -224,6 +224,78 @@ async fn parity_installed_helpers_are_readable_but_secrets_and_symlink_escapes_s
     assert!(!skills.join("new.py").exists());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn parity_secret_reads_follow_the_file_really_opened_and_spare_node_modules() {
+    let fixture = Fixture::new();
+    std::fs::create_dir_all(fixture.0.join("node_modules/pkg")).unwrap();
+    std::fs::write(fixture.0.join(".env"), "secret").unwrap();
+    std::fs::write(fixture.0.join("node_modules/pkg/.env"), "fixture").unwrap();
+    std::os::unix::fs::symlink(".env", fixture.0.join("notes.txt")).unwrap();
+    let runtime = Arc::new(runtime(&fixture.0, RuntimeConfig::default(), None));
+    let thread = echo_thread(&runtime).await;
+    // A package's .env fixture is read without asking.
+    let result = runtime
+        .run_direct_tool(
+            thread.id,
+            "read",
+            json!({"path":"node_modules/pkg/.env"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error);
+    assert!(result.output.text.contains("fixture"));
+    // A link to the project's .env, or a path that only passes through
+    // node_modules, asks for the file it really opens.
+    for (path, always) in [
+        ("notes.txt", vec!["read:notes.txt", "read:.env"]),
+        (
+            "node_modules/pkg/../../.env",
+            vec!["read:node_modules/pkg/../../.env", "read:.env"],
+        ),
+    ] {
+        let r = runtime.clone();
+        let id = thread.id;
+        let call = tokio::spawn(async move {
+            r.run_direct_tool(id, "read", json!({"path":path}), CancellationToken::new())
+                .await
+        });
+        let approval = pending(&runtime).await;
+        assert_eq!(approval.permission, "read");
+        assert_eq!(approval.patterns, vec![".env"], "{path}");
+        assert_eq!(approval.always_patterns, always, "{path}");
+        runtime
+            .reply_permission(
+                &approval.permission_id,
+                PermissionReply {
+                    decision: Reply::Reject,
+                    feedback: None,
+                },
+            )
+            .await
+            .unwrap();
+        let result = call.await.unwrap().unwrap();
+        assert!(result.is_error);
+        assert!(!result.output.text.contains("secret"));
+    }
+    // Search tools never ask; they leave the secret out and say so.
+    let result = runtime
+        .run_direct_tool(
+            thread.id,
+            "grep",
+            json!({"pattern":".","path":"notes.txt"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result.output.text,
+        "No files found\n\n(skipped 1 secret-named file)"
+    );
+    assert!(runtime.pending_permissions().is_empty());
+}
+
 #[tokio::test]
 async fn parity_repository_grants_cross_worktrees_and_preserve_other_repositories_and_denies() {
     let fixture = Fixture::new();

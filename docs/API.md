@@ -52,7 +52,7 @@ Primary resources:
 - `GET|POST /v1/ptys`; `GET|PATCH|DELETE /v1/ptys/{id}`; WebSocket `GET /v1/ptys/{id}/connect?cursor=N`
 - `POST /v1/threads/{id}/fork`, `/turns`, `/commands`, `/compact`
 - `GET /v1/threads/{id}/items`, `/todos`, `/active`, `/background`, `/pending-question`, `/goal`
-- `GET /v1/threads/{id}/diff` for the last completed mutating turn; `POST /v1/threads/{id}/revert` and `/unrevert` for stepwise undo/redo
+- `GET /v1/threads/{id}/diff` for the last completed turn that changed files and is not undone; `POST /v1/threads/{id}/revert` and `/unrevert` for stepwise undo/redo
 - `GET /v1/vcs/diff?mode=working|branch[&context=N][&summary=true][&path=FILE]` for bounded Git review, metadata-only listings, or one literal file. Entries are `ReviewFile` (a `FileDiff` plus optional `truncation` and `omittedFiles`); bounds are 1000 files, 512 KiB per patch and 8 MiB per response — see [large-diff review](LARGE-DIFF-REVIEW.md)
 - `GET /v1/threads/{id}/diff/review[?summary=true|path=FILE]` for deferred last-turn review; see [large-diff review](LARGE-DIFF-REVIEW.md)
 Scheduled thread creation accepts optional `schedule: {id, name}`. The scheduler sets this durable origin on each new run; thread responses, live events, reloads and session archives retain it independently of the editable title. The schedule ID, rather than its name, is the grouping identity. Forks omit it. Sanitized archives redact the schedule name while retaining its ID. Existing threads without this additive field are unchanged.
@@ -152,7 +152,7 @@ Disconnecting a socket never terminates its process. DELETE does, as does
 graceful server shutdown. PTYs intentionally do not survive server restart and
 their output is never persisted in SQLite. `pty.v1` advertises this contract.
 
-SSE envelopes include `schemaVersion`, `serverInstanceId`, monotonic `eventId`, type, relevant domain IDs, payload, and timestamp. `GET /v1/info` exposes `eventCursor`: snapshot-first clients capture it before REST hydration and connect with that value as `Last-Event-ID`, closing the snapshot/delta race. Reconnects continue from the last applied event. A changed server instance or `resync_required` means clients must replace items, todos, the process-wide `/v1/turns/active` snapshot, pending requests, and thread snapshots from REST. SSE connections are observers: disconnecting, switching threads, or creating a new thread never cancels execution. Pending questions are root-scoped structured records (question, child thread, root thread, turn, choices, and creation time); `question.requested` adds one and `question.resolved` removes exactly that ID, so parallel child questions never overwrite each other.
+SSE envelopes include `schemaVersion`, `serverInstanceId`, monotonic `eventId`, type, relevant domain IDs, payload, and timestamp. `GET /v1/info` exposes `eventCursor`: snapshot-first clients capture it before REST hydration and connect with that value as `Last-Event-ID`, closing the snapshot/delta race. Reconnects continue from the last applied event. A changed server instance or `resync_required` means clients must replace items, todos, the process-wide `/v1/turns/active` snapshot, pending requests, and thread snapshots from REST. SSE connections are observers: disconnecting, switching threads, or creating a new thread never cancels execution. Pending questions are root-scoped structured records (question, child thread, root thread, turn, choices, and creation time); `question.requested` adds one and `question.resolved` removes exactly that ID, so parallel child questions never overwrite each other. A question must be answerable: the `question` tool rejects a call that turns free-form answers off (`custom: false`) without offering a choice.
 
 Runtime-source changes publish `configuration.reload_queued` when an active
 turn delays application, `configuration.reloaded` after the complete new
@@ -203,10 +203,17 @@ current todo snapshot with transcript history.
 Mutating turns and direct native workspace tools are enclosed by paired
 before/after checkpoints. Undo applies the newest complete pair with conflict
 checks, can walk backward repeatedly, and keeps redo available until new work
-confirms the boundary. Redo advances one checkpoint at a time. The last-turn
-diff is derived from the same pair, while the VCS endpoint reports staged,
-unstaged, untracked, unborn-branch, and branch-relative changes without
-following workspace symlinks. Diff bodies and process output are bounded.
+confirms the boundary. Redo advances one checkpoint at a time. An undo or redo
+changes all of its files or none: when a path cannot be written part way (a
+read-only directory, a locked file, a full disk), every path already changed
+is put back, the chat keeps its previous undo state, and the same request
+succeeds once the cause is fixed. Undo and redo run one at a time across the
+chats of a workspace. The last-turn diff comes from the newest pair before any
+pending undo boundary that changed files: an undone turn drops out of it, and a
+later turn that only ran commands does not hide the edits before it. The VCS
+endpoint reports staged, unstaged, untracked, unborn-branch, and
+branch-relative changes without following workspace symlinks. Diff bodies and
+process output are bounded.
 Undo against an active turn cancels it and waits for its terminal checkpoint
 before restoring; a cancellation-resistant operation times out without a file
 restore. Text-only turns receive a same-snapshot boundary lazily, so undoing a

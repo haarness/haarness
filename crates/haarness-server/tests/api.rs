@@ -1315,7 +1315,14 @@ async fn undo_rejects_an_active_text_turn_without_cancelling_it() {
         "keep\n",
         "a no-op active turn must not roll back an older file change"
     );
-    assert!(runtime.diff_last_turn(thread.id).await.unwrap().is_empty());
+    let last = runtime.diff_last_turn(thread.id).await.unwrap();
+    assert_eq!(
+        last.iter()
+            .map(|file| file.file.as_str())
+            .collect::<Vec<_>>(),
+        ["keep.txt"],
+        "the undone text turn changed nothing, so the last change is the earlier write"
+    );
     runtime.unrevert(thread.id).await.unwrap();
     assert!(workspace.join("keep.txt").exists());
     tokio::fs::remove_dir_all(root).await.unwrap();
@@ -5099,6 +5106,248 @@ async fn revert_restores_files_and_unrevert_redoes() {
     );
     assert!(workspace.join("created.txt").exists());
     assert!(workspace.join("second.txt").exists());
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+/// An echo-provider runtime with snapshots over `workspace` that writes
+/// without asking.
+fn undo_fixture_runtime(root: &std::path::Path, workspace: &std::path::Path) -> AgentRuntime {
+    let database = root.join("db.sqlite");
+    let store = Arc::new(SqliteStore::open(&database).unwrap());
+    let snapshots = Arc::new(
+        haarness_store::SqliteSnapshotStore::open(&database, workspace.to_path_buf()).unwrap(),
+    );
+    AgentRuntime::with_config(
+        store,
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Capturing::default()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(haarness_server::NativeToolRegistry::new(
+            workspace.to_path_buf(),
+        )),
+        EventBus::new(64),
+        workspace.to_path_buf(),
+        String::new(),
+        {
+            let mut config = haarness_core::RuntimeConfig::default();
+            config.base_rules.push(haarness_core::PermissionRule {
+                pattern: "write:*".into(),
+                decision: haarness_core::PermissionDecision::Allow,
+            });
+            config
+        },
+    )
+    .with_snapshots(snapshots)
+}
+
+#[tokio::test]
+async fn last_turn_diff_skips_unchanged_turns_and_stops_at_the_undo_boundary() {
+    let root = std::env::temp_dir().join(format!("haarness-last-diff-{}", uuid::Uuid::now_v7()));
+    let workspace = root.join("ws");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    let runtime = undo_fixture_runtime(&root, &workspace);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Last turn fixture".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    for request in [
+        r#"!tool write {"path":"first.txt","content":"one"}"#,
+        r#"!tool write {"path":"second.txt","content":"two"}"#,
+        // Records a checkpoint pair, but changes nothing.
+        r#"!tool write {"path":"second.txt","content":"two"}"#,
+    ] {
+        let turn = runtime
+            .start_turn(thread.id, turn_request(request))
+            .await
+            .unwrap();
+        assert_eq!(
+            wait_done(&runtime, &turn).await.status,
+            TurnStatus::Completed
+        );
+    }
+    let last = |summary: bool, path: Option<&'static str>| {
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .diff_last_turn_review(thread.id, summary, path)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|file| (file.file, file.status, file.after))
+                .collect::<Vec<_>>()
+        }
+    };
+    let added = |file: &str, after: Option<&str>| {
+        (
+            file.to_owned(),
+            haarness_protocol::FileDiffStatus::Added,
+            after.map(str::to_owned),
+        )
+    };
+    assert_eq!(
+        last(false, None).await,
+        [added("second.txt", Some("two"))],
+        "a turn that changed nothing does not hide the one before it"
+    );
+    assert_eq!(last(true, None).await, [added("second.txt", None)]);
+    assert_eq!(
+        last(false, Some("second.txt")).await,
+        [added("second.txt", Some("two"))]
+    );
+    assert!(last(false, Some("first.txt")).await.is_empty());
+
+    // Undo steps over the unchanged turn first; the files and the diff stay.
+    runtime.revert(thread.id, None).await.unwrap();
+    assert!(workspace.join("second.txt").exists());
+    assert_eq!(last(true, None).await, [added("second.txt", None)]);
+    // The undone turn's file is gone, and so is it from the diff.
+    runtime.revert(thread.id, None).await.unwrap();
+    assert!(!workspace.join("second.txt").exists());
+    assert_eq!(
+        last(false, None).await,
+        [added("first.txt", Some("one"))],
+        "an undone turn is not the last turn"
+    );
+    assert_eq!(runtime.diff_last_turn(thread.id).await.unwrap().len(), 1);
+    runtime.revert(thread.id, None).await.unwrap();
+    assert!(last(false, None).await.is_empty(), "everything is undone");
+
+    // Redo brings each turn's diff back with its files.
+    runtime.unrevert(thread.id).await.unwrap();
+    assert_eq!(last(true, None).await, [added("first.txt", None)]);
+    runtime.unrevert(thread.id).await.unwrap();
+    runtime.unrevert(thread.id).await.unwrap();
+    assert!(
+        runtime
+            .get_thread(thread.id)
+            .await
+            .unwrap()
+            .revert
+            .is_none()
+    );
+    assert_eq!(last(true, None).await, [added("second.txt", None)]);
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_undo_or_redo_changes_nothing_and_can_be_retried() {
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Gives the locked directory its permissions back, so cleanup works
+    /// even when an assertion fails.
+    struct Unlock(std::path::PathBuf);
+    impl Drop for Unlock {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    let lock = |path: &std::path::Path, mode| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let root = std::env::temp_dir().join(format!("haarness-undo-fail-{}", uuid::Uuid::now_v7()));
+    let workspace = root.join("ws");
+    tokio::fs::create_dir_all(workspace.join("locked"))
+        .await
+        .unwrap();
+    tokio::fs::write(workspace.join("a.txt"), "before\n")
+        .await
+        .unwrap();
+    tokio::fs::write(workspace.join("locked/b.txt"), "before\n")
+        .await
+        .unwrap();
+    let runtime = undo_fixture_runtime(&root, &workspace);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Failed undo fixture".into()),
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(
+                r#"!multi [{"name":"write","arguments":{"path":"a.txt","content":"after\n"}},{"name":"write","arguments":{"path":"locked/b.txt","content":"after\n"}}]"#,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let read = |path: &str| std::fs::read_to_string(workspace.join(path)).unwrap();
+    let unlock = Unlock(workspace.join("locked"));
+    lock(&unlock.0, 0o555);
+    if std::fs::write(unlock.0.join("probe"), "").is_ok() {
+        // Root writes everywhere; there is nothing to fail.
+        return;
+    }
+
+    // `a.txt` is restored first, then `locked/b.txt` cannot be: undo puts
+    // `a.txt` back and the chat stays where it was.
+    let error = runtime.revert(thread.id, None).await.unwrap_err();
+    assert!(
+        error.to_string().contains("no files were changed"),
+        "{error}"
+    );
+    assert!(
+        runtime
+            .get_thread(thread.id)
+            .await
+            .unwrap()
+            .revert
+            .is_none()
+    );
+    assert_eq!(
+        (read("a.txt"), read("locked/b.txt")),
+        ("after\n".into(), "after\n".into())
+    );
+
+    // Once the cause is fixed the same undo goes through.
+    lock(&unlock.0, 0o755);
+    let reverted = runtime.revert(thread.id, None).await.unwrap();
+    assert!(reverted.revert.is_some());
+    assert_eq!(
+        (read("a.txt"), read("locked/b.txt")),
+        ("before\n".into(), "before\n".into())
+    );
+
+    // Redo fails the same way without losing the pending undo.
+    lock(&unlock.0, 0o555);
+    let error = runtime.unrevert(thread.id).await.unwrap_err();
+    assert!(
+        error.to_string().contains("no files were changed"),
+        "{error}"
+    );
+    let state = |thread: Thread| {
+        thread
+            .revert
+            .map(|state| (state.sequence, state.snapshot_id, state.base_snapshot_id))
+    };
+    assert_eq!(
+        state(runtime.get_thread(thread.id).await.unwrap()),
+        state(reverted)
+    );
+    assert_eq!(
+        (read("a.txt"), read("locked/b.txt")),
+        ("before\n".into(), "before\n".into())
+    );
+    lock(&unlock.0, 0o755);
+    assert!(runtime.unrevert(thread.id).await.unwrap().revert.is_none());
+    assert_eq!(
+        (read("a.txt"), read("locked/b.txt")),
+        ("after\n".into(), "after\n".into())
+    );
+    drop(unlock);
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 

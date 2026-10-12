@@ -155,7 +155,7 @@ with tempfile.TemporaryDirectory(prefix='haarness-reliability-adaptations-') as 
         until(lambda: 'Model: openai/gpt-5.4-mini' in capture(session) and 'Previous model: echo/echo-1' in capture(session), 'model disclosure missing')
         proof('switch-model-consent', session)
         key(session, 'a')
-        until(lambda: 'only agent review in this session' in capture(session), 'remembered scope missing')
+        until(lambda: 'only agent review in this chat' in capture(session), 'remembered scope missing')
         proof('switch-remembered-scope', session)
         key(session, 'Enter')
         until(lambda: api('/threads/' + thread)['agent'] == 'review', 'switch did not execute')
@@ -170,6 +170,9 @@ with tempfile.TemporaryDirectory(prefix='haarness-reliability-adaptations-') as 
                 assert not api('/permissions')
             else:
                 until(lambda: api('/permissions'), 'remembered approval leaked to another destination')
+                # The server lists the request before the TUI draws its card;
+                # a key pressed in between is typing, not an answer.
+                until(lambda: 'Agent: review-two' in capture(session), 'switch approval card missing')
                 key(session, 'n')
                 idle()
                 assert api('/threads/' + thread)['agent'] == 'build'
@@ -180,6 +183,7 @@ with tempfile.TemporaryDirectory(prefix='haarness-reliability-adaptations-') as 
         until(lambda: api('/permissions'), 'remembered approval leaked to another session')
         # Change the current model while consent is pending: the old consent must fail.
         api('/threads/' + other, {'model': 'echo-changed'}, 'PATCH')
+        until(lambda: 'Agent: review' in capture(other_session), 'stale switch approval card missing')
         key(other_session, 'y')
         idle()
         items = api(f'/threads/{other}/items')

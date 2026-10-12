@@ -222,7 +222,11 @@ impl SqliteSnapshotStore {
     fn source_paths(&self) -> CoreResult<Vec<SourcePath>> {
         let mut builder = ignore::WalkBuilder::new(&self.workspace);
         builder.hidden(false).follow_links(false);
-        builder.filter_entry(|entry| entry.depth() == 0 || entry.file_name() != OsStr::new(".git"));
+        builder.filter_entry(|entry| {
+            entry.depth() == 0
+                || (entry.file_name() != OsStr::new(".git")
+                    && !is_restore_scratch(entry.file_name()))
+        });
 
         let mut sources = Vec::new();
         for result in builder.build() {
@@ -823,16 +827,27 @@ impl SnapshotStore for SqliteSnapshotStore {
             let _ = self.load_blob(entry)?;
         }
 
+        let mut journal = RestoreJournal::new(&self.workspace);
         let mut touched = Vec::new();
+        let mut failure = None;
         for entry in manifest.values() {
-            let target = safe_target(&self.workspace, &entry.path)?;
-            if self.live_matches(Some(entry))? {
-                continue;
+            let written = self.live_matches(Some(entry)).and_then(|matches| {
+                if matches {
+                    return Ok(false);
+                }
+                journal.write(&self.prepare_entry(entry)?)?;
+                Ok(true)
+            });
+            match written {
+                Ok(true) => touched.push(entry.path.clone()),
+                Ok(false) => {}
+                Err(error) => {
+                    failure = Some((entry.path.clone(), error));
+                    break;
+                }
             }
-            let prepared = self.prepare_entry(entry)?;
-            write_prepared(&self.workspace, &target, &prepared)?;
-            touched.push(entry.path.clone());
         }
+        journal.finish(failure)?;
         Ok(touched)
     }
 
@@ -889,20 +904,27 @@ impl SnapshotStore for SqliteSnapshotStore {
         let mut touched = Vec::with_capacity(prepared.len());
         // Delete delta-only paths first, then materialize desired entries. A
         // replacement never removes anything outside this explicit path set.
-        for change in prepared.iter().filter(|change| change.desired.is_none()) {
-            let target = safe_target(&self.workspace, &change.path)?;
-            ensure_safe_ancestors(&self.workspace, &change.path)?;
-            remove_target(&target)?;
+        // The journal makes the whole set one change: a path that fails part
+        // way (permissions, a locked file, a full disk) puts every earlier
+        // path back, so a retry meets the workspace its checks expect.
+        let mut journal = RestoreJournal::new(&self.workspace);
+        let mut failure = None;
+        let (removals, writes): (Vec<_>, Vec<_>) =
+            prepared.iter().partition(|change| change.desired.is_none());
+        for change in removals.into_iter().chain(writes) {
+            let result = match &change.desired {
+                None => journal.remove(&change.path),
+                Some(entry) => self
+                    .prepare_entry(entry)
+                    .and_then(|desired| journal.write(&desired)),
+            };
+            if let Err(error) = result {
+                failure = Some((change.path.clone(), error));
+                break;
+            }
             touched.push(change.path.clone());
         }
-        for change in prepared.iter().filter(|change| change.desired.is_some()) {
-            let target = safe_target(&self.workspace, &change.path)?;
-            ensure_safe_ancestors(&self.workspace, &change.path)?;
-            let desired =
-                self.prepare_entry(change.desired.as_ref().expect("filtered desired entry"))?;
-            write_prepared(&self.workspace, &target, &desired)?;
-            touched.push(change.path.clone());
-        }
+        journal.finish(failure)?;
         Ok(touched)
     }
 
@@ -920,6 +942,15 @@ impl SnapshotStore for SqliteSnapshotStore {
         let before = self.load_manifest(before_snapshot_id)?;
         let after = self.load_manifest(after_snapshot_id)?;
         self.diff_manifests(&before, &after, false, false, None)
+    }
+
+    /// Manifests only: no blob is read to learn that nothing changed.
+    async fn snapshots_differ(
+        &self,
+        before_snapshot_id: &str,
+        after_snapshot_id: &str,
+    ) -> CoreResult<bool> {
+        Ok(self.load_manifest(before_snapshot_id)? != self.load_manifest(after_snapshot_id)?)
     }
 
     async fn diff_review(
@@ -1043,7 +1074,13 @@ fn ensure_safe_ancestors(workspace: &Path, relative: &str) -> CoreResult<()> {
     Ok(())
 }
 
-fn create_safe_parents(workspace: &Path, relative: &str) -> CoreResult<()> {
+/// Create the missing parents of `relative`, recording each directory it
+/// creates in `created` so a failed restore can remove them again.
+fn create_safe_parents(
+    workspace: &Path,
+    relative: &str,
+    created: &mut Vec<PathBuf>,
+) -> CoreResult<()> {
     let decoded = decode_relative_path(relative)?;
     let Some(parent) = decoded.parent() else {
         return Ok(());
@@ -1070,6 +1107,7 @@ fn create_safe_parents(workspace: &Path, relative: &str) -> CoreResult<()> {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 fs::create_dir(&current).map_err(io_error)?;
+                created.push(current.clone());
                 let metadata = fs::symlink_metadata(&current).map_err(io_error)?;
                 if !metadata.is_dir() || metadata.file_type().is_symlink() {
                     return Err(CoreError::Conflict(format!(
@@ -1198,49 +1236,202 @@ fn read_live_data(target: &Path, entry: &ManifestEntry) -> CoreResult<Option<Vec
     Ok(Some(data))
 }
 
-fn write_prepared(workspace: &Path, target: &Path, prepared: &PreparedEntry) -> CoreResult<()> {
-    create_safe_parents(workspace, &prepared.manifest.path)?;
-    ensure_safe_ancestors(workspace, &prepared.manifest.path)?;
-    if fs::symlink_metadata(target).is_ok_and(|metadata| metadata.is_dir()) {
-        fs::remove_dir(target).map_err(|error| {
-            CoreError::Conflict(format!(
-                "cannot replace directory at {}: {error}",
-                prepared.manifest.path
-            ))
-        })?;
-    }
-    let parent = target.parent().ok_or_else(|| {
-        CoreError::Invalid(format!("invalid snapshot path {}", prepared.manifest.path))
-    })?;
-    let temporary = parent.join(format!(".haarness-snapshot-{}.tmp", uuid::Uuid::now_v7()));
+/// What a restore names its scratch entries: the replacement written beside
+/// a path, and the live entry moved aside until the restore is kept.
+/// Snapshots never record them, so one a crash leaves behind is neither
+/// restored nor reported as a change.
+const SCRATCH_NAMES: [(&str, &str); 2] =
+    [(".haarness-snapshot-", ".tmp"), (".haarness-undo-", ".bak")];
 
+fn is_restore_scratch(name: &OsStr) -> bool {
+    name.to_str().is_some_and(|name| {
+        SCRATCH_NAMES
+            .iter()
+            .any(|(prefix, suffix)| name.starts_with(prefix) && name.ends_with(suffix))
+    })
+}
+
+fn scratch_path(directory: &Path, (prefix, suffix): (&str, &str)) -> PathBuf {
+    directory.join(format!("{prefix}{}{suffix}", uuid::Uuid::now_v7()))
+}
+
+/// One change a restore made, in the order it made them.
+#[derive(Debug)]
+enum RestoreStep {
+    /// A missing parent directory created for a restored path.
+    CreatedDirectory(PathBuf),
+    /// The live entry at `target`, renamed to `backup` before its path was
+    /// replaced or removed.
+    MovedAside { target: PathBuf, backup: PathBuf },
+    /// A restored entry, now at this path.
+    Wrote(PathBuf),
+}
+
+/// Makes a restore of many paths all or nothing. Every entry a restore
+/// replaces or removes is first renamed aside in its own directory; a
+/// failure undoes the steps newest first, and success deletes what was
+/// moved aside.
+struct RestoreJournal<'a> {
+    workspace: &'a Path,
+    steps: Vec<RestoreStep>,
+}
+
+impl<'a> RestoreJournal<'a> {
+    fn new(workspace: &'a Path) -> Self {
+        Self {
+            workspace,
+            steps: Vec::new(),
+        }
+    }
+
+    /// Remove whatever is at `relative`.
+    fn remove(&mut self, relative: &str) -> CoreResult<()> {
+        let target = safe_target(self.workspace, relative)?;
+        ensure_safe_ancestors(self.workspace, relative)?;
+        self.move_aside(&target, relative)
+    }
+
+    /// Put `prepared` at its path, replacing whatever is there.
+    fn write(&mut self, prepared: &PreparedEntry) -> CoreResult<()> {
+        let relative = &prepared.manifest.path;
+        let target = safe_target(self.workspace, relative)?;
+        let mut created = Vec::new();
+        let parents = create_safe_parents(self.workspace, relative, &mut created);
+        self.steps
+            .extend(created.into_iter().map(RestoreStep::CreatedDirectory));
+        parents?;
+        ensure_safe_ancestors(self.workspace, relative)?;
+        let parent = target
+            .parent()
+            .ok_or_else(|| CoreError::Invalid(format!("invalid snapshot path {relative}")))?;
+        // Written in full before anything at the path moves, so the path is
+        // only ever missing between two renames.
+        let temporary = scratch_path(parent, SCRATCH_NAMES[0]);
+        let written = write_temporary(&temporary, prepared)
+            .and_then(|()| self.move_aside(&target, relative))
+            .and_then(|()| fs::rename(&temporary, &target).map_err(io_error));
+        if let Err(error) = written {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        self.steps.push(RestoreStep::Wrote(target));
+        Ok(())
+    }
+
+    fn move_aside(&mut self, target: &Path, relative: &str) -> CoreResult<()> {
+        let metadata = match fs::symlink_metadata(target) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(io_error(error)),
+        };
+        // Only an empty directory is ever replaced.
+        if metadata.is_dir() && fs::read_dir(target).map_err(io_error)?.next().is_some() {
+            return Err(CoreError::Conflict(format!(
+                "cannot replace non-empty directory at {relative}"
+            )));
+        }
+        let parent = target
+            .parent()
+            .ok_or_else(|| CoreError::Invalid(format!("invalid snapshot path {relative}")))?;
+        let backup = scratch_path(parent, SCRATCH_NAMES[1]);
+        fs::rename(target, &backup).map_err(io_error)?;
+        self.steps.push(RestoreStep::MovedAside {
+            target: target.to_path_buf(),
+            backup,
+        });
+        Ok(())
+    }
+
+    /// Keep every change when nothing failed; otherwise put back everything
+    /// already changed and report the path that failed.
+    fn finish(self, failure: Option<(String, CoreError)>) -> CoreResult<()> {
+        let Some((path, error)) = failure else {
+            for step in self.steps {
+                if let RestoreStep::MovedAside { backup, .. } = step
+                    && let Err(error) = remove_target(&backup)
+                {
+                    tracing::warn!(
+                        path = %backup.display(),
+                        %error,
+                        "restore could not delete a moved-aside entry"
+                    );
+                }
+            }
+            return Ok(());
+        };
+        let reason = match &error {
+            CoreError::Storage(message)
+            | CoreError::Conflict(message)
+            | CoreError::Invalid(message) => message.clone(),
+            other => other.to_string(),
+        };
+        let workspace = self.workspace;
+        let relative = |path: &Path| {
+            path.strip_prefix(workspace)
+                .unwrap_or(path)
+                .display()
+                .to_string()
+        };
+        let mut stuck = Vec::new();
+        for step in self.steps.into_iter().rev() {
+            match step {
+                RestoreStep::Wrote(target) => {
+                    if let Err(error) = remove_target(&target) {
+                        stuck.push(format!("{} ({error})", relative(&target)));
+                    }
+                }
+                RestoreStep::MovedAside { target, backup } => {
+                    if let Err(error) = fs::rename(&backup, &target) {
+                        stuck.push(format!(
+                            "{} ({error}; its previous content is in {})",
+                            relative(&target),
+                            relative(&backup)
+                        ));
+                    }
+                }
+                RestoreStep::CreatedDirectory(directory) => match fs::remove_dir(&directory) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                        stuck.push(format!("{} ({error})", relative(&directory)));
+                    }
+                    _ => {}
+                },
+            }
+        }
+        if stuck.is_empty() {
+            return Err(CoreError::Conflict(format!(
+                "could not restore {path}: {reason}; no files were changed"
+            )));
+        }
+        tracing::error!(
+            %path,
+            %reason,
+            ?stuck,
+            "restore failed and could not put every path back"
+        );
+        Err(CoreError::Storage(format!(
+            "could not restore {path}: {reason}; putting back the files already changed also failed for {}",
+            stuck.join(", ")
+        )))
+    }
+}
+
+fn write_temporary(temporary: &Path, prepared: &PreparedEntry) -> CoreResult<()> {
     if prepared.manifest.kind.is_symlink() {
         let link_target = bytes_os_string(&prepared.data)?;
-        create_symlink(
+        return create_symlink(
             &link_target,
-            &temporary,
+            temporary,
             prepared.manifest.kind == EntryKind::SymlinkDirectory,
-        )?;
-    } else {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .map_err(io_error)?;
-        file.write_all(&prepared.data).map_err(io_error)?;
-        set_file_mode(&file, prepared.manifest.mode)?;
-        file.sync_all().map_err(io_error)?;
+        );
     }
-
-    #[cfg(windows)]
-    if fs::symlink_metadata(target).is_ok() {
-        remove_target(target)?;
-    }
-    if let Err(error) = fs::rename(&temporary, target) {
-        let _ = fs::remove_file(&temporary);
-        return Err(io_error(error));
-    }
-    Ok(())
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(temporary)
+        .map_err(io_error)?;
+    file.write_all(&prepared.data).map_err(io_error)?;
+    set_file_mode(&file, prepared.manifest.mode)?;
+    file.sync_all().map_err(io_error)
 }
 
 fn remove_target(target: &Path) -> CoreResult<()> {
@@ -1594,6 +1785,116 @@ mod tests {
         assert!(matches!(error, CoreError::Conflict(_)));
         assert_eq!(fs::read_to_string(workspace.join("a")).unwrap(), "new-a");
         assert_eq!(fs::read_to_string(workspace.join("b")).unwrap(), "human-b");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mid_write_failure_rolls_back_every_touched_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        /// Gives the locked directory its permissions back, so cleanup works
+        /// even when an assertion fails.
+        struct Unlock(PathBuf);
+        impl Drop for Unlock {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+            }
+        }
+        fn scratch(directory: &Path) -> Vec<String> {
+            let mut found = Vec::new();
+            for entry in fs::read_dir(directory).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    found.extend(scratch(&entry.path()));
+                } else if is_restore_scratch(&entry.file_name()) {
+                    found.push(entry.path().display().to_string());
+                }
+            }
+            found
+        }
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::create_dir(workspace.join("dir-restored")).unwrap();
+        fs::create_dir(workspace.join("locked")).unwrap();
+        fs::write(workspace.join("a"), "old-a").unwrap();
+        fs::write(workspace.join("dir-restored/d"), "old-d").unwrap();
+        fs::write(workspace.join("locked/b"), "old-b").unwrap();
+        let before = store.capture(ThreadId::new()).await.unwrap();
+        fs::write(workspace.join("a"), "new-a").unwrap();
+        fs::remove_dir_all(workspace.join("dir-restored")).unwrap();
+        fs::write(workspace.join("added"), "new").unwrap();
+        fs::write(workspace.join("locked/b"), "new-b").unwrap();
+        let after = store.capture(ThreadId::new()).await.unwrap();
+
+        // Undo removes `added`, then writes `a` and recreates `dir-restored`
+        // before it reaches the path it cannot write.
+        let unlock = Unlock(workspace.join("locked"));
+        fs::set_permissions(&unlock.0, fs::Permissions::from_mode(0o555)).unwrap();
+        if fs::write(unlock.0.join("probe"), "").is_ok() {
+            // Root writes everywhere; there is nothing to fail.
+            return;
+        }
+        for attempt in ["delta", "legacy overlay"] {
+            let error = if attempt == "delta" {
+                store.restore_delta(&after.id, &before.id).await
+            } else {
+                store.restore(&before.id).await
+            }
+            .unwrap_err();
+            assert!(
+                matches!(error, CoreError::Conflict(_)),
+                "{attempt}: {error}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains("locked/b") && message.contains("no files were changed"),
+                "{attempt}: {message}"
+            );
+            assert_eq!(fs::read_to_string(workspace.join("a")).unwrap(), "new-a");
+            assert_eq!(fs::read_to_string(workspace.join("added")).unwrap(), "new");
+            assert!(
+                !workspace.join("dir-restored").exists(),
+                "{attempt}: a directory the restore created goes again"
+            );
+            assert_eq!(
+                fs::read_to_string(workspace.join("locked/b")).unwrap(),
+                "new-b"
+            );
+            assert_eq!(scratch(&workspace), Vec::<String>::new(), "{attempt}");
+        }
+
+        // Fixed, the same undo passes its checks and completes.
+        drop(unlock);
+        let undone = store.restore_delta(&after.id, &before.id).await.unwrap();
+        assert_eq!(undone, vec!["added", "a", "dir-restored/d", "locked/b"]);
+        assert_eq!(fs::read_to_string(workspace.join("a")).unwrap(), "old-a");
+        assert_eq!(
+            fs::read_to_string(workspace.join("dir-restored/d")).unwrap(),
+            "old-d"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("locked/b")).unwrap(),
+            "old-b"
+        );
+        assert!(!workspace.join("added").exists());
+        assert_eq!(scratch(&workspace), Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn restore_scratch_entries_are_never_captured() {
+        let (guard, store) = fixture();
+        let workspace = guard.0.join("ws");
+        fs::write(workspace.join("kept"), "yes").unwrap();
+        fs::write(workspace.join(".haarness-undo-0193.bak"), "left by a crash").unwrap();
+        fs::write(workspace.join("src/.haarness-snapshot-0193.tmp"), "half").unwrap();
+        fs::write(workspace.join(".haarness-undo-notes"), "a user's file").unwrap();
+
+        let snapshot = store.capture(ThreadId::new()).await.unwrap();
+        let manifest = store.load_manifest(&snapshot.id).unwrap();
+        assert_eq!(
+            manifest.keys().collect::<Vec<_>>(),
+            vec![".haarness-undo-notes", "kept"]
+        );
     }
 
     #[tokio::test]
