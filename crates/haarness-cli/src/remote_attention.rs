@@ -29,7 +29,7 @@ use parking_lot::Mutex;
 use reqwest::Url;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     path::Path,
     sync::Arc,
     time::Duration,
@@ -56,6 +56,9 @@ const STREAM_IDLE: Duration = Duration::from_secs(45);
 /// The largest event read whole. A bigger one (a message carrying large
 /// attachments) is skipped, keeping only its id.
 const MAX_EVENT: usize = 32 * 1024 * 1024;
+/// How often a finished turn is checked before it is given up on, when the
+/// server does not answer the check.
+const SETTLE_ATTEMPTS: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -146,11 +149,13 @@ impl Default for Timing {
 }
 
 /// What a connector keeps between its connections: where each server's
-/// events were read up to, and the turns that finished, so a reconnect
-/// (OAuth connectors reconnect every ten minutes) misses neither.
+/// events were read up to, the finished turns still to check, and the ones
+/// that finished, so a reconnect (OAuth connectors reconnect every ten
+/// minutes) misses none and reports none twice.
 #[derive(Clone, Debug, Default)]
 struct Remembered {
-    resume: Option<u64>,
+    cursor: Option<u64>,
+    settling: Vec<Turn>,
     finished: Vec<Done>,
 }
 
@@ -824,27 +829,33 @@ fn finished_root_turn(envelope: &EventEnvelope, chat: Option<ThreadId>) -> Optio
 
 /// A finished root turn, checked once it had time to settle.
 struct Settled {
-    event: u64,
     turn: Turn,
-    /// Nothing else runs in the chat: no goal or loop took over.
-    idle: bool,
-    thread: Option<Thread>,
+    attempt: u32,
+    /// The chat when nothing else runs in it; None when a goal or loop
+    /// took over.
+    checked: Result<Option<Thread>>,
 }
 
-async fn settle(daemon: Daemon, event: u64, turn: Turn, delay: Duration) -> Settled {
+async fn settle(daemon: Daemon, turn: Turn, delay: Duration, attempt: u32) -> Settled {
     tokio::time::sleep(delay).await;
-    let active = daemon
-        .get::<Option<Turn>>(&format!("threads/{}/active", turn.thread_id))
-        .await;
-    let thread = daemon
-        .get::<Thread>(&format!("threads/{}", turn.thread_id))
-        .await
-        .ok();
+    let checked = async {
+        let thread = turn.thread_id;
+        if daemon
+            .get::<Option<Turn>>(&format!("threads/{thread}/active"))
+            .await?
+            .is_some()
+        {
+            return Ok(None);
+        }
+        Ok(Some(
+            daemon.get::<Thread>(&format!("threads/{thread}")).await?,
+        ))
+    }
+    .await;
     Settled {
-        event,
-        idle: matches!(active, Ok(None)),
         turn,
-        thread,
+        attempt,
+        checked,
     }
 }
 
@@ -866,8 +877,9 @@ struct Follower {
     loaded: bool,
     /// The last event read.
     cursor: Option<u64>,
-    /// Finished root turns still settling, by event id.
-    unsettled: BTreeSet<u64>,
+    /// Finished root turns still settling, by chat. A chat's next finished
+    /// turn replaces its last: only that one can be where the chat stopped.
+    settling: HashMap<ThreadId, Turn>,
 }
 
 impl Follower {
@@ -934,14 +946,11 @@ impl Follower {
                 }
             }
             "turn.finished" => {
-                if let (Some(id), Some(turn)) = (
-                    event.id,
-                    event
-                        .envelope()
-                        .and_then(|envelope| finished_root_turn(&envelope, self.daemon.scope)),
-                ) {
-                    self.unsettled.insert(id);
-                    settling.spawn(settle(self.daemon.clone(), id, turn, settle_for));
+                if let Some(turn) = event
+                    .envelope()
+                    .and_then(|envelope| finished_root_turn(&envelope, self.daemon.scope))
+                {
+                    self.check(turn, settle_for, settling);
                 }
                 // Its prompts were answered or withdrawn.
                 Step::Refresh
@@ -950,38 +959,75 @@ impl Follower {
         };
         if let Some(id) = event.id {
             self.cursor = Some(id);
-            self.memory
-                .lock()
-                .entry(self.instance.clone())
-                .or_default()
-                .resume = self.resume();
+            if let Some(remembered) = self.memory.lock().get_mut(&self.instance) {
+                remembered.cursor = self.cursor;
+            }
         }
         step
     }
 
-    /// Count a settled turn as finished when nothing took over. True when
-    /// the view changed.
-    fn settled(&mut self, settled: Settled) -> bool {
-        self.unsettled.remove(&settled.event);
-        let mut changed = false;
-        if let Some(thread) = &settled.thread {
-            let chat = Chat::of(thread);
-            changed |= self.view.chats.insert(thread.id, chat.clone()) != Some(chat);
+    /// Check a finished root turn once it had time to settle, unless it is
+    /// already reported or being checked.
+    fn check(&mut self, turn: Turn, settle_for: Duration, settling: &mut JoinSet<Settled>) {
+        if self.view.finished.iter().any(|done| done.turn == turn.id)
+            || self
+                .settling
+                .get(&turn.thread_id)
+                .is_some_and(|known| known.id == turn.id)
+        {
+            return;
         }
-        let turn = settled.turn;
-        if settled.idle && !self.view.finished.iter().any(|done| done.turn == turn.id) {
-            self.view.finished.push(Done {
-                turn: turn.id,
-                thread: turn.thread_id,
-                status: if turn.status == TurnStatus::Failed {
-                    Outcome::Failed
-                } else {
-                    Outcome::Completed
-                },
-                at: turn.updated_at,
-            });
-            changed = true;
+        settling.spawn(settle(self.daemon.clone(), turn.clone(), settle_for, 1));
+        self.settling.insert(turn.thread_id, turn);
+        self.remember();
+    }
+
+    /// Count a settled turn as finished when nothing took over, checking it
+    /// again when the server did not answer. True when the view changed.
+    fn settled(
+        &mut self,
+        settled: Settled,
+        settle_for: Duration,
+        settling: &mut JoinSet<Settled>,
+    ) -> bool {
+        let Settled {
+            turn,
+            attempt,
+            checked,
+        } = settled;
+        if self
+            .settling
+            .get(&turn.thread_id)
+            .is_none_or(|current| current.id != turn.id)
+        {
+            // A later turn of the chat replaced it.
+            return false;
         }
+        let thread = match checked {
+            Err(_) if attempt < SETTLE_ATTEMPTS => {
+                settling.spawn(settle(self.daemon.clone(), turn, settle_for, attempt + 1));
+                return false;
+            }
+            Ok(thread) => thread,
+            Err(_) => None,
+        };
+        self.settling.remove(&turn.thread_id);
+        let Some(thread) = thread else {
+            // Given up on, or a goal or loop took over.
+            self.remember();
+            return false;
+        };
+        self.view.chats.insert(thread.id, Chat::of(&thread));
+        self.view.finished.push(Done {
+            turn: turn.id,
+            thread: turn.thread_id,
+            status: if turn.status == TurnStatus::Failed {
+                Outcome::Failed
+            } else {
+                Outcome::Completed
+            },
+            at: turn.updated_at,
+        });
         let now = Utc::now();
         self.view
             .finished
@@ -990,20 +1036,17 @@ impl Follower {
             .finished
             .sort_by(|left, right| right.at.cmp(&left.at));
         self.view.finished.truncate(MAX_FINISHED);
-        let mut memory = self.memory.lock();
-        let remembered = memory.entry(self.instance.clone()).or_default();
-        remembered.resume = self.resume();
-        remembered.finished.clone_from(&self.view.finished);
-        changed
+        self.remember();
+        true
     }
 
-    /// Where a later connection resumes: before the oldest finished turn
-    /// still settling, so it is checked again rather than lost.
-    fn resume(&self) -> Option<u64> {
-        self.unsettled
-            .first()
-            .map(|event| event.saturating_sub(1))
-            .or(self.cursor)
+    /// Keep what a later connection to this server needs.
+    fn remember(&self) {
+        if let Some(remembered) = self.memory.lock().get_mut(&self.instance) {
+            remembered.cursor = self.cursor;
+            remembered.settling = self.settling.values().cloned().collect();
+            remembered.finished.clone_from(&self.view.finished);
+        }
     }
 }
 
@@ -1032,7 +1075,7 @@ async fn follow(
             // A chat connector serves one server; earlier ones are gone.
             memory.retain(|known, _| known == &instance);
         }
-        memory.get(&instance).cloned().unwrap_or_default()
+        memory.entry(instance.clone()).or_default().clone()
     };
     let mut follower = Follower {
         daemon,
@@ -1044,10 +1087,17 @@ async fn follow(
             ..View::default()
         },
         loaded: false,
-        cursor: remembered.resume,
-        unsettled: BTreeSet::new(),
+        // A server first seen now is read from now on: turns that finished
+        // before the connector watched it are not news.
+        cursor: remembered
+            .cursor
+            .or((info.event_cursor > 0).then_some(info.event_cursor)),
+        settling: HashMap::new(),
     };
     let mut settling = JoinSet::new();
+    for turn in remembered.settling {
+        follower.check(turn, settle_for, &mut settling);
+    }
     let report = |follower: &Follower| {
         let update = follower
             .loaded
@@ -1092,7 +1142,7 @@ async fn follow(
                 }
                 Some(settled) = settling.join_next(), if !settling.is_empty() => {
                     if let Ok(settled) = settled
-                        && follower.settled(settled)
+                        && follower.settled(settled, settle_for, &mut settling)
                         && !report(&follower).await
                     {
                         return;
