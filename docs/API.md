@@ -57,6 +57,8 @@ Primary resources:
 - `GET /v1/threads/{id}/diff/review[?summary=true|path=FILE]` for deferred last-turn review; see [large-diff review](LARGE-DIFF-REVIEW.md)
 Scheduled thread creation accepts optional `schedule: {id, name}`. The scheduler sets this durable origin on each new run; thread responses, live events, reloads and session archives retain it independently of the editable title. The schedule ID, rather than its name, is the grouping identity. Forks omit it. Sanitized archives redact the schedule name while retaining its ID. Existing threads without this additive field are unchanged.
 
+Thread creation also accepts an optional client-chosen `id` (a UUID), so a create that is retried after a lost response cannot make a second chat. When a chat with that `id` already exists, `POST /v1/threads` returns it unchanged with the same `201` response, ignores the rest of the request, and publishes no second `thread.created`. Concurrent creates with one new `id` make one chat. Haarness Cloud uses this to deliver a session's first prompt into the chat it named in advance. Servers advertise it as `thread-create-id.v1` in `/v1/info.capabilities`; older servers ignore `id` and choose their own, so check the capability or compare the returned `id`.
+
 - `POST /v1/threads/{id}/background[?childThreadId=...]` to promote running foreground subagents
 - `POST /v1/threads/{id}/interrupt` to stop every active turn, child task, and workflow in that root conversation. Add `?resume=true` for an interactive Stop: steering the agent has not answered yet is answered by a continuation turn (see [Steer and Queue](INPUT-QUEUE.md))
 - `POST /v1/threads/{id}/goal` for tagged goal lifecycle actions

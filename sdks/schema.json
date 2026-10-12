@@ -964,6 +964,17 @@
               "null"
             ]
           },
+          "id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ThreadId",
+                "description": "Id for the new chat, chosen by the client so a retried request cannot\ncreate a second one: when a chat with this id exists, it is returned\nunchanged and nothing else in the request applies. Omitted, the server\nchooses the id."
+              }
+            ]
+          },
           "model": {
             "type": [
               "string",

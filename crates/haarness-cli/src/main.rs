@@ -3542,6 +3542,7 @@ async fn execute_schedule(
             .unwrap_or((None, None));
         let thread = client
             .create_thread(CreateThreadRequest {
+                id: None,
                 schedule: Some(haarness_protocol::ScheduleOrigin {
                     id: schedule.id,
                     name: schedule.name.clone(),
@@ -4235,6 +4236,7 @@ async fn run_command(
                     };
                     let thread = client
                         .create_thread(CreateThreadRequest {
+                            id: None,
                             schedule: None,
                             title: Some(title),
                             parent_id: None,
@@ -9945,6 +9947,7 @@ mod tests {
         ));
         let thread = runtime
             .create_thread(CreateThreadRequest {
+                id: None,
                 schedule: None,
                 title: Some("goal watcher test".into()),
                 parent_id: None,
@@ -10013,6 +10016,7 @@ mod tests {
         ));
         let thread = runtime
             .create_thread(CreateThreadRequest {
+                id: None,
                 schedule: None,
                 title: Some("goal question test".into()),
                 parent_id: None,

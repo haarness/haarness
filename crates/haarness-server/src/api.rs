@@ -729,6 +729,7 @@ async fn info(State(state): State<ServerState>) -> Json<ServerInfo> {
             WORKSPACE_HISTORY_CAPABILITY.into(),
             haarness_protocol::INPUT_QUEUE_CAPABILITY.into(),
             haarness_protocol::APPROVAL_MODE_CAPABILITY.into(),
+            haarness_protocol::THREAD_CREATE_ID_CAPABILITY.into(),
             PTY_CAPABILITY.into(),
             SESSION_ARCHIVE_CAPABILITY.into(),
         ]
