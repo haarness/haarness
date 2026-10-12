@@ -173,7 +173,8 @@ fn list_directories(
     })
 }
 
-fn hidden_projects(paths: &Paths) -> Result<std::collections::HashSet<String>> {
+/// Projects closed for remote access: Cloud cannot reach them.
+pub(crate) fn hidden_projects(paths: &Paths) -> Result<std::collections::HashSet<String>> {
     match std::fs::read(paths.config_dir().join("remote-hidden-projects.json")) {
         Ok(data) => Ok(serde_json::from_slice(&data)?),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

@@ -19,6 +19,7 @@ mod plugins;
 mod profile;
 mod reconnect;
 mod remote;
+mod remote_attention;
 mod remote_cloud;
 mod rendezvous;
 mod router_connection;
