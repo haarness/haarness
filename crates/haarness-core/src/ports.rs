@@ -607,6 +607,18 @@ pub trait SnapshotStore: Send + Sync {
         before_snapshot_id: &str,
         after_snapshot_id: &str,
     ) -> CoreResult<Vec<haarness_protocol::FileDiff>>;
+    /// Whether two checkpoints record any different file. The default keeps
+    /// external snapshot adapters compatible.
+    async fn snapshots_differ(
+        &self,
+        before_snapshot_id: &str,
+        after_snapshot_id: &str,
+    ) -> CoreResult<bool> {
+        Ok(!self
+            .diff_snapshots(before_snapshot_id, after_snapshot_id)
+            .await?
+            .is_empty())
+    }
     /// Review metadata or one file. The default keeps external snapshot adapters compatible.
     async fn diff_review(
         &self,

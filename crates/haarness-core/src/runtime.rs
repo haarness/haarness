@@ -1002,6 +1002,12 @@ pub struct AgentRuntime {
     /// threads. They reset with the provider process by design.
     tool_promotions: Arc<ToolPromotions>,
     snapshots: Option<Arc<dyn crate::SnapshotStore>>,
+    /// Serializes undo and redo across every thread of the workspace: one
+    /// thread's conflict checks must not interleave with another's writes.
+    /// A runtime owns exactly one snapshot store, so this gate is per store.
+    /// Lock order: a thread's turn admission lock first, then this gate;
+    /// nothing holding the gate waits for an admission lock.
+    restore_gate: Arc<AsyncMutex<()>>,
     /// Threads whose queued prompts wait for the user: after Stop, or after a
     /// queued prompt's own turn failed. A new message or Send resumes them.
     queue_pauses: Arc<DashMap<ThreadId, ()>>,
@@ -1135,6 +1141,7 @@ impl AgentRuntime {
             tool_execution_gates: Arc::new(DashMap::new()),
             tool_promotions: Arc::new(DashMap::new()),
             snapshots: None,
+            restore_gate: Arc::new(AsyncMutex::new(())),
             queue_pauses: Arc::new(DashMap::new()),
             approval_modes,
         }
@@ -2706,6 +2713,8 @@ impl AgentRuntime {
     pub async fn revert(&self, id: ThreadId, sequence: Option<u64>) -> CoreResult<Thread> {
         let admission_lock = turn_admission_lock(&self.turn_admissions, id);
         let _admission_guard = admission_lock.lock().await;
+        // Held from the backup capture through the saved undo state.
+        let _restore_guard = self.restore_gate.lock().await;
         let snapshots = self
             .snapshots
             .as_ref()
@@ -2946,6 +2955,7 @@ impl AgentRuntime {
     pub async fn unrevert(&self, id: ThreadId) -> CoreResult<Thread> {
         let admission_lock = turn_admission_lock(&self.turn_admissions, id);
         let _admission_guard = admission_lock.lock().await;
+        let _restore_guard = self.restore_gate.lock().await;
         if self.active.contains_key(&id) {
             return Err(CoreError::Conflict(
                 "cannot unrevert while a turn is running".into(),
@@ -3036,8 +3046,9 @@ impl AgentRuntime {
         Ok(thread)
     }
 
-    /// Stable file changes for the latest completed mutation epoch. Unlike a
-    /// live Git diff this remains meaningful after unrelated later edits.
+    /// Stable file changes for the latest completed mutation epoch that
+    /// changed files and is not undone. Unlike a live Git diff this remains
+    /// meaningful after unrelated later edits.
     pub async fn diff_last_turn(
         &self,
         id: ThreadId,
@@ -3055,25 +3066,50 @@ impl AgentRuntime {
             .snapshots
             .as_ref()
             .ok_or_else(|| CoreError::Invalid("snapshots are disabled".into()))?;
+        // An undone turn stays in the transcript until new work confirms the
+        // undo, but its files are gone: only checkpoints before the undo
+        // boundary describe the workspace.
+        let undone = self
+            .repository
+            .get_thread(id)
+            .await?
+            .revert
+            .map(|state| state.sequence);
         let items = self.repository.list_items(id, None).await?;
-        if let Some((before, after)) = items.iter().rev().find_map(|item| match &item.data {
+        let kept = |item: &Item, boundary: Option<u64>| {
+            undone.is_none_or(|undone| boundary.map_or(item.sequence <= undone, |b| b < undone))
+        };
+        let pairs = items.iter().rev().filter_map(|item| match &item.data {
             ItemData::Snapshot {
                 snapshot_id,
+                boundary_sequence,
                 base_snapshot_id: Some(base),
                 ..
-            } => Some((base.clone(), snapshot_id.clone())),
+            } if kept(item, *boundary_sequence) => Some((base, snapshot_id)),
             _ => None,
-        }) {
-            return snapshots
-                .diff_review(&before, Some(&after), summary, path)
-                .await;
+        });
+        // The newest turn that changed files. A turn that only ran commands
+        // still records a pair (undo needs its boundary); it must not hide
+        // the edits before it.
+        let mut paired = false;
+        for (before, after) in pairs {
+            paired = true;
+            if snapshots.snapshots_differ(before, after).await? {
+                return snapshots
+                    .diff_review(before, Some(after), summary, path)
+                    .await;
+            }
+        }
+        if paired {
+            return Ok(Vec::new());
         }
         let legacy = items.iter().rev().find_map(|item| match &item.data {
             ItemData::Snapshot {
                 snapshot_id,
+                boundary_sequence,
                 base_snapshot_id: None,
                 ..
-            } => Some(snapshot_id.clone()),
+            } if kept(item, *boundary_sequence) => Some(snapshot_id.clone()),
             _ => None,
         });
         match legacy {
@@ -4490,6 +4526,7 @@ impl AgentRuntime {
             last_tool_catalog: Mutex::new(None),
             config: components.config.clone(),
             snapshots: self.snapshots.clone(),
+            restore_gate: self.restore_gate.clone(),
             hooks: components.hooks.clone(),
             snapshot_boundary: user_item.sequence.saturating_sub(1),
             snapshot_state: AsyncMutex::new(TurnSnapshotState::new()),
@@ -4874,6 +4911,8 @@ struct RunnerTask {
     last_tool_catalog: Mutex<Option<ToolCatalogResponse>>,
     config: Arc<RuntimeConfig>,
     snapshots: Option<Arc<dyn crate::SnapshotStore>>,
+    /// The runtime's restore gate, passed on to handles built from this task.
+    restore_gate: Arc<AsyncMutex<()>>,
     hooks: Option<Arc<dyn crate::HookPort>>,
     snapshot_boundary: u64,
     snapshot_state: AsyncMutex<TurnSnapshotState>,
@@ -8747,6 +8786,7 @@ impl RunnerTask {
             last_tool_catalog: Mutex::new(None),
             config: self.config.clone(),
             snapshots: self.snapshots.clone(),
+            restore_gate: self.restore_gate.clone(),
             hooks: self.hooks.clone(),
             snapshot_boundary: user.sequence.saturating_sub(1),
             snapshot_state: AsyncMutex::new(TurnSnapshotState::new()),
@@ -8989,6 +9029,7 @@ impl RunnerTask {
             tool_execution_gates: self.tool_execution_gates.clone(),
             tool_promotions: self.tool_promotions.clone(),
             snapshots: self.snapshots.clone(),
+            restore_gate: self.restore_gate.clone(),
             queue_pauses: self.queue_pauses.clone(),
             approval_modes: self.approval_modes.clone(),
         }
