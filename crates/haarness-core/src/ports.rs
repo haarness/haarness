@@ -448,6 +448,16 @@ pub trait ModelProvider: Send + Sync {
     async fn check_api_key(&self, _key: &str) -> KeyCheck {
         KeyCheck::Unsupported
     }
+    /// Who can read the prompt cache for `model`, when this provider writes
+    /// it explicitly (Anthropic `cache_control` breakpoints). Such an entry is
+    /// readable only once the response to the request that wrote it begins,
+    /// so the runtime holds back concurrent sibling requests until then. The
+    /// value fingerprints the endpoint and credentials and must not contain a
+    /// secret. `None`, the default: the provider caches automatically or not
+    /// at all.
+    fn explicit_prompt_cache_scope(&self, _model: &str) -> Option<String> {
+        None
+    }
     async fn stream(
         &self,
         request: ProviderRequest,

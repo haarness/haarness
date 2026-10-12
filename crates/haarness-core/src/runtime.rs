@@ -1012,6 +1012,9 @@ pub struct AgentRuntime {
     /// queued prompt's own turn failed. A new message or Send resumes them.
     queue_pauses: Arc<DashMap<ThreadId, ()>>,
     approval_modes: Arc<crate::approval_mode::ApprovalModes>,
+    /// Concurrent child agents' first requests for one prompt prefix: the
+    /// first goes alone so the others can read the cache it writes.
+    prefix_warmup: crate::prefix_warmup::PrefixWarmup,
 }
 
 #[derive(Clone)]
@@ -1144,6 +1147,7 @@ impl AgentRuntime {
             restore_gate: Arc::new(AsyncMutex::new(())),
             queue_pauses: Arc::new(DashMap::new()),
             approval_modes,
+            prefix_warmup: crate::prefix_warmup::PrefixWarmup::default(),
         }
     }
 
@@ -4535,6 +4539,7 @@ impl AgentRuntime {
             queue_pauses: self.queue_pauses.clone(),
             approval_modes: self.approval_modes.clone(),
             answer_steer: AtomicBool::new(false),
+            prefix_warmup: self.prefix_warmup.clone(),
         });
         // A real message, or Send on a queued one, resumes a paused queue.
         if !task.request.synthetic {
@@ -4925,6 +4930,7 @@ struct RunnerTask {
     approval_modes: Arc<crate::approval_mode::ApprovalModes>,
     /// Set when a stop leaves unread steering for a continuation to answer.
     answer_steer: AtomicBool,
+    prefix_warmup: crate::prefix_warmup::PrefixWarmup,
 }
 
 struct TurnToolInvoker {
@@ -6021,6 +6027,10 @@ impl RunnerTask {
             let mut previous_stalled_goal_turn = None;
             let mut repeated_stalled_goal_turns = 0_u32;
             let mut tool_rounds = 0_u32;
+            // Only a turn's first provider request can share a prompt prefix
+            // with siblings started alongside it; later rounds read the cache
+            // the first one wrote.
+            let mut first_request = true;
             let mut logical_turn = GoalLogicalTurnGuard::new(
                 self.events.clone(),
                 self.thread.id,
@@ -6369,12 +6379,32 @@ impl RunnerTask {
                     "gen_ai.usage.cache_read.input_tokens" = tracing::field::Empty,
                     "gen_ai.usage.cache_creation.input_tokens" = tracing::field::Empty,
                 );
+                // Child agents started together (a workflow fan-out, a batch
+                // of task delegations) share a prompt prefix. Where a provider
+                // writes its cache explicitly, the first of them goes alone
+                // and the others wait for its response to begin, so they read
+                // the prefix instead of each writing it again.
+                let warmup_key = (std::mem::take(&mut first_request)
+                    && (self.depth > 0 || self.thread.is_subagent))
+                    .then(|| provider.explicit_prompt_cache_scope(&provider_request.model))
+                    .flatten()
+                    .map(|scope| {
+                        crate::prefix_warmup::PrefixKey::new(provider_id, &scope, &provider_request)
+                    });
+                let lead = match warmup_key {
+                    Some(key) => self.prefix_warmup.enter(key, &self.cancel).await?,
+                    None => None,
+                };
                 let stream_result = tokio::select! {
                     biased;
                     () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
                     result = provider
                         .stream(provider_request, self.cancel.clone())
                         .instrument(provider_span.clone()) => result,
+                };
+                let stream_result = match lead {
+                    Some(lead) => stream_result.map(|stream| lead.watch(stream)),
+                    None => stream_result,
                 };
                 let mut stream = match stream_result {
                     Ok(stream) => stream,
@@ -8795,6 +8825,7 @@ impl RunnerTask {
             queue_pauses: self.queue_pauses.clone(),
             approval_modes: self.approval_modes.clone(),
             answer_steer: AtomicBool::new(false),
+            prefix_warmup: self.prefix_warmup.clone(),
         });
         child_task.publish_task_update("running");
         let task = Arc::new(BackgroundTask {
@@ -9032,6 +9063,7 @@ impl RunnerTask {
             restore_gate: self.restore_gate.clone(),
             queue_pauses: self.queue_pauses.clone(),
             approval_modes: self.approval_modes.clone(),
+            prefix_warmup: self.prefix_warmup.clone(),
         }
     }
 }
