@@ -2386,7 +2386,7 @@ impl Tool for BuiltinTool {
                     "prompt":{"type":"string","description":"Single concise question shown to the user."},
                     "choices":{"type":"array","items":{"type":"string"},"description":"Optional answer labels. Put a recommended choice first and suffix it with '(Recommended)'. Do not include Other when custom is enabled."},
                     "multiple":{"type":"boolean","default":false,"description":"Allow selection of more than one choice. Defaults to false."},
-                    "custom":{"type":"boolean","default":true,"description":"Allow a free-form answer. Defaults to true; set false only when every valid answer is represented by a choice."}
+                    "custom":{"type":"boolean","default":true,"description":"Allow a free-form answer. Defaults to true; set false only when every valid answer is represented by a choice, so false requires at least one choice."}
                 }),
                 vec!["prompt"],
             ),
