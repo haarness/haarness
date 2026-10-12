@@ -1900,6 +1900,8 @@ mod tests {
         /// Every request's path and scope header.
         requests: Vec<(String, Option<String>)>,
         event_id: u64,
+        /// The event stream ends as soon as it opens.
+        close_events: bool,
     }
     /// A Haarness server as the attention watcher sees it: a scope-aware
     /// `/v1/permissions`, `/v1/questions`, chats and an event stream.
@@ -1975,6 +1977,12 @@ mod tests {
                     "/v1/events",
                     get(|State(daemon): State<FakeDaemon>, uri: Uri, headers: HeaderMap| async move {
                         let visible = daemon.visible(&uri, &headers);
+                        if daemon.state.lock().unwrap().close_events {
+                            return Response::builder()
+                                .header("content-type", "text/event-stream")
+                                .body(Body::empty())
+                                .unwrap();
+                        }
                         let receiver = daemon.events.subscribe();
                         let live = futures::stream::unfold(receiver, move |mut receiver| {
                             let visible = visible.clone();
@@ -2029,6 +2037,25 @@ mod tests {
                 thread,
                 format!("id: {id}\nevent: {kind}\ndata: {envelope}\n\n"),
             ));
+        }
+        /// How many requests asked for `path`.
+        fn requested(&self, path: &str) -> usize {
+            let state = self.state.lock().unwrap();
+            state
+                .requests
+                .iter()
+                .filter(|(asked, _)| asked == path)
+                .count()
+        }
+        /// Wait until more than `count` requests asked for `path`.
+        async fn requested_more(&self, path: &str, count: usize) {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while self.requested(path) <= count {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{path} was not requested again"));
         }
         /// Write this server's discovery record, started by `executable`.
         fn record(
@@ -2438,6 +2465,63 @@ mod tests {
             "{requests:?}"
         );
         link.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    /// The connector's link to `relay`, reporting for the projects of
+    /// `attention` and for `target`.
+    fn link(
+        relay: &str,
+        target: &Target,
+        attention: &Arc<remote_attention::Context>,
+    ) -> tokio::task::JoinHandle<Result<Link>> {
+        let (handshake, target, attention) = (
+            relay.into_client_request().unwrap(),
+            target.clone(),
+            attention.clone(),
+        );
+        tokio::spawn(async move {
+            relay_link(
+                handshake,
+                &target,
+                &reqwest::Client::new(),
+                Duration::from_secs(60),
+                &attention,
+            )
+            .await
+        })
+    }
+    /// A computer whose only running server is the connector's own, with
+    /// these chats.
+    async fn watched_home(chats: &[(Uuid, &str)]) -> (Computer, FakeDaemon) {
+        let computer = Computer::new();
+        let home = FakeDaemon::start(Path::new(&computer.home.path)).await;
+        home.record(
+            &computer.paths,
+            &computer.home.id,
+            Path::new(&computer.home.path),
+            crate::current_executable_fingerprint().ok(),
+        );
+        let mut state = home.state.lock().unwrap();
+        for (id, title) in chats {
+            state.threads.insert(*id, chat(*id, title));
+        }
+        drop(state);
+        (computer, home)
+    }
+    #[tokio::test]
+    async fn a_server_that_keeps_closing_its_event_stream_is_asked_less_and_less_often() {
+        let (computer, home) = watched_home(&[]).await;
+        home.state.lock().unwrap().close_events = true;
+        let (relay, _frames) = fake_relay(vec![Relay::Record(&["attention.v1"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        home.requested_more("/v1/events", 0).await;
+        tokio::time::sleep(Duration::from_millis(1600)).await;
+        // Waits of about 0.25, 0.5 and 1 s; reopening at once every 0.25 s
+        // would be seven.
+        let opened = home.requested("/v1/events");
+        assert!((2..=4).contains(&opened), "{opened} streams in 1.6 s");
+        connection.abort();
         std::fs::remove_dir_all(&computer.root).unwrap();
     }
 }
