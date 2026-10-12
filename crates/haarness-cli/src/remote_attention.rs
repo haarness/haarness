@@ -53,9 +53,9 @@ const FINISHED_WINDOW: TimeDelta = TimeDelta::minutes(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// Servers send a keepalive every 15 s; a stream silent for longer is gone.
 const STREAM_IDLE: Duration = Duration::from_secs(45);
-/// One event never comes near this; a stream that does is not a server's.
+/// The largest event read whole. A bigger one (a message carrying large
+/// attachments) is skipped, keeping only its id.
 const MAX_EVENT: usize = 32 * 1024 * 1024;
-const REFRESH_RETRY: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -733,25 +733,36 @@ impl Event {
 /// Splits a response body into events.
 struct Events<S> {
     body: S,
+    /// How long the body may send nothing at all, keepalives included.
+    idle: Duration,
     buffer: Vec<u8>,
     /// Bytes already searched for a frame end.
     searched: usize,
+    /// The buffer holds the rest of an event too large to read.
+    skipping: bool,
 }
+
+/// Enough of a frame's start for its `id:` line, which servers write first.
+const EVENT_HEAD: usize = 256;
 
 impl<S, B> Events<S>
 where
     S: Stream<Item = reqwest::Result<B>> + Unpin,
     B: AsRef<[u8]>,
 {
-    fn new(body: S) -> Self {
+    fn new(body: S, idle: Duration) -> Self {
         Self {
             body,
+            idle,
             buffer: Vec::new(),
             searched: 0,
+            skipping: false,
         }
     }
 
-    /// The next event; None when the stream ended or broke.
+    /// The next event; None when the stream ended, broke or fell silent.
+    /// An event larger than `MAX_EVENT` comes back with its id only, so the
+    /// cursor still moves past it: resuming before it would read it again.
     async fn next(&mut self) -> Option<Event> {
         loop {
             let from = self.searched.saturating_sub(1);
@@ -762,16 +773,38 @@ where
             {
                 let frame: Vec<u8> = self.buffer.drain(..end).collect();
                 self.searched = 0;
+                if std::mem::take(&mut self.skipping) {
+                    continue;
+                }
                 if let Some(event) = Event::parse(&String::from_utf8_lossy(&frame)) {
                     return Some(event);
                 }
                 continue;
             }
-            self.searched = self.buffer.len();
             if self.buffer.len() > MAX_EVENT {
-                return None;
+                let skipped = (!self.skipping)
+                    .then(|| {
+                        let head = &self.buffer[..EVENT_HEAD];
+                        Event::parse(&String::from_utf8_lossy(head))?.id
+                    })
+                    .flatten();
+                self.skipping = true;
+                // Keep the last byte: the frame's end may straddle chunks.
+                self.buffer.drain(..self.buffer.len() - 1);
+                if let Some(id) = skipped {
+                    self.searched = self.buffer.len();
+                    return Some(Event {
+                        id: Some(id),
+                        kind: String::new(),
+                        data: String::new(),
+                    });
+                }
             }
-            let chunk = self.body.next().await?.ok()?;
+            self.searched = self.buffer.len();
+            let chunk = tokio::time::timeout(self.idle, self.body.next())
+                .await
+                .ok()??
+                .ok()?;
             self.buffer.extend_from_slice(chunk.as_ref());
         }
     }
@@ -1027,6 +1060,8 @@ async fn follow(
             }
         }
     };
+    // A refresh the server keeps failing is asked less and less often.
+    let mut refreshes = Backoff::new(discovery::retry_pacing());
     loop {
         let stream = match follower.daemon.events(follower.cursor).await {
             Ok(response) => response,
@@ -1035,14 +1070,14 @@ async fn follow(
                 continue;
             }
         };
-        backoff = Backoff::new(discovery::retry_pacing());
-        let mut events = Events::new(stream.bytes_stream());
+        let since = Instant::now();
+        let mut events = Events::new(stream.bytes_stream(), STREAM_IDLE);
         // Read after subscribing, so nothing raised in between is missed.
         let mut refresh_at = Some(Instant::now());
         loop {
             tokio::select! {
-                event = tokio::time::timeout(STREAM_IDLE, events.next()) => {
-                    let Ok(Some(event)) = event else { break };
+                event = events.next() => {
+                    let Some(event) = event else { break };
                     match follower.read(&event, settle_for, &mut settling) {
                         Step::Nothing => {}
                         Step::Refresh => {
@@ -1066,14 +1101,20 @@ async fn follow(
                 () = tokio::time::sleep_until(refresh_at.unwrap_or_else(Instant::now)), if refresh_at.is_some() => {
                     refresh_at = None;
                     if follower.refresh().await.is_err() {
-                        refresh_at = Some(Instant::now() + REFRESH_RETRY);
-                    } else if !report(&follower).await {
-                        return;
+                        refresh_at = Some(Instant::now() + refreshes.wait(Link::Failed));
+                    } else {
+                        refreshes = Backoff::new(discovery::retry_pacing());
+                        if !report(&follower).await {
+                            return;
+                        }
                     }
                 }
             }
         }
-        tokio::time::sleep(backoff.wait(Link::Failed)).await;
+        // Only a stream that stayed up resets the waits: one the server
+        // keeps closing at once is not reopened four times a second.
+        let proven = since.elapsed() >= backoff.pacing.stable;
+        tokio::time::sleep(backoff.wait(Link::Ended { proven })).await;
     }
 }
 
@@ -1401,7 +1442,7 @@ mod tests {
             Ok(b"ta: {}\n"),
             Ok(b"\nid: 2\nevent: b\ndata: {}\n\n"),
         ];
-        let mut events = Events::new(futures::stream::iter(chunks));
+        let mut events = Events::new(futures::stream::iter(chunks), STREAM_IDLE);
         assert_eq!(
             events.next().await.map(|event| (event.id, event.kind)),
             Some((Some(1), "a".into()))
@@ -1411,6 +1452,60 @@ mod tests {
             Some((Some(2), "b".into()))
         );
         assert!(events.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn keepalives_keep_a_quiet_stream_open_and_silence_ends_it() {
+        let idle = Duration::from_millis(400);
+        // Keepalives for longer than the idle limit, one event, then nothing.
+        let body = futures::stream::unfold(0, |sent| async move {
+            match sent {
+                0..12 => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    Some((Ok::<_, reqwest::Error>(&b":keepalive\n\n"[..]), sent + 1))
+                }
+                12 => Some((Ok(&b"id: 9\nevent: a\ndata: {}\n\n"[..]), sent + 1)),
+                _ => std::future::pending().await,
+            }
+        });
+        let mut events = Events::new(Box::pin(body), idle);
+        let started = Instant::now();
+        assert_eq!(events.next().await.and_then(|event| event.id), Some(9));
+        assert!(started.elapsed() > idle, "keepalives kept it open");
+        let silent = Instant::now();
+        assert!(events.next().await.is_none(), "a silent stream is gone");
+        assert!(silent.elapsed() >= idle);
+    }
+
+    #[tokio::test]
+    async fn an_event_too_large_to_read_is_skipped_but_its_id_is_kept() {
+        let huge = format!(
+            "id: 5\nevent: item.created\ndata: {{\"text\":\"{}\"}}\n\n",
+            "x".repeat(MAX_EVENT)
+        )
+        .into_bytes();
+        let (start, rest) = huge.split_at(MAX_EVENT / 2);
+        let (middle, end) = rest.split_at(rest.len() - 1);
+        let chunks: Vec<reqwest::Result<Vec<u8>>> = vec![
+            Ok(b"id: 4\nevent: a\ndata: {}\n\n".to_vec()),
+            Ok(start.to_vec()),
+            Ok(middle.to_vec()),
+            // The frame's end straddles chunks.
+            Ok([end, b"id: 6\nevent: b\ndata: {}\n\n"].concat()),
+        ];
+        let mut events = Events::new(futures::stream::iter(chunks), STREAM_IDLE);
+        let mut read = Vec::new();
+        while let Some(event) = events.next().await {
+            read.push((event.id, event.kind, event.data.len()));
+        }
+        assert_eq!(
+            read,
+            [
+                (Some(4), "a".into(), 2),
+                (Some(5), String::new(), 0),
+                (Some(6), "b".into(), 2)
+            ]
+        );
     }
 
     fn info(schema: &str, trusted: bool) -> ServerInfo {
