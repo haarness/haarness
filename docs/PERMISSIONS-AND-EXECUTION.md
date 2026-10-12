@@ -52,6 +52,8 @@ This example permits longer tools and two levels of task delegation:
 
 Reads, listings, globbing, grep, web fetches and task delegations can run together: a batch of `task` calls launches its child agents side by side, bounded by `execution.subagent_concurrency`, and the TUI lists each child under the batch row with its own live status. Writes, shell commands and tools without an explicit parallel-read contract remain ordering barriers. Batch calls preserve those barriers and return results in input order. Task agents have a separate pool at each depth so a parent waiting for a grandchild does not consume the grandchild's only slot. Cancellation still reaches descendants.
 
+Child agents started together share a prompt prefix. On a provider with explicit prompt caching (Anthropic and Claude through the Haarness Cloud router), the first child's request goes alone and its siblings' first requests follow once its response begins streaming (at most 20 seconds later), so they read the cache it wrote instead of writing the same prefix again. See [Dynamic workflows](WORKFLOWS.md#context-api) for the details; the same applies to workflow agents.
+
 Shell output is streamed to a file with a bounded preview in memory. Large output exposes the full file path. Cancellation and deadlines terminate the shell process group on Unix; `0` removes the deadline, not the Stop control. Stdout stays separate in metadata for dynamic definition context. This does not add a new background-shell job API.
 
 ## Secret files

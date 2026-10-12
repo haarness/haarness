@@ -12,6 +12,7 @@ pub mod instructions;
 pub mod patch;
 mod permissions;
 mod ports;
+mod prefix_warmup;
 mod runtime;
 mod side_question;
 mod tool_catalog;
