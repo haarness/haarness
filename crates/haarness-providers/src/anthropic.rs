@@ -240,6 +240,15 @@ impl ModelProvider for AnthropicProvider {
             .headers(headers);
         crate::key_check::check(&self.name, request).await
     }
+    /// Every request marks its tools, system prompt and newest turns with
+    /// `cache_control`.
+    fn explicit_prompt_cache_scope(&self, _model: &str) -> Option<String> {
+        Some(crate::prompt_cache_scope(
+            &self.endpoint,
+            self.resolved_api_key().as_deref(),
+            &self.headers,
+        ))
+    }
     fn id(&self) -> &str {
         &self.id
     }
@@ -868,6 +877,28 @@ mod tests {
         assert_eq!(info.max_output_tokens, Some(192_000));
         assert!(info.reasoning);
         assert!(!info.images);
+    }
+
+    #[test]
+    fn the_prompt_cache_scope_separates_accounts_without_holding_the_key() {
+        let provider = |key: &str| {
+            let mut provider =
+                AnthropicProvider::for_test("https://api.anthropic.com/v1/messages".into());
+            provider.api_key = Some(key.to_owned().into());
+            provider
+        };
+        let scope = provider("sk-ant-fixture-a")
+            .explicit_prompt_cache_scope("claude-sonnet-5-5")
+            .expect("every Anthropic request marks its prompt for caching");
+        assert!(!scope.contains("fixture"));
+        assert_eq!(
+            provider("sk-ant-fixture-a").explicit_prompt_cache_scope("claude-haiku-5-5"),
+            Some(scope.clone())
+        );
+        assert_ne!(
+            provider("sk-ant-fixture-b").explicit_prompt_cache_scope("claude-sonnet-5-5"),
+            Some(scope)
+        );
     }
 
     #[test]
