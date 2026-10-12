@@ -1900,6 +1900,10 @@ mod tests {
         /// Every request's path and scope header.
         requests: Vec<(String, Option<String>)>,
         event_id: u64,
+        /// Every event sent, with its chat, for streams that resume.
+        log: Vec<(u64, Uuid, String)>,
+        /// How many `/threads/{id}/active` checks fail before one answers.
+        active_failures: usize,
         /// The event stream ends as soon as it opens.
         close_events: bool,
     }
@@ -1930,11 +1934,18 @@ mod tests {
                 state: Arc::default(),
                 events,
             };
-            let info = json!({"name":"haarness","version":"0.1.1","schemaVersion":"1",
-                "serverInstanceId":daemon.instance,"workspace":workspace,"pid":std::process::id(),
-                "projectTrusted":false,"capabilities":["remote-chat-scope.v1","workspace-history.v1","pty.v1"]});
+            let workspace = workspace.to_owned();
             let app = Router::new()
-                .route("/v1/info", get(move || async move { Json(info) }))
+                .route(
+                    "/v1/info",
+                    get(move |State(daemon): State<FakeDaemon>| async move {
+                        let cursor = daemon.state.lock().unwrap().event_id;
+                        Json(json!({"name":"haarness","version":"0.1.1","schemaVersion":"1",
+                            "serverInstanceId":daemon.instance,"workspace":workspace,"pid":std::process::id(),
+                            "eventCursor":cursor,"projectTrusted":false,
+                            "capabilities":["remote-chat-scope.v1","workspace-history.v1","pty.v1"]}))
+                    }),
+                )
                 .route(
                     "/v1/permissions",
                     get(|State(daemon): State<FakeDaemon>, uri: Uri, headers: HeaderMap| async move {
@@ -1968,8 +1979,12 @@ mod tests {
                     get(
                         |State(daemon): State<FakeDaemon>, Route(id): Route<Uuid>, uri: Uri, headers: HeaderMap| async move {
                             daemon.visible(&uri, &headers);
-                            let active = daemon.state.lock().unwrap().active.get(&id).cloned();
-                            Json(active.unwrap_or(Value::Null))
+                            let mut state = daemon.state.lock().unwrap();
+                            if state.active_failures > 0 {
+                                state.active_failures -= 1;
+                                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                            }
+                            Json(state.active.get(&id).cloned().unwrap_or(Value::Null)).into_response()
                         },
                     ),
                 )
@@ -1977,13 +1992,28 @@ mod tests {
                     "/v1/events",
                     get(|State(daemon): State<FakeDaemon>, uri: Uri, headers: HeaderMap| async move {
                         let visible = daemon.visible(&uri, &headers);
-                        if daemon.state.lock().unwrap().close_events {
+                        // Like a real server: everything after the cursor,
+                        // or everything kept when there is none.
+                        let after = headers
+                            .get("last-event-id")
+                            .map(|value| value.to_str().unwrap().parse::<u64>().unwrap());
+                        let shown = |thread: &Uuid| visible.as_ref().is_none_or(|ids| ids.contains(thread));
+                        let (receiver, replay, close) = {
+                            let state = daemon.state.lock().unwrap();
+                            let replay = state
+                                .log
+                                .iter()
+                                .filter(|(id, thread, _)| after.is_none_or(|after| *id > after) && shown(thread))
+                                .map(|(_, _, frame)| Ok(frame.clone()))
+                                .collect::<Vec<_>>();
+                            (daemon.events.subscribe(), replay, state.close_events)
+                        };
+                        if close {
                             return Response::builder()
                                 .header("content-type", "text/event-stream")
                                 .body(Body::empty())
                                 .unwrap();
                         }
-                        let receiver = daemon.events.subscribe();
                         let live = futures::stream::unfold(receiver, move |mut receiver| {
                             let visible = visible.clone();
                             async move {
@@ -2000,7 +2030,9 @@ mod tests {
                                 }
                             }
                         });
-                        let body = futures::stream::once(async { Ok(": connected\n\n".to_owned()) }).chain(live);
+                        let body = futures::stream::once(async { Ok(": connected\n\n".to_owned()) })
+                            .chain(futures::stream::iter(replay))
+                            .chain(live);
                         Response::builder()
                             .header("content-type", "text/event-stream")
                             .body(Body::from_stream(body))
@@ -2033,10 +2065,11 @@ mod tests {
             let envelope = json!({"schemaVersion":"1","serverInstanceId":self.instance,"eventId":id,
                 "type":kind,"threadId":thread,"rootThreadId":root,"turnId":null,"itemId":null,
                 "payload":payload,"createdAt":chrono::Utc::now()});
-            let _ = self.events.send((
-                thread,
-                format!("id: {id}\nevent: {kind}\ndata: {envelope}\n\n"),
-            ));
+            let frame = format!("id: {id}\nevent: {kind}\ndata: {envelope}\n\n");
+            state.log.push((id, thread, frame.clone()));
+            // Sent while the state is locked, so a stream opening now
+            // either replays it or receives it, never both.
+            let _ = self.events.send((thread, frame));
         }
         /// How many requests asked for `path`.
         fn requested(&self, path: &str) -> usize {
@@ -2490,6 +2523,15 @@ mod tests {
             .await
         })
     }
+    /// The turn ids of a frame's finished chats.
+    fn finished_turns(frame: &Value) -> Vec<Value> {
+        frame["finished"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|turn| turn["turnId"].clone())
+            .collect()
+    }
     /// A computer whose only running server is the connector's own, with
     /// these chats.
     async fn watched_home(chats: &[(Uuid, &str)]) -> (Computer, FakeDaemon) {
@@ -2507,6 +2549,134 @@ mod tests {
         }
         drop(state);
         (computer, home)
+    }
+    #[tokio::test]
+    async fn turns_count_from_when_the_connector_watches_and_survive_its_reconnects() {
+        let (earlier, dropped, offline) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let (computer, home) = watched_home(&[
+            (earlier, "Earlier"),
+            (dropped, "Dropped"),
+            (offline, "Offline"),
+        ])
+        .await;
+        // It finished before the connector watched the server: not news.
+        let before = Uuid::now_v7();
+        home.emit(
+            "turn.finished",
+            earlier,
+            earlier,
+            finished_turn(before, earlier, "completed"),
+        );
+        let (relay, mut frames) = fake_relay(vec![
+            Relay::Record(&["attention.v1"]),
+            Relay::Record(&["attention.v1"]),
+        ])
+        .await;
+        let attention = attention(&computer.paths);
+        let target = home.target(&computer.home.id, None);
+        let first = link(&relay, &target, &attention);
+        assert_eq!(next_attention(&mut frames).await["finished"], json!([]));
+
+        // One turn finishes as the connection drops, before it settled, and
+        // one while the connector is away.
+        let (settling, away) = (Uuid::now_v7(), Uuid::now_v7());
+        let refreshes = home.requested("/v1/permissions");
+        home.emit(
+            "turn.finished",
+            dropped,
+            dropped,
+            finished_turn(settling, dropped, "completed"),
+        );
+        // Read: it refreshes what waits whenever a turn finishes.
+        home.requested_more("/v1/permissions", refreshes).await;
+        first.abort();
+        let _ = first.await;
+        home.emit(
+            "turn.finished",
+            offline,
+            offline,
+            finished_turn(away, offline, "failed"),
+        );
+
+        let second = link(&relay, &target, &attention);
+        let mut seen = Vec::new();
+        let last = loop {
+            let frame = next_attention(&mut frames).await;
+            seen.push(frame.clone());
+            if frame["finished"].as_array().unwrap().len() == 2 {
+                break frame;
+            }
+        };
+        let mut reported = finished_turns(&last);
+        reported.sort_by_key(ToString::to_string);
+        let mut expected = vec![json!(settling), json!(away)];
+        expected.sort_by_key(ToString::to_string);
+        assert_eq!(reported, expected, "{last}");
+        assert!(
+            seen.iter()
+                .all(|frame| !finished_turns(frame).contains(&json!(before))),
+            "{seen:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        while let Ok(frame) = frames.try_recv() {
+            assert_ne!(frame["type"], "attention", "{frame}");
+        }
+        second.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_finished_turn_is_checked_again_when_the_server_does_not_answer() {
+        let work = Uuid::now_v7();
+        let (computer, home) = watched_home(&[(work, "Work")]).await;
+        // The first two checks fail; the last one allowed answers.
+        home.state.lock().unwrap().active_failures = 2;
+        let (relay, mut frames) = fake_relay(vec![Relay::Record(&["attention.v1"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        next_attention(&mut frames).await;
+        let done = Uuid::now_v7();
+        home.emit(
+            "turn.finished",
+            work,
+            work,
+            finished_turn(done, work, "completed"),
+        );
+        let frame = next_attention(&mut frames).await;
+        assert_eq!(finished_turns(&frame), [json!(done)], "{frame}");
+        assert_eq!(home.requested(&format!("/v1/threads/{work}/active")), 3);
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn only_the_last_of_a_chats_finished_turns_is_reported() {
+        let work = Uuid::now_v7();
+        let (computer, home) = watched_home(&[(work, "Work")]).await;
+        let (relay, mut frames) = fake_relay(vec![Relay::Record(&["attention.v1"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        next_attention(&mut frames).await;
+        // A goal ran a second turn at once; both ended before either settled.
+        let (first, last) = (Uuid::now_v7(), Uuid::now_v7());
+        home.emit(
+            "turn.finished",
+            work,
+            work,
+            finished_turn(first, work, "completed"),
+        );
+        home.emit(
+            "turn.finished",
+            work,
+            work,
+            finished_turn(last, work, "completed"),
+        );
+        let frame = next_attention(&mut frames).await;
+        assert_eq!(finished_turns(&frame), [json!(last)], "{frame}");
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        while let Ok(frame) = frames.try_recv() {
+            assert_ne!(frame["type"], "attention", "{frame}");
+        }
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
     }
     #[tokio::test]
     async fn a_server_that_keeps_closing_its_event_stream_is_asked_less_and_less_often() {
