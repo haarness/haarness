@@ -65,6 +65,7 @@ import { useApp } from "./state";
 import { Button, Icon, stringify, time, type IconName } from "./ui";
 import { attachmentName, type Attachment } from "./media";
 import { createFileDrop } from "./file-drop";
+import { isTextEntry, typingElsewhere } from "./text-entry";
 import { Markdown } from "./Markdown";
 import { ConversationOutline } from "./ConversationOutline";
 import { promptTitle, readingMark } from "./outline-layout";
@@ -390,6 +391,7 @@ export function Session() {
   });
   let scrolling!: HTMLDivElement;
   let composer!: HTMLTextAreaElement;
+  let conversation!: HTMLElement;
 
   let historyIndex = -1;
   let recalled: PromptHistoryEntry[] = [];
@@ -763,6 +765,48 @@ export function Session() {
     };
     document.addEventListener("keydown", keys);
     onCleanup(() => document.removeEventListener("keydown", keys));
+  });
+  // A paste that no text field takes (the transcript or a button has the
+  // focus, or nothing does) goes where a drop would: files attach to the
+  // draft, and text lands at the message box's caret. The message box and
+  // other fields handle their own.
+  onMount(() => {
+    const paste = (event: ClipboardEvent) => {
+      const data = event.clipboardData,
+        target = event.target instanceof Element ? event.target : null;
+      if (
+        event.defaultPrevented ||
+        !data ||
+        !conversation.getClientRects().length ||
+        (target !== document.body && !conversation.contains(target)) ||
+        target?.closest("dialog, [role='dialog']") ||
+        document.querySelector("dialog[open]") ||
+        isTextEntry(target) ||
+        isTextEntry(document.activeElement)
+      )
+        return;
+      const files = Array.from(data.files);
+      if (files.length) {
+        if (!project() || !editable()) return;
+        event.preventDefault();
+        void app.run(() => app.attachFiles(app.draftKey(), files));
+        return;
+      }
+      const text = data.getData("text/plain");
+      if (!text || !editable() || !composer?.isConnected || composer.disabled)
+        return;
+      event.preventDefault();
+      composer.focus({ preventScroll: true });
+      composer.setRangeText(
+        text,
+        composer.selectionStart,
+        composer.selectionEnd,
+        "end",
+      );
+      change(composer.value);
+    };
+    document.addEventListener("paste", paste);
+    onCleanup(() => document.removeEventListener("paste", paste));
   });
   app.registerSearch("composer", () => {
     if (!project() || !editable() || state.openingProject) return [];
@@ -1419,7 +1463,10 @@ export function Session() {
     !pending();
   return (
     <section
-      ref={fileDrop.ref}
+      ref={(element) => {
+        conversation = element;
+        fileDrop.ref(element);
+      }}
       class="conversation"
       classList={{
         "empty-start": empty(),
@@ -1799,11 +1846,18 @@ export function Session() {
                         <span class="attachment-name">{item.name}</span>
                         <button
                           aria-label={t("Remove {name}", { name: item.name })}
-                          onClick={() =>
-                            setAttachments((items) =>
+                          // Focus stays in the message box, so the next paste
+                          // still reaches it.
+                          onMouseDown={(event) => event.preventDefault()}
+                          onClick={() => {
+                            void setAttachments((items) =>
                               items.filter((_, i) => i !== index()),
-                            )
-                          }
+                            );
+                            // Removed from the keyboard, the button would take
+                            // the focus with it.
+                            if (document.activeElement !== composer)
+                              composer.focus({ preventScroll: true });
+                          }}
                         >
                           <Icon name="close" size="xs" />
                         </button>
@@ -2643,9 +2697,47 @@ function chromeRequestText(category: ChromeField) {
 function Question(props: { question: T.PendingQuestionInfo }) {
   const app = useApp();
   const [answer, setAnswer] = createSignal(""),
-    [choices, setChoices] = createSignal<string[]>([]);
+    [choices, setChoices] = createSignal<string[]>([]),
+    [answered, setAnswered] = createSignal(false);
+  let dock!: HTMLElement, input: HTMLInputElement | undefined;
+  const submit = () => {
+    const value = answer() || choices().join(", ");
+    if (!value || answered()) return;
+    setAnswered(true);
+    void app.run(async () => {
+      try {
+        await app.api("replyQuestion", props.question.questionId, {
+          answer: value,
+        });
+        await app.refresh();
+      } catch (error) {
+        setAnswered(false);
+        throw error;
+      }
+    });
+  };
+  // A question with nothing to pick is answered by typing, so it opens in
+  // its answer field, unless someone is typing elsewhere.
+  onMount(() => {
+    if (!input || props.question.choices?.length) return;
+    const active = document.activeElement;
+    if (
+      active?.closest("dialog, [role='dialog']") ||
+      typingElsewhere(
+        active,
+        dock,
+        document.querySelector("[data-composer-input]"),
+      )
+    )
+      return;
+    input.focus({ preventScroll: true });
+  });
   return (
-    <section class="prompt-dock question" aria-label={t("A question for you")}>
+    <section
+      ref={dock}
+      class="prompt-dock question"
+      aria-label={t("A question for you")}
+    >
       <header class="prompt-head">
         <Icon name="chat" size="sm" />
         <strong class="prompt-title">{t("A question for you")}</strong>
@@ -2675,23 +2767,28 @@ function Question(props: { question: T.PendingQuestionInfo }) {
       <footer class="prompt-actions">
         <Show when={props.question.custom !== false}>
           <input
+            ref={input}
             aria-label={t("Answer")}
             placeholder={t("Or write your answer…")}
             value={answer()}
             onInput={(event) => setAnswer(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (
+                event.key !== "Enter" ||
+                event.shiftKey ||
+                event.isComposing ||
+                !answer()
+              )
+                return;
+              event.preventDefault();
+              if (!event.repeat) submit();
+            }}
           />
         </Show>
         <button
           class="primary"
-          disabled={!answer() && !choices().length}
-          onClick={() =>
-            app.run(async () => {
-              await app.api("replyQuestion", props.question.questionId, {
-                answer: answer() || choices().join(", "),
-              });
-              await app.refresh();
-            })
-          }
+          disabled={answered() || (!answer() && !choices().length)}
+          onClick={submit}
         >
           {t("Reply")}
         </button>

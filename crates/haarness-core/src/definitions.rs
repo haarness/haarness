@@ -19,13 +19,15 @@ pub fn markdown(content: &str) -> CoreResult<(BTreeMap<String, String>, &str)> {
     let mut offset = 0;
     for line in rest.split_inclusive('\n') {
         if line.trim_end_matches(['\r', '\n']) == "---" {
-            let docs = yaml_rust::YamlLoader::load_from_str(&rest[..offset])
+            let front = &rest[..offset];
+            let docs = yaml_rust::YamlLoader::load_from_str(front)
                 .or_else(|original| {
                     // Anthropic's legacy public agents put unindented XML examples
                     // in description. Repair only that scalar; malformed policy
                     // fields still fail YAML parsing instead of becoming permissive.
-                    let repaired = legacy_description(&rest[..offset]);
-                    yaml_rust::YamlLoader::load_from_str(&repaired).map_err(|_| original)
+                    yaml_rust::YamlLoader::load_from_str(&legacy_description(front))
+                        .or_else(|_| yaml_rust::YamlLoader::load_from_str(&text_values(front)))
+                        .map_err(|_| original)
                 })
                 .map_err(|e| CoreError::Invalid(format!("invalid definition frontmatter: {e}")))?;
             let value = docs.first().map(yaml_json).unwrap_or(Value::Null);
@@ -38,14 +40,7 @@ pub fn markdown(content: &str) -> CoreResult<(BTreeMap<String, String>, &str)> {
                 .as_object()
                 .into_iter()
                 .flatten()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        v.as_str()
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| v.to_string()),
-                    )
-                })
+                .map(|(k, v)| (k.clone(), front_value(v)))
                 .collect();
             return Ok((front, &rest[offset + line.len()..]));
         }
@@ -54,6 +49,25 @@ pub fn markdown(content: &str) -> CoreResult<(BTreeMap<String, String>, &str)> {
     Err(CoreError::Invalid(
         "definition frontmatter is missing its closing delimiter".into(),
     ))
+}
+
+fn front_value(value: &Value) -> String {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| value.to_string())
+}
+
+/// Whether `value` can follow `key: ` unquoted and read back unchanged under
+/// YAML's own rules. A writer must not lean on the repairs [`markdown`]
+/// applies, so the file stays valid for every other reader.
+pub fn plain_value(value: &str) -> bool {
+    !value.contains(['\n', '\r'])
+        && yaml_rust::YamlLoader::load_from_str(&format!("value: {value}"))
+            .ok()
+            .and_then(|docs| docs.first().map(yaml_json))
+            .and_then(|front| front.get("value").map(front_value))
+            .is_some_and(|read| read == value)
 }
 fn legacy_description(front: &str) -> String {
     let lines = front.lines().collect::<Vec<_>>();
@@ -114,6 +128,47 @@ fn legacy_description(front: &str) -> String {
     output
 }
 
+/// Claude Code reads `allowed-tools: Bash(git commit: *)` and the documented
+/// `argument-hint: [filename] [format]` as text; YAML rejects both (a colon
+/// and space inside a plain scalar, a flow list followed by more text). Quote
+/// such a top-level value. A value that opens a collection, alias, anchor,
+/// tag, quote or block scalar depends on the rest of the header, so it is
+/// never coerced: a malformed policy list still fails the whole file.
+fn text_values(front: &str) -> String {
+    let field =
+        regex::Regex::new(r"^([A-Za-z_][A-Za-z0-9_-]*)[ \t]*:[ \t]+(.+)$").expect("constant regex");
+    let placeholders =
+        regex::Regex::new(r"^\[[^\[\]]+\](?:[ \t]+\[[^\[\]]+\])+$").expect("constant regex");
+    let comment = regex::Regex::new(r"(?:^|[ \t])#.*$").expect("constant regex");
+    let colon = regex::Regex::new(r":(?:[ \t]|$)").expect("constant regex");
+    front
+        .lines()
+        .map(|line| {
+            let Some(capture) = field.captures(line) else {
+                return line.to_owned();
+            };
+            let (key, value) = (&capture[1], capture[2].trim());
+            let text = if key == "argument-hint" && placeholders.is_match(value) {
+                value.to_owned()
+            } else {
+                // Only a colon before whitespace is illegal in a plain scalar;
+                // times, URLs and comments keep their YAML meaning.
+                let scalar = comment.replace(value, "");
+                let scalar = scalar.trim_end();
+                if value.starts_with(['[', ']', '{', '}', '"', '\'', '|', '>', '&', '*', '!', '#'])
+                    || !colon.is_match(scalar)
+                    || yaml_rust::YamlLoader::load_from_str(&format!("probe: {scalar}")).is_ok()
+                {
+                    return line.to_owned();
+                }
+                scalar.to_owned()
+            };
+            format!("{key}: {}", serde_json::to_string(&text).unwrap())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn yaml_json(y: &yaml_rust::Yaml) -> Value {
     use yaml_rust::Yaml;
     match y {
@@ -159,6 +214,39 @@ pub fn list(value: Option<&String>) -> Vec<String> {
         result.push(value[start..].trim().into());
     }
     result
+}
+/// Claude Code's `model` families. Each resolves to the newest release a
+/// configured provider lists.
+pub const MODEL_FAMILIES: [&str; 4] = ["sonnet", "opus", "haiku", "fable"];
+
+/// The Claude release a model id names, without the routing a catalog adds:
+/// `claude-sonnet-5-5`, `anthropic/claude-sonnet-5.5` and
+/// `us.anthropic.claude-sonnet-5-5-v1:0` all name `claude-sonnet-5-5`.
+pub fn claude_release(id: &str) -> Option<String> {
+    let id = id.trim().to_ascii_lowercase();
+    let start = id.find("claude-")?;
+    if start > 0 && !id[..start].ends_with(['/', '.']) {
+        return None;
+    }
+    let mut release = &id[start..];
+    // Vertex pins a snapshot with `@date`; Bedrock appends `-v1:0`.
+    if let Some((name, _)) = release.split_once('@') {
+        release = name;
+    }
+    if let Some((name, version)) = release.rsplit_once("-v")
+        && version
+            .split(':')
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        release = name;
+    }
+    (release.len() > "claude-".len()).then(|| release.replace('.', "-"))
+}
+
+/// Whether a definition's `model` may leave out the provider: a family, or a
+/// Claude release id such as `claude-sonnet-5-5`, as Claude Code writes them.
+pub fn unqualified_model(value: &str) -> bool {
+    MODEL_FAMILIES.contains(&value) || (!value.contains('/') && claude_release(value).is_some())
 }
 pub fn execution(
     front: &BTreeMap<String, String>,
@@ -708,6 +796,53 @@ mod tests {
             r"$0 one \\two"
         );
         assert_eq!(arguments("$0", r"'\$1'", true, false), r"\$1");
+    }
+    #[test]
+    fn claude_code_text_values_load_without_coercing_collections() {
+        let other = "disable-model-invocation: true\r\ntags: [a, b]\r\nmetadata: {\r\n  key: value\r\n}\r\ncount: 3 # note: keep numeric\r\ntime: 12:30\r\nurl: https://example.test:8443/path\r\nnotes: |-\r\n  Keep: this text\r\nsummary: first line\r\n  second line\r\n";
+        let text = format!(
+            "---\r\nname: deploy\r\ndescription: TRIGGER: when asked # internal\r\nargument-hint: [filename] [format]\r\nallowed-tools: Bash(git commit: *), Read\r\n{other}---\r\nBody: $& stays\r\n"
+        );
+        let (front, body) = markdown(&text).unwrap();
+        assert_eq!(front["name"], "deploy");
+        assert_eq!(front["description"], "TRIGGER: when asked");
+        assert_eq!(front["argument-hint"], "[filename] [format]");
+        let execution = execution(&front, Path::new("/tmp/deploy.md"), None);
+        assert_eq!(execution.allowed_tools, vec!["Bash(git commit: *)", "Read"]);
+        assert!(execution.disable_model_invocation);
+        // Lines YAML accepts keep exactly the values they have without the repair.
+        let (plain, _) = markdown(&format!("---\r\n{other}---\r\n")).unwrap();
+        for (key, value) in &plain {
+            assert_eq!(front.get(key), Some(value), "{key}");
+        }
+        assert_eq!(list(front.get("tags")), vec!["a", "b"]);
+        assert_eq!(front["notes"], "Keep: this text");
+        assert_eq!(body, "Body: $& stays\r\n");
+        // A value YAML reads as a list, map or alias is never turned into text,
+        // so a malformed policy field still fails the file.
+        for value in ["[Bash(git commit: *)]", "[Read,", "[Read] [Grep]"] {
+            let text = format!(
+                "---\nname: malformed\ndescription: Use: on demand\nallowed-tools: {value}\n---\nBody"
+            );
+            assert!(markdown(&text).is_err(), "{value}");
+        }
+        assert!(
+            markdown("---\nname: broken\nallowed-tools:\n  - Bash(git commit: *)\n---\nBody")
+                .is_err()
+        );
+        // Writers quote whatever only the repair would read back.
+        for value in ["anthropic/claude-sonnet-5-5", "true", "12:30", "Fix typo"] {
+            assert!(plain_value(value), "{value}");
+        }
+        for value in [
+            "Fix: typo",
+            "[filename] [format]",
+            "[file]",
+            "a # b",
+            "two\nlines",
+        ] {
+            assert!(!plain_value(value), "{value}");
+        }
     }
     #[test]
     fn tool_masks_handle_defaults_and_mcp_patterns() {

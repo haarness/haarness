@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createStore } from "solid-js/store";
-import { reduceEvent, type Live } from "../src/renderer/sync";
+import { freshChat, reduceEvent, type Live } from "../src/renderer/sync";
 import type { EventEnvelope } from "@haarness/sdk";
 test("replayed durable items replace streamed text without duplicating the conversation", () => {
   const [state, set] = createStore<Live>({
@@ -58,4 +58,14 @@ test("replayed durable items replace streamed text without duplicating the conve
   assert.equal(state.permissions.length, 1);
   event("permission.resolved", { permissionId: "approval" });
   assert.equal(state.permissions.length, 0);
+});
+
+test("a chat created moments ago opens without a history request, unless late or after a reconnect", () => {
+  const created = { at: 10_000, stream: 4 };
+  assert.equal(freshChat(created, 10_000, 4), true);
+  assert.equal(freshChat(created, 12_999, 4), true);
+  // The open was superseded and came back later: whatever happened since is loaded.
+  assert.equal(freshChat(created, 13_000, 4), false);
+  // The event stream reconnected in between and may have missed its first events.
+  assert.equal(freshChat(created, 10_500, 5), false);
 });

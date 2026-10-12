@@ -721,13 +721,23 @@ async fn connected(
     }));
     let mut active: HashMap<Uuid, Active> = HashMap::new();
     let mut jobs = JoinSet::new();
+    // The request each job serves, so one that panics is still logged and released.
+    let mut requests: HashMap<tokio::task::Id, (Uuid, String)> = HashMap::new();
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     let mut last_message = tokio::time::Instant::now();
     loop {
         tokio::select! {
             ()=runtime_lost.cancelled()=>anyhow::bail!("Local runtime changed; reconnecting"),
             _=tick.tick()=>{ensure!(last_message.elapsed()<Duration::from_secs(25),"Relay heartbeat timed out");socket.send(Message::Ping(vec![1].into())).await?;},
-            completed=jobs.join_next(),if !jobs.is_empty()=>{if let Some(Ok(id))=completed {active.remove(&id);}},
+            completed=jobs.join_next_with_id(),if !jobs.is_empty()=>match completed {
+                Some(Ok((task,id)))=>{requests.remove(&task);active.remove(&id);},
+                Some(Err(error))=>if let Some((id,label))=requests.remove(&error.id()) {
+                    active.remove(&id);
+                    eprintln!("Remote request {id} {label} failed: {error}");
+                    let _=send.try_send(Frame::Error{id,message:"Local request failed".into()});
+                },
+                None=>{},
+            },
             frame=outgoing.recv()=>{let Some(frame)=frame else {break};tokio::time::timeout(Duration::from_secs(10),socket.send(Message::Text(serde_json::to_string(&frame)?.into()))).await??;},
             frame=socket.next()=>{
                 match frame.context("Relay closed")?? {
@@ -742,11 +752,17 @@ async fn connected(
                                 let credit=Arc::new(Semaphore::new(WINDOW));
                                 let cancel=tokio_util::sync::CancellationToken::new();
                                 active.insert(id,Active{input,credit:credit.clone(),cancel:cancel.clone()});
-                                let send=send.clone();let target=target.clone();let http=http.clone();
-                                jobs.spawn(async move {
-                                    tokio::select! {()=cancel.cancelled()=>{},result=dispatch(frame,target,http,send.clone(),credit,receiver)=>{if result.is_err(){let _=send.send(Frame::Error{id,message:"Local request failed".into()}).await;}}}
+                                let label=request_label(&frame);
+                                let send=send.clone();let target=target.clone();let http=http.clone();let job_label=label.clone();
+                                let task=jobs.spawn(async move {
+                                    tokio::select! {()=cancel.cancelled()=>{},result=dispatch(frame,target,http,send.clone(),credit,receiver)=>{if let Err(error)=result {
+                                        // The remote side only hears that it failed; the connector log says why.
+                                        eprintln!("Remote request {id} {job_label} failed: {error:#}");
+                                        let _=send.send(Frame::Error{id,message:"Local request failed".into()}).await;
+                                    }}}
                                     id
                                 });
+                                requests.insert(task.id(),(id,label));
                             },
                             Frame::Ack{id}=>{if let Some(stream)=active.get(&id) {ensure!(stream.credit.available_permits()<WINDOW,"Invalid relay credit");stream.credit.add_permits(1);}},
                             Frame::Cancel{id}=>{if let Some(stream)=active.remove(&id) {stream.cancel.cancel();}},
@@ -763,6 +779,20 @@ async fn connected(
     // Dropping JoinSet also cancels requests on every error exit. Accepted turns live in the daemon.
     jobs.abort_all();
     Ok(())
+}
+/// How the connector log names a relayed request: its method and path. The
+/// query, headers and body never reach the log, and the remote side cannot
+/// break the line.
+fn request_label(frame: &Frame) -> String {
+    let Frame::Open { method, path, .. } = frame else {
+        return "request".into();
+    };
+    let path = path.split(['?', '#']).next().unwrap_or_default();
+    format!("{method} {path}")
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(200)
+        .collect()
 }
 fn validate_path(path: &str, target: &Target, thread: Option<Uuid>) -> Result<()> {
     let path = path.split('?').next().unwrap_or(path);
@@ -914,8 +944,10 @@ async fn dispatch(
         if let Some(thread) = thread {
             request = request.header(REMOTE_THREAD_HEADER, thread.to_string());
         }
-        let response =
-            tokio::time::timeout(Duration::from_secs(310), request.body(body).send()).await??;
+        // Its errors would name the URL, query included; the log names the path.
+        let response = tokio::time::timeout(Duration::from_secs(310), request.body(body).send())
+            .await?
+            .map_err(reqwest::Error::without_url)?;
         let headers = ["content-type", "content-disposition", "x-accel-buffering"]
             .into_iter()
             .filter_map(|name| {
@@ -934,7 +966,8 @@ async fn dispatch(
         .await?;
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            data(&send, &credit, id, &chunk?, false).await?;
+            let chunk = chunk.map_err(reqwest::Error::without_url)?;
+            data(&send, &credit, id, &chunk, false).await?;
         }
     }
     send.send(Frame::End { id }).await?;
@@ -1863,6 +1896,31 @@ mod tests {
             "{share:?}"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn a_failed_request_is_logged_by_method_and_path_alone() {
+        let open = |method: &str, path: &str| Frame::Open {
+            id: Uuid::now_v7(),
+            method: method.into(),
+            path: path.into(),
+            headers: vec![("authorization".into(), "Bearer secret".into())],
+            body: STANDARD.encode("secret body"),
+            websocket: false,
+            thread: None,
+        };
+        assert_eq!(
+            request_label(&open(
+                "POST",
+                "/v1/host/workspaces/p/v1/threads?token=secret#frag"
+            )),
+            "POST /v1/host/workspaces/p/v1/threads"
+        );
+        assert_eq!(
+            request_label(&open("GET\n", "/v1/info\r\nRemote host connected")),
+            "GET /v1/infoRemote host connected",
+            "a forged line break cannot start a new log line"
+        );
+        assert_eq!(request_label(&open("GET", &"/v1".repeat(200))).len(), 200);
     }
     #[test]
     fn relay_paths_cannot_escape_an_advertised_project_or_chat() {

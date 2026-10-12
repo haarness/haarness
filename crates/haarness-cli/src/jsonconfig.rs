@@ -162,14 +162,32 @@ pub fn load_layers(
         for directory in claude_directories(home, workspace, trust) {
             if compat.commands() {
                 let commands = directory.join("commands");
-                discover_commands(&mut layers.commands, &commands, &commands, None);
+                discover_commands(
+                    &mut layers.commands,
+                    &mut layers.notices,
+                    &commands,
+                    &commands,
+                    None,
+                );
             }
             if compat.agents() {
                 let agents = directory.join("agents");
-                discover_agents_with(&mut layers.agents, &agents, &agents, None, true);
+                discover_agents_with(
+                    &mut layers.agents,
+                    &mut layers.notices,
+                    &agents,
+                    &agents,
+                    None,
+                    true,
+                );
             }
             if compat.skills() {
-                discover_skill_commands(&mut layers.commands, &directory.join("skills"), None);
+                discover_skill_commands(
+                    &mut layers.commands,
+                    &mut layers.notices,
+                    &directory.join("skills"),
+                    None,
+                );
             }
         }
     }
@@ -178,17 +196,24 @@ pub fn load_layers(
         for directory in haarness_core::definitions::component_paths(root, "commands") {
             discover_commands(
                 &mut layers.commands,
+                &mut layers.notices,
                 &directory,
                 &directory,
                 plugin.as_deref(),
             );
         }
         for directory in haarness_core::definitions::component_paths(root, "skills") {
-            discover_skill_commands(&mut layers.commands, &directory, plugin.as_deref());
+            discover_skill_commands(
+                &mut layers.commands,
+                &mut layers.notices,
+                &directory,
+                plugin.as_deref(),
+            );
         }
         for directory in haarness_core::definitions::component_paths(root, "agents") {
             discover_agents(
                 &mut layers.agents,
+                &mut layers.notices,
                 &directory,
                 &directory,
                 plugin.as_deref(),
@@ -198,19 +223,41 @@ pub fn load_layers(
     for root in &resources {
         for name in ["command", "commands"] {
             let directory = root.join(name);
-            discover_commands(&mut layers.commands, &directory, &directory, None);
+            discover_commands(
+                &mut layers.commands,
+                &mut layers.notices,
+                &directory,
+                &directory,
+                None,
+            );
         }
         for name in ["skill", "skills"] {
-            discover_skill_commands(&mut layers.commands, &root.join(name), None);
+            discover_skill_commands(
+                &mut layers.commands,
+                &mut layers.notices,
+                &root.join(name),
+                None,
+            );
         }
         for name in ["agent", "agents"] {
             let directory = root.join(name);
-            discover_agents(&mut layers.agents, &directory, &directory, None);
+            discover_agents(
+                &mut layers.agents,
+                &mut layers.notices,
+                &directory,
+                &directory,
+                None,
+            );
         }
     }
     // Agent Skills roots share the same command surface as Haarness skills.
     if let Some(home) = home {
-        discover_skill_commands(&mut layers.commands, &home.join(".agents/skills"), None);
+        discover_skill_commands(
+            &mut layers.commands,
+            &mut layers.notices,
+            &home.join(".agents/skills"),
+            None,
+        );
     }
     for directory in crate::layout::project_directories(workspace)
         .into_iter()
@@ -218,13 +265,14 @@ pub fn load_layers(
     {
         discover_skill_commands(
             &mut layers.commands,
+            &mut layers.notices,
             &directory.join(".agents/skills"),
             None,
         );
     }
     // `skills.paths`: extra skill folders, `~/` or workspace-relative.
     for path in configured_skill_paths(&layers.native, home, workspace) {
-        discover_skill_commands(&mut layers.commands, &path, None);
+        discover_skill_commands(&mut layers.commands, &mut layers.notices, &path, None);
     }
 
     // Instructions: global files, then project instruction files from the
@@ -1248,11 +1296,33 @@ fn upsert_agent(agents: &mut Vec<CustomAgent>, agent: CustomAgent) {
     }
 }
 
+/// A definition file whose frontmatter does not parse is skipped and reported,
+/// so a command, skill or agent that never appears has a recorded cause.
+fn definition_markdown<'a>(
+    content: &'a str,
+    path: &Path,
+    kind: &str,
+    notices: &mut Vec<String>,
+) -> Option<(BTreeMap<String, String>, &'a str)> {
+    match haarness_core::definitions::markdown(content) {
+        Ok(parsed) => Some(parsed),
+        Err(error) => {
+            let error = match error {
+                haarness_core::CoreError::Invalid(message) => message,
+                error => error.to_string(),
+            };
+            notices.push(format!("skipped {kind} {}: {error}", path.display()));
+            None
+        }
+    }
+}
+
 /// Markdown slash commands: `<root>/**/*.md`, frontmatter `description`,
 /// `agent`, `model`, `argument-hint`; nested directories namespace the name
 /// (`git/review.md` → `git/review`).
 fn discover_commands(
     commands: &mut Vec<CommandInfo>,
+    notices: &mut Vec<String>,
     root: &Path,
     base: &Path,
     plugin: Option<&str>,
@@ -1269,7 +1339,7 @@ fn discover_commands(
     };
     for path in paths {
         if path.is_dir() {
-            discover_commands(commands, &path, base, plugin);
+            discover_commands(commands, notices, &path, base, plugin);
             continue;
         }
         if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
@@ -1278,7 +1348,7 @@ fn discover_commands(
         let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
-        let Ok((front, body)) = haarness_core::definitions::markdown(&content) else {
+        let Some((front, body)) = definition_markdown(&content, &path, "command", notices) else {
             continue;
         };
         let relative_name = path
@@ -1334,13 +1404,15 @@ fn plugin_name(root: &Path) -> Option<String> {
 
 pub(super) fn discover_skill_commands(
     commands: &mut Vec<CommandInfo>,
+    notices: &mut Vec<String>,
     root: &Path,
     plugin: Option<&str>,
 ) {
-    discover_skill_commands_inner(commands, root, plugin, 0);
+    discover_skill_commands_inner(commands, notices, root, plugin, 0);
 }
 fn discover_skill_commands_inner(
     commands: &mut Vec<CommandInfo>,
+    notices: &mut Vec<String>,
     root: &Path,
     plugin: Option<&str>,
     depth: usize,
@@ -1362,7 +1434,7 @@ fn discover_skill_commands_inner(
     };
     for path in paths {
         if path.is_dir() {
-            discover_skill_commands_inner(commands, &path, plugin, depth + 1);
+            discover_skill_commands_inner(commands, notices, &path, plugin, depth + 1);
             continue;
         }
         if path.file_name().is_none_or(|n| n != "SKILL.md") {
@@ -1371,7 +1443,7 @@ fn discover_skill_commands_inner(
         let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
-        let Ok((front, body)) = haarness_core::definitions::markdown(&content) else {
+        let Some((front, body)) = definition_markdown(&content, &path, "skill", notices) else {
             continue;
         };
         let execution = haarness_core::definitions::execution(
@@ -1411,15 +1483,23 @@ fn discover_skill_commands_inner(
 /// presentation/limit fields `hidden`, `color`, `steps`/`maxSteps`,
 /// `temperature`, `top_p`, `variant` and `disable`; the body is the system
 /// prompt. Structured policy values use compact JSON in frontmatter.
-fn discover_agents(agents: &mut Vec<CustomAgent>, root: &Path, base: &Path, plugin: Option<&str>) {
-    discover_agents_with(agents, root, base, plugin, false);
+fn discover_agents(
+    agents: &mut Vec<CustomAgent>,
+    notices: &mut Vec<String>,
+    root: &Path,
+    base: &Path,
+    plugin: Option<&str>,
+) {
+    discover_agents_with(agents, notices, root, base, plugin, false);
 }
 
 /// `claude` normalises Claude Code agent frontmatter: `allowed-tools` as a
 /// fallback for `tools`, colour names, and `model: inherit` meaning no pin
-/// (bare `sonnet`/`opus`/`haiku` aliases resolve at dispatch time).
+/// (the `sonnet`/`opus`/`haiku`/`fable` families and bare Claude ids such as
+/// `claude-sonnet-5-5` resolve at dispatch time).
 fn discover_agents_with(
     agents: &mut Vec<CustomAgent>,
+    notices: &mut Vec<String>,
     root: &Path,
     base: &Path,
     plugin: Option<&str>,
@@ -1437,7 +1517,7 @@ fn discover_agents_with(
     };
     for path in paths {
         if path.is_dir() {
-            discover_agents_with(agents, &path, base, plugin, claude);
+            discover_agents_with(agents, notices, &path, base, plugin, claude);
             continue;
         }
         if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
@@ -1446,7 +1526,7 @@ fn discover_agents_with(
         let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
-        let Ok((mut front, body)) = haarness_core::definitions::markdown(&content) else {
+        let Some((mut front, body)) = definition_markdown(&content, &path, "agent", notices) else {
             continue;
         };
         if body.trim().is_empty() {
@@ -2146,6 +2226,93 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_frontmatter_loads_and_unparseable_definitions_are_reported() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-claude-frontmatter-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        let workspace = root.join("workspace");
+        for directory in [
+            config.clone(),
+            workspace.join(".git"),
+            workspace.join(".claude/commands"),
+            workspace.join(".claude/agents"),
+            workspace.join(".claude/skills/broken"),
+        ] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        fs::write(
+            config.join("haarness.json"),
+            r#"{"compatibility":{"claude_code":{"agents":true,"skills":true,"commands":true}}}"#,
+        )
+        .unwrap();
+        // Frontmatter Claude Code documents, which YAML rejects as written.
+        fs::write(
+            workspace.join(".claude/commands/export.md"),
+            "---\ndescription: Export: one file\nargument-hint: [filename] [format]\nallowed-tools: Bash(git commit: *), Read\n---\nExport $1 as $2.",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join(".claude/agents/reviewer.md"),
+            "---\nname: reviewer\ndescription: Reviews: diffs\ntools: Read, Bash(git log: *)\nmodel: claude-sonnet-5-5\n---\nReview the diff.",
+        )
+        .unwrap();
+        let broken = "---\ndescription: Broken\nallowed-tools:\n  - Bash(git commit: *)\n---\nBody";
+        let skipped = [
+            ("command", workspace.join(".claude/commands/broken.md")),
+            ("agent", workspace.join(".claude/agents/broken.md")),
+            ("skill", workspace.join(".claude/skills/broken/SKILL.md")),
+        ];
+        for (_, path) in &skipped {
+            fs::write(path, broken).unwrap();
+        }
+        let layers = load_layers(&config, None, &workspace, true, &[]);
+        assert!(layers.errors.is_empty(), "{:?}", layers.errors);
+        let export = layers
+            .commands
+            .iter()
+            .find(|command| command.name == "export")
+            .expect("export command");
+        assert_eq!(export.description, "Export: one file");
+        assert_eq!(export.argument_hint.as_deref(), Some("[filename] [format]"));
+        assert_eq!(
+            export.execution.allowed_tools,
+            vec!["Bash(git commit: *)", "Read"]
+        );
+        let reviewer = layers
+            .agents
+            .iter()
+            .find(|agent| agent.id == "reviewer")
+            .expect("reviewer agent");
+        assert_eq!(reviewer.description, "Reviews: diffs");
+        assert_eq!(reviewer.model.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(reviewer.tools.get("bash"), Some(&true));
+        assert!(
+            !layers
+                .commands
+                .iter()
+                .any(|command| command.name == "broken")
+        );
+        assert!(!layers.agents.iter().any(|agent| agent.id == "broken"));
+        for (kind, path) in skipped {
+            let prefix = format!(
+                "skipped {kind} {}: invalid definition frontmatter",
+                path.display()
+            );
+            assert!(
+                layers
+                    .notices
+                    .iter()
+                    .any(|notice| notice.starts_with(&prefix)),
+                "{prefix}\n{:?}",
+                layers.notices
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn agent_frontmatter_and_json_entries_carry_presentation_limits_and_disable() {
         let root =
             std::env::temp_dir().join(format!("haarness-agent-fields-{}", uuid::Uuid::now_v7()));
@@ -2316,7 +2483,7 @@ mod tests {
             "parent traversal is rejected"
         );
         let mut commands = Vec::new();
-        discover_skill_commands(&mut commands, &host, None);
+        discover_skill_commands(&mut commands, &mut Vec::new(), &host, None);
         let mut names = commands.iter().map(|c| c.name.as_str()).collect::<Vec<_>>();
         names.sort_unstable();
         assert_eq!(names, vec!["remote-a", "remote-b"]);
