@@ -6,6 +6,38 @@
     "version": "v1"
   },
   "paths": {
+    "/.well-known/apple-app-site-association": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "The Universal Links file Apple fetches for Haarness for iOS: which of this Cloud's web pages the app opens.",
+        "description": "Auth: public. Built from `HAARNESS_CLOUD_APPLE_APP_IDS`; always JSON (never the web app, never a redirect),\n`Cache-Control: public, max-age=3600`.",
+        "operationId": "apple_app_site_association",
+        "responses": {
+          "200": {
+            "description": "The association file",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppleAppSiteAssociation"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "This Cloud names no app (`HAARNESS_CLOUD_APPLE_APP_IDS` is unset)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/account/router-session": {
       "post": {
         "tags": [
@@ -973,6 +1005,164 @@
           },
           "404": {
             "description": "Key unavailable or expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/attention": {
+      "get": {
+        "tags": [
+          "attention"
+        ],
+        "summary": "List what waits on a person.",
+        "description": "Open permission requests and questions on the account's connected computers and Cloud sessions, and chats that\nfinished in the last 24 hours, newest first. Metadata only: open the chat to read and answer a request.\nAuth: scope `workspaces`, any member (viewer). API keys: `workspaces:read`; computer items also need\n`remote:read`. Refresh on the `attention` entity event.",
+        "operationId": "list_attention",
+        "parameters": [
+          {
+            "name": "accountId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_AttentionItemDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid page size or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/attention/{id}": {
+      "delete": {
+        "tags": [
+          "attention"
+        ],
+        "summary": "Dismiss a finished chat.",
+        "description": "Marks a `turn_completed`/`turn_failed` item as seen (call it when the person opens the chat); dismissing it again\nis a no-op. A permission or question is resolved only by answering it: `409 invalid_state`.\nAuth: scope `workspaces`, builder; CSRF for cookies. API keys: `workspaces:write` (computer items also\n`remote:read`).",
+        "operationId": "dismiss_attention",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Dismissed"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not a finished chat",
             "content": {
               "application/json": {
                 "schema": {
@@ -4477,6 +4667,513 @@
         }
       }
     },
+    "/api/v1/push/activities/{activityId}": {
+      "put": {
+        "tags": [
+          "push"
+        ],
+        "summary": "Register a Live Activity's push token.",
+        "description": "The activity id is the app's `ActivityKit` id. Cloud updates the activity while its chat waits on you and ends\nit when the chat finishes. Registering again refreshes the token. The target must be a computer, shared chat\nor Cloud session of an account you belong to.\nAuth: native bearer token of a sign-in (refresh family) with scope `account`; cookies and API keys get `403`.",
+        "operationId": "register_live_activity",
+        "parameters": [
+          {
+            "name": "activityId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterLiveActivityRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiveActivityDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid token or target",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not the signed-in app",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Target not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The activity ended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Another app's bundle identifier",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "push"
+        ],
+        "summary": "Forget a Live Activity.",
+        "description": "Idempotent. Auth: native bearer token of a sign-in, scope `account`.",
+        "operationId": "delete_live_activity",
+        "parameters": [
+          {
+            "name": "activityId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Forgotten"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not the signed-in app",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/push/devices": {
+      "get": {
+        "tags": [
+          "push"
+        ],
+        "summary": "List the devices that receive your notifications.",
+        "description": "`current` marks the device making the request. Auth: scope `account` (cookie or bearer).",
+        "operationId": "list_push_devices",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushDevicesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/push/devices/current": {
+      "put": {
+        "tags": [
+          "push"
+        ],
+        "summary": "Register this device for push notifications.",
+        "description": "Stores the APNs token of the signed-in app making the request, tied to its sign-in: a new token replaces the\nsign-in's previous one, and a token registered before by another sign-in moves here. The token is never\nreturned. `bundleId` must be the app this Cloud sends to (`422 unprocessable` otherwise).\nAuth: native bearer token of a sign-in (refresh family) with scope `account`; cookies and API keys get `403`.",
+        "operationId": "register_push_device",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterPushDeviceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushDeviceDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid token, locale or version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not the signed-in app, or the token lacks the account scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Another app's bundle identifier",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "push"
+        ],
+        "summary": "Stop push notifications to this device.",
+        "description": "The app calls this before it signs out. Idempotent. Auth: native bearer token of a sign-in, scope `account`.",
+        "operationId": "unregister_push_device",
+        "responses": {
+          "204": {
+            "description": "This device receives no more notifications"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not the signed-in app",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/push/devices/current/test": {
+      "post": {
+        "tags": [
+          "push"
+        ],
+        "summary": "Send a test notification to this device.",
+        "description": "Queues \"Notifications are on\" for this device, at most once every ten seconds.\nAuth: native bearer token of a sign-in, scope `account`.",
+        "operationId": "test_push_device",
+        "responses": {
+          "202": {
+            "description": "Queued"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not the signed-in app",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "This device is not registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "A test was sent less than ten seconds ago",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/push/devices/{id}": {
+      "delete": {
+        "tags": [
+          "push"
+        ],
+        "summary": "Stop notifications to one of your devices.",
+        "description": "Auth: scope `account` (cookie with CSRF, or bearer); only your own devices.",
+        "operationId": "remove_push_device",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/push/preferences": {
+      "get": {
+        "tags": [
+          "push"
+        ],
+        "summary": "Read your notification settings.",
+        "description": "One switch per category, shared by all your devices (all on until changed). `available` is false when this\nCloud delivers no pushes. Auth: scope `account` (cookie or bearer).",
+        "operationId": "get_push_preferences",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushPreferencesDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "push"
+        ],
+        "summary": "Change your notification settings.",
+        "description": "Only the listed categories change. Auth: scope `account` (cookie with CSRF, or bearer).",
+        "operationId": "update_push_preferences",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdatePushPreferencesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushPreferencesDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown category",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/releases": {
       "get": {
         "tags": [
@@ -6787,7 +7484,7 @@
         "tags": [
           "cloud-agents"
         ],
-        "summary": "Create an isolated Fly session with its own configuration. cloudAgentId is optional; configuration overrides supplied fields from the template/defaults. start=false prepares it stopped.",
+        "summary": "Create an isolated Fly session with its own configuration. cloudAgentId is optional; configuration overrides supplied fields from the template/defaults. start=false prepares it stopped. `initialPrompt` makes Cloud send a first message into a new chat once the session is ready (requires start; capability `session_initial_prompt`); `session.launch` reports its chat id and delivery.",
         "operationId": "create_agent_session",
         "parameters": [
           {
@@ -6859,7 +7556,7 @@
         "tags": [
           "cloud-agents"
         ],
-        "summary": "Read a session and its runtime status.",
+        "summary": "Read a session, its runtime status and the delivery of its first message (launch).",
         "operationId": "get_agent_session",
         "parameters": [
           {
@@ -10797,6 +11494,17 @@
             "type": "string",
             "format": "uuid"
           },
+          "launch": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SessionLaunchDto",
+                "description": "How Cloud is delivering the session's first message; absent on sessions created without one."
+              }
+            ]
+          },
           "sshPublicKey": {
             "type": [
               "string",
@@ -10861,6 +11569,97 @@
           }
         }
       },
+      "AppleAppLinkComponent": {
+        "type": "object",
+        "description": "One path pattern; `exclude` leaves matching links to the browser.",
+        "required": [
+          "/"
+        ],
+        "properties": {
+          "/": {
+            "type": "string"
+          },
+          "exclude": {
+            "type": "boolean"
+          }
+        }
+      },
+      "AppleAppLinks": {
+        "type": "object",
+        "description": "Universal Links: which apps open which paths.",
+        "required": [
+          "details"
+        ],
+        "properties": {
+          "details": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AppleAppLinksDetail"
+            }
+          }
+        }
+      },
+      "AppleAppLinksDetail": {
+        "type": "object",
+        "required": [
+          "appIDs",
+          "components"
+        ],
+        "properties": {
+          "appIDs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`<team id>.<bundle id>`, e.g. `ABCDE12345.dev.haarness.ios`."
+          },
+          "components": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AppleAppLinkComponent"
+            }
+          }
+        }
+      },
+      "AppleAppSiteAssociation": {
+        "type": "object",
+        "description": "The whole association file.",
+        "required": [
+          "applinks",
+          "webcredentials"
+        ],
+        "properties": {
+          "applinks": {
+            "$ref": "#/components/schemas/AppleAppLinks"
+          },
+          "webcredentials": {
+            "$ref": "#/components/schemas/AppleWebCredentials"
+          }
+        }
+      },
+      "AppleWebCredentials": {
+        "type": "object",
+        "description": "The apps that may offer this site's saved passwords.",
+        "required": [
+          "apps"
+        ],
+        "properties": {
+          "apps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ApprovalMode": {
+        "type": "string",
+        "description": "The chat's approvals, set before the message is sent (`PUT /v1/threads/{id}/approval-mode`).",
+        "enum": [
+          "auto",
+          "review"
+        ]
+      },
       "ArtifactId": {
         "type": "string"
       },
@@ -10920,6 +11719,168 @@
             "type": "string"
           }
         }
+      },
+      "AttentionItemDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "accountId",
+          "source",
+          "kind",
+          "itemId",
+          "threadId",
+          "rootThreadId",
+          "explicit",
+          "actionable",
+          "custom",
+          "scheduled",
+          "connected",
+          "occurredAt",
+          "observedAt"
+        ],
+        "properties": {
+          "accountId": {
+            "$ref": "#/components/schemas/AccountId"
+          },
+          "actionable": {
+            "type": "boolean",
+            "description": "`false` when Cloud cannot route an answer (an older daemon on the computer)."
+          },
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Permissions: `bash`, `edit`, `read`, `external_directory`, `webfetch`, `browser`, `browser_site`, `mcp`, …"
+          },
+          "chatTitle": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "connected": {
+            "type": "boolean",
+            "description": "The computer is online or the session is running."
+          },
+          "custom": {
+            "type": "boolean",
+            "description": "Questions: whether a typed answer is accepted."
+          },
+          "explicit": {
+            "type": "boolean",
+            "description": "A Chrome site prompt: answer it in the chat on the computer running Chrome."
+          },
+          "hostId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Computer items: the remote host."
+          },
+          "hostName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "itemId": {
+            "type": "string",
+            "description": "The runtime's permission or question id; the turn id of a finished chat."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/AttentionKind"
+          },
+          "observedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "projectId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The computer's project (native workspace id), as in `/runtime/v1/host/workspaces/{projectId}`."
+          },
+          "projectName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "remoteSessionId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Items of a computer that shares single chats: the shared chat to open."
+          },
+          "rootThreadId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The chat to open."
+          },
+          "scheduled": {
+            "type": "boolean",
+            "description": "The finished turn was started by a schedule."
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Cloud session items: the session."
+          },
+          "sessionTitle": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "$ref": "#/components/schemas/AttentionSource"
+          },
+          "threadId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The chat that asked: a sub-agent's chat when one asked."
+          },
+          "turnId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
+      "AttentionKind": {
+        "type": "string",
+        "enum": [
+          "permission",
+          "question",
+          "turn_completed",
+          "turn_failed"
+        ]
+      },
+      "AttentionSource": {
+        "type": "string",
+        "description": "Where an item was observed: a connected computer (`remote_hosts`) or a Cloud session (`agent_sessions`).",
+        "enum": [
+          "host",
+          "session"
+        ]
       },
       "AuthKind": {
         "type": "string",
@@ -11946,6 +12907,17 @@
             "propertyNames": {
               "type": "string"
             }
+          },
+          "initialPrompt": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/InitialPromptRequest",
+                "description": "A first message Cloud sends once the session is ready, into a new chat, so it reaches the agent even when the\nperson closes the tab or the app first. Requires the session to start (`start` not `false`). Check for the\n`session_initial_prompt` capability first: an older Cloud refuses the field."
+              }
+            ]
           },
           "start": {
             "type": [
@@ -13266,6 +14238,45 @@
             "type": "string"
           }
         }
+      },
+      "InitialPromptRequest": {
+        "type": "object",
+        "description": "The first message of a new session (`initialPrompt`). Attachments are not carried: send those from the chat.",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "approvalMode": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ApprovalMode",
+                "description": "Set on the chat before the message is sent; omitted, the chat asks for every request (Review)."
+              }
+            ]
+          },
+          "chatTitle": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "1–200 characters on one line; omitted, the first 80 characters of the message on one line."
+          },
+          "reasoningEffort": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reasoning effort for this message (`low`, `high`, …); omitted, the session's own applies."
+          },
+          "text": {
+            "type": "string",
+            "description": "1–32768 bytes, not only whitespace."
+          }
+        },
+        "additionalProperties": false
       },
       "InstallLockDto": {
         "type": "object",
@@ -14602,6 +15613,66 @@
           },
           {
             "type": "object",
+            "description": "Delivers each new Cloud session's first message (`initialPrompt`) once its runtime is ready, then follows that\nturn until it ends.",
+            "required": [
+              "payload",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "session_launch_sweep"
+                ]
+              },
+              "payload": {
+                "type": "object",
+                "description": "Delivers each new Cloud session's first message (`initialPrompt`) once its runtime is ready, then follows that\nturn until it ends."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Reads what each running Cloud session waits on (pending permissions and questions) and which of its root\nchats finished, straight from the runtime; never feeds an idle-stop decision.",
+            "required": [
+              "payload",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "session_attention_sweep"
+                ]
+              },
+              "payload": {
+                "type": "object",
+                "description": "Reads what each running Cloud session waits on (pending permissions and questions) and which of its root\nchats finished, straight from the runtime; never feeds an idle-stop decision."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Turns what waits on a person, and chats that finished, into push notifications and Live Activity updates on\ntheir phones, from the attention rows' transitions (never once per sweep).",
+            "required": [
+              "payload",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "push_dispatch"
+                ]
+              },
+              "payload": {
+                "type": "object",
+                "description": "Turns what waits on a person, and chats that finished, into push notifications and Live Activity updates on\ntheir phones, from the attention rows' transitions (never once per sweep)."
+              }
+            }
+          },
+          {
+            "type": "object",
             "required": [
               "payload",
               "kind"
@@ -14774,6 +15845,19 @@
         },
         "additionalProperties": false
       },
+      "LaunchStatus": {
+        "type": "string",
+        "description": "Where a launch stands: the schedule-run vocabulary.",
+        "enum": [
+          "pending",
+          "running",
+          "needs_attention",
+          "completed",
+          "failed",
+          "interrupted",
+          "cancelled"
+        ]
+      },
       "LedgerCheckResponse": {
         "type": "object",
         "required": [
@@ -14855,6 +15939,84 @@
           "refund",
           "adjustment"
         ]
+      },
+      "LiveActivityDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "environment",
+          "bundleId",
+          "target",
+          "threadId",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "bundleId": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "environment": {
+            "$ref": "#/components/schemas/PushEnvironment"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "target": {
+            "$ref": "#/components/schemas/LiveActivityTargetDto"
+          },
+          "threadId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "LiveActivityTargetDto": {
+        "type": "object",
+        "description": "The chat a Live Activity follows: `source: host` with `hostId` (and `projectId`), or `remoteSessionId` for a\nshared chat; `source: session` with `sessionId`.",
+        "required": [
+          "source"
+        ],
+        "properties": {
+          "hostId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "projectId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "remoteSessionId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "source": {
+            "$ref": "#/components/schemas/AttentionSource"
+          }
+        }
       },
       "McpConfiguration": {
         "type": "object",
@@ -15595,6 +16757,17 @@
                   "type": "string",
                   "format": "uuid"
                 },
+                "launch": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SessionLaunchDto",
+                      "description": "How Cloud is delivering the session's first message; absent on sessions created without one."
+                    }
+                  ]
+                },
                 "sshPublicKey": {
                   "type": [
                     "string",
@@ -15614,6 +16787,169 @@
                 },
                 "workspace": {
                   "$ref": "#/components/schemas/WorkspaceDto"
+                }
+              }
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "Page_AttentionItemDto": {
+        "type": "object",
+        "description": "`{items, nextCursor}`.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "accountId",
+                "source",
+                "kind",
+                "itemId",
+                "threadId",
+                "rootThreadId",
+                "explicit",
+                "actionable",
+                "custom",
+                "scheduled",
+                "connected",
+                "occurredAt",
+                "observedAt"
+              ],
+              "properties": {
+                "accountId": {
+                  "$ref": "#/components/schemas/AccountId"
+                },
+                "actionable": {
+                  "type": "boolean",
+                  "description": "`false` when Cloud cannot route an answer (an older daemon on the computer)."
+                },
+                "category": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Permissions: `bash`, `edit`, `read`, `external_directory`, `webfetch`, `browser`, `browser_site`, `mcp`, …"
+                },
+                "chatTitle": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "connected": {
+                  "type": "boolean",
+                  "description": "The computer is online or the session is running."
+                },
+                "custom": {
+                  "type": "boolean",
+                  "description": "Questions: whether a typed answer is accepted."
+                },
+                "explicit": {
+                  "type": "boolean",
+                  "description": "A Chrome site prompt: answer it in the chat on the computer running Chrome."
+                },
+                "hostId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid",
+                  "description": "Computer items: the remote host."
+                },
+                "hostName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "itemId": {
+                  "type": "string",
+                  "description": "The runtime's permission or question id; the turn id of a finished chat."
+                },
+                "kind": {
+                  "$ref": "#/components/schemas/AttentionKind"
+                },
+                "observedAt": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "occurredAt": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "projectId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The computer's project (native workspace id), as in `/runtime/v1/host/workspaces/{projectId}`."
+                },
+                "projectName": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "remoteSessionId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid",
+                  "description": "Items of a computer that shares single chats: the shared chat to open."
+                },
+                "rootThreadId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "description": "The chat to open."
+                },
+                "scheduled": {
+                  "type": "boolean",
+                  "description": "The finished turn was started by a schedule."
+                },
+                "sessionId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid",
+                  "description": "Cloud session items: the session."
+                },
+                "sessionTitle": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "$ref": "#/components/schemas/AttentionSource"
+                },
+                "threadId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "description": "The chat that asked: a sub-agent's chat when one asked."
+                },
+                "turnId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
                 }
               }
             }
@@ -16957,6 +18293,134 @@
           }
         }
       },
+      "PushCategory": {
+        "type": "string",
+        "description": "A person's switch for one kind of notification. Stored per user, so every device of theirs follows one set.",
+        "enum": [
+          "approvals",
+          "completions",
+          "failures",
+          "billing",
+          "security"
+        ]
+      },
+      "PushCategoryPreference": {
+        "type": "object",
+        "required": [
+          "category",
+          "enabled"
+        ],
+        "properties": {
+          "category": {
+            "$ref": "#/components/schemas/PushCategory"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "PushDeviceDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "familyId",
+          "environment",
+          "bundleId",
+          "createdAt",
+          "updatedAt",
+          "current"
+        ],
+        "properties": {
+          "appVersion": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bundleId": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "current": {
+            "type": "boolean",
+            "description": "The device making the request."
+          },
+          "environment": {
+            "$ref": "#/components/schemas/PushEnvironment"
+          },
+          "familyId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The sign-in (Settings → Devices) this device belongs to."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "lastSentAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "locale": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "PushDevicesResponse": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PushDeviceDto"
+            }
+          }
+        }
+      },
+      "PushEnvironment": {
+        "type": "string",
+        "description": "The APNs environment a token was issued for: development builds get `sandbox` tokens, `TestFlight` and App Store\nbuilds `production` ones. Sending a token to the other environment fails with `BadDeviceToken`.",
+        "enum": [
+          "sandbox",
+          "production"
+        ]
+      },
+      "PushPreferencesDto": {
+        "type": "object",
+        "required": [
+          "available",
+          "categories"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "description": "Whether this Cloud delivers pushes at all (a provider other than `log` is configured)."
+          },
+          "categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PushCategoryPreference"
+            },
+            "description": "Every category, in the order settings show them: `approvals`, `completions`, `failures`, `billing`,\n`security`."
+          }
+        }
+      },
       "ReadyResponse": {
         "type": "object",
         "description": "`GET /readyz`.",
@@ -16979,6 +18443,79 @@
           "status": {
             "type": "string",
             "description": "\"ok\" | \"degraded\""
+          }
+        }
+      },
+      "RegisterLiveActivityRequest": {
+        "type": "object",
+        "description": "`PUT /api/v1/push/activities/{activityId}`: a Live Activity's push token (the id is the app's `ActivityKit` id).",
+        "required": [
+          "token",
+          "environment",
+          "bundleId",
+          "target",
+          "threadId"
+        ],
+        "properties": {
+          "bundleId": {
+            "type": "string"
+          },
+          "environment": {
+            "$ref": "#/components/schemas/PushEnvironment"
+          },
+          "target": {
+            "$ref": "#/components/schemas/LiveActivityTargetDto"
+          },
+          "threadId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The root chat."
+          },
+          "token": {
+            "type": "string"
+          }
+        }
+      },
+      "RegisterPushDeviceRequest": {
+        "type": "object",
+        "description": "`PUT /api/v1/push/devices/current`: the APNs device token of the app making the request.",
+        "required": [
+          "token",
+          "environment",
+          "bundleId"
+        ],
+        "properties": {
+          "appVersion": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bundleId": {
+            "type": "string",
+            "description": "The app's bundle identifier; must be the one this Cloud sends to."
+          },
+          "deviceLabel": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Names the sign-in in Settings → Devices when it has no name yet, e.g. `iPhone · iOS 26`."
+          },
+          "environment": {
+            "$ref": "#/components/schemas/PushEnvironment",
+            "description": "`sandbox` for development builds, `production` for `TestFlight` and App Store builds."
+          },
+          "locale": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "BCP 47, e.g. `fr-FR`."
+          },
+          "token": {
+            "type": "string",
+            "description": "The device token as hex (64–200 characters; stored lowercase)."
           }
         }
       },
@@ -17775,6 +19312,56 @@
       "SessionId": {
         "type": "string"
       },
+      "SessionLaunchDto": {
+        "type": "object",
+        "description": "The delivery of a session's first message (`initialPrompt`). Every change is a `session` entity event.",
+        "required": [
+          "chatId",
+          "status",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "chatId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The runtime chat the message goes to, chosen when the session is created: open it straight away. It answers\n404 until the launch delivers the message."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the launch failed, was cancelled or interrupted, in words for people."
+          },
+          "prompt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The message while it has not reached the chat (`pending`, or `failed`/`cancelled` before delivery), to show\nas the pending first message or to send by hand."
+          },
+          "status": {
+            "$ref": "#/components/schemas/LaunchStatus"
+          },
+          "turnId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The first turn, once the runtime accepted the message."
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "SessionSkill": {
         "type": "object",
         "required": [
@@ -18502,6 +20089,21 @@
         "properties": {
           "role": {
             "$ref": "#/components/schemas/MembershipRole"
+          }
+        }
+      },
+      "UpdatePushPreferencesRequest": {
+        "type": "object",
+        "description": "`PATCH /api/v1/push/preferences`: the categories to change; the others keep their setting.",
+        "required": [
+          "categories"
+        ],
+        "properties": {
+          "categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PushCategoryPreference"
+            }
           }
         }
       },
@@ -19985,6 +21587,14 @@
       "description": "Connected computers and explicitly published local chats"
     },
     {
+      "name": "attention",
+      "description": "Pending requests and finished chats on computers and Cloud sessions"
+    },
+    {
+      "name": "push",
+      "description": "Push notifications and Live Activities for Haarness for iOS"
+    },
+    {
       "name": "cloud-schedules",
       "description": "Durable Cloud prompts targeting session chats"
     },
@@ -20038,7 +21648,7 @@
     },
     {
       "name": "meta",
-      "description": "Health, readiness, capabilities and this document"
+      "description": "Health, readiness, capabilities, this document and the iOS app's link file"
     }
   ]
 }
