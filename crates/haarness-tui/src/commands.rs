@@ -2312,6 +2312,7 @@ impl App {
             }
             "new" => {
                 let request = CreateThreadRequest {
+                    id: None,
                     schedule: None,
                     title: None,
                     parent_id: None,
@@ -4727,6 +4728,7 @@ impl App {
             .await?;
         let thread = client
             .create_thread(CreateThreadRequest {
+                id: None,
                 schedule: None,
                 title: None,
                 parent_id: None,

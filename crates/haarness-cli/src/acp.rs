@@ -150,6 +150,7 @@ impl Service {
         let thread = self
             .client
             .create_thread(CreateThreadRequest {
+                id: None,
                 schedule: None,
                 title: Some("ACP session".into()),
                 parent_id: None,

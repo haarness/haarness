@@ -2711,6 +2711,104 @@ async fn authenticated_rest_turn_runs_end_to_end() {
 }
 
 #[tokio::test]
+async fn creating_a_chat_with_a_chosen_id_twice_returns_the_first_chat() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let providers = Arc::new(StaticProviderRegistry::new(vec![
+        Arc::new(Echo) as Arc<dyn ModelProvider>
+    ]));
+    let runtime = Arc::new(AgentRuntime::new(
+        store,
+        providers,
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(64),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let handle = serve(
+        listener,
+        "fixture-token",
+        ServerState {
+            browser: None,
+            management: None,
+            runtime: runtime.clone(),
+            mcp: Arc::new(NoMcp),
+            skills: Arc::new(NoSkills),
+            plugins: None,
+            workflows: None,
+            workspaces: None,
+            workspace_id: None,
+            workspace: std::env::temp_dir(),
+            project_trusted: false,
+            language: None,
+        },
+    )
+    .await
+    .unwrap();
+    let base = format!("http://{}", handle.address);
+    let client = reqwest::Client::new();
+    let info: ServerInfo = client
+        .get(format!("{base}/v1/info"))
+        .bearer_auth("fixture-token")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        info.capabilities
+            .iter()
+            .any(|capability| capability == haarness_protocol::THREAD_CREATE_ID_CAPABILITY)
+    );
+    let id = haarness_protocol::ThreadId::new();
+    let create = |title: &'static str| {
+        client
+            .post(format!("{base}/v1/threads"))
+            .bearer_auth("fixture-token")
+            .json(&serde_json::json!({"id": id, "title": title, "provider": "echo", "model": "echo-1"}))
+            .send()
+    };
+    let first = create("Fix login").await.unwrap();
+    assert_eq!(first.status(), reqwest::StatusCode::CREATED);
+    let first: Thread = first.json().await.unwrap();
+    assert_eq!(first.id, id);
+    assert_eq!(first.title, "Fix login");
+    // A retry (a lost response, a restarted worker) gets the same chat back.
+    let retried = create("Something else").await.unwrap();
+    assert_eq!(retried.status(), reqwest::StatusCode::CREATED);
+    let retried: Thread = retried.json().await.unwrap();
+    assert_eq!(retried.id, id);
+    assert_eq!(retried.title, "Fix login");
+    assert_eq!(retried.created_at, first.created_at);
+    // Concurrent creates with one new id make one chat too.
+    let racing = haarness_protocol::ThreadId::new();
+    let request = || CreateThreadRequest {
+        id: Some(racing),
+        provider: Some("echo".into()),
+        model: Some("echo-1".into()),
+        ..Default::default()
+    };
+    let (left, right) = tokio::join!(
+        runtime.create_thread(request()),
+        runtime.create_thread(request())
+    );
+    assert_eq!(left.unwrap().id, racing);
+    assert_eq!(right.unwrap().id, racing);
+
+    let threads = runtime.list_threads(true).await.unwrap();
+    assert_eq!(threads.len(), 2, "{threads:?}");
+    let created = runtime
+        .events()
+        .subscribe(Some(0))
+        .replay
+        .into_iter()
+        .filter(|event| event.event_type == "thread.created")
+        .filter_map(|event| event.thread_id)
+        .collect::<Vec<_>>();
+    assert_eq!(created, [id, racing], "one created event per chat");
+    handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn forked_thread_continues_with_parent_history() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
     let provider = Capturing::default();
