@@ -11,6 +11,17 @@ export interface Live {
   items: T.Item[];
   selected: string;
 }
+/** When this window created a chat, and on which event stream connection. */
+export interface CreatedChat {
+  at: number;
+  stream: number;
+}
+/** A chat created moments ago has no history yet, so opening it needs no
+ * request and nothing to wait for. A late open, or one after the event stream
+ * reconnected (which may have missed its first events), loads as usual. */
+export function freshChat(created: CreatedChat, now: number, stream: number) {
+  return now - created.at < 3000 && created.stream === stream;
+}
 function merge<V extends { id: string }>(items: V[], value: V) {
   return items.some((item) => item.id === value.id)
     ? items.map((item) => (item.id === value.id ? value : item))
