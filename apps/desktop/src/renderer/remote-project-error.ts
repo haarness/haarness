@@ -4,7 +4,7 @@ export function remoteProjectError(error: unknown): string {
   if (/401|unauthori[sz]ed|authentication required/i.test(message))
     return "Couldn’t sign in. Check this server’s username and password in Settings.";
   if (
-    /active turn|still starting|different authentication|busy on a different version/i.test(
+    /active turn|still starting|different authentication|busy on a different version|busy with a different project configuration|whether it still works/i.test(
       message,
     )
   )
