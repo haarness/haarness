@@ -10451,6 +10451,103 @@ mod permission_parity;
 mod chrome;
 
 #[tokio::test]
+async fn workspace_file_routes_answer_a_missing_file_with_404_in_plain_words() {
+    let workspace =
+        std::env::temp_dir().join(format!("haarness-files-gone-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(workspace.join("docs")).unwrap();
+    std::fs::write(workspace.join("docs/readme.md"), "# Readme").unwrap();
+    // Servers run in their canonical folder (the temporary one is a symlink on macOS).
+    let workspace = workspace.canonicalize().unwrap();
+    let runtime = Arc::new(AgentRuntime::new(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Echo) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(64),
+    ));
+    let handle = serve(
+        TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        "files-fixture",
+        ServerState {
+            browser: None,
+            management: None,
+            runtime,
+            mcp: Arc::new(NoMcp),
+            skills: Arc::new(NoSkills),
+            plugins: None,
+            workflows: None,
+            workspaces: None,
+            workspace_id: None,
+            workspace: workspace.clone(),
+            project_trusted: false,
+            language: None,
+        },
+    )
+    .await
+    .unwrap();
+    let base = format!("http://{}", handle.address);
+    let http = reqwest::Client::new();
+    let get = |path: &str| {
+        http.get(format!("{base}/v1/files/{path}"))
+            .bearer_auth("files-fixture")
+            .send()
+    };
+    let answer = |response: reqwest::Response| async move {
+        (response.status(), response.text().await.unwrap())
+    };
+    let gone = |message: &str| (reqwest::StatusCode::NOT_FOUND, message.to_owned());
+    assert_eq!(
+        answer(get("content?path=docs/deleted.md").await.unwrap()).await,
+        gone("This file no longer exists")
+    );
+    assert_eq!(
+        answer(get("list?path=deleted").await.unwrap()).await,
+        gone("This folder no longer exists")
+    );
+    // A missing file has no current revision, whether or not its folder went too.
+    for path in ["docs/deleted.html", "deleted/index.html"] {
+        let (status, body) =
+            answer(get(&format!("preview/current?path={path}")).await.unwrap()).await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{path}: {body}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap()["revision"],
+            Value::Null
+        );
+    }
+    // Versions live outside the workspace: only the version itself can be gone.
+    let unknown = "0".repeat(64);
+    assert_eq!(
+        answer(
+            get(&format!("preview?path=deleted/index.html&hash={unknown}"))
+                .await
+                .unwrap()
+        )
+        .await,
+        gone("This preview version is no longer available")
+    );
+    // Other failures keep their 400 and their words.
+    assert_eq!(
+        answer(get("content?path=../outside.txt").await.unwrap()).await,
+        (
+            reqwest::StatusCode::BAD_REQUEST,
+            "Path must be relative to the workspace".to_owned()
+        )
+    );
+    assert_eq!(
+        answer(get("content?path=docs").await.unwrap()).await,
+        (
+            reqwest::StatusCode::BAD_REQUEST,
+            "Only regular files can be opened".to_owned()
+        )
+    );
+    let listed: Value = get("list?path=docs").await.unwrap().json().await.unwrap();
+    assert_eq!(listed["entries"][0]["path"], "docs/readme.md");
+    handle.shutdown().await.unwrap();
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+#[tokio::test]
 async fn published_remote_chat_cannot_read_or_control_other_conversations() {
     let workspace =
         std::env::temp_dir().join(format!("haarness-remote-scope-{}", uuid::Uuid::now_v7()));

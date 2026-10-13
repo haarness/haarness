@@ -6056,6 +6056,9 @@
               }
             },
             "description": ""
+          },
+          "404": {
+            "description": "This file no longer exists (plain text)"
           }
         },
         "tags": []
@@ -6118,6 +6121,9 @@
               }
             },
             "description": ""
+          },
+          "404": {
+            "description": "This folder no longer exists (plain text)"
           }
         },
         "tags": []
@@ -6154,6 +6160,9 @@
               }
             },
             "description": ""
+          },
+          "404": {
+            "description": "This preview version is no longer available (plain text)"
           }
         },
         "tags": []
