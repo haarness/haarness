@@ -9253,22 +9253,31 @@ async fn replace_incompatible_workspace_server(
     reason: &str,
 ) -> Result<()> {
     let client = haarness_tui::api::ApiClient::new(&live.discovery.url, &live.discovery.token)?;
-    let active = tokio::time::timeout(Duration::from_millis(750), client.active_turns())
+    // The person at the computer reads the pid and command; the host gateway
+    // finds `ProjectBusy` underneath and answers remote clients in plain words.
+    let active = match tokio::time::timeout(Duration::from_millis(750), client.active_turns())
         .await
         .context("timed out checking the stale Haarness server for active turns")?
-        .with_context(|| {
-            format!(
-                "cannot safely replace Haarness server {} ({reason}) because its activity endpoint is unavailable; stop it explicitly with `haarness --workspace '{}' serve --stop`",
-                live.discovery.pid,
-                expected_workspace.display()
-            )
-        })?;
+    {
+        Ok(active) => active,
+        Err(error) => {
+            return Err(error
+                .context(haarness_server::remote::ProjectBusy)
+                .context(format!(
+                    "cannot safely replace Haarness server {} ({reason}) because its activity endpoint is unavailable; stop it explicitly with `haarness --workspace '{}' serve --stop`",
+                    live.discovery.pid,
+                    expected_workspace.display()
+                )));
+        }
+    };
     if !active.is_empty() {
-        anyhow::bail!(
-            "Haarness server {} needs an upgrade ({reason}) but still owns {} active turn(s); wait for them to finish or stop it explicitly with `haarness --workspace '{}' serve --stop`",
-            live.discovery.pid,
-            active.len(),
-            expected_workspace.display()
+        return Err(
+            anyhow::Error::new(haarness_server::remote::ProjectBusy).context(format!(
+                "Haarness server {} needs an upgrade ({reason}) but still owns {} active turn(s); wait for them to finish or stop it explicitly with `haarness --workspace '{}' serve --stop`",
+                live.discovery.pid,
+                active.len(),
+                expected_workspace.display()
+            )),
         );
     }
 
@@ -10848,6 +10857,103 @@ mod tests {
         let requests = server.await.unwrap();
         assert!(requests[0].starts_with("GET /v1/turns/active "));
         assert!(requests[1].starts_with("POST /v1/shutdown "));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn incompatible_busy_workspace_server_is_kept_and_reported_as_busy() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-busy-server-test-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let paths = Paths::new(Some(&root.join("state"))).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let discovery = RuntimeDiscovery {
+            url: format!("http://{address}"),
+            token: "test-token".into(),
+            pid: 4242,
+            workspace: Some(workspace.display().to_string()),
+            executable_fingerprint: Some("other-build".into()),
+            access_fingerprint: None,
+            trace_endpoint: None,
+        };
+        write_runtime(&paths, &discovery).unwrap();
+        let now = chrono::Utc::now();
+        let running = serde_json::to_string(&[haarness_protocol::Turn {
+            id: haarness_protocol::TurnId::new(),
+            thread_id: haarness_protocol::ThreadId::new(),
+            request_id: haarness_protocol::RequestId::new(),
+            status: TurnStatus::Running,
+            agent: "build".into(),
+            provider: "echo".into(),
+            model: "echo-1".into(),
+            ultracode: false,
+            error: None,
+            created_at: now,
+            updated_at: now,
+        }])
+        .unwrap();
+        // First a server that is working, then one whose activity is unknown.
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (status, body) in [("200 OK", running.as_str()), ("404 Not Found", "{}")] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = socket.read(&mut chunk).await.unwrap();
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                requests.push(String::from_utf8(request).unwrap());
+            }
+            requests
+        });
+        let info = fixture_server_info(vec![
+            WORKSPACE_HISTORY_CAPABILITY.into(),
+            PTY_CAPABILITY.into(),
+        ]);
+        for _ in 0..2 {
+            let error = replace_incompatible_workspace_server(
+                &paths,
+                &workspace,
+                LiveWorkspaceServer {
+                    discovery: discovery.clone(),
+                    info: info.clone(),
+                },
+                "server executable differs from this client build",
+            )
+            .await
+            .unwrap_err();
+            // The host gateway answers remote clients from the marker alone.
+            assert!(
+                error
+                    .downcast_ref::<haarness_server::remote::ProjectBusy>()
+                    .is_some(),
+                "{error:#}"
+            );
+            // The person at the computer still gets the pid and the command.
+            let local = error.to_string();
+            assert!(
+                local.contains("4242") && local.contains("serve --stop"),
+                "{local}"
+            );
+            assert!(paths.runtime.exists(), "a busy server is never replaced");
+        }
+        let requests = server.await.unwrap();
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.starts_with("GET /v1/turns/active ")),
+            "{requests:?}"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

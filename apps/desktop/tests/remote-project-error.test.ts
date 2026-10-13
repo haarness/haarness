@@ -29,6 +29,15 @@ test("remote project failures give relevant next steps without exposing server d
     ),
     /server is busy/,
   );
+  // A host gateway's plain answer for a project another build is running.
+  assert.match(
+    remoteProjectError(
+      new Error(
+        "This project is busy on a different version of Haarness. Open it on the computer, or wait until its work finishes.",
+      ),
+    ),
+    /server is busy/,
+  );
   assert.match(
     remoteProjectError(
       new Error("This server does not support remote project browsing yet"),
