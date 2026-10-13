@@ -2963,7 +2963,8 @@ mod tests {
         )
         .await;
         assert_eq!(
-            navigate.permission_constraint(&prepared, "browser:navigate:https://blocked.test./inbox"),
+            navigate
+                .permission_constraint(&prepared, "browser:navigate:https://blocked.test./inbox"),
             Some(Deny)
         );
         assert_eq!(prepared["__browser"]["remember"], json!([]));
