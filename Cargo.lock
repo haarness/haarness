@@ -1660,6 +1660,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "directories",
+ "nix 0.31.3",
  "serde",
  "serde_json",
  "uuid",

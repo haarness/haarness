@@ -7403,6 +7403,45 @@ test("themed pickers search, stay within the window, support keyboard selection 
     await popup.getByRole("button", { name: "Done", exact: true }).click();
     await expect(popup).toHaveCount(0);
     await expect(model).toBeFocused();
+    // A keyboard choice keeps the highlight on the chosen model while the
+    // picker applies it, so another Enter keeps that model and ArrowDown
+    // moves on from it rather than from the first row.
+    await model.click();
+    await expect(search).toBeFocused();
+    for (let step = 0; step < 3; step++) await search.press("ArrowDown");
+    const highlighted = popup.locator(".select-option.highlighted");
+    const target = (await highlighted.getAttribute("data-value"))!;
+    expect(target).not.toBe("echo/echo-1");
+    await search.press("Enter");
+    await expect(model).toHaveAttribute("data-value", target);
+    await expect(popup.locator(".model-picker-detail")).toHaveAttribute("aria-busy", "false");
+    const chosen = popup.locator('[role="option"][aria-selected="true"]');
+    await expect(chosen).toHaveAttribute("data-value", target);
+    await expect(highlighted).toHaveCount(1);
+    await expect(highlighted).toHaveAttribute("data-value", target);
+    await expect(search).toHaveAttribute("aria-activedescendant", (await chosen.getAttribute("id"))!);
+    await expect(popup.getByRole("listbox", { name: "Model", exact: true })).toHaveAttribute(
+      "aria-activedescendant",
+      (await chosen.getAttribute("id"))!,
+    );
+    await page.screenshot({ path: "test-results/model-picker-keyboard-choice.png" });
+    const choices = await popup
+      .locator('[role="option"]:not([aria-disabled="true"])')
+      .evaluateAll((items) => items.map((item) => item.getAttribute("data-value")));
+    await search.press("ArrowDown");
+    await expect(highlighted).toHaveAttribute(
+      "data-value",
+      choices[(choices.indexOf(target) + 1) % choices.length]!,
+    );
+    await search.press("ArrowUp");
+    await search.press("Enter");
+    await expect(model).toHaveAttribute("data-value", target);
+    await search.press("Escape");
+    await expect(popup).toHaveCount(0);
+    await selectValue(model, "echo/echo-1");
+    await expect(model).toHaveAttribute("data-value", "echo/echo-1");
+    await expect(popup).toHaveCount(0);
+    await model.focus();
     await model.press("ArrowDown");
     await expect(search).toBeFocused();
     await search.press("Escape");

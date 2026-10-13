@@ -86,8 +86,9 @@ async function launchChromium(options: {
         ? ["--enable-unsafe-extension-debugging"]
         : [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`]),
       "--silent-debugger-extension-api",
-      // Every *.test name is the fixture site, so one port serves several origins.
-      "--host-resolver-rules=MAP *.test 127.0.0.1",
+      // Every *.test name is the fixture site, so one port serves several origins,
+      // also spelled with a trailing dot (other.test.).
+      "--host-resolver-rules=MAP *.test 127.0.0.1,MAP *.test. 127.0.0.1",
     ],
     env,
   });

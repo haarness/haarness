@@ -1,0 +1,75 @@
+{
+  "about": "Site-rule cases shared by the server (crates/haarness-server/src/browser_policy.rs) and the browser hosts (packages/browser-driver/src/policy.ts, the Chrome extension's fetch policy). Each URL in `browsing` gets that decision under `policy`. A domain with a trailing dot (example.com.) is the same site as without it. `userinfo` URLs carry a user name and password; they are assembled at run time, so the file holds no credential URL; the server judges them by their origin and the hosts refuse them. `network` and `other` are what the hosts' request filters read: a WebSocket by the http(s) origin it opens on, and no site at all for data:, blob: and about: addresses.",
+  "policy": {
+    "defaults": "ask",
+    "sites": [
+      { "origin": "https://blocked.example", "browsing": "deny" },
+      { "origin": "https://*.evil.example", "browsing": "deny" },
+      { "origin": "http://localhost:3000", "browsing": "deny" },
+      { "origin": "https://open.example", "browsing": "allow" },
+      { "origin": "https://*.cdn.example", "browsing": "allow" }
+    ]
+  },
+  "browsing": {
+    "deny": [
+      "https://blocked.example/",
+      "https://blocked.example./",
+      "https://BLOCKED.example./path?q=1#top",
+      "https://blocked.example:443/",
+      "https://blocked.example.:443/x.js",
+      "https://a.evil.example/",
+      "https://a.evil.example./",
+      "https://A.B.evil.example./login",
+      "http://localhost:3000/app",
+      "http://localhost.:3000/app",
+      "http://LOCALHOST.:3000/"
+    ],
+    "allow": [
+      "https://open.example/",
+      "https://open.example./",
+      "https://OPEN.example.:443/a",
+      "https://a.cdn.example./x.js",
+      "https://a.b.cdn.example/"
+    ],
+    "ask": [
+      "https://x.blocked.example/",
+      "https://blocked.example.evil.com/",
+      "https://notblocked.example/",
+      "http://blocked.example/",
+      "https://blocked.example:8443/",
+      "https://evil.example/",
+      "https://evil.example./",
+      "https://a.evil.example.com/",
+      "https://evil.com/?.blocked.example",
+      "https://evil.com#.blocked.example",
+      "https://evil.com/.blocked.example/",
+      "http://localhost:3001/",
+      "https://localhost:3000/",
+      "http://localhost.evil.example.com:3000/",
+      "https://cdn.example./",
+      "https://open.example.evil.com/"
+    ]
+  },
+  "userinfo": [
+    { "url": "https://blocked.example./", "username": "user", "password": "secret", "origin": "https://blocked.example" },
+    { "url": "https://a.evil.example/x.js", "username": "user", "password": "", "origin": "https://a.evil.example" },
+    { "url": "https://open.example/", "username": "user", "password": "secret", "origin": "https://open.example" }
+  ],
+  "network": {
+    "wss://blocked.example/socket": "https://blocked.example",
+    "wss://blocked.example./socket": "https://blocked.example",
+    "ws://localhost.:3000/hmr": "http://localhost:3000",
+    "ws://a.evil.example:80/": "http://a.evil.example",
+    "wss://open.example:443/live": "https://open.example",
+    "ws://open.example:443/live": "http://open.example:443",
+    "https://blocked.example./x.js": "https://blocked.example"
+  },
+  "other": [
+    "about:blank",
+    "about:srcdoc",
+    "data:text/html,hi",
+    "blob:https://blocked.example/0123",
+    "file:///etc/hosts",
+    "chrome://settings"
+  ]
+}

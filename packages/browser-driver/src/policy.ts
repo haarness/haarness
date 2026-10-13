@@ -1,12 +1,43 @@
 // Includes MIT-licensed code; see THIRD-PARTY-NOTICES.md.
 // URL policy shared by the hosts and the page. Browser-free so it stays unit-testable.
 
-export function destinationOrigin(input: string) {
+/** Schemes that reach a network site, and the HTTP(S) origin each opens on. */
+const NETWORK: Record<string, string> = {
+  "http:": "http:",
+  "https:": "https:",
+  "ws:": "http:",
+  "wss:": "https:",
+};
+
+/**
+ * The origin site rules judge a request by: an HTTP(S) URL's own, a
+ * WebSocket's HTTP(S) twin (`wss://a.example/x` → `https://a.example`), a
+ * domain without its trailing dot (`example.com.` is the same site as
+ * `example.com`), and never credentials. `credentials` says whether the URL
+ * carried a user name or password, which request filters refuse rather than
+ * judge. None for addresses that reach no site of their own (`data:`,
+ * `blob:`, `about:`) or are not URLs.
+ */
+export function policyOrigin(
+  input: string,
+): { origin: string; credentials: boolean } | undefined {
   if (!URL.canParse(input)) return;
   const url = new URL(input);
-  return /^https?:$/.test(url.protocol) && !url.username && !url.password
-    ? url.origin
-    : undefined;
+  const protocol = NETWORK[url.protocol];
+  if (!protocol) return;
+  const credentials = !!(url.username || url.password);
+  url.protocol = protocol;
+  const host = url.hostname;
+  // An address never keeps a trailing dot; URL parsing already drops it.
+  if (host.length > 1 && host.endsWith(".")) url.hostname = host.slice(0, -1);
+  return { origin: url.origin, credentials };
+}
+
+/** The HTTP(S) origin of a credential-free HTTP(S) URL, as site rules read it. */
+export function destinationOrigin(input: string) {
+  if (!URL.canParse(input) || !/^https?:$/.test(new URL(input).protocol)) return;
+  const target = policyOrigin(input);
+  return target && !target.credentials ? target.origin : undefined;
 }
 
 export function normalizeURL(input: string) {
@@ -68,7 +99,8 @@ export type SiteDecision = "allow" | "ask" | "deny";
  * Picks the rule that applies to an origin. Exact origins take priority;
  * otherwise the most specific subdomain rule (`https://*.example.com`) wins;
  * otherwise the defaults. Works for any set of categories (Desktop's three,
- * Chrome's four with scripts), taken from the defaults.
+ * Chrome's four with scripts), taken from the defaults. `input` is an origin
+ * or URL, read as `policyOrigin` reads it.
  */
 export function browserSiteAccess<Category extends string>(
   policy: {
@@ -77,8 +109,10 @@ export function browserSiteAccess<Category extends string>(
       origin: string;
     })[];
   },
-  origin: string,
+  input: string,
 ): Record<Category, SiteDecision> {
+  // Rules hold canonical origins; read the same site however it is spelled.
+  const origin = policyOrigin(input)?.origin ?? input;
   const match = (pattern: string) => {
     if (pattern === origin) return true;
     const index = pattern.indexOf("*.");
