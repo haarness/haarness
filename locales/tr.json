@@ -1999,6 +1999,7 @@
   "Manage runtime hooks": "Çalışma zamanı kancalarını yönet",
   "Save and restore configuration profiles": "Yapılandırma profillerini kaydet ve geri yükle",
   "Manage and inspect Haarness plugins": "Haarness eklentilerini yönet ve incele",
+  "Browse, install and manage Haarness marketplace resources": "Haarness pazar yeri kaynaklarına göz atın, yükleyin ve yönetin",
   "Show discovered skills": "Keşfedilen yetenekleri göster",
   "Browse/toggle tools · /tools lazy auto|always|off · /tools show|hide": "Araçlara göz at ve aç/kapat · /tools lazy auto|always|off · /tools show|hide",
   "Show server and thread status": "Sunucu ve sohbet durumunu göster",

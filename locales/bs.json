@@ -1999,6 +1999,7 @@
   "Manage runtime hooks": "Upravljaj hookovima izvršnog okruženja",
   "Save and restore configuration profiles": "Spremi i vrati profile konfiguracije",
   "Manage and inspect Haarness plugins": "Upravljaj Haarness pluginima i pregledaj ih",
+  "Browse, install and manage Haarness marketplace resources": "Pregledajte, instalirajte i upravljajte resursima Haarness marketplacea",
   "Show discovered skills": "Prikaži otkrivene vještine",
   "Browse/toggle tools · /tools lazy auto|always|off · /tools show|hide": "Pregled/uključivanje alata · /tools lazy auto|always|off · /tools show|hide",
   "Show server and thread status": "Prikaži status servera i razgovora",

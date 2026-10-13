@@ -48,7 +48,7 @@ test("Marketplace and plugin settings install, disable and remove a scoped resou
     await expect(proof).not.toBeChecked();
     await settings.getByRole("button", { name: "Marketplace", exact: true }).click();
     await settings.getByRole("button", { name: "Installed resources", exact: true }).click();
-    await settings.getByRole("button", { name: "remove desktop-proof", exact: true }).click();
+    await settings.getByRole("button", { name: "Remove desktop-proof", exact: true }).click();
     await settings.getByRole("alertdialog").getByRole("button", { name: "Remove desktop-proof", exact: true }).click();
     await expect.poll(() => client!.marketplace({ action: "installed" })).toEqual([]);
     await expect(settings.getByRole("alert")).toHaveCount(0);

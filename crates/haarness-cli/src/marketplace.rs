@@ -134,7 +134,9 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: Args) -> Re
         Command::Versions { id, kind } => json!({"action":"versions","id":id,"kind":kind}),
         Command::Collections => json!({"action":"collections"}),
         Command::Installed { json: false } => {
-            let installed = installed(paths, workspace, trust)?;
+            let installed = service(paths, workspace, trust)
+                .await?
+                .marketplace_installed()?;
             let rows = installed.as_array().map(Vec::as_slice).unwrap_or_default();
             if rows.is_empty() {
                 println!(
@@ -144,7 +146,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: Args) -> Re
             for row in rows {
                 let text = |key: &str| row[key].as_str().unwrap_or_default().to_owned();
                 println!(
-                    "{}\t{}\tversion {}\t{}",
+                    "{}\t{}\tversion {}\t{}{}",
                     text("name"),
                     text("kind"),
                     row["version"]["number"],
@@ -152,7 +154,8 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: Args) -> Re
                         "this project"
                     } else {
                         "all projects"
-                    }
+                    },
+                    if row["enabled"] == false { "\toff" } else { "" }
                 );
             }
             return Ok(());
@@ -237,11 +240,9 @@ pub async fn catalog(path: &str, query: &[(&str, String)]) -> Result<Value> {
             .send()
             .await
             .map_err(unreachable)?;
-        ensure!(
-            response.status().is_success(),
-            "Cloud catalog request failed ({})",
-            response.status()
-        );
+        if !response.status().is_success() {
+            return Err(refusal(response, "Cloud catalog request").await);
+        }
         // The authorized manifest carries a short-lived object-store URL.
         // Preserve it for Cloud runtimes too; never forward runtime credentials to R2.
         return Ok(response.json().await?);
@@ -309,7 +310,7 @@ pub async fn fetch(input: &Value) -> Result<Value> {
     catalog(&path, &query).await
 }
 
-async fn resolve(input: &Value) -> Result<String> {
+pub(crate) async fn resolve(input: &Value) -> Result<String> {
     let id = input["id"]
         .as_str()
         .context("Resource id or publisher/slug is required")?;
@@ -354,6 +355,27 @@ fn unreachable(error: reqwest::Error) -> anyhow::Error {
     };
     tracing::debug!(error = %error.without_url(), "marketplace request failed");
     anyhow::anyhow!(message)
+}
+
+/// Cloud says why it refused (a yanked version and its reason, a missing one)
+/// in the body; the status alone told people nothing they could act on.
+async fn refusal(response: reqwest::Response, what: &str) -> anyhow::Error {
+    let status = response.status();
+    let message = response
+        .bytes()
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|body| body["message"].as_str().map(str::to_owned))
+        .filter(|message| !message.trim().is_empty());
+    match message {
+        Some(message) => {
+            let mut chars = message.chars();
+            let first = chars.next().map(|c| c.to_uppercase().collect::<String>());
+            anyhow::anyhow!("{}{} ({status})", first.unwrap_or_default(), chars.as_str())
+        }
+        None => anyhow::anyhow!("{what} failed ({status})"),
+    }
 }
 
 /// A signed-in catalog request's failure; transport failures read as above
@@ -410,11 +432,9 @@ async fn download(url: &str, limit: usize) -> Result<Vec<u8>> {
         }
     }
     let mut response = request.send().await.map_err(unreachable)?;
-    ensure!(
-        response.status().is_success(),
-        "Marketplace download failed ({})",
-        response.status()
-    );
+    if !response.status().is_success() {
+        return Err(refusal(response, "Marketplace download").await);
+    }
     ensure!(
         response.content_length().unwrap_or_default() <= limit as u64,
         "Download exceeds size limit"
@@ -794,7 +814,7 @@ pub async fn install(
             if target.exists() { ensure!(old["installedDigest"] == tree_digest(&target)?, "Resource was modified locally; preserve your edits before updating"); }
         }
         let digest = tree_digest(&source)?;
-        let receipt = json!({"id":id,"kind":kind,"name":name,"scope":if local {"local"} else {"global"},"path":target,"version":manifest["version"],"lock":manifest["lock"],"installedDigest":digest,"pluginName":if kind=="mcp" {Some(format!("mcp-{name}"))} else if kind=="plugin" {Some(name.to_owned())} else {None},"restartRequired":false});
+        let receipt = json!({"id":id,"kind":kind,"name":name,"publisher":manifest["resource"]["publisher"],"slug":slug,"scope":if local {"local"} else {"global"},"path":target,"version":manifest["version"],"lock":manifest["lock"],"installedDigest":digest,"pluginName":if kind=="mcp" {Some(format!("mcp-{name}"))} else if kind=="plugin" {Some(name.to_owned())} else {None},"restartRequired":false});
         fs::create_dir_all(target.parent().context("Target parent")?)?;
         let backup = stage.join("previous");
         let existed = target.exists();
@@ -825,10 +845,10 @@ fn substitute(value: &mut Value, values: &Value) -> Result<()> {
                 }
             }
             let remaining = text.replace("${CLAUDE_PLUGIN_ROOT}", "");
-            ensure!(
-                !remaining.contains("${"),
-                "Provide all required MCP configuration values"
-            );
+            if let Some((_, rest)) = remaining.split_once("${") {
+                let name = rest.split_once('}').map_or(rest, |(name, _)| name);
+                bail!("Provide a value for {name}: this MCP server needs it to connect");
+            }
         }
         Value::Array(items) => {
             for item in items {
@@ -878,6 +898,42 @@ pub fn tree_digest(root: &Path) -> Result<String> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[tokio::test]
+    async fn a_refused_download_says_why() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new()
+            .route(
+                "/yanked",
+                axum::routing::get(|| async {
+                    (
+                        axum::http::StatusCode::GONE,
+                        r#"{"code":"gone","message":"version 1 of demo was yanked: leaks a token"}"#,
+                    )
+                }),
+            )
+            .route(
+                "/bare",
+                axum::routing::get(|| async { axum::http::StatusCode::BAD_GATEWAY }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let yanked = download(&format!("http://{address}/yanked"), 1024)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            yanked.to_string(),
+            "Version 1 of demo was yanked: leaks a token (410 Gone)"
+        );
+        let bare = download(&format!("http://{address}/bare"), 1024)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            bare.to_string(),
+            "Marketplace download failed (502 Bad Gateway)"
+        );
+        server.abort();
+    }
 
     #[tokio::test]
     async fn an_unreachable_marketplace_is_explained_in_words() {
@@ -1161,7 +1217,12 @@ mod tests {
         assert!(extract(&zip.finish().unwrap().into_inner(), &root).is_err());
         let mut config =
             json!({"env":{"TOKEN":"${TOKEN}"},"args":["${CLAUDE_PLUGIN_ROOT}/server.js"]});
-        assert!(substitute(&mut config, &json!({})).is_err());
+        assert_eq!(
+            substitute(&mut config.clone(), &json!({}))
+                .unwrap_err()
+                .to_string(),
+            "Provide a value for TOKEN: this MCP server needs it to connect"
+        );
         substitute(&mut config, &json!({"TOKEN":"$(do not execute)"})).unwrap();
         assert_eq!(config["env"]["TOKEN"], "$(do not execute)");
         fs::remove_dir_all(root).unwrap();
