@@ -9259,25 +9259,36 @@ async fn replace_incompatible_workspace_server(
 ) -> Result<()> {
     let client = haarness_tui::api::ApiClient::new(&live.discovery.url, &live.discovery.token)?;
     // The person at the computer reads the pid and command; the host gateway
-    // finds `ProjectBusy` underneath and answers remote clients in plain words.
-    let active = match tokio::time::timeout(Duration::from_millis(750), client.active_turns())
-        .await
-        .context("timed out checking the stale Haarness server for active turns")?
+    // finds `ProjectBusy` underneath and answers remote clients in plain words,
+    // which name another build only when another build runs the server.
+    let busy = if local_server_compatibility_error(&live).is_some() {
+        haarness_server::remote::ProjectBusy::OtherBuild
+    } else {
+        haarness_server::remote::ProjectBusy::OtherSetting
+    };
+    let active = match tokio::time::timeout(Duration::from_millis(750), client.active_turns()).await
     {
-        Ok(active) => active,
-        Err(error) => {
-            return Err(error
-                .context(haarness_server::remote::ProjectBusy)
-                .context(format!(
-                    "cannot safely replace Haarness server {} ({reason}) because its activity endpoint is unavailable; stop it explicitly with `haarness --workspace '{}' serve --stop`",
-                    live.discovery.pid,
-                    expected_workspace.display()
-                )));
+        Ok(Ok(active)) => active,
+        Ok(Err(error)) => {
+            return Err(error.context(busy).context(format!(
+                "cannot safely replace Haarness server {} ({reason}) because its activity endpoint is unavailable; stop it explicitly with `haarness --workspace '{}' serve --stop`",
+                live.discovery.pid,
+                expected_workspace.display()
+            )));
+        }
+        // A server too busy to answer is no more replaceable than one that
+        // says it works.
+        Err(elapsed) => {
+            return Err(anyhow::Error::new(elapsed).context(busy).context(format!(
+                "cannot safely replace Haarness server {} ({reason}) because it did not say in time whether it still works; wait for it or stop it explicitly with `haarness --workspace '{}' serve --stop`",
+                live.discovery.pid,
+                expected_workspace.display()
+            )));
         }
     };
     if !active.is_empty() {
         return Err(
-            anyhow::Error::new(haarness_server::remote::ProjectBusy).context(format!(
+            anyhow::Error::new(busy).context(format!(
                 "Haarness server {} needs an upgrade ({reason}) but still owns {} active turn(s); wait for them to finish or stop it explicitly with `haarness --workspace '{}' serve --stop`",
                 live.discovery.pid,
                 active.len(),
@@ -10901,10 +10912,17 @@ mod tests {
             updated_at: now,
         }])
         .unwrap();
-        // First a server that is working, then one whose activity is unknown.
+        // A server that is working, one whose activity is unknown, one too
+        // busy to say in time, and a server of this build that is working
+        // with the other project configuration setting.
         let server = tokio::spawn(async move {
             let mut requests = Vec::new();
-            for (status, body) in [("200 OK", running.as_str()), ("404 Not Found", "{}")] {
+            for (status, body, delay) in [
+                ("200 OK", running.as_str(), 0),
+                ("404 Not Found", "{}", 0),
+                ("200 OK", "[]", 1500),
+                ("200 OK", running.as_str(), 0),
+            ] {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
                 let mut chunk = [0_u8; 1024];
@@ -10912,11 +10930,12 @@ mod tests {
                     let read = socket.read(&mut chunk).await.unwrap();
                     request.extend_from_slice(&chunk[..read]);
                 }
+                tokio::time::sleep(Duration::from_millis(delay)).await;
                 let response = format!(
                     "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
                 );
-                socket.write_all(response.as_bytes()).await.unwrap();
+                let _ = socket.write_all(response.as_bytes()).await;
                 requests.push(String::from_utf8(request).unwrap());
             }
             requests
@@ -10925,23 +10944,36 @@ mod tests {
             WORKSPACE_HISTORY_CAPABILITY.into(),
             PTY_CAPABILITY.into(),
         ]);
-        for _ in 0..2 {
+        let this_build = RuntimeDiscovery {
+            executable_fingerprint: current_executable_fingerprint().ok(),
+            ..discovery.clone()
+        };
+        let other_build = (
+            &discovery,
+            "server executable differs from this client build",
+            haarness_server::remote::ProjectBusy::OtherBuild,
+        );
+        let other_setting = (
+            &this_build,
+            "project configuration setting changed",
+            haarness_server::remote::ProjectBusy::OtherSetting,
+        );
+        for (live, reason, busy) in [other_build, other_build, other_build, other_setting] {
             let error = replace_incompatible_workspace_server(
                 &paths,
                 &workspace,
                 LiveWorkspaceServer {
-                    discovery: discovery.clone(),
+                    discovery: live.clone(),
                     info: info.clone(),
                 },
-                "server executable differs from this client build",
+                reason,
             )
             .await
             .unwrap_err();
             // The host gateway answers remote clients from the marker alone.
-            assert!(
-                error
-                    .downcast_ref::<haarness_server::remote::ProjectBusy>()
-                    .is_some(),
+            assert_eq!(
+                error.downcast_ref::<haarness_server::remote::ProjectBusy>(),
+                Some(&busy),
                 "{error:#}"
             );
             // The person at the computer still gets the pid and the command.

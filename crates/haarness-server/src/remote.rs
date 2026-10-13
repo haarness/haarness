@@ -43,19 +43,32 @@ pub struct WorkspaceTarget {
     pub url: String,
     pub token: String,
 }
-/// A project whose server another Haarness build started cannot be replaced
-/// while that server is still working. Hosts return this (as the error or
-/// its source) so the gateway can say so in plain words, without the pid and
-/// shell command a person at the computer gets.
+/// A project's server that the host would have to replace cannot be while it
+/// is still working, or while it cannot tell whether it is. Hosts return this
+/// (as the error or its source) so the gateway can say so in plain words,
+/// without the pid and shell command a person at the computer gets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProjectBusy;
+pub enum ProjectBusy {
+    /// Another Haarness build started the server.
+    OtherBuild,
+    /// The server runs with the other project configuration setting.
+    OtherSetting,
+}
 impl ProjectBusy {
     pub const CODE: &'static str = "project_busy";
     pub const MESSAGE: &'static str = "This project is busy on a different version of Haarness. Open it on the computer, or wait until its work finishes.";
+    pub const SETTING_MESSAGE: &'static str = "This project is busy with a different project configuration setting. Open it on the computer, or wait until its work finishes.";
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::OtherBuild => Self::MESSAGE,
+            Self::OtherSetting => Self::SETTING_MESSAGE,
+        }
+    }
 }
 impl std::fmt::Display for ProjectBusy {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(Self::MESSAGE)
+        formatter.write_str(self.message())
     }
 }
 impl std::error::Error for ProjectBusy {}
@@ -111,8 +124,8 @@ pub fn routes(
         })
 }
 fn failure(error: anyhow::Error) -> Response {
-    if error.downcast_ref::<ProjectBusy>().is_some() {
-        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": {"code":ProjectBusy::CODE, "message":ProjectBusy::MESSAGE, "retryable":true}}))).into_response();
+    if let Some(busy) = error.downcast_ref::<ProjectBusy>() {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": {"code":ProjectBusy::CODE, "message":busy.message(), "retryable":true}}))).into_response();
     }
     (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": {"code":"remote_project", "message":error.to_string(), "retryable":false}}))).into_response()
 }
@@ -305,10 +318,13 @@ mod tests {
     use super::*;
     use tower::ServiceExt as _;
 
-    /// A host whose project runs on another Haarness build that is still working.
+    /// A host whose project's server is still working and would have to be
+    /// replaced: another Haarness build runs it, or it runs with the other
+    /// project configuration setting.
     struct Busy {
         upstream: String,
         closed: std::sync::Mutex<Vec<String>>,
+        busy: std::sync::Mutex<ProjectBusy>,
     }
     #[async_trait::async_trait]
     impl WorkspaceHost for Busy {
@@ -330,7 +346,7 @@ mod tests {
             Ok(())
         }
         async fn target(&self, _: String) -> anyhow::Result<WorkspaceTarget> {
-            Err(anyhow::Error::new(ProjectBusy).context(
+            Err(anyhow::Error::new(*self.busy.lock().unwrap()).context(
                 "Haarness server 4242 needs an upgrade (server executable differs from this client build) but still owns 1 active turn(s); wait for them to finish or stop it explicitly with `haarness --workspace '/private/project' serve --stop`",
             ))
         }
@@ -381,6 +397,7 @@ mod tests {
         let host = Arc::new(Busy {
             upstream,
             closed: Default::default(),
+            busy: std::sync::Mutex::new(ProjectBusy::OtherBuild),
         });
         let router = routes(host.clone(), tokio_util::sync::CancellationToken::new());
 
@@ -400,6 +417,18 @@ mod tests {
             !text.contains("4242") && !text.contains("serve --stop"),
             "{text}"
         );
+        // A server of this build, busy with the other project configuration
+        // setting, is not said to be another version.
+        *host.busy.lock().unwrap() = ProjectBusy::OtherSetting;
+        let (status, body) =
+            send(&router, "POST", "/v1/host/workspaces/w1/v1/permissions/p1").await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body,
+            serde_json::json!({"error": {"code": "project_busy", "message": ProjectBusy::SETTING_MESSAGE, "retryable": true}})
+        );
+        let (status, _) = send(&router, "GET", "/v1/host/workspaces/w1/v1/threads").await;
+        assert_eq!(status, StatusCode::OK, "reads still reach it");
 
         // Other host failures keep their code and words.
         let (status, body) = send(&router, "GET", "/v1/host/directories").await;
