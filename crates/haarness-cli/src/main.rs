@@ -2143,7 +2143,9 @@ fn agents_command(
     for agent in layers.agents {
         if let Some(profile) = profiles.iter_mut().find(|profile| profile.id == agent.id) {
             profile.description = agent.description;
-            profile.mode = agent.mode;
+            if agent.mode.is_some() {
+                profile.mode = agent.mode;
+            }
             profile.model = agent.model;
         } else {
             profiles.push(haarness_protocol::AgentProfile {
@@ -2152,7 +2154,7 @@ fn agents_command(
                 description: agent.description,
                 hidden: agent.hidden,
                 max_subagents: 4,
-                mode: agent.mode,
+                mode: Some(agent.mode.unwrap_or_else(|| "all".into())),
                 model: agent.model,
             });
         }
