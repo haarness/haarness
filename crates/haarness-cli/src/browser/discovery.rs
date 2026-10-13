@@ -348,7 +348,12 @@ fn judge(record: &Record, info: Info) -> Verdict {
 enum State {
     Live(Server),
     Rejected,
-    Waiting { backoff: Backoff, retry_at: Instant },
+    Waiting {
+        backoff: Backoff,
+        retry_at: Instant,
+        /// When this record was first asked without an answer.
+        since: Instant,
+    },
 }
 
 struct Entry {
@@ -429,16 +434,20 @@ impl Discovery {
                     State::Rejected
                 }
                 Verdict::Unreachable(reason) => {
-                    let mut backoff = match self.entries.remove(&record.file) {
+                    let (mut backoff, since) = match self.entries.remove(&record.file) {
                         Some(Entry {
                             key: previous,
-                            state: State::Waiting { backoff, .. },
-                        }) if previous == key => backoff,
-                        _ => Backoff::new(self.pacing),
+                            state: State::Waiting { backoff, since, .. },
+                        }) if previous == key => (backoff, since),
+                        _ => (Backoff::new(self.pacing), now),
                     };
                     tracing::debug!(record = %record.file.display(), %reason, "Haarness server not reachable yet");
                     let retry_at = Instant::now() + backoff.wait(Link::Failed);
-                    State::Waiting { backoff, retry_at }
+                    State::Waiting {
+                        backoff,
+                        retry_at,
+                        since,
+                    }
                 }
             };
             self.entries
@@ -460,6 +469,14 @@ impl Discovery {
     pub(crate) fn forget(&mut self, id: &str) {
         self.entries
             .retain(|_, entry| !matches!(&entry.state, State::Live(server) if server.id == id));
+    }
+
+    /// When each server that has not answered yet was first asked.
+    pub(crate) fn waiting_since(&self) -> impl Iterator<Item = Instant> + '_ {
+        self.entries.values().filter_map(|entry| match entry.state {
+            State::Waiting { since, .. } => Some(since),
+            _ => None,
+        })
     }
 
     /// When a server that did not answer is next worth asking.

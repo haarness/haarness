@@ -8916,9 +8916,14 @@ impl Paths {
         self.config.parent().expect("config file has parent")
     }
 
+    /// The file that lists the registered workspaces.
+    fn workspace_registry(&self) -> PathBuf {
+        self.data.join("workspaces.json")
+    }
+
     fn workspace_manager(&self) -> Result<WorkspaceManager> {
         WorkspaceManager::new(
-            self.data.join("workspaces.json"),
+            self.workspace_registry(),
             self.data.join("worktrees"),
             self.cache.join("workspaces"),
         )

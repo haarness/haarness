@@ -133,7 +133,8 @@ pub(crate) struct Timing {
     /// How often the servers on this computer are looked for.
     pub(crate) scan: Duration,
     /// How long the first snapshot of a connection waits for the servers
-    /// found at its start; a partial one would resolve their items in Cloud.
+    /// found at its start, including ones that are starting and have not
+    /// answered yet; a partial one would resolve their items in Cloud.
     pub(crate) first: Duration,
 }
 
@@ -148,26 +149,42 @@ impl Default for Timing {
     }
 }
 
-/// What a connector keeps between its connections: where each server's
-/// events were read up to, the finished turns still to check, and the ones
-/// that finished, so a reconnect (OAuth connectors reconnect every ten
-/// minutes) misses none and reports none twice.
+/// What a connector keeps of a server it stopped following (its project was
+/// closed for remote access, or a published chat's server was replaced), so
+/// following it again misses nothing and reports nothing twice.
 #[derive(Clone, Debug, Default)]
 struct Remembered {
     cursor: Option<u64>,
     settling: Vec<Turn>,
     finished: Vec<Done>,
+    /// Root turns that ran when it was last read.
+    running: HashSet<TurnId>,
 }
 
 /// By server instance.
 type Memory = Arc<Mutex<HashMap<String, Remembered>>>;
 
+/// This build's executable fingerprint as it is now.
+pub(crate) type Fingerprint = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
 pub(crate) struct Context {
+    setup: Setup,
+    /// Started by the first connection whose Cloud stores attention and kept
+    /// for the rest of the run: it keeps reading the servers while Cloud is
+    /// unreachable, so a turn that ends meanwhile is reported on reconnect.
+    watcher: Mutex<Option<Watcher>>,
+}
+
+/// What the watcher works with. It holds no `Context`, so the watcher stops
+/// with the connector that owns the context.
+#[derive(Clone)]
+struct Setup {
     paths: Paths,
     trust: bool,
-    /// This build's executable: other project servers started by another one
-    /// are replaced, not reused, when Cloud routes to them.
-    executable: Option<String>,
+    /// This build's executable as it is now. An in-place upgrade changes it
+    /// while the connector runs, and the host gateway compares each server
+    /// with the executable on disk at every request.
+    executable: Fingerprint,
     timing: Timing,
     memory: Memory,
 }
@@ -176,13 +193,72 @@ impl Context {
     /// For the connector of the workspace `paths` is scoped to, started with
     /// this project configuration setting.
     pub(crate) fn new(paths: &Paths, trust: bool, timing: Timing) -> Arc<Self> {
-        Arc::new(Self {
-            paths: paths.clone(),
+        Self::with_executable(
+            paths,
             trust,
-            executable: super::current_executable_fingerprint().ok(),
             timing,
-            memory: Arc::default(),
+            Arc::new(|| super::current_executable_fingerprint().ok()),
+        )
+    }
+
+    /// As `new`, comparing servers with `executable` (tests replace the build).
+    pub(crate) fn with_executable(
+        paths: &Paths,
+        trust: bool,
+        timing: Timing,
+        executable: Fingerprint,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            setup: Setup {
+                paths: paths.clone(),
+                trust,
+                executable,
+                timing,
+                memory: Arc::default(),
+            },
+            watcher: Mutex::new(None),
         })
+    }
+
+    /// The board the watcher for `scope` publishes, starting the watcher
+    /// unless it runs. A published chat whose server moved (it was replaced)
+    /// is followed afresh.
+    fn board(&self, scope: Scope) -> Option<BoardReceiver> {
+        let chat = match &scope {
+            Scope::Host => None,
+            Scope::Chat { url, token, .. } => Some((Url::parse(url).ok()?, token.clone())),
+        };
+        let mut watcher = self.watcher.lock();
+        if let Some(running) = watcher.as_ref()
+            && running.chat == chat
+            && !running.task.0.is_finished()
+        {
+            return Some(running.board.clone());
+        }
+        let (publish, board) = tokio::sync::watch::channel(Board::default());
+        let setup = self.setup.clone();
+        let task = match (scope, chat.clone()) {
+            (
+                Scope::Chat {
+                    project, thread, ..
+                },
+                Some((base, token)),
+            ) => tokio::spawn(follow_chat(
+                setup,
+                base,
+                token,
+                project,
+                ThreadId(thread),
+                publish,
+            )),
+            _ => tokio::spawn(follow_host(setup, publish)),
+        };
+        *watcher = Some(Watcher {
+            chat,
+            board: board.clone(),
+            task: AbortTask(task),
+        });
+        Some(board)
     }
 }
 
@@ -199,91 +275,87 @@ pub(crate) enum Scope {
     },
 }
 
-/// Report attention over one relay connection until it ends: the first
-/// snapshot as soon as every server found at the start has answered (even
-/// when nothing waits, so Cloud resolves what an earlier connection left),
-/// then one snapshot per change, at most every `debounce`.
-pub(crate) async fn watch(context: Arc<Context>, scope: Scope, send: mpsc::Sender<Frame>) {
-    let timing = context.timing;
-    let (updates, mut received) = mpsc::channel(64);
-    let mut watched = HashMap::new();
-    let mut discovery = Discovery::new(vec![context.paths.cache.clone()], discovery::http_client());
-    let host = matches!(scope, Scope::Host);
-    match scope {
-        Scope::Host => {
-            context.rescan(&mut discovery, &mut watched, &updates).await;
-        }
-        Scope::Chat {
-            url,
-            token,
-            project,
-            thread,
-        } => {
-            let Ok(base) = Url::parse(&url) else { return };
-            let paths = context.paths.clone();
-            let id = project.clone();
-            let name = tokio::task::spawn_blocking(move || {
-                paths
-                    .workspace_manager()
-                    .and_then(|manager| Ok(manager.get(&id)?.name))
-            })
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default();
-            let chat = ThreadId(thread);
-            let daemon = Daemon::new(base, token, Some(chat));
-            let key = String::from("chat");
-            let follower = follow(
-                daemon,
-                Route::Direct,
-                context.memory.clone(),
-                timing.settle,
-                key.clone(),
-                updates.clone(),
-            );
-            watched.insert(
-                key,
-                Watched {
-                    project: Project::new(project, &name, Some(chat)),
-                    view: None,
-                    _task: AbortTask(tokio::spawn(follower)),
-                },
-            );
-        }
+/// The servers' follower, which outlives connections.
+struct Watcher {
+    /// The published chat's server (address and token), or None for every
+    /// project.
+    chat: Option<(Url, String)>,
+    board: BoardReceiver,
+    task: AbortTask,
+}
+
+type BoardReceiver = tokio::sync::watch::Receiver<Board>;
+
+/// Every followed server's part of the next snapshot, as the watcher last
+/// saw it.
+#[derive(Clone, Default)]
+struct Board {
+    /// The running servers were matched to their projects at least once.
+    /// Before that nothing is known, not even that nothing waits.
+    scanned: bool,
+    /// Every server found was matched and every one that is starting has
+    /// answered, as far as a connection's first snapshot waits for them.
+    ready: bool,
+    /// None until that server has answered once.
+    servers: Vec<(Project, Option<View>)>,
+}
+
+impl Board {
+    /// Whether a connection's first snapshot can go out: a partial one would
+    /// resolve the missing servers' items in Cloud.
+    fn loaded(&self) -> bool {
+        self.ready && self.servers.iter().all(|(_, view)| view.is_some())
     }
+
+    fn snapshot(&self, now: DateTime<Utc>) -> Snapshot {
+        snapshot(
+            self.servers
+                .iter()
+                .filter_map(|(project, view)| Some((project, view.as_ref()?))),
+            now,
+        )
+    }
+}
+
+/// Report attention over one relay connection until it ends: the first
+/// snapshot as soon as every server found has answered (even when nothing
+/// waits, so Cloud resolves what an earlier connection left), then one
+/// snapshot per change, at most every `debounce`.
+pub(crate) async fn watch(context: Arc<Context>, scope: Scope, send: mpsc::Sender<Frame>) {
+    let timing = context.setup.timing;
+    let Some(mut board) = context.board(scope) else {
+        return;
+    };
     let start = Instant::now();
     let mut outbox = Outbox::default();
     let mut flush_at = Some(start);
-    let mut scan = tokio::time::interval_at(start + timing.scan, timing.scan);
-    scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            _ = scan.tick(), if host => {
-                if context.rescan(&mut discovery, &mut watched, &updates).await {
-                    flush_at.get_or_insert(Instant::now() + timing.debounce);
+            changed = board.changed() => {
+                if changed.is_err() {
+                    return;
                 }
-            }
-            Some((key, view)) = received.recv() => {
-                let Some(entry) = watched.get_mut(&key) else { continue };
-                entry.view = Some(view);
-                if outbox.first() && watched.values().all(|entry| entry.view.is_some()) {
+                if outbox.first() && board.borrow().loaded() {
                     flush_at = Some(Instant::now());
                 } else {
                     flush_at.get_or_insert(Instant::now() + timing.debounce);
                 }
             }
             () = tokio::time::sleep_until(flush_at.unwrap_or(start)), if flush_at.is_some() => {
-                let loaded = watched.values().all(|entry| entry.view.is_some());
-                if outbox.first() && !loaded && Instant::now() < start + timing.first {
-                    flush_at = Some(start + timing.first);
-                    continue;
+                let current = board.borrow_and_update().clone();
+                if outbox.first() && !current.loaded() {
+                    if !current.scanned {
+                        // The board's next change brings the first match.
+                        flush_at = None;
+                        continue;
+                    }
+                    if Instant::now() < start + timing.first {
+                        flush_at = Some(start + timing.first);
+                        continue;
+                    }
                 }
                 flush_at = None;
-                let views = watched
-                    .values()
-                    .filter_map(|entry| Some((&entry.project, entry.view.as_ref()?)));
-                if let Some(frame) = outbox.frame(snapshot(views, Utc::now()))
+                if let Some(frame) = outbox.frame(current.snapshot(Utc::now()))
                     && send.send(frame).await.is_err()
                 {
                     return;
@@ -293,74 +365,333 @@ pub(crate) async fn watch(context: Arc<Context>, scope: Scope, send: mpsc::Sende
     }
 }
 
+/// Follow every project server on this computer that runs, for as long as
+/// the connector runs.
+async fn follow_host(setup: Setup, publish: tokio::sync::watch::Sender<Board>) {
+    let timing = setup.timing;
+    let (updates, mut received) = mpsc::channel(64);
+    let mut discovery = Discovery::new(vec![setup.paths.cache.clone()], discovery::http_client());
+    let mut projects = Projects::new(setup.paths.clone());
+    let mut watching = Watching::new(publish, setup.executable.clone());
+    let mut servers = Vec::new();
+    let mut next_scan = Instant::now();
+    loop {
+        // A server that did not answer yet is asked again once its backoff
+        // passed, not only at the next scan.
+        let wake = discovery
+            .next_retry()
+            .map_or(next_scan, |retry| retry.min(next_scan));
+        tokio::select! {
+            () = tokio::time::sleep_until(wake) => {
+                servers = discovery.scan().await;
+                next_scan = Instant::now() + timing.scan;
+                // A server stays found until its record goes or its process
+                // ends; only then is what it was read up to forgotten.
+                setup
+                    .memory
+                    .lock()
+                    .retain(|instance, _| servers.iter().any(|server| &server.id == instance));
+                watching.forget_gone(&servers);
+                watching.refresh_executable();
+                projects.want(&servers);
+            }
+            matched = projects.finished(), if projects.busy() => {
+                if let Some(live) = matched {
+                    watching.follow(live, &servers, &setup, &updates);
+                }
+            }
+            Some((key, view)) = received.recv() => watching.update(&key, view),
+        }
+        let starting = discovery
+            .waiting_since()
+            .any(|since| since.elapsed() < timing.first);
+        watching.publish(!projects.busy() && !starting);
+    }
+}
+
+/// Follow one published chat's tree on the connector's own server.
+async fn follow_chat(
+    setup: Setup,
+    base: Url,
+    token: String,
+    project: String,
+    chat: ThreadId,
+    publish: tokio::sync::watch::Sender<Board>,
+) {
+    let paths = setup.paths.clone();
+    let id = project.clone();
+    let lookup = tokio::task::spawn_blocking(move || {
+        Ok::<_, anyhow::Error>(
+            paths
+                .workspace_manager()?
+                .registered()?
+                .into_iter()
+                .find(|workspace| workspace.id == id)
+                .map(|workspace| workspace.name),
+        )
+    });
+    // A registry that cannot be read in time names the project by its id.
+    let name = tokio::time::timeout(REGISTRY_TIMEOUT, lookup)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .and_then(Result::ok)
+        .flatten()
+        .unwrap_or_default();
+    let (updates, mut received) = mpsc::channel(64);
+    let mut watching = Watching::new(publish, setup.executable.clone());
+    let key = String::from("chat");
+    let follower = follow(
+        Daemon::new(base, token, Some(chat)),
+        setup.memory.clone(),
+        setup.timing.settle,
+        key.clone(),
+        updates,
+    );
+    watching.watched.insert(
+        key,
+        Watched {
+            project: Project::new(project, &name, Some(chat)),
+            route: Route::Direct,
+            view: None,
+            _task: AbortTask(tokio::spawn(follower)),
+        },
+    );
+    watching.scanned = true;
+    watching.publish(true);
+    while let Some((key, view)) = received.recv().await {
+        watching.update(&key, view);
+        watching.publish(true);
+    }
+}
+
 struct Watched {
     project: Project,
+    route: Route,
     /// None until the server has answered once.
     view: Option<View>,
     _task: AbortTask,
 }
 
-impl Context {
-    /// Follow the project servers that run now and stop following the ones
-    /// that are gone. True when that changed what is followed.
-    async fn rescan(
-        &self,
-        discovery: &mut Discovery,
-        watched: &mut HashMap<String, Watched>,
+/// The servers followed, published to the connections as a `Board` when
+/// something changed.
+struct Watching {
+    watched: HashMap<String, Watched>,
+    publish: tokio::sync::watch::Sender<Board>,
+    fingerprint: Fingerprint,
+    /// What `fingerprint` said at the last scan.
+    executable: Option<String>,
+    scanned: bool,
+    ready: bool,
+    /// Changed since the last publish.
+    dirty: bool,
+}
+
+impl Watching {
+    fn new(publish: tokio::sync::watch::Sender<Board>, fingerprint: Fingerprint) -> Self {
+        Self {
+            watched: HashMap::new(),
+            publish,
+            executable: fingerprint(),
+            fingerprint,
+            scanned: false,
+            ready: false,
+            dirty: false,
+        }
+    }
+
+    fn update(&mut self, key: &str, view: View) {
+        if let Some(entry) = self.watched.get_mut(key) {
+            entry.view = Some(view);
+            self.dirty = true;
+        }
+    }
+
+    /// Look at this build's executable again: after an in-place upgrade,
+    /// the servers the old one started are the ones the gateway replaces.
+    fn refresh_executable(&mut self) {
+        let current = (self.fingerprint)();
+        if current != self.executable {
+            self.executable = current;
+            self.dirty = true;
+        }
+    }
+
+    /// Stop following the servers that are gone.
+    fn forget_gone(&mut self, servers: &[Server]) {
+        let before = self.watched.len();
+        self.watched
+            .retain(|key, _| servers.iter().any(|server| &server.id == key));
+        self.dirty |= self.watched.len() != before;
+    }
+
+    /// Follow the servers Cloud can reach now, of those still found, and
+    /// stop following the others.
+    fn follow(
+        &mut self,
+        live: Live,
+        servers: &[Server],
+        setup: &Setup,
         updates: &mpsc::Sender<(String, View)>,
-    ) -> bool {
-        let servers = discovery.scan().await;
-        let paths = self.paths.clone();
-        let registry = tokio::task::spawn_blocking(move || {
-            Ok::<_, anyhow::Error>((
-                paths.workspace_manager()?.list(None)?.workspaces,
-                super::remote::hidden_projects(&paths)?,
-            ))
-        })
-        .await;
-        // Unreadable for a moment (being rewritten): keep what is followed.
-        let Ok(Ok((workspaces, hidden))) = registry else {
-            return false;
-        };
-        let live = reachable(servers, &workspaces, &hidden);
-        self.memory
-            .lock()
-            .retain(|instance, _| live.iter().any(|(_, server)| &server.id == instance));
-        let before = watched.len();
-        watched.retain(|key, _| live.iter().any(|(_, server)| &server.id == key));
-        let mut changed = watched.len() != before;
+    ) {
+        let live: Vec<_> = live
+            .into_iter()
+            .filter(|(_, server)| servers.iter().any(|found| found.id == server.id))
+            .collect();
+        let before = self.watched.len();
+        self.watched
+            .retain(|key, _| live.iter().any(|(_, server)| &server.id == key));
+        self.dirty |= self.watched.len() != before || !self.scanned;
+        self.scanned = true;
         for (project, server) in live {
-            if watched.contains_key(&server.id) {
+            if let Some(entry) = self.watched.get_mut(&server.id) {
+                // Renamed meanwhile.
+                if entry.project != project {
+                    entry.project = project;
+                    self.dirty = true;
+                }
                 continue;
             }
-            let route = if self.paths.workspace_id.as_ref() == Some(&project.id) {
+            let route = if setup.paths.workspace_id.as_ref() == Some(&project.id) {
                 Route::Direct
             } else {
                 Route::Gateway {
                     record: server.record.discovery.clone(),
-                    trust: self.trust,
-                    executable: self.executable.clone(),
+                    trust: setup.trust,
                 }
             };
             let follower = follow(
                 Daemon::new(server.base.clone(), server.token.clone(), None),
-                route,
-                self.memory.clone(),
-                self.timing.settle,
+                setup.memory.clone(),
+                setup.timing.settle,
                 server.id.clone(),
                 updates.clone(),
             );
-            watched.insert(
+            self.watched.insert(
                 server.id,
                 Watched {
                     project,
+                    route,
                     view: None,
                     _task: AbortTask(tokio::spawn(follower)),
                 },
             );
-            changed = true;
+            self.dirty = true;
         }
-        changed
+    }
+
+    /// Publish the board when it changed. `ready` only once matched.
+    fn publish(&mut self, ready: bool) {
+        let ready = ready && self.scanned;
+        if !self.dirty && ready == self.ready {
+            return;
+        }
+        self.dirty = false;
+        self.ready = ready;
+        let executable = self.executable.as_deref();
+        let servers = self
+            .watched
+            .values()
+            .map(|entry| {
+                let view = entry.view.clone().map(|mut view| {
+                    view.reachable = entry.route.reaches(view.info.as_deref(), executable);
+                    view
+                });
+                (entry.project.clone(), view)
+            })
+            .collect();
+        self.publish.send_replace(Board {
+            scanned: self.scanned,
+            ready,
+            servers,
+        });
+    }
+}
+
+/// How long the project's name may take to read for a published chat.
+const REGISTRY_TIMEOUT: Duration = Duration::from_secs(5);
+/// How often the projects are matched again when nothing seems to change:
+/// a file's modification time can be too coarse to show a quick rewrite.
+const REMATCH: Duration = Duration::from_secs(30);
+
+/// A file's modification time and length.
+type Stamp = Option<(std::time::SystemTime, u64)>;
+
+fn stamp(path: &Path) -> Stamp {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
+/// Works out which project each running server serves, off the watcher's
+/// loop and only when the servers or the files it reads changed. It reads
+/// the registry as stored and resolves only running servers' folders, so an
+/// unrelated folder that is slow or offline costs nothing, and a read that
+/// hangs holds up only the next match, never the snapshots or the servers'
+/// updates. One read runs at a time.
+struct Projects {
+    paths: Paths,
+    /// The servers and files the last match was made from, and when.
+    basis: Option<(Vec<String>, [Stamp; 2], Instant)>,
+    job: Option<tokio::task::JoinHandle<Result<Live>>>,
+}
+
+/// The running servers Cloud can reach, each with its project.
+type Live = Vec<(Project, Server)>;
+
+impl Projects {
+    fn new(paths: Paths) -> Self {
+        Self {
+            paths,
+            basis: None,
+            job: None,
+        }
+    }
+
+    fn busy(&self) -> bool {
+        self.job.is_some()
+    }
+
+    /// Match these servers, unless the last match stands.
+    fn want(&mut self, servers: &[Server]) {
+        if self.job.is_some() {
+            // The next scan compares again once it ended.
+            return;
+        }
+        let mut ids: Vec<String> = servers.iter().map(|server| server.id.clone()).collect();
+        ids.sort();
+        let files = [
+            stamp(&self.paths.workspace_registry()),
+            stamp(&super::remote::hidden_projects_file(&self.paths)),
+        ];
+        if self.basis.as_ref().is_some_and(|(known, stamps, at)| {
+            *known == ids && *stamps == files && at.elapsed() < REMATCH
+        }) {
+            return;
+        }
+        self.basis = Some((ids, files, Instant::now()));
+        let paths = self.paths.clone();
+        let servers = servers.to_vec();
+        self.job = Some(tokio::task::spawn_blocking(move || {
+            let workspaces = paths.workspace_manager()?.registered()?;
+            let hidden = super::remote::hidden_projects(&paths)?;
+            Ok(reachable(servers, &workspaces, &hidden))
+        }));
+    }
+
+    /// The running match's result. None when it failed (a file being
+    /// rewritten): what is followed stays, and the next scan reads again.
+    async fn finished(&mut self) -> Option<Live> {
+        let Some(job) = self.job.as_mut() else {
+            return std::future::pending().await;
+        };
+        let result = job.await;
+        self.job = None;
+        if let Ok(Ok(live)) = result {
+            Some(live)
+        } else {
+            self.basis = None;
+            None
+        }
     }
 }
 
@@ -383,11 +714,7 @@ impl Project {
 /// The live servers Cloud can reach, each with the project it routes to: a
 /// registered workspace (a record's folder is its workspace id) that is not
 /// closed for remote access and that the server really serves.
-fn reachable(
-    servers: Vec<Server>,
-    workspaces: &[WorkspaceInfo],
-    hidden: &HashSet<String>,
-) -> Vec<(Project, Server)> {
+fn reachable(servers: Vec<Server>, workspaces: &[WorkspaceInfo], hidden: &HashSet<String>) -> Live {
     servers
         .into_iter()
         .filter_map(|server| {
@@ -416,19 +743,18 @@ enum Route {
     Gateway {
         record: RuntimeDiscovery,
         trust: bool,
-        executable: Option<String>,
     },
 }
 
 impl Route {
-    fn reaches(&self, info: &ServerInfo) -> bool {
+    /// Whether Cloud can answer the server that said `info`, while this
+    /// build's executable is `executable`.
+    fn reaches(&self, info: Option<&ServerInfo>, executable: Option<&str>) -> bool {
         match self {
             Self::Direct => true,
-            Self::Gateway {
-                record,
-                trust,
-                executable,
-            } => reused_as_is(record, info, *trust, executable.as_deref()),
+            Self::Gateway { record, trust } => {
+                info.is_some_and(|info| reused_as_is(record, info, *trust, executable))
+            }
         }
     }
 }
@@ -459,6 +785,9 @@ fn reused_as_is(
 /// One server's part of the snapshot, as its follower last saw it.
 #[derive(Clone, Debug, Default)]
 struct View {
+    /// What the server said about itself when it was first asked.
+    info: Option<Arc<ServerInfo>>,
+    /// Set by the watcher, which knows the build Cloud's requests reach.
     reachable: bool,
     permissions: Vec<PendingPermissionInfo>,
     questions: Vec<PendingQuestionInfo>,
@@ -681,6 +1010,15 @@ impl Daemon {
             .await?)
     }
 
+    /// As `get`, with None for something the server does not have (any more).
+    async fn find<T: DeserializeOwned>(&self, path: &str) -> Result<Option<T>> {
+        let response = self.request(path)?.timeout(REQUEST_TIMEOUT).send().await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Some(response.error_for_status()?.json().await?))
+    }
+
     /// The event stream, resumed after `cursor` when there is one.
     async fn events(&self, cursor: Option<u64>) -> Result<reqwest::Response> {
         let mut request = self.request("events")?;
@@ -815,16 +1153,24 @@ where
     }
 }
 
-/// The finished turn of a chat a person started, not of a helper agent:
-/// the root of its conversation, or the published chat itself.
-fn finished_root_turn(envelope: &EventEnvelope, chat: Option<ThreadId>) -> Option<Turn> {
+/// The turn of a chat a person started, not of a helper agent: the root of
+/// its conversation, or the published chat itself.
+fn root_turn(envelope: &EventEnvelope, chat: Option<ThreadId>) -> Option<Turn> {
     let thread = envelope.thread_id?;
     let root = chat.or(envelope.root_thread_id)?;
     if thread != root {
         return None;
     }
-    let turn = serde_json::from_value::<Turn>(envelope.payload.clone()).ok()?;
-    matches!(turn.status, TurnStatus::Completed | TurnStatus::Failed).then_some(turn)
+    serde_json::from_value::<Turn>(envelope.payload.clone()).ok()
+}
+
+/// The finished turn of a chat a person started, when it completed or failed.
+fn finished_root_turn(envelope: &EventEnvelope, chat: Option<ThreadId>) -> Option<Turn> {
+    root_turn(envelope, chat).filter(finished)
+}
+
+fn finished(turn: &Turn) -> bool {
+    matches!(turn.status, TurnStatus::Completed | TurnStatus::Failed)
 }
 
 /// A finished root turn, checked once it had time to settle.
@@ -880,6 +1226,13 @@ struct Follower {
     /// Finished root turns still settling, by chat. A chat's next finished
     /// turn replaces its last: only that one can be where the chat stopped.
     settling: HashMap<ThreadId, Turn>,
+    /// Root turns that run, as far as the events read tell. When events were
+    /// missed, the ones no longer running are asked about: their end may be
+    /// among what was missed.
+    running: HashSet<TurnId>,
+    /// Events may have been missed (the server's buffer moved past the
+    /// cursor, or this server is followed afresh): ask which turns run.
+    missed: bool,
 }
 
 impl Follower {
@@ -913,6 +1266,46 @@ impl Follower {
         Ok(())
     }
 
+    /// Check the root turns that ended while their events were missed, and
+    /// note the ones that run now, whose end a later gap could hide.
+    async fn reconcile(
+        &mut self,
+        settle_for: Duration,
+        settling: &mut JoinSet<Settled>,
+    ) -> Result<()> {
+        let active: Vec<Turn> = self.daemon.get("turns/active").await?;
+        let ids: Vec<TurnId> = self.running.iter().copied().collect();
+        for id in ids {
+            if active.iter().any(|turn| turn.id == id) {
+                continue;
+            }
+            let turn = self.daemon.find::<Turn>(&format!("turns/{id}")).await?;
+            self.running.remove(&id);
+            if let Some(turn) = turn.filter(finished) {
+                self.check(turn, settle_for, settling);
+            }
+        }
+        for turn in active {
+            if self.running.contains(&turn.id) {
+                continue;
+            }
+            let root = match self.daemon.scope {
+                Some(chat) => turn.thread_id == chat,
+                None => self
+                    .daemon
+                    .find::<Thread>(&format!("threads/{}", turn.thread_id))
+                    .await?
+                    .is_some_and(|thread| thread.parent_id.is_none()),
+            };
+            if root {
+                self.running.insert(turn.id);
+            }
+        }
+        self.missed = false;
+        self.remember();
+        Ok(())
+    }
+
     fn read(
         &mut self,
         event: &Event,
@@ -920,11 +1313,24 @@ impl Follower {
         settling: &mut JoinSet<Settled>,
     ) -> Step {
         let step = match event.kind.as_str() {
-            "resync_required"
-            | "permission.requested"
+            "resync_required" => {
+                // What was missed may hold a root turn's end.
+                self.missed = true;
+                Step::Refresh
+            }
+            "permission.requested"
             | "permission.resolved"
             | "question.requested"
             | "question.resolved" => Step::Refresh,
+            "turn.started" => {
+                if let Some(turn) = event
+                    .envelope()
+                    .and_then(|envelope| root_turn(&envelope, self.daemon.scope))
+                {
+                    self.running.insert(turn.id);
+                }
+                Step::Nothing
+            }
             "thread.updated" => {
                 let renamed = event
                     .envelope()
@@ -948,9 +1354,12 @@ impl Follower {
             "turn.finished" => {
                 if let Some(turn) = event
                     .envelope()
-                    .and_then(|envelope| finished_root_turn(&envelope, self.daemon.scope))
+                    .and_then(|envelope| root_turn(&envelope, self.daemon.scope))
                 {
-                    self.check(turn, settle_for, settling);
+                    self.running.remove(&turn.id);
+                    if finished(&turn) {
+                        self.check(turn, settle_for, settling);
+                    }
                 }
                 // Its prompts were answered or withdrawn.
                 Step::Refresh
@@ -1046,6 +1455,7 @@ impl Follower {
             remembered.cursor = self.cursor;
             remembered.settling = self.settling.values().cloned().collect();
             remembered.finished.clone_from(&self.view.finished);
+            remembered.running.clone_from(&self.running);
         }
     }
 }
@@ -1055,7 +1465,6 @@ impl Follower {
 /// change goes to the watcher as the whole view.
 async fn follow(
     daemon: Daemon,
-    route: Route,
     memory: Memory,
     settle_for: Duration,
     key: String,
@@ -1082,7 +1491,6 @@ async fn follow(
         instance,
         memory,
         view: View {
-            reachable: route.reaches(&info),
             finished: remembered.finished,
             ..View::default()
         },
@@ -1093,7 +1501,10 @@ async fn follow(
             .cursor
             .or((info.event_cursor > 0).then_some(info.event_cursor)),
         settling: HashMap::new(),
+        running: remembered.running,
+        missed: true,
     };
+    follower.view.info = Some(Arc::new(info));
     let mut settling = JoinSet::new();
     for turn in remembered.settling {
         follower.check(turn, settle_for, &mut settling);
@@ -1152,11 +1563,18 @@ async fn follow(
                     refresh_at = None;
                     if follower.refresh().await.is_err() {
                         refresh_at = Some(Instant::now() + refreshes.wait(Link::Failed));
+                        continue;
+                    }
+                    if follower.missed
+                        && follower.reconcile(settle_for, &mut settling).await.is_err()
+                    {
+                        // What waits is reported now; the turns are asked again.
+                        refresh_at = Some(Instant::now() + refreshes.wait(Link::Failed));
                     } else {
                         refreshes = Backoff::new(discovery::retry_pacing());
-                        if !report(&follower).await {
-                            return;
-                        }
+                    }
+                    if !report(&follower).await {
+                        return;
                     }
                 }
             }
@@ -1235,7 +1653,7 @@ mod tests {
             ],
             questions: vec![question("q-1", child, Some(root), true, 3)],
             chats: HashMap::from([(root, chat("Fix login"))]),
-            finished: vec![],
+            ..View::default()
         };
         let snapshot = snapshot([(&project, &view)], at(10));
         let wire = serde_json::to_value(Frame::Attention {
@@ -1623,7 +2041,15 @@ mod tests {
             false,
             this
         ));
-        assert!(Route::Direct.reaches(&info("0", true)));
+        assert!(Route::Direct.reaches(Some(&info("0", true)), None));
+        assert!(
+            !Route::Gateway {
+                record: record(this, None),
+                trust: false
+            }
+            .reaches(None, this),
+            "a server that has not answered yet"
+        );
     }
 
     #[test]
