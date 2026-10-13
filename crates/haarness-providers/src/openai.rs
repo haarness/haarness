@@ -668,6 +668,7 @@ impl ModelProvider for OpenAiProvider {
         }
         request = request.json(&body);
         let response = request.send().await.map_err(crate::sse::transport_error)?;
+        let request_id = crate::request_id(response.headers());
         let mut events = json_stream(response, cancel.clone());
         Ok(Box::pin(try_stream! {
             // Reasoning streams as indexed parts, each a self-contained
@@ -724,7 +725,9 @@ impl ModelProvider for OpenAiProvider {
                     }
                     "response.completed" | "response.incomplete" => {
                         if let Some(usage) = response_usage(&event) { yield usage; }
-                        yield ProviderEvent::Finished { reason: event["response"]["incomplete_details"]["reason"].as_str().unwrap_or(if event["type"] == "response.completed" { "completed" } else { "incomplete" }).into() };
+                        let reason = event["response"]["incomplete_details"]["reason"].as_str().unwrap_or(if event["type"] == "response.completed" { "completed" } else { "incomplete" });
+                        crate::log_blocked_finish("openai", reason, request_id.as_deref(), event["response"]["id"].as_str());
+                        yield ProviderEvent::Finished { reason: reason.into() };
                     }
                     // A failed response can still have been billed.
                     "response.failed" | "error" => {
