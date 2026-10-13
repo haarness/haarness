@@ -743,8 +743,11 @@ impl Scheduler {
     pub fn render_systemd(&self, schedule: &Schedule) -> Result<(String, String)> {
         let args = self.runner_args(schedule, RunSource::SystemdUser);
         let timer_body = match &schedule.trigger {
+            // OnUnitActiveSec= alone never fires: it counts from the
+            // service's last activation, and a new timer has none.
+            // OnActiveSec= schedules the first run from the timer's start.
             Trigger::Interval { seconds } => {
-                format!("OnUnitActiveSec={seconds}s\nAccuracySec=1s")
+                format!("OnActiveSec={seconds}s\nOnUnitActiveSec={seconds}s\nAccuracySec=1s")
             }
             Trigger::Once { at } => format!("OnCalendar={}", at.format("%Y-%m-%d %H:%M:%S UTC")),
             Trigger::Cron { expression } => expand_cron(expression)?
@@ -1947,6 +1950,18 @@ mod tests {
         assert!(service.contains("schedule\" \"trigger"));
         assert!(timer.contains("OnCalendar=Mon *-*-* 9:15:00"));
         assert!(timer.contains("Persistent=true"));
+        // An interval timer needs a first run from its own start; repeating
+        // from the last run alone never begins.
+        let interval = Schedule {
+            trigger: Trigger::Interval { seconds: 300 },
+            ..schedule
+        };
+        let (_, timer) = scheduler.render_systemd(&interval).unwrap();
+        assert!(
+            timer.contains("[Timer]\nOnActiveSec=300s\nOnUnitActiveSec=300s\nAccuracySec=1s\n"),
+            "{timer}"
+        );
+        assert!(!timer.contains("OnCalendar="));
         fs::remove_dir_all(root).unwrap();
     }
 
