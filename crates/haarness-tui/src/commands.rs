@@ -366,6 +366,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         "Save and restore configuration profiles",
     ),
     command(
+        "marketplace",
+        &["market"],
+        "Browse, install and manage Haarness marketplace resources",
+    ),
+    command(
         "plugin",
         &["plugins"],
         "Manage and inspect Haarness plugins",
@@ -2457,6 +2462,18 @@ impl App {
                 self.open_management("sharing", &serde_json::json!({"action":"view"}), client)
                     .await?;
             }
+            "marketplace" => {
+                // The same server-authored pages as Desktop's Settings ›
+                // Marketplace: search, inspect, install, then installed resources.
+                let input = if arguments == "installed" {
+                    serde_json::json!({"action":"installed"})
+                } else {
+                    // The first page, searching for the text when there is one.
+                    serde_json::json!({"action":"view","q":arguments})
+                };
+                self.open_management("marketplace-ui", &input, client)
+                    .await?;
+            }
             "remote-control" => self.remote_control_command(arguments, client)?,
             "chrome" => self.chrome_command(arguments, client)?,
             "usage" => {
@@ -2806,8 +2823,17 @@ impl App {
                                 target,
                             })
                             .await?;
-                        self.notice =
-                            "Plugin updated · reload queued until active work is idle".into();
+                        self.notice = match action {
+                            "install" => "Plugin installed · reload queued until active work is idle",
+                            "enable" => "Plugin enabled · reload queued until active work is idle",
+                            "disable" => "Plugin disabled · reload queued until active work is idle",
+                            "remove" | "uninstall" => {
+                                "Plugin removed · reload queued until active work is idle"
+                            }
+                            "marketplace" => "Marketplace added · install its plugins with /plugin install <name>@<marketplace>",
+                            _ => "Plugin updated · reload queued until active work is idle",
+                        }
+                        .into();
                     }
                 }
             }

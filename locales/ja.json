@@ -2001,6 +2001,7 @@
   "Manage runtime hooks": "ランタイムフックを管理",
   "Save and restore configuration profiles": "設定プロファイルを保存・復元",
   "Manage and inspect Haarness plugins": "Haarness プラグインを管理・確認",
+  "Browse, install and manage Haarness marketplace resources": "Haarness マーケットプレイスのリソースを探す・インストール・管理",
   "Show discovered skills": "検出されたスキルを表示",
   "Browse/toggle tools · /tools lazy auto|always|off · /tools show|hide": "ツールを閲覧/切り替え · /tools lazy auto|always|off · /tools show|hide",
   "Show server and thread status": "サーバーとスレッドの状態を表示",

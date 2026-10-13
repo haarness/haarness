@@ -2001,6 +2001,7 @@
   "Manage runtime hooks": "管理运行时钩子",
   "Save and restore configuration profiles": "保存并恢复配置档案",
   "Manage and inspect Haarness plugins": "管理并查看 Haarness 插件",
+  "Browse, install and manage Haarness marketplace resources": "浏览、安装和管理 Haarness 市场资源",
   "Show discovered skills": "显示已发现的技能",
   "Browse/toggle tools · /tools lazy auto|always|off · /tools show|hide": "浏览/切换工具 · /tools lazy auto|always|off · /tools show|hide",
   "Show server and thread status": "显示服务器和对话状态",

@@ -2001,6 +2001,7 @@
   "Manage runtime hooks": "Manage runtime hooks",
   "Save and restore configuration profiles": "Save and restore configuration profiles",
   "Manage and inspect Haarness plugins": "Manage and inspect Haarness plugins",
+  "Browse, install and manage Haarness marketplace resources": "Browse, install and manage Haarness marketplace resources",
   "Show discovered skills": "Show discovered skills",
   "Browse/toggle tools · /tools lazy auto|always|off · /tools show|hide": "Browse/toggle tools · /tools lazy auto|always|off · /tools show|hide",
   "Show server and thread status": "Show server and thread status",

@@ -531,6 +531,40 @@ pub fn catalog(paths: &Paths, workspace: &Path, trust: bool) -> Result<serde_jso
     Ok(serde_json::json!(entries))
 }
 
+/// The npm root a marketplace install created for itself,
+/// `<data>/extensions/packages/<uuid>`, named by the receipt's package or entry path.
+pub(crate) fn marketplace_package_root(
+    paths: &Paths,
+    receipt: &serde_json::Value,
+) -> Option<PathBuf> {
+    let packages = paths.data.join("extensions/packages");
+    let installed = receipt["packageRoot"]
+        .as_str()
+        .or(receipt["path"].as_str())?;
+    let relative = Path::new(installed).strip_prefix(&packages).ok()?;
+    if relative
+        .components()
+        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    let first = relative.components().next()?.as_os_str().to_str()?;
+    uuid::Uuid::parse_str(first).ok()?;
+    Some(packages.join(first))
+}
+
+/// Uninstalling or replacing a marketplace extension deletes the package it
+/// installed; only the configuration entry used to go, leaving the code behind.
+pub(crate) fn remove_marketplace_package(paths: &Paths, receipt: &serde_json::Value) -> Result<()> {
+    if let Some(root) = marketplace_package_root(paths, receipt)
+        && root.is_dir()
+    {
+        haarness_profiles::check_path(&root)?;
+        std::fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+
 pub async fn marketplace_install(
     paths: &Paths,
     workspace: &Path,
@@ -573,107 +607,122 @@ pub async fn marketplace_install(
         // Compatibility with catalogs published before R2-backed npm artifacts.
         install_npm(paths, spec).await?
     };
-    // Verify the catalog's digest before executing the extension initializer.
-    let install_root = source
-        .ancestors()
-        .find(|p| p.join("bun.lock").is_file())
-        .context("Missing npm installation lock")?;
-    let package_root = install_root.join("node_modules").join(package_name);
-    let metadata: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(package_root.join("package.json"))?)?;
-    ensure!(
-        metadata["name"] == package_name && metadata["version"] == version,
-        "Installed package identity does not match marketplace version"
-    );
-    if archive.is_none() {
-        let lock_text = std::fs::read_to_string(install_root.join("bun.lock"))?;
-        let lock = jsonc_parser::parse_to_serde_value::<serde_json::Value>(
-            &lock_text,
-            &Default::default(),
-        )?;
-        let pinned = &lock["packages"][package_name];
+    // A package that fails any check below never stays installed.
+    let result = async {
+        // Verify the catalog's digest before executing the extension initializer.
+        let install_root = source
+            .ancestors()
+            .find(|p| p.join("bun.lock").is_file())
+            .context("Missing npm installation lock")?;
+        let package_root = install_root.join("node_modules").join(package_name);
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(package_root.join("package.json"))?)?;
         ensure!(
-            pinned.as_array().is_some_and(|items| items
-                .first()
-                .and_then(serde_json::Value::as_str)
-                == Some(spec)
-                && items.iter().any(|v| v == integrity)),
-            "Installed npm package does not match marketplace integrity"
+            metadata["name"] == package_name && metadata["version"] == version,
+            "Installed package identity does not match marketplace version"
         );
-    }
-    let path = scoped_config_path(paths, workspace, local);
-    let _lock = crate::desktop::editor_lock(&paths.data, "extensions")?;
-    let previous = std::fs::read(&path).ok();
-    let mut config = scoped_config(paths, workspace, local)?;
-    normalize_entries(&mut config, &path);
-    let mut enabled = true;
-    let mut options = input.get("options").cloned();
-    if let Some(old) = old {
-        let old_path = Path::new(old["path"].as_str().context("Invalid extension receipt")?);
-        let digest_path = Path::new(
-            old["packageRoot"]
-                .as_str()
-                .unwrap_or(old["path"].as_str().unwrap_or_default()),
-        );
-        ensure!(
-            digest_path.starts_with(paths.data.join("extensions/packages"))
-                && !digest_path
-                    .components()
-                    .any(|c| matches!(c, std::path::Component::ParentDir)),
-            "Invalid extension package root"
-        );
-        ensure!(
-            crate::marketplace::tree_digest(digest_path)? == old["installedDigest"],
-            "Extension was modified locally"
-        );
-        if let Some(entry) = config.entries.iter().find(|e| e.source == old_path) {
-            enabled = entry.enabled;
-            if options.is_none() {
-                options = Some(entry.options.clone());
+        if archive.is_none() {
+            let lock_text = std::fs::read_to_string(install_root.join("bun.lock"))?;
+            let lock = jsonc_parser::parse_to_serde_value::<serde_json::Value>(
+                &lock_text,
+                &jsonc_parser::ParseOptions::default(),
+            )?;
+            let pinned = &lock["packages"][package_name];
+            ensure!(
+                pinned.as_array().is_some_and(|items| items
+                    .first()
+                    .and_then(serde_json::Value::as_str)
+                    == Some(spec)
+                    && items.iter().any(|v| v == integrity)),
+                "Installed npm package does not match marketplace integrity"
+            );
+        }
+        let path = scoped_config_path(paths, workspace, local);
+        let _lock = crate::desktop::editor_lock(&paths.data, "extensions")?;
+        let previous = std::fs::read(&path).ok();
+        let mut config = scoped_config(paths, workspace, local)?;
+        normalize_entries(&mut config, &path);
+        let mut enabled = true;
+        let mut options = input.get("options").cloned();
+        if let Some(old) = old {
+            let old_path = Path::new(old["path"].as_str().context("Invalid extension receipt")?);
+            let digest_path = Path::new(
+                old["packageRoot"]
+                    .as_str()
+                    .unwrap_or(old["path"].as_str().unwrap_or_default()),
+            );
+            ensure!(
+                digest_path.starts_with(paths.data.join("extensions/packages"))
+                    && !digest_path
+                        .components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir)),
+                "Invalid extension package root"
+            );
+            ensure!(
+                crate::marketplace::tree_digest(digest_path)? == old["installedDigest"],
+                "Extension was modified locally"
+            );
+            if let Some(entry) = config.entries.iter().find(|e| e.source == old_path) {
+                enabled = entry.enabled;
+                if options.is_none() {
+                    options = Some(entry.options.clone());
+                }
             }
+            config.entries.retain(|e| e.source != old_path);
         }
-        config.entries.retain(|e| e.source != old_path);
+        let entry = Entry {
+            name: None,
+            source: source.clone(),
+            options: options.unwrap_or(json!({})),
+            enabled: true,
+        };
+        // Include inherited extensions when checking duplicate tools and names.
+        let mut validation = sources(paths, workspace, trust)?;
+        if let Some(old) = old {
+            validation
+                .entries
+                .retain(|e| Some(e.source.as_path()) != old["path"].as_str().map(Path::new));
+        }
+        validation.entries.push(entry.clone());
+        validation.enabled = true;
+        let loaded = Extensions::load(&validation, workspace).await?;
+        let name = loaded
+            .names()
+            .last()
+            .cloned()
+            .context("Extension did not register a name")?;
+        config.entries.push(Entry {
+            name: Some(name.clone()),
+            enabled,
+            ..entry
+        });
+        config.enabled = true;
+        let receipt = json!({"id":manifest["resource"]["id"],"kind":"extension","name":name,"publisher":manifest["resource"]["publisher"],"slug":manifest["resource"]["slug"],"scope":if local {"local"} else {"global"},"path":source,"packageRoot":package_root,"version":manifest["version"],"lock":manifest["lock"],"installedDigest":crate::marketplace::tree_digest(&package_root)?,"restartRequired":false});
+        save(&path, &config)?;
+        if let Err(error) =
+            haarness_profiles::write(receipt_file, &serde_json::to_vec_pretty(&receipt)?, true)
+        {
+            if let Some(bytes) = previous {
+                haarness_profiles::write(&path, &bytes, true)?;
+            } else {
+                std::fs::remove_file(&path)?;
+            }
+            return Err(error);
+        }
+        if let Some(old) = old
+            && marketplace_package_root(paths, old) != marketplace_package_root(paths, &receipt)
+        {
+            remove_marketplace_package(paths, old)?;
+        }
+        Ok(receipt)
     }
-    let entry = Entry {
-        name: None,
-        source: source.clone(),
-        options: options.unwrap_or(json!({})),
-        enabled: true,
-    };
-    // Include inherited extensions when checking duplicate tools and names.
-    let mut validation = sources(paths, workspace, trust)?;
-    if let Some(old) = old {
-        validation
-            .entries
-            .retain(|e| Some(e.source.as_path()) != old["path"].as_str().map(Path::new));
-    }
-    validation.entries.push(entry.clone());
-    validation.enabled = true;
-    let loaded = Extensions::load(&validation, workspace).await?;
-    let name = loaded
-        .names()
-        .last()
-        .cloned()
-        .context("Extension did not register a name")?;
-    config.entries.push(Entry {
-        name: Some(name.clone()),
-        enabled,
-        ..entry
-    });
-    config.enabled = true;
-    let receipt = json!({"id":manifest["resource"]["id"],"kind":"extension","name":name,"scope":if local {"local"} else {"global"},"path":source,"packageRoot":package_root,"version":manifest["version"],"lock":manifest["lock"],"installedDigest":crate::marketplace::tree_digest(&package_root)?,"restartRequired":false});
-    save(&path, &config)?;
-    if let Err(error) =
-        haarness_profiles::write(receipt_file, &serde_json::to_vec_pretty(&receipt)?, true)
+    .await;
+    if result.is_err()
+        && let Some(root) = marketplace_package_root(paths, &json!({ "path": source }))
     {
-        if let Some(bytes) = previous {
-            haarness_profiles::write(&path, &bytes, true)?;
-        } else {
-            std::fs::remove_file(&path)?;
-        }
-        return Err(error);
+        let _ = std::fs::remove_dir_all(root);
     }
-    Ok(receipt)
+    result
 }
 
 pub async fn manage(
