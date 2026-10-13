@@ -3,7 +3,11 @@ export function remoteProjectError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   if (/401|unauthori[sz]ed|authentication required/i.test(message))
     return "Couldn’t sign in. Check this server’s username and password in Settings.";
-  if (/active turn|still starting|different authentication/i.test(message))
+  if (
+    /active turn|still starting|different authentication|busy on a different version/i.test(
+      message,
+    )
+  )
     return "This project’s server is busy. Wait a moment and try again.";
   if (
     /incompatible|needs an upgrade|does not support remote project/i.test(
