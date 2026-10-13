@@ -206,8 +206,12 @@ impl ModelProvider for BedrockProvider {
         if cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
+        let request_id = crate::request_id(response.headers());
         let response: Value = response.json().await.map_err(crate::sse::transport_error)?;
         let events = bedrock_events(&response);
+        if let Some(ProviderEvent::Finished { reason }) = events.last() {
+            crate::log_blocked_finish(&self.instance.id, reason, request_id.as_deref(), None);
+        }
         Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
     }
 }
@@ -280,6 +284,24 @@ fn bedrock_request(request: ProviderRequest) -> CoreResult<Value> {
             }
         }
     }
+    // Converse wants user and assistant turns to alternate: parallel calls
+    // share one assistant turn, their results one user turn, and a prompt
+    // followed by its stored reminder or a steered message is one user turn.
+    let mut grouped: Vec<Value> = Vec::new();
+    for message in messages {
+        if let Some(previous) = grouped
+            .last_mut()
+            .filter(|previous| previous["role"] == message["role"])
+        {
+            previous["content"]
+                .as_array_mut()
+                .unwrap()
+                .extend(message["content"].as_array().unwrap().iter().cloned());
+        } else {
+            grouped.push(message);
+        }
+    }
+    let messages = grouped;
     let max_tokens = request
         .parameters
         .max_output_tokens
@@ -613,6 +635,82 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn converse_safety_stops_fail_the_turn_and_keep_partial_text() {
+        for stop in ["content_filtered", "guardrail_intervened"] {
+            let events = bedrock_events(&json!({
+                "output":{"message":{"content":[{"text":"Partial"}]}},
+                "usage":{"inputTokens":7,"outputTokens":1},
+                "stopReason":stop
+            }));
+            assert!(matches!(&events[0], ProviderEvent::TextDelta(text) if text == "Partial"));
+            let Some(ProviderEvent::Finished { reason }) = events.last() else {
+                panic!("Converse responses finish: {events:?}");
+            };
+            assert!(
+                matches!(
+                    ProviderEvent::finish_error(reason),
+                    Some(haarness_core::CoreError::ProviderBlocked(_))
+                ),
+                "{stop} must not read as a completed reply"
+            );
+        }
+        for stop in ["end_turn", "tool_use", "max_tokens", "stop_sequence"] {
+            assert!(ProviderEvent::finish_error(stop).is_none(), "{stop}");
+        }
+    }
+
+    #[test]
+    fn converse_turns_alternate_when_messages_of_one_role_follow_each_other() {
+        let text = |role: &str, content: &str| ProviderMessage::Text {
+            role: role.into(),
+            content: content.into(),
+        };
+        let call = |id: &str| ProviderMessage::ToolCall {
+            call_id: id.into(),
+            name: "read".into(),
+            arguments: json!({"path":id}),
+            provider_metadata: Value::Null,
+        };
+        let result = |id: &str| ProviderMessage::ToolResult {
+            call_id: id.into(),
+            name: "read".into(),
+            output: "ok".into(),
+            is_error: false,
+            attachments: Vec::new(),
+        };
+        let body = bedrock_request(ProviderRequest {
+            model: "test-model".into(),
+            system: "test".into(),
+            messages: vec![
+                text("user", "Read both"),
+                text(
+                    "user",
+                    "<system-reminder>\nToday's date is now 2026-10-14.\n</system-reminder>",
+                ),
+                call("a"),
+                call("b"),
+                result("a"),
+                result("b"),
+                text("assistant", "Done"),
+            ],
+            tools: Vec::new(),
+            reasoning_effort: None,
+            parameters: haarness_core::RequestParameters::default(),
+            output_schema: None,
+        })
+        .unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        let roles: Vec<_> = messages
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "user", "assistant"]);
+        assert_eq!(messages[0]["content"].as_array().unwrap().len(), 2);
+        assert_eq!(messages[1]["content"][1]["toolUse"]["toolUseId"], "b");
+        assert_eq!(messages[2]["content"][1]["toolResult"]["toolUseId"], "b");
     }
 
     #[test]

@@ -488,6 +488,7 @@
   "Show side panel": "Show side panel",
   "Show sidebar": "Show sidebar",
   "Show {name} panel": "Show {name} panel",
+  "The agent opened another page": "The agent opened another page",
   "Slash commands": "Slash commands",
   "Stop response": "Stop response",
   "Symbolic link": "Symbolic link",
@@ -1656,6 +1657,7 @@
   "reject": "reject",
   "answer": "answer",
   "always allows": "always allows",
+  "Leads to {path}": "Leads to {path}",
   "every file edit": "every file edit",
   "every shell command": "every shell command",
   "every file read": "every file read",
@@ -2404,5 +2406,9 @@
   "Chrome is turned off for this project.": "Chrome is turned off for this project.",
   "{category}: {decision} by default": "{category}: {decision} by default",
   "{category} on {origin}: {decision}": "{category} on {origin}: {decision}",
-  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page."
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.",
+  "The provider refused {name}, so it is left out of this chat from now on.": "The provider refused {name}, so it is left out of this chat from now on.",
+  "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.",
+  "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.",
+  "{name} is not an image Haarness can read.": "{name} is not an image Haarness can read."
 }

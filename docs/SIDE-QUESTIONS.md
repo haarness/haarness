@@ -27,6 +27,8 @@ answer can be plain text.
 Prepared requests are held in memory, with at most 16 sessions and a 4 MiB
 serialized-size budget per request. A restart, eviction, configuration reload,
 changed tool catalog, or incompatible history makes the side question reconstruct
-the current project instructions, memory, agent prompt, and eligible schemas.
-Transient hook context from an unavailable prepared request cannot be recovered;
-hooks are not replayed to recreate it.
+the current project instructions, agent prompt, and eligible schemas. The memory
+index, a changed date and earlier turns' hook context are stored in the chat's
+history, so the reconstructed question reads them from there; a chat with no
+turn yet gets the current memory index and date with the question. Hooks are not
+replayed.

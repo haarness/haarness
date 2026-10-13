@@ -488,6 +488,7 @@
   "Show side panel": "Vis sidepanelet",
   "Show sidebar": "Vis sidepanel",
   "Show {name} panel": "Vis panelet {name}",
+  "The agent opened another page": "Agenten åbnede en anden side",
   "Slash commands": "Skråstregskommandoer",
   "Stop response": "Stop svaret",
   "Symbolic link": "Symbolsk link",
@@ -1656,6 +1657,7 @@
   "reject": "afvis",
   "answer": "besvar",
   "always allows": "tillader altid",
+  "Leads to {path}": "Fører til {path}",
   "every file edit": "hver filredigering",
   "every shell command": "hver shell-kommando",
   "every file read": "hver fillæsning",
@@ -2404,5 +2406,9 @@
   "Chrome is turned off for this project.": "Chrome er slået fra for dette projekt.",
   "{category}: {decision} by default": "{category}: {decision} som standard",
   "{category} on {origin}: {decision}": "{category} på {origin}: {decision}",
-  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Agentens browserstyring er slået fra, så agenter kan ikke bruge Chrome i dette projekt. Slå den til øverst på denne side."
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Agentens browserstyring er slået fra, så agenter kan ikke bruge Chrome i dette projekt. Slå den til øverst på denne side.",
+  "The provider refused {name}, so it is left out of this chat from now on.": "Udbyderen afviste {name}, så det udelades fremover i denne chat.",
+  "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "Udbyderen afviste et billede uden at sige hvilket, så det nyeste, {name}, udelades fremover i denne chat.",
+  "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "Udbyderen afviste et billede uden at sige hvilket, så de nyeste, {names}, udelades fremover i denne chat.",
+  "{name} is not an image Haarness can read.": "{name} er ikke et billede, som Haarness kan læse."
 }

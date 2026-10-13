@@ -488,6 +488,7 @@
   "Show side panel": "إظهار اللوحة الجانبية",
   "Show sidebar": "إظهار الشريط الجانبي",
   "Show {name} panel": "إظهار لوحة {name}",
+  "The agent opened another page": "فتح الوكيل صفحة أخرى",
   "Slash commands": "أوامر الشرطة المائلة",
   "Stop response": "إيقاف الرد",
   "Symbolic link": "ارتباط رمزي",
@@ -1656,6 +1657,7 @@
   "reject": "رفض",
   "answer": "الرد",
   "always allows": "يسمح دائمًا",
+  "Leads to {path}": "يؤدي إلى {path}",
   "every file edit": "كل تعديل على الملفات",
   "every shell command": "كل أوامر shell",
   "every file read": "كل قراءة للملفات",
@@ -2404,5 +2406,9 @@
   "Chrome is turned off for this project.": "Chrome متوقف في هذا المشروع.",
   "{category}: {decision} by default": "{category}: {decision} افتراضيًا",
   "{category} on {origin}: {decision}": "{category} على {origin}: {decision}",
-  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "تحكم الوكيل في المتصفح متوقف، لذا لا يمكن للوكلاء استخدام Chrome في هذا المشروع. شغّله من أعلى هذه الصفحة."
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "تحكم الوكيل في المتصفح متوقف، لذا لا يمكن للوكلاء استخدام Chrome في هذا المشروع. شغّله من أعلى هذه الصفحة.",
+  "The provider refused {name}, so it is left out of this chat from now on.": "رفض الموفر {name}، لذا سيُستبعد من هذه المحادثة من الآن فصاعدًا.",
+  "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "رفض الموفر صورة دون أن يحدد أيها، لذا ستُستبعد أحدث صورة، {name}، من هذه المحادثة من الآن فصاعدًا.",
+  "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "رفض الموفر صورة دون أن يحدد أيها، لذا ستُستبعد أحدث الصور، {names}، من هذه المحادثة من الآن فصاعدًا.",
+  "{name} is not an image Haarness can read.": "{name} ليست صورة يستطيع Haarness قراءتها."
 }

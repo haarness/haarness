@@ -488,6 +488,7 @@
   "Show side panel": "Prikaži bočni panel",
   "Show sidebar": "Prikaži bočnu traku",
   "Show {name} panel": "Prikaži panel {name}",
+  "The agent opened another page": "Agent je otvorio drugu stranicu",
   "Slash commands": "Kose-crta naredbe",
   "Stop response": "Zaustavi odgovor",
   "Symbolic link": "Simbolička poveznica",
@@ -1656,6 +1657,7 @@
   "reject": "odbij",
   "answer": "odgovori",
   "always allows": "uvijek dozvoljava",
+  "Leads to {path}": "Vodi do {path}",
   "every file edit": "svako uređivanje datoteke",
   "every shell command": "svaka shell naredba",
   "every file read": "svako čitanje datoteke",
@@ -2404,5 +2406,9 @@
   "Chrome is turned off for this project.": "Chrome je isključen za ovaj projekat.",
   "{category}: {decision} by default": "{category}: {decision} prema zadanim postavkama",
   "{category} on {origin}: {decision}": "{category} na {origin}: {decision}",
-  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Kontrola preglednika od strane agenta je isključena, pa agenti ne mogu koristiti Chrome u ovom projektu. Uključite je na vrhu ove stranice."
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Kontrola preglednika od strane agenta je isključena, pa agenti ne mogu koristiti Chrome u ovom projektu. Uključite je na vrhu ove stranice.",
+  "The provider refused {name}, so it is left out of this chat from now on.": "Provajder je odbio {name}, pa se od sada izostavlja iz ovog chata.",
+  "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "Provajder je odbio sliku bez navođenja koju, pa se od sada najnovija, {name}, izostavlja iz ovog chata.",
+  "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "Provajder je odbio sliku bez navođenja koju, pa se od sada najnovije, {names}, izostavljaju iz ovog chata.",
+  "{name} is not an image Haarness can read.": "{name} nije slika koju Haarness može pročitati."
 }

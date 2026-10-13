@@ -132,7 +132,13 @@ impl HookPort for Hooks {
     ) -> Option<String> {
         None
     }
-    async fn permission_request(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+    async fn permission_request(
+        &self,
+        _: ThreadId,
+        _: &str,
+        _: &[String],
+        _: &Value,
+    ) -> HookDecision {
         HookDecision::default()
     }
     async fn stop(&self, _: ThreadId) {}
@@ -295,13 +301,18 @@ async fn side_question_reuses_prepared_context_and_settled_history_without_mutat
         let requests = provider.requests.lock().unwrap();
         let main = &requests[0];
         let side = &requests[1];
-        for marker in [
-            "Project instructions marker",
-            "Memory marker",
-            "Submit hook marker",
-            "Prepared hook marker 0",
-        ] {
+        for marker in ["Project instructions marker", "Prepared hook marker 0"] {
             assert!(side.system.contains(marker));
+        }
+        // The memory index and hook context are stored with the turn, so the
+        // side question reads them from the same history.
+        let history = serde_json::to_string(&side.messages).unwrap();
+        for marker in ["Memory marker", "Submit hook marker"] {
+            assert!(
+                !side.system.contains(marker),
+                "{marker} is still in the system prompt"
+            );
+            assert!(history.contains(marker), "{marker} missing from {history}");
         }
         assert_eq!(main.system, side.system);
         assert_eq!(main.tools, side.tools);
@@ -389,9 +400,202 @@ async fn cold_side_context_and_repeated_refusals_are_bounded_and_do_not_execute(
         let requests = provider.requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
         assert!(requests[0].system.contains("Cold project marker"));
-        assert!(requests[0].system.contains("Cold memory marker"));
+        // No turn told the model the memory index yet: the question carries it.
+        assert!(!requests[0].system.contains("Cold memory marker"));
+        assert!(
+            serde_json::to_string(&requests[0].messages)
+                .unwrap()
+                .contains("Cold memory marker")
+        );
     }
     assert_eq!(hooks.submits.load(Ordering::SeqCst), 0);
     assert_eq!(hooks.prepares.load(Ordering::SeqCst), 0);
     assert!(runtime.items(thread.id, None).await.unwrap().is_empty());
+}
+
+/// Per-turn hook context: a timestamp, as a real `UserPromptSubmit` hook
+/// might add.
+#[derive(Default)]
+struct StampHooks(AtomicUsize);
+#[async_trait]
+impl HookPort for StampHooks {
+    async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
+        HookDecision {
+            context: Some(format!(
+                "Hook stamp {}",
+                self.0.fetch_add(1, Ordering::SeqCst)
+            )),
+            ..Default::default()
+        }
+    }
+    async fn pre_tool_use(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn post_tool_use(
+        &self,
+        _: ThreadId,
+        _: &str,
+        _: &Value,
+        _: &str,
+        _: bool,
+    ) -> Option<String> {
+        None
+    }
+    async fn permission_request(
+        &self,
+        _: ThreadId,
+        _: &str,
+        _: &[String],
+        _: &Value,
+    ) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn stop(&self, _: ThreadId) {}
+}
+
+/// Every request must start with the previous one byte for byte (the system
+/// prompt and every earlier message), or the provider re-caches the whole
+/// conversation. Hook context that differs per turn, a memory save and a new
+/// day used to rewrite the system prompt.
+#[tokio::test]
+async fn hook_context_memory_saves_and_a_new_day_keep_earlier_requests_a_prefix() {
+    let provider = Arc::new(Probe::default());
+    let runtime = |store: Arc<SqliteStore>| {
+        let runtime = AgentRuntime::with_config(
+            store,
+            Arc::new(StaticProviderRegistry::new(vec![
+                provider.clone() as Arc<dyn ModelProvider>
+            ])),
+            Arc::new(Registry(vec![])),
+            EventBus::new(256),
+            PathBuf::from("."),
+            "Stable project marker".into(),
+            RuntimeConfig::default(),
+        )
+        .with_hooks(Arc::new(StampHooks::default()));
+        runtime.set_memory_context("- first [project]: Memory before the save".into());
+        runtime
+    };
+    // A chat begun three days ago, as a restored archive carries it.
+    let source = Arc::new(SqliteStore::in_memory().unwrap());
+    let thread = runtime(source.clone())
+        .create_thread(CreateThreadRequest {
+            title: Some("Prompt stability".into()),
+            provider: Some("parity".into()),
+            model: Some("fixture".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let mut archive =
+        haarness_core::ThreadRepository::export_session_archive(source.as_ref(), thread.id, false)
+            .await
+            .unwrap();
+    let began = chrono::Utc::now() - chrono::Duration::days(3);
+    archive.threads[0].thread.created_at = began;
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    haarness_core::ThreadRepository::import_session_archive(store.as_ref(), archive)
+        .await
+        .unwrap();
+    let runtime = runtime(store);
+    let turn = |text: &'static str| {
+        let runtime = &runtime;
+        async move {
+            let mut request = request();
+            request.text = text.into();
+            let turn = runtime.start_turn(thread.id, request).await.unwrap();
+            done(runtime, turn.id).await;
+        }
+    };
+    turn("First turn").await;
+    turn("Second turn").await;
+    runtime.set_memory_context(
+        "- first [project]: Memory before the save\n- second [project]: Saved mid-chat".into(),
+    );
+    turn("Third turn").await;
+
+    let requests = provider.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 3, "one request per turn");
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    let began = began
+        .with_timezone(&chrono::Local)
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    for pair in requests.windows(2) {
+        assert_eq!(pair[1].system, pair[0].system, "system prompt changed");
+        assert_eq!(pair[1].tools, pair[0].tools);
+        assert_eq!(
+            pair[1].messages[..pair[0].messages.len()],
+            pair[0].messages[..],
+            "an earlier message changed"
+        );
+    }
+    let system = &requests[0].system;
+    assert!(
+        system.contains(&format!("Today's date: {began}")),
+        "{system}"
+    );
+    for absent in ["Memory before the save", "Hook stamp", &today] {
+        assert!(!system.contains(absent), "{absent} is in the system prompt");
+    }
+    let reminders = |request: &ProviderRequest| {
+        request
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                ProviderMessage::Text { content, .. }
+                    if content.starts_with("<system-reminder>") =>
+                {
+                    Some(content.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let last = reminders(&requests[2]);
+    assert_eq!(last.len(), 3, "{last:#?}");
+    // The first turn says the date has moved on and gives the index, once.
+    assert!(last[0].contains(&format!("Today's date is now {today}.")));
+    assert!(last[0].contains("Memory before the save"));
+    assert!(last[0].contains("Hook stamp 0"));
+    assert!(!last[1].contains("Today's date") && !last[1].contains("memory index"));
+    assert!(last[1].contains("Hook stamp 1"));
+    // The save reaches the model with the next turn, not in the system prompt.
+    assert!(!last[2].contains("Today's date"));
+    assert!(last[2].contains("Saved mid-chat"));
+    assert!(last[2].contains("Hook stamp 2"));
+    // Each reminder directly follows its turn's prompt.
+    for (index, prompt) in ["First turn", "Second turn", "Third turn"]
+        .into_iter()
+        .enumerate()
+    {
+        let position = requests[2]
+            .messages
+            .iter()
+            .position(|message| matches!(message, ProviderMessage::Text { content, .. } if content == prompt))
+            .unwrap();
+        assert!(matches!(
+            &requests[2].messages[position + 1],
+            ProviderMessage::Text { content, .. } if *content == last[index]
+        ));
+    }
+    // Hidden from the transcript: clients skip synthetic messages.
+    let items = runtime.items(thread.id, None).await.unwrap();
+    let hidden = items
+        .iter()
+        .filter(|item| {
+            matches!(
+                &item.data,
+                haarness_protocol::ItemData::UserMessage {
+                    synthetic: true,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(hidden, 3);
 }

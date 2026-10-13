@@ -118,6 +118,7 @@ impl HookPort for ApproveAll {
         &self,
         _: haarness_protocol::ThreadId,
         _: &str,
+        _: &[String],
         _: &Value,
     ) -> HookDecision {
         HookDecision {

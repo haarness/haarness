@@ -91,25 +91,13 @@ pub(crate) fn settled(mut messages: Vec<ProviderMessage>) -> Vec<ProviderMessage
     messages
 }
 
-pub(crate) fn system(
-    mut base: String,
-    project: &str,
-    memory: &str,
-    hook: Option<&str>,
-    ultracode: bool,
-    structured: bool,
-) -> String {
-    for (heading, value) in [
-        ("Project and global instructions:", project),
-        ("Durable project memory index:", memory),
-        ("Context from hooks:", hook.unwrap_or_default()),
-    ] {
-        if !value.is_empty() {
-            base.push_str("\n\n");
-            base.push_str(heading);
-            base.push('\n');
-            base.push_str(value);
-        }
+/// The system prompt: the agent's scaffold plus standing instructions. The
+/// memory index and hook context change between turns, so they reach the
+/// model as stored turn reminders instead (see `turn_context`).
+pub(crate) fn system(mut base: String, project: &str, ultracode: bool, structured: bool) -> String {
+    if !project.is_empty() {
+        base.push_str("\n\nProject and global instructions:\n");
+        base.push_str(project);
     }
     if ultracode {
         base.push_str("\n\n");

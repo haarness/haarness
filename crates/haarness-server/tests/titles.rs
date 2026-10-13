@@ -438,6 +438,7 @@ impl haarness_core::HookPort for BlockPrompt {
         &self,
         _: ThreadId,
         _: &str,
+        _: &[String],
         _: &serde_json::Value,
     ) -> haarness_core::HookDecision {
         haarness_core::HookDecision::default()

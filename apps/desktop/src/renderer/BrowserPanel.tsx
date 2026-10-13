@@ -51,7 +51,13 @@ function covered(area: DOMRect) {
   }
   return false;
 }
-export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
+export function BrowserPanel(props: {
+  visible: boolean;
+  /** The agent opened or focused a tab: show the Browser. */
+  onOpen: () => void;
+  /** The agent took the shown tab to another page: bring the Browser back if it is closed. */
+  onReveal: () => void;
+}) {
   const app = useApp();
   const { state } = app;
   const [editingAddress, setEditingAddress] = createSignal(false);
@@ -249,11 +255,13 @@ export function BrowserPanel(props: { visible: boolean; onOpen: () => void }) {
         state?: BrowserState;
         error?: string;
         focus?: boolean;
+        reveal?: boolean;
         disconnected?: boolean;
       };
       if (data.state) setBrowser(data.state);
       if (data.error) setError(data.error);
       if (data.focus) props.onOpen();
+      else if (data.reveal) props.onReveal();
       if (data.disconnected) {
         setConnected(false);
         clearTimeout(retry);

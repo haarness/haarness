@@ -63,7 +63,7 @@ import { createVirtualizer } from "@tanstack/solid-virtual";
 import type * as T from "@haarness/sdk";
 import { useApp } from "./state";
 import { Button, Icon, stringify, time, type IconName } from "./ui";
-import { attachmentName, type Attachment } from "./media";
+import { attachmentName, relabelAttachments, type Attachment } from "./media";
 import { createFileDrop } from "./file-drop";
 import { isTextEntry, typingElsewhere } from "./text-entry";
 import { Markdown } from "./Markdown";
@@ -2016,7 +2016,7 @@ export function Session() {
                       app.run(async () => {
                         const key = app.draftKey();
                         const values = await window.haarness.attachments();
-                        await app.addAttachments(key, values);
+                        await app.addAttachments(key, relabelAttachments(values));
                       })
                     }
                   />
@@ -2177,6 +2177,16 @@ export function Session() {
  * right, Haarness answers in the reading column, and everything the engine
  * *did* sits on a single quiet rail beneath the answer.
  */
+/** What the person reads when a provider refused images that later requests leave out. */
+function mediaOmittedNotice(names: string[], guessed: boolean) {
+  const list = names.join(", ");
+  if (!guessed)
+    return t("The provider refused {name}, so it is left out of this chat from now on.", { name: list });
+  return names.length === 1
+    ? t("The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.", { name: list })
+    : t("The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.", { names: list });
+}
+
 function Message(props: {
   item: T.Item;
   result?: T.Item;
@@ -2352,6 +2362,24 @@ function Message(props: {
             })()}
           </Match>
 
+          <Match when={content().type === "media_omitted"}>
+            {(() => {
+              const omitted = () =>
+                content() as Extract<T.ItemData, { type: "media_omitted" }>;
+              return (
+                <div class="notice-inline media-omitted" role="status">
+                  <Icon name="alert" size="sm" />
+                  <span>
+                    {mediaOmittedNotice(omitted().names, !!omitted().guessed)}
+                    <Show when={omitted().reason}>
+                      <small class="notice-detail">{omitted().reason}</small>
+                    </Show>
+                  </span>
+                </div>
+              );
+            })()}
+          </Match>
+
           <Match when={content().type === "plan"}>
             <div class="plan-block">
               <span class="block-label">
@@ -2496,6 +2524,15 @@ function Permission(props: {
     const rest = Object.entries(value).filter(([key]) => key !== "__browser");
     return rest.length ? stringify(Object.fromEntries(rest)) : "";
   };
+  // A path that a link or `..` takes elsewhere is also asked about where it
+  // leads; name that file, since it is what gets opened.
+  const linkTargets = () => {
+    const value = props.permission.detail;
+    const path =
+      value && typeof value === "object" && !Array.isArray(value) ? value.path : undefined;
+    if (typeof path !== "string" || !["read", "edit"].includes(category())) return [];
+    return (props.permission.patterns ?? []).filter((pattern) => pattern !== path);
+  };
   // A file change is approved for what it changes, so show the change itself
   // rather than only the path it touches.
   const changes = () =>
@@ -2586,6 +2623,13 @@ function Permission(props: {
             {permissionCommand(props.permission.detail)}
           </pre>
         </Show>
+        <For each={linkTargets()}>
+          {(target) => (
+            <p class="approval-target">
+              {splitAround(t("Leads to {path}"), () => <bdi><code>{target}</code></bdi>, "{path}")}
+            </p>
+          )}
+        </For>
       </Show>
       <Show when={changes().length}>
         <div class="approval-changes">
