@@ -94,8 +94,9 @@ pub fn routes(
         .route("/v1/host/projects", get(catalog))
         .route("/v1/host/directories", get(browse))
         .route("/v1/host/open", post(open))
+        // The path keeps its old name; the id is a workspace id.
         .route(
-            "/v1/host/projects/{id}",
+            "/v1/host/projects/{workspace_id}",
             axum::routing::delete(close_project),
         )
         .route("/v1/host/workspaces/{id}/{*path}", any(forward))
@@ -163,9 +164,14 @@ async fn open(State(gateway): State<Gateway>, Json(input): Json<Open>) -> Respon
         Err(error) => failure(error),
     }
 }
-#[utoipa::path(delete,path="/v1/host/projects/{id}",operation_id="close_remote_project",params(("id"=String,Path)),responses((status=204)))]
-async fn close_project(State(gateway): State<Gateway>, Path(id): Path<String>) -> Response {
-    match gateway.host.close(id).await {
+/// Closes a project for remote access. The id is the catalog's workspace id
+/// (`workspaces[].id` from `GET /v1/host/projects`), not its project id.
+#[utoipa::path(delete,path="/v1/host/projects/{workspace_id}",operation_id="close_remote_project",params(("workspace_id"=String,Path,description="Workspace id: `workspaces[].id` from GET /v1/host/projects, not `projects[].id`")),responses((status=204)))]
+async fn close_project(
+    State(gateway): State<Gateway>,
+    Path(workspace_id): Path<String>,
+) -> Response {
+    match gateway.host.close(workspace_id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => failure(error),
     }

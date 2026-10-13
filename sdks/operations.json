@@ -1588,9 +1588,9 @@
   {
     "name": "host_close",
     "method": "DELETE",
-    "path": "/v1/host/projects/{id}",
+    "path": "/v1/host/projects/{workspace_id}",
     "pathParams": [
-      "id"
+      "workspace_id"
     ],
     "response": {
       "type": "null"
