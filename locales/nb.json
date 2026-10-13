@@ -1656,6 +1656,7 @@
   "reject": "avvis",
   "answer": "svar",
   "always allows": "tillater alltid",
+  "Leads to {path}": "Fører til {path}",
   "every file edit": "hver filredigering",
   "every shell command": "hver shell-kommando",
   "every file read": "hver fillesing",

@@ -1656,6 +1656,7 @@
   "reject": "отклонить",
   "answer": "ответить",
   "always allows": "всегда разрешает",
+  "Leads to {path}": "Ведёт к {path}",
   "every file edit": "любое изменение файлов",
   "every shell command": "любая команда оболочки",
   "every file read": "любое чтение файлов",

@@ -1656,6 +1656,7 @@
   "reject": "ปฏิเสธ",
   "answer": "ตอบ",
   "always allows": "อนุญาตเสมอ",
+  "Leads to {path}": "ชี้ไปที่ {path}",
   "every file edit": "การแก้ไขไฟล์ทั้งหมด",
   "every shell command": "คำสั่งเชลล์ทั้งหมด",
   "every file read": "การอ่านไฟล์ทั้งหมด",

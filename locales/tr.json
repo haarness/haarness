@@ -1656,6 +1656,7 @@
   "reject": "reddet",
   "answer": "yanıtla",
   "always allows": "her zaman izin verir",
+  "Leads to {path}": "Hedefi: {path}",
   "every file edit": "her dosya düzenlemesi",
   "every shell command": "her kabuk komutu",
   "every file read": "her dosya okuması",

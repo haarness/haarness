@@ -215,7 +215,16 @@ fn subject(pending: &PendingPermissionInfo, language: Language) -> Option<String
             .and_then(serde_json::Value::as_str)
             .filter(|value| !value.trim().is_empty())
         {
-            return Some(value.to_owned());
+            // A path that a link or `..` takes elsewhere is also asked about
+            // where it leads; name that file, since it is what gets opened.
+            let mut text = value.to_owned();
+            if key == "path" && pending.patterns.first().map(String::as_str) == Some(value) {
+                for target in &pending.patterns[1..] {
+                    text.push('\n');
+                    text.push_str(&language.text("Leads to {path}").replace("{path}", target));
+                }
+            }
+            return Some(text);
         }
     }
     if !pending.patterns.is_empty() {
@@ -262,7 +271,9 @@ fn always_rules(
         .always_patterns
         .iter()
         .map(|rule| rule.strip_prefix(&prefix).unwrap_or(rule).to_owned())
-        .filter(|rule| Some(rule.as_str()) != subject)
+        .filter(|rule| Some(rule.as_str()) != subject.and_then(|subject| subject.lines().next()))
+        // A link's target already has its own subject row.
+        .filter(|rule| !(pending.patterns.len() > 1 && pending.patterns[1..].contains(rule)))
         // A bare `*` is the whole category; say so rather than print a glob.
         .map(|rule| {
             if rule == "*" {
