@@ -4194,7 +4194,8 @@ async fn context_overflow_compacts_once_and_replays_without_binary_media() {
         .unwrap();
     // Attachments must exist when the message is sent.
     let image = std::env::temp_dir().join(format!("large-reference-{}.png", uuid::Uuid::now_v7()));
-    std::fs::write(&image, b"\x89PNG").unwrap();
+    // A valid 1×1 PNG: images that do not decode are refused on arrival.
+    std::fs::write(&image, b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x02\0\0\0\x90wS\xde\0\0\0\x0cIDATx\x9cc\xf8\xcf\xc0\0\0\x03\x01\x01\0\xc9\xfe\x92\xef\0\0\0\0IEND\xaeB`\x82").unwrap();
     let mut request = turn_request("inspect the attachment");
     request.attachments = vec![image.to_string_lossy().into_owned()];
     let turn = runtime.start_turn(thread.id, request).await.unwrap();

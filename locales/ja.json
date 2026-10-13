@@ -2405,5 +2405,9 @@
   "Chrome is turned off for this project.": "このプロジェクトでは Chrome がオフになっています。",
   "{category}: {decision} by default": "{category}: 既定で{decision}",
   "{category} on {origin}: {decision}": "{origin} の{category}: {decision}",
-  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "エージェントのブラウザ制御がオフのため、このプロジェクトではエージェントが Chrome を使えません。このページの上部でオンにしてください。"
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "エージェントのブラウザ制御がオフのため、このプロジェクトではエージェントが Chrome を使えません。このページの上部でオンにしてください。",
+  "The provider refused {name}, so it is left out of this chat from now on.": "プロバイダーが {name} を拒否したため、今後このチャットでは除外されます。",
+  "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "プロバイダーがどの画像かを示さずに画像を拒否したため、最新の画像 {name} を今後このチャットから除外します。",
+  "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "プロバイダーがどの画像かを示さずに画像を拒否したため、最新の画像（{names}）を今後このチャットから除外します。",
+  "{name} is not an image Haarness can read.": "{name} は Haarness が読み込める画像ではありません。"
 }

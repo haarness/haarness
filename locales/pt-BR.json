@@ -2405,5 +2405,9 @@
   "Chrome is turned off for this project.": "O Chrome está desativado para este projeto.",
   "{category}: {decision} by default": "{category}: {decision} por padrão",
   "{category} on {origin}: {decision}": "{category} em {origin}: {decision}",
-  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "O controle do navegador pelo agente está desativado, então os agentes não podem usar o Chrome neste projeto. Ative-o no topo desta página."
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "O controle do navegador pelo agente está desativado, então os agentes não podem usar o Chrome neste projeto. Ative-o no topo desta página.",
+  "The provider refused {name}, so it is left out of this chat from now on.": "O provedor recusou {name}, então a partir de agora ele fica de fora deste chat.",
+  "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "O provedor recusou uma imagem sem dizer qual, então a mais recente, {name}, fica de fora deste chat a partir de agora.",
+  "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "O provedor recusou uma imagem sem dizer qual, então as mais recentes, {names}, ficam de fora deste chat a partir de agora.",
+  "{name} is not an image Haarness can read.": "{name} não é uma imagem que o Haarness consiga ler."
 }

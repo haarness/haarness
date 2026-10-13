@@ -154,6 +154,12 @@ MIMES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
     ".gif": "image/gif",
+    # The server converts these to PNG or JPEG.
+    ".heic": "image/heic",
+    ".heif": "image/heif",
+    ".bmp": "image/bmp",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
     ".mp3": "audio/mpeg",
     ".wav": "audio/wav",
     ".mp4": "video/mp4",

@@ -334,6 +334,22 @@ pub enum ItemData {
         message: String,
         retryable: bool,
     },
+    /// Attachments a provider refused, left out of every later request of
+    /// this thread so one bad image does not fail each turn. The attachments
+    /// themselves stay in their messages; the model gets a short note instead.
+    MediaOmitted {
+        /// Hex SHA-256 of each omitted attachment source exactly as stored
+        /// (a path or a data URL).
+        fingerprints: Vec<String>,
+        /// Display names of those attachments, for the notice.
+        names: Vec<String>,
+        /// The provider's reason, bounded.
+        reason: String,
+        /// The provider did not say which image it refused, so the newest
+        /// ones were left out.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        guessed: bool,
+    },
     Usage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<PromptUsage>,

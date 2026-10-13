@@ -1935,7 +1935,33 @@ impl Tool for BrowserTool {
                     .await
                     .map_err(error)?;
             }
-            let name = file["name"].as_str().unwrap_or("capture");
+            let mut name = file["name"].as_str().unwrap_or("capture").to_owned();
+            let mut mime = file["mime"]
+                .as_str()
+                .unwrap_or("application/octet-stream")
+                .to_owned();
+            // A screenshot is saved as the model will see it: shrunk to what
+            // every provider takes. One that does not decode is kept on disk
+            // but not shown to the model.
+            let mut bytes = bytes;
+            let mut visible = false;
+            if mime.starts_with("image/") {
+                let source = bytes.clone();
+                if let Ok(Ok(prepared)) =
+                    tokio::task::spawn_blocking(move || haarness_core::images::prepare(source))
+                        .await
+                {
+                    visible = true;
+                    if prepared.changed {
+                        let stem = name
+                            .rsplit_once('.')
+                            .map_or(name.as_str(), |(stem, _)| stem);
+                        name = format!("{stem}.{}", prepared.extension());
+                        prepared.mime_type.clone_into(&mut mime);
+                        bytes = prepared.bytes;
+                    }
+                }
+            }
             let safe: String = name
                 .chars()
                 .map(|c| {
@@ -1955,8 +1981,7 @@ impl Tool for BrowserTool {
             let mut output = options.open(&path).await.map_err(error)?;
             output.write_all(&bytes).await.map_err(error)?;
             output.flush().await.map_err(error)?;
-            let mime = file["mime"].as_str().unwrap_or("application/octet-stream");
-            if matches!(mime, "image/png" | "image/jpeg" | "image/webp") {
+            if visible {
                 attachments.push(path.to_string_lossy().to_string());
             }
             let relative = format!(
@@ -1985,6 +2010,8 @@ impl Tool for BrowserTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A valid 1×1 PNG.
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
     fn connected(
         broker: &Arc<BrowserBroker>,
         thread: ThreadId,
@@ -3167,14 +3194,19 @@ mod tests {
             &host,
             &mut messages,
             json!({}),
-            json!([{"id":"file_1","name":"inbox.png","mime":"image/png","data":STANDARD.encode(b"png")}]),
+            json!([
+                {"id":"file_1","name":"inbox.png","mime":"image/png","data":PNG},
+                {"id":"file_2","name":"broken.png","mime":"image/png","data":STANDARD.encode(b"png")}
+            ]),
         )
         .await;
         assert_eq!(command["thread"], json!(thread));
         let output = task.await.unwrap().unwrap();
         assert_eq!(output.metadata["browser"], "chrome");
+        // Only the screenshot that decodes is shown to the model.
+        assert_eq!(output.metadata["attachments"].as_array().unwrap().len(), 1);
         let path = PathBuf::from(output.metadata["attachments"][0].as_str().unwrap());
-        assert_eq!(std::fs::read(&path).unwrap(), b"png");
+        assert_eq!(std::fs::read(&path).unwrap(), STANDARD.decode(PNG).unwrap());
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
