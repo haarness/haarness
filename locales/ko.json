@@ -2405,5 +2405,9 @@
   "Chrome is turned off for this project.": "이 프로젝트에서는 Chrome이 꺼져 있습니다.",
   "{category}: {decision} by default": "{category}: 기본값 {decision}",
   "{category} on {origin}: {decision}": "{origin}의 {category}: {decision}",
-  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "에이전트 브라우저 제어가 꺼져 있어 이 프로젝트에서 에이전트가 Chrome을 사용할 수 없습니다. 이 페이지 맨 위에서 켜세요."
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "에이전트 브라우저 제어가 꺼져 있어 이 프로젝트에서 에이전트가 Chrome을 사용할 수 없습니다. 이 페이지 맨 위에서 켜세요.",
+  "The provider refused {name}, so it is left out of this chat from now on.": "공급자가 {name}을(를) 거부했으므로 이제부터 이 채팅에서 제외됩니다.",
+  "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "공급자가 어떤 이미지인지 밝히지 않고 이미지를 거부했으므로 가장 최근 이미지 {name}을(를) 이제부터 이 채팅에서 제외합니다.",
+  "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "공급자가 어떤 이미지인지 밝히지 않고 이미지를 거부했으므로 가장 최근 이미지들({names})을 이제부터 이 채팅에서 제외합니다.",
+  "{name} is not an image Haarness can read.": "{name}은(는) Haarness가 읽을 수 있는 이미지가 아닙니다."
 }

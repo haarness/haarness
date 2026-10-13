@@ -1,0 +1,309 @@
+//! A provider that refuses an image must not break the chat: the image is
+//! left out of every later request, durably, and the request is retried once.
+
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+
+use async_trait::async_trait;
+use futures::stream;
+use haarness_core::{
+    AgentRuntime, CoreError, CoreResult, EventBus, ModelProvider, ProviderEvent, ProviderMessage,
+    ProviderRequest, ProviderStream, RuntimeConfig, StaticProviderRegistry,
+};
+use haarness_protocol::{
+    CreateThreadRequest, ItemData, ProviderInfo, RequestId, StartTurnRequest, ThreadId, Turn,
+    TurnStatus,
+};
+use haarness_server::NativeToolRegistry;
+use haarness_store::SqliteStore;
+use tokio_util::sync::CancellationToken;
+
+/// A valid 1×1 PNG.
+const PNG: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+
+/// Refuses every request that carries an image, the way Anthropic refuses
+/// one over its size limit, once `refusing` is set.
+#[derive(Default)]
+struct Picky {
+    refusing: AtomicBool,
+    error: Mutex<String>,
+    requests: Mutex<Vec<ProviderRequest>>,
+}
+
+fn images(request: &ProviderRequest) -> usize {
+    request
+        .messages
+        .iter()
+        .map(|message| match message {
+            ProviderMessage::Media { attachments, .. }
+            | ProviderMessage::ToolResult { attachments, .. } => attachments.len(),
+            _ => 0,
+        })
+        .sum()
+}
+
+#[async_trait]
+impl ModelProvider for Picky {
+    fn id(&self) -> &str {
+        "fixture"
+    }
+    fn info(&self) -> ProviderInfo {
+        ProviderInfo {
+            id: "fixture".into(),
+            name: "Image fixture".into(),
+            authenticated: true,
+            models: vec![],
+        }
+    }
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        _: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        let refuse = self.refusing.load(Ordering::SeqCst) && images(&request) > 0;
+        self.requests.lock().unwrap().push(request);
+        if refuse {
+            let error = CoreError::Provider(self.error.lock().unwrap().clone());
+            return Ok(Box::pin(stream::iter(vec![Err(error)])));
+        }
+        Ok(Box::pin(stream::iter(
+            [
+                ProviderEvent::TextDelta("Answered".into()),
+                ProviderEvent::Finished {
+                    reason: "done".into(),
+                },
+            ]
+            .into_iter()
+            .map(Ok),
+        )))
+    }
+}
+
+struct Fixture {
+    root: PathBuf,
+    provider: Arc<Picky>,
+}
+
+impl Fixture {
+    fn new(error: &str) -> Self {
+        let root = std::env::temp_dir().join(format!("haarness-images-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let provider = Arc::new(Picky::default());
+        error.clone_into(&mut provider.error.lock().unwrap());
+        Self { root, provider }
+    }
+
+    /// A runtime over the same database file, as after a server restart.
+    fn runtime(&self) -> AgentRuntime {
+        AgentRuntime::with_config(
+            Arc::new(SqliteStore::open(self.root.join("state.db")).unwrap()),
+            Arc::new(StaticProviderRegistry::new(vec![
+                self.provider.clone() as Arc<dyn ModelProvider>
+            ])),
+            Arc::new(NativeToolRegistry::new(self.root.clone())),
+            EventBus::new(128),
+            self.root.clone(),
+            String::new(),
+            RuntimeConfig::default(),
+        )
+    }
+
+    fn requests(&self) -> Vec<ProviderRequest> {
+        std::mem::take(&mut *self.provider.requests.lock().unwrap())
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+async fn thread(runtime: &AgentRuntime) -> ThreadId {
+    runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Image recovery".into()),
+            provider: Some("fixture".into()),
+            model: Some("fixture".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .id
+}
+
+async fn turn(
+    runtime: &AgentRuntime,
+    thread: ThreadId,
+    text: &str,
+    attachments: Vec<String>,
+) -> Turn {
+    let turn = runtime
+        .start_turn(
+            thread,
+            StartTurnRequest {
+                request_id: RequestId::new(),
+                text: text.into(),
+                attachments,
+                synthetic: false,
+                auto_approve: false,
+                agent: None,
+                provider: None,
+                model: None,
+                reasoning_effort: None,
+                tools: None,
+                command: None,
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while runtime.active_turn(thread).await.unwrap().is_some() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the turn finishes");
+    runtime.turn(turn.id).await.unwrap()
+}
+
+fn image(name: &str) -> String {
+    format!("data:image/png;name={name};base64,{PNG}")
+}
+
+fn omissions(items: &[haarness_protocol::Item]) -> Vec<(Vec<String>, bool)> {
+    items
+        .iter()
+        .filter_map(|item| match &item.data {
+            ItemData::MediaOmitted { names, guessed, .. } => Some((names.clone(), *guessed)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_refused_image_is_left_out_retried_once_and_stays_out_after_a_restart() {
+    let fixture = Fixture::new(
+        "HTTP 400 Bad Request: messages.0.content.1.image.source.base64: image exceeds 5 MB maximum: 7340032 bytes > 5242880 bytes",
+    );
+    fixture.provider.refusing.store(true, Ordering::SeqCst);
+    let runtime = fixture.runtime();
+    let thread = thread(&runtime).await;
+
+    let first = turn(&runtime, thread, "Look at this", vec![image("shot.png")]).await;
+    assert_eq!(first.status, TurnStatus::Completed, "{:?}", first.error);
+    let requests = fixture.requests();
+    assert_eq!(requests.len(), 2, "refused once, then retried once");
+    assert_eq!(images(&requests[0]), 1);
+    assert_eq!(images(&requests[1]), 0);
+    let ProviderMessage::Text { content, .. } = &requests[1].messages[0] else {
+        panic!("{:?}", requests[1].messages[0]);
+    };
+    assert!(content.contains("[Image shot.png omitted"), "{content}");
+    let items = runtime.items(thread, None).await.unwrap();
+    // The error named the image by its place in the request.
+    assert_eq!(
+        omissions(&items),
+        vec![(vec!["shot.png".to_owned()], false)]
+    );
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item.data, ItemData::Error { .. }))
+    );
+
+    let second = turn(&runtime, thread, "And now?", Vec::new()).await;
+    assert_eq!(second.status, TurnStatus::Completed, "{:?}", second.error);
+    let requests = fixture.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(images(&requests[0]), 0);
+    let replayed = serde_json::to_string(&requests[0].messages[0]).unwrap();
+
+    drop(runtime);
+    let restarted = fixture.runtime();
+    let third = turn(&restarted, thread, "Still there?", Vec::new()).await;
+    assert_eq!(third.status, TurnStatus::Completed, "{:?}", third.error);
+    let requests = fixture.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(images(&requests[0]), 0);
+    // The same bytes as before the restart, so the prompt cache still holds.
+    assert_eq!(
+        serde_json::to_string(&requests[0].messages[0]).unwrap(),
+        replayed
+    );
+}
+
+#[tokio::test]
+async fn an_unnamed_refusal_leaves_out_the_newest_images_and_retries_only_once() {
+    let fixture = Fixture::new("HTTP 400 Bad Request: Could not process image");
+    let runtime = fixture.runtime();
+    let thread = thread(&runtime).await;
+    // The provider took the first image; later it refuses any image.
+    let first = turn(&runtime, thread, "One", vec![image("old.png")]).await;
+    assert_eq!(first.status, TurnStatus::Completed, "{:?}", first.error);
+    fixture.requests();
+    fixture.provider.refusing.store(true, Ordering::SeqCst);
+
+    let second = turn(&runtime, thread, "Two", vec![image("new.png")]).await;
+    assert_eq!(second.status, TurnStatus::Failed);
+    let requests = fixture.requests();
+    assert_eq!(requests.len(), 2, "one retry per turn");
+    assert_eq!(images(&requests[0]), 2);
+    assert_eq!(images(&requests[1]), 1, "the newest image went first");
+    let items = runtime.items(thread, None).await.unwrap();
+    assert_eq!(
+        omissions(&items),
+        vec![
+            (vec!["new.png".to_owned()], true),
+            (vec!["old.png".to_owned()], true)
+        ]
+    );
+
+    let third = turn(&runtime, thread, "Three", Vec::new()).await;
+    assert_eq!(third.status, TurnStatus::Completed, "{:?}", third.error);
+    assert_eq!(images(&fixture.requests()[0]), 0);
+}
+
+#[tokio::test]
+async fn a_request_too_large_for_its_images_leaves_out_the_newest_image_file() {
+    let fixture = Fixture::new(
+        "HTTP 413 Payload Too Large: Request exceeds the maximum allowed number of bytes.",
+    );
+    fixture.provider.refusing.store(true, Ordering::SeqCst);
+    let runtime = fixture.runtime();
+    let thread = thread(&runtime).await;
+    let photo = fixture.root.join("photo.png");
+    std::fs::write(&photo, base64_png()).unwrap();
+    let first = turn(
+        &runtime,
+        thread,
+        "Look",
+        vec![photo.to_string_lossy().into_owned()],
+    )
+    .await;
+    assert_eq!(first.status, TurnStatus::Completed, "{:?}", first.error);
+    let items = runtime.items(thread, None).await.unwrap();
+    assert_eq!(
+        omissions(&items),
+        vec![(vec!["photo.png".to_owned()], true)]
+    );
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item.data, ItemData::Compaction { .. }))
+    );
+}
+
+fn base64_png() -> Vec<u8> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(PNG)
+        .unwrap()
+}

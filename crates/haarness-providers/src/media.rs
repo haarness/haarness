@@ -76,12 +76,7 @@ fn load(source: &str) -> CoreResult<LoadedMedia> {
         return load_data_url(data);
     }
     let path = local_path(source)?;
-    let mime_type = mime_for_path(&path).ok_or_else(|| {
-        CoreError::Provider(format!(
-            "unsupported media attachment {}; use a supported image, PDF, audio, or video format",
-            path.display()
-        ))
-    })?;
+    let named = mime_for_path(&path);
     let metadata = std::fs::metadata(&path).map_err(|error| {
         CoreError::Provider(format!(
             "cannot read attachment {}: {error}",
@@ -108,6 +103,13 @@ fn load(source: &str) -> CoreResult<LoadedMedia> {
             path.display()
         ))
     })?;
+    // A screenshot saved without an extension is still an image.
+    let mime_type = actual_mime(named.unwrap_or_default(), &bytes).ok_or_else(|| {
+        CoreError::Provider(format!(
+            "unsupported media attachment {}; use a supported image, PDF, audio, or video format",
+            path.display()
+        ))
+    })?;
     Ok(LoadedMedia {
         mime_type: mime_type.to_owned(),
         base64: STANDARD.encode(bytes),
@@ -116,6 +118,21 @@ fn load(source: &str) -> CoreResult<LoadedMedia> {
             |name| name.to_string_lossy().into_owned(),
         ),
     })
+}
+
+/// The type a provider is told: an image's own bytes win over its name or
+/// label, since providers refuse an image whose declared type is wrong
+/// (a JPEG saved as `shot.png`). Other media keeps its declared type.
+fn actual_mime<'a>(declared: &'a str, bytes: &[u8]) -> Option<&'a str> {
+    match haarness_core::images::sniff(bytes) {
+        Some(sniffed)
+            if haarness_core::images::is_provider_image(sniffed)
+                && (declared.is_empty() || declared.starts_with("image/")) =>
+        {
+            Some(sniffed)
+        }
+        _ => (!declared.is_empty()).then_some(declared),
+    }
 }
 
 fn load_data_url(data: &str) -> CoreResult<LoadedMedia> {
@@ -144,6 +161,7 @@ fn load_data_url(data: &str) -> CoreResult<LoadedMedia> {
             MAX_INLINE_MEDIA_BYTES / 1024 / 1024
         )));
     }
+    let mime_type = actual_mime(mime_type, &bytes).unwrap_or(mime_type);
     Ok(LoadedMedia {
         mime_type: mime_type.to_owned(),
         base64: STANDARD.encode(bytes),
@@ -249,6 +267,38 @@ mod tests {
             STANDARD.encode(vec![0; MAX_INLINE_MEDIA_BYTES])
         );
         assert!(load_all(&[boundary]).is_ok());
+    }
+
+    #[test]
+    fn an_image_is_sent_as_the_type_its_bytes_say() {
+        // A JPEG labelled PNG, and one saved as shot.png or with no extension.
+        let jpeg = [0xff, 0xd8, 0xff, 0xe0, 0, 0x10, b'J', b'F', b'I', b'F'];
+        let labelled = format!(
+            "data:image/png;name=shot.png;base64,{}",
+            STANDARD.encode(jpeg)
+        );
+        assert_eq!(load(&labelled).unwrap().mime_type, "image/jpeg");
+        let dir = std::env::temp_dir().join(format!(
+            "haarness-media-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["shot.png", "capture"] {
+            std::fs::write(dir.join(name), jpeg).unwrap();
+            let loaded = load(&dir.join(name).to_string_lossy()).unwrap();
+            assert_eq!(loaded.mime_type, "image/jpeg", "{name}");
+        }
+        std::fs::write(dir.join("notes"), b"plain").unwrap();
+        assert!(load(&dir.join("notes").to_string_lossy()).is_err());
+        // Other media keeps its declared type.
+        assert_eq!(
+            load("data:application/pdf;base64,JVBERi0xLjQK")
+                .unwrap()
+                .mime_type,
+            "application/pdf"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -2405,5 +2405,9 @@
   "Chrome is turned off for this project.": "Chrome ถูกปิดสำหรับโปรเจกต์นี้",
   "{category}: {decision} by default": "{category}: {decision} เป็นค่าเริ่มต้น",
   "{category} on {origin}: {decision}": "{category} บน {origin}: {decision}",
-  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "การควบคุมเบราว์เซอร์โดยเอเจนต์ปิดอยู่ เอเจนต์จึงใช้ Chrome ในโปรเจกต์นี้ไม่ได้ เปิดได้ที่ด้านบนของหน้านี้"
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "การควบคุมเบราว์เซอร์โดยเอเจนต์ปิดอยู่ เอเจนต์จึงใช้ Chrome ในโปรเจกต์นี้ไม่ได้ เปิดได้ที่ด้านบนของหน้านี้",
+  "The provider refused {name}, so it is left out of this chat from now on.": "ผู้ให้บริการปฏิเสธ {name} จึงจะไม่ส่งรูปนี้ในแชตนี้อีกต่อไป",
+  "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "ผู้ให้บริการปฏิเสธรูปภาพโดยไม่ระบุว่ารูปใด จึงจะไม่ส่งรูปล่าสุด {name} ในแชตนี้อีกต่อไป",
+  "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "ผู้ให้บริการปฏิเสธรูปภาพโดยไม่ระบุว่ารูปใด จึงจะไม่ส่งรูปล่าสุด ({names}) ในแชตนี้อีกต่อไป",
+  "{name} is not an image Haarness can read.": "{name} ไม่ใช่รูปภาพที่ Haarness อ่านได้"
 }

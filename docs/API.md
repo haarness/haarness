@@ -296,6 +296,34 @@ transcript chips. Exact support remains provider-specific: OpenAI, Anthropic,
 and Bedrock accept PDF/images; Gemini accepts PDF/image/audio/video; compatible
 Chat gateways receive file/image/MP3/WAV shapes where supported.
 
+Images are judged by their bytes, never by file name or declared type, and made
+into images every provider reads before the message is stored: a JPEG named or
+labelled PNG is sent as JPEG; BMP and TIFF become PNG; HEIC/HEIF photos become
+JPEG on macOS (through the system's `sips`) and are refused elsewhere with a
+request to export them as JPEG or PNG; images larger than 2000 pixels on a side
+or 3.75 MB (Anthropic's 5 MB base64 limit on Bedrock and Vertex) are shrunk,
+first keeping PNG, then as JPEG. A converted image is stored inline as a data
+URL; an image that already fits keeps its path. Bytes that do not decode are
+refused with `400` and the reason; a PNG whose chunk checksums are wrong, which
+browsers still show, is corrected instead. The `read` tool and saved browser
+screenshots apply the same rules; a `read` of a damaged image fails the call
+with the reason.
+
+An attachment or tool image whose file is deleted later is named in the message
+("no longer available") instead of failing every later request. When a
+provider still refuses an image (its type, size, pixels or count, or a
+request too large because of images), the runtime appends a `media_omitted`
+item to the thread with the SHA-256 `fingerprints` of the refused attachment
+sources, their display `names`, the provider's `reason` and `guessed`. Every
+later request of that thread, after restarts and in forks, sends a short note
+in place of those images, so the prompt stays stable for caching; the original
+attachments stay in their messages. When the provider names the image by its
+place in the request (Anthropic's `messages.N.content.M`) only that image is
+left out; otherwise the newest images are (`guessed: true`). A refusal before
+anything streamed is retried once per turn; a second refusal in the same turn
+fails it, and the next turn sends without the images. TUI and Desktop show the
+item as a notice.
+
 Ultracode is an additive, provider-neutral workflow mode. `Thread.ultracode`
 stores the standing session preference; `CreateThreadRequest.ultracode` and
 `PATCH /v1/threads/{id}` update it. Every `Turn` records the effective

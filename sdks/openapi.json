@@ -3045,6 +3045,46 @@
             "type": "object"
           },
           {
+            "description": "Attachments a provider refused, left out of every later request of\nthis thread so one bad image does not fail each turn. The attachments\nthemselves stay in their messages; the model gets a short note instead.",
+            "properties": {
+              "fingerprints": {
+                "description": "Hex SHA-256 of each omitted attachment source exactly as stored\n(a path or a data URL).",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "guessed": {
+                "description": "The provider did not say which image it refused, so the newest\nones were left out.",
+                "type": "boolean"
+              },
+              "names": {
+                "description": "Display names of those attachments, for the notice.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "reason": {
+                "description": "The provider's reason, bounded.",
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "media_omitted"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "fingerprints",
+              "names",
+              "reason",
+              "type"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "cache_read_tokens": {
                 "format": "int64",

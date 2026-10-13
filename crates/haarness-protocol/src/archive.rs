@@ -431,6 +431,12 @@ fn sanitize_item(item: &mut Item) {
             }
         }
         ItemData::Error { message, .. } => *message = redact(message, "error", item.id),
+        ItemData::MediaOmitted { names, reason, .. } => {
+            for (index, name) in names.iter_mut().enumerate() {
+                *name = redact(name, "omitted-media", format!("{}-{index}", item.id));
+            }
+            *reason = redact(reason, "omitted-media-reason", item.id);
+        }
         ItemData::Todo { items } => sanitize_todos(items, item.id),
         ItemData::QueueConsumed { .. }
         | ItemData::TaskLink { .. }

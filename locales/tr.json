@@ -2405,5 +2405,9 @@
   "Chrome is turned off for this project.": "Chrome bu proje için kapalı.",
   "{category}: {decision} by default": "{category}: varsayılan olarak {decision}",
   "{category} on {origin}: {decision}": "{origin} üzerinde {category}: {decision}",
-  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Ajanın tarayıcı denetimi kapalı, bu yüzden ajanlar bu projede Chrome'u kullanamaz. Bu sayfanın üst kısmından açın."
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Ajanın tarayıcı denetimi kapalı, bu yüzden ajanlar bu projede Chrome'u kullanamaz. Bu sayfanın üst kısmından açın.",
+  "The provider refused {name}, so it is left out of this chat from now on.": "Sağlayıcı {name} görselini reddetti; bundan sonra bu sohbette dışarıda bırakılacak.",
+  "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "Sağlayıcı hangisi olduğunu söylemeden bir görseli reddetti; bu yüzden en yeni görsel, {name}, bundan sonra bu sohbette dışarıda bırakılacak.",
+  "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "Sağlayıcı hangisi olduğunu söylemeden bir görseli reddetti; bu yüzden en yeni görseller, {names}, bundan sonra bu sohbette dışarıda bırakılacak.",
+  "{name} is not an image Haarness can read.": "{name}, Haarness'ın okuyabileceği bir görsel değil."
 }
