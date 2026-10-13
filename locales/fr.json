@@ -2406,5 +2406,6 @@
   "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Le contrôle du navigateur par l’agent est désactivé : les agents ne peuvent donc pas utiliser Chrome dans ce projet. Activez-le en haut de cette page.",
   "The provider refused {name}, so it is left out of this chat from now on.": "Le fournisseur a refusé {name} : cette image est désormais omise de cette conversation.",
   "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "Le fournisseur a refusé une image sans préciser laquelle : la plus récente, {name}, est désormais omise de cette conversation.",
-  "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "Le fournisseur a refusé une image sans préciser laquelle : les plus récentes, {names}, sont désormais omises de cette conversation."
+  "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "Le fournisseur a refusé une image sans préciser laquelle : les plus récentes, {names}, sont désormais omises de cette conversation.",
+  "{name} is not an image Haarness can read.": "{name} n’est pas une image que Haarness peut lire."
 }

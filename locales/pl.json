@@ -2406,5 +2406,6 @@
   "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Sterowanie przeglądarką przez agenta jest wyłączone, więc agenci nie mogą używać Chrome w tym projekcie. Włącz je na górze tej strony.",
   "The provider refused {name}, so it is left out of this chat from now on.": "Dostawca odrzucił {name}, więc od teraz jest pomijany w tym czacie.",
   "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "Dostawca odrzucił obraz, nie podając który, więc od teraz najnowszy, {name}, jest pomijany w tym czacie.",
-  "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "Dostawca odrzucił obraz, nie podając który, więc od teraz najnowsze, {names}, są pomijane w tym czacie."
+  "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "Dostawca odrzucił obraz, nie podając który, więc od teraz najnowsze, {names}, są pomijane w tym czacie.",
+  "{name} is not an image Haarness can read.": "{name} nie jest obrazem, który Haarness może odczytać."
 }

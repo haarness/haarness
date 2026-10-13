@@ -63,7 +63,7 @@ import { createVirtualizer } from "@tanstack/solid-virtual";
 import type * as T from "@haarness/sdk";
 import { useApp } from "./state";
 import { Button, Icon, stringify, time, type IconName } from "./ui";
-import { attachmentName, type Attachment } from "./media";
+import { attachmentName, relabelAttachments, type Attachment } from "./media";
 import { createFileDrop } from "./file-drop";
 import { isTextEntry, typingElsewhere } from "./text-entry";
 import { Markdown } from "./Markdown";
@@ -2016,7 +2016,7 @@ export function Session() {
                       app.run(async () => {
                         const key = app.draftKey();
                         const values = await window.haarness.attachments();
-                        await app.addAttachments(key, values);
+                        await app.addAttachments(key, relabelAttachments(values));
                       })
                     }
                   />
@@ -2177,6 +2177,16 @@ export function Session() {
  * right, Haarness answers in the reading column, and everything the engine
  * *did* sits on a single quiet rail beneath the answer.
  */
+/** What the person reads when a provider refused images that later requests leave out. */
+function mediaOmittedNotice(names: string[], guessed: boolean) {
+  const list = names.join(", ");
+  if (!guessed)
+    return t("The provider refused {name}, so it is left out of this chat from now on.", { name: list });
+  return names.length === 1
+    ? t("The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.", { name: list })
+    : t("The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.", { names: list });
+}
+
 function Message(props: {
   item: T.Item;
   result?: T.Item;
@@ -2347,6 +2357,24 @@ function Message(props: {
                       {t(recovery()!.label)}
                     </button>
                   </Show>
+                </div>
+              );
+            })()}
+          </Match>
+
+          <Match when={content().type === "media_omitted"}>
+            {(() => {
+              const omitted = () =>
+                content() as Extract<T.ItemData, { type: "media_omitted" }>;
+              return (
+                <div class="notice-inline media-omitted" role="status">
+                  <Icon name="alert" size="sm" />
+                  <span>
+                    {mediaOmittedNotice(omitted().names, !!omitted().guessed)}
+                    <Show when={omitted().reason}>
+                      <small class="notice-detail">{omitted().reason}</small>
+                    </Show>
+                  </span>
                 </div>
               );
             })()}
