@@ -193,9 +193,11 @@ impl Tool for PreviewTool {
             let requested = Path::new(arguments["filePath"].as_str().unwrap());
             let relative = if requested.is_absolute() { requested.strip_prefix(&root).map_err(|_| bad("Preview must be inside the workspace"))? } else { requested };
             let path = relative.to_string_lossy().replace('\\', "/");
-            let target = files::resolve(&root, &path, false)?;
+            // The model may have named a file that never existed.
+            let missing = |error: Failure| if error.0 == StatusCode::NOT_FOUND { bad(format!("File not found: {path}")) } else { error };
+            let target = files::resolve(&root, &path, false).map_err(missing)?;
             let kind = kind(&path).ok_or_else(|| bad("Preview supports HTML, Markdown, SVG and images"))?;
-            let data = files::bytes(&target)?;
+            let data = files::bytes(&target).map_err(missing)?;
             if kind != "image" && !std::str::from_utf8(&data).is_ok_and(|text| !text.contains('\0')) { return Err(bad("Preview requires UTF-8 text")); }
             let version = record(&root, &data)?;
             Ok(ToolOutput {
@@ -249,25 +251,31 @@ pub async fn current_preview(
     Query(query): Query<files::FileQuery>,
 ) -> Result<Json<PreviewCurrent>, Failure> {
     tokio::task::spawn_blocking(move || {
-        let path = files::resolve(&state.workspace, &query.path, true)?;
-        let revision = if path.exists() {
-            Some(files::hash(&files::bytes(&path)?))
-        } else {
-            None
+        // A file that is gone, or whose folder is gone, has no revision.
+        let revision = match files::resolve(&state.workspace, &query.path, true)
+            .and_then(|path| files::bytes(&path))
+        {
+            Ok(data) => Some(files::hash(&data)),
+            Err((StatusCode::NOT_FOUND, _)) => None,
+            Err(error) => return Err(error),
         };
         Ok(Json(PreviewCurrent { revision }))
     })
     .await
     .map_err(bad)?
 }
-#[utoipa::path(get,path="/v1/files/preview",params(PreviewVersionQuery),responses((status=200,body=files::FileContent)))]
+#[utoipa::path(get,path="/v1/files/preview",params(PreviewVersionQuery),responses((status=200,body=files::FileContent),(status=404,description="This preview version is no longer available (plain text)")))]
 pub async fn preview_version(
     State(state): State<ServerState>,
     Query(query): Query<PreviewVersionQuery>,
 ) -> Result<Json<files::FileContent>, Failure> {
     tokio::task::spawn_blocking(move || {
         // Versions are workspace-scoped; the display path still follows the explorer contract.
-        files::resolve(&state.workspace, &query.path, true)?;
+        // A version is kept outside the workspace, so it still opens once its folder is gone.
+        match files::resolve(&state.workspace, &query.path, true) {
+            Ok(_) | Err((StatusCode::NOT_FOUND, _)) => {}
+            Err(error) => return Err(error),
+        }
         Ok(Json(content(
             query.path,
             load(&state.workspace, &query.hash)?,
