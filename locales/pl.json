@@ -2001,6 +2001,7 @@
   "Manage runtime hooks": "Zarządzaj hookami środowiska uruchomieniowego",
   "Save and restore configuration profiles": "Zapisuj i przywracaj profile konfiguracji",
   "Manage and inspect Haarness plugins": "Zarządzaj wtyczkami Haarness i sprawdzaj je",
+  "Browse, install and manage Haarness marketplace resources": "Przeglądaj, instaluj i zarządzaj zasobami z marketplace Haarness",
   "Show discovered skills": "Pokaż wykryte umiejętności",
   "Browse/toggle tools · /tools lazy auto|always|off · /tools show|hide": "Przeglądaj/przełączaj narzędzia · /tools lazy auto|always|off · /tools show|hide",
   "Show server and thread status": "Pokaż stan serwera i wątku",

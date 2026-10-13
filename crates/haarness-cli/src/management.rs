@@ -3143,6 +3143,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn marketplace_manage_installs_from_claude_code_plugin_marketplaces() {
+        // The model's install tool reaches Claude-format marketplaces, as
+        // `/plugin` and Desktop's Plugins page do.
+        let root = std::env::temp_dir().join(format!(
+            "haarness-management-plugin-market-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let workspace = root.join("workspace");
+        let data = root.join("data");
+        let config = root.join("config");
+        let market = root.join("market");
+        for dir in [&workspace, &data, &config] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::create_dir_all(market.join(".claude-plugin")).unwrap();
+        fs::create_dir_all(market.join("plugins/kit/.claude-plugin")).unwrap();
+        fs::write(
+            market.join(".claude-plugin/marketplace.json"),
+            r#"{"name":"team-tools","plugins":[{"name":"kit","source":"./plugins/kit","description":"Fixture kit"}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            market.join("plugins/kit/.claude-plugin/plugin.json"),
+            r#"{"name":"kit"}"#,
+        )
+        .unwrap();
+        let paths = Paths {
+            root: Some(root.clone()),
+            data: data.clone(),
+            cache: root.join("cache"),
+            database: data.join("haarness.db"),
+            auth: config.join("auth.json"),
+            runtime: root.join("cache/runtime.json"),
+            server_lock: root.join("cache/server.lock"),
+            skills: data.join("skills"),
+            config: config.join("config.toml"),
+            workspace_id: None,
+        };
+        let skills: Arc<dyn SkillRegistry> = Arc::new(FilesystemSkillRegistry::new(vec![(
+            paths.skills.clone(),
+            true,
+        )]));
+        let mcp = Arc::new(NativeMcpRegistry::with_auth_dir(data.join("mcp-oauth")));
+        let service = ManagementService::new(paths, workspace, true, skills, mcp);
+        let request = async |input: Value| service.marketplace_request(&input).await;
+
+        request(json!({"action":"add_plugin_marketplace","source":market.to_str().unwrap()}))
+            .await
+            .unwrap();
+        let listed = request(json!({"action":"plugin_marketplaces"}))
+            .await
+            .unwrap();
+        assert_eq!(listed[0]["name"], "team-tools");
+        assert_eq!(listed[0]["plugins"][0]["install"], "kit@team-tools");
+        assert_eq!(listed[0]["plugins"][0]["installed"], false);
+
+        let installed = request(json!({"action":"install","plugin":"kit@team-tools"}))
+            .await
+            .unwrap();
+        assert!(
+            installed["plugins"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|plugin| plugin["name"] == "kit" && plugin["enabled"] == true)
+        );
+        let listed = request(json!({"action":"plugin_marketplaces"}))
+            .await
+            .unwrap();
+        assert_eq!(listed[0]["plugins"][0]["installed"], true);
+        let disabled = request(json!({"action":"disable","plugin":"kit"}))
+            .await
+            .unwrap();
+        assert!(
+            disabled["plugins"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|plugin| plugin["name"] == "kit" && plugin["enabled"] == false)
+        );
+        let removed = request(json!({"action":"remove","plugin":"kit"}))
+            .await
+            .unwrap();
+        assert!(
+            !removed["plugins"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|plugin| plugin["name"] == "kit")
+        );
+        assert!(
+            request(json!({"action":"install","plugin":"missing@team-tools"}))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("has no plugin missing")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn non_marketplace_managers_round_trip_real_files_and_queue_mcp_definitions() {
         let root = std::env::temp_dir().join(format!(
             "haarness-management-roundtrip-{}",

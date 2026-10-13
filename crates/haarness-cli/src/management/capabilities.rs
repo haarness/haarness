@@ -57,7 +57,7 @@ impl ManagementService {
             let extensions =
                 crate::extensions::catalog(&self.paths, &self.workspace, self.trust_project)?;
             return Ok(
-                json!({"skills":skills,"agents":agents,"plugins":plugins,"mcp":mcp,"extensions":extensions,"marketplace":crate::marketplace::installed(&self.paths,&self.workspace,self.trust_project)?,"applyWhen":"idle"}),
+                json!({"skills":skills,"agents":agents,"plugins":plugins,"mcp":mcp,"extensions":extensions,"marketplace":self.marketplace_installed()?,"applyWhen":"idle"}),
             );
         }
         let kind = required_string(input, "kind")?;
@@ -131,10 +131,78 @@ impl ManagementService {
         Ok(result)
     }
 
+    /// Installation receipts plus whether each resource is currently on, so
+    /// clients offer the one toggle that applies.
+    pub(crate) fn marketplace_installed(&self) -> Result<Value> {
+        let mut rows =
+            crate::marketplace::installed(&self.paths, &self.workspace, self.trust_project)?;
+        let state =
+            crate::capability_state::load(&self.paths, &self.workspace, self.trust_project)?;
+        let extensions =
+            crate::extensions::catalog(&self.paths, &self.workspace, self.trust_project)?;
+        for row in rows.as_array_mut().into_iter().flatten() {
+            let name = row["name"].as_str().unwrap_or_default().to_owned();
+            let enabled = match row["kind"].as_str() {
+                Some("plugin" | "mcp") => !Path::new(row["path"].as_str().unwrap_or_default())
+                    .join(".haarness-disabled")
+                    .exists(),
+                Some(kind @ ("skill" | "agent")) => state
+                    .get(kind)
+                    .and_then(|items| items.get(&name))
+                    .copied()
+                    .unwrap_or(true),
+                Some("extension") => extensions
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|entry| entry["source"] == row["path"])
+                    .and_then(|entry| entry["enabled"].as_bool())
+                    .unwrap_or(true),
+                _ => true,
+            };
+            row["enabled"] = json!(enabled);
+        }
+        Ok(rows)
+    }
+
     pub(crate) async fn marketplace_request(&self, input: &Value) -> Result<Value> {
         let action = required_string(input, "action")?;
         if action == "installed" {
-            return crate::marketplace::installed(&self.paths, &self.workspace, self.trust_project);
+            return self.marketplace_installed();
+        }
+        if action == "plugin_marketplaces" {
+            return Ok(plugins::marketplace_catalog(&self.paths.data));
+        }
+        // Claude Code plugin marketplaces use the same plugin service as
+        // `/plugin` in the TUI and Desktop's Plugins page.
+        let plugin = match action {
+            "add_plugin_marketplace" => Some(("marketplace", required_string(input, "source")?)),
+            "install" | "update" | "enable" | "disable" | "remove" => input
+                .get("plugin")
+                .and_then(Value::as_str)
+                .filter(|plugin| !plugin.trim().is_empty())
+                .map(|plugin| (action, plugin)),
+            _ => None,
+        };
+        if let Some((action, target)) = plugin {
+            let service = plugins::PluginService::new(
+                self.paths.data.clone(),
+                self.paths.config_dir().into(),
+                self.workspace.clone(),
+                self.trust_project,
+            );
+            let request = haarness_protocol::PluginActionRequest {
+                action: action.into(),
+                target: target.into(),
+            };
+            let plugins = tokio::task::spawn_blocking(move || {
+                haarness_server::PluginRegistry::apply(&service, &request)
+            })
+            .await??;
+            self.capabilities_changed("plugin", action);
+            return Ok(
+                json!({"action":action,"plugin":target,"plugins":plugins,"restartRequired":false}),
+            );
         }
         if matches!(
             action,
@@ -159,21 +227,46 @@ impl ManagementService {
             self.capabilities_changed("marketplace", action);
             return Ok(result);
         }
-        let id = required_string(input, "id")?;
+        let wanted = required_string(input, "id")?;
         let rows = crate::marketplace::installed(&self.paths, &self.workspace, self.trust_project)?;
-        let rows: Vec<_> = rows
+        let in_scope = |r: &&Value| input.get("scope").is_none() || r["scope"] == input["scope"];
+        // `publisher/slug` selects like the resource id; receipts written
+        // before they recorded both are found through the catalog.
+        let named = |r: &&Value| {
+            r["id"] == wanted
+                || wanted.split_once('/').is_some_and(|(publisher, slug)| {
+                    r["publisher"] == publisher && r["slug"] == slug
+                })
+        };
+        let mut rows: Vec<_> = rows
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|r| {
-                r["id"] == id && (input.get("scope").is_none() || r["scope"] == input["scope"])
-            })
+            .filter(in_scope)
             .collect();
+        if rows.iter().any(named) {
+            rows.retain(named);
+        } else if wanted.contains('/') && uuid::Uuid::parse_str(wanted).is_err() {
+            let id = crate::marketplace::resolve(input).await?;
+            rows.retain(|r| r["id"] == id);
+        } else {
+            rows.clear();
+        }
+        ensure!(
+            !rows.is_empty(),
+            "{wanted} is not installed{}",
+            match input["scope"].as_str() {
+                Some("local") => " for this project",
+                Some("global") => " for all projects",
+                _ => "",
+            }
+        );
         ensure!(
             rows.len() == 1,
-            "Select an installed resource and its scope"
+            "{wanted} is installed for this project and for all projects; choose one with its scope"
         );
         let receipt = rows[0];
+        let id = receipt["id"].as_str().context("Invalid receipt id")?;
         ensure!(
             matches!(action, "enable" | "disable" | "remove"),
             "Unsupported marketplace action"
@@ -214,10 +307,27 @@ impl ManagementService {
                 fs::remove_file(marker)?;
             }
         } else {
+            if action == "remove" && kind == "extension" {
+                let _lock = crate::desktop::editor_lock(&self.paths.data, "marketplace")?;
+                crate::marketplace::validate_receipt(&self.paths, &self.workspace, receipt)?;
+                if let Some(root) = receipt["packageRoot"]
+                    .as_str()
+                    .map(Path::new)
+                    .filter(|root| root.exists())
+                {
+                    ensure!(
+                        receipt["installedDigest"] == crate::marketplace::tree_digest(root)?,
+                        "Resource was modified locally; preserve your edits before removing it"
+                    );
+                }
+            }
             let mut request = target;
             request["action"] = json!(action);
             request["scope"] = receipt["scope"].clone();
             self.capability_request(&request).await?;
+            if action == "remove" && kind == "extension" {
+                crate::extensions::remove_marketplace_package(&self.paths, receipt)?;
+            }
         }
         if action == "remove" {
             let id = uuid::Uuid::parse_str(id)?;

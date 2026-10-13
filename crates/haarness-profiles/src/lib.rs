@@ -334,6 +334,14 @@ impl Archive {
         let mut files = BTreeMap::new();
         if scope != Scope::Local {
             collect(&roots.config, "global/config", scope, &mut files)?;
+            // The walk above never enters `plugins/`, whose only portable part
+            // is `plugins/local/` (global plugins and marketplace MCP bundles).
+            collect(
+                &roots.config.join("plugins/local"),
+                "global/config/plugins/local",
+                scope,
+                &mut files,
+            )?;
             for name in ["skills", "plugins/local"] {
                 collect(
                     &roots.data.join(name),

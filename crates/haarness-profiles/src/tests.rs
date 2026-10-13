@@ -397,6 +397,50 @@ fn installed_plugins_are_bundled_with_disabled_state_without_absolute_registry_p
 }
 
 #[test]
+fn global_plugin_bundles_in_the_configuration_folder_are_shared() {
+    // Marketplace plugins and MCP servers installed for all projects live in
+    // `<config>/plugins/local`; a saved profile used to leave them out.
+    let fixture = Fixture::new();
+    let source = fixture.roots("source");
+    put(
+        &source.config,
+        "plugins/local/mcp-docs/.claude-plugin/plugin.json",
+        "{\"name\":\"mcp-docs\"}",
+    );
+    put(
+        &source.config,
+        "plugins/local/mcp-docs/.mcp.json",
+        "{\"mcpServers\":{\"docs\":{\"type\":\"remote\",\"url\":\"https://example.invalid/mcp\"}}}",
+    );
+    put(
+        &source.config,
+        "plugins/local/mcp-docs/.haarness-disabled",
+        "",
+    );
+    put(&source.config, "plugins/installed.json", "{}");
+    let archive =
+        Archive::decode(&Archive::capture(&source, "plugins", Scope::Global).unwrap()).unwrap();
+    let mut keys = archive.files.keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "global/config/plugins/local/mcp-docs/.claude-plugin/plugin.json",
+            "global/config/plugins/local/mcp-docs/.haarness-disabled",
+            "global/config/plugins/local/mcp-docs/.mcp.json",
+        ]
+    );
+    let destination = fixture.roots("destination");
+    archive.restore(&destination, false, false).unwrap();
+    assert!(
+        destination
+            .config
+            .join("plugins/local/mcp-docs/.mcp.json")
+            .is_file()
+    );
+}
+
+#[test]
 fn catalog_is_persistent_searchable_immutable_and_validates_before_storage() {
     let fixture = Fixture::new();
     let roots = fixture.roots("source");

@@ -407,7 +407,73 @@ fn git_url(source: &str) -> String {
     source.to_owned()
 }
 
+/// The revision a git plugin source pins: `ref` is a branch or tag, `sha` an
+/// exact commit that wins over `ref`, as in Claude Code's marketplace format.
+#[derive(Default)]
+struct GitRevision<'a> {
+    reference: Option<&'a str>,
+    sha: Option<&'a str>,
+}
+
+impl<'a> GitRevision<'a> {
+    fn of(source: &'a serde_json::Map<String, serde_json::Value>) -> Self {
+        let field = |key| source.get(key).and_then(serde_json::Value::as_str);
+        Self {
+            reference: field("ref"),
+            sha: field("sha"),
+        }
+    }
+}
+
+/// Marketplace text names the repository and revision, so neither may be
+/// read by git as an option, and fetching must never stop to ask for a password.
+fn git<S: AsRef<std::ffi::OsStr>>(args: impl IntoIterator<Item = S>) -> Result<()> {
+    let output = Command::new("git")
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ALLOW_PROTOCOL", "file:git:http:https:ssh")
+        .output()
+        .context("running git")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "{}",
+            stderr
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("git failed")
+                .trim()
+        );
+    }
+    Ok(())
+}
+
+fn checked_git_value<'a>(value: &'a str, what: &str) -> Result<&'a str> {
+    if value.is_empty()
+        || value.starts_with('-')
+        || value.chars().any(|c| c.is_control() || c.is_whitespace())
+    {
+        bail!("invalid git {what} {value:?}");
+    }
+    Ok(value)
+}
+
 fn git_clone(url: &str, destination: &Path) -> Result<()> {
+    git_checkout(url, &GitRevision::default(), destination)
+}
+
+fn git_checkout(url: &str, revision: &GitRevision<'_>, destination: &Path) -> Result<()> {
+    checked_git_value(url, "URL")?;
+    let reference = revision
+        .reference
+        .map(|reference| checked_git_value(reference, "ref"))
+        .transpose()?;
+    if let Some(sha) = revision.sha
+        && !(sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        bail!("plugin source sha must be a full 40-character commit SHA, not {sha:?}");
+    }
     let parent = destination.parent().unwrap_or(destination);
     fs::create_dir_all(parent)?;
     let leaf = destination
@@ -417,14 +483,40 @@ fn git_clone(url: &str, destination: &Path) -> Result<()> {
     let nonce = uuid::Uuid::now_v7();
     let staging = parent.join(format!(".{leaf}.stage-{nonce}"));
     let backup = parent.join(format!(".{leaf}.backup-{nonce}"));
-    let status = Command::new("git")
-        .args(["clone", "--depth", "1", url])
-        .arg(&staging)
-        .status()
-        .context("running git clone")?;
-    if !status.success() {
+    let fetched = (|| -> Result<()> {
+        let staged = staging.to_string_lossy();
+        let staged = staged.as_ref();
+        let Some(sha) = revision.sha else {
+            let mut args = vec!["clone", "-q", "--depth", "1"];
+            if let Some(reference) = reference {
+                args.extend(["--branch", reference]);
+            }
+            args.extend(["--", url, staged]);
+            return git(args);
+        };
+        let sha = sha.to_ascii_lowercase();
+        git(["-c", "init.defaultBranch=main", "init", "-q", staged])?;
+        // Most hosts serve a reachable commit by its id. Others only serve
+        // refs, so fall back to the named ref's (or default branch's) history.
+        let by_id = git(["-C", staged, "fetch", "-q", "--depth", "1", "--", url, &sha]);
+        if by_id.is_err() {
+            git([
+                "-C",
+                staged,
+                "fetch",
+                "-q",
+                "--",
+                url,
+                reference.unwrap_or("HEAD"),
+            ])
+            .with_context(|| format!("commit {sha} is not available from {url}"))?;
+        }
+        git(["-C", staged, "checkout", "-q", "--detach", &sha])
+            .with_context(|| format!("commit {sha} is not available from {url}"))
+    })();
+    if let Err(error) = fetched {
         let _ = fs::remove_dir_all(&staging);
-        bail!("git clone failed for {url}");
+        return Err(error.context(format!("git clone failed for {url}")));
     }
     if destination.exists() {
         fs::rename(destination, &backup)?;
@@ -722,19 +814,19 @@ pub fn install(data: &Path, spec: &str) -> Result<InstalledPlugin> {
                     .context("plugin source needs url")?,
                 other => bail!("unsupported plugin source type {other} for {name}"),
             };
-            let subdir = if kind == "git-subdir" {
-                let subdir = object
-                    .get("path")
-                    .and_then(serde_json::Value::as_str)
-                    .context("git-subdir plugin source needs path")?;
-                if !safe_relative(subdir) {
-                    bail!("plugin {name} has an unsafe git subdirectory path");
+            // `git-subdir` requires a path; Anthropic's own marketplace also
+            // gives some `url` sources one, so honour it there too.
+            let subdir = match (kind, object.get("path").and_then(serde_json::Value::as_str)) {
+                ("git-subdir", None) => bail!("git-subdir plugin source needs path"),
+                ("git-subdir" | "url", Some(subdir)) => {
+                    if !safe_relative(subdir) {
+                        bail!("plugin {name} has an unsafe git subdirectory path");
+                    }
+                    Some(subdir)
                 }
-                Some(subdir)
-            } else {
-                None
+                _ => None,
             };
-            git_clone(&source, &cache)?;
+            git_checkout(&source, &GitRevision::of(object), &cache)?;
             if let Some(subdir) = subdir {
                 let target = cache.join(subdir);
                 let canonical_cache = cache.canonicalize()?;
@@ -819,6 +911,30 @@ pub fn remove(data: &Path, name: &str) -> Result<()> {
 
 pub fn marketplaces(data: &Path) -> BTreeMap<String, PathBuf> {
     read_map(&marketplaces_file(data))
+}
+
+/// Registered Claude-format marketplaces and what each offers, for clients
+/// (and the model) that choose a plugin to install by `name@marketplace`.
+pub fn marketplace_catalog(data: &Path) -> serde_json::Value {
+    let installed = installed(data);
+    serde_json::Value::Array(
+        marketplaces(data)
+            .into_iter()
+            .map(|(name, root)| match manifest_of(&root) {
+                Ok(manifest) => serde_json::json!({
+                    "name": name,
+                    "path": root,
+                    "plugins": manifest.plugins.iter().map(|plugin| serde_json::json!({
+                        "name": plugin.name,
+                        "install": format!("{}@{name}", plugin.name),
+                        "description": plugin.description,
+                        "installed": installed.get(&plugin.name).is_some_and(|entry| entry.marketplace == name),
+                    })).collect::<Vec<_>>(),
+                }),
+                Err(error) => serde_json::json!({"name": name, "path": root, "error": error.to_string()}),
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -1116,6 +1232,113 @@ mod tests {
             "a plain name is still a marketplace plugin"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn git_sources_check_out_their_pinned_sha_or_ref_and_url_paths() {
+        let root = std::env::temp_dir().join(format!("haarness-pins-{}", uuid::Uuid::now_v7()));
+        let data = root.join("data");
+        let repo = root.join("repo");
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args([
+                        "-c",
+                        "user.name=Haarness Test",
+                        "-c",
+                        "user.email=test@example.invalid"
+                    ])
+                    .args(args)
+                    .current_dir(&repo)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        let mut commits = Vec::new();
+        for version in ["one", "two"] {
+            for dir in [repo.clone(), repo.join("plugins/kit")] {
+                fs::create_dir_all(dir.join(".claude-plugin")).unwrap();
+                fs::write(
+                    dir.join(".claude-plugin/plugin.json"),
+                    format!(r#"{{"name":"kit","version":"{version}"}}"#),
+                )
+                .unwrap();
+            }
+            if version == "one" {
+                git(&["init", "-q", "-b", "main"]);
+            }
+            git(&["add", "."]);
+            git(&["commit", "-qm", version]);
+            if version == "one" {
+                git(&["tag", "v1"]);
+            }
+            let head = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            commits.push(String::from_utf8(head.stdout).unwrap().trim().to_owned());
+        }
+        let url = format!("file://{}", repo.display());
+        let market = root.join("market");
+        fs::create_dir_all(market.join(".claude-plugin")).unwrap();
+        fs::write(
+            market.join(".claude-plugin/marketplace.json"),
+            serde_json::json!({"name": "pins", "plugins": [
+                {"name": "by-sha", "source": {"source": "url", "url": url, "ref": "main", "sha": commits[0]}},
+                {"name": "by-ref", "source": {"source": "url", "url": url, "ref": "v1"}},
+                {"name": "subdir-sha", "source": {"source": "git-subdir", "url": url, "path": "plugins/kit", "sha": commits[0]}},
+                {"name": "url-path", "source": {"source": "url", "url": url, "path": "plugins/kit"}},
+                {"name": "latest", "source": {"source": "url", "url": url}},
+                {"name": "short-sha", "source": {"source": "url", "url": url, "sha": &commits[0][..7]}},
+                {"name": "option", "source": {"source": "url", "url": "--upload-pack=touch injected"}}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        marketplace_add(&data, market.to_str().unwrap()).unwrap();
+        let version = |plugin: &InstalledPlugin| {
+            let manifest: serde_json::Value = serde_json::from_slice(
+                &fs::read(plugin.path.join(".claude-plugin/plugin.json")).unwrap(),
+            )
+            .unwrap();
+            manifest["version"].as_str().unwrap().to_owned()
+        };
+        for (name, expected) in [
+            ("by-sha", "one"),
+            ("by-ref", "one"),
+            ("subdir-sha", "one"),
+            ("latest", "two"),
+        ] {
+            assert_eq!(
+                version(&install(&data, &format!("{name}@pins")).unwrap()),
+                expected,
+                "{name}"
+            );
+        }
+        let subdir = install(&data, "url-path@pins").unwrap();
+        assert!(
+            subdir.path.ends_with("plugins/kit"),
+            "{}",
+            subdir.path.display()
+        );
+        // Updating re-fetches the same pinned commit.
+        assert_eq!(version(&update(&data, "by-sha").unwrap()), "one");
+        assert!(
+            install(&data, "short-sha@pins")
+                .unwrap_err()
+                .to_string()
+                .contains("40-character")
+        );
+        assert!(
+            install(&data, "option@pins")
+                .unwrap_err()
+                .to_string()
+                .contains("invalid git URL")
+        );
+        assert!(!repo.join("injected").exists() && !Path::new("injected").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

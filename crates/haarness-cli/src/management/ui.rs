@@ -620,16 +620,83 @@ impl ManagementService {
                     &json!({"action":"manifest","id":input["id"],"version":input["version"]}),
                 )
                 .await?;
+            let resource = &manifest["resource"];
+            let mut lines = vec![format!(
+                "{} · version {} · {}",
+                text(resource, "kind"),
+                manifest["version"]["number"],
+                text(resource, "publisher")
+            )];
+            // Say what the resource can do in words rather than raw JSON.
+            let capabilities = &manifest["capabilities"];
+            let listed = |key: &str| {
+                capabilities[key]
+                    .as_array()
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .filter(|items| !items.is_empty())
+            };
+            for (flag, line) in [
+                ("executable", "Runs programs on this computer"),
+                ("shell", "Runs shell commands"),
+                ("network", "Uses the network"),
+            ] {
+                if capabilities[flag] == true {
+                    lines.push(line.into());
+                }
+            }
+            for (key, label) in [
+                ("mcp", "MCP servers"),
+                ("hooks", "Hooks"),
+                ("secrets", "Asks for"),
+            ] {
+                if let Some(items) = listed(key) {
+                    lines.push(format!("{label}: {items}"));
+                }
+            }
+            let mut fields = vec![choice(
+                "scope",
+                "Installation scope",
+                "local",
+                &["local", "global"],
+            )];
+            // One field per value an MCP server asks for; each installer
+            // supplies their own, and secrets stay masked.
+            for placeholder in manifest["install"]["mcp"]["env_placeholders"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                let name = text(placeholder, "name");
+                if name.is_empty() {
+                    continue;
+                }
+                let description = text(placeholder, "description");
+                let mut value = field(
+                    &format!("value:{name}"),
+                    &if description.is_empty() {
+                        name.to_owned()
+                    } else {
+                        format!("{name} · {description}")
+                    },
+                    "",
+                    placeholder["required"] != false,
+                );
+                let upper = name.to_ascii_uppercase();
+                value.secret = ["KEY", "TOKEN", "SECRET", "PASSWORD"]
+                    .iter()
+                    .any(|word| upper.contains(word));
+                fields.push(value);
+            }
             return Ok(View {
-                title: format!("Install {}", text(&manifest["resource"], "name")),
-                lines: vec![
-                    format!("Version {}", manifest["version"]["number"]),
-                    serde_json::to_string_pretty(&manifest["capabilities"])?,
-                ],
-                fields: vec![
-                    choice("scope", "Installation scope", "local", &["local", "global"]),
-                    field("valuesText", "MCP configuration values (JSON)", "{}", false),
-                ],
+                title: format!("Install {}", text(resource, "name")),
+                lines,
+                fields,
                 submit: Some(
                     json!({"action":"install","id":input["id"],"version":manifest["version"]["number"]}),
                 ),
@@ -645,10 +712,22 @@ impl ManagementService {
             if let Some(values) = input["valuesText"].as_str() {
                 request["values"] = serde_json::from_str(values)?;
             }
+            for (key, value) in input.as_object().into_iter().flatten() {
+                if let Some(name) = key.strip_prefix("value:") {
+                    request["values"][name] = value.clone();
+                }
+            }
             self.marketplace_request(&request).await?;
-            notice = Some("Saved. Changes apply when active work is idle.".into());
+            let done = match action {
+                "install" => "Installed",
+                "update" => "Updated",
+                "enable" => "Turned on",
+                "disable" => "Turned off",
+                _ => "Removed",
+            };
+            notice = Some(format!("{done}. Changes apply when active work is idle."));
         }
-        let mut view=View {title:"Marketplace".into(),fields:vec![field("q","Search marketplace",text(input,"q"),false),choice("kind","Resource type",input["kind"].as_str().unwrap_or("skill"),&["skill","agent","mcp","plugin","extension"])],submit:Some(json!({"action":"search"})),lines:vec!["Public resources are visible to everyone. Private resources belong to your Haarness account and its members.".into()],..View::default()};
+        let mut view=View {title:"Marketplace".into(),fields:vec![field("q","Search marketplace",text(input,"q"),false),choice("kind","Resource type",input["kind"].as_str().filter(|kind| !kind.is_empty()).unwrap_or("all"),&["all","skill","agent","mcp","plugin","extension"])],submit:Some(json!({"action":"search"})),lines:vec!["Public resources are visible to everyone. Private resources belong to your Haarness account and its members.".into()],..View::default()};
         if let Some(notice) = notice {
             view.lines.insert(0, notice);
         }
@@ -657,41 +736,87 @@ impl ManagementService {
             "Manage versions and availability",
             json!({"action":"installed"}),
         ));
-        if action == "installed" {
+        // Changing an installed resource stays on the installed list, where
+        // its new state shows; an install goes back to browsing.
+        if matches!(
+            action,
+            "installed" | "enable" | "disable" | "update" | "remove"
+        ) {
             let installed = self
                 .marketplace_request(&json!({"action":"installed"}))
                 .await?;
+            if installed.as_array().is_none_or(Vec::is_empty) {
+                view.lines
+                    .push("Nothing is installed from the marketplace yet.".into());
+            }
             for row in installed.as_array().into_iter().flatten() {
-                for action in ["enable", "disable", "update", "remove"] {
-                    let mut e = entry(
-                        format!("{action} {}", text(row, "name")),
-                        format!(
-                            "{} · {} · version {}",
-                            text(row, "kind"),
-                            text(row, "scope"),
-                            row["version"]["number"]
-                        ),
-                        json!({"action":action,"id":row["id"],"scope":row["scope"],"name":row["name"]}),
-                    );
-                    if action == "remove" {
-                        e.confirm = Some(format!("Remove {}?", text(row, "name")));
-                    }
-                    view.entries.push(e);
-                }
+                let name = text(row, "name");
+                let enabled = row["enabled"] != false;
+                let details = format!(
+                    "{} · {} · version {} · {}",
+                    text(row, "kind"),
+                    if row["scope"] == "local" {
+                        "this project"
+                    } else {
+                        "all projects"
+                    },
+                    row["version"]["number"],
+                    if enabled { "on" } else { "off" }
+                );
+                let request = |action: &str| json!({"action":action,"id":row["id"],"scope":row["scope"],"name":row["name"]});
+                // Only the toggle that applies: the state is in the description.
+                let toggle = if enabled { "disable" } else { "enable" };
+                view.entries.push(entry(
+                    format!("{} {name}", if enabled { "Disable" } else { "Enable" }),
+                    details,
+                    request(toggle),
+                ));
+                view.entries.push(entry(
+                    format!("Update {name}"),
+                    "Install the latest version",
+                    request("update"),
+                ));
+                let mut remove = entry(format!("Remove {name}"), "Uninstall it", request("remove"));
+                remove.confirm = Some(format!("Remove {name}?"));
+                view.entries.push(remove);
             }
         } else {
             // Offline or Cloud down: say so, and keep installed resources reachable.
-            match self.marketplace_request(&json!({"action":"search","q":input["q"],"kind":input["kind"],"cursor":input["cursor"]})).await {
+            // "all" (the form's default) searches every kind.
+            let kind = input["kind"]
+                .as_str()
+                .filter(|kind| !matches!(*kind, "" | "all"));
+            match self
+                .marketplace_request(
+                    &json!({"action":"search","q":input["q"],"kind":kind,"cursor":input["cursor"]}),
+                )
+                .await
+            {
                 Ok(page) => {
                     for row in page["items"].as_array().into_iter().flatten() {
-                        view.entries.push(entry(format!("{} · {} · {}",text(row,"name"),text(row,"kind"),text(row,"visibility")),text(row,"summary"),json!({"action":"inspect","id":row["id"]})));
+                        view.entries.push(entry(
+                            format!(
+                                "{} · {} · {}",
+                                text(row, "name"),
+                                text(row, "kind"),
+                                text(row, "visibility")
+                            ),
+                            text(row, "summary"),
+                            json!({"action":"inspect","id":row["id"]}),
+                        ));
                     }
-                    if page["nextCursor"].is_string() {view.entries.push(entry("Next page","",json!({"action":"search","q":input["q"],"kind":input["kind"],"cursor":page["nextCursor"]})));}
+                    if page["nextCursor"].is_string() {
+                        view.entries.push(entry("Next page","",json!({"action":"search","q":input["q"],"kind":kind,"cursor":page["nextCursor"]})));
+                    }
                 }
                 Err(error) => {
                     view.lines.pop();
                     view.lines.push(error.to_string());
-                    view.entries.push(entry("Try again","",json!({"action":"search","q":input["q"],"kind":input["kind"]})));
+                    view.entries.push(entry(
+                        "Try again",
+                        "",
+                        json!({"action":"search","q":input["q"],"kind":kind}),
+                    ));
                 }
             }
         }

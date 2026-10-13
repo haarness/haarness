@@ -7983,12 +7983,20 @@ async fn custom_command_expands_server_side_and_switches_agent() {
             config
         },
     );
-    // Custom agents surface in the profile list.
+    // Custom agents surface in the profile list. Without a mode (as in every
+    // Claude Code agent) they are usable everywhere, so clients offer `@pirate`.
     assert!(
         runtime
             .agent_profiles()
             .iter()
-            .any(|profile| profile.id == "pirate")
+            .any(|profile| profile.id == "pirate" && profile.mode.as_deref() == Some("all"))
+    );
+    assert!(
+        runtime
+            .agent_profiles()
+            .iter()
+            .any(|profile| profile.id == "build" && profile.mode.is_none()),
+        "built-in primaries keep mode None"
     );
     let thread = runtime
         .create_thread(CreateThreadRequest {
