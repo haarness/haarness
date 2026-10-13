@@ -686,6 +686,137 @@ fn is_provider_context_overflow(error: &CoreError) -> bool {
     .any(|marker| message.contains(marker))
 }
 
+/// A provider that refused an image in the request (its type, bytes, size,
+/// pixels or count) rather than the request as a whole. With images in the
+/// request a request-size refusal counts too: images are what made it large.
+fn is_provider_image_rejection(error: &CoreError, request_has_images: bool) -> bool {
+    let CoreError::Provider(message) = error else {
+        return false;
+    };
+    if !request_has_images || is_provider_usage_limit(error) || is_provider_transient(error) {
+        return false;
+    }
+    let message = message.to_ascii_lowercase();
+    // Phrasings of Anthropic (also on Bedrock and Vertex), OpenAI and Gemini.
+    let named = [
+        "could not process image",
+        "unable to process image",
+        "unable to process input image",
+        "could not decode image",
+        "unable to decode image",
+        "invalid image",
+        "invalid_image",
+        "unsupported image",
+        "provided image is not valid",
+        "does not represent a valid image",
+        "image_parse_error",
+        "image exceeds",
+        "image is too large",
+        "image too large",
+        "image_too_large",
+        "image dimensions",
+        "many-image",
+        "too many images",
+        "maximum number of images",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker))
+        || (message.contains("image")
+            && ["media type", "media_type", "mime type"]
+                .iter()
+                .any(|marker| message.contains(marker)));
+    // Too many bytes, unless the provider says it is the context that is
+    // too long: compaction answers that one.
+    let oversized = [
+        "http 413",
+        "status 413",
+        "request entity too large",
+        "request too large",
+        "request_too_large",
+        "payload too large",
+        "maximum allowed number of bytes",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker))
+        && ![
+            "context",
+            "token",
+            "prompt is too long",
+            "input is too long",
+        ]
+        .iter()
+        .any(|marker| message.contains(marker));
+    named || oversized
+}
+
+/// An image attachment in a sent request, where an Anthropic-shaped error
+/// path (`messages.3.content.1`, or `messages.3.content.0.content.2` inside
+/// a tool result) would point at it.
+#[derive(Debug, Clone)]
+struct SentImage {
+    message: usize,
+    block: usize,
+    nested: Option<usize>,
+    source: String,
+}
+
+fn sent_images(messages: &[ProviderMessage]) -> Vec<SentImage> {
+    let mut images = Vec::new();
+    // Adapters drop developer-role messages; the rest keep their order.
+    let wire = messages.iter().filter(|message| {
+        !matches!(message, ProviderMessage::Text { role, .. } | ProviderMessage::Media { role, .. } if role == "developer")
+    });
+    for (index, message) in wire.enumerate() {
+        let (attachments, first) = match message {
+            // A media message's text, when it has any, is its first block.
+            ProviderMessage::Media {
+                content,
+                attachments,
+                ..
+            } => (attachments, (None, usize::from(!content.is_empty()))),
+            // A tool result is one block whose own content starts with text.
+            ProviderMessage::ToolResult { attachments, .. } => (attachments, (Some(0), 1)),
+            _ => continue,
+        };
+        for (offset, source) in attachments.iter().enumerate() {
+            if crate::attachments::is_image_source(source) {
+                let position = first.1 + offset;
+                let (block, nested) = match first.0 {
+                    Some(block) => (block, Some(position)),
+                    None => (position, None),
+                };
+                images.push(SentImage {
+                    message: index,
+                    block,
+                    nested,
+                    source: source.clone(),
+                });
+            }
+        }
+    }
+    images
+}
+
+/// The image a refusal names by its place in the request, when it names one.
+fn refused_image<'a>(message: &str, sent: &'a [SentImage]) -> Option<&'a SentImage> {
+    static PATH: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"messages\.(\d+)\.content\.(\d+)(?:\.content\.(\d+))?")
+            .expect("valid error path pattern")
+    });
+    let captures = PATH.captures(message)?;
+    let number = |index: usize| {
+        captures
+            .get(index)
+            .and_then(|value| value.as_str().parse().ok())
+    };
+    let (message, block, nested) = (number(1)?, number(2)?, number(3));
+    sent.iter().find(|image| {
+        image.message == message
+            && image.block == block
+            && (image.nested.is_none() || image.nested == nested)
+    })
+}
+
 /// Keep transport envelopes in logs while giving the transcript a concise,
 /// actionable failure. Providers use several JSON shapes for the same error;
 /// extract their human message/code before falling back to bounded plain text.
@@ -5763,6 +5894,59 @@ impl RunnerTask {
         );
     }
 
+    /// Leaves the images a provider refused out of this and every later
+    /// request of the thread. The record is an item, so a restarted server,
+    /// a fork and a replay all leave out the same images and the prompt stays
+    /// the same from one request to the next. A refusal that names no image
+    /// leaves out the newest ones: what the last request added is the
+    /// likeliest cause. False for any other error.
+    async fn omit_refused_images(&self, error: &CoreError, sent: &[SentImage]) -> CoreResult<bool> {
+        let CoreError::Provider(message) = error else {
+            return Ok(false);
+        };
+        if !is_provider_image_rejection(error, !sent.is_empty()) {
+            return Ok(false);
+        }
+        let (refused, guessed) = match refused_image(message, sent) {
+            Some(image) => (vec![image], false),
+            None => {
+                let newest = sent.iter().map(|image| image.message).max();
+                (
+                    sent.iter()
+                        .filter(|image| Some(image.message) == newest)
+                        .collect(),
+                    true,
+                )
+            }
+        };
+        let mut fingerprints = Vec::new();
+        let mut names = Vec::new();
+        for image in refused {
+            let fingerprint = crate::attachments::fingerprint(&image.source);
+            if !fingerprints.contains(&fingerprint) {
+                fingerprints.push(fingerprint);
+                names.push(crate::attachments::display_name(&image.source));
+            }
+        }
+        warn!(
+            thread = %self.thread.id,
+            turn = %self.turn.id,
+            images = fingerprints.len(),
+            guessed,
+            %error,
+            "provider refused an image; leaving it out"
+        );
+        let reason = user_facing_error(error).chars().take(500).collect();
+        self.publish_item(ItemData::MediaOmitted {
+            fingerprints,
+            names,
+            reason,
+            guessed,
+        })
+        .await?;
+        Ok(true)
+    }
+
     /// Bounded recovery for a provider which rejects the request before it
     /// emits any semantic output. The caller enforces the per-turn recovery
     /// ceiling; the same queue gate used by proactive compaction protects
@@ -5947,6 +6131,8 @@ impl RunnerTask {
             // prose, and no provider validates the schema for us.
             let mut structured_retries = 0_u8;
             let mut transient_retries = 0_u8;
+            // One retry per turn after a provider refused an image.
+            let mut image_retried = false;
             let mut recovering = false;
             // UserPromptSubmit hooks may block the turn or inject context.
             let mut prompt_context: Option<String> = None;
@@ -6477,6 +6663,7 @@ impl RunnerTask {
                     Some(key) => self.prefix_warmup.enter(key, &self.cancel).await?,
                     None => None,
                 };
+                let sent_images = sent_images(&provider_request.messages);
                 let stream_result = tokio::select! {
                     biased;
                     () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
@@ -6492,6 +6679,12 @@ impl RunnerTask {
                     Ok(stream) => stream,
                     Err(error_value) => {
                         record_span_error(&provider_span, &error_value);
+                        if self.omit_refused_images(&error_value, &sent_images).await? {
+                            if !std::mem::replace(&mut image_retried, true) {
+                                continue 'provider_round;
+                            }
+                            return Err(error_value);
+                        }
                         if compactions_this_turn < MAX_COMPACTIONS_PER_TURN
                             && is_provider_context_overflow(&error_value)
                             && self.recover_context_overflow(&provider, &model).await?
@@ -6537,6 +6730,17 @@ impl RunnerTask {
                         Ok(event) => event,
                         Err(error_value) => {
                             record_span_error(&provider_span, &error_value);
+                            // Providers check images before they answer, so a
+                            // refusal arrives before anything was streamed.
+                            if !saw_provider_event
+                                && self.omit_refused_images(&error_value, &sent_images).await?
+                            {
+                                if !std::mem::replace(&mut image_retried, true) {
+                                    continue 'provider_round;
+                                }
+                                blocked = Some(error_value);
+                                break;
+                            }
                             if !saw_provider_event
                                 && compactions_this_turn < MAX_COMPACTIONS_PER_TURN
                                 && is_provider_context_overflow(&error_value)
@@ -9686,6 +9890,7 @@ pub fn shorten_title(title: &str, limit: usize) -> String {
 }
 
 fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
+    let omitted = omitted_media(&items);
     let compaction_sequence = items
         .iter()
         .rfind(|item| matches!(item.data, ItemData::Compaction { .. }))
@@ -9721,7 +9926,9 @@ fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
                 let (content, attachments) = if replayed_after_compaction {
                     (content, attachments)
                 } else {
-                    crate::attachments::for_model(content, attachments)
+                    let (content, attachments) =
+                        crate::attachments::for_model(content, attachments);
+                    without_omitted(content, attachments, &omitted)
                 };
                 let message = if attachments.is_empty() || replayed_after_compaction {
                     ProviderMessage::Text {
@@ -9797,16 +10004,20 @@ fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
                 is_error,
                 metadata,
                 ..
-            } => valid_calls
-                .get(&call_id)
-                .cloned()
-                .map(|name| ProviderMessage::ToolResult {
+            } => valid_calls.get(&call_id).cloned().map(|name| {
+                // A tool's image is a file it saw; one deleted since is named
+                // instead of failing every later request.
+                let (output, attachments) =
+                    crate::attachments::for_model(output, tool_output_attachments(&metadata));
+                let (output, attachments) = without_omitted(output, attachments, &omitted);
+                ProviderMessage::ToolResult {
                     call_id,
                     name,
                     output,
                     is_error,
-                    attachments: tool_output_attachments(&metadata),
-                }),
+                    attachments,
+                }
+            }),
             ItemData::QueueConsumed { item_id } => deferred_queued.remove(&item_id),
             _ => None,
         };
@@ -9820,6 +10031,44 @@ fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
         }
     }
     messages
+}
+
+/// Every attachment a provider refused earlier in the thread.
+fn omitted_media(items: &[Item]) -> HashSet<String> {
+    items
+        .iter()
+        .filter_map(|item| match &item.data {
+            ItemData::MediaOmitted { fingerprints, .. } => Some(fingerprints.iter().cloned()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// Leaves out attachments a provider refused, naming each one so the model
+/// knows an image was there.
+fn without_omitted(
+    mut content: String,
+    attachments: Vec<String>,
+    omitted: &HashSet<String>,
+) -> (String, Vec<String>) {
+    if omitted.is_empty() {
+        return (content, attachments);
+    }
+    let mut kept = Vec::with_capacity(attachments.len());
+    for source in attachments {
+        if omitted.contains(&crate::attachments::fingerprint(&source)) {
+            use std::fmt::Write as _;
+            let _ = write!(
+                content,
+                "\n[Image {} omitted: the provider refused it earlier in this conversation]",
+                crate::attachments::display_name(&source)
+            );
+        } else {
+            kept.push(source);
+        }
+    }
+    (content, kept)
 }
 
 fn compaction_provider_context(
@@ -11814,6 +12063,10 @@ mod tests {
 
     #[test]
     fn provider_messages_preserve_tool_result_attachments() {
+        let dir = std::env::temp_dir().join(format!("haarness-media-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let report = dir.join("report.pdf").to_string_lossy().into_owned();
+        std::fs::write(&report, b"%PDF-1.4").unwrap();
         let messages = provider_messages(vec![
             item(
                 1,
@@ -11833,20 +12086,190 @@ mod tests {
                     is_error: false,
                     metadata: json!({
                         "attachments": [
-                            "/tmp/report.pdf",
+                            report,
                             "data:audio/mpeg;base64,SUQz"
                         ]
                     }),
                 },
             ),
         ]);
+        std::fs::remove_dir_all(dir).unwrap();
 
         assert!(matches!(
             &messages[1],
             ProviderMessage::ToolResult { attachments, .. }
-                if attachments
-                    == &["/tmp/report.pdf", "data:audio/mpeg;base64,SUQz"]
+                if attachments == &[report.as_str(), "data:audio/mpeg;base64,SUQz"]
         ));
+    }
+
+    fn tool_round(call_id: &str, attachment: &str) -> Vec<Item> {
+        vec![
+            item(
+                1,
+                ItemData::ToolCall {
+                    call_id: call_id.into(),
+                    name: "read".into(),
+                    arguments: json!({"path": attachment}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            item(
+                2,
+                ItemData::ToolResult {
+                    call_id: call_id.into(),
+                    name: "read".into(),
+                    output: format!("Image read successfully: {attachment}"),
+                    is_error: false,
+                    metadata: json!({"attachments": [attachment]}),
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_tool_image_deleted_since_is_named_instead_of_failing_the_request() {
+        let messages = provider_messages(tool_round("call-shot", "/nonexistent/shots/page.png"));
+        let ProviderMessage::ToolResult {
+            output,
+            attachments,
+            ..
+        } = &messages[1]
+        else {
+            panic!("{messages:?}");
+        };
+        assert!(attachments.is_empty());
+        assert!(
+            output.ends_with("[Attachment /nonexistent/shots/page.png is no longer available]"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn refused_images_are_left_out_of_every_later_request() {
+        let shot = "data:image/png;name=shot.png;base64,iVBORw0KGgo=";
+        let screen = "data:image/png;name=screen.png;base64,iVBORw0KGgo=";
+        let mut items = vec![item(
+            1,
+            ItemData::UserMessage {
+                text: "Look".into(),
+                attachments: vec![shot.into(), screen.into()],
+                queued: false,
+                synthetic: false,
+            },
+        )];
+        items.extend(tool_round("call-image", shot).into_iter().map(|mut item| {
+            item.sequence += 1;
+            item
+        }));
+        let before = provider_messages(items.clone());
+        assert!(
+            matches!(&before[0], ProviderMessage::Media { attachments, .. } if attachments.len() == 2)
+        );
+        items.push(item(
+            4,
+            ItemData::MediaOmitted {
+                fingerprints: vec![crate::attachments::fingerprint(shot)],
+                names: vec!["shot.png".into()],
+                reason: "image exceeds 5 MB maximum".into(),
+                guessed: false,
+            },
+        ));
+        let after = provider_messages(items.clone());
+        // The other image stays; the refused one becomes a note, everywhere.
+        assert!(
+            matches!(&after[0], ProviderMessage::Media { content, attachments, .. }
+            if attachments == &[screen]
+                && content.ends_with("[Image shot.png omitted: the provider refused it earlier in this conversation]"))
+        );
+        assert!(
+            matches!(&after[2], ProviderMessage::ToolResult { output, attachments, .. }
+            if attachments.is_empty() && output.contains("[Image shot.png omitted"))
+        );
+        assert_eq!(after.len(), 3, "the record itself is not sent");
+        // Replays are byte-for-byte the same, so the prompt cache holds.
+        assert_eq!(
+            serde_json::to_string(&after).unwrap(),
+            serde_json::to_string(&provider_messages(items)).unwrap()
+        );
+    }
+
+    #[test]
+    fn image_refusals_are_told_apart_from_other_failures() {
+        let refused = |message: &str| {
+            super::is_provider_image_rejection(&CoreError::Provider(message.into()), true)
+        };
+        for message in [
+            "HTTP 400 Bad Request: messages.0.content.1.image.source.base64: image exceeds 5 MB maximum: 7340032 bytes > 5242880 bytes",
+            "HTTP 400 Bad Request: messages.2.content.0.image.source.base64.data: Image does not match the provided media type image/png",
+            "HTTP 400 Bad Request: Could not process image",
+            "HTTP 400 Bad Request: messages.4.content.3.image.source.base64.data: image dimensions exceed max allowed size for many-image requests: 2000 pixels",
+            "HTTP 400 Bad Request: [invalid_image_format] You uploaded an unsupported image. Please make sure your image has of one the following formats",
+            "HTTP 400 Bad Request: The image data you provided does not represent a valid image.",
+            "HTTP 400 Bad Request: Unable to process input image. Please retry or report in https://developers.generativeai.google/guide/troubleshooting",
+            "HTTP 400 Bad Request: Provided image is not valid.",
+            "HTTP 413 Payload Too Large: Request exceeds the maximum allowed number of bytes.",
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"messages.0.content.1.image.source.base64: image exceeds 5 MB maximum"}}"#,
+        ] {
+            assert!(refused(message), "{message}");
+        }
+        for message in [
+            "HTTP 400 Bad Request: messages.1: tool_use ids must be unique",
+            "HTTP 429 Too Many Requests: rate limit exceeded",
+            "HTTP 529: Overloaded",
+            "HTTP 400 Bad Request: prompt is too long: 250000 tokens > 200000 maximum",
+            "HTTP 413 Payload Too Large: maximum context length exceeded",
+        ] {
+            assert!(!refused(message), "{message}");
+        }
+        // A request without images cannot have been refused for one.
+        assert!(!super::is_provider_image_rejection(
+            &CoreError::Provider("HTTP 413 Payload Too Large".into()),
+            false
+        ));
+    }
+
+    #[test]
+    fn an_anthropic_error_path_names_the_refused_image() {
+        let messages = vec![
+            ProviderMessage::Media {
+                role: "user".into(),
+                content: "Compare".into(),
+                attachments: vec![
+                    "data:application/pdf;base64,JVBE".into(),
+                    "data:image/png;name=a.png;base64,AA==".into(),
+                ],
+            },
+            ProviderMessage::ToolCall {
+                call_id: "c".into(),
+                name: "read".into(),
+                arguments: json!({}),
+                provider_metadata: serde_json::Value::Null,
+            },
+            ProviderMessage::ToolResult {
+                call_id: "c".into(),
+                name: "read".into(),
+                output: "Image read".into(),
+                is_error: false,
+                attachments: vec!["/tmp/b.png".into()],
+            },
+        ];
+        let sent = super::sent_images(&messages);
+        assert_eq!(sent.len(), 2);
+        let named =
+            |error: &str| super::refused_image(error, &sent).map(|image| image.source.clone());
+        // Block 0 is the text, 1 the PDF, 2 the image.
+        assert_eq!(
+            named("messages.0.content.2.image.source.base64: image exceeds 5 MB maximum")
+                .as_deref(),
+            Some("data:image/png;name=a.png;base64,AA==")
+        );
+        assert_eq!(
+            named("messages.2.content.0.content.1.image.source.base64: Could not process image")
+                .as_deref(),
+            Some("/tmp/b.png")
+        );
+        assert_eq!(named("messages.0.content.1.document: invalid"), None);
+        assert_eq!(named("Could not process image"), None);
     }
 
     #[test]

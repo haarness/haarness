@@ -2403,5 +2403,8 @@
   "Chrome is turned off for this project.": "此專案已關閉 Chrome。",
   "{category}: {decision} by default": "{category}：預設{decision}",
   "{category} on {origin}: {decision}": "{origin} 上的{category}：{decision}",
-  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "代理程式瀏覽器控制已關閉，因此代理程式不能在此專案中使用 Chrome。請在此頁頂端將其開啟。"
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "代理程式瀏覽器控制已關閉，因此代理程式不能在此專案中使用 Chrome。請在此頁頂端將其開啟。",
+  "The provider refused {name}, so it is left out of this chat from now on.": "提供者拒絕了 {name}，從現在起本聊天將略過它。",
+  "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "提供者拒絕了一張圖片但未說明是哪張，因此從現在起本聊天將略過最新的圖片 {name}。",
+  "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "提供者拒絕了一張圖片但未說明是哪張，因此從現在起本聊天將略過最新的幾張圖片：{names}。"
 }
