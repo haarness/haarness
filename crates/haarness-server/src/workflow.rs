@@ -1418,6 +1418,8 @@ fn host_error(error: CoreError) -> HostError {
 
 #[cfg(test)]
 mod tests {
+    /// A valid 1×1 PNG.
+    const PIXEL_PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x02\0\0\0\x90wS\xde\0\0\0\x0cIDATx\x9cc\xf8\xcf\xc0\0\0\x03\x01\x01\0\xc9\xfe\x92\xef\0\0\0\0IEND\xaeB`\x82";
     use super::*;
     use futures::stream;
     use haarness_core::{
@@ -1711,7 +1713,7 @@ mod tests {
         tokio::fs::write(workspace.join("src/z-last.txt"), "listed only\n")
             .await
             .unwrap();
-        tokio::fs::write(workspace.join("pixel.png"), b"\x89PNG\r\n\x1a\n")
+        tokio::fs::write(workspace.join("pixel.png"), PIXEL_PNG)
             .await
             .unwrap();
         tokio::fs::write(

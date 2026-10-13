@@ -106,6 +106,8 @@ test("larger media survives a real drop, draft reload and server submission",asy
   const threads=await api("listThreads");
   const items=await api("listItems",threads[0].id);
   const message=items.find((item:any)=>item.data.type==="user_message"&&item.data.text.includes("MEDIA_TRANSPORT_PROOF"));
-  expect(message.data.attachments[0].length).toBeGreaterThan(14*1024*1024);
+  // The server keeps the image every provider takes: the 11 MB file holds one pixel.
+  expect(message.data.attachments[0]).toMatch(/^data:image\/png;name=large-parity\.png;base64,/);
+  expect(message.data.attachments[0].length).toBeLessThan(1024);
   await transfer.dispose();expect(errors).toEqual([]);
 });

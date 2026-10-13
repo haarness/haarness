@@ -1730,8 +1730,11 @@ impl AgentRuntime {
                 "text or an attachment is required".into(),
             ));
         }
-        request.attachments =
-            crate::attachments::admit(std::mem::take(&mut request.attachments), &self.workspace)?;
+        request.attachments = crate::attachments::admit_off_executor(
+            std::mem::take(&mut request.attachments),
+            self.workspace.clone(),
+        )
+        .await?;
         loop {
             let thread = self.repository.get_thread(thread_id).await?;
             let active_turn = self
@@ -4241,8 +4244,11 @@ impl AgentRuntime {
         queue_revision: Option<u64>,
     ) -> CoreResult<Turn> {
         let _reload = self.reload_gate.read().await;
-        request.attachments =
-            crate::attachments::admit(std::mem::take(&mut request.attachments), &self.workspace)?;
+        request.attachments = crate::attachments::admit_off_executor(
+            std::mem::take(&mut request.attachments),
+            self.workspace.clone(),
+        )
+        .await?;
         self.apply_chat_turn_settings(thread_id, &mut request).await;
         let components = self.components();
         // A standalone `ultracode` in the user's current request is a one-turn

@@ -8,6 +8,7 @@ pub mod definitions;
 mod events;
 mod execution;
 mod goal;
+pub mod images;
 pub mod instructions;
 pub mod patch;
 mod permissions;

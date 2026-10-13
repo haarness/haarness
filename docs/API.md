@@ -286,6 +286,19 @@ transcript chips. Exact support remains provider-specific: OpenAI, Anthropic,
 and Bedrock accept PDF/images; Gemini accepts PDF/image/audio/video; compatible
 Chat gateways receive file/image/MP3/WAV shapes where supported.
 
+Images are judged by their bytes, never by file name or declared type, and made
+into images every provider reads before the message is stored: a JPEG named or
+labelled PNG is sent as JPEG; BMP and TIFF become PNG; HEIC/HEIF photos become
+JPEG on macOS (through the system's `sips`) and are refused elsewhere with a
+request to export them as JPEG or PNG; images larger than 2000 pixels on a side
+or 3.75 MB (Anthropic's 5 MB base64 limit on Bedrock and Vertex) are shrunk,
+first keeping PNG, then as JPEG. A converted image is stored inline as a data
+URL; an image that already fits keeps its path. Bytes that do not decode are
+refused with `400` and the reason; a PNG whose chunk checksums are wrong, which
+browsers still show, is corrected instead. The `read` tool and saved browser
+screenshots apply the same rules; a `read` of a damaged image fails the call
+with the reason.
+
 Ultracode is an additive, provider-neutral workflow mode. `Thread.ultracode`
 stores the standing session preference; `CreateThreadRequest.ultracode` and
 `PATCH /v1/threads/{id}` update it. Every `Turn` records the effective
