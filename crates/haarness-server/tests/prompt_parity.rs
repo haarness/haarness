@@ -502,7 +502,7 @@ async fn hook_context_memory_saves_and_a_new_day_keep_earlier_requests_a_prefix(
     );
     turn("Third turn").await;
 
-    let requests = provider.requests.lock().unwrap();
+    let requests = provider.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 3, "one request per turn");
     let today = chrono::Local::now()
         .date_naive()
@@ -571,7 +571,6 @@ async fn hook_context_memory_saves_and_a_new_day_keep_earlier_requests_a_prefix(
             ProviderMessage::Text { content, .. } if *content == last[index]
         ));
     }
-    drop(requests);
     // Hidden from the transcript: clients skip synthetic messages.
     let items = runtime.items(thread.id, None).await.unwrap();
     let hidden = items
