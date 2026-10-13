@@ -4814,6 +4814,48 @@
         }
       }
     },
+    "/api/v1/push/badge": {
+      "get": {
+        "tags": [
+          "push"
+        ],
+        "summary": "Read the app icon's badge.",
+        "description": "The count the notifications set as the badge, computed the same way: your open approvals and questions that\nyou can answer and a notification told you about, across all your accounts, each once. The app sets its icon\nbadge to it, so the badge never disagrees with the last notification. Requests of a computer that has been\noffline for half a minute are not counted until it is back. Auth: scope `account` (bearer of the app or cookie);\nAPI keys refused.",
+        "operationId": "get_push_badge",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushBadgeDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/push/devices": {
       "get": {
         "tags": [
@@ -18290,6 +18332,21 @@
           },
           "verified": {
             "type": "boolean"
+          }
+        }
+      },
+      "PushBadgeDto": {
+        "type": "object",
+        "description": "`GET /api/v1/push/badge`: the number the app icon shows, as the notifications set it.",
+        "required": [
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The person's open requests (approvals and questions they can answer) that a notification told them about,\nacross every account they build in, each once however many connectors reported it. Pushes carry it as\n`aps.badge` (left out at zero).",
+            "minimum": 0
           }
         }
       },

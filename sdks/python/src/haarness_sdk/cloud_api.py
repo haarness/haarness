@@ -327,6 +327,10 @@ class CloudApi(Transport):
         """DELETE /api/v1/push/activities/{activityId}."""
         return cast("None", self.request('DELETE', f'/api/v1/push/activities/{self.segment(activityId)}', binary_body=False, binary_response=False, options=options))
 
+    def get_push_badge(self, *, options: RequestOptions | None = None) -> T.PushBadgeDto:
+        """GET /api/v1/push/badge."""
+        return cast("T.PushBadgeDto", self.request('GET', f'/api/v1/push/badge', binary_body=False, binary_response=False, options=options))
+
     def list_push_devices(self, *, options: RequestOptions | None = None) -> T.PushDevicesResponse:
         """GET /api/v1/push/devices."""
         return cast("T.PushDevicesResponse", self.request('GET', f'/api/v1/push/devices', binary_body=False, binary_response=False, options=options))
@@ -1075,6 +1079,10 @@ class AsyncCloudApi(AsyncTransport):
     async def delete_live_activity(self, activityId: str, *, options: RequestOptions | None = None) -> None:
         """DELETE /api/v1/push/activities/{activityId}."""
         return cast("None", await self.request('DELETE', f'/api/v1/push/activities/{self.segment(activityId)}', binary_body=False, binary_response=False, options=options))
+
+    async def get_push_badge(self, *, options: RequestOptions | None = None) -> T.PushBadgeDto:
+        """GET /api/v1/push/badge."""
+        return cast("T.PushBadgeDto", await self.request('GET', f'/api/v1/push/badge', binary_body=False, binary_response=False, options=options))
 
     async def list_push_devices(self, *, options: RequestOptions | None = None) -> T.PushDevicesResponse:
         """GET /api/v1/push/devices."""

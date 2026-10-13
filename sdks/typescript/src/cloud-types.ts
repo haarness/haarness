@@ -233,6 +233,7 @@ export type PublishRemoteSessionRequest = { "projectId": string; "threadId": str
 export type PublisherId = string;
 export type PublisherPageDto = { "publisher": PublisherRefDto; "resources": Array<ResourceSummaryDto> };
 export type PublisherRefDto = { "displayName": string; "id": PublisherId; "slug": string; "verified": boolean };
+export type PushBadgeDto = { "count": number };
 export type PushCategory = "approvals" | "completions" | "failures" | "billing" | "security";
 export type PushCategoryPreference = { "category": PushCategory; "enabled": boolean };
 export type PushDeviceDto = { "appVersion"?: (string | null); "bundleId": string; "createdAt": string; "current": boolean; "environment": PushEnvironment; "familyId": string; "id": string; "lastSentAt"?: (string | null); "locale"?: (string | null); "updatedAt": string };
