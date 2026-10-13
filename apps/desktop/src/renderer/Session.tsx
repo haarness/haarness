@@ -2502,8 +2502,8 @@ function Permission(props: {
     const value = props.permission.detail;
     const path =
       value && typeof value === "object" && !Array.isArray(value) ? value.path : undefined;
-    const patterns = props.permission.patterns ?? [];
-    return typeof path === "string" && patterns[0] === path ? patterns.slice(1) : [];
+    if (typeof path !== "string" || !["read", "edit"].includes(category())) return [];
+    return (props.permission.patterns ?? []).filter((pattern) => pattern !== path);
   };
   // A file change is approved for what it changes, so show the change itself
   // rather than only the path it touches.
