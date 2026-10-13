@@ -73,10 +73,7 @@ impl BrowserPolicy {
         if !self.enabled {
             return PermissionDecision::Deny;
         }
-        let origin = url::Url::parse(resource)
-            .ok()
-            .map(|url| url.origin().ascii_serialization());
-        let access = origin
+        let access = policy_origin(resource)
             .and_then(|origin| {
                 most_specific(
                     self.sites
@@ -103,7 +100,7 @@ fn site_origin(origin: &str) -> CoreResult<String> {
     } else {
         origin.to_owned()
     };
-    let url = url::Url::parse(&parseable)
+    let mut url = url::Url::parse(&parseable)
         .map_err(|_| CoreError::Invalid("Use a complete http:// or https:// site origin".into()))?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none_or(|host| host.contains('*'))
@@ -115,6 +112,7 @@ fn site_origin(origin: &str) -> CoreResult<String> {
     {
         return Err(CoreError::Invalid("Site rules use an exact HTTP(S) origin, including its port, without a path or credentials; only a leading *. subdomain wildcard is supported".into()));
     }
+    without_trailing_dot(&mut url);
     let origin = url.origin().ascii_serialization();
     Ok(if wildcard {
         origin.replacen("haarness-wildcard.", "*.", 1)
@@ -133,11 +131,39 @@ fn most_specific<'a, T>(rules: impl Iterator<Item = (&'a str, T)>, origin: &str)
 }
 
 /// The HTTP(S) origin of a URL or origin, or `None` for anything else
-/// (`about:blank`, opaque documents, the tab inventory).
+/// (`about:blank`, opaque documents, the tab inventory). A domain loses its
+/// trailing dot, as site rules read it.
 #[must_use]
 pub fn web_origin(resource: &str) -> Option<String> {
     let url = url::Url::parse(resource).ok()?;
-    matches!(url.scheme(), "http" | "https").then(|| url.origin().ascii_serialization())
+    matches!(url.scheme(), "http" | "https").then(|| site_of(url))
+}
+
+/// The origin site rules judge `resource` by, whatever its scheme, or `None`
+/// when it is not a URL (the tab inventory).
+#[must_use]
+pub fn policy_origin(resource: &str) -> Option<String> {
+    url::Url::parse(resource).ok().map(site_of)
+}
+
+fn site_of(mut url: url::Url) -> String {
+    without_trailing_dot(&mut url);
+    url.origin().ascii_serialization()
+}
+
+/// Drops the one trailing dot of a fully qualified domain: `example.com.`
+/// reaches the same site as `example.com`, so a rule for one must hold for
+/// the other. Addresses never keep one; URL parsing already removes it.
+fn without_trailing_dot(url: &mut url::Url) {
+    let host = match url.host() {
+        Some(url::Host::Domain(host)) => host.strip_suffix('.').filter(|host| !host.is_empty()),
+        _ => None,
+    }
+    .map(str::to_owned);
+    if let Some(host) = host {
+        // The shorter name is still a valid host of the same scheme.
+        let _ = url.set_host(Some(&host));
+    }
 }
 
 /// Wildcards include subdomains only and preserve scheme and port boundaries.
@@ -916,6 +942,121 @@ mod tests {
             policy.sites[0].origin = origin.into();
             assert!(policy.validate().is_err(), "{origin}");
         }
+    }
+
+    /// The cases the browser hosts run too (`packages/browser-driver/tests`).
+    #[test]
+    fn shared_site_cases_decide_alike_in_both_browsers_including_trailing_dots() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../packages/browser-driver/tests/site-rules.cases.json"
+        ))
+        .unwrap();
+        let decision = |value: &serde_json::Value| decision_value(value).unwrap();
+        let defaults = decision(&cases["policy"]["defaults"]);
+        let mut policy = BrowserPolicy {
+            defaults: BrowserAccess {
+                browsing: defaults,
+                ..BrowserAccess::default()
+            },
+            sites: cases["policy"]["sites"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|site| BrowserSite {
+                    origin: site["origin"].as_str().unwrap().into(),
+                    access: BrowserAccess {
+                        browsing: decision(&site["browsing"]),
+                        ..BrowserAccess::default()
+                    },
+                })
+                .collect(),
+            ..BrowserPolicy::default()
+        };
+        policy.validate().unwrap();
+        let chrome = ChromePolicy {
+            enabled: true,
+            defaults: ChromeAccess {
+                browsing: defaults,
+                ..ChromeAccess::default()
+            },
+            sites: policy
+                .sites
+                .iter()
+                .map(|site| ChromeSite {
+                    origin: site.origin.clone(),
+                    access: ChromeAccess {
+                        browsing: site.access.browsing,
+                        ..ChromeAccess::default()
+                    },
+                })
+                .collect(),
+        };
+        let mut checked = 0;
+        for (word, expected) in [
+            ("deny", PermissionDecision::Deny),
+            ("ask", PermissionDecision::Ask),
+            ("allow", PermissionDecision::Allow),
+        ] {
+            for url in cases["browsing"][word].as_array().unwrap() {
+                let url = url.as_str().unwrap();
+                assert_eq!(policy.decision("navigate", url), expected, "{url}");
+                assert_eq!(
+                    chrome.decision(ChromeCategory::Browsing, url),
+                    expected,
+                    "Chrome: {url}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 30);
+        // The server judges an address with credentials by its origin.
+        for case in cases["userinfo"].as_array().unwrap() {
+            let mut url = url::Url::parse(case["url"].as_str().unwrap()).unwrap();
+            url.set_username(case["username"].as_str().unwrap()).unwrap();
+            url.set_password(Some(case["password"].as_str().unwrap()).filter(|p| !p.is_empty()))
+                .unwrap();
+            let origin = case["origin"].as_str().unwrap();
+            assert_eq!(web_origin(url.as_str()).as_deref(), Some(origin), "{url}");
+            assert_eq!(
+                policy.decision("navigate", url.as_str()),
+                policy.decision("navigate", origin),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn rules_spelled_with_a_trailing_dot_are_the_site_without_it() {
+        for (rule, canonical) in [
+            ("https://blocked.example.", "https://blocked.example"),
+            ("https://Blocked.Example.:8443/", "https://blocked.example:8443"),
+            ("https://*.evil.example.", "https://*.evil.example"),
+            ("http://localhost.:3000", "http://localhost:3000"),
+        ] {
+            assert_eq!(site_origin(rule).unwrap(), canonical, "{rule}");
+        }
+        assert_eq!(
+            web_origin("https://blocked.example./x").as_deref(),
+            Some("https://blocked.example")
+        );
+        assert_eq!(
+            policy_origin("https://blocked.example./x").as_deref(),
+            Some("https://blocked.example")
+        );
+        assert_eq!(web_origin("http://127.0.0.1./").as_deref(), Some("http://127.0.0.1"));
+        assert_eq!(policy_origin("inventory"), None);
+        // Both spellings are one site, so they cannot hold two rules.
+        let mut policy = shared(
+            serde_json::json!([
+                {"origin": "https://blocked.example", "browsing": "deny", "downloads": "deny", "uploads": "deny"},
+            ]),
+            "allow",
+        );
+        policy.sites.push(BrowserSite {
+            origin: "https://blocked.example.".into(),
+            access: BrowserAccess::default(),
+        });
+        assert!(policy.validate().is_err());
     }
 
     fn shared(sites: serde_json::Value, browsing: &str) -> BrowserPolicy {

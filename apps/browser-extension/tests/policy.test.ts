@@ -1,8 +1,20 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
-import type { Policy } from "../src/core/browser";
+import type { Decision, Policy } from "../src/core/browser";
 import { blockedMessage, decideRequest, fetchPatterns, landing } from "../src/core/fetch-policy";
 import { allowedOnBlank, normalizeURL, restricted, siteAccess, supportedInChrome, wwwTwin } from "../src/core/policy";
+
+/** The site cases the server and Desktop run too (packages/browser-driver/tests). */
+const cases = JSON.parse(
+  readFileSync(new URL("../../../packages/browser-driver/tests/site-rules.cases.json", import.meta.url), "utf8"),
+) as {
+  policy: { defaults: Decision; sites: { origin: string; browsing: Decision }[] };
+  browsing: Record<Decision, string[]>;
+  userinfo: { url: string; username: string; password: string; origin: string }[];
+  network: Record<string, string>;
+  other: string[];
+};
 
 const policy: Policy = {
   enabled: true,
@@ -18,7 +30,68 @@ const page = (url: string) => decideRequest(context, { url, resourceType: "Docum
 test("a blocked origin is refused for every kind of request", () => {
   assert.deepEqual(page("https://evil.example/login"), { action: "block", reason: "deny", origin: "https://evil.example" });
   assert.equal(decideRequest(context, { url: "https://evil.example/x.js", resourceType: "Script", mainFrame: false }).action, "block");
-  assert.deepEqual(fetchPatterns(policy), [{ resourceType: "Document" }, { urlPattern: "https://evil.example/*" }]);
+  assert.deepEqual(fetchPatterns(policy), [
+    { resourceType: "Document" },
+    { urlPattern: "https://evil.example/*" },
+    { urlPattern: "https://evil.example./*" },
+  ]);
+});
+
+test("shared site cases: a blocked site is refused however its host is spelled, for pages and subresources", () => {
+  const access = (browsing: Decision) => ({ browsing, downloads: browsing, uploads: browsing });
+  const shared: Policy = {
+    enabled: true,
+    defaults: access(cases.policy.defaults),
+    sites: cases.policy.sites.map((site) => ({ origin: site.origin, ...access(site.browsing) })),
+  };
+  const context = { policy: shared, approved: new Set<string>() };
+  for (const decision of ["deny", "ask", "allow"] as const)
+    for (const url of cases.browsing[decision]) {
+      const resource = decideRequest(context, { url, resourceType: "Script", mainFrame: false });
+      const document = decideRequest(context, { url, resourceType: "Document", mainFrame: true });
+      assert.equal(resource.action, decision === "deny" ? "block" : "continue", url);
+      assert.equal(document.action, decision === "allow" ? "continue" : "block", url);
+    }
+  // WebSockets and other network schemes read as their HTTP(S) origin.
+  for (const [url, origin] of Object.entries(cases.network)) {
+    const decision = decideRequest(context, { url, resourceType: "WebSocket", mainFrame: false });
+    const browsing = siteAccess(shared, origin).browsing;
+    assert.equal(decision.action, browsing === "deny" ? "block" : "continue", url);
+  }
+  // Addresses with credentials are refused, even on an allowed site.
+  for (const item of cases.userinfo) {
+    const url = new URL(item.url);
+    url.username = item.username;
+    url.password = item.password;
+    assert.deepEqual(
+      decideRequest(context, { url: url.href, resourceType: "Image", mainFrame: false }),
+      { action: "block", reason: "credentials", origin: item.origin },
+      url.href,
+    );
+  }
+  for (const url of ["data:text/html,hi", "blob:https://blocked.example/0123", "about:srcdoc"])
+    assert.equal(decideRequest(context, { url, resourceType: "Image", mainFrame: false }).action, "continue", url);
+  // Chrome keeps the trailing dot in a request URL, so the pause patterns name both spellings.
+  assert.deepEqual(
+    fetchPatterns({
+      ...shared,
+      sites: [
+        { origin: "https://*.evil.example", ...access("deny") },
+        { origin: "http://localhost:3000", ...access("deny") },
+        { origin: "http://127.0.0.1:3000", ...access("deny") },
+        { origin: "http://[::1]:3000", ...access("deny") },
+      ],
+    }).map((pattern) => pattern.urlPattern ?? pattern.resourceType),
+    [
+      "Document",
+      "https://*.evil.example/*",
+      "https://*.evil.example./*",
+      "http://localhost:3000/*",
+      "http://localhost.:3000/*",
+      "http://127.0.0.1:3000/*",
+      "http://[::1]:3000/*",
+    ],
+  );
 });
 
 test("the tab's page may load an Ask origin only once this chat approved it", () => {
@@ -55,6 +128,10 @@ test("block messages name the origin and say what the agent can do", () => {
   const ask = page("https://other.example/");
   assert.equal(ask.action, "block");
   if (ask.action === "block") assert.match(blockedMessage(ask), /https:\/\/other\.example.*Call browser_navigate with that URL to ask the user, or choose another site\./);
+  assert.match(
+    blockedMessage({ action: "block", reason: "credentials", origin: "https://evil.example" }),
+    /https:\/\/evil\.example that carries a user name or password/,
+  );
 });
 
 test("www twins, restricted pages and Chrome-only limits", () => {

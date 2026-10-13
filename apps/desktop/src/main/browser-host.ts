@@ -13,7 +13,7 @@ import {
 import { createBrowserPage, type BrowserPage } from "./browser-chromium";
 import { createBrowserNetwork, type BrowserNetwork } from "./browser/network";
 import { browserFailure } from "@haarness/browser-driver/errors";
-import { destinationOrigin, normalizeURL } from "@haarness/browser-driver/policy";
+import { destinationOrigin, normalizeURL, policyOrigin } from "@haarness/browser-driver/policy";
 import { connections } from "./runtime";
 import { data, persist } from "./store";
 import { translate } from "../localization";
@@ -483,8 +483,15 @@ export function createBrowserHost(
             },
             (url) => {
               const access = entry.access;
-              const origin = destinationOrigin(url);
-              if (!access || !origin) return true;
+              // WebSockets count as their HTTP(S) origin; addresses that
+              // reach no site (data:, blob:, about:) are the page's own.
+              const target = policyOrigin(url);
+              if (!access || !target) return true;
+              const { origin } = target;
+              if (target.credentials) {
+                access.error = `Browser site permission blocked an address on ${origin} that carries a user name or password; agents cannot use such addresses.`;
+                return false;
+              }
               const decision = browserSiteAccess(access.policy, origin).browsing;
               if (access.policy.enabled && (decision === "allow" || (decision === "ask" && access.approved.has(origin)))) return true;
               access.error = `Browser site permission blocked ${origin}. ${decision === "ask" ? "Navigate to this site directly to request approval." : "This site is blocked in Settings → Browser."}`;
