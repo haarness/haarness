@@ -17,6 +17,7 @@ mod runtime;
 mod side_question;
 mod tool_catalog;
 mod tool_validation;
+mod turn_context;
 mod workflows;
 
 pub use agents::{

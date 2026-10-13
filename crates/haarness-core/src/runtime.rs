@@ -2054,6 +2054,15 @@ impl AgentRuntime {
             items.retain(|item| item.sequence <= revert.sequence);
         }
         let turn_id = items.iter().rev().find_map(|item| item.turn_id);
+        // What the next turn would tell the model first; only a cold
+        // question, which has no prepared turn to reuse, adds it.
+        let reminder = crate::turn_context::reminder(
+            &items,
+            crate::turn_context::local_date(thread.created_at),
+            crate::turn_context::today(),
+            &self.memory_context.read(),
+            None,
+        );
         let messages = crate::side_question::settled(provider_messages(items));
         let catalog = components.tools.list();
         let prepared =
@@ -2084,14 +2093,8 @@ impl AgentRuntime {
             } else {
                 false
             };
-            let mut system = crate::side_question::system(
-                base,
-                &components.project_context,
-                &self.memory_context.read(),
-                None,
-                ultracode,
-                false,
-            );
+            let mut system =
+                crate::side_question::system(base, &components.project_context, ultracode, false);
             let mut engine = components.config.permission_defaults(&thread.agent, "");
             for rule in self.repository_rules.lock().iter().cloned() {
                 engine.add_repository_grant(rule);
@@ -2144,6 +2147,11 @@ impl AgentRuntime {
             if selection.response.lazy_active {
                 system.push_str(crate::side_question::LAZY_INSTRUCTIONS);
             }
+            let mut messages = messages;
+            messages.extend(reminder.map(|content| ProviderMessage::Text {
+                role: "user".into(),
+                content,
+            }));
             (
                 provider,
                 ProviderRequest {
@@ -6061,6 +6069,26 @@ impl RunnerTask {
                     }
                 }
             }
+            // A changed date or memory index and this prompt's hook context
+            // reach the model in a hidden message stored with the turn, so the
+            // system prompt and every earlier message stay byte-identical.
+            let items = self.repository.list_items(self.thread.id, None).await?;
+            let reminder = crate::turn_context::reminder(
+                &items,
+                crate::turn_context::local_date(self.thread.created_at),
+                crate::turn_context::today(),
+                &self.memory_context.read(),
+                prompt_context.as_deref(),
+            );
+            if let Some(text) = reminder {
+                self.publish_item(ItemData::UserMessage {
+                    text,
+                    attachments: Vec::new(),
+                    queued: false,
+                    synthetic: true,
+                })
+                .await?;
+            }
             // Start auxiliary naming once prompt hooks have accepted the input.
             // It runs alongside the main provider and never waits for tool
             // results, permission responses or turn completion.
@@ -6313,8 +6341,6 @@ impl RunnerTask {
                 let mut system = crate::side_question::system(
                     base,
                     &self.project_context,
-                    &self.memory_context.read(),
-                    prompt_context.as_deref(),
                     self.turn.ultracode,
                     self.output_schema.is_some(),
                 );
