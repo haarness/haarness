@@ -183,6 +183,14 @@ impl WorkspaceManager {
         Ok(self.read_registry_locked()?.workspaces.len())
     }
 
+    /// The registered workspaces as stored, without looking at any folder:
+    /// `exists` and `branch` are as last recorded. For callers that run
+    /// often and need only ids, names and paths, such as the remote
+    /// connector, since unrelated folders may be slow or offline.
+    pub fn registered(&self) -> Result<Vec<WorkspaceInfo>> {
+        Ok(self.read_registry_locked()?.workspaces)
+    }
+
     /// Read the project identity last validated by register_local/open_workspace.
     pub fn project_for_workspace(&self, reference: &str) -> Result<ProjectInfo> {
         let registry = self.read_registry_locked()?;
@@ -1297,6 +1305,36 @@ mod tests {
             other.project_id
         );
         assert!(fixture.manager.project_for_workspace("unknown").is_err());
+    }
+
+    #[test]
+    fn registered_rows_are_read_as_stored_without_looking_at_any_folder() {
+        let fixture = Fixture::new();
+        let plain = fixture.root.join("plain");
+        fs::create_dir(&plain).unwrap();
+        let other = fixture.manager.register_local(&plain).unwrap();
+        fs::remove_dir(&plain).unwrap();
+        command(&fixture.repository, ["checkout", "-b", "updated"]);
+        let row = |rows: &[WorkspaceInfo], id: &str| {
+            rows.iter()
+                .find(|workspace| workspace.id == id)
+                .cloned()
+                .unwrap()
+        };
+        // The folder that went and the branch that changed stay as recorded.
+        let stored = fixture.manager.registered().unwrap();
+        assert!(row(&stored, &other.id).exists);
+        assert_eq!(
+            row(&stored, &fixture.local.id).branch.as_deref(),
+            Some("main")
+        );
+        // Listing looks at every folder.
+        let listed = fixture.manager.list(None).unwrap().workspaces;
+        assert!(!row(&listed, &other.id).exists);
+        assert_eq!(
+            row(&listed, &fixture.local.id).branch.as_deref(),
+            Some("updated")
+        );
     }
 
     #[test]
