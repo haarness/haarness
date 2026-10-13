@@ -8054,6 +8054,211 @@ async fn custom_command_expands_server_side_and_switches_agent() {
     assert!(matches!(error, haarness_core::CoreError::NotFound(_)));
 }
 
+/// Speaks two scripts: `!delegate <agent>` dispatches a task running
+/// `!pause-write` as that agent; `!pause-write` stops before its first answer
+/// until the test releases it, then writes `out.txt`. Every request's system
+/// prompt is recorded.
+#[derive(Clone)]
+struct PausingWriter {
+    systems: Arc<std::sync::Mutex<Vec<String>>>,
+    paused: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for PausingWriter {
+    fn default() -> Self {
+        Self {
+            systems: Arc::default(),
+            paused: Arc::default(),
+            release: Arc::new(tokio::sync::Semaphore::new(0)),
+        }
+    }
+}
+
+#[async_trait]
+impl ModelProvider for PausingWriter {
+    fn id(&self) -> &str {
+        "echo"
+    }
+    fn info(&self) -> ProviderInfo {
+        Echo.info()
+    }
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        _cancel: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        if let Some(title) = title_fixture(&request) {
+            return title;
+        }
+        self.systems.lock().unwrap().push(request.system.clone());
+        let answered = request
+            .messages
+            .iter()
+            .any(|message| matches!(message, ProviderMessage::ToolResult { .. }));
+        let prompt = request
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                ProviderMessage::Text { role, content } if role == "user" => Some(content.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let call = |name: &str, arguments: Value| {
+            Ok(ProviderEvent::ToolCall {
+                call_id: format!("call-{}", uuid::Uuid::now_v7()),
+                name: name.into(),
+                arguments,
+                provider_metadata: Value::Null,
+            })
+        };
+        let events = if answered {
+            vec![Ok(ProviderEvent::TextDelta("done".into()))]
+        } else if let Some(agent) = prompt.trim().strip_prefix("!delegate ") {
+            vec![call(
+                "task",
+                serde_json::json!({"agent": agent, "description": "write", "prompt": "!pause-write"}),
+            )]
+        } else {
+            self.paused.notify_one();
+            self.release.acquire().await.unwrap().forget();
+            vec![call(
+                "write",
+                serde_json::json!({"path": "out.txt", "content": "written"}),
+            )]
+        };
+        Ok(Box::pin(stream::iter(events.into_iter().chain([Ok(
+            ProviderEvent::Finished {
+                reason: "done".into(),
+            },
+        )]))))
+    }
+}
+
+/// A reviewer that may not touch `out.txt`. (Denying every edit would hide
+/// `write` from its tool list, a check that never reaches its rules.)
+fn reviewer(id: &str, deny_edits: bool) -> haarness_core::CustomAgent {
+    haarness_core::CustomAgent {
+        id: id.into(),
+        description: "Reviews without editing".into(),
+        prompt: format!("REVIEWER_PROMPT {id}"),
+        mode: Some("all".into()),
+        permissions: if deny_edits {
+            vec![haarness_core::PermissionRule {
+                pattern: "edit:out.txt".into(),
+                decision: haarness_core::PermissionDecision::Deny,
+            }]
+        } else {
+            Vec::new()
+        },
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn a_running_agent_keeps_its_definition_when_its_file_changes() {
+    // (script, what happens to the agent while its turn waits)
+    for (script, change) in [
+        ("!pause-write", "delete"),
+        ("!pause-write", "loosen"),
+        ("!delegate reviewer", "rename"),
+    ] {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-agent-snapshot-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        let provider = PausingWriter::default();
+        let runtime = AgentRuntime::with_config(
+            Arc::new(SqliteStore::in_memory().unwrap()),
+            Arc::new(StaticProviderRegistry::new(vec![
+                Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
+            ])),
+            Arc::new(NativeToolRegistry::new(workspace.clone())),
+            EventBus::new(2048),
+            workspace.clone(),
+            String::new(),
+            {
+                let mut config = RuntimeConfig::default();
+                config.custom_agents.push(reviewer("reviewer", true));
+                config
+            },
+        );
+        let thread = echo_thread(&runtime).await;
+        let mut request = turn_request(script);
+        if script == "!pause-write" {
+            request.agent = Some("reviewer".into());
+        }
+        let turn = runtime.start_turn(thread.id, request).await.unwrap();
+        // The reviewer's turn (or the delegated reviewer) is mid-turn now.
+        tokio::time::timeout(Duration::from_secs(10), provider.paused.notified())
+            .await
+            .expect("the reviewer's turn reaches its provider");
+        runtime.replace_custom_agents(match change {
+            "delete" => Vec::new(),
+            "loosen" => vec![reviewer("reviewer", false)],
+            _ => vec![reviewer("reviewer-renamed", false)],
+        });
+        provider.release.add_permits(1);
+        assert_eq!(
+            wait_done(&runtime, &turn).await.status,
+            TurnStatus::Completed,
+            "{change}"
+        );
+        // The write was refused by the rule the agent had when it started.
+        assert!(!workspace.join("out.txt").exists(), "{change}");
+        let mut threads = vec![thread.id];
+        threads.extend(
+            runtime
+                .list_threads(false)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|child| child.parent_id == Some(thread.id))
+                .map(|child| child.id),
+        );
+        let mut refused = false;
+        for id in threads {
+            for item in runtime.items(id, None).await.unwrap() {
+                if let haarness_protocol::ItemData::ToolResult {
+                    is_error: true,
+                    name,
+                    output,
+                    ..
+                } = &item.data
+                {
+                    refused |= name == "write" && output.contains("'edit:out.txt' is denied");
+                }
+            }
+        }
+        assert!(refused, "{change}: the write must be refused");
+        // Its prompt stayed the reviewer's after the change too.
+        let systems = provider.systems.lock().unwrap().clone();
+        let last_reviewer_round = systems
+            .iter()
+            .rev()
+            .find(|system| system.contains("REVIEWER_PROMPT"));
+        assert!(
+            last_reviewer_round.is_some_and(|system| system.contains("REVIEWER_PROMPT reviewer")),
+            "{change}: {systems:?}"
+        );
+        assert!(
+            systems
+                .iter()
+                .filter(|system| system.contains("REVIEWER_PROMPT reviewer"))
+                .count()
+                >= 2,
+            "{change}: the round after the change still used the snapshot"
+        );
+        // A new turn sees the change: deleted or renamed, it is unknown.
+        if change != "loosen" {
+            let mut request = turn_request("hello");
+            request.agent = Some("reviewer".into());
+            let error = runtime.start_turn(thread.id, request).await.unwrap_err();
+            assert!(error.to_string().contains("Unknown agent"), "{error}");
+        }
+        let _ = tokio::fs::remove_dir_all(&workspace).await;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // P7 (early): standing goals and loop configuration.
 // ---------------------------------------------------------------------------

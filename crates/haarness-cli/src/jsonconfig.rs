@@ -63,6 +63,9 @@ pub struct JsonLayers {
     /// Agent names some layer marked `disable: true` (the
     /// flag survives later layers unless one sets `disable: false`).
     pub disabled_agents: Vec<String>,
+    /// Folders scanned for agent markdown, so hot reload can tell an edit
+    /// that changes only agent definitions from one that changes more.
+    pub agent_directories: Vec<PathBuf>,
     /// Human-readable notes (migrations, skipped files) for logs.
     pub notices: Vec<String>,
     /// Existing JSON/JSONC inputs that could not be read or parsed. Startup
@@ -172,6 +175,7 @@ pub fn load_layers(
             }
             if compat.agents() {
                 let agents = directory.join("agents");
+                layers.agent_directories.push(agents.clone());
                 discover_agents_with(
                     &mut layers.agents,
                     &mut layers.notices,
@@ -211,6 +215,7 @@ pub fn load_layers(
             );
         }
         for directory in haarness_core::definitions::component_paths(root, "agents") {
+            layers.agent_directories.push(directory.clone());
             discover_agents(
                 &mut layers.agents,
                 &mut layers.notices,
@@ -241,6 +246,7 @@ pub fn load_layers(
         }
         for name in ["agent", "agents"] {
             let directory = root.join(name);
+            layers.agent_directories.push(directory.clone());
             discover_agents(
                 &mut layers.agents,
                 &mut layers.notices,
