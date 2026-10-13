@@ -4059,11 +4059,11 @@ impl AgentRuntime {
         let mut profiles = crate::builtin_profiles();
         for custom in self.live_agents.read().iter() {
             if let Some(profile) = profiles.iter_mut().find(|profile| profile.id == custom.id) {
-                profile.description = custom.description.clone();
+                profile.description.clone_from(&custom.description);
                 if custom.mode.is_some() {
-                    profile.mode = custom.mode.clone();
+                    profile.mode.clone_from(&custom.mode);
                 }
-                profile.model = custom.model.clone();
+                profile.model.clone_from(&custom.model);
                 profile.hidden |= custom.hidden;
                 continue;
             }
