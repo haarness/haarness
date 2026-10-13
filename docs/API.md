@@ -169,6 +169,16 @@ content reload nothing either. A reload keeps each connected MCP server whose
 effective configuration (with `${VAR}` references resolved) is unchanged,
 instead of starting it again. Servers connect concurrently at startup and on
 reload.
+An edit that changes only agent definition files (markdown in an `agents` or
+`agent` folder) does not wait for active turns: once the files load, new
+turns use the new definitions and `assets.updated` (`resource: "agent"`) is
+published, with no `configuration.reload_queued`. A turn keeps the agent
+definition it was admitted with until it ends, and a delegated child the one
+it was dispatched with, however the agent is edited, renamed or deleted
+meanwhile, from a file, the management tool, Desktop or the TUI. An agent
+file whose frontmatter does not parse makes the change wait for idle like any
+other. Skill edits still wait for idle: skill bodies are cached in the
+registry and the `skill` tool's catalog is part of the generation.
 Servers advertise this contract as `configuration-hot-reload.v1` in
 `/v1/info.capabilities`.
 

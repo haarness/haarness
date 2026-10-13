@@ -189,6 +189,10 @@ struct ActiveTurn {
     /// The user stopped this turn and asked for steering it has not read yet
     /// to be answered, rather than dropped.
     answer_steer: AtomicBool,
+    /// The agent definition the turn runs with. Ceilings for work it starts
+    /// (workflow agents, direct tools on its children) come from it, not
+    /// from the agent's file as it is now.
+    agent: AgentSnapshot,
 }
 
 /// Model-facing prompt for the turn that answers steering the user sent
@@ -4284,11 +4288,16 @@ impl AgentRuntime {
                 }
             }
         }
+        // The turn's agent is read once and kept for the whole turn.
+        let requested_agent = request.agent.clone().map(|id| AgentSnapshot {
+            custom: self.custom_agent(&id),
+            id,
+        });
         if request.model.is_none()
-            && let Some(agent) = request.agent.as_deref()
-            && let Some(model) = self
-                .custom_agent(agent)
-                .and_then(|agent| agent.model)
+            && let Some(model) = requested_agent
+                .as_ref()
+                .and_then(|agent| agent.custom.as_ref())
+                .and_then(|agent| agent.model.clone())
                 .filter(|m| m != "inherit")
         {
             if let Some((provider, model)) = resolve_definition_model(
@@ -4335,7 +4344,13 @@ impl AgentRuntime {
                 "Agent is disabled: {effective_agent}"
             )));
         }
-        if self.custom_agent(effective_agent).is_none()
+        let agent = requested_agent
+            .filter(|agent| agent.id == effective_agent)
+            .unwrap_or_else(|| AgentSnapshot {
+                id: effective_agent.to_owned(),
+                custom: self.custom_agent(effective_agent),
+            });
+        if agent.custom.is_none()
             && !crate::builtin_profiles()
                 .iter()
                 .any(|p| p.id == effective_agent)
@@ -4344,8 +4359,8 @@ impl AgentRuntime {
                 "Unknown agent: {effective_agent}"
             )));
         }
-        if let Some(custom) = self.custom_agent(effective_agent) {
-            validate_custom_agent_mode(&custom, thread.parent_id.is_some())?;
+        if let Some(custom) = &agent.custom {
+            validate_custom_agent_mode(custom, thread.parent_id.is_some())?;
             merge_agent_tools(&mut request.tools, &custom.tools);
         }
         let root = self.resolve_root(&thread).await;
@@ -4376,6 +4391,7 @@ impl AgentRuntime {
             accepting: AsyncMutex::new(false),
             stop_reason: Mutex::new(None),
             answer_steer: AtomicBool::new(false),
+            agent: agent.clone(),
         });
         self.active.insert(thread_id, active.clone());
 
@@ -4519,6 +4535,7 @@ impl AgentRuntime {
             thread,
             turn: turn.clone(),
             request,
+            agent,
             command: prepared_command,
             command_started: AtomicBool::new(false),
             skill_rules: Mutex::new(Vec::new()),
@@ -4678,9 +4695,9 @@ impl AgentRuntime {
         );
     }
 
-    fn permission_boundary(&self, agent: &str) -> Vec<PermissionRule> {
+    fn permission_boundary(&self, agent: &AgentSnapshot) -> Vec<PermissionRule> {
         let components = self.components();
-        let mut engine = components.config.permission_defaults(agent, "");
+        let mut engine = components.config.permission_defaults(&agent.id, "");
         for rule in self.repository_rules.lock().iter().cloned() {
             engine.add_repository_grant(rule);
         }
@@ -4696,8 +4713,8 @@ impl AgentRuntime {
         {
             engine.add_grant(rule);
         }
-        if let Some(custom) = self.custom_agent(agent) {
-            for rule in custom.permissions {
+        if let Some(custom) = &agent.custom {
+            for rule in custom.permissions.iter().cloned() {
                 engine.add_rule(rule);
             }
         }
@@ -4721,7 +4738,16 @@ impl AgentRuntime {
                 ));
             }
             let thread = self.repository.get_thread(authority_thread_id).await?;
-            inherited_ceilings.extend(self.permission_boundary(&thread.agent));
+            // A running turn answers with the definition it was admitted with.
+            let agent = self
+                .active
+                .get(&authority_thread_id)
+                .map(|active| active.agent.clone())
+                .unwrap_or_else(|| AgentSnapshot {
+                    custom: self.custom_agent(&thread.agent),
+                    id: thread.agent.clone(),
+                });
+            inherited_ceilings.extend(self.permission_boundary(&agent));
             authority = thread.parent_id;
         }
         Ok(inherited_ceilings)
@@ -4893,6 +4919,11 @@ struct RunnerTask {
     thread: Thread,
     turn: Turn,
     request: StartTurnRequest,
+    /// The turn's agent as it was defined when the turn was admitted (a
+    /// child agent: when it was dispatched). Prompt, model, steps, tools and
+    /// permission rules come from it for the whole turn, whatever happens to
+    /// the agent's file meanwhile.
+    agent: AgentSnapshot,
     command: Option<haarness_protocol::CommandInfo>,
     command_started: AtomicBool,
     skill_rules: Mutex<Vec<PermissionRule>>,
@@ -5061,6 +5092,13 @@ impl crate::ToolInvoker for TurnToolInvoker {
             .map(|tool| tool.side_effectful_for(arguments))
             .ok_or_else(|| CoreError::Tool(format!("unknown tool: {name}")))
     }
+}
+
+/// One agent's definition, read once: `custom` is `None` for a built-in.
+#[derive(Clone)]
+struct AgentSnapshot {
+    id: String,
+    custom: Option<crate::CustomAgent>,
 }
 
 #[derive(Clone)]
@@ -5410,7 +5448,16 @@ impl RunnerTask {
         describe_error(error, name.as_deref())
     }
 
+    /// An agent's definition: this turn's own from its snapshot, any other
+    /// as it is defined now.
     fn custom_agent(&self, agent: &str) -> Option<crate::CustomAgent> {
+        if agent == self.agent.id {
+            return self.agent.custom.clone();
+        }
+        self.live_agent(agent)
+    }
+
+    fn live_agent(&self, agent: &str) -> Option<crate::CustomAgent> {
         self.live_agents
             .read()
             .iter()
@@ -8582,15 +8629,22 @@ impl RunnerTask {
             .or_else(|| resumed_child.as_ref().map(|child| child.agent.as_str()))
             .unwrap_or("general")
             .to_owned();
-        if self.custom_agent(&agent).is_none()
-            && !crate::builtin_profiles().iter().any(|p| p.id == agent)
-        {
+        // A dispatch admits the child's turn: its agent is read once, here,
+        // and the child keeps that definition for its whole run.
+        let definition = AgentSnapshot {
+            custom: self.live_agent(&agent),
+            id: agent.clone(),
+        };
+        if definition.custom.is_none() && !crate::builtin_profiles().iter().any(|p| p.id == agent) {
             return Err(CoreError::Invalid(format!("Unknown agent: {agent}")));
         }
-        if let Some(custom) = self.custom_agent(&agent) {
-            validate_custom_agent_mode(&custom, true)?;
+        if let Some(custom) = &definition.custom {
+            validate_custom_agent_mode(custom, true)?;
         }
-        let configured = self.custom_agent(&agent).and_then(|agent| agent.model);
+        let configured = definition
+            .custom
+            .as_ref()
+            .and_then(|agent| agent.model.clone());
         let ((provider, model), notice) = subagent_model(
             self.providers.as_ref(),
             &self.turn.provider,
@@ -8735,7 +8789,7 @@ impl RunnerTask {
         })
         .await?;
         let mut tools = self.request.tools.clone();
-        if let Some(custom) = self.custom_agent(&agent) {
+        if let Some(custom) = &definition.custom {
             merge_agent_tools(&mut tools, &custom.tools);
         }
         let request = StartTurnRequest {
@@ -8781,6 +8835,7 @@ impl RunnerTask {
             accepting: AsyncMutex::new(false),
             stop_reason: Mutex::new(None),
             answer_steer: AtomicBool::new(false),
+            agent: definition.clone(),
         });
         self.active.insert(child.id, active.clone());
         let mut accepting = active.accepting.lock().await;
@@ -8820,6 +8875,7 @@ impl RunnerTask {
             thread: child.clone(),
             turn: turn.clone(),
             request,
+            agent: definition,
             command: None,
             command_started: AtomicBool::new(false),
             skill_rules: Mutex::new(self.skill_rules.lock().clone()),
