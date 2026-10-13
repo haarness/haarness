@@ -10577,7 +10577,7 @@ async fn a_preview_whose_folder_was_removed_is_restored_into_a_new_folder() {
         .execute(
             serde_json::json!({"filePath": "site/index.html"}),
             ToolContext {
-                execution: Default::default(),
+                execution: haarness_core::ExecutionSettings::default(),
                 thread_id: haarness_protocol::ThreadId::new(),
                 turn_id: haarness_protocol::TurnId::new(),
                 workspace: workspace.clone(),

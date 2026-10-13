@@ -324,7 +324,7 @@ mod tests {
     struct Busy {
         upstream: String,
         closed: std::sync::Mutex<Vec<String>>,
-        busy: std::sync::Mutex<ProjectBusy>,
+        kind: std::sync::Mutex<ProjectBusy>,
     }
     #[async_trait::async_trait]
     impl WorkspaceHost for Busy {
@@ -346,7 +346,7 @@ mod tests {
             Ok(())
         }
         async fn target(&self, _: String) -> anyhow::Result<WorkspaceTarget> {
-            Err(anyhow::Error::new(*self.busy.lock().unwrap()).context(
+            Err(anyhow::Error::new(*self.kind.lock().unwrap()).context(
                 "Haarness server 4242 needs an upgrade (server executable differs from this client build) but still owns 1 active turn(s); wait for them to finish or stop it explicitly with `haarness --workspace '/private/project' serve --stop`",
             ))
         }
@@ -397,7 +397,7 @@ mod tests {
         let host = Arc::new(Busy {
             upstream,
             closed: Default::default(),
-            busy: std::sync::Mutex::new(ProjectBusy::OtherBuild),
+            kind: std::sync::Mutex::new(ProjectBusy::OtherBuild),
         });
         let router = routes(host.clone(), tokio_util::sync::CancellationToken::new());
 
@@ -419,7 +419,7 @@ mod tests {
         );
         // A server of this build, busy with the other project configuration
         // setting, is not said to be another version.
-        *host.busy.lock().unwrap() = ProjectBusy::OtherSetting;
+        *host.kind.lock().unwrap() = ProjectBusy::OtherSetting;
         let (status, body) =
             send(&router, "POST", "/v1/host/workspaces/w1/v1/permissions/p1").await;
         assert_eq!(status, StatusCode::CONFLICT);
