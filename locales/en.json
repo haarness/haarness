@@ -1656,6 +1656,7 @@
   "reject": "reject",
   "answer": "answer",
   "always allows": "always allows",
+  "Leads to {path}": "Leads to {path}",
   "every file edit": "every file edit",
   "every shell command": "every shell command",
   "every file read": "every file read",

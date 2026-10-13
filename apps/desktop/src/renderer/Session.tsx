@@ -2496,6 +2496,15 @@ function Permission(props: {
     const rest = Object.entries(value).filter(([key]) => key !== "__browser");
     return rest.length ? stringify(Object.fromEntries(rest)) : "";
   };
+  // A path that a link or `..` takes elsewhere is also asked about where it
+  // leads; name that file, since it is what gets opened.
+  const linkTargets = () => {
+    const value = props.permission.detail;
+    const path =
+      value && typeof value === "object" && !Array.isArray(value) ? value.path : undefined;
+    const patterns = props.permission.patterns ?? [];
+    return typeof path === "string" && patterns[0] === path ? patterns.slice(1) : [];
+  };
   // A file change is approved for what it changes, so show the change itself
   // rather than only the path it touches.
   const changes = () =>
@@ -2586,6 +2595,13 @@ function Permission(props: {
             {permissionCommand(props.permission.detail)}
           </pre>
         </Show>
+        <For each={linkTargets()}>
+          {(target) => (
+            <p class="approval-target">
+              {splitAround(t("Leads to {path}"), () => <bdi><code>{target}</code></bdi>, "{path}")}
+            </p>
+          )}
+        </For>
       </Show>
       <Show when={changes().length}>
         <div class="approval-changes">

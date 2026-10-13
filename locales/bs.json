@@ -1656,6 +1656,7 @@
   "reject": "odbij",
   "answer": "odgovori",
   "always allows": "uvijek dozvoljava",
+  "Leads to {path}": "Vodi do {path}",
   "every file edit": "svako uređivanje datoteke",
   "every shell command": "svaka shell naredba",
   "every file read": "svako čitanje datoteke",

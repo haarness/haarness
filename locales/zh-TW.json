@@ -1656,6 +1656,7 @@
   "reject": "拒絕",
   "answer": "回應",
   "always allows": "一律允許",
+  "Leads to {path}": "實際指向 {path}",
   "every file edit": "所有檔案編輯",
   "every shell command": "所有 shell 命令",
   "every file read": "所有檔案讀取",

@@ -1720,6 +1720,15 @@ html[dir="rtl"] .tool-target {
   font-family: var(--mono);
   font-size: var(--ui-sm);
 }
+/* Where a linked path really leads, under the path the tool names. */
+.approval-target {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--ui-sm);
+}
+.approval-target code {
+  font-family: var(--mono);
+}
 /* The proposed change under an edit request: short enough to keep the
    composer in view, scrollable when the edit is long. */
 .approval-changes {

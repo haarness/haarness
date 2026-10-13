@@ -7746,6 +7746,37 @@ fn pending_permission_fixture(
 }
 
 #[test]
+fn approval_names_the_file_a_linked_path_leads_to() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let mut pending = pending_permission_fixture(&thread, "linked-read");
+    pending.permission = "read".into();
+    pending.operation = "read:notes.txt".into();
+    pending.detail = serde_json::json!({"path": "notes.txt"});
+    pending.patterns = vec!["notes.txt".into(), ".env".into()];
+    pending.always_patterns = vec!["read:notes.txt".into(), "read:.env".into()];
+    app.pending_permissions.push(pending);
+    app.permission_focus = true;
+    let text = frame_text(&app, (100, 40));
+    // The card says what is really opened, once, and the rule row does not
+    // repeat either path.
+    assert!(text.contains("notes.txt"), "{text}");
+    assert!(text.contains("Leads to .env"), "{text}");
+    assert!(!text.contains("always allows"), "{text}");
+    assert_eq!(text.matches(".env").count(), 1, "{text}");
+    // A plain path stays a single row.
+    let mut plain = pending_permission_fixture(&thread, "plain-read");
+    plain.permission = "read".into();
+    plain.operation = "read:main.rs".into();
+    plain.detail = serde_json::json!({"path": "main.rs"});
+    plain.patterns = vec!["main.rs".into()];
+    plain.always_patterns = vec!["read:main.rs".into()];
+    app.pending_permissions = vec![plain];
+    let text = frame_text(&app, (100, 40));
+    assert!(!text.contains("Leads to"), "{text}");
+}
+
+#[test]
 fn agent_switch_approval_discloses_destination_model_and_scope() {
     let thread = fixture_thread();
     let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);

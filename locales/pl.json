@@ -1656,6 +1656,7 @@
   "reject": "odrzuć",
   "answer": "odpowiedz",
   "always allows": "zawsze zezwala",
+  "Leads to {path}": "Prowadzi do {path}",
   "every file edit": "każda edycja pliku",
   "every shell command": "każde polecenie powłoki",
   "every file read": "każdy odczyt pliku",
