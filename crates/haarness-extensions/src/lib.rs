@@ -749,12 +749,13 @@ impl HookPort for CombinedHooks {
         &self,
         thread: ThreadId,
         permission: &str,
+        patterns: &[String],
         detail: &Value,
     ) -> HookDecision {
         // Extensions answer first; command hooks only see
         // prompts that extensions leave open.
         for host in &self.extensions.hosts {
-            let input = json!({"threadId":thread,"permission":permission,"detail":detail});
+            let input = json!({"threadId":thread,"permission":permission,"patterns":patterns,"detail":detail});
             match host.hook("permission.ask", input).await {
                 Ok(value) => match value["status"].as_str() {
                     Some("allow") => {
@@ -787,7 +788,9 @@ impl HookPort for CombinedHooks {
             }
         }
         if let Some(inner) = &self.inner {
-            inner.permission_request(thread, permission, detail).await
+            inner
+                .permission_request(thread, permission, patterns, detail)
+                .await
         } else {
             HookDecision::default()
         }

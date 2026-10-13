@@ -427,7 +427,7 @@ export default (ctx) => {
       'chat.headers'(input) { return {headers: {'x-fixture': 'yes', 'x-model': input.model}}; },
       'permission.ask'(input) {
         if (input.permission === 'bash') return {status: 'deny', reason: 'DENIED_BY_PERMISSION_ASK'};
-        if (input.permission === 'read') return {status: 'allow'};
+        if (input.permission === 'read') return input.patterns.some((p) => p.endsWith('.env')) && input.detail.path === '.env' ? {status: 'deny', reason: 'SECRET_READ'} : {status: 'allow'};
       },
       'command.execute.before'(input) { return input.command === 'forbidden' ? {block: 'COMMAND_BLOCKED'} : {context: 'COMMAND_CONTEXT ' + input.arguments}; },
       'shell.env'(input) { return {env: {FIXTURE_ENV: 'from-extension', FIXTURE_CWD: input.cwd}}; },
@@ -536,17 +536,33 @@ async fn lifecycle_params_env_and_permission_hooks_reach_extensions() {
     assert_eq!(request.parameters.headers["x-model"], "fixture-model");
 
     let denied = hooks
-        .permission_request(thread, "bash", &json!({"command":"rm -rf /"}))
+        .permission_request(
+            thread,
+            "bash",
+            &["rm -rf /".to_owned()],
+            &json!({"command":"rm -rf /"}),
+        )
         .await;
     assert_eq!(denied.permission, Some(PermissionDecision::Deny));
     assert_eq!(denied.block.as_deref(), Some("DENIED_BY_PERMISSION_ASK"));
     let allowed = hooks
-        .permission_request(thread, "read", &json!({"path":"x"}))
+        .permission_request(thread, "read", &["x".to_owned()], &json!({"path":"x"}))
         .await;
     assert_eq!(allowed.permission, Some(PermissionDecision::Allow));
     assert!(allowed.block.is_none());
+    // The patterns asked about reach the extension beside the arguments.
+    let secret = hooks
+        .permission_request(
+            thread,
+            "read",
+            &[".env".to_owned()],
+            &json!({"path":".env"}),
+        )
+        .await;
+    assert_eq!(secret.permission, Some(PermissionDecision::Deny));
+    assert_eq!(secret.block.as_deref(), Some("SECRET_READ"));
     let open = hooks
-        .permission_request(thread, "write", &json!({"path":"x"}))
+        .permission_request(thread, "write", &["x".to_owned()], &json!({"path":"x"}))
         .await;
     assert_eq!(open.permission, None);
 
@@ -617,7 +633,9 @@ async fn unsupported_hooks_and_malformed_results_are_rejected() {
             .to_string()
             .contains("temperature must be a number")
     );
-    let decision = hooks.permission_request(thread, "bash", &json!({})).await;
+    let decision = hooks
+        .permission_request(thread, "bash", &[], &json!({}))
+        .await;
     assert_eq!(decision.permission, Some(PermissionDecision::Deny));
     assert!(decision.block.unwrap().contains("status must be"));
     // A malformed shell.env answer is logged and ignored rather than failing the tool.
