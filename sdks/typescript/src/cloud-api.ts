@@ -330,6 +330,10 @@ export class CloudApi extends Transport {
   deleteLiveActivity(activityId: string, options: RequestOptions = {}): Promise<void> {
     return this.request("DELETE", `/api/v1/push/activities/${this.segment(activityId)}`, { binaryBody: false, binaryResponse: false, ...options });
   }
+  /** GET /api/v1/push/badge */
+  getPushBadge(options: RequestOptions = {}): Promise<T.PushBadgeDto> {
+    return this.request("GET", `/api/v1/push/badge`, { binaryBody: false, binaryResponse: false, ...options });
+  }
   /** GET /api/v1/push/devices */
   listPushDevices(options: RequestOptions = {}): Promise<T.PushDevicesResponse> {
     return this.request("GET", `/api/v1/push/devices`, { binaryBody: false, binaryResponse: false, ...options });

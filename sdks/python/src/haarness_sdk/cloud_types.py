@@ -310,6 +310,7 @@ PublishRemoteSessionRequest = TypedDict('PublishRemoteSessionRequest', {'project
 PublisherId: TypeAlias = str
 PublisherPageDto = TypedDict('PublisherPageDto', {'publisher': Required['PublisherRefDto'], 'resources': Required[List['ResourceSummaryDto']]})
 PublisherRefDto = TypedDict('PublisherRefDto', {'displayName': Required[str], 'id': Required['PublisherId'], 'slug': Required[str], 'verified': Required[bool]})
+PushBadgeDto = TypedDict('PushBadgeDto', {'count': Required[int]})
 PushCategory: TypeAlias = Literal['approvals', 'completions', 'failures', 'billing', 'security']
 PushCategoryPreference = TypedDict('PushCategoryPreference', {'category': Required['PushCategory'], 'enabled': Required[bool]})
 PushDeviceDto = TypedDict('PushDeviceDto', {'appVersion': NotRequired[Union[str, None]], 'bundleId': Required[str], 'createdAt': Required[str], 'current': Required[bool], 'environment': Required['PushEnvironment'], 'familyId': Required[str], 'id': Required[str], 'lastSentAt': NotRequired[Union[str, None]], 'locale': NotRequired[Union[str, None]], 'updatedAt': Required[str]})

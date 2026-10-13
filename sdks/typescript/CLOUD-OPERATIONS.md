@@ -84,6 +84,7 @@
 | `patch_project` | `patchProject` | `PATCH /api/v1/projects/{id}` |
 | `register_live_activity` | `registerLiveActivity` | `PUT /api/v1/push/activities/{activityId}` |
 | `delete_live_activity` | `deleteLiveActivity` | `DELETE /api/v1/push/activities/{activityId}` |
+| `get_push_badge` | `getPushBadge` | `GET /api/v1/push/badge` |
 | `list_push_devices` | `listPushDevices` | `GET /api/v1/push/devices` |
 | `register_push_device` | `registerPushDevice` | `PUT /api/v1/push/devices/current` |
 | `unregister_push_device` | `unregisterPushDevice` | `DELETE /api/v1/push/devices/current` |

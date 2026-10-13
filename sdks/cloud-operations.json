@@ -1013,6 +1013,15 @@
     }
   },
   {
+    "name": "get_push_badge",
+    "method": "GET",
+    "path": "/api/v1/push/badge",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/PushBadgeDto"
+    }
+  },
+  {
     "name": "list_push_devices",
     "method": "GET",
     "path": "/api/v1/push/devices",
