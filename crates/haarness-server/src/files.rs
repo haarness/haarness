@@ -108,7 +108,9 @@ fn folder(failure: Failure) -> Failure {
         failure
     }
 }
-pub(crate) fn resolve(root: &Path, value: &str, create: bool) -> Result<PathBuf, Failure> {
+/// `value` as a path inside the workspace, refused when it is absolute,
+/// climbs out, or names Git metadata.
+fn relative(value: &str) -> Result<&Path, Failure> {
     let relative = Path::new(value);
     if relative.is_absolute()
         || relative
@@ -120,6 +122,45 @@ pub(crate) fn resolve(root: &Path, value: &str, create: bool) -> Result<PathBuf,
     if relative.components().any(|part| part.as_os_str() == ".git") {
         return Err(bad("Git metadata is not editable in the file explorer"));
     }
+    Ok(relative)
+}
+/// Whether `canonical`, a resolved path, is inside `root` and outside `.git`.
+fn inside(root: &Path, canonical: &Path) -> Result<(), Failure> {
+    if !canonical.starts_with(root) {
+        return Err(bad("Path escapes the workspace"));
+    }
+    if canonical
+        .strip_prefix(root)
+        .map_err(bad)?
+        .components()
+        .any(|part| part.as_os_str() == ".git")
+    {
+        return Err(bad("Git metadata is not editable in the file explorer"));
+    }
+    Ok(())
+}
+/// Make the folders that hold `value` again, after they were removed, so a
+/// file can be put back there. Only folders below the nearest one that still
+/// exists are made, and that one must be inside the workspace and outside
+/// `.git`, as `resolve` requires of any parent.
+pub(crate) fn create_parents(root: &Path, value: &str) -> Result<(), Failure> {
+    let relative = relative(value)?;
+    let root = root.canonicalize().map_err(bad)?;
+    let parent = root
+        .join(relative)
+        .parent()
+        .ok_or_else(|| bad("Missing parent"))?
+        .to_path_buf();
+    let mut existing = parent.as_path();
+    // A dangling link counts as there: making a folder through it is refused below.
+    while fs::symlink_metadata(existing).is_err() {
+        existing = existing.parent().ok_or_else(|| bad("Missing parent"))?;
+    }
+    inside(&root, &existing.canonicalize().map_err(io(FOLDER_GONE))?)?;
+    fs::create_dir_all(&parent).map_err(bad)
+}
+pub(crate) fn resolve(root: &Path, value: &str, create: bool) -> Result<PathBuf, Failure> {
+    let relative = relative(value)?;
     let root = root.canonicalize().map_err(bad)?;
     let path = root.join(relative);
     let (existing, missing) = if create && !path.exists() {
@@ -131,17 +172,7 @@ pub(crate) fn resolve(root: &Path, value: &str, create: bool) -> Result<PathBuf,
         (path.as_path(), FILE_GONE)
     };
     let canonical = existing.canonicalize().map_err(io(missing))?;
-    if !canonical.starts_with(&root) {
-        return Err(bad("Path escapes the workspace"));
-    }
-    if canonical
-        .strip_prefix(&root)
-        .map_err(bad)?
-        .components()
-        .any(|part| part.as_os_str() == ".git")
-    {
-        return Err(bad("Git metadata is not editable in the file explorer"));
-    }
+    inside(&root, &canonical)?;
     Ok(path)
 }
 /// A symlink the explorer can open as a folder: its target is a directory
