@@ -6,7 +6,7 @@
 use crate::api::ServerState;
 use crate::browser_policy::{
     BrowserPolicy, BrowserSettings, ChromeBlock, ChromeCategory, ChromePolicy, DefaultBrowser,
-    web_origin,
+    policy_origin, web_origin,
 };
 use async_trait::async_trait;
 use axum::{
@@ -1126,10 +1126,7 @@ impl BrowserBroker {
                 .filter_map(Value::as_str)
             {
                 if policy.decision(method, resource) == PermissionDecision::Ask {
-                    let origin = url::Url::parse(resource)
-                        .ok()
-                        .map(|url| url.origin().ascii_serialization())
-                        .unwrap_or_else(|| resource.into());
+                    let origin = policy_origin(resource).unwrap_or_else(|| resource.into());
                     remember.push(format!("{category}:{origin}"));
                 }
             }
@@ -2928,6 +2925,18 @@ mod tests {
         .await;
         assert_eq!(
             navigate.permission_constraint(&prepared, "browser:navigate:https://blocked.test"),
+            Some(Deny)
+        );
+        assert_eq!(prepared["__browser"]["remember"], json!([]));
+        // A trailing dot spells the same blocked site.
+        let (_, prepared) = check(
+            "browser_navigate",
+            json!({"tabID":id,"url":"https://blocked.test./inbox"}),
+            json!(["https://blocked.test./inbox"]),
+        )
+        .await;
+        assert_eq!(
+            navigate.permission_constraint(&prepared, "browser:navigate:https://blocked.test./inbox"),
             Some(Deny)
         );
         assert_eq!(prepared["__browser"]["remember"], json!([]));

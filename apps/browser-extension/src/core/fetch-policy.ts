@@ -5,7 +5,9 @@
  * still go elsewhere on its own: a redirect, a script navigation, a form. While
  * a command runs the extension pauses document requests (and every request to
  * a blocked origin) with CDP `Fetch`, and decides each hop here:
- *   - a blocked (Deny) origin is refused for every resource type;
+ *   - a blocked (Deny) origin is refused for every resource type, under any
+ *     spelling of its host (`example.com.` is `example.com`);
+ *   - an address carrying a user name or password is refused;
  *   - the tab's own page may only load an Ask origin this chat has approved;
  *   - the tab's own page may not leave the web (file:, chrome:, data:, …).
  * Everything else continues, so ordinary pages are not stalled. Only a
@@ -14,12 +16,13 @@
  * navigations within 2 s of it) a backstop checks where the tab landed with
  * `landing()`.
  *
- * Not covered: requests from workers and service workers, and requests an
- * out-of-process frame starts before `Fetch.enable` reaches it; the backstop
- * still catches a top-level page that ends up somewhere it may not be.
+ * Not covered: requests from workers and service workers, WebSockets (CDP
+ * `Fetch` does not pause them), and requests an out-of-process frame starts
+ * before `Fetch.enable` reaches it; the backstop still catches a top-level
+ * page that ends up somewhere it may not be.
  */
 import type { Policy } from "./browser";
-import { destinationOrigin, siteAccess } from "./policy";
+import { policyOrigin, siteAccess } from "./policy";
 
 export interface FetchContext {
   policy: Policy;
@@ -29,7 +32,7 @@ export interface FetchContext {
 
 export type FetchDecision =
   | { action: "continue" }
-  | { action: "block"; reason: "deny" | "ask" | "scheme" | "disabled"; origin: string };
+  | { action: "block"; reason: "deny" | "ask" | "scheme" | "disabled" | "credentials"; origin: string };
 
 export interface RequestPattern {
   urlPattern?: string;
@@ -43,8 +46,20 @@ export function fetchPatterns(policy: Policy): RequestPattern[] {
     { resourceType: "Document" },
     ...policy.sites
       .filter((site) => site.browsing === "deny")
-      .map((site) => ({ urlPattern: patternFor(site.origin) })),
+      .flatMap((site) => spellings(site.origin))
+      .map((origin) => ({ urlPattern: patternFor(origin) })),
   ];
+}
+
+/**
+ * A rule's origin as Chrome may spell a request to it: as written, and with
+ * the trailing dot of a fully qualified domain (`https://example.com.:8443`),
+ * which Chrome keeps in the URL.
+ */
+function spellings(origin: string) {
+  const match = /^([a-z][a-z\d+.-]*:\/\/)([^/:[\]]+)(:\d+)?$/i.exec(origin);
+  if (!match || /^[\d.]+$/.test(match[2])) return [origin];
+  return [origin, `${match[1]}${match[2]}.${match[3] ?? ""}`];
 }
 
 /** `https://*.example.com` → `https://*.example.com/*`; over-matching is fine, `decide` re-checks. */
@@ -56,11 +71,15 @@ export function decideRequest(
   context: FetchContext,
   request: { url: string; resourceType: string; mainFrame: boolean },
 ): FetchDecision {
-  const origin = destinationOrigin(request.url);
+  const target = policyOrigin(request.url);
   const page = request.mainFrame && request.resourceType === "Document";
-  if (!origin)
+  // Addresses that reach no site (data:, blob:) are the page's own business;
+  // the tab's own page stays on http(s).
+  if (!target || (page && !/^https?:/i.test(request.url)))
     return page ? { action: "block", reason: "scheme", origin: scheme(request.url) } : { action: "continue" };
+  const { origin } = target;
   if (!context.policy.enabled) return { action: "block", reason: "disabled", origin };
+  if (target.credentials) return { action: "block", reason: "credentials", origin };
   const browsing = siteAccess(context.policy, origin).browsing;
   if (browsing === "deny") return { action: "block", reason: "deny", origin };
   if (page && browsing === "ask" && !context.approved.has(origin)) return { action: "block", reason: "ask", origin };
@@ -90,5 +109,7 @@ export function blockedMessage(decision: Extract<FetchDecision, { action: "block
       return `Chrome stopped the page from opening a ${decision.origin} address; agents can use only http(s) sites and about:blank. Choose another site.`;
     case "disabled":
       return `Chrome blocked ${decision.origin}: agents may not use Chrome right now.`;
+    case "credentials":
+      return `Chrome blocked an address on ${decision.origin} that carries a user name or password; agents cannot use such addresses. Choose another address.`;
   }
 }
