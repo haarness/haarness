@@ -162,7 +162,10 @@ def main():
             wait(lambda:not has("/v1/skills","name","proof-skill"),"remove")
             assert marketplace("installed")==[]
             assert not (workspace/".haarness/plugins/proof-plugin").exists()
-            print("PASS all five kinds: catalog/collections/detail/versions, verified install, Bun integrity-before-execution, executable tool, live disable/update/enable/remove, restart persistence")
+            # Uninstalling an extension deletes the package it installed, and updates replaced theirs.
+            leftovers=[p for p in data.rglob("extensions/packages/*") if p.parent.name=="packages"]
+            assert not leftovers,leftovers
+            print("PASS all five kinds: catalog/collections/detail/versions, verified install, Bun integrity-before-execution, executable tool, live disable/update/enable/remove, restart persistence, no package left behind")
         finally:
             if process: process.terminate();process.wait(timeout=20)
             catalog.shutdown()
