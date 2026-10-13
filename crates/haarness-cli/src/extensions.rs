@@ -625,7 +625,7 @@ pub async fn marketplace_install(
             let lock_text = std::fs::read_to_string(install_root.join("bun.lock"))?;
             let lock = jsonc_parser::parse_to_serde_value::<serde_json::Value>(
                 &lock_text,
-                &Default::default(),
+                &jsonc_parser::ParseOptions::default(),
             )?;
             let pinned = &lock["packages"][package_name];
             ensure!(
