@@ -11,9 +11,13 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+/// The cached model-access grant, with the sign-in, account and router it
+/// was issued for.
+type Grant = Mutex<Option<(String, Option<String>, Option<String>, RouterSession)>>;
+
 pub struct HaarnessCloudProvider {
     client: Client,
-    grant: Mutex<Option<(String, Option<String>, Option<String>, RouterSession)>>,
+    grant: Arc<Grant>,
     models: RwLock<Option<([u8; 32], Arc<crate::live_models::LiveModels>)>>,
 }
 
@@ -80,7 +84,7 @@ mod tests {
         haarness_account::credentials::save(&config.path(), &credentials).unwrap();
         let provider = Arc::new(HaarnessCloudProvider {
             client: Client::new(config.clone()).unwrap(),
-            grant: Mutex::new(None),
+            grant: Arc::default(),
             models: RwLock::new(None),
         });
         let refresh = || async {
@@ -251,6 +255,147 @@ mod tests {
         );
     }
 
+    #[derive(Clone)]
+    struct Grants {
+        url: String,
+        issued: Arc<AtomicUsize>,
+        requests: Arc<AtomicUsize>,
+        /// Grants up to this number are refused, as if Cloud withdrew them.
+        revoked: Arc<AtomicUsize>,
+    }
+
+    /// Cloud withdrew the cached grant early: the router's 401 drops it, and
+    /// the request is asked once more with a new one instead of failing until
+    /// the old one expires.
+    #[tokio::test]
+    async fn a_withdrawn_grant_is_replaced_once_on_401() {
+        use futures::StreamExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let grants = Grants {
+            url: url.clone(),
+            issued: Arc::default(),
+            requests: Arc::default(),
+            revoked: Arc::new(AtomicUsize::new(1)),
+        };
+        let app = Router::new()
+            .route(
+                "/api/v1/account/router-session",
+                post(|State(state): State<Grants>| async move {
+                    let number = state.issued.fetch_add(1, Ordering::SeqCst) + 1;
+                    Json(json!({"token":format!("grant-{number}"), "routerUrl":state.url,
+                        "expiresAt":chrono::Utc::now() + chrono::Duration::hours(1)}))
+                }),
+            )
+            .route(
+                "/models",
+                get(|| async { Json(json!({"data":[{"id":"fixture-chat"}]})) }),
+            )
+            .route(
+                "/chat/completions",
+                post(
+                    |State(state): State<Grants>, headers: axum::http::HeaderMap| async move {
+                        state.requests.fetch_add(1, Ordering::SeqCst);
+                        let number = headers["authorization"]
+                            .to_str()
+                            .unwrap()
+                            .trim_start_matches("Bearer grant-")
+                            .parse::<usize>()
+                            .unwrap();
+                        if number <= state.revoked.load(Ordering::SeqCst) {
+                            return (
+                                StatusCode::UNAUTHORIZED,
+                                Json(json!({"error":{"message":"grant revoked"}})),
+                            )
+                                .into_response();
+                        }
+                        (
+                            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                        )
+                            .into_response()
+                    },
+                ),
+            )
+            .with_state(grants.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let root = std::env::temp_dir().join(format!("haarness-cloud-grant-{}", uuid_for_test()));
+        let config = Config::new(&url, root.clone(), "fixture").unwrap();
+        haarness_account::credentials::save(
+            &config.path(),
+            &haarness_account::Credentials {
+                api_url: url.clone(),
+                access_token: "signed-in".into(),
+                refresh_token: "fixture".into(),
+                access_expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            },
+        )
+        .unwrap();
+        let provider = HaarnessCloudProvider {
+            client: Client::new(config).unwrap(),
+            grant: Arc::default(),
+            models: RwLock::new(None),
+        };
+        let request = || ProviderRequest {
+            model: "fixture-chat".into(),
+            system: "system".into(),
+            messages: vec![haarness_core::ProviderMessage::Text {
+                role: "user".into(),
+                content: "hello".into(),
+            }],
+            tools: Vec::new(),
+            reasoning_effort: None,
+            output_schema: None,
+            parameters: haarness_core::RequestParameters::default(),
+        };
+        let text = |events: Vec<CoreResult<haarness_core::ProviderEvent>>| {
+            events
+                .into_iter()
+                .map(|event| match event {
+                    Ok(haarness_core::ProviderEvent::TextDelta(text)) => Ok(text),
+                    Ok(_) => Ok(String::new()),
+                    Err(error) => Err(error),
+                })
+                .collect::<CoreResult<String>>()
+        };
+        let events = provider
+            .stream(request(), CancellationToken::new())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(text(events).unwrap(), "ok");
+        assert_eq!(grants.issued.load(Ordering::SeqCst), 2);
+        assert_eq!(grants.requests.load(Ordering::SeqCst), 2);
+
+        // The new grant is kept for the next request.
+        let events = provider
+            .stream(request(), CancellationToken::new())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(text(events).unwrap(), "ok");
+        assert_eq!(grants.issued.load(Ordering::SeqCst), 2);
+
+        // A refusal that a new grant does not cure is reported, after one retry.
+        grants.revoked.store(usize::MAX, Ordering::SeqCst);
+        let events = provider
+            .stream(request(), CancellationToken::new())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        let error = text(events).unwrap_err();
+        assert!(error.to_string().contains("HTTP 401"), "{error}");
+        assert_eq!(grants.issued.load(Ordering::SeqCst), 3);
+        assert_eq!(grants.requests.load(Ordering::SeqCst), 5);
+        server.abort();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn uuid_for_test() -> String {
         format!(
             "{}-{}",
@@ -266,7 +411,7 @@ impl HaarnessCloudProvider {
     pub fn from_environment() -> Option<Self> {
         Some(Self {
             client: Client::new(Config::from_env().ok()?).ok()?,
-            grant: Mutex::new(None),
+            grant: Arc::default(),
             models: RwLock::new(None),
         })
     }
@@ -327,48 +472,58 @@ impl HaarnessCloudProvider {
         catalog.clone()
     }
     async fn transport(&self) -> CoreResult<OpenAiCompatibleProvider> {
-        let bearer = self.client.bearer(None).await.map_err(error)?;
-        let account = self.client.config.selected_account();
-        let router = self.client.config.selected_router().map_err(error)?;
-        let mut grant = self.grant.lock().await;
-        if grant
-            .as_ref()
-            .is_none_or(|(token, selected, selected_router, g)| {
-                token != &bearer
-                    || selected != &account
-                    || selected_router != &router
-                    || g.expires_at <= chrono::Utc::now() + chrono::Duration::seconds(30)
-            })
-        {
-            *grant = Some((
-                bearer,
-                account,
-                router,
-                self.client.router_session().await.map_err(error)?,
-            ));
-        }
-        let g = &grant.as_ref().expect("grant initialized").3;
-        haarness_account::safe_url(&g.router_url).map_err(error)?;
-        let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(error)?;
-        Ok(OpenAiCompatibleProvider::new(CompatibleInstance {
-            id: "haarness".into(),
-            name: "Haarness Cloud".into(),
-            base_url: g.router_url.clone(),
-            api_key: Some(g.token.clone()),
-            models: Vec::new(),
-            discover_models: true,
-            server_output_limit: false,
-            model_defaults: CompatibleModelDefaults::default(),
-            assume_authenticated: false,
-            headers: ProviderHeaders::default(),
-        })
-        .with_http_client(http)
-        .with_server_output_limit())
+        router_transport(&self.client, &self.grant).await
     }
 }
+
+async fn router_transport(client: &Client, grant: &Grant) -> CoreResult<OpenAiCompatibleProvider> {
+    let bearer = client.bearer(None).await.map_err(error)?;
+    let account = client.config.selected_account();
+    let router = client.config.selected_router().map_err(error)?;
+    let mut grant = grant.lock().await;
+    if grant
+        .as_ref()
+        .is_none_or(|(token, selected, selected_router, g)| {
+            token != &bearer
+                || selected != &account
+                || selected_router != &router
+                || g.expires_at <= chrono::Utc::now() + chrono::Duration::seconds(30)
+        })
+    {
+        *grant = Some((
+            bearer,
+            account,
+            router,
+            client.router_session().await.map_err(error)?,
+        ));
+    }
+    let g = &grant.as_ref().expect("grant initialized").3;
+    haarness_account::safe_url(&g.router_url).map_err(error)?;
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(error)?;
+    Ok(OpenAiCompatibleProvider::new(CompatibleInstance {
+        id: "haarness".into(),
+        name: "Haarness Cloud".into(),
+        base_url: g.router_url.clone(),
+        api_key: Some(g.token.clone()),
+        models: Vec::new(),
+        discover_models: true,
+        server_output_limit: false,
+        model_defaults: CompatibleModelDefaults::default(),
+        assume_authenticated: false,
+        headers: ProviderHeaders::default(),
+    })
+    .with_http_client(http)
+    .with_server_output_limit())
+}
+
+/// The router's answer to a grant it no longer accepts.
+fn unauthorized(error: &CoreError) -> bool {
+    matches!(error, CoreError::Provider(message) if message.starts_with("HTTP 401"))
+}
+
 fn error(e: impl std::fmt::Display) -> CoreError {
     CoreError::Provider(e.to_string())
 }
@@ -527,13 +682,50 @@ impl ModelProvider for HaarnessCloudProvider {
         let models = self
             .catalog()
             .map_or_else(Vec::new, |(_, catalog)| catalog.get(&[]));
-        let stream = transport
-            .with_model_info(models)
-            .stream(request, cancel)
+        let mut stream = transport
+            .with_model_info(models.clone())
+            .stream(request.clone(), cancel.clone())
             .await
             .map_err(readable)?;
-        Ok(Box::pin(futures::StreamExt::map(stream, |event| {
-            event.map_err(readable)
-        })))
+        let client = self.client.clone();
+        let grant = Arc::clone(&self.grant);
+        let used = grant
+            .lock()
+            .await
+            .as_ref()
+            .map(|(.., session)| session.token.clone());
+        // Cloud can withdraw a grant before it expires (a sign-out elsewhere,
+        // a changed plan), and the router then answers 401 to every request
+        // until the cached copy ages out. Fetch a new grant and ask once more.
+        let mut retry = Some(request);
+        Ok(Box::pin(async_stream::try_stream! {
+            while let Some(event) = futures::StreamExt::next(&mut stream).await {
+                match event {
+                    Err(failure) if retry.is_some() && unauthorized(&failure) => {
+                        let request = retry.take().expect("checked above");
+                        {
+                            // Another request may already have replaced it.
+                            let mut cached = grant.lock().await;
+                            if cached.as_ref().map(|(.., session)| &session.token) == used.as_ref() {
+                                *cached = None;
+                            }
+                        }
+                        let transport = tokio::select! {
+                            () = cancel.cancelled() => Err(CoreError::Cancelled),
+                            result = router_transport(&client, &grant) => result,
+                        }?;
+                        stream = transport
+                            .with_model_info(models.clone())
+                            .stream(request, cancel.clone())
+                            .await
+                            .map_err(readable)?;
+                    }
+                    event => {
+                        retry = None;
+                        yield event.map_err(readable)?;
+                    }
+                }
+            }
+        }))
     }
 }

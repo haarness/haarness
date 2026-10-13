@@ -156,7 +156,7 @@ Production credentials live in `~/.config/haarness-cloud` (or `$XDG_CONFIG_HOME/
 
 Only HTTPS and loopback HTTP are accepted for account/router traffic; token-bearing requests do not follow redirects.
 
-The API exchanges an authenticated native session for a five-minute router credential. The router checks the login family, current membership, billing status and model restrictions. Automatic refresh does not create a user-visible developer API key. Explicit developer keys retain their own lifecycle.
+The API exchanges an authenticated native session for a five-minute router credential. The router checks the login family, current membership, billing status and model restrictions. When the router refuses a cached credential before it expires (401), the client fetches a new one and sends the request once more. Automatic refresh does not create a user-visible developer API key. Explicit developer keys retain their own lifecycle.
 
 Deploy the Cloud migration and API/router changes before distributing the native client. No production configuration or deployment is performed by the local test suite.
 
