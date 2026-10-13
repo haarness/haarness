@@ -488,6 +488,7 @@
   "Show side panel": "顯示側面板",
   "Show sidebar": "顯示側邊欄",
   "Show {name} panel": "顯示{name}面板",
+  "The agent opened another page": "代理程式開啟了另一個頁面",
   "Slash commands": "斜線命令",
   "Stop response": "停止回覆",
   "Symbolic link": "符號連結",
@@ -1656,6 +1657,7 @@
   "reject": "拒絕",
   "answer": "回應",
   "always allows": "一律允許",
+  "Leads to {path}": "實際指向 {path}",
   "every file edit": "所有檔案編輯",
   "every shell command": "所有 shell 命令",
   "every file read": "所有檔案讀取",
@@ -2404,5 +2406,9 @@
   "Chrome is turned off for this project.": "此專案已關閉 Chrome。",
   "{category}: {decision} by default": "{category}：預設{decision}",
   "{category} on {origin}: {decision}": "{origin} 上的{category}：{decision}",
-  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "代理程式瀏覽器控制已關閉，因此代理程式不能在此專案中使用 Chrome。請在此頁頂端將其開啟。"
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "代理程式瀏覽器控制已關閉，因此代理程式不能在此專案中使用 Chrome。請在此頁頂端將其開啟。",
+  "The provider refused {name}, so it is left out of this chat from now on.": "提供者拒絕了 {name}，從現在起本聊天將略過它。",
+  "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "提供者拒絕了一張圖片但未說明是哪張，因此從現在起本聊天將略過最新的圖片 {name}。",
+  "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "提供者拒絕了一張圖片但未說明是哪張，因此從現在起本聊天將略過最新的幾張圖片：{names}。",
+  "{name} is not an image Haarness can read.": "{name} 不是 Haarness 能讀取的圖片。"
 }

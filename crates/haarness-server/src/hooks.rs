@@ -960,6 +960,7 @@ impl HookPort for ConfiguredHooks {
         &self,
         thread: ThreadId,
         permission: &str,
+        patterns: &[String],
         detail: &Value,
     ) -> HookDecision {
         self.run_event(
@@ -971,6 +972,7 @@ impl HookPort for ConfiguredHooks {
                 "cwd": self.workspace,
                 "tool_name": permission,
                 "tool_input": detail,
+                "permission_patterns": patterns,
             }),
         )
         .await
@@ -1337,7 +1339,12 @@ mod tests {
             std::env::temp_dir(),
         );
         let decision = hooks
-            .permission_request(ThreadId::new(), "bash", &json!({"command": "cargo test"}))
+            .permission_request(
+                ThreadId::new(),
+                "bash",
+                &["cargo test".to_owned()],
+                &json!({"command": "cargo test"}),
+            )
             .await;
         assert_eq!(decision.permission, Some(PermissionDecision::Allow));
         assert!(decision.block.is_none());
@@ -1358,6 +1365,7 @@ mod tests {
                     .permission_request(
                         ThreadId::new(),
                         "bash",
+                        &["rm -rf build".to_owned()],
                         &json!({"command": "rm -rf build"}),
                     )
                     .await;

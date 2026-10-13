@@ -196,7 +196,7 @@ with tempfile.TemporaryDirectory(prefix='haarness-reliability-adaptations-') as 
             filtered = new(provider, 'gpt-5.4-mini', 'Filtered response ' + provider)
             filtered_session = attach(filtered)
             send(filtered_session, 'Show the filtered response fixture')
-            until(lambda: 'content filter' in capture(filtered_session), 'filtered response was not explained')
+            until(lambda: 'safety check stopped' in capture(filtered_session), 'filtered response was not explained')
             idle()
             items = api(f'/threads/{filtered}/items')
             assert any(item['data']['type'] == 'assistant_message' and item['data']['text'] == 'PARTIAL_FILTER_PROOF' for item in items), items

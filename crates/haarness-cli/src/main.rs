@@ -5886,6 +5886,9 @@ struct HotReloadCandidate {
 struct ReloadWatch {
     claude: ClaudeCodeCompatibility,
     instruction_files: Vec<PathBuf>,
+    /// Folders that hold only agent definitions (`…/agents`, `…/agent`), so
+    /// the scan can tell an edit to them apart from every other source.
+    agent_directories: Vec<PathBuf>,
 }
 
 impl ReloadWatch {
@@ -5893,13 +5896,34 @@ impl ReloadWatch {
         Self {
             claude: claude_compat(&layers.native),
             instruction_files: layers.instruction_files.clone(),
+            // A plugin may name any folder for its agents; only a folder
+            // called `agents` or `agent` is known to hold nothing else.
+            agent_directories: layers
+                .agent_directories
+                .iter()
+                .filter(|directory| {
+                    directory
+                        .file_name()
+                        .is_some_and(|name| name == "agents" || name == "agent")
+                })
+                .cloned()
+                .collect(),
         }
     }
 }
 
+/// What a hot-reload source scan saw: a digest of every runtime source, and
+/// one of every source except what lies in agent definition folders. Two
+/// scans that differ only in `all` differ only in agent definitions.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct SourceFingerprint {
+    all: String,
+    without_agents: String,
+}
+
 struct HotReloadController {
     browser: Arc<haarness_server::browser::BrowserBroker>,
-    initial_fingerprint: String,
+    initial_fingerprint: SourceFingerprint,
     digests: parking_lot::Mutex<SourceDigests>,
     watch: parking_lot::RwLock<ReloadWatch>,
     paths: Paths,
@@ -6048,6 +6072,41 @@ impl HotReloadController {
         )
     }
 
+    /// Only agent definition files changed while work is running. Running
+    /// turns keep the definitions they were admitted with, so the new ones
+    /// can apply to the next turn without waiting for every chat to go idle.
+    /// A candidate that skipped an agent file (frontmatter that does not
+    /// parse) waits for idle like any other change.
+    fn apply_agents_in_place(&self, candidate: &HotReloadCandidate) -> bool {
+        if candidate
+            .notices
+            .iter()
+            .any(|notice| notice.starts_with("skipped agent "))
+        {
+            return false;
+        }
+        self.runtime
+            .replace_custom_agents(candidate.runtime_config.custom_agents.clone());
+        *self.watch.write() = candidate.watch.clone();
+        tracing::info!(
+            "config: agent definitions changed; new turns use them, running turns keep theirs"
+        );
+        if let Some(hooks) = candidate.hooks.clone() {
+            let detail = json!({"source": "reload", "cwd": self.workspace});
+            tokio::spawn(async move {
+                hooks.config_change(&detail).await;
+            });
+        }
+        self.runtime.events().publish(
+            "assets.updated",
+            None,
+            None,
+            None,
+            json!({"resource":"agent","action":"reload"}),
+        );
+        true
+    }
+
     async fn run(self, shutdown: tokio_util::sync::CancellationToken) {
         let mut observed = self.initial_fingerprint.clone();
         // The sources the live generation was composed from.
@@ -6122,6 +6181,7 @@ impl HotReloadController {
                 settle_since = Some(Instant::now());
                 continue;
             }
+            let agents_only = observed.without_agents == applied.without_agents;
             if self.apply(candidate) {
                 applied = observed.clone();
                 for notice in &candidate.notices {
@@ -6150,6 +6210,11 @@ impl HotReloadController {
                 pending = None;
                 settle_since = None;
                 queued = false;
+            } else if agents_only && self.apply_agents_in_place(candidate) {
+                applied = observed.clone();
+                pending = None;
+                settle_since = None;
+                queued = false;
             } else if !queued {
                 self.runtime.events().publish(
                     "configuration.reload_queued",
@@ -6169,7 +6234,7 @@ fn concise_reload_error(error: &anyhow::Error) -> String {
     text.chars().take(1_000).collect()
 }
 
-fn runtime_source_fingerprint(controller: &HotReloadController) -> Result<String> {
+fn runtime_source_fingerprint(controller: &HotReloadController) -> Result<SourceFingerprint> {
     let watch = controller.watch.read().clone();
     runtime_source_fingerprint_for(
         &controller.paths,
@@ -6191,7 +6256,7 @@ fn runtime_source_fingerprint_for(
     memory_root: &Path,
     watch: &ReloadWatch,
     digests: &mut SourceDigests,
-) -> Result<String> {
+) -> Result<SourceFingerprint> {
     let config_dir = paths
         .config
         .parent()
@@ -6308,13 +6373,23 @@ fn runtime_source_fingerprint_for(
         previous: &digests.files,
         next: HashMap::new(),
         hasher: Sha256::new(),
+        without_agents: Sha256::new(),
+        agent_directories: &watch.agent_directories,
     };
     for root in roots {
         fingerprint_path(&root, 0, &mut scan)?;
     }
-    let SourceScan { next, hasher, .. } = scan;
+    let SourceScan {
+        next,
+        hasher,
+        without_agents,
+        ..
+    } = scan;
     digests.files = next;
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(SourceFingerprint {
+        all: format!("{:x}", hasher.finalize()),
+        without_agents: format!("{:x}", without_agents.finalize()),
+    })
 }
 
 /// Files larger than this stand in by size and timestamp instead of being
@@ -6362,9 +6437,24 @@ struct SourceScan<'a> {
     previous: &'a HashMap<PathBuf, (FileStamp, [u8; 32])>,
     next: HashMap<PathBuf, (FileStamp, [u8; 32])>,
     hasher: Sha256,
+    /// The same digest without anything inside an agent definition folder.
+    without_agents: Sha256,
+    agent_directories: &'a [PathBuf],
 }
 
 impl SourceScan<'_> {
+    /// Adds `bytes` for `path` to the digests it belongs to.
+    fn update(&mut self, path: &Path, bytes: impl AsRef<[u8]>) {
+        self.hasher.update(bytes.as_ref());
+        if !self
+            .agent_directories
+            .iter()
+            .any(|directory| path != directory && path.starts_with(directory))
+        {
+            self.without_agents.update(bytes.as_ref());
+        }
+    }
+
     fn digest(&mut self, path: &Path, metadata: &fs::Metadata) -> Result<[u8; 32]> {
         let stamp = FileStamp::of(metadata);
         let digest = match self.previous.get(path) {
@@ -6396,31 +6486,29 @@ impl SourceScan<'_> {
 }
 
 fn fingerprint_path(path: &Path, depth: usize, scan: &mut SourceScan<'_>) -> Result<()> {
-    scan.hasher
-        .update(path.as_os_str().to_string_lossy().as_bytes());
+    scan.update(path, path.as_os_str().to_string_lossy().as_bytes());
     if depth > 24 {
         return Ok(());
     }
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            scan.hasher.update([0]);
+            scan.update(path, [0]);
             return Ok(());
         }
         Err(error) => return Err(error).with_context(|| format!("inspecting {}", path.display())),
     };
     if metadata.file_type().is_symlink() {
-        scan.hasher.update([1]);
+        scan.update(path, [1]);
         if let Ok(target) = fs::read_link(path) {
-            scan.hasher
-                .update(target.as_os_str().to_string_lossy().as_bytes());
+            scan.update(path, target.as_os_str().to_string_lossy().as_bytes());
         }
         return Ok(());
     }
     if metadata.is_file() {
-        scan.hasher.update([2]);
+        scan.update(path, [2]);
         let digest = scan.digest(path, &metadata)?;
-        scan.hasher.update(digest);
+        scan.update(path, digest);
         return Ok(());
     }
     if !metadata.is_dir() {
@@ -6428,7 +6516,7 @@ fn fingerprint_path(path: &Path, depth: usize, scan: &mut SourceScan<'_>) -> Res
     }
     // A folder contributes its entries, not its own metadata, which changes
     // whenever any entry comes or goes.
-    scan.hasher.update([3]);
+    scan.update(path, [3]);
     let mut children = fs::read_dir(path)
         .with_context(|| format!("listing {}", path.display()))?
         .filter_map(std::result::Result::ok)
@@ -12372,6 +12460,79 @@ mod tests {
             assert_ne!(inputs(base.clone()), inputs(changed));
         }
         assert_eq!(super::auth_reload_inputs(b"{not json"), b"{not json");
+    }
+
+    #[test]
+    fn agent_definition_edits_are_told_apart_from_other_sources() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-agent-fingerprint-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config_dir = root.join("config");
+        let workspace = root.join("workspace");
+        let agents = workspace.join(".haarness/agents");
+        fs::create_dir_all(&agents).unwrap();
+        fs::create_dir_all(&config_dir).unwrap();
+        let paths = Paths {
+            root: Some(root.clone()),
+            data: root.join("data"),
+            cache: root.join("cache"),
+            database: root.join("data/haarness.db"),
+            auth: config_dir.join("auth.json"),
+            runtime: root.join("cache/runtime.json"),
+            server_lock: root.join("cache/server.lock"),
+            skills: root.join("data/skills"),
+            config: config_dir.join("config.toml"),
+            workspace_id: None,
+        };
+        fs::write(
+            agents.join("reviewer.md"),
+            "---\ndescription: r\n---\nReview.\n",
+        )
+        .unwrap();
+        let watch = super::ReloadWatch::from_layers(&super::asset_layers(&paths, &workspace, true));
+        assert!(watch.agent_directories.contains(&agents), "{watch:?}");
+        let mut digests = super::SourceDigests::default();
+        let mut fingerprint = || {
+            super::runtime_source_fingerprint_for(
+                &paths,
+                &workspace,
+                true,
+                &root.join("memory"),
+                &watch,
+                &mut digests,
+            )
+            .unwrap()
+        };
+        let baseline = fingerprint();
+        // Editing, adding and removing agent files changes only `all`.
+        fs::write(
+            agents.join("reviewer.md"),
+            "---\ndescription: r\n---\nReview more.\n",
+        )
+        .unwrap();
+        fs::write(
+            agents.join("writer.md"),
+            "---\ndescription: w\n---\nWrite.\n",
+        )
+        .unwrap();
+        let edited = fingerprint();
+        assert_ne!(edited.all, baseline.all);
+        assert_eq!(edited.without_agents, baseline.without_agents);
+        fs::remove_file(agents.join("writer.md")).unwrap();
+        assert_eq!(fingerprint().without_agents, baseline.without_agents);
+        // Anything else changes both.
+        fs::write(workspace.join("AGENTS.md"), "Use tabs.\n").unwrap();
+        let instructions = fingerprint();
+        assert_ne!(instructions.without_agents, baseline.without_agents);
+        fs::create_dir_all(workspace.join(".haarness/skills/s")).unwrap();
+        fs::write(
+            workspace.join(".haarness/skills/s/SKILL.md"),
+            "---\nname: s\ndescription: s\n---\nDo s.\n",
+        )
+        .unwrap();
+        assert_ne!(fingerprint().without_agents, instructions.without_agents);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -2542,6 +2542,9 @@ impl Tool for BuiltinTool {
                         });
                     }
                 }
+                if haarness_core::attachments::is_image_source(&path.to_string_lossy()) {
+                    return read_image(&path, &context).await;
+                }
                 if let Some(mime) = workflow_media_mime(&path) {
                     let metadata = tokio::fs::metadata(&path).await.map_err(tool_error)?;
                     if !metadata.is_file() {
@@ -3222,6 +3225,66 @@ fn usize_value(value: &Value, key: &str) -> Option<usize> {
         .get(key)
         .and_then(Value::as_u64)
         .and_then(|value| usize::try_from(value).ok())
+}
+
+/// An image file as the model sees it. One every provider reads stays a path
+/// to the file; a converted or shrunk one travels inline, since the file
+/// itself is not what the provider would accept. Bytes that are no image fail
+/// the call with the reason, so nothing unreadable reaches the transcript.
+async fn read_image(path: &Path, context: &ToolContext) -> CoreResult<ToolOutput> {
+    let metadata = tokio::fs::metadata(path).await.map_err(tool_error)?;
+    if !metadata.is_file() {
+        return Err(CoreError::Tool(format!(
+            "media path is not a regular file: {}",
+            path.display()
+        )));
+    }
+    if metadata.len() > context.execution.media_max_bytes {
+        return Err(CoreError::Tool(format!(
+            "{} is larger than the configured {} byte inline media limit",
+            path.display(),
+            context.execution.media_max_bytes
+        )));
+    }
+    let bytes = tokio::fs::read(path).await.map_err(tool_error)?;
+    let source = path.display().to_string();
+    let name = path.file_name().map_or_else(
+        || source.clone(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let label = name.clone();
+    let prepared = tokio::task::spawn_blocking(move || haarness_core::images::prepare(bytes))
+        .await
+        .map_err(tool_error)?
+        .map_err(|refusal| CoreError::Tool(refusal.message(&label)))?;
+    let (text, attachment) = if prepared.changed {
+        (
+            format!(
+                "Image read successfully: {source} (shown to you as a {}×{} {})",
+                prepared.width,
+                prepared.height,
+                prepared.extension().to_ascii_uppercase()
+            ),
+            format!(
+                "data:{};name={};base64,{}",
+                prepared.mime_type,
+                url::form_urlencoded::byte_serialize(name.as_bytes()).collect::<String>(),
+                STANDARD.encode(&prepared.bytes)
+            ),
+        )
+    } else {
+        (format!("Image read successfully: {source}"), source.clone())
+    };
+    Ok(ToolOutput {
+        text,
+        metadata: json!({
+            "title": name,
+            "path": source,
+            "mime": prepared.mime_type,
+            "size": metadata.len(),
+            "attachments": [attachment],
+        }),
+    })
 }
 
 /// Media formats accepted by Haarness's native provider adapters. Keep this
@@ -3999,6 +4062,67 @@ mod tests {
             audio_output.metadata["attachments"][0],
             audio.canonicalize().unwrap().display().to_string()
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn read_shows_images_as_providers_take_them() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-read-image-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        // A valid 1×1 PNG, the same pixels saved as BMP, and text named .png.
+        let png = STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC")
+            .unwrap();
+        std::fs::write(root.join("dot.png"), &png).unwrap();
+        let mut bmp = b"BM".to_vec();
+        for value in [58_u32, 0, 54, 40, 1, 1] {
+            bmp.extend(value.to_le_bytes());
+        }
+        bmp.extend([1, 0, 24, 0]);
+        bmp.extend([0_u8; 24]);
+        bmp.extend([0, 0, 255, 0]);
+        std::fs::write(root.join("dot.bmp"), &bmp).unwrap();
+        std::fs::write(root.join("notes.png"), b"just text").unwrap();
+        let registry = NativeToolRegistry::new(root.clone());
+        let read = |path: &'static str| {
+            let registry = &registry;
+            let root = &root;
+            async move {
+                registry
+                    .get("read")
+                    .unwrap()
+                    .execute(json!({ "path": path }), tool_context(root))
+                    .await
+            }
+        };
+
+        let kept = read("dot.png").await.unwrap();
+        assert_eq!(kept.metadata["mime"], "image/png");
+        assert_eq!(
+            kept.metadata["attachments"][0],
+            root.join("dot.png")
+                .canonicalize()
+                .unwrap()
+                .display()
+                .to_string()
+        );
+        let converted = read("dot.bmp").await.unwrap();
+        assert!(
+            converted.text.contains("shown to you as a 1×1 PNG"),
+            "{}",
+            converted.text
+        );
+        assert_eq!(converted.metadata["mime"], "image/png");
+        assert!(
+            converted.metadata["attachments"][0]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;name=dot.bmp;base64,iVBORw0KGgo")
+        );
+        let refused = read("notes.png").await.unwrap_err().to_string();
+        assert!(refused.contains("notes.png is not an image"), "{refused}");
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -5758,7 +5882,7 @@ mod webfetch_tests {
         let workspace =
             std::env::temp_dir().join(format!("haarness-budget-parity-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&workspace).unwrap();
-        let file = std::fs::File::create(workspace.join("large.png")).unwrap();
+        let file = std::fs::File::create(workspace.join("large.pdf")).unwrap();
         file.set_len(11 * 1024 * 1024).unwrap();
         let registry = NativeToolRegistry::new(workspace.clone());
         let mut context = composite_context(&workspace);
@@ -5766,7 +5890,7 @@ mod webfetch_tests {
             registry
                 .get("read")
                 .unwrap()
-                .execute(json!({"path":"large.png"}), context.clone())
+                .execute(json!({"path":"large.pdf"}), context.clone())
                 .await
                 .is_ok()
         );
@@ -5775,7 +5899,7 @@ mod webfetch_tests {
             registry
                 .get("read")
                 .unwrap()
-                .execute(json!({"path":"large.png"}), context.clone())
+                .execute(json!({"path":"large.pdf"}), context.clone())
                 .await
                 .unwrap_err()
                 .to_string()

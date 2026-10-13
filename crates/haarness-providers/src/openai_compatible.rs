@@ -1357,10 +1357,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .post(&self.endpoint)
             .headers(headers)
             .json(&body);
-        let mut events = json_stream(
-            builder.send().await.map_err(crate::sse::transport_error)?,
-            cancel,
-        );
+        let response = builder.send().await.map_err(crate::sse::transport_error)?;
+        let request_id = crate::request_id(response.headers());
+        let provider_id = self.id.clone();
+        let mut events = json_stream(response, cancel);
         // A Cloud session's own router (the Haarness Cloud provider translates its errors itself).
         if self.server_output_limit && self.id != "haarness" {
             events = Box::pin(futures::StreamExt::map(events, |event| {
@@ -1371,6 +1371,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             // Parallel tool calls stream interleaved deltas keyed by index.
             let mut calls: Vec<(String, String, String)> = Vec::new();
             let mut finish_reason: Option<String> = None;
+            let mut response_id: Option<String> = None;
             let mut usage: Option<(u64, u64, u64, u64)> = None;
             let mut reasoning_details: Vec<Value> = Vec::new();
             let mut reasoning_content = String::new();
@@ -1471,6 +1472,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     }
                 }
                 if let Some(reason)=event["choices"][0]["finish_reason"].as_str(){finish_reason = Some(reason.to_owned());}
+                if response_id.is_none() { response_id = event["id"].as_str().map(str::to_owned); }
             }
             let mut provider_metadata = json!({});
             if !reasoning_details.is_empty() { provider_metadata["reasoning_details"] = json!(reasoning_details); }
@@ -1495,7 +1497,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 let value = serde_json::from_str(&json_output).map_err(|error| CoreError::Provider(format!("OpenAI-compatible provider returned invalid structured output: {error}")))?;
                 yield ProviderEvent::StructuredOutput(value);
             }
-            yield ProviderEvent::Finished{reason:finish_reason.unwrap_or_else(||"incomplete".into())};
+            let reason = finish_reason.unwrap_or_else(||"incomplete".into());
+            crate::log_blocked_finish(&provider_id, &reason, request_id.as_deref(), response_id.as_deref());
+            yield ProviderEvent::Finished{reason};
         }))
     }
 }

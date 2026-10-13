@@ -182,6 +182,7 @@
   padding: var(--s3) 0 0;
 }
 .message.assistant > .inline-error,
+.message.assistant > .notice-inline.media-omitted,
 .message.assistant > .plan-block,
 .message.assistant > .activity-note {
   margin-block: var(--s2);
@@ -840,6 +841,22 @@ html[dir="rtl"] .tool-target {
   border-color: var(--danger);
   color: var(--danger);
   align-items: flex-start;
+}
+.notice-inline.media-omitted {
+  align-items: flex-start;
+}
+.notice-inline.media-omitted > svg {
+  flex: none;
+  margin-top: 3px;
+}
+.notice-inline .notice-detail {
+  display: block;
+  margin-top: var(--s1);
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  overflow-wrap: anywhere;
+  /* The provider's reason is English even in a right-to-left interface. */
+  unicode-bidi: plaintext;
 }
 .notice-inline.turn-stopped {
   background: transparent;
@@ -1719,6 +1736,15 @@ html[dir="rtl"] .tool-target {
 .chrome-approval code {
   font-family: var(--mono);
   font-size: var(--ui-sm);
+}
+/* Where a linked path really leads, under the path the tool names. */
+.approval-target {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--ui-sm);
+}
+.approval-target code {
+  font-family: var(--mono);
 }
 /* The proposed change under an edit request: short enough to keep the
    composer in view, scrollable when the edit is long. */

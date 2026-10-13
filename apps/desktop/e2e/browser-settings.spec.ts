@@ -40,6 +40,8 @@ let env: Record<string, string>,
   connection: string;
 let tabID: string;
 let protectedRequests = 0;
+/** WebSockets that reached the fixture on its localhost name, the one the tests block. */
+let blockedSockets = 0;
 const errors: string[] = [];
 const directories: string[] = [];
 const evidence = process.env.HAARNESS_BROWSER_EVIDENCE;
@@ -198,9 +200,10 @@ test.beforeAll(async () => {
     );
   });
   wss = new WebSocketServer({ server: site, path: "/ws" });
-  wss.on("connection", (socket) =>
-    socket.send("WebSocket connected through server"),
-  );
+  wss.on("connection", (socket, request) => {
+    if (/^localhost\.?:/i.test(request.headers.host ?? "")) blockedSockets++;
+    socket.send("WebSocket connected through server");
+  });
   await new Promise<void>((resolve) => site.listen(0, "127.0.0.1", resolve));
   siteURL = "http://127.0.0.1:" + (site.address() as any).port;
   if (evidence) await mkdir(evidence, { recursive: true });
@@ -1172,6 +1175,42 @@ test("site boundaries cover redirects, script requests, and cached back navigati
     tool("navigate", { tabID: tab, url: siteURL + "/redirect-protected" }),
   ).rejects.toThrow(/blocked|failed|permission/i);
   expect(protectedRequests).toBe(before);
+  // A WebSocket counts as its http(s) origin: the page cannot open one to a
+  // blocked site during an agent operation.
+  await tool("navigate", { tabID: tab, url: siteURL });
+  const sockets = blockedSockets;
+  const socketTo = (url: string) =>
+    `new Promise((resolve) => { const socket = new WebSocket(${JSON.stringify(url)}); socket.onopen = () => { socket.close(); resolve("open"); }; socket.onerror = () => resolve("refused"); })`;
+  await expect(
+    tool("evaluate", {
+      tabID: tab,
+      script: socketTo(blockedOrigin.replace(/^http/, "ws") + "/ws"),
+    }),
+  ).rejects.toThrow(/Browser site permission blocked http:\/\/localhost:\d+\. This site is blocked/);
+  expect(blockedSockets).toBe(sockets);
+  // A trailing dot spells the same blocked site, for the server and the page alike.
+  const dotted = blockedOrigin.replace("localhost", "localhost.");
+  await expect(
+    tool("evaluate", {
+      tabID: tab,
+      script: socketTo(dotted.replace(/^http/, "ws") + "/ws"),
+    }),
+  ).rejects.toThrow(/Browser site permission blocked http:\/\/localhost:\d+\. This site is blocked/);
+  await expect(
+    tool("evaluate", {
+      tabID: tab,
+      script: `fetch(${JSON.stringify(dotted + "/protected")}).then(r => r.text())`,
+    }),
+  ).rejects.toThrow(/blocked|fetch|failed|permission/i);
+  await expect(
+    tool("navigate", { tabID: tab, url: dotted + "/protected" }),
+  ).rejects.toThrow(/denied|blocked/i);
+  expect(blockedSockets).toBe(sockets);
+  expect(protectedRequests).toBe(before);
+  // The page's own origin stays reachable, sockets included.
+  expect(
+    (await tool("evaluate", { tabID: tab, script: socketTo(siteURL.replace(/^http/, "ws") + "/ws") })).value.value,
+  ).toBe("open");
   // Manual browsing remains possible, but an agent cannot revisit the cached page with Back.
   await page.evaluate(
     ({ connection, thread, tab, url }) =>

@@ -488,6 +488,7 @@
   "Show side panel": "显示侧面板",
   "Show sidebar": "显示侧边栏",
   "Show {name} panel": "显示{name}面板",
+  "The agent opened another page": "智能体打开了另一个页面",
   "Slash commands": "斜杠命令",
   "Stop response": "停止回复",
   "Symbolic link": "符号链接",
@@ -1656,6 +1657,7 @@
   "reject": "拒绝",
   "answer": "回答",
   "always allows": "始终允许",
+  "Leads to {path}": "实际指向 {path}",
   "every file edit": "所有文件编辑",
   "every shell command": "所有 shell 命令",
   "every file read": "所有文件读取",
@@ -2404,5 +2406,9 @@
   "Chrome is turned off for this project.": "此项目已关闭 Chrome。",
   "{category}: {decision} by default": "{category}：默认{decision}",
   "{category} on {origin}: {decision}": "{origin} 上的{category}：{decision}",
-  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "智能体浏览器控制已关闭，因此智能体不能在此项目中使用 Chrome。请在此页顶部将其打开。"
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "智能体浏览器控制已关闭，因此智能体不能在此项目中使用 Chrome。请在此页顶部将其打开。",
+  "The provider refused {name}, so it is left out of this chat from now on.": "提供商拒绝了 {name}，从现在起本聊天将略过它。",
+  "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "提供商拒绝了一张图片但未说明是哪张，因此从现在起本聊天将略过最新的图片 {name}。",
+  "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "提供商拒绝了一张图片但未说明是哪张，因此从现在起本聊天将略过最新的几张图片：{names}。",
+  "{name} is not an image Haarness can read.": "{name} 不是 Haarness 能读取的图片。"
 }

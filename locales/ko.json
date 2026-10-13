@@ -488,6 +488,7 @@
   "Show side panel": "사이드 패널 표시",
   "Show sidebar": "사이드바 표시",
   "Show {name} panel": "{name} 패널 표시",
+  "The agent opened another page": "에이전트가 다른 페이지를 열었습니다",
   "Slash commands": "슬래시 명령",
   "Stop response": "응답 중지",
   "Symbolic link": "심볼릭 링크",
@@ -1656,6 +1657,7 @@
   "reject": "거부",
   "answer": "응답",
   "always allows": "항상 허용",
+  "Leads to {path}": "실제 대상: {path}",
   "every file edit": "모든 파일 편집",
   "every shell command": "모든 셸 명령",
   "every file read": "모든 파일 읽기",
@@ -2404,5 +2406,9 @@
   "Chrome is turned off for this project.": "이 프로젝트에서는 Chrome이 꺼져 있습니다.",
   "{category}: {decision} by default": "{category}: 기본값 {decision}",
   "{category} on {origin}: {decision}": "{origin}의 {category}: {decision}",
-  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "에이전트 브라우저 제어가 꺼져 있어 이 프로젝트에서 에이전트가 Chrome을 사용할 수 없습니다. 이 페이지 맨 위에서 켜세요."
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "에이전트 브라우저 제어가 꺼져 있어 이 프로젝트에서 에이전트가 Chrome을 사용할 수 없습니다. 이 페이지 맨 위에서 켜세요.",
+  "The provider refused {name}, so it is left out of this chat from now on.": "공급자가 {name}을(를) 거부했으므로 이제부터 이 채팅에서 제외됩니다.",
+  "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "공급자가 어떤 이미지인지 밝히지 않고 이미지를 거부했으므로 가장 최근 이미지 {name}을(를) 이제부터 이 채팅에서 제외합니다.",
+  "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "공급자가 어떤 이미지인지 밝히지 않고 이미지를 거부했으므로 가장 최근 이미지들({names})을 이제부터 이 채팅에서 제외합니다.",
+  "{name} is not an image Haarness can read.": "{name}은(는) Haarness가 읽을 수 있는 이미지가 아닙니다."
 }

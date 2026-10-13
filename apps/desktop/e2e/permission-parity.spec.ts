@@ -1,5 +1,5 @@
 import { test, expect, _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
-import { mkdtemp, mkdir, writeFile, readFile, realpath } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, realpath, symlink } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -27,6 +27,7 @@ test.beforeAll(async()=>{
   await writeFile(join(main,".haarness/config.toml"),'[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\nbash="ask"\n[execution]\nshell_timeout_ms=0\nsubagent_concurrency=1\nsubagent_depth=2\n');
   await writeFile(join(main,".haarness/commands/context.md"),'---\ndescription: Read dynamic context\n---\nContext: !`printf DYNAMIC_APPROVAL_PROOF`\n');
   await writeFile(join(main,".env"),"PARITY_SECRET=fixture-only");
+  await symlink(".env",join(main,"notes.txt"));
   const git=(args:string[])=>execFileSync("git",args,{cwd:main,stdio:"ignore"});
   git(["init","-b","main"]);git(["add","."]);git(["-c","user.name=Fixture","-c","user.email=fixture@example.test","commit","-m","fixture"]);git(["worktree","add","-b","linked",linked]);
   env=Object.fromEntries(Object.entries(process.env).filter(([key,value])=>value!==undefined&&!key.startsWith("HAARNESS_"))) as Record<string,string>;
@@ -85,7 +86,11 @@ test("nested agents complete with one slot and secret reads still require approv
   await page.getByRole("button",{name:"Allow once",exact:true}).click();await idle();
   expect(await readFile(join(main,"nested-ui.txt"),"utf8")).toBe("NESTED_UI_PROOF");
   await send('!tool read {"path":".env"}');await expect(page.getByRole("button",{name:"Allow once",exact:true})).toBeVisible();
-  await proof("secret-still-requires-approval");await page.getByRole("button",{name:"Deny",exact:true}).click();await idle();expect(errors).toEqual([]);
+  await proof("secret-still-requires-approval");await page.getByRole("button",{name:"Deny",exact:true}).click();await idle();
+  // A link to the secret asks about the file it leads to, and the card names it.
+  await send('!tool read {"path":"notes.txt"}');await expect(page.getByRole("button",{name:"Allow once",exact:true})).toBeVisible();
+  await expect(page.locator(".approval-target")).toHaveText("Leads to .env");
+  await proof("linked-secret-names-its-target");await page.getByRole("button",{name:"Deny",exact:true}).click();await idle();expect(errors).toEqual([]);
 });
 
 test("larger media survives a real drop, draft reload and server submission",async()=>{
@@ -106,6 +111,8 @@ test("larger media survives a real drop, draft reload and server submission",asy
   const threads=await api("listThreads");
   const items=await api("listItems",threads[0].id);
   const message=items.find((item:any)=>item.data.type==="user_message"&&item.data.text.includes("MEDIA_TRANSPORT_PROOF"));
-  expect(message.data.attachments[0].length).toBeGreaterThan(14*1024*1024);
+  // The server keeps the image every provider takes: the 11 MB file holds one pixel.
+  expect(message.data.attachments[0]).toMatch(/^data:image\/png;name=large-parity\.png;base64,/);
+  expect(message.data.attachments[0].length).toBeLessThan(1024);
   await transfer.dispose();expect(errors).toEqual([]);
 });

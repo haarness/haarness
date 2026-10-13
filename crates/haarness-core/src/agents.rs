@@ -2,7 +2,8 @@ use haarness_protocol::AgentProfile;
 
 /// Stable runtime facts supplied to every model request. Keeping the thread
 /// creation date fixed preserves the reusable system-prompt prefix across
-/// provider rounds while still giving the model the context it needs.
+/// provider rounds and days; a later turn on another date tells the model the
+/// new date in a reminder stored with that turn (see `turn_context`).
 pub struct SystemPromptContext<'a> {
     pub provider: &'a str,
     pub model: &'a str,
@@ -164,7 +165,7 @@ fn runtime_context_prompt(context: &SystemPromptContext<'_>) -> String {
         if context.git_repository { "yes" } else { "no" },
         std::env::consts::OS,
         std::env::consts::ARCH,
-        context.created_at.format("%Y-%m-%d"),
+        crate::turn_context::local_date(context.created_at).format("%Y-%m-%d"),
     );
     if let Some(style) = context.output_style {
         prompt.push_str("\n\n<output-style name=\"");
@@ -182,7 +183,8 @@ mod tests {
 
     #[test]
     fn contextual_prompt_is_provider_neutral_and_stable() {
-        let created_at = chrono::DateTime::parse_from_rfc3339("2026-08-26T01:02:03Z")
+        // Midday UTC is the same date almost everywhere the test may run.
+        let created_at = chrono::DateTime::parse_from_rfc3339("2026-08-26T12:02:03Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
         let prompt = system_prompt_with_context(

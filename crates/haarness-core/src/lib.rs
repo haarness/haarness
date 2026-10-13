@@ -8,6 +8,7 @@ pub mod definitions;
 mod events;
 mod execution;
 mod goal;
+pub mod images;
 pub mod instructions;
 pub mod patch;
 mod permissions;
@@ -17,6 +18,7 @@ mod runtime;
 mod side_question;
 mod tool_catalog;
 mod tool_validation;
+mod turn_context;
 mod workflows;
 
 pub use agents::{

@@ -488,6 +488,7 @@
   "Show side panel": "Показать боковую панель",
   "Show sidebar": "Показать боковую панель",
   "Show {name} panel": "Показать панель {name}",
+  "The agent opened another page": "Агент открыл другую страницу",
   "Slash commands": "Слэш-команды",
   "Stop response": "Остановить ответ",
   "Symbolic link": "Символическая ссылка",
@@ -1656,6 +1657,7 @@
   "reject": "отклонить",
   "answer": "ответить",
   "always allows": "всегда разрешает",
+  "Leads to {path}": "Ведёт к {path}",
   "every file edit": "любое изменение файлов",
   "every shell command": "любая команда оболочки",
   "every file read": "любое чтение файлов",
@@ -2404,5 +2406,9 @@
   "Chrome is turned off for this project.": "Chrome отключён для этого проекта.",
   "{category}: {decision} by default": "{category}: по умолчанию {decision}",
   "{category} on {origin}: {decision}": "{category} на {origin}: {decision}",
-  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Управление браузером агентом выключено, поэтому агенты не могут использовать Chrome в этом проекте. Включите его в верхней части этой страницы."
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Управление браузером агентом выключено, поэтому агенты не могут использовать Chrome в этом проекте. Включите его в верхней части этой страницы.",
+  "The provider refused {name}, so it is left out of this chat from now on.": "Провайдер отклонил {name}, поэтому теперь это изображение не отправляется в этом чате.",
+  "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "Провайдер отклонил изображение, не указав какое, поэтому теперь самое новое, {name}, не отправляется в этом чате.",
+  "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "Провайдер отклонил изображение, не указав какое, поэтому теперь самые новые ({names}) не отправляются в этом чате.",
+  "{name} is not an image Haarness can read.": "{name} — не изображение, которое Haarness может прочитать."
 }

@@ -434,6 +434,32 @@ fn render_file_diffs(metadata: &serde_json::Value, width: usize, theme: &Theme) 
     rendered
 }
 
+/// What the person reads when a provider refused images and later requests
+/// leave them out.
+fn media_omitted_notice(
+    language: crate::locale::Language,
+    names: &[String],
+    guessed: bool,
+) -> String {
+    let list = names.join(", ");
+    if !guessed {
+        language.format(
+            "The provider refused {name}, so it is left out of this chat from now on.",
+            &[("name", &list)],
+        )
+    } else if names.len() == 1 {
+        language.format(
+            "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.",
+            &[("name", &list)],
+        )
+    } else {
+        language.format(
+            "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.",
+            &[("names", &list)],
+        )
+    }
+}
+
 #[cfg(test)]
 mod workflow_tests {
     use haarness_protocol::{FileDiff, FileDiffStatus};
@@ -1495,6 +1521,32 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     block.push(line(
                         format!("{}{}", if index == 0 { "  × " } else { "    " }, wrapped),
                         theme.danger,
+                    ));
+                }
+            }
+            ItemData::MediaOmitted {
+                names,
+                reason,
+                guessed,
+                ..
+            } => {
+                let notice = media_omitted_notice(app.language, names, *guessed);
+                for (index, wrapped) in textwrap::wrap(&notice, width.saturating_sub(4).max(10))
+                    .into_iter()
+                    .enumerate()
+                {
+                    block.push(line(
+                        format!("{}{}", if index == 0 { "  ! " } else { "    " }, wrapped),
+                        theme.accent,
+                    ));
+                }
+                if !reason.trim().is_empty() {
+                    block.push(line(
+                        format!(
+                            "    {}",
+                            single_line(reason, width.saturating_sub(8).max(10))
+                        ),
+                        theme.muted,
                     ));
                 }
             }

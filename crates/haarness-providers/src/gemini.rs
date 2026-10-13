@@ -328,6 +328,8 @@ impl ModelProvider for GeminiProvider {
             .send()
             .await
             .map_err(crate::sse::transport_error)?;
+        let request_id = crate::request_id(response.headers());
+        let provider_id = self.id.clone();
         let mut events = json_stream(response, cancel);
         Ok(Box::pin(try_stream! {
             let mut call_index = 0_u64;
@@ -365,9 +367,15 @@ impl ModelProvider for GeminiProvider {
                     }
                 }
                 if let Some(usage)=event.get("usageMetadata") { yield ProviderEvent::Usage { input_tokens:usage["promptTokenCount"].as_u64().unwrap_or(0),output_tokens:usage["candidatesTokenCount"].as_u64().unwrap_or(0)+usage["thoughtsTokenCount"].as_u64().unwrap_or(0),cache_read_tokens:usage["cachedContentTokenCount"].as_u64().unwrap_or(0),cache_write_tokens:0 }; }
-                if event.pointer("/candidates/0/finishReason").is_some() { yield ProviderEvent::Finished { reason:event.pointer("/candidates/0/finishReason").and_then(Value::as_str).unwrap_or("completed").into() }; }
+                if event.pointer("/candidates/0/finishReason").is_some() {
+                    let reason = event.pointer("/candidates/0/finishReason").and_then(Value::as_str).unwrap_or("completed");
+                    crate::log_blocked_finish(&provider_id, reason, request_id.as_deref(), event["responseId"].as_str());
+                    yield ProviderEvent::Finished { reason: reason.into() };
+                }
                 if let Some(reason) = event.pointer("/promptFeedback/blockReason").and_then(Value::as_str).filter(|reason| *reason != "BLOCK_REASON_UNSPECIFIED") {
-                    yield ProviderEvent::Finished { reason: if haarness_core::ProviderEvent::finish_error(reason).is_some() { reason.into() } else { "SAFETY".into() } };
+                    let reason = if haarness_core::ProviderEvent::finish_error(reason).is_some() { reason } else { "SAFETY" };
+                    crate::log_blocked_finish(&provider_id, reason, request_id.as_deref(), event["responseId"].as_str());
+                    yield ProviderEvent::Finished { reason: reason.into() };
                 }
             }
         }))

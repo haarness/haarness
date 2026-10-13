@@ -488,6 +488,7 @@
   "Show side panel": "Afficher le panneau latéral",
   "Show sidebar": "Afficher la barre latérale",
   "Show {name} panel": "Afficher le panneau {name}",
+  "The agent opened another page": "L’agent a ouvert une autre page",
   "Slash commands": "Commandes slash",
   "Stop response": "Arrêter la réponse",
   "Symbolic link": "Lien symbolique",
@@ -1656,6 +1657,7 @@
   "reject": "refuser",
   "answer": "répondre",
   "always allows": "autorise toujours",
+  "Leads to {path}": "Mène à {path}",
   "every file edit": "chaque modification de fichier",
   "every shell command": "chaque commande shell",
   "every file read": "chaque lecture de fichier",
@@ -2404,5 +2406,9 @@
   "Chrome is turned off for this project.": "Chrome est désactivé pour ce projet.",
   "{category}: {decision} by default": "{category} : {decision} par défaut",
   "{category} on {origin}: {decision}": "{category} sur {origin} : {decision}",
-  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Le contrôle du navigateur par l’agent est désactivé : les agents ne peuvent donc pas utiliser Chrome dans ce projet. Activez-le en haut de cette page."
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Le contrôle du navigateur par l’agent est désactivé : les agents ne peuvent donc pas utiliser Chrome dans ce projet. Activez-le en haut de cette page.",
+  "The provider refused {name}, so it is left out of this chat from now on.": "Le fournisseur a refusé {name} : cette image est désormais omise de cette conversation.",
+  "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "Le fournisseur a refusé une image sans préciser laquelle : la plus récente, {name}, est désormais omise de cette conversation.",
+  "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "Le fournisseur a refusé une image sans préciser laquelle : les plus récentes, {names}, sont désormais omises de cette conversation.",
+  "{name} is not an image Haarness can read.": "{name} n’est pas une image que Haarness peut lire."
 }

@@ -157,6 +157,9 @@ pub fn mime_for_path(path: &Path) -> Option<&'static str> {
         "gif" => Some("image/gif"),
         "heic" => Some("image/heic"),
         "heif" => Some("image/heif"),
+        // The server converts these, and HEIC, to PNG or JPEG.
+        "bmp" => Some("image/bmp"),
+        "tif" | "tiff" => Some("image/tiff"),
         "pdf" => Some("application/pdf"),
         "mp3" => Some("audio/mpeg"),
         "wav" => Some("audio/wav"),
