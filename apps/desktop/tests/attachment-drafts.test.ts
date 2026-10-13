@@ -64,3 +64,16 @@ test("a failed disk write is reported, keeps the draft in memory, and permits re
   await drafts.update("a", (items) => items);
   assert.deepEqual(drafts.get("a"), value);
 });
+
+test("an attached image is typed by its bytes, not its name", async () => {
+  const { imageType } = await import("../src/attachments");
+  const bytes = (...values: (number | string)[]) =>
+    Uint8Array.from(values.flatMap((value) => typeof value === "string" ? [...value].map((char) => char.charCodeAt(0)) : [value]));
+  assert.equal(imageType(bytes(0x89, "PNG\r\n\x1a\n", 0, 0)), "image/png");
+  assert.equal(imageType(bytes(0xff, 0xd8, 0xff, 0xe0)), "image/jpeg");
+  assert.equal(imageType(bytes("GIF89a")), "image/gif");
+  assert.equal(imageType(bytes("RIFF", 0, 0, 0, 0, "WEBPVP8 ")), "image/webp");
+  assert.equal(imageType(bytes(0, 0, 0, 0x18, "ftypheic", 0, 0, 0, 0)), "image/heic");
+  assert.equal(imageType(bytes("II*\0")), "image/tiff");
+  assert.equal(imageType(bytes("just some text")), undefined);
+});

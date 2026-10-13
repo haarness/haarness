@@ -1,4 +1,5 @@
-import { attachmentMimeTypes, checkAttachments, type Attachment } from "../attachments";
+import { attachmentMimeTypes, checkAttachments, imageType, type Attachment } from "../attachments";
+import { t } from "./i18n";
 export { checkAttachments, type Attachment } from "../attachments";
 
 export async function fileAttachments(files: File[]) {
@@ -6,7 +7,17 @@ export async function fileAttachments(files: File[]) {
   if (files.reduce((total, file) => total + file.size, 0) > 20 * 1024 * 1024)
     throw new Error("Attachments exceed 20 MiB.");
   for (const file of files) {
-    if (!attachmentMimeTypes.has(file.type))
+    // An image's own bytes say what it is, whatever its name says. A file
+    // that claims to be an image and is none is refused while it can still
+    // be replaced; the server decodes, converts and shrinks the rest.
+    const claimed = !file.type || file.type.startsWith("image/");
+    const image = claimed
+      ? imageType(new Uint8Array(await file.slice(0, 16).arrayBuffer()))
+      : undefined;
+    if (!image && file.type.startsWith("image/"))
+      throw new Error(t("{name} is not an image Haarness can read.", { name: file.name }));
+    const type = image ?? file.type;
+    if (!attachmentMimeTypes.has(type))
       throw new Error(
         "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.",
       );
@@ -19,12 +30,25 @@ export async function fileAttachments(files: File[]) {
     values.push({
       name: file.name,
       data: raw.replace(
-        ";base64,",
-        ";name=" + encodeURIComponent(file.name) + ";base64,",
+        /^data:[^;,]*(;base64,)/,
+        "data:" + type + ";name=" + encodeURIComponent(file.name) + "$1",
       ),
     });
   }
   return checkAttachments(values);
+}
+
+/** Attachments read from disk by name, relabelled by what their bytes are. */
+export function relabelAttachments(values: Attachment[]) {
+  return values.map((value) => {
+    const match = value.data.match(/^data:(image\/[^;,]+)([^,]*),(.*)$/);
+    if (!match) return value;
+    const head = atob(match[3].slice(0, 24));
+    const type = imageType(Uint8Array.from(head, (char) => char.charCodeAt(0)));
+    return type && type !== match[1]
+      ? { ...value, data: "data:" + type + match[2] + "," + match[3] }
+      : value;
+  });
 }
 export function attachmentName(value: string) {
   try {
