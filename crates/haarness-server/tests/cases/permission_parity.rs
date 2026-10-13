@@ -296,6 +296,195 @@ async fn parity_secret_reads_follow_the_file_really_opened_and_spare_node_module
     assert!(runtime.pending_permissions().is_empty());
 }
 
+/// A hook that allows a read unless its path ends in `.env`, as Claude Code
+/// hooks commonly do, logging each input it is given.
+fn env_guard_hooks(workspace: &Path, event: &str, log: &Path) -> Arc<dyn haarness_core::HookPort> {
+    let allow = if event == "PreToolUse" {
+        r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}"#
+    } else {
+        r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#
+    };
+    let command = format!(
+        r#"input=$(cat); printf '%s\n' "$input" >> '{}'; if printf '%s' "$input" | grep -q '"path":"[^"]*\.env"'; then exit 0; fi; echo '{allow}'"#,
+        log.display()
+    );
+    Arc::new(haarness_server::ConfiguredHooks::new(
+        haarness_server::ConfiguredHooks::parse_block(
+            &json!({ event: [{"matcher": "Read", "hooks": [{"command": command}]}] }),
+        ),
+        workspace.to_owned(),
+    ))
+}
+
+#[tokio::test]
+async fn parity_hooks_judge_the_file_a_link_really_opens() {
+    for event in ["PreToolUse", "PermissionRequest"] {
+        let fixture = Fixture::new();
+        let log = fixture.0.join("hook.log");
+        std::fs::write(fixture.0.join(".env"), "SECRET_CANARY").unwrap();
+        std::os::unix::fs::symlink(".env", fixture.0.join("notes.txt")).unwrap();
+        let runtime = Arc::new(
+            runtime(&fixture.0, RuntimeConfig::default(), None)
+                .with_hooks(env_guard_hooks(&fixture.0, event, &log)),
+        );
+        let thread = echo_thread(&runtime).await;
+        // The model path: the hook allows `notes.txt`, but the read opens
+        // `.env`, which the hook would refuse, so the person is asked.
+        let turn = send(
+            &runtime,
+            &thread,
+            &format!("!tool read {}", json!({"path": "notes.txt"})),
+        )
+        .await;
+        let approval = pending(&runtime).await;
+        assert_eq!(approval.permission, "read", "{event}");
+        assert_eq!(approval.patterns, vec![".env"], "{event}");
+        runtime
+            .reply_permission(
+                &approval.permission_id,
+                PermissionReply {
+                    decision: Reply::Reject,
+                    feedback: None,
+                },
+            )
+            .await
+            .unwrap();
+        wait_done(&runtime, &turn).await;
+        let items = runtime.items(thread.id, None).await.unwrap();
+        assert!(
+            !serde_json::to_string(&items)
+                .unwrap()
+                .contains("SECRET_CANARY"),
+            "{event}"
+        );
+        // A direct call (workflows, `!` shell) is asked the same way.
+        if event == "PreToolUse" {
+            let r = runtime.clone();
+            let id = thread.id;
+            let call = tokio::spawn(async move {
+                r.run_direct_tool(
+                    id,
+                    "read",
+                    json!({"path":"notes.txt"}),
+                    CancellationToken::new(),
+                )
+                .await
+            });
+            let approval = pending(&runtime).await;
+            assert_eq!(approval.patterns, vec![".env"]);
+            runtime
+                .reply_permission(
+                    &approval.permission_id,
+                    PermissionReply {
+                        decision: Reply::Reject,
+                        feedback: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let result = call.await.unwrap().unwrap();
+            assert!(result.is_error);
+            assert!(!result.output.text.contains("SECRET_CANARY"));
+        } else {
+            // The hook was asked about `.env` itself, by path and pattern.
+            let inputs: Vec<serde_json::Value> = std::fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(inputs.len(), 1, "{inputs:?}");
+            assert_eq!(inputs[0]["tool_input"]["path"], ".env");
+            assert_eq!(inputs[0]["permission_patterns"], json!([".env"]));
+        }
+        assert!(runtime.pending_permissions().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn parity_a_link_out_of_the_project_asks_although_a_hook_allowed_its_name() {
+    let fixture = Fixture::new();
+    let workspace = fixture.0.join("project");
+    let outside = fixture.0.join("outside");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), "SECRET_CANARY").unwrap();
+    std::os::unix::fs::symlink(outside.join("secret.txt"), workspace.join("notes.txt")).unwrap();
+    let log = fixture.0.join("hook.log");
+    let allow = r#"echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'"#;
+    let record = format!("cat >> '{}'", log.display());
+    let hooks = Arc::new(haarness_server::ConfiguredHooks::new(
+        haarness_server::ConfiguredHooks::parse_block(&json!({
+            "PreToolUse": [{"matcher": "Read", "hooks": [{"command": allow}]}],
+            "PermissionRequest": [{"hooks": [{"command": record}]}],
+        })),
+        workspace.clone(),
+    ));
+    let runtime = Arc::new(runtime(&workspace, RuntimeConfig::default(), None).with_hooks(hooks));
+    let thread = echo_thread(&runtime).await;
+    let turn = send(
+        &runtime,
+        &thread,
+        &format!("!tool read {}", json!({"path": "notes.txt"})),
+    )
+    .await;
+    let approval = pending(&runtime).await;
+    assert_eq!(approval.permission, "external_directory");
+    assert_eq!(approval.patterns, vec![format!("{}/*", outside.display())]);
+    runtime
+        .reply_permission(
+            &approval.permission_id,
+            PermissionReply {
+                decision: Reply::Reject,
+                feedback: None,
+            },
+        )
+        .await
+        .unwrap();
+    wait_done(&runtime, &turn).await;
+    let input: serde_json::Value =
+        serde_json::from_str(std::fs::read_to_string(&log).unwrap().trim()).unwrap();
+    assert_eq!(input["tool_name"], "external_directory");
+    assert_eq!(
+        input["tool_input"]["path"],
+        outside.join("secret.txt").display().to_string()
+    );
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(
+        !serde_json::to_string(&items)
+            .unwrap()
+            .contains("SECRET_CANARY")
+    );
+}
+
+#[tokio::test]
+async fn parity_a_hook_that_sees_the_opened_file_can_still_answer() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.0.join(".env"), "SECRET_CANARY").unwrap();
+    std::os::unix::fs::symlink(".env", fixture.0.join("notes.txt")).unwrap();
+    let allow_all = r#"echo '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'"#;
+    let hooks = Arc::new(haarness_server::ConfiguredHooks::new(
+        haarness_server::ConfiguredHooks::parse_block(
+            &json!({"PermissionRequest": [{"matcher": "Read", "hooks": [{"command": allow_all}]}]}),
+        ),
+        fixture.0.clone(),
+    ));
+    let runtime = Arc::new(runtime(&fixture.0, RuntimeConfig::default(), None).with_hooks(hooks));
+    let thread = echo_thread(&runtime).await;
+    let turn = send(
+        &runtime,
+        &thread,
+        &format!("!tool read {}", json!({"path": "notes.txt"})),
+    )
+    .await;
+    assert_success(&runtime, &thread, &turn).await;
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(
+        serde_json::to_string(&items)
+            .unwrap()
+            .contains("SECRET_CANARY")
+    );
+}
+
 #[tokio::test]
 async fn parity_repository_grants_cross_worktrees_and_preserve_other_repositories_and_denies() {
     let fixture = Fixture::new();

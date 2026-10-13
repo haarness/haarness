@@ -717,10 +717,15 @@ pub trait HookPort: Send + Sync {
         is_error: bool,
     ) -> Option<String>;
     async fn user_prompt_submit(&self, thread: ThreadId, prompt: &str) -> HookDecision;
+    /// A prompt is about to be shown for `permission` and the `patterns` it
+    /// asks about. `detail` is the tool's arguments; when a pattern names
+    /// where a file path really leads (a link's target), the runtime asks
+    /// about it alone, with the arguments' path replaced by it.
     async fn permission_request(
         &self,
         thread: ThreadId,
         permission: &str,
+        patterns: &[String],
         detail: &Value,
     ) -> HookDecision;
     async fn stop(&self, thread: ThreadId);

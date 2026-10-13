@@ -406,6 +406,23 @@ pub fn resolve_permission_path(workspace: &Path, value: &str) -> PathBuf {
     resolved
 }
 
+/// Whether `value`, read as written (`.` and `..` folded, links not
+/// followed), names a path inside `workspace`. A link inside that leads out
+/// still names a path inside.
+pub(crate) fn names_inside(workspace: &Path, value: &str) -> bool {
+    let configured = normalize_absolute(workspace);
+    let root = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| configured.clone());
+    let given = Path::new(value);
+    if given.is_absolute() {
+        let named = normalize_absolute(given);
+        named.starts_with(&root) || named.starts_with(&configured)
+    } else {
+        normalize_absolute(&root.join(given)).starts_with(&root)
+    }
+}
+
 fn normalize_absolute(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {

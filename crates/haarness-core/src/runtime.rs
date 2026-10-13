@@ -189,6 +189,10 @@ struct ActiveTurn {
     /// The user stopped this turn and asked for steering it has not read yet
     /// to be answered, rather than dropped.
     answer_steer: AtomicBool,
+    /// The agent definition the turn runs with. Ceilings for work it starts
+    /// (workflow agents, direct tools on its children) come from it, not
+    /// from the agent's file as it is now.
+    agent: AgentSnapshot,
 }
 
 /// Model-facing prompt for the turn that answers steering the user sent
@@ -3378,10 +3382,12 @@ impl AgentRuntime {
                         allowed = Err(operation);
                         break;
                     }
-                    // A hook pre-approval never answers what only a person may.
+                    // A hook pre-approval never answers what only a person
+                    // may, nor where a path leads that the hook never saw.
                     PermissionDecision::Ask
                         if !explicit
                             && hook_permission == Some(PermissionDecision::Allow)
+                            && !plan.is_resolved(pattern)
                             && constraint != Some(PermissionDecision::Ask) => {}
                     PermissionDecision::Ask => asked.push(pattern.clone()),
                     PermissionDecision::Allow => {}
@@ -3390,12 +3396,7 @@ impl AgentRuntime {
             if allowed.is_err() || asked.is_empty() {
                 continue;
             }
-            pending_plans.push(AskPlan {
-                permission: plan.permission,
-                patterns: asked,
-                always: plan.always,
-                external_paths: Vec::new(),
-            });
+            pending_plans.push(plan.asking(asked));
         }
         for plan in combine_browser_approvals(name, pending_plans) {
             if allowed.is_err() {
@@ -4295,11 +4296,16 @@ impl AgentRuntime {
                 }
             }
         }
+        // The turn's agent is read once and kept for the whole turn.
+        let requested_agent = request.agent.clone().map(|id| AgentSnapshot {
+            custom: self.custom_agent(&id),
+            id,
+        });
         if request.model.is_none()
-            && let Some(agent) = request.agent.as_deref()
-            && let Some(model) = self
-                .custom_agent(agent)
-                .and_then(|agent| agent.model)
+            && let Some(model) = requested_agent
+                .as_ref()
+                .and_then(|agent| agent.custom.as_ref())
+                .and_then(|agent| agent.model.clone())
                 .filter(|m| m != "inherit")
         {
             if let Some((provider, model)) = resolve_definition_model(
@@ -4346,7 +4352,13 @@ impl AgentRuntime {
                 "Agent is disabled: {effective_agent}"
             )));
         }
-        if self.custom_agent(effective_agent).is_none()
+        let agent = requested_agent
+            .filter(|agent| agent.id == effective_agent)
+            .unwrap_or_else(|| AgentSnapshot {
+                id: effective_agent.to_owned(),
+                custom: self.custom_agent(effective_agent),
+            });
+        if agent.custom.is_none()
             && !crate::builtin_profiles()
                 .iter()
                 .any(|p| p.id == effective_agent)
@@ -4355,8 +4367,8 @@ impl AgentRuntime {
                 "Unknown agent: {effective_agent}"
             )));
         }
-        if let Some(custom) = self.custom_agent(effective_agent) {
-            validate_custom_agent_mode(&custom, thread.parent_id.is_some())?;
+        if let Some(custom) = &agent.custom {
+            validate_custom_agent_mode(custom, thread.parent_id.is_some())?;
             merge_agent_tools(&mut request.tools, &custom.tools);
         }
         let root = self.resolve_root(&thread).await;
@@ -4387,6 +4399,7 @@ impl AgentRuntime {
             accepting: AsyncMutex::new(false),
             stop_reason: Mutex::new(None),
             answer_steer: AtomicBool::new(false),
+            agent: agent.clone(),
         });
         self.active.insert(thread_id, active.clone());
 
@@ -4530,6 +4543,7 @@ impl AgentRuntime {
             thread,
             turn: turn.clone(),
             request,
+            agent,
             command: prepared_command,
             command_started: AtomicBool::new(false),
             skill_rules: Mutex::new(Vec::new()),
@@ -4689,9 +4703,9 @@ impl AgentRuntime {
         );
     }
 
-    fn permission_boundary(&self, agent: &str) -> Vec<PermissionRule> {
+    fn permission_boundary(&self, agent: &AgentSnapshot) -> Vec<PermissionRule> {
         let components = self.components();
-        let mut engine = components.config.permission_defaults(agent, "");
+        let mut engine = components.config.permission_defaults(&agent.id, "");
         for rule in self.repository_rules.lock().iter().cloned() {
             engine.add_repository_grant(rule);
         }
@@ -4707,8 +4721,8 @@ impl AgentRuntime {
         {
             engine.add_grant(rule);
         }
-        if let Some(custom) = self.custom_agent(agent) {
-            for rule in custom.permissions {
+        if let Some(custom) = &agent.custom {
+            for rule in custom.permissions.iter().cloned() {
                 engine.add_rule(rule);
             }
         }
@@ -4732,7 +4746,16 @@ impl AgentRuntime {
                 ));
             }
             let thread = self.repository.get_thread(authority_thread_id).await?;
-            inherited_ceilings.extend(self.permission_boundary(&thread.agent));
+            // A running turn answers with the definition it was admitted with.
+            let agent = self
+                .active
+                .get(&authority_thread_id)
+                .map(|active| active.agent.clone())
+                .unwrap_or_else(|| AgentSnapshot {
+                    custom: self.custom_agent(&thread.agent),
+                    id: thread.agent.clone(),
+                });
+            inherited_ceilings.extend(self.permission_boundary(&agent));
             authority = thread.parent_id;
         }
         Ok(inherited_ceilings)
@@ -4904,6 +4927,11 @@ struct RunnerTask {
     thread: Thread,
     turn: Turn,
     request: StartTurnRequest,
+    /// The turn's agent as it was defined when the turn was admitted (a
+    /// child agent: when it was dispatched). Prompt, model, steps, tools and
+    /// permission rules come from it for the whole turn, whatever happens to
+    /// the agent's file meanwhile.
+    agent: AgentSnapshot,
     command: Option<haarness_protocol::CommandInfo>,
     command_started: AtomicBool,
     skill_rules: Mutex<Vec<PermissionRule>>,
@@ -5072,6 +5100,13 @@ impl crate::ToolInvoker for TurnToolInvoker {
             .map(|tool| tool.side_effectful_for(arguments))
             .ok_or_else(|| CoreError::Tool(format!("unknown tool: {name}")))
     }
+}
+
+/// One agent's definition, read once: `custom` is `None` for a built-in.
+#[derive(Clone)]
+struct AgentSnapshot {
+    id: String,
+    custom: Option<crate::CustomAgent>,
 }
 
 #[derive(Clone)]
@@ -5421,7 +5456,16 @@ impl RunnerTask {
         describe_error(error, name.as_deref())
     }
 
+    /// An agent's definition: this turn's own from its snapshot, any other
+    /// as it is defined now.
     fn custom_agent(&self, agent: &str) -> Option<crate::CustomAgent> {
+        if agent == self.agent.id {
+            return self.agent.custom.clone();
+        }
+        self.live_agent(agent)
+    }
+
+    fn live_agent(&self, agent: &str) -> Option<crate::CustomAgent> {
         self.live_agents
             .read()
             .iter()
@@ -7943,11 +7987,13 @@ impl RunnerTask {
                         )));
                     }
                     // A hook pre-approval skips the prompt (never a deny), but
-                    // never answers what only a person may.
+                    // never answers what only a person may, nor where a path
+                    // leads that the hook never saw.
                     PermissionDecision::Ask
                         if !explicit
                             && constraint != Some(PermissionDecision::Ask)
-                            && (hook_permission == Some(PermissionDecision::Allow)
+                            && ((hook_permission == Some(PermissionDecision::Allow)
+                                && !plan.is_resolved(pattern))
                                 || (evaluation.matched.is_none()
                                     && PermissionEngine::new(self.skill_rules.lock().clone())
                                         .evaluate(&plan.operation(pattern))
@@ -7957,12 +8003,7 @@ impl RunnerTask {
                 }
             }
             if !asked.is_empty() {
-                pending_plans.push(AskPlan {
-                    permission: plan.permission.clone(),
-                    patterns: asked,
-                    always: plan.always.clone(),
-                    external_paths: Vec::new(),
-                });
+                pending_plans.push(plan.asking(asked));
             }
         }
         for plan in combine_browser_approvals(name, pending_plans) {
@@ -8192,29 +8233,20 @@ impl RunnerTask {
             });
         }
         if let Some(hooks) = &self.hooks {
-            let decision = hooks
-                .permission_request(self.thread.id, &plan.permission, detail)
-                .await;
-            if let Some(reason) = decision.block {
-                return Ok(PermissionResolution {
-                    allowed: false,
-                    feedback: Some(reason),
-                });
-            }
-            match decision.permission {
-                Some(PermissionDecision::Allow) if !forced && !explicit => {
+            match permission_hook_answer(hooks.as_ref(), self.thread.id, plan, detail).await {
+                HookAnswer::Refused(feedback) => {
+                    return Ok(PermissionResolution {
+                        allowed: false,
+                        feedback: Some(feedback),
+                    });
+                }
+                HookAnswer::Allowed if !forced && !explicit => {
                     return Ok(PermissionResolution {
                         allowed: true,
                         feedback: None,
                     });
                 }
-                Some(PermissionDecision::Deny) => {
-                    return Ok(PermissionResolution {
-                        allowed: false,
-                        feedback: Some("denied by a PermissionRequest hook".into()),
-                    });
-                }
-                _ => {}
+                HookAnswer::Allowed | HookAnswer::Open => {}
             }
         }
         let id = uuid::Uuid::now_v7().to_string();
@@ -8623,15 +8655,22 @@ impl RunnerTask {
             .or_else(|| resumed_child.as_ref().map(|child| child.agent.as_str()))
             .unwrap_or("general")
             .to_owned();
-        if self.custom_agent(&agent).is_none()
-            && !crate::builtin_profiles().iter().any(|p| p.id == agent)
-        {
+        // A dispatch admits the child's turn: its agent is read once, here,
+        // and the child keeps that definition for its whole run.
+        let definition = AgentSnapshot {
+            custom: self.live_agent(&agent),
+            id: agent.clone(),
+        };
+        if definition.custom.is_none() && !crate::builtin_profiles().iter().any(|p| p.id == agent) {
             return Err(CoreError::Invalid(format!("Unknown agent: {agent}")));
         }
-        if let Some(custom) = self.custom_agent(&agent) {
-            validate_custom_agent_mode(&custom, true)?;
+        if let Some(custom) = &definition.custom {
+            validate_custom_agent_mode(custom, true)?;
         }
-        let configured = self.custom_agent(&agent).and_then(|agent| agent.model);
+        let configured = definition
+            .custom
+            .as_ref()
+            .and_then(|agent| agent.model.clone());
         let ((provider, model), notice) = subagent_model(
             self.providers.as_ref(),
             &self.turn.provider,
@@ -8776,7 +8815,7 @@ impl RunnerTask {
         })
         .await?;
         let mut tools = self.request.tools.clone();
-        if let Some(custom) = self.custom_agent(&agent) {
+        if let Some(custom) = &definition.custom {
             merge_agent_tools(&mut tools, &custom.tools);
         }
         let request = StartTurnRequest {
@@ -8822,6 +8861,7 @@ impl RunnerTask {
             accepting: AsyncMutex::new(false),
             stop_reason: Mutex::new(None),
             answer_steer: AtomicBool::new(false),
+            agent: definition.clone(),
         });
         self.active.insert(child.id, active.clone());
         let mut accepting = active.accepting.lock().await;
@@ -8861,6 +8901,7 @@ impl RunnerTask {
             thread: child.clone(),
             turn: turn.clone(),
             request,
+            agent: definition,
             command: None,
             command_started: AtomicBool::new(false),
             skill_rules: Mutex::new(self.skill_rules.lock().clone()),
@@ -10184,6 +10225,11 @@ struct AskPlan {
     /// Exact canonical paths this call may use after its external-directory
     /// policy resolves. Empty for ordinary permission groups.
     external_paths: Vec<PathBuf>,
+    /// Patterns about where a file path really leads (after links and `..`)
+    /// that the tool's own arguments do not name, each with that path. Hooks
+    /// and extensions judged the arguments, so their answer about the path
+    /// given never settles these: see `permission_hook_answer`.
+    resolved: Vec<(String, String)>,
 }
 
 impl AskPlan {
@@ -10200,6 +10246,108 @@ impl AskPlan {
             .map(|pattern| self.operation(pattern))
             .collect()
     }
+    fn is_resolved(&self, pattern: &str) -> bool {
+        self.resolved
+            .iter()
+            .any(|(resolved, _)| resolved == pattern)
+    }
+    /// This group narrowed to the patterns still to be answered.
+    fn asking(self, patterns: Vec<String>) -> Self {
+        let resolved = self
+            .resolved
+            .into_iter()
+            .filter(|(pattern, _)| patterns.contains(pattern))
+            .collect();
+        Self {
+            permission: self.permission,
+            patterns,
+            always: self.always,
+            external_paths: Vec::new(),
+            resolved,
+        }
+    }
+}
+
+/// What `PermissionRequest` hooks and `permission.ask` extensions said about
+/// one prompt.
+enum HookAnswer {
+    Allowed,
+    Refused(String),
+    Open,
+}
+
+/// Asks `PermissionRequest` hooks and `permission.ask` extensions about one
+/// prompt. The patterns the tool's own arguments name are asked about
+/// together, with those arguments. Each pattern about where a path really
+/// leads is asked about alone, with the arguments' path replaced by it: the
+/// hook would otherwise judge the link it was given (`notes.txt`) and answer
+/// for the file it opens (`.env`). Any refusal refuses the prompt; the hooks
+/// answer it only when every call allowed.
+async fn permission_hook_answer(
+    hooks: &dyn crate::HookPort,
+    thread: ThreadId,
+    plan: &AskPlan,
+    detail: &serde_json::Value,
+) -> HookAnswer {
+    let own: Vec<String> = plan
+        .patterns
+        .iter()
+        .filter(|pattern| !plan.is_resolved(pattern))
+        .cloned()
+        .collect();
+    let mut calls = Vec::new();
+    if !own.is_empty() {
+        calls.push((own, detail.clone()));
+    }
+    for (pattern, path) in &plan.resolved {
+        calls.push((vec![pattern.clone()], with_target_path(detail, path)));
+    }
+    let mut allowed = !calls.is_empty();
+    for (patterns, input) in calls {
+        let decision = hooks
+            .permission_request(thread, &plan.permission, &patterns, &input)
+            .await;
+        if let Some(reason) = decision.block {
+            return HookAnswer::Refused(reason);
+        }
+        match decision.permission {
+            Some(PermissionDecision::Deny) => {
+                return HookAnswer::Refused("denied by a PermissionRequest hook".into());
+            }
+            Some(PermissionDecision::Allow) => {}
+            _ => allowed = false,
+        }
+    }
+    if allowed {
+        HookAnswer::Allowed
+    } else {
+        HookAnswer::Open
+    }
+}
+
+/// Tool arguments with the file path they name replaced by `path`, as a
+/// hook reads them: `path` (and `file_path` or `filePath` where present),
+/// or an upload's `paths`.
+fn with_target_path(arguments: &serde_json::Value, path: &str) -> serde_json::Value {
+    let mut arguments = arguments.clone();
+    let Some(object) = arguments.as_object_mut() else {
+        return json!({ "path": path });
+    };
+    let mut replaced = false;
+    for key in ["path", "file_path", "filePath"] {
+        if let Some(value) = object.get_mut(key).filter(|value| value.is_string()) {
+            *value = json!(path);
+            replaced = true;
+        }
+    }
+    if let Some(paths) = object.get_mut("paths").filter(|paths| paths.is_array()) {
+        *paths = json!([path]);
+        replaced = true;
+    }
+    if !replaced {
+        object.insert("path".into(), json!(path));
+    }
+    arguments
 }
 
 /// Why a scheduled run's Chrome site gate failed instead of waiting.
@@ -10251,12 +10399,18 @@ fn combine_browser_approvals(name: &str, plans: Vec<AskPlan>) -> Vec<AskPlan> {
         patterns: Vec::new(),
         always: Vec::new(),
         external_paths: Vec::new(),
+        resolved: Vec::new(),
     };
     for plan in plans {
         combined
             .patterns
             .extend(plan.patterns.iter().map(|pattern| plan.operation(pattern)));
         combined.always.extend(plan.always_rules());
+        combined.resolved.extend(
+            plan.resolved
+                .iter()
+                .map(|(pattern, path)| (plan.operation(pattern), path.clone())),
+        );
     }
     combined.patterns.sort();
     combined.patterns.dedup();
@@ -10289,6 +10443,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             patterns: vec![pattern.clone()],
             always: vec![pattern],
             external_paths: Vec::new(),
+            resolved: Vec::new(),
         }];
     }
     if matches!(
@@ -10311,6 +10466,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             patterns: vec![format!("{action}:{target}")],
             always: vec![format!("{action}:*")],
             external_paths: Vec::new(),
+            resolved: Vec::new(),
         }];
     }
     if name.starts_with("browser_") {
@@ -10338,6 +10494,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             always: patterns.clone(),
             patterns,
             external_paths: Vec::new(),
+            resolved: Vec::new(),
         }];
         let remember = arguments["__browser"]["remember"]
             .as_array()
@@ -10352,6 +10509,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 patterns: remember.clone(),
                 always: remember,
                 external_paths: Vec::new(),
+                resolved: Vec::new(),
             });
         }
         if matches!(name, "browser_files_upload" | "browser_files_drop") {
@@ -10378,6 +10536,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             patterns: vec![format!("{kind}:generate")],
             always: vec![format!("{kind}:*")],
             external_paths: Vec::new(),
+            resolved: Vec::new(),
         }];
     }
     if name == "workflow" {
@@ -10393,6 +10552,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             patterns: vec![target.clone()],
             always: vec!["*".into()],
             external_paths: Vec::new(),
+            resolved: Vec::new(),
         }];
         if arguments.get("action").and_then(serde_json::Value::as_str) == Some("create") {
             plans.push(AskPlan {
@@ -10400,6 +10560,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 patterns: vec![format!(".haarness/workflows/{target}.ts")],
                 always: vec![format!(".haarness/workflows/{target}.ts")],
                 external_paths: Vec::new(),
+                resolved: Vec::new(),
             });
         }
         return plans;
@@ -10433,6 +10594,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 patterns: external_patterns.clone(),
                 always: external_patterns,
                 external_paths,
+                resolved: Vec::new(),
             });
         }
         if !analysis.patterns.is_empty() {
@@ -10441,6 +10603,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 patterns: analysis.patterns,
                 always: analysis.always,
                 external_paths: Vec::new(),
+                resolved: Vec::new(),
             });
         }
         return plans;
@@ -10450,7 +10613,19 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
     if !external_requests.is_empty() {
         let mut patterns = Vec::new();
         let mut external_paths = Vec::new();
+        let mut resolved = Vec::new();
+        // A file path that names a file in the project but leads outside it
+        // (a link) asks about a folder the tool's own arguments never named.
+        let file_target = arguments
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .filter(|_| matches!(name, "read" | "write" | "edit" | "multiedit"));
+        let leads_outside =
+            file_target.is_some_and(|target| crate::permissions::names_inside(workspace, target));
         for (pattern, path) in external_requests {
+            if leads_outside {
+                resolved.push((pattern.clone(), path.to_string_lossy().into_owned()));
+            }
             if !patterns.contains(&pattern) {
                 patterns.push(pattern);
             }
@@ -10463,6 +10638,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             always: patterns.clone(),
             patterns,
             external_paths,
+            resolved,
         });
     }
     if name == "apply_patch" {
@@ -10478,6 +10654,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                         .collect(),
                     always: vec!["*".into()],
                     external_paths: Vec::new(),
+                    resolved: Vec::new(),
                 });
                 return plans;
             }
@@ -10487,6 +10664,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             patterns: vec!["*".into()],
             always: vec!["*".into()],
             external_paths: Vec::new(),
+            resolved: Vec::new(),
         });
         return plans;
     }
@@ -10507,10 +10685,12 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
     // open, after links and `..`: a link `notes.txt -> .env` still asks, and
     // `node_modules/x/../../.env` is not a file inside node_modules.
     let mut patterns = vec![target.clone()];
+    let mut resolved = Vec::new();
     if matches!(name, "read" | "write" | "edit" | "multiedit")
-        && let Some(resolved) = resolved_file_pattern(workspace, &target)
+        && let Some(pattern) = resolved_file_pattern(workspace, &target)
     {
-        patterns.push(resolved);
+        resolved.push((pattern.clone(), pattern.clone()));
+        patterns.push(pattern);
     }
     // Reads generalize only to the exact path (an approved `.env` read must
     // not open every secret); mutations generalize wide.
@@ -10528,6 +10708,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         patterns,
         always,
         external_paths: Vec::new(),
+        resolved,
     });
     plans
 }
