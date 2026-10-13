@@ -6339,13 +6339,14 @@
         "tags": []
       }
     },
-    "/v1/host/projects/{id}": {
+    "/v1/host/projects/{workspace_id}": {
       "delete": {
         "operationId": "close_remote_project",
         "parameters": [
           {
+            "description": "Workspace id: `workspaces[].id` from GET /v1/host/projects, not `projects[].id`",
             "in": "path",
-            "name": "id",
+            "name": "workspace_id",
             "required": true,
             "schema": {
               "type": "string"
@@ -6357,6 +6358,7 @@
             "description": ""
           }
         },
+        "summary": "Closes a project for remote access. The id is the catalog's workspace id\n(`workspaces[].id` from `GET /v1/host/projects`), not its project id.",
         "tags": []
       }
     },

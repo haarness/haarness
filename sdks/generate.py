@@ -606,7 +606,7 @@ def generate(doc=None, ops=None):
             continue
         params = op["pathParams"]
         pyargs = [x + ": str" for x in params]
-        tsargs = [x + ": string" for x in params]
+        tsargs = [camel(x) + ": string" for x in params]
 
         def tst(value):
             return re.sub(
@@ -653,7 +653,11 @@ def generate(doc=None, ops=None):
         pyargs += ["*, options: RequestOptions | None = None"]
         tsargs += ["options: RequestOptions = {}"]
         path = op["path"]
-        tspath = "`" + re.sub(r"\{(\w+)\}", r"${this.segment(\1)}", path) + "`"
+        tspath = (
+            "`"
+            + re.sub(r"\{(\w+)\}", lambda m: "${this.segment(" + camel(m[1]) + ")}", path)
+            + "`"
+        )
         pypath = "f" + repr(re.sub(r"\{(\w+)\}", r"{self.segment(\1)}", path))
         tr = (
             "Uint8Array"

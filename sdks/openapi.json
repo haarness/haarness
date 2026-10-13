@@ -7567,13 +7567,13 @@
         ]
       }
     },
-    "/v1/host/projects/{id}": {
+    "/v1/host/projects/{workspace_id}": {
       "delete": {
         "operationId": "host_close",
         "parameters": [
           {
             "in": "path",
-            "name": "id",
+            "name": "workspace_id",
             "required": true,
             "schema": {
               "type": "string"
