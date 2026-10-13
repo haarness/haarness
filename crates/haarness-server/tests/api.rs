@@ -7987,7 +7987,10 @@ async fn custom_command_expands_server_side_and_switches_agent() {
     assert!(system.contains(&format!("Architecture: {}", std::env::consts::ARCH)));
     assert!(system.contains(&format!(
         "Today's date: {}",
-        thread.created_at.format("%Y-%m-%d")
+        thread
+            .created_at
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
     )));
     assert!(system.contains("Use native tool calls only"));
     assert_eq!(

@@ -160,6 +160,8 @@ The `hooks` object in any configuration layer (and `hooks/hooks.json` in a plugi
 | `SessionEnd` | a thread is archived | `reason` (`archived`) | `reason` |
 | `ConfigChange` | a hot-reloaded configuration generation became active | `source` (`reload`); no `session_id` | — |
 
+`additionalContext` (top level or in `hookSpecificOutput`) from `UserPromptSubmit` reaches the model with that prompt: it is stored with the turn as a hidden message after the prompt, and later turns replay it as history. It is not added to the system prompt, so a hook that answers differently every turn does not rewrite the provider's cached prompt.
+
 Any other non-zero exit is a non-blocking error: the action continues and the daemon log records one `hook command failed` warning with the event, the command's program name, its exit code or signal and the start of its redacted stderr. Every block is logged once at INFO as `hook blocked`. The configured command line is never logged; see [observability](OBSERVABILITY.md#diagnostic-log-lines).
 
 `SessionStart`, `SessionEnd`, `TurnEnd`, `Notification`, `FileChanged` and `ConfigChange` are observational: their output is logged, never applied. The desktop hook editor accepts these lifecycle events. `PostCompact` and `StopFailure` are observational: hook output never changes the compaction or retries a failed response. Cancellation does not emit `StopFailure`. JavaScript extensions receive the matching `session.start`, `session.end`, `session.compacted`, `chat.turn.failed`, `chat.turn.end` and `config` hooks; see [extensions](EXTENSIONS.md#hooks).
