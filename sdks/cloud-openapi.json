@@ -15846,6 +15846,34 @@
                 }
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "Sends one `push` delivery to a phone (`notification_deliveries.channel = 'push'`). Pushes have their own kind\nso a worker from before pushes, which claims `send_notification` and treats every delivery as an email,\nnever claims one (during a rolling deploy or after a rollback): it waits for a worker that knows it.",
+            "required": [
+              "payload",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "send_push"
+                ]
+              },
+              "payload": {
+                "type": "object",
+                "description": "Sends one `push` delivery to a phone (`notification_deliveries.channel = 'push'`). Pushes have their own kind\nso a worker from before pushes, which claims `send_notification` and treats every delivery as an email,\nnever claims one (during a rolling deploy or after a rollback): it waits for a worker that knows it.",
+                "required": [
+                  "notification_id"
+                ],
+                "properties": {
+                  "notification_id": {
+                    "$ref": "#/components/schemas/NotificationId"
+                  }
+                }
+              }
+            }
           }
         ],
         "description": "Payload = JSON of the variant content: `{\"kind\":\"meter_compute\",\"payload\":{}}`."
