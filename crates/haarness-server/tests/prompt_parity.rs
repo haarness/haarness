@@ -441,7 +441,13 @@ impl HookPort for StampHooks {
     ) -> Option<String> {
         None
     }
-    async fn permission_request(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+    async fn permission_request(
+        &self,
+        _: ThreadId,
+        _: &str,
+        _: &[String],
+        _: &Value,
+    ) -> HookDecision {
         HookDecision::default()
     }
     async fn stop(&self, _: ThreadId) {}

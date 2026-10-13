@@ -686,7 +686,10 @@ mod tests {
             system: "test".into(),
             messages: vec![
                 text("user", "Read both"),
-                text("user", "<system-reminder>\nToday's date is now 2026-10-14.\n</system-reminder>"),
+                text(
+                    "user",
+                    "<system-reminder>\nToday's date is now 2026-10-14.\n</system-reminder>",
+                ),
                 call("a"),
                 call("b"),
                 result("a"),
@@ -700,7 +703,10 @@ mod tests {
         })
         .unwrap();
         let messages = body["messages"].as_array().unwrap();
-        let roles: Vec<_> = messages.iter().map(|message| message["role"].as_str().unwrap()).collect();
+        let roles: Vec<_> = messages
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
         assert_eq!(roles, ["user", "assistant", "user", "assistant"]);
         assert_eq!(messages[0]["content"].as_array().unwrap().len(), 2);
         assert_eq!(messages[1]["content"][1]["toolUse"]["toolUseId"], "b");

@@ -142,7 +142,7 @@ else:
     check('a link to .env asks although the hook allows notes.txt', pending['permission'] == 'read' and pending['patterns'] == ['.env'], pending)
     until(lambda: '.env' in capture() and ('Allow once' in capture() or 'Reject' in capture()), 'approval card in the TUI')
     (root / 'tui-approval.txt').write_text(capture())
-    check('the TUI card names .env', '.env' in capture())
+    check('the TUI card names the file notes.txt leads to', 'notes.txt' in capture() and 'Leads to .env' in capture(), capture())
     inputs = [json.loads(line) for line in hook_log.read_text().splitlines() if line]
     asked = [i for i in inputs if i['hook_event_name'] == 'PermissionRequest']
     check('the PermissionRequest hook was shown .env',

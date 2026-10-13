@@ -1012,7 +1012,8 @@ mod tests {
         // The server judges an address with credentials by its origin.
         for case in cases["userinfo"].as_array().unwrap() {
             let mut url = url::Url::parse(case["url"].as_str().unwrap()).unwrap();
-            url.set_username(case["username"].as_str().unwrap()).unwrap();
+            url.set_username(case["username"].as_str().unwrap())
+                .unwrap();
             url.set_password(Some(case["password"].as_str().unwrap()).filter(|p| !p.is_empty()))
                 .unwrap();
             let origin = case["origin"].as_str().unwrap();
@@ -1029,7 +1030,10 @@ mod tests {
     fn rules_spelled_with_a_trailing_dot_are_the_site_without_it() {
         for (rule, canonical) in [
             ("https://blocked.example.", "https://blocked.example"),
-            ("https://Blocked.Example.:8443/", "https://blocked.example:8443"),
+            (
+                "https://Blocked.Example.:8443/",
+                "https://blocked.example:8443",
+            ),
             ("https://*.evil.example.", "https://*.evil.example"),
             ("http://localhost.:3000", "http://localhost:3000"),
         ] {
@@ -1043,7 +1047,10 @@ mod tests {
             policy_origin("https://blocked.example./x").as_deref(),
             Some("https://blocked.example")
         );
-        assert_eq!(web_origin("http://127.0.0.1./").as_deref(), Some("http://127.0.0.1"));
+        assert_eq!(
+            web_origin("http://127.0.0.1./").as_deref(),
+            Some("http://127.0.0.1")
+        );
         assert_eq!(policy_origin("inventory"), None);
         // Both spellings are one site, so they cannot hold two rules.
         let mut policy = shared(

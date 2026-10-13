@@ -245,7 +245,10 @@ fn subject(pending: &PendingPermissionInfo, language: Language) -> Option<String
 /// Files a read or edit is asked about besides the path the tool names: where
 /// a link or `..` in that path leads.
 fn link_targets(pending: &PendingPermissionInfo) -> impl Iterator<Item = &str> {
-    let path = pending.detail.get("path").and_then(serde_json::Value::as_str);
+    let path = pending
+        .detail
+        .get("path")
+        .and_then(serde_json::Value::as_str);
     let file = matches!(category(pending), "read" | "edit");
     pending
         .patterns
