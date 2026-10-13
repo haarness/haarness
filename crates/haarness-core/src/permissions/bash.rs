@@ -4,7 +4,7 @@
 //! "always" prefix pattern, and path-taking commands / redirect targets that
 //! escape the workspace raise `external_directory` operations.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use super::arity;
 
@@ -85,18 +85,19 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
                     "command_name" | "word" | "number" | "string" | "raw_string" | "concatenation"
                 )
             })
-            .map(|child| literal(child, command))
+            .map(|child| {
+                let (value, complete) = literal(child, command);
+                (value, complete, node_text(child, command))
+            })
             .collect::<Vec<_>>();
-        if let Some((first, true)) = paths.first() {
+        if let Some((first, true, _)) = paths.first() {
             if PATH_COMMANDS.contains(&first.as_str()) {
-                for (argument, complete) in &paths[1..] {
-                    if !complete
-                        || argument.starts_with('-')
-                        || (first == "chmod" && argument.starts_with('+'))
+                for (argument, complete, raw) in &paths[1..] {
+                    if argument.starts_with('-') || (first == "chmod" && argument.starts_with('+'))
                     {
                         continue;
                     }
-                    if let Some(dir) = external_dir(workspace, argument, true) {
+                    if let Some(dir) = external_dir(workspace, raw, argument, *complete) {
                         push_unique(&mut analysis.external_dirs, glob(&dir));
                     }
                 }
@@ -128,20 +129,10 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
         {
             continue;
         }
-        let target = if complete {
-            value.as_str()
-        } else {
-            value.rfind('/').map_or("", |end| &value[..=end])
-        };
-        if target.is_empty() || target.starts_with("/dev/") {
+        if value.starts_with("/dev/") {
             continue;
         }
-        if let Some(dir) = external_dir(workspace, target, false) {
-            let dir = if complete {
-                dir
-            } else {
-                resolve(workspace, target)
-            };
+        if let Some(dir) = external_dir(workspace, &node_text(dest, command), &value, complete) {
             push_unique(&mut analysis.external_dirs, glob(&dir));
         }
     }
@@ -324,53 +315,112 @@ fn glob(dir: &Path) -> String {
     format!("{}/*", text.trim_end_matches('/'))
 }
 
-/// The directory a path argument points at when it escapes the workspace.
-/// `must_exist` controls discovery: path-command arguments are only flagged
-/// when they resolve (realpath), redirect targets are flagged even when the
-/// file does not exist yet.
-fn external_dir(workspace: &Path, argument: &str, must_exist: bool) -> Option<PathBuf> {
-    if must_exist && !workspace.join(argument).exists() {
+/// The directory a path argument or redirect target points at when it
+/// escapes the workspace. A path that does not exist yet (a `touch`, `mkdir`
+/// or `cp` target, a new redirect file) is judged where it would be created,
+/// so a new file outside the project asks like an existing one. A value with
+/// a dynamic part (`/tmp/$name`) is judged by the folder its literal start
+/// names. `raw` is the source text, which tells an unquoted leading `~`.
+fn external_dir(workspace: &Path, raw: &str, value: &str, complete: bool) -> Option<PathBuf> {
+    let target = if complete {
+        value
+    } else {
+        value.rfind('/').map_or("", |end| &value[..=end])
+    };
+    if target.is_empty() {
         return None;
     }
-    let resolved = resolve(workspace, argument);
-    let workspace = workspace
-        .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf());
+    let resolved = match home_expansion(raw, target) {
+        Some(expanded) => resolve(workspace, &expanded),
+        None => resolve(workspace, Path::new(target)),
+    };
+    let workspace = resolve(workspace, Path::new(""));
     if resolved.starts_with(&workspace) {
         return None;
     }
-    if resolved.is_dir() {
+    if !complete || resolved.is_dir() {
         Some(resolved)
     } else {
-        Some(resolved.parent()?.to_path_buf())
+        Some(resolved.parent().unwrap_or(&resolved).to_path_buf())
     }
 }
 
-/// Resolve nonexistent leaves through the nearest existing ancestor too.
-fn resolve(workspace: &Path, argument: &str) -> PathBuf {
-    let joined = workspace.join(argument);
-    let mut ancestor = joined.as_path();
-    let mut suffix = Vec::new();
-    loop {
-        if let Ok(mut resolved) = ancestor.canonicalize() {
-            for part in suffix.into_iter().rev() {
-                if part == ".." {
-                    resolved.pop();
-                } else if part != "." {
-                    resolved.push(part);
+/// The folder an unquoted leading `~` expands to: `~` and `~/…` are the
+/// user's home, `~name/…` that user's home, taken as a sibling of this one.
+/// Without a known home the path is put at `/`, which is never the project.
+fn home_expansion(raw: &str, value: &str) -> Option<PathBuf> {
+    if !raw.starts_with('~') || !value.starts_with('~') {
+        return None;
+    }
+    let (user, rest) = value[1..].split_once('/').unwrap_or((&value[1..], ""));
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+        .unwrap_or_else(|| PathBuf::from("/"));
+    let base = if user.is_empty() {
+        home
+    } else {
+        home.parent().unwrap_or(Path::new("/")).join(user)
+    };
+    Some(base.join(rest))
+}
+
+/// How many links one path may pass through before the check gives up and
+/// treats it as outside the project (the system's own limit is similar).
+const MAX_LINKS: u8 = 40;
+
+/// Where `argument` lands when a command runs from `workspace`, as the
+/// system resolves it: links (dangling ones too) and the `..` after them
+/// are followed through the part that exists, and the part that does not
+/// exist yet is laid onto its nearest existing folder, with `..` taken
+/// lexically there (what `mkdir -p` creates). Unresolvable link chains
+/// resolve to `/`, outside every project.
+fn resolve(workspace: &Path, argument: impl AsRef<Path>) -> PathBuf {
+    resolve_path(&workspace.join(argument), 0)
+}
+
+fn resolve_path(path: &Path, depth: u8) -> PathBuf {
+    if let Ok(resolved) = path.canonicalize() {
+        return resolved;
+    }
+    let mut resolved = PathBuf::new();
+    // Once a component is missing, the rest is laid on lexically.
+    let mut missing = false;
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => resolved.push(component.as_os_str()),
+            Component::CurDir => {}
+            // `resolved` holds no links up to its first missing component,
+            // so its parent is where the system's `..` goes. Climbing back
+            // out of the missing part resumes following links.
+            Component::ParentDir => {
+                resolved.pop();
+                missing = missing && std::fs::symlink_metadata(&resolved).is_err();
+            }
+            Component::Normal(name) => {
+                resolved.push(name);
+                if missing {
+                    continue;
+                }
+                match std::fs::symlink_metadata(&resolved) {
+                    Err(_) => missing = true,
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        let Ok(target) = std::fs::read_link(&resolved) else {
+                            return PathBuf::from("/");
+                        };
+                        if depth >= MAX_LINKS {
+                            return PathBuf::from("/");
+                        }
+                        resolved.pop();
+                        resolved = resolve_path(&resolved.join(target), depth + 1);
+                        missing = std::fs::symlink_metadata(&resolved).is_err();
+                    }
+                    Ok(_) => {}
                 }
             }
-            return resolved;
         }
-        let Some(name) = ancestor.file_name() else {
-            return joined;
-        };
-        suffix.push(name.to_os_string());
-        let Some(parent) = ancestor.parent() else {
-            return joined;
-        };
-        ancestor = parent;
     }
+    resolved
 }
 
 /// Decode literal shell syntax without evaluating variables or substitutions.
@@ -586,6 +636,138 @@ mod regression {
                 .external_dirs
                 .is_empty()
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn new_paths_outside_the_project_ask_like_existing_ones() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-new-paths-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(workspace.join("file"), "x").unwrap();
+        let outside_dir = outside.canonicalize().unwrap();
+        let expected = vec![glob(&outside_dir)];
+        let new = outside.join("new");
+        for command in [
+            format!("touch {}", new.display()),
+            format!("mkdir {}", new.display()),
+            format!("cp file {}", new.display()),
+            format!("mv file {}", new.display()),
+            format!("chmod 600 {}", new.display()),
+            format!("echo x > {}", new.display()),
+            format!("echo x >> '{}'", new.display()),
+            format!("touch {}/$name", outside.display()),
+            format!("rm -rf {}/", outside.display()),
+        ] {
+            assert_eq!(
+                analyze(&command, &workspace).external_dirs,
+                expected,
+                "{command}"
+            );
+        }
+        // A chain `mkdir -p` creates is judged where it ends, `..` included.
+        assert_eq!(
+            analyze(&format!("mkdir -p {}/a/b", new.display()), &workspace).external_dirs,
+            vec![glob(&outside_dir.join("new/a"))]
+        );
+        assert_eq!(
+            analyze("mkdir -p fresh/../../outside/made", &workspace).external_dirs,
+            expected
+        );
+        // New paths inside the project stay quiet.
+        for command in [
+            "touch fresh",
+            "mkdir -p a/b/c",
+            "cp file copy",
+            "echo x > out.txt",
+        ] {
+            assert!(
+                analyze(command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_lead_new_paths_outside_the_project() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-new-links-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(outside.join("sub")).unwrap();
+        let outside_dir = outside.canonicalize().unwrap();
+        // A dangling link: writing through it creates its target.
+        std::os::unix::fs::symlink(outside.join("missing"), workspace.join("dangling")).unwrap();
+        // `..` after a link goes up from where the link leads.
+        std::os::unix::fs::symlink(outside.join("sub"), workspace.join("linked")).unwrap();
+        // A link chain that never ends is outside every project.
+        std::os::unix::fs::symlink("loop-b", workspace.join("loop-a")).unwrap();
+        std::os::unix::fs::symlink("loop-a", workspace.join("loop-b")).unwrap();
+        for (command, expected) in [
+            ("touch dangling", glob(&outside_dir)),
+            ("echo x > dangling", glob(&outside_dir)),
+            ("touch linked/new", glob(&outside_dir.join("sub"))),
+            ("touch linked/../new", glob(&outside_dir)),
+            (
+                "mkdir -p linked/../made/deeper",
+                glob(&outside_dir.join("made")),
+            ),
+            (
+                "mkdir -p fresh/../linked/made",
+                glob(&outside_dir.join("sub")),
+            ),
+            ("touch loop-a/new", "/*".to_owned()),
+        ] {
+            assert_eq!(
+                analyze(command, &workspace).external_dirs,
+                vec![expected],
+                "{command}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_unquoted_tilde_is_the_home_folder() {
+        let root = std::env::temp_dir().join(format!("haarness-tilde-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|home| home.is_absolute())
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let home = resolve(&home, "");
+        if workspace.canonicalize().unwrap().starts_with(&home) {
+            // A temporary folder inside home cannot tell the two apart.
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        let new = format!("haarness-tilde-{}", uuid::Uuid::now_v7());
+        for (command, expected) in [
+            (format!("touch ~/{new}"), glob(&home)),
+            (format!("echo x >> ~/{new}"), glob(&home)),
+            (format!("cat ~/{new}/$name"), glob(&home.join(&new))),
+            ("cd ~".to_owned(), glob(&home)),
+        ] {
+            assert_eq!(
+                analyze(&command, &workspace).external_dirs,
+                vec![expected],
+                "{command}"
+            );
+        }
+        // Quoted, the shell keeps `~` as a name in the project.
+        for command in [format!("touch '~/{new}'"), format!("touch \"~/{new}\"")] {
+            assert!(
+                analyze(&command, &workspace).external_dirs.is_empty(),
+                "{command}"
+            );
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

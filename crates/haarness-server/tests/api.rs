@@ -7610,6 +7610,54 @@ async fn redirects_outside_the_workspace_ask_even_when_bash_is_allowed() {
 }
 
 #[tokio::test]
+async fn new_files_outside_the_workspace_ask_like_existing_ones() {
+    let root = std::env::temp_dir().join(format!("haarness-newpath-{}", uuid::Uuid::now_v7()));
+    let workspace = root.join("project");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    let (runtime, _) = p0_runtime(&workspace, true); // bash fully allowed
+    let thread = echo_thread(&runtime).await;
+    // Neither the file nor its folder exists yet; `touch` and `mkdir -p`
+    // would create them outside the project.
+    for command in [
+        format!("touch {}", root.join("new-file").display()),
+        format!("mkdir -p {}", root.join("new-dir/deeper").display()),
+    ] {
+        let turn = runtime
+            .start_turn(
+                thread.id,
+                turn_request(&format!(
+                    "!tool bash {}",
+                    serde_json::json!({"command": command})
+                )),
+            )
+            .await
+            .unwrap();
+        wait_pending_permissions(&runtime, 1).await;
+        let pending = runtime.pending_permissions();
+        assert_eq!(pending[0].permission, "external_directory", "{command}");
+        assert!(
+            pending[0].patterns[0].starts_with(&*root.canonicalize().unwrap().to_string_lossy()),
+            "{:?}",
+            pending[0].patterns
+        );
+        runtime
+            .reply_permission(
+                &pending[0].permission_id,
+                haarness_protocol::PermissionReply {
+                    decision: haarness_protocol::PermissionReplyDecision::Reject,
+                    feedback: None,
+                },
+            )
+            .await
+            .unwrap();
+        wait_done(&runtime, &turn).await;
+    }
+    assert!(!root.join("new-file").exists());
+    assert!(!root.join("new-dir").exists());
+    let _ = tokio::fs::remove_dir_all(&root).await;
+}
+
+#[tokio::test]
 async fn external_list_asks_then_executes_after_allow_once() {
     let workspace =
         std::env::temp_dir().join(format!("haarness-list-workspace-{}", uuid::Uuid::now_v7()));
