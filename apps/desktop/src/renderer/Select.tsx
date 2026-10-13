@@ -119,11 +119,20 @@ export function Select(props: {
     );
     setOpen(true);
   };
+  // The highlight moves only when its row can no longer be chosen. While no
+  // row can (a picker busy applying a choice disables them all) it stays put,
+  // so the row just chosen keeps it once the rows come back. When it must
+  // move, it goes to the selected row, unless a search is under way: a search
+  // starts at its first match.
   createEffect(() => {
     if (!open()) return;
     const options = enabled();
-    if (!options.some((option) => String(option.value) === cursor()))
-      setCursor(String(options[0]?.value ?? ""));
+    if (!options.length) return;
+    if (options.some((option) => String(option.value) === cursor())) return;
+    const current = query().trim()
+      ? undefined
+      : options.find((option) => String(option.value) === value());
+    setCursor(String((current ?? options[0]).value));
   });
   const keydown = (event: KeyboardEvent) => {
     if (event.key === "Escape") {
