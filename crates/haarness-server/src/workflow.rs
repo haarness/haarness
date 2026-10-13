@@ -547,6 +547,7 @@ impl WorkflowRuntimeAdapter {
         } else {
             runtime
                 .create_thread(CreateThreadRequest {
+                    id: None,
                     schedule: None,
                     title: Some(
                         input
@@ -624,6 +625,7 @@ impl WorkflowRuntimeHost for WorkflowRuntimeAdapter {
         };
         runtime
             .create_thread(CreateThreadRequest {
+                id: None,
                 schedule: None,
                 title: Some(title.to_owned()),
                 parent_id: parent,
@@ -2463,6 +2465,7 @@ mod tests {
         ));
         let root = runtime
             .create_thread(CreateThreadRequest {
+                id: None,
                 schedule: None,
                 title: Some("root".into()),
                 parent_id: None,
@@ -2613,6 +2616,7 @@ mod tests {
         ));
         let root = runtime
             .create_thread(CreateThreadRequest {
+                id: None,
                 schedule: None,
                 title: Some("plan root".into()),
                 parent_id: None,
@@ -2725,6 +2729,7 @@ mod tests {
         ));
         let root = runtime
             .create_thread(CreateThreadRequest {
+                id: None,
                 schedule: None,
                 title: Some("plan root".into()),
                 parent_id: None,
@@ -2737,6 +2742,7 @@ mod tests {
             .unwrap();
         let build_descendant = runtime
             .create_thread(CreateThreadRequest {
+                id: None,
                 schedule: None,
                 title: Some("build descendant".into()),
                 parent_id: Some(root.id),
@@ -2811,6 +2817,7 @@ mod tests {
         ));
         let root = runtime
             .create_thread(CreateThreadRequest {
+                id: None,
                 schedule: None,
                 title: Some("root".into()),
                 parent_id: None,

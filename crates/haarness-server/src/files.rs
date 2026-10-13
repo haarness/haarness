@@ -86,7 +86,31 @@ pub fn routes() -> Router<ServerState> {
 fn bad(error: impl std::fmt::Display) -> Failure {
     (StatusCode::BAD_REQUEST, error.to_string())
 }
-pub(crate) fn resolve(root: &Path, value: &str, create: bool) -> Result<PathBuf, Failure> {
+/// A path that is not there (any more) answers 404 with a plain sentence, not
+/// the operating system's "No such file or directory (os error 2)". Every
+/// other error keeps its 400 and its own text.
+pub(crate) const FILE_GONE: &str = "This file no longer exists";
+pub(crate) const FOLDER_GONE: &str = "This folder no longer exists";
+fn io(missing: &'static str) -> impl Fn(std::io::Error) -> Failure {
+    move |error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            (StatusCode::NOT_FOUND, missing.into())
+        } else {
+            bad(error)
+        }
+    }
+}
+/// The listed path is a folder, so say so when it is gone.
+fn folder(failure: Failure) -> Failure {
+    if failure.0 == StatusCode::NOT_FOUND {
+        (StatusCode::NOT_FOUND, FOLDER_GONE.into())
+    } else {
+        failure
+    }
+}
+/// `value` as a path inside the workspace, refused when it is absolute,
+/// climbs out, or names Git metadata.
+fn relative(value: &str) -> Result<&Path, Failure> {
     let relative = Path::new(value);
     if relative.is_absolute()
         || relative
@@ -98,25 +122,57 @@ pub(crate) fn resolve(root: &Path, value: &str, create: bool) -> Result<PathBuf,
     if relative.components().any(|part| part.as_os_str() == ".git") {
         return Err(bad("Git metadata is not editable in the file explorer"));
     }
-    let root = root.canonicalize().map_err(bad)?;
-    let path = root.join(relative);
-    let existing = if create && !path.exists() {
-        path.parent().ok_or_else(|| bad("Missing parent"))?
-    } else {
-        path.as_path()
-    };
-    let canonical = existing.canonicalize().map_err(bad)?;
-    if !canonical.starts_with(&root) {
+    Ok(relative)
+}
+/// Whether `canonical`, a resolved path, is inside `root` and outside `.git`.
+fn inside(root: &Path, canonical: &Path) -> Result<(), Failure> {
+    if !canonical.starts_with(root) {
         return Err(bad("Path escapes the workspace"));
     }
     if canonical
-        .strip_prefix(&root)
+        .strip_prefix(root)
         .map_err(bad)?
         .components()
         .any(|part| part.as_os_str() == ".git")
     {
         return Err(bad("Git metadata is not editable in the file explorer"));
     }
+    Ok(())
+}
+/// Make the folders that hold `value` again, after they were removed, so a
+/// file can be put back there. Only folders below the nearest one that still
+/// exists are made, and that one must be inside the workspace and outside
+/// `.git`, as `resolve` requires of any parent.
+pub(crate) fn create_parents(root: &Path, value: &str) -> Result<(), Failure> {
+    let relative = relative(value)?;
+    let root = root.canonicalize().map_err(bad)?;
+    let parent = root
+        .join(relative)
+        .parent()
+        .ok_or_else(|| bad("Missing parent"))?
+        .to_path_buf();
+    let mut existing = parent.as_path();
+    // A dangling link counts as there: making a folder through it is refused below.
+    while fs::symlink_metadata(existing).is_err() {
+        existing = existing.parent().ok_or_else(|| bad("Missing parent"))?;
+    }
+    inside(&root, &existing.canonicalize().map_err(io(FOLDER_GONE))?)?;
+    fs::create_dir_all(&parent).map_err(bad)
+}
+pub(crate) fn resolve(root: &Path, value: &str, create: bool) -> Result<PathBuf, Failure> {
+    let relative = relative(value)?;
+    let root = root.canonicalize().map_err(bad)?;
+    let path = root.join(relative);
+    let (existing, missing) = if create && !path.exists() {
+        (
+            path.parent().ok_or_else(|| bad("Missing parent"))?,
+            FOLDER_GONE,
+        )
+    } else {
+        (path.as_path(), FILE_GONE)
+    };
+    let canonical = existing.canonicalize().map_err(io(missing))?;
+    inside(&root, &canonical)?;
     Ok(path)
 }
 /// A symlink the explorer can open as a folder: its target is a directory
@@ -137,12 +193,12 @@ pub(crate) fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 pub(crate) fn bytes(path: &Path) -> Result<Vec<u8>, Failure> {
-    if !path.metadata().map_err(bad)?.is_file() {
+    if !path.metadata().map_err(io(FILE_GONE))?.is_file() {
         return Err(bad("Only regular files can be opened"));
     }
     let mut output = Vec::new();
     fs::File::open(path)
-        .map_err(bad)?
+        .map_err(io(FILE_GONE))?
         .take(LIMIT + 1)
         .read_to_end(&mut output)
         .map_err(bad)?;
@@ -152,23 +208,28 @@ pub(crate) fn bytes(path: &Path) -> Result<Vec<u8>, Failure> {
     Ok(output)
 }
 
-#[utoipa::path(get,path="/v1/files/list",params(FileQuery),responses((status=200,body=FileListing)))]
+#[utoipa::path(get,path="/v1/files/list",params(FileQuery),responses((status=200,body=FileListing),(status=404,description="This folder no longer exists (plain text)")))]
 pub async fn list_files(
     State(state): State<ServerState>,
     Query(query): Query<FileQuery>,
 ) -> Result<Json<FileListing>, Failure> {
     tokio::task::spawn_blocking(move || {
-        let path = resolve(&state.workspace, &query.path, false)?;
-        let listed = path.canonicalize().map_err(bad)?;
+        let path = resolve(&state.workspace, &query.path, false).map_err(folder)?;
+        let listed = path.canonicalize().map_err(io(FOLDER_GONE))?;
         let root = state.workspace.canonicalize().map_err(bad)?;
         let mut entries = Vec::new();
-        for entry in fs::read_dir(path).map_err(bad)? {
+        for entry in fs::read_dir(path).map_err(io(FOLDER_GONE))? {
             let entry = entry.map_err(bad)?;
             let name = entry.file_name().to_string_lossy().into_owned();
             if name == ".git" || (!query.hidden && name.starts_with('.')) {
                 continue;
             }
-            let meta = fs::symlink_metadata(entry.path()).map_err(bad)?;
+            let meta = match fs::symlink_metadata(entry.path()) {
+                Ok(meta) => meta,
+                // Removed while the folder was being read: not listed.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(bad(error)),
+            };
             entries.push(FileEntry {
                 name,
                 path: entry
@@ -197,7 +258,7 @@ pub async fn list_files(
     .map_err(bad)?
 }
 
-#[utoipa::path(get,path="/v1/files/content",params(FileQuery),responses((status=200,body=FileContent)))]
+#[utoipa::path(get,path="/v1/files/content",params(FileQuery),responses((status=200,body=FileContent),(status=404,description="This file no longer exists (plain text)")))]
 pub async fn read_file(
     State(state): State<ServerState>,
     Query(query): Query<FileQuery>,
@@ -408,6 +469,42 @@ mod tests {
             decode_write(&input).unwrap_err().0,
             StatusCode::PAYLOAD_TOO_LARGE
         );
+    }
+    #[test]
+    fn missing_paths_answer_not_found_in_plain_words_and_other_errors_stay() {
+        let root = std::env::temp_dir().join(format!("haarness-gone-{}", uuid::Uuid::now_v7()));
+        fs::create_dir(&root).unwrap();
+        let gone = |status: StatusCode, message: &str| Err::<PathBuf, _>((status, message.into()));
+        assert_eq!(
+            resolve(&root, "deleted.txt", false),
+            gone(StatusCode::NOT_FOUND, FILE_GONE)
+        );
+        assert_eq!(
+            resolve(&root, "deleted/new.txt", true),
+            gone(StatusCode::NOT_FOUND, FOLDER_GONE)
+        );
+        assert_eq!(
+            resolve(&root, "deleted", false).map_err(folder),
+            gone(StatusCode::NOT_FOUND, FOLDER_GONE)
+        );
+        // Removed between resolving and reading.
+        fs::write(root.join("brief.txt"), "brief").unwrap();
+        let brief = resolve(&root, "brief.txt", false).unwrap();
+        fs::remove_file(&brief).unwrap();
+        assert_eq!(
+            bytes(&brief).unwrap_err(),
+            (StatusCode::NOT_FOUND, FILE_GONE.into())
+        );
+        fs::create_dir(root.join("folder")).unwrap();
+        assert_eq!(
+            bytes(&root.join("folder")).unwrap_err(),
+            bad("Only regular files can be opened")
+        );
+        assert_eq!(
+            resolve(&root, "../secret", false).unwrap_err(),
+            bad("Path must be relative to the workspace")
+        );
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn paths_reject_traversal_and_external_symlinks() {

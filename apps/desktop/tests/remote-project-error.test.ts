@@ -29,6 +29,32 @@ test("remote project failures give relevant next steps without exposing server d
     ),
     /server is busy/,
   );
+  // A host gateway's plain answer for a project another build is running.
+  assert.match(
+    remoteProjectError(
+      new Error(
+        "This project is busy on a different version of Haarness. Open it on the computer, or wait until its work finishes.",
+      ),
+    ),
+    /server is busy/,
+  );
+  // ...and for one of this build working with the other project setting.
+  assert.match(
+    remoteProjectError(
+      new Error(
+        "This project is busy with a different project configuration setting. Open it on the computer, or wait until its work finishes.",
+      ),
+    ),
+    /server is busy/,
+  );
+  assert.match(
+    remoteProjectError(
+      new Error(
+        "cannot safely replace Haarness server 4242 (server executable differs from this client build) because it did not say in time whether it still works",
+      ),
+    ),
+    /server is busy/,
+  );
   assert.match(
     remoteProjectError(
       new Error("This server does not support remote project browsing yet"),

@@ -4,7 +4,7 @@ use axum::{
     Json, Router,
     body::{Body, to_bytes},
     extract::{Path, Query, Request, State, WebSocketUpgrade, ws::Message},
-    http::StatusCode,
+    http::{Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{any, get, post},
 };
@@ -43,6 +43,35 @@ pub struct WorkspaceTarget {
     pub url: String,
     pub token: String,
 }
+/// A project's server that the host would have to replace cannot be while it
+/// is still working, or while it cannot tell whether it is. Hosts return this
+/// (as the error or its source) so the gateway can say so in plain words,
+/// without the pid and shell command a person at the computer gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectBusy {
+    /// Another Haarness build started the server.
+    OtherBuild,
+    /// The server runs with the other project configuration setting.
+    OtherSetting,
+}
+impl ProjectBusy {
+    pub const CODE: &'static str = "project_busy";
+    pub const MESSAGE: &'static str = "This project is busy on a different version of Haarness. Open it on the computer, or wait until its work finishes.";
+    pub const SETTING_MESSAGE: &'static str = "This project is busy with a different project configuration setting. Open it on the computer, or wait until its work finishes.";
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::OtherBuild => Self::MESSAGE,
+            Self::OtherSetting => Self::SETTING_MESSAGE,
+        }
+    }
+}
+impl std::fmt::Display for ProjectBusy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+impl std::error::Error for ProjectBusy {}
 #[async_trait::async_trait]
 pub trait WorkspaceHost: Send + Sync {
     async fn catalog(&self) -> anyhow::Result<WorkspaceListResponse>;
@@ -56,6 +85,13 @@ pub trait WorkspaceHost: Send + Sync {
         anyhow::bail!("Closing advertised projects is not supported by this host")
     }
     async fn target(&self, id: String) -> anyhow::Result<WorkspaceTarget>;
+    /// Where a read (a plain GET or HEAD, never a WebSocket) may go. A host may
+    /// let reads reach a server it cannot take over, such as one another
+    /// Haarness build runs while it is busy ([`ProjectBusy`]), so the project
+    /// can still be viewed; everything else still goes through `target`.
+    async fn read_target(&self, id: String) -> anyhow::Result<WorkspaceTarget> {
+        self.target(id).await
+    }
 }
 #[derive(Clone)]
 struct Gateway {
@@ -71,8 +107,9 @@ pub fn routes(
         .route("/v1/host/projects", get(catalog))
         .route("/v1/host/directories", get(browse))
         .route("/v1/host/open", post(open))
+        // The path keeps its old name; the id is a workspace id.
         .route(
-            "/v1/host/projects/{id}",
+            "/v1/host/projects/{workspace_id}",
             axum::routing::delete(close_project),
         )
         .route("/v1/host/workspaces/{id}/{*path}", any(forward))
@@ -87,6 +124,9 @@ pub fn routes(
         })
 }
 fn failure(error: anyhow::Error) -> Response {
+    if let Some(busy) = error.downcast_ref::<ProjectBusy>() {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": {"code":ProjectBusy::CODE, "message":busy.message(), "retryable":true}}))).into_response();
+    }
     (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": {"code":"remote_project", "message":error.to_string(), "retryable":false}}))).into_response()
 }
 #[utoipa::path(get, path="/v1/host/projects", responses((status=200, body=WorkspaceListResponse)))]
@@ -137,9 +177,14 @@ async fn open(State(gateway): State<Gateway>, Json(input): Json<Open>) -> Respon
         Err(error) => failure(error),
     }
 }
-#[utoipa::path(delete,path="/v1/host/projects/{id}",operation_id="close_remote_project",params(("id"=String,Path)),responses((status=204)))]
-async fn close_project(State(gateway): State<Gateway>, Path(id): Path<String>) -> Response {
-    match gateway.host.close(id).await {
+/// Closes a project for remote access. The id is the catalog's workspace id
+/// (`workspaces[].id` from `GET /v1/host/projects`), not its project id.
+#[utoipa::path(delete,path="/v1/host/projects/{workspace_id}",operation_id="close_remote_project",params(("workspace_id"=String,Path,description="Workspace id: `workspaces[].id` from GET /v1/host/projects, not `projects[].id`")),responses((status=204)))]
+async fn close_project(
+    State(gateway): State<Gateway>,
+    Path(workspace_id): Path<String>,
+) -> Response {
+    match gateway.host.close(workspace_id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => failure(error),
     }
@@ -157,7 +202,13 @@ async fn forward(
     {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let target = match gateway.host.target(id.clone()).await {
+    let read = ws.is_err() && matches!(*request.method(), Method::GET | Method::HEAD);
+    let target = if read {
+        gateway.host.read_target(id.clone()).await
+    } else {
+        gateway.host.target(id.clone()).await
+    };
+    let target = match target {
         Ok(value) => value,
         Err(error) => return failure(error),
     };
@@ -261,3 +312,144 @@ async fn forward(
 #[derive(OpenApi)]
 #[openapi(paths(catalog, browse, open, close_project))]
 pub struct HostApi;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tower::ServiceExt as _;
+
+    /// A host whose project's server is still working and would have to be
+    /// replaced: another Haarness build runs it, or it runs with the other
+    /// project configuration setting.
+    struct Busy {
+        upstream: String,
+        closed: std::sync::Mutex<Vec<String>>,
+        kind: std::sync::Mutex<ProjectBusy>,
+    }
+    #[async_trait::async_trait]
+    impl WorkspaceHost for Busy {
+        async fn catalog(&self) -> anyhow::Result<WorkspaceListResponse> {
+            anyhow::bail!("unused")
+        }
+        async fn browse(
+            &self,
+            _: Option<String>,
+            _: BrowseOptions,
+        ) -> anyhow::Result<DirectoryListing> {
+            anyhow::bail!("Folder is unavailable")
+        }
+        async fn open(&self, _: String) -> anyhow::Result<WorkspaceInfo> {
+            anyhow::bail!("unused")
+        }
+        async fn close(&self, id: String) -> anyhow::Result<()> {
+            self.closed.lock().unwrap().push(id);
+            Ok(())
+        }
+        async fn target(&self, _: String) -> anyhow::Result<WorkspaceTarget> {
+            Err(anyhow::Error::new(*self.kind.lock().unwrap()).context(
+                "Haarness server 4242 needs an upgrade (server executable differs from this client build) but still owns 1 active turn(s); wait for them to finish or stop it explicitly with `haarness --workspace '/private/project' serve --stop`",
+            ))
+        }
+        async fn read_target(&self, _: String) -> anyhow::Result<WorkspaceTarget> {
+            Ok(WorkspaceTarget {
+                url: self.upstream.clone(),
+                token: "upstream-token".into(),
+            })
+        }
+    }
+
+    async fn send(router: &Router, method: &str, uri: &str) -> (StatusCode, serde_json::Value) {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(if method == "GET" { "" } else { "{}" }))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_busy_project_of_another_build_is_readable_and_refuses_the_rest_in_plain_words() {
+        // The other build's server, which only reads may reach.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/v1/threads",
+                get(|headers: axum::http::HeaderMap| async move {
+                    assert_eq!(headers["authorization"], "Bearer upstream-token");
+                    Json(serde_json::json!([{"id": "chat"}]))
+                }),
+            );
+            axum::serve(listener, app).await.unwrap();
+        });
+        let host = Arc::new(Busy {
+            upstream,
+            closed: Default::default(),
+            kind: std::sync::Mutex::new(ProjectBusy::OtherBuild),
+        });
+        let router = routes(host.clone(), tokio_util::sync::CancellationToken::new());
+
+        let (status, body) = send(&router, "GET", "/v1/host/workspaces/w1/v1/threads").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!([{"id": "chat"}]));
+
+        let (status, body) =
+            send(&router, "POST", "/v1/host/workspaces/w1/v1/permissions/p1").await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body,
+            serde_json::json!({"error": {"code": "project_busy", "message": ProjectBusy::MESSAGE, "retryable": true}})
+        );
+        let text = body.to_string();
+        assert!(
+            !text.contains("4242") && !text.contains("serve --stop"),
+            "{text}"
+        );
+        // A server of this build, busy with the other project configuration
+        // setting, is not said to be another version.
+        *host.kind.lock().unwrap() = ProjectBusy::OtherSetting;
+        let (status, body) =
+            send(&router, "POST", "/v1/host/workspaces/w1/v1/permissions/p1").await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body,
+            serde_json::json!({"error": {"code": "project_busy", "message": ProjectBusy::SETTING_MESSAGE, "retryable": true}})
+        );
+        let (status, _) = send(&router, "GET", "/v1/host/workspaces/w1/v1/threads").await;
+        assert_eq!(status, StatusCode::OK, "reads still reach it");
+
+        // Other host failures keep their code and words.
+        let (status, body) = send(&router, "GET", "/v1/host/directories").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "remote_project");
+        assert_eq!(body["error"]["message"], "Folder is unavailable");
+
+        // Closing still takes the workspace id at the same path.
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/host/projects/w1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(*host.closed.lock().unwrap(), ["w1"]);
+        server.abort();
+    }
+}

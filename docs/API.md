@@ -37,7 +37,7 @@ Deferred prompts use `delivery: "queue"` on `/input`, with revisioned `GET|POST 
 
 Primary resources:
 
-- CLI-hosted daemons also expose authenticated remote project discovery and routing: `GET /v1/host/projects`, `GET /v1/host/directories?path=...`, `POST /v1/host/open`, and `/v1/host/workspaces/{id}/v1/...`. These optional host routes are separate from the directory SDK/OpenAPI contract; the routed directory API uses the normal SDK with a project base URL. See [remote host architecture](DESKTOP-PROJECT-MODEL.md#remote-hosts-with-multiple-projects).
+- CLI-hosted daemons also expose authenticated remote project discovery and routing: `GET /v1/host/projects`, `GET /v1/host/directories?path=...`, `POST /v1/host/open`, `DELETE /v1/host/projects/{workspaceId}` (closes a project for remote access), and `/v1/host/workspaces/{workspaceId}/v1/...`. Both take the catalog's workspace id (`workspaces[].id`), not `projects[].id`. These optional host routes are separate from the directory SDK/OpenAPI contract; the routed directory API uses the normal SDK with a project base URL. See [remote host architecture](DESKTOP-PROJECT-MODEL.md#remote-hosts-with-multiple-projects).
 
 - `POST /v1/providers/refresh` refreshes connected model catalogs (same response as `GET /v1/providers`; `providers.refresh.v1` capability). See [Model catalogs](MODELS.md).
 - `GET /v1/info`, `/v1/providers`, `/v1/agents`, `/v1/commands`, `/v1/skills`, `/v1/plugins`, `/v1/mcp`, `/v1/tools[?threadId=...]`
@@ -56,6 +56,8 @@ Primary resources:
 - `GET /v1/vcs/diff?mode=working|branch[&context=N][&summary=true][&path=FILE]` for bounded Git review, metadata-only listings, or one literal file. Entries are `ReviewFile` (a `FileDiff` plus optional `truncation` and `omittedFiles`); bounds are 1000 files, 512 KiB per patch and 8 MiB per response — see [large-diff review](LARGE-DIFF-REVIEW.md)
 - `GET /v1/threads/{id}/diff/review[?summary=true|path=FILE]` for deferred last-turn review; see [large-diff review](LARGE-DIFF-REVIEW.md)
 Scheduled thread creation accepts optional `schedule: {id, name}`. The scheduler sets this durable origin on each new run; thread responses, live events, reloads and session archives retain it independently of the editable title. The schedule ID, rather than its name, is the grouping identity. Forks omit it. Sanitized archives redact the schedule name while retaining its ID. Existing threads without this additive field are unchanged.
+
+Thread creation also accepts an optional client-chosen `id` (a UUID), so a create that is retried after a lost response cannot make a second chat. When a chat with that `id` already exists, `POST /v1/threads` returns it unchanged with the same `201` response, ignores the rest of the request, and publishes no second `thread.created`. Concurrent creates with one new `id` make one chat. Haarness Cloud uses this to deliver a session's first prompt into the chat it named in advance. Servers advertise it as `thread-create-id.v1` in `/v1/info.capabilities`; older servers ignore `id` and choose their own, so check the capability or compare the returned `id`.
 
 - `POST /v1/threads/{id}/background[?childThreadId=...]` to promote running foreground subagents
 - `POST /v1/threads/{id}/interrupt` to stop every active turn, child task, and workflow in that root conversation. Add `?resume=true` for an interactive Stop: steering the agent has not answered yet is answered by a continuation turn (see [Steer and Queue](INPUT-QUEUE.md))

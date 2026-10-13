@@ -2,6 +2,7 @@
 use super::{
     Paths, ensure_workspace_server,
     reconnect::{Backoff, Link, Pacing},
+    remote_attention,
 };
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -20,6 +21,9 @@ use uuid::Uuid;
 const CHUNK: usize = 32 * 1024;
 const WINDOW: usize = 8;
 const MAX_BODY: usize = 16 * 1024 * 1024;
+/// Scopes a request to one published chat tree (`haarness-server`'s
+/// `remote_scope`): the server answers only for that chat and its children.
+pub(crate) const REMOTE_THREAD_HEADER: &str = "x-haarness-remote-thread";
 #[derive(Args)]
 pub struct RemoteArgs {
     #[command(subcommand)]
@@ -74,11 +78,22 @@ enum RemoteCommand {
 // Kept wire-compatible with cloud-contracts::remote::RelayFrame; protocol fixtures test both ends.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum Frame {
+pub(crate) enum Frame {
     Ready {
         version: u32,
+        /// Optional frames this relay accepts, such as `attention.v1`. A
+        /// relay that does not list one drops the socket when it arrives.
+        #[serde(default)]
+        features: Vec<String>,
     },
     CatalogChanged,
+    /// What waits on the person here, sent only to a relay announcing
+    /// `attention.v1` (see `remote_attention`).
+    Attention {
+        revision: u64,
+        items: Vec<remote_attention::Item>,
+        finished: Vec<remote_attention::Finished>,
+    },
     Open {
         id: Uuid,
         method: String,
@@ -379,6 +394,8 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
             });
             let _watcher = AbortTask(watcher);
             let mut shown_title = identity["title"].as_str().unwrap_or_default().to_owned();
+            let attention =
+                remote_attention::Context::new(paths, trust, remote_attention::Timing::default());
             let mut backoff = Backoff::new(Pacing::default());
             let mut rejected = None;
             let ended: Result<()> = async {
@@ -409,13 +426,10 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
                         .join(&format!("api/v1/remote-hosts/{id}/connect"))?;
                     url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
                         .map_err(|()| anyhow::anyhow!("Invalid Cloud URL"))?;
-                    let mut handshake = url.as_str().into_client_request()?;
-                    handshake
-                        .headers_mut()
-                        .insert("authorization", format!("Bearer {bearer}").parse()?);
+                    let handshake = relay_handshake(&url, &bearer)?;
                     let link = tokio::select! {
                         () = stop.cancelled() => break,
-                        link = relay_link(handshake, &target, &http, backoff.pacing.stable) => link?,
+                        link = relay_link(handshake, &target, &http, backoff.pacing.stable, &attention) => link?,
                         () = follow_title(&client, &http, &target, id, &file, &mut shown_title) => continue,
                     };
                     if link == Link::Unauthorized {
@@ -532,14 +546,35 @@ impl std::fmt::Display for Unsupported {
 }
 impl std::error::Error for Unsupported {}
 const RELAY_VERSION: u64 = 1;
-/// The version a relay's first frame announces, when it is a `ready` frame.
-fn relay_version(frame: &str) -> Option<u64> {
+/// The upgrade header that names the relay features this connector
+/// understands. Cloud lists features in `ready` only when asked, because
+/// connectors built before features parse `ready` strictly.
+const RELAY_FEATURES_HEADER: &str = "x-haarness-relay-features";
+/// The relay's WebSocket upgrade: the bearer, and the features to offer.
+fn relay_handshake(
+    url: &reqwest::Url,
+    bearer: &str,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request> {
+    let mut handshake = url.as_str().into_client_request()?;
+    let headers = handshake.headers_mut();
+    headers.insert("authorization", format!("Bearer {bearer}").parse()?);
+    headers.insert(RELAY_FEATURES_HEADER, remote_attention::FEATURE.parse()?);
+    Ok(handshake)
+}
+/// The version and optional features a relay's first frame announces, when
+/// it is a `ready` frame. Read loosely: a newer relay may say more.
+fn relay_ready(frame: &str) -> Option<(u64, Vec<String>)> {
     let frame = serde_json::from_str::<Value>(frame).ok()?;
-    if frame["type"] == "ready" {
-        frame["version"].as_u64()
-    } else {
-        None
+    if frame["type"] != "ready" {
+        return None;
     }
+    let features = frame["features"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|feature| feature.as_str().map(str::to_owned))
+        .collect();
+    Some((frame["version"].as_u64()?, features))
 }
 /// One connection to the relay, from the handshake until it ends. Only an
 /// answer that reconnecting cannot change is an error.
@@ -548,6 +583,7 @@ async fn relay_link(
     target: &Target,
     http: &reqwest::Client,
     stable: Duration,
+    attention: &Arc<remote_attention::Context>,
 ) -> Result<Link> {
     let attempt = tokio::time::timeout(
         Duration::from_secs(10),
@@ -585,7 +621,15 @@ async fn relay_link(
     println!("Remote host connected");
     let since = tokio::time::Instant::now();
     let mut served = false;
-    if let Err(error) = connected(socket, target.clone(), http.clone(), &mut served).await {
+    if let Err(error) = connected(
+        socket,
+        target.clone(),
+        http.clone(),
+        &mut served,
+        attention.clone(),
+    )
+    .await
+    {
         if error.is::<Unsupported>() {
             return Err(error);
         }
@@ -614,20 +658,41 @@ async fn connected(
     target: Target,
     http: reqwest::Client,
     served: &mut bool,
+    attention: Arc<remote_attention::Context>,
 ) -> Result<()> {
     let ready = tokio::time::timeout(Duration::from_secs(10), socket.next())
         .await?
         .context("Relay closed")??;
-    let version = match &ready {
-        Message::Text(value) => relay_version(value),
+    let ready = match &ready {
+        Message::Text(value) => relay_ready(value),
         _ => None,
     };
-    match version {
-        Some(RELAY_VERSION) => {}
-        Some(version) => return Err(Unsupported(version).into()),
+    let features = match ready {
+        Some((RELAY_VERSION, features)) => features,
+        Some((version, _)) => return Err(Unsupported(version).into()),
         None => anyhow::bail!("Relay did not announce its protocol"),
-    }
+    };
     let (send, mut outgoing) = mpsc::channel::<Frame>(128);
+    // An older relay drops the socket on a frame it does not know.
+    let _attention = features
+        .iter()
+        .any(|feature| feature == remote_attention::FEATURE)
+        .then(|| {
+            let scope = match target.thread {
+                Some(thread) => remote_attention::Scope::Chat {
+                    url: target.url.clone(),
+                    token: target.token.clone(),
+                    project: target.project.clone(),
+                    thread,
+                },
+                None => remote_attention::Scope::Host,
+            };
+            AbortTask(tokio::spawn(remote_attention::watch(
+                attention,
+                scope,
+                send.clone(),
+            )))
+        });
     let runtime_lost = tokio_util::sync::CancellationToken::new();
     let health = runtime_lost.clone();
     let health_target = target.clone();
@@ -889,7 +954,7 @@ async fn dispatch(
             }
         }
         if let Some(thread) = thread {
-            request = request.header("x-haarness-remote-thread", thread.to_string());
+            request = request.header(REMOTE_THREAD_HEADER, thread.to_string());
         }
         // Its errors would name the URL, query included; the log names the path.
         let response = tokio::time::timeout(Duration::from_secs(310), request.body(body).send())
@@ -929,7 +994,7 @@ fn account_query(client: &haarness_account::Client) -> String {
         .unwrap_or_default()
 }
 
-struct AbortTask(tokio::task::JoinHandle<()>);
+pub(crate) struct AbortTask(pub(crate) tokio::task::JoinHandle<()>);
 impl Drop for AbortTask {
     fn drop(&mut self) {
         self.0.abort();
@@ -1626,22 +1691,30 @@ mod tests {
         Serve,
         /// Announce another protocol version.
         Version(u64),
+        /// Announce these features, keep the socket and pass on every frame
+        /// the connector sends.
+        Record(&'static [&'static str]),
     }
-    /// A relay that plays one step per connection.
-    async fn fake_relay(script: Vec<Relay>) -> String {
+    /// A relay that plays one step per connection, and the frames recorded.
+    async fn fake_relay(script: Vec<Relay>) -> (String, mpsc::UnboundedReceiver<Value>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}/connect", listener.local_addr().unwrap());
+        let (recorded, frames) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             for step in script {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
-                let version = if let Relay::Version(version) = step {
-                    version
-                } else {
-                    1
+                let ready = match step {
+                    Relay::Version(version) => json!({"type":"ready","version":version}),
+                    Relay::Record(features) => {
+                        json!({"type":"ready","version":1,"features":features})
+                    }
+                    _ => json!({"type":"ready","version":1}),
                 };
-                let ready = json!({"type":"ready","version":version}).to_string();
-                socket.send(Message::Text(ready.into())).await.unwrap();
+                socket
+                    .send(Message::Text(ready.to_string().into()))
+                    .await
+                    .unwrap();
                 match step {
                     Relay::Hold(time) => tokio::time::sleep(time).await,
                     Relay::Serve => {
@@ -1659,12 +1732,63 @@ mod tests {
                             }
                         }
                     }
+                    Relay::Record(_) => {
+                        while let Some(Ok(message)) = socket.next().await {
+                            if let Message::Text(text) = message {
+                                let _ = recorded.send(serde_json::from_str(&text).unwrap());
+                            }
+                        }
+                    }
                     Relay::Drop | Relay::Version(_) => {}
                 }
                 let _ = socket.close(None).await;
             }
         });
-        url
+        (url, frames)
+    }
+    #[test]
+    fn the_relay_upgrade_asks_for_the_features_the_connector_understands() {
+        let url: reqwest::Url = "wss://cloud.example/api/v1/remote-hosts/1/connect"
+            .parse()
+            .unwrap();
+        let handshake = relay_handshake(&url, "token").unwrap();
+        assert_eq!(
+            handshake.uri(),
+            "wss://cloud.example/api/v1/remote-hosts/1/connect"
+        );
+        assert_eq!(handshake.headers()["authorization"], "Bearer token");
+        assert_eq!(
+            handshake.headers()["x-haarness-relay-features"],
+            "attention.v1"
+        );
+    }
+    #[test]
+    fn a_ready_frame_announces_a_version_and_optional_features() {
+        assert_eq!(
+            relay_ready(r#"{"type":"ready","version":1}"#),
+            Some((1, vec![]))
+        );
+        assert_eq!(
+            relay_ready(
+                r#"{"type":"ready","version":1,"features":["attention.v1",7],"later":true}"#
+            ),
+            Some((1, vec!["attention.v1".to_owned()]))
+        );
+        assert_eq!(relay_ready(r#"{"type":"ready"}"#), None);
+        assert_eq!(relay_ready(r#"{"type":"open","version":1}"#), None);
+    }
+    /// Attention context for `paths`, with waits short enough for tests.
+    fn attention(paths: &Paths) -> Arc<remote_attention::Context> {
+        remote_attention::Context::new(
+            paths,
+            false,
+            remote_attention::Timing {
+                debounce: Duration::from_millis(50),
+                settle: Duration::from_millis(300),
+                scan: Duration::from_millis(100),
+                first: Duration::from_secs(5),
+            },
+        )
     }
     #[tokio::test]
     async fn a_relay_that_keeps_dropping_the_connection_is_retried_less_and_less_often() {
@@ -1698,13 +1822,16 @@ mod tests {
             Relay::Drop,
             Relay::Version(2),
         ]);
-        let relay = fake_relay(script).await;
+        let (relay, _) = fake_relay(script).await;
+        let root = std::env::temp_dir().join(format!("haarness-remote-backoff-{}", Uuid::now_v7()));
+        let attention = attention(&Paths::new(Some(&root)).unwrap());
         let connect = || {
             relay_link(
                 relay.as_str().into_client_request().unwrap(),
                 &target,
                 &http,
                 pacing.stable,
+                &attention,
             )
         };
 
@@ -1747,10 +1874,12 @@ mod tests {
             &target,
             &http,
             pacing.stable,
+            &attention,
         )
         .await
         .unwrap();
         assert_eq!(link, Link::Failed);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn a_connector_that_gave_up_says_why_in_the_chat_status() {
@@ -1842,5 +1971,1138 @@ mod tests {
         }
         assert!(validate_path("/v1/host/workspaces/project/v1/info", &target, None).is_err());
         assert!(validate_path("/v1/host/workspaces/project/v1/info", &target, Some(chat)).is_ok());
+    }
+
+    /// What a fake Haarness server holds; the tests change it as they go.
+    #[derive(Default)]
+    struct FakeState {
+        permissions: Vec<Value>,
+        questions: Vec<Value>,
+        threads: HashMap<Uuid, Value>,
+        /// The turn `/threads/{id}/active` reports, by chat; all of them
+        /// are what `/turns/active` lists.
+        active: HashMap<Uuid, Value>,
+        /// What `/turns/{id}` answers.
+        turns: HashMap<Uuid, Value>,
+        /// The oldest event still kept: a stream resuming before it is told
+        /// to resync and replays nothing, as a server whose buffer moved on.
+        kept_from: u64,
+        /// How many `/info` requests answer only after a second.
+        slow_info: usize,
+        /// A published chat's tree, for requests scoped to it.
+        tree: HashMap<Uuid, Vec<Uuid>>,
+        /// Every request's path and scope header.
+        requests: Vec<(String, Option<String>)>,
+        event_id: u64,
+        /// Every event sent, with its chat, for streams that resume.
+        log: Vec<(u64, Uuid, String)>,
+        /// How many `/threads/{id}/active` checks fail before one answers.
+        active_failures: usize,
+        /// The event stream ends as soon as it opens.
+        close_events: bool,
+    }
+    /// A Haarness server as the attention watcher sees it: a scope-aware
+    /// `/v1/permissions`, `/v1/questions`, chats and an event stream.
+    #[derive(Clone)]
+    struct FakeDaemon {
+        url: String,
+        instance: Uuid,
+        state: Arc<std::sync::Mutex<FakeState>>,
+        events: tokio::sync::broadcast::Sender<(Uuid, String)>,
+    }
+    impl FakeDaemon {
+        async fn start(workspace: &Path) -> Self {
+            use axum::{
+                Json, Router,
+                body::Body,
+                extract::{Path as Route, State},
+                http::{HeaderMap, StatusCode, Uri},
+                response::{IntoResponse, Response},
+                routing::get,
+            };
+            let (events, _) = tokio::sync::broadcast::channel(64);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let daemon = Self {
+                url: format!("http://{}", listener.local_addr().unwrap()),
+                instance: Uuid::now_v7(),
+                state: Arc::default(),
+                events,
+            };
+            let workspace = workspace.to_owned();
+            let app = Router::new()
+                .route(
+                    "/v1/info",
+                    get(move |State(daemon): State<FakeDaemon>| async move {
+                        let slow = {
+                            let mut state = daemon.state.lock().unwrap();
+                            let slow = state.slow_info > 0;
+                            state.slow_info = state.slow_info.saturating_sub(1);
+                            slow
+                        };
+                        if slow {
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
+                        let cursor = daemon.state.lock().unwrap().event_id;
+                        Json(json!({"name":"haarness","version":"0.1.1","schemaVersion":"1",
+                            "serverInstanceId":daemon.instance,"workspace":workspace,"pid":std::process::id(),
+                            "eventCursor":cursor,"projectTrusted":false,
+                            "capabilities":["remote-chat-scope.v1","workspace-history.v1","pty.v1"]}))
+                    }),
+                )
+                .route(
+                    "/v1/permissions",
+                    get(|State(daemon): State<FakeDaemon>, uri: Uri, headers: HeaderMap| async move {
+                        let visible = daemon.visible(&uri, &headers);
+                        rows(&daemon.state.lock().unwrap().permissions, visible.as_deref())
+                    }),
+                )
+                .route(
+                    "/v1/questions",
+                    get(|State(daemon): State<FakeDaemon>, uri: Uri, headers: HeaderMap| async move {
+                        let visible = daemon.visible(&uri, &headers);
+                        rows(&daemon.state.lock().unwrap().questions, visible.as_deref())
+                    }),
+                )
+                .route(
+                    "/v1/threads/{id}",
+                    get(
+                        |State(daemon): State<FakeDaemon>, Route(id): Route<Uuid>, uri: Uri, headers: HeaderMap| async move {
+                            if daemon.visible(&uri, &headers).is_some_and(|ids| !ids.contains(&id)) {
+                                return StatusCode::FORBIDDEN.into_response();
+                            }
+                            let thread = daemon.state.lock().unwrap().threads.get(&id).cloned();
+                            thread.map_or(StatusCode::NOT_FOUND.into_response(), |thread| {
+                                Json(thread).into_response()
+                            })
+                        },
+                    ),
+                )
+                .route(
+                    "/v1/threads/{id}/active",
+                    get(
+                        |State(daemon): State<FakeDaemon>, Route(id): Route<Uuid>, uri: Uri, headers: HeaderMap| async move {
+                            daemon.visible(&uri, &headers);
+                            let mut state = daemon.state.lock().unwrap();
+                            if state.active_failures > 0 {
+                                state.active_failures -= 1;
+                                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                            }
+                            Json(state.active.get(&id).cloned().unwrap_or(Value::Null)).into_response()
+                        },
+                    ),
+                )
+                .route(
+                    "/v1/turns/active",
+                    get(|State(daemon): State<FakeDaemon>, uri: Uri, headers: HeaderMap| async move {
+                        let visible = daemon.visible(&uri, &headers);
+                        let active: Vec<Value> = daemon.state.lock().unwrap().active.values().cloned().collect();
+                        rows(&active, visible.as_deref())
+                    }),
+                )
+                .route(
+                    "/v1/turns/{id}",
+                    get(
+                        |State(daemon): State<FakeDaemon>, Route(id): Route<Uuid>, uri: Uri, headers: HeaderMap| async move {
+                            daemon.visible(&uri, &headers);
+                            let turn = daemon.state.lock().unwrap().turns.get(&id).cloned();
+                            turn.map_or(StatusCode::NOT_FOUND.into_response(), |turn| Json(turn).into_response())
+                        },
+                    ),
+                )
+                .route(
+                    "/v1/events",
+                    get(|State(daemon): State<FakeDaemon>, uri: Uri, headers: HeaderMap| async move {
+                        let visible = daemon.visible(&uri, &headers);
+                        // Like a real server: everything after the cursor,
+                        // or everything kept when there is none.
+                        let after = headers
+                            .get("last-event-id")
+                            .map(|value| value.to_str().unwrap().parse::<u64>().unwrap());
+                        let shown = |thread: &Uuid| visible.as_ref().is_none_or(|ids| ids.contains(thread));
+                        let (receiver, replay, close) = {
+                            let state = daemon.state.lock().unwrap();
+                            let replay = if after.is_some_and(|after| after + 1 < state.kept_from) {
+                                vec![Ok("event: resync_required\ndata: {\"type\":\"resync_required\"}\n\n".to_owned())]
+                            } else {
+                                state
+                                    .log
+                                    .iter()
+                                    .filter(|(id, thread, _)| after.is_none_or(|after| *id > after) && shown(thread))
+                                    .map(|(_, _, frame)| Ok(frame.clone()))
+                                    .collect::<Vec<_>>()
+                            };
+                            (daemon.events.subscribe(), replay, state.close_events)
+                        };
+                        if close {
+                            return Response::builder()
+                                .header("content-type", "text/event-stream")
+                                .body(Body::empty())
+                                .unwrap();
+                        }
+                        let live = futures::stream::unfold(receiver, move |mut receiver| {
+                            let visible = visible.clone();
+                            async move {
+                                loop {
+                                    match receiver.recv().await {
+                                        // Cut: the stream ends.
+                                        Ok((thread, _)) if thread.is_nil() => return None,
+                                        Ok((thread, frame))
+                                            if visible.as_ref().is_none_or(|ids| ids.contains(&thread)) =>
+                                        {
+                                            return Some((Ok::<_, std::convert::Infallible>(frame), receiver));
+                                        }
+                                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                                    }
+                                }
+                            }
+                        });
+                        let body = futures::stream::once(async { Ok(": connected\n\n".to_owned()) })
+                            .chain(futures::stream::iter(replay))
+                            .chain(live);
+                        Response::builder()
+                            .header("content-type", "text/event-stream")
+                            .body(Body::from_stream(body))
+                            .unwrap()
+                    }),
+                )
+                .with_state(daemon.clone());
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            daemon
+        }
+        /// The chats a request may see: all, or a published chat's tree.
+        /// Records the request.
+        fn visible(
+            &self,
+            uri: &axum::http::Uri,
+            headers: &axum::http::HeaderMap,
+        ) -> Option<Vec<Uuid>> {
+            let scope = headers
+                .get(REMOTE_THREAD_HEADER)
+                .map(|value| value.to_str().unwrap().to_owned());
+            let mut state = self.state.lock().unwrap();
+            state.requests.push((uri.path().to_owned(), scope.clone()));
+            let root = scope?.parse::<Uuid>().unwrap();
+            Some(state.tree.get(&root).cloned().unwrap_or_default())
+        }
+        fn emit(&self, kind: &str, thread: Uuid, root: Uuid, payload: Value) {
+            let mut state = self.state.lock().unwrap();
+            state.event_id += 1;
+            let id = state.event_id;
+            let envelope = json!({"schemaVersion":"1","serverInstanceId":self.instance,"eventId":id,
+                "type":kind,"threadId":thread,"rootThreadId":root,"turnId":null,"itemId":null,
+                "payload":payload,"createdAt":chrono::Utc::now()});
+            let frame = format!("id: {id}\nevent: {kind}\ndata: {envelope}\n\n");
+            state.log.push((id, thread, frame.clone()));
+            // Sent while the state is locked, so a stream opening now
+            // either replays it or receives it, never both.
+            let _ = self.events.send((thread, frame));
+        }
+        /// End every open event stream, as a server does when its client
+        /// falls too far behind.
+        fn cut(&self) {
+            let _ = self.events.send((Uuid::nil(), String::new()));
+        }
+        /// How many requests asked for `path`.
+        fn requested(&self, path: &str) -> usize {
+            let state = self.state.lock().unwrap();
+            state
+                .requests
+                .iter()
+                .filter(|(asked, _)| asked == path)
+                .count()
+        }
+        /// Wait until more than `count` requests asked for `path`.
+        async fn requested_more(&self, path: &str, count: usize) {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while self.requested(path) <= count {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{path} was not requested again"));
+        }
+        /// Write this server's discovery record, started by `executable`.
+        fn record(
+            &self,
+            paths: &Paths,
+            workspace_id: &str,
+            workspace: &Path,
+            executable: Option<String>,
+        ) {
+            let folder = paths.cache.join("workspaces").join(workspace_id);
+            std::fs::create_dir_all(&folder).unwrap();
+            let record = crate::rendezvous::RuntimeDiscovery {
+                url: self.url.clone(),
+                token: "fixture".into(),
+                pid: std::process::id(),
+                workspace: Some(workspace.display().to_string()),
+                executable_fingerprint: executable,
+                access_fingerprint: Some(
+                    haarness_server::auth::ServerAccess::Private.fingerprint("fixture"),
+                ),
+                trace_endpoint: None,
+            };
+            crate::write_private_json(&folder.join("runtime.json"), &record).unwrap();
+        }
+        fn target(&self, project: &str, thread: Option<Uuid>) -> Target {
+            Target {
+                url: self.url.clone(),
+                token: "fixture".into(),
+                project: project.into(),
+                thread,
+            }
+        }
+    }
+    /// Pending rows as a server lists them: all, or those of `visible` chats.
+    fn rows(rows: &[Value], visible: Option<&[Uuid]>) -> axum::Json<Value> {
+        axum::Json(Value::Array(
+            rows.iter()
+                .filter(|row| {
+                    visible.is_none_or(|ids| ids.iter().any(|id| row["threadId"] == json!(id)))
+                })
+                .cloned()
+                .collect(),
+        ))
+    }
+    fn chat(id: Uuid, title: &str) -> Value {
+        json!({"id":id,"title":title,"parentId":null,"archived":false,"agent":"build",
+            "provider":"echo","model":"echo-1","createdAt":chrono::Utc::now(),"updatedAt":chrono::Utc::now()})
+    }
+    fn pending_permission(id: &str, thread: Uuid, root: Uuid) -> Value {
+        json!({"permissionId":id,"operation":"bash:git push origin main","permission":"bash",
+            "detail":{"command":"git push origin main"},"patterns":["git push origin main"],
+            "alwaysPatterns":["bash:git push *"],"threadId":thread,"rootThreadId":root,
+            "turnId":Uuid::now_v7(),"explicit":false,"createdAt":chrono::Utc::now()})
+    }
+    fn pending_question(id: &str, thread: Uuid, root: Uuid) -> Value {
+        json!({"questionId":id,"prompt":"Which password should I use?","choices":[],"custom":true,
+            "threadId":thread,"rootThreadId":root,"createdAt":chrono::Utc::now()})
+    }
+    fn finished_turn(id: Uuid, thread: Uuid, status: &str) -> Value {
+        json!({"id":id,"threadId":thread,"requestId":Uuid::now_v7(),"status":status,"agent":"build",
+            "provider":"echo","model":"echo-1","error":null,
+            "createdAt":chrono::Utc::now(),"updatedAt":chrono::Utc::now()})
+    }
+    /// The next attention frame the relay recorded.
+    async fn next_attention(frames: &mut mpsc::UnboundedReceiver<Value>) -> Value {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let frame = frames.recv().await.expect("relay is recording");
+                if frame["type"] == "attention" {
+                    return frame;
+                }
+            }
+        })
+        .await
+        .expect("an attention frame arrives")
+    }
+    /// A data root with three registered projects: `home`, the connector's,
+    /// `other`, whose server an older build started, and `stopped`, which
+    /// has no server.
+    struct Computer {
+        root: std::path::PathBuf,
+        paths: Paths,
+        home: haarness_protocol::WorkspaceInfo,
+        other: haarness_protocol::WorkspaceInfo,
+        stopped: haarness_protocol::WorkspaceInfo,
+    }
+    impl Computer {
+        fn new() -> Self {
+            let root = crate::browser::discovery::tests::temp("remote-attention");
+            let base = Paths::new(Some(&root)).unwrap();
+            let manager = base.workspace_manager().unwrap();
+            let register = |name: &str| {
+                let folder = root.join(name);
+                std::fs::create_dir_all(&folder).unwrap();
+                manager.register_local(&folder).unwrap()
+            };
+            let (home, other, stopped) = (register("home"), register("other"), register("stopped"));
+            let paths = base.scoped(&home.id, false).unwrap();
+            Self {
+                root,
+                paths,
+                home,
+                other,
+                stopped,
+            }
+        }
+    }
+    #[tokio::test]
+    async fn a_relay_announcing_attention_hears_what_waits_on_every_running_project() {
+        let computer = Computer::new();
+        let home = FakeDaemon::start(Path::new(&computer.home.path)).await;
+        let other = FakeDaemon::start(Path::new(&computer.other.path)).await;
+        home.record(
+            &computer.paths,
+            &computer.home.id,
+            Path::new(&computer.home.path),
+            crate::current_executable_fingerprint().ok(),
+        );
+        other.record(
+            &computer.paths,
+            &computer.other.id,
+            Path::new(&computer.other.path),
+            Some("an-older-build".into()),
+        );
+        let (login, upgrade, helper, looping) = (
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+        );
+        {
+            let mut state = home.state.lock().unwrap();
+            state
+                .permissions
+                .push(pending_permission("perm-1", login, login));
+            state.threads.insert(login, chat(login, "Fix login"));
+            state.threads.insert(looping, chat(looping, "Keep going"));
+        }
+        {
+            let mut state = other.state.lock().unwrap();
+            state
+                .questions
+                .push(pending_question("question-1", helper, upgrade));
+            state.threads.insert(upgrade, chat(upgrade, "New chat"));
+        }
+        let (relay, mut frames) = fake_relay(vec![Relay::Record(&["attention.v1"])]).await;
+        let attention = attention(&computer.paths);
+        let target = home.target(&computer.home.id, None);
+        let http = reqwest::Client::new();
+        let link = tokio::spawn(async move {
+            relay_link(
+                relay.into_client_request().unwrap(),
+                &target,
+                &http,
+                Duration::from_secs(60),
+                &attention,
+            )
+            .await
+        });
+
+        let first = next_attention(&mut frames).await;
+        assert_eq!(first["revision"], 1);
+        assert_eq!(first["finished"], json!([]));
+        let items = first["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2, "{first}");
+        let permission = &items[0];
+        assert_eq!(permission["kind"], "permission");
+        assert_eq!(permission["id"], "perm-1");
+        assert_eq!(permission["projectId"], computer.home.id.as_str());
+        assert_eq!(permission["projectName"], "home");
+        assert_eq!(permission["rootThreadId"], json!(login));
+        assert_eq!(permission["chatTitle"], "Fix login");
+        assert_eq!(permission["category"], "bash");
+        assert_eq!(permission["actionable"], true);
+        let question = &items[1];
+        assert_eq!(question["kind"], "question");
+        assert_eq!(question["projectId"], computer.other.id.as_str());
+        assert_eq!(
+            (&question["threadId"], &question["rootThreadId"]),
+            (&json!(helper), &json!(upgrade))
+        );
+        assert_eq!(question["chatTitle"], Value::Null, "an untitled chat");
+        assert_eq!(question["custom"], true);
+        assert_eq!(question["category"], Value::Null);
+        // An older build's server would be replaced, not reused, so Cloud cannot answer it.
+        assert_eq!(question["actionable"], false);
+        let text = first.to_string();
+        for private in [
+            "git push",
+            "password",
+            "operation",
+            "patterns",
+            "detail",
+            "prompt",
+        ] {
+            assert!(
+                !text.contains(private),
+                "{private} left the computer: {text}"
+            );
+        }
+
+        // Answered on the computer: Cloud hears it is gone.
+        home.state.lock().unwrap().permissions.clear();
+        home.emit(
+            "permission.resolved",
+            login,
+            login,
+            json!({"permissionId":"perm-1","allowed":true}),
+        );
+        let resolved = next_attention(&mut frames).await;
+        assert_eq!(resolved["revision"], 2);
+        assert_eq!(resolved["items"].as_array().unwrap().len(), 1);
+
+        // A helper agent's turn, a turn a loop continues, and a root turn
+        // that stays finished: only the last one is reported.
+        let (helper_turn, continued, done) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        other.emit(
+            "turn.finished",
+            helper,
+            upgrade,
+            finished_turn(helper_turn, helper, "completed"),
+        );
+        home.state
+            .lock()
+            .unwrap()
+            .active
+            .insert(looping, finished_turn(Uuid::now_v7(), looping, "running"));
+        home.emit(
+            "turn.finished",
+            looping,
+            looping,
+            finished_turn(continued, looping, "completed"),
+        );
+        home.emit(
+            "turn.finished",
+            login,
+            login,
+            finished_turn(done, login, "failed"),
+        );
+        let finished = next_attention(&mut frames).await;
+        assert_eq!(
+            finished["finished"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|turn| (
+                    &turn["turnId"],
+                    &turn["threadId"],
+                    &turn["status"],
+                    &turn["chatTitle"],
+                    &turn["scheduled"]
+                ))
+                .collect::<Vec<_>>(),
+            [(
+                &json!(done),
+                &json!(login),
+                &json!("failed"),
+                &json!("Fix login"),
+                &json!(false)
+            )],
+            "{finished}"
+        );
+        // Nothing changes after: no further frame, and the turn is not reported twice.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        while let Ok(frame) = frames.try_recv() {
+            assert_ne!(frame["type"], "attention", "{frame}");
+        }
+        // Watching never started a server for the project that has none.
+        assert!(
+            !computer
+                .paths
+                .cache
+                .join("workspaces")
+                .join(&computer.stopped.id)
+                .join("runtime.json")
+                .exists()
+        );
+        link.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_relay_that_does_not_announce_attention_never_receives_it() {
+        let computer = Computer::new();
+        let home = FakeDaemon::start(Path::new(&computer.home.path)).await;
+        home.record(
+            &computer.paths,
+            &computer.home.id,
+            Path::new(&computer.home.path),
+            crate::current_executable_fingerprint().ok(),
+        );
+        let login = Uuid::now_v7();
+        home.state
+            .lock()
+            .unwrap()
+            .permissions
+            .push(pending_permission("perm-1", login, login));
+        let (relay, mut frames) = fake_relay(vec![Relay::Record(&[])]).await;
+        let attention = attention(&computer.paths);
+        let target = home.target(&computer.home.id, None);
+        let http = reqwest::Client::new();
+        let link = tokio::spawn(async move {
+            relay_link(
+                relay.into_client_request().unwrap(),
+                &target,
+                &http,
+                Duration::from_secs(60),
+                &attention,
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        home.emit(
+            "permission.resolved",
+            login,
+            login,
+            json!({"permissionId":"perm-1"}),
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!link.is_finished(), "the connection stays up");
+        while let Ok(frame) = frames.try_recv() {
+            assert_ne!(frame["type"], "attention", "{frame}");
+        }
+        assert!(
+            home.state.lock().unwrap().requests.is_empty(),
+            "nothing watched the server"
+        );
+        link.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_shared_chat_reports_only_its_own_tree() {
+        let computer = Computer::new();
+        let home = FakeDaemon::start(Path::new(&computer.home.path)).await;
+        let (shared, child, grandchild, unrelated) = (
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+        );
+        {
+            let mut state = home.state.lock().unwrap();
+            state.tree.insert(shared, vec![shared, child, grandchild]);
+            state.threads.insert(shared, chat(shared, "Shared work"));
+            state.threads.insert(unrelated, chat(unrelated, "Private"));
+            state
+                .permissions
+                .push(pending_permission("in-tree", grandchild, shared));
+            state
+                .permissions
+                .push(pending_permission("elsewhere", unrelated, unrelated));
+            state
+                .questions
+                .push(pending_question("asked-elsewhere", unrelated, unrelated));
+        }
+        let (relay, mut frames) = fake_relay(vec![Relay::Record(&["attention.v1"])]).await;
+        let attention = attention(&computer.paths);
+        let target = home.target(&computer.home.id, Some(shared));
+        let http = reqwest::Client::new();
+        let link = tokio::spawn(async move {
+            relay_link(
+                relay.into_client_request().unwrap(),
+                &target,
+                &http,
+                Duration::from_secs(60),
+                &attention,
+            )
+            .await
+        });
+        let first = next_attention(&mut frames).await;
+        let items = first["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "{first}");
+        assert_eq!(items[0]["id"], "in-tree");
+        assert_eq!(items[0]["threadId"], json!(grandchild));
+        assert_eq!(items[0]["rootThreadId"], json!(shared));
+        assert_eq!(items[0]["projectId"], computer.home.id.as_str());
+        assert_eq!(items[0]["projectName"], "home");
+        assert_eq!(items[0]["chatTitle"], "Shared work");
+        assert_eq!(items[0]["actionable"], true);
+
+        let done = Uuid::now_v7();
+        home.emit(
+            "turn.finished",
+            unrelated,
+            unrelated,
+            finished_turn(Uuid::now_v7(), unrelated, "completed"),
+        );
+        home.emit(
+            "turn.finished",
+            shared,
+            shared,
+            finished_turn(done, shared, "completed"),
+        );
+        let finished = next_attention(&mut frames).await;
+        let turns = finished["finished"].as_array().unwrap();
+        assert_eq!(turns.len(), 1, "{finished}");
+        assert_eq!(
+            (&turns[0]["turnId"], &turns[0]["threadId"]),
+            (&json!(done), &json!(shared))
+        );
+        // Every request was scoped to the shared chat, as Cloud's are.
+        let requests = home.state.lock().unwrap().requests.clone();
+        assert!(requests.iter().any(|(path, _)| path == "/v1/events"));
+        assert!(
+            requests
+                .iter()
+                .all(|(_, scope)| scope.as_deref() == Some(shared.to_string().as_str())),
+            "{requests:?}"
+        );
+        link.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    /// The connector's link to `relay`, reporting for the projects of
+    /// `attention` and for `target`.
+    fn link(
+        relay: &str,
+        target: &Target,
+        attention: &Arc<remote_attention::Context>,
+    ) -> tokio::task::JoinHandle<Result<Link>> {
+        let (handshake, target, attention) = (
+            relay.into_client_request().unwrap(),
+            target.clone(),
+            attention.clone(),
+        );
+        tokio::spawn(async move {
+            relay_link(
+                handshake,
+                &target,
+                &reqwest::Client::new(),
+                Duration::from_secs(60),
+                &attention,
+            )
+            .await
+        })
+    }
+    /// The turn ids of a frame's finished chats.
+    fn finished_turns(frame: &Value) -> Vec<Value> {
+        frame["finished"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|turn| turn["turnId"].clone())
+            .collect()
+    }
+    /// A computer whose only running server is the connector's own, with
+    /// these chats.
+    async fn watched_home(chats: &[(Uuid, &str)]) -> (Computer, FakeDaemon) {
+        let computer = Computer::new();
+        let home = FakeDaemon::start(Path::new(&computer.home.path)).await;
+        home.record(
+            &computer.paths,
+            &computer.home.id,
+            Path::new(&computer.home.path),
+            crate::current_executable_fingerprint().ok(),
+        );
+        let mut state = home.state.lock().unwrap();
+        for (id, title) in chats {
+            state.threads.insert(*id, chat(*id, title));
+        }
+        drop(state);
+        (computer, home)
+    }
+    #[tokio::test]
+    async fn turns_count_from_when_the_connector_watches_and_survive_its_reconnects() {
+        let (earlier, dropped, offline) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let (computer, home) = watched_home(&[
+            (earlier, "Earlier"),
+            (dropped, "Dropped"),
+            (offline, "Offline"),
+        ])
+        .await;
+        // It finished before the connector watched the server: not news.
+        let before = Uuid::now_v7();
+        home.emit(
+            "turn.finished",
+            earlier,
+            earlier,
+            finished_turn(before, earlier, "completed"),
+        );
+        let (relay, mut frames) = fake_relay(vec![
+            Relay::Record(&["attention.v1"]),
+            Relay::Record(&["attention.v1"]),
+        ])
+        .await;
+        let attention = attention(&computer.paths);
+        let target = home.target(&computer.home.id, None);
+        let first = link(&relay, &target, &attention);
+        assert_eq!(next_attention(&mut frames).await["finished"], json!([]));
+
+        // One turn finishes as the connection drops, before it settled, and
+        // one while the connector is away.
+        let (settling, away) = (Uuid::now_v7(), Uuid::now_v7());
+        let refreshes = home.requested("/v1/permissions");
+        home.emit(
+            "turn.finished",
+            dropped,
+            dropped,
+            finished_turn(settling, dropped, "completed"),
+        );
+        // Read: it refreshes what waits whenever a turn finishes.
+        home.requested_more("/v1/permissions", refreshes).await;
+        first.abort();
+        let _ = first.await;
+        home.emit(
+            "turn.finished",
+            offline,
+            offline,
+            finished_turn(away, offline, "failed"),
+        );
+
+        let second = link(&relay, &target, &attention);
+        let mut seen = Vec::new();
+        let last = loop {
+            let frame = next_attention(&mut frames).await;
+            seen.push(frame.clone());
+            if frame["finished"].as_array().unwrap().len() == 2 {
+                break frame;
+            }
+        };
+        let mut reported = finished_turns(&last);
+        reported.sort_by_key(ToString::to_string);
+        let mut expected = vec![json!(settling), json!(away)];
+        expected.sort_by_key(ToString::to_string);
+        assert_eq!(reported, expected, "{last}");
+        assert!(
+            seen.iter()
+                .all(|frame| !finished_turns(frame).contains(&json!(before))),
+            "{seen:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        while let Ok(frame) = frames.try_recv() {
+            assert_ne!(frame["type"], "attention", "{frame}");
+        }
+        second.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_finished_turn_is_checked_again_when_the_server_does_not_answer() {
+        let work = Uuid::now_v7();
+        let (computer, home) = watched_home(&[(work, "Work")]).await;
+        // The first two checks fail; the last one allowed answers.
+        home.state.lock().unwrap().active_failures = 2;
+        let (relay, mut frames) = fake_relay(vec![Relay::Record(&["attention.v1"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        next_attention(&mut frames).await;
+        let done = Uuid::now_v7();
+        home.emit(
+            "turn.finished",
+            work,
+            work,
+            finished_turn(done, work, "completed"),
+        );
+        let frame = next_attention(&mut frames).await;
+        assert_eq!(finished_turns(&frame), [json!(done)], "{frame}");
+        assert_eq!(home.requested(&format!("/v1/threads/{work}/active")), 3);
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn only_the_last_of_a_chats_finished_turns_is_reported() {
+        let work = Uuid::now_v7();
+        let (computer, home) = watched_home(&[(work, "Work")]).await;
+        let (relay, mut frames) = fake_relay(vec![Relay::Record(&["attention.v1"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        next_attention(&mut frames).await;
+        // A goal ran a second turn at once; both ended before either settled.
+        let (first, last) = (Uuid::now_v7(), Uuid::now_v7());
+        home.emit(
+            "turn.finished",
+            work,
+            work,
+            finished_turn(first, work, "completed"),
+        );
+        home.emit(
+            "turn.finished",
+            work,
+            work,
+            finished_turn(last, work, "completed"),
+        );
+        let frame = next_attention(&mut frames).await;
+        assert_eq!(finished_turns(&frame), [json!(last)], "{frame}");
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        while let Ok(frame) = frames.try_recv() {
+            assert_ne!(frame["type"], "attention", "{frame}");
+        }
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_server_that_keeps_closing_its_event_stream_is_asked_less_and_less_often() {
+        let (computer, home) = watched_home(&[]).await;
+        home.state.lock().unwrap().close_events = true;
+        let (relay, _frames) = fake_relay(vec![Relay::Record(&["attention.v1"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        home.requested_more("/v1/events", 0).await;
+        tokio::time::sleep(Duration::from_millis(1600)).await;
+        // Waits of about 0.25, 0.5 and 1 s; reopening at once every 0.25 s
+        // would be seven.
+        let opened = home.requested("/v1/events");
+        assert!((2..=4).contains(&opened), "{opened} streams in 1.6 s");
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+
+    /// The turn ids a frame reports finished, in a stable order.
+    fn finished_set(frame: &Value) -> Vec<String> {
+        let mut turns: Vec<String> = finished_turns(frame)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        turns.sort();
+        turns
+    }
+    #[tokio::test]
+    async fn a_turn_that_ends_while_cloud_is_unreachable_is_reported_after_the_servers_buffer_moved_on()
+     {
+        let work = Uuid::now_v7();
+        let (computer, home) = watched_home(&[(work, "Work")]).await;
+        let (relay, mut frames) = fake_relay(vec![
+            Relay::Record(&["attention.v1"]),
+            Relay::Record(&["attention.v1"]),
+        ])
+        .await;
+        let attention = attention(&computer.paths);
+        let target = home.target(&computer.home.id, None);
+        let first = link(&relay, &target, &attention);
+        next_attention(&mut frames).await;
+        first.abort();
+        let _ = first.await;
+        // Cloud is away. The turn ends, and so many events follow (a chat
+        // streaming its answer) that the server keeps none from before.
+        let done = Uuid::now_v7();
+        let checks = home.requested(&format!("/v1/threads/{work}/active"));
+        home.emit(
+            "turn.finished",
+            work,
+            work,
+            finished_turn(done, work, "completed"),
+        );
+        home.requested_more(&format!("/v1/threads/{work}/active"), checks)
+            .await;
+        {
+            let mut state = home.state.lock().unwrap();
+            state.event_id += 3000;
+            state.kept_from = state.event_id;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let second = link(&relay, &target, &attention);
+        let frame = next_attention(&mut frames).await;
+        assert_eq!(finished_turns(&frame), [json!(done)], "{frame}");
+        second.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn root_turns_that_end_while_the_servers_events_are_missed_are_still_reported() {
+        let (seeded, started, helper) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let (computer, home) =
+            watched_home(&[(seeded, "Seeded"), (started, "Started"), (helper, "Helper")]).await;
+        home.state.lock().unwrap().threads.get_mut(&helper).unwrap()["parentId"] = json!(started);
+        // One root turn already runs when the connector starts watching, and
+        // so does a helper agent's.
+        let (early, late, assisting) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        {
+            let mut state = home.state.lock().unwrap();
+            state
+                .active
+                .insert(seeded, finished_turn(early, seeded, "running"));
+            state
+                .active
+                .insert(helper, finished_turn(assisting, helper, "running"));
+        }
+        let (relay, mut frames) = fake_relay(vec![Relay::Record(&["attention.v1"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        next_attention(&mut frames).await;
+        // Another starts once it watches; a prompt after it shows the start was read.
+        home.emit(
+            "turn.started",
+            started,
+            started,
+            finished_turn(late, started, "running"),
+        );
+        home.state
+            .lock()
+            .unwrap()
+            .permissions
+            .push(pending_permission("perm-1", started, started));
+        home.emit("permission.requested", started, started, json!({}));
+        let asked = next_attention(&mut frames).await;
+        assert_eq!(asked["items"].as_array().unwrap().len(), 1, "{asked}");
+        // All three end where the connector cannot see it: its stream is cut
+        // and the server keeps none of those events.
+        {
+            let mut state = home.state.lock().unwrap();
+            state.active.clear();
+            state.permissions.clear();
+            state
+                .turns
+                .insert(early, finished_turn(early, seeded, "completed"));
+            state
+                .turns
+                .insert(late, finished_turn(late, started, "failed"));
+            state
+                .turns
+                .insert(assisting, finished_turn(assisting, helper, "completed"));
+            state.event_id += 3000;
+            state.kept_from = state.event_id;
+        }
+        home.cut();
+        let frame = loop {
+            let frame = next_attention(&mut frames).await;
+            if !finished_turns(&frame).is_empty() {
+                break frame;
+            }
+        };
+        let mut expected = vec![json!(early).to_string(), json!(late).to_string()];
+        expected.sort();
+        // Both may settle in one frame or in two.
+        let frame = if finished_set(&frame) == expected {
+            frame
+        } else {
+            next_attention(&mut frames).await
+        };
+        assert_eq!(finished_set(&frame), expected, "{frame}");
+        assert_eq!(frame["items"], json!([]), "{frame}");
+        assert_eq!(home.requested(&format!("/v1/turns/{assisting}")), 0);
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_server_that_answers_late_is_waited_for_by_the_first_snapshot() {
+        let computer = Computer::new();
+        let home = FakeDaemon::start(Path::new(&computer.home.path)).await;
+        let other = FakeDaemon::start(Path::new(&computer.other.path)).await;
+        home.record(
+            &computer.paths,
+            &computer.home.id,
+            Path::new(&computer.home.path),
+            crate::current_executable_fingerprint().ok(),
+        );
+        other.record(
+            &computer.paths,
+            &computer.other.id,
+            Path::new(&computer.other.path),
+            crate::current_executable_fingerprint().ok(),
+        );
+        let (upgrade, helper) = (Uuid::now_v7(), Uuid::now_v7());
+        {
+            // Busy: its first answer misses the probe's time limit.
+            let mut state = other.state.lock().unwrap();
+            state.slow_info = 1;
+            state
+                .questions
+                .push(pending_question("question-1", helper, upgrade));
+            state.threads.insert(upgrade, chat(upgrade, "Upgrade"));
+        }
+        let (relay, mut frames) = fake_relay(vec![Relay::Record(&["attention.v1"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        let first = next_attention(&mut frames).await;
+        assert_eq!(first["revision"], 1);
+        let items = first["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "{first}");
+        assert_eq!(items[0]["id"], "question-1");
+        assert_eq!(items[0]["projectId"], computer.other.id.as_str());
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn servers_of_the_old_build_cannot_be_answered_from_the_phone_after_an_in_place_upgrade()
+    {
+        let computer = Computer::new();
+        let home = FakeDaemon::start(Path::new(&computer.home.path)).await;
+        let other = FakeDaemon::start(Path::new(&computer.other.path)).await;
+        home.record(
+            &computer.paths,
+            &computer.home.id,
+            Path::new(&computer.home.path),
+            Some("build-1".into()),
+        );
+        other.record(
+            &computer.paths,
+            &computer.other.id,
+            Path::new(&computer.other.path),
+            Some("build-1".into()),
+        );
+        let (fix, upgrade) = (Uuid::now_v7(), Uuid::now_v7());
+        home.state
+            .lock()
+            .unwrap()
+            .permissions
+            .push(pending_permission("perm-1", fix, fix));
+        other.state.lock().unwrap().questions.push(pending_question(
+            "question-1",
+            upgrade,
+            upgrade,
+        ));
+        let build = Arc::new(std::sync::Mutex::new("build-1".to_owned()));
+        let installed = build.clone();
+        let attention = remote_attention::Context::with_executable(
+            &computer.paths,
+            false,
+            remote_attention::Timing {
+                debounce: Duration::from_millis(50),
+                settle: Duration::from_millis(300),
+                scan: Duration::from_millis(100),
+                first: Duration::from_secs(5),
+            },
+            Arc::new(move || Some(installed.lock().unwrap().clone())),
+        );
+        let (relay, mut frames) = fake_relay(vec![Relay::Record(&["attention.v1"])]).await;
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        let actionable = |frame: &Value| -> Vec<(String, bool)> {
+            let mut items: Vec<(String, bool)> = frame["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| {
+                    (
+                        item["id"].as_str().unwrap().to_owned(),
+                        item["actionable"] == true,
+                    )
+                })
+                .collect();
+            items.sort();
+            items
+        };
+        let first = next_attention(&mut frames).await;
+        assert_eq!(
+            actionable(&first),
+            [("perm-1".to_owned(), true), ("question-1".to_owned(), true)],
+            "{first}"
+        );
+        // Haarness is upgraded in place while the connector keeps running:
+        // the gateway would now replace the other project's server.
+        *build.lock().unwrap() = "build-2".into();
+        let upgraded = next_attention(&mut frames).await;
+        assert_eq!(
+            actionable(&upgraded),
+            [
+                ("perm-1".to_owned(), true),
+                ("question-1".to_owned(), false)
+            ],
+            "{upgraded}"
+        );
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_registry_that_cannot_be_read_holds_up_nothing_but_the_next_match() {
+        let work = Uuid::now_v7();
+        let (computer, home) = watched_home(&[(work, "Work")]).await;
+        let (relay, mut frames) = fake_relay(vec![Relay::Record(&["attention.v1"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        next_attention(&mut frames).await;
+        // Another process holds the registry (creating a worktree, say), and
+        // the projects closed for remote access change, so it is read again.
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(computer.paths.data.join("workspaces.lock"))
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        std::fs::create_dir_all(computer.paths.config_dir()).unwrap();
+        std::fs::write(crate::remote::hidden_projects_file(&computer.paths), "[]").unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        home.state
+            .lock()
+            .unwrap()
+            .permissions
+            .push(pending_permission("perm-1", work, work));
+        home.emit("permission.requested", work, work, json!({}));
+        let frame = tokio::time::timeout(Duration::from_secs(3), next_attention(&mut frames))
+            .await
+            .expect("what waits is reported while the registry is held");
+        assert_eq!(frame["items"][0]["id"], "perm-1", "{frame}");
+        drop(lock);
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
     }
 }
