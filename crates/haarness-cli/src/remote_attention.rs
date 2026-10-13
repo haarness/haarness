@@ -1164,11 +1164,6 @@ fn root_turn(envelope: &EventEnvelope, chat: Option<ThreadId>) -> Option<Turn> {
     serde_json::from_value::<Turn>(envelope.payload.clone()).ok()
 }
 
-/// The finished turn of a chat a person started, when it completed or failed.
-fn finished_root_turn(envelope: &EventEnvelope, chat: Option<ThreadId>) -> Option<Turn> {
-    root_turn(envelope, chat).filter(finished)
-}
-
 fn finished(turn: &Turn) -> bool {
     matches!(turn.status, TurnStatus::Completed | TurnStatus::Failed)
 }
@@ -1849,6 +1844,12 @@ mod tests {
         json!({"id": Uuid::from_u128(50), "threadId": thread, "requestId": Uuid::from_u128(51),
             "status": status, "agent": "build", "provider": "echo", "model": "echo-1",
             "error": null, "createdAt": at(0), "updatedAt": at(3)})
+    }
+
+    /// The finished turn of a chat a person started, as `Follower::read`
+    /// finds it.
+    fn finished_root_turn(envelope: &EventEnvelope, chat: Option<ThreadId>) -> Option<Turn> {
+        root_turn(envelope, chat).filter(finished)
     }
 
     #[test]
