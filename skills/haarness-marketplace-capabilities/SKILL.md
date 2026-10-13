@@ -42,6 +42,38 @@ Use varied LLM prompts to select a skill, call an MCP tool, and delegate through
 
 Record installed IDs, artifact versions/hashes, session/chat IDs, actual tool names and output proof. Remove only test submissions/installs/resources using normal reversible lifecycle operations.
 
+## Validated 2026-10-13 (every surface, real models)
+
+A private Cloud stack (own Postgres container, ports outside 18xxx) with two fixture accounts covered CLI,
+TUI in tmux, Desktop through Playwright `_electron` over CDP, the model's tools via `haarness run --format json`
+plus `/v1/threads/{id}/items` for the tool trace, and Cloud web plus a Cloud session in the browser. Sign the
+browser in through the fixture IdP by adding `login_hint=<user>` to its authorize URL; complete a native
+`haarness login --json --no-browser` link the same way with an HTTP client. Solid inputs need the native value
+setter plus an `input` event when scripted. Copy a rebuilt binary with `rm` then `cp`: overwriting a signed
+copy in place gets it SIGKILLed (exit 137).
+
+Use trusted, read-only real resources: Anthropic's `skills` and `claude-plugins-official` repos (Git
+submissions with a subdirectory), the Microsoft Learn and DeepWiki remote MCPs (a harmless header placeholder
+proves per-install values), an owned npm extension from a tiny local registry
+(`HAARNESS_CLOUD_MARKETPLACE_NPM_REGISTRY`). Avoid plugins with hooks and agents pinned to `model: opus`.
+
+Checks that found real bugs and must stay covered:
+- Claude marketplace entries pinned by `sha`/`ref` (and `url` + `path`) install exactly that commit; build
+  a two-commit fixture repo and compare the installed file.
+- `enable|disable|remove <publisher/slug>`, installed state (`enabled`) in Desktop/TUI/Cloud session lists.
+- Extension uninstall/update/failed install leave no `data/extensions/packages/<id>`.
+- A public submission is invisible to other accounts and anonymous visitors until approved
+  (`POST /internal/ops/marketplace/versions/{id}/review`); a yank keeps 410-with-reason for pinned installers
+  and the CLI prints that reason.
+- Sessions of a non-production stack read that stack's catalog (`HAARNESS_CLOUD_MARKETPLACE_URL`).
+- The model installs `name@marketplace` through `marketplace_manage` (`plugin_marketplaces`, `plugin`).
+- `@agent` offers Claude-format agents (no `mode`) in the TUI; profiles carry `config/plugins/local`.
+
+Open gaps: Desktop's plugin install form asks for plugin and marketplace names instead of listing a registered
+marketplace's plugins; entries with `strict: false` and entry-level `skills` (no plugin.json) are not
+installable; there is no native publish/share command (Cloud web and the SDK publish); marketplace installs run
+without an approval prompt in Review mode, like other in-project actions.
+
 ## Explore beyond this guide
 
 Treat the documented flows as a starting point. Do not hesitate to test relevant behavior that is not documented here: inspect the current implementation, follow unexpected results, and cover interactions and failure paths suggested by the task. Stay within the authorized environment and scope. Fix discovered bugs when authorized, verify the fixes, and record newly validated steps and remaining gaps so this skill improves with use.
