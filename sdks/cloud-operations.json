@@ -1,5 +1,14 @@
 [
   {
+    "name": "apple_app_site_association",
+    "method": "GET",
+    "path": "/.well-known/apple-app-site-association",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/AppleAppSiteAssociation"
+    }
+  },
+  {
     "name": "native_router_session",
     "method": "POST",
     "path": "/api/v1/account/router-session",
@@ -243,6 +252,29 @@
     },
     "query": {
       "$ref": "#/components/schemas/RotateAccountApiKeyQuery"
+    }
+  },
+  {
+    "name": "list_attention",
+    "method": "GET",
+    "path": "/api/v1/attention",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/Page_AttentionItemDto"
+    },
+    "query": {
+      "$ref": "#/components/schemas/ListAttentionQuery"
+    }
+  },
+  {
+    "name": "dismiss_attention",
+    "method": "DELETE",
+    "path": "/api/v1/attention/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
     }
   },
   {
@@ -952,6 +984,114 @@
     "contentType": "application/json",
     "body": {
       "$ref": "#/components/schemas/CreateProjectRequest"
+    }
+  },
+  {
+    "name": "register_live_activity",
+    "method": "PUT",
+    "path": "/api/v1/push/activities/{activityId}",
+    "pathParams": [
+      "activityId"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/LiveActivityDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/RegisterLiveActivityRequest"
+    }
+  },
+  {
+    "name": "delete_live_activity",
+    "method": "DELETE",
+    "path": "/api/v1/push/activities/{activityId}",
+    "pathParams": [
+      "activityId"
+    ],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "get_push_badge",
+    "method": "GET",
+    "path": "/api/v1/push/badge",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/PushBadgeDto"
+    }
+  },
+  {
+    "name": "list_push_devices",
+    "method": "GET",
+    "path": "/api/v1/push/devices",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/PushDevicesResponse"
+    }
+  },
+  {
+    "name": "register_push_device",
+    "method": "PUT",
+    "path": "/api/v1/push/devices/current",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/PushDeviceDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/RegisterPushDeviceRequest"
+    }
+  },
+  {
+    "name": "unregister_push_device",
+    "method": "DELETE",
+    "path": "/api/v1/push/devices/current",
+    "pathParams": [],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "test_push_device",
+    "method": "POST",
+    "path": "/api/v1/push/devices/current/test",
+    "pathParams": [],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "remove_push_device",
+    "method": "DELETE",
+    "path": "/api/v1/push/devices/{id}",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "type": "null"
+    }
+  },
+  {
+    "name": "get_push_preferences",
+    "method": "GET",
+    "path": "/api/v1/push/preferences",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/PushPreferencesDto"
+    }
+  },
+  {
+    "name": "update_push_preferences",
+    "method": "PATCH",
+    "path": "/api/v1/push/preferences",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/PushPreferencesDto"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/UpdatePushPreferencesRequest"
     }
   },
   {

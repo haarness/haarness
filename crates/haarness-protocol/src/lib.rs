@@ -45,6 +45,10 @@ pub const WORKSPACE_HISTORY_CAPABILITY: &str = "workspace-history.v1";
 pub const WORKSPACE_CLEANUP_CAPABILITY: &str = "workspace-cleanup.v1";
 /// Server capability for workspace-scoped interactive PTY sessions.
 pub const PTY_CAPABILITY: &str = "pty.v1";
+/// Server capability for [`CreateThreadRequest::id`]. Older servers ignore an
+/// unknown `id` and choose their own, so a client that relies on its chosen id
+/// checks this first or compares the returned one.
+pub const THREAD_CREATE_ID_CAPABILITY: &str = "thread-create-id.v1";
 /// Reasoning-effort names Haarness can send to a provider, lightest first.
 /// Model catalogs advertise a per-model subset of this scale; a tier outside
 /// it is a provider-app setting the public request APIs reject, so it never
@@ -484,6 +488,12 @@ pub struct Item {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateThreadRequest {
+    /// Id for the new chat, chosen by the client so a retried request cannot
+    /// create a second one: when a chat with this id exists, it is returned
+    /// unchanged and nothing else in the request applies. Omitted, the server
+    /// chooses the id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<ThreadId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<ScheduleOrigin>,
     #[serde(default)]

@@ -2,6 +2,10 @@
 import { Transport, type RequestOptions } from "./cloud-transport.js";
 import type * as T from "./cloud-types.js";
 export class CloudApi extends Transport {
+  /** GET /.well-known/apple-app-site-association */
+  appleAppSiteAssociation(options: RequestOptions = {}): Promise<T.AppleAppSiteAssociation> {
+    return this.request("GET", `/.well-known/apple-app-site-association`, { binaryBody: false, binaryResponse: false, ...options });
+  }
   /** POST /api/v1/account/router-session */
   nativeRouterSession(body: T.NativeRouterSessionRequest, options: RequestOptions = {}): Promise<T.NativeRouterSessionResponse> {
     return this.request("POST", `/api/v1/account/router-session`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
@@ -77,6 +81,14 @@ export class CloudApi extends Transport {
   /** POST /api/v1/api-keys/{id}/rotate */
   rotateAccountApiKey(id: string, query: T.RotateAccountApiKeyQuery = {}, options: RequestOptions = {}): Promise<T.CreatedAccountApiKeyResponse> {
     return this.request("POST", `/api/v1/api-keys/${this.segment(id)}/rotate`, { query, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /api/v1/attention */
+  listAttention(query: T.ListAttentionQuery = {}, options: RequestOptions = {}): Promise<T.Page_AttentionItemDto> {
+    return this.request("GET", `/api/v1/attention`, { query, binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** DELETE /api/v1/attention/{id} */
+  dismissAttention(id: string, options: RequestOptions = {}): Promise<void> {
+    return this.request("DELETE", `/api/v1/attention/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /api/v1/billing/budgets */
   listBudgets(query: T.ListBudgetsQuery = {}, options: RequestOptions = {}): Promise<T.Items_BudgetDto> {
@@ -309,6 +321,46 @@ export class CloudApi extends Transport {
   /** PATCH /api/v1/projects/{id} */
   patchProject(id: string, body: T.CreateProjectRequest, options: RequestOptions = {}): Promise<T.ProjectDto> {
     return this.request("PATCH", `/api/v1/projects/${this.segment(id)}`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** PUT /api/v1/push/activities/{activityId} */
+  registerLiveActivity(activityId: string, body: T.RegisterLiveActivityRequest, options: RequestOptions = {}): Promise<T.LiveActivityDto> {
+    return this.request("PUT", `/api/v1/push/activities/${this.segment(activityId)}`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** DELETE /api/v1/push/activities/{activityId} */
+  deleteLiveActivity(activityId: string, options: RequestOptions = {}): Promise<void> {
+    return this.request("DELETE", `/api/v1/push/activities/${this.segment(activityId)}`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /api/v1/push/badge */
+  getPushBadge(options: RequestOptions = {}): Promise<T.PushBadgeDto> {
+    return this.request("GET", `/api/v1/push/badge`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /api/v1/push/devices */
+  listPushDevices(options: RequestOptions = {}): Promise<T.PushDevicesResponse> {
+    return this.request("GET", `/api/v1/push/devices`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** PUT /api/v1/push/devices/current */
+  registerPushDevice(body: T.RegisterPushDeviceRequest, options: RequestOptions = {}): Promise<T.PushDeviceDto> {
+    return this.request("PUT", `/api/v1/push/devices/current`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** DELETE /api/v1/push/devices/current */
+  unregisterPushDevice(options: RequestOptions = {}): Promise<void> {
+    return this.request("DELETE", `/api/v1/push/devices/current`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /api/v1/push/devices/current/test */
+  testPushDevice(options: RequestOptions = {}): Promise<void> {
+    return this.request("POST", `/api/v1/push/devices/current/test`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** DELETE /api/v1/push/devices/{id} */
+  removePushDevice(id: string, options: RequestOptions = {}): Promise<void> {
+    return this.request("DELETE", `/api/v1/push/devices/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** GET /api/v1/push/preferences */
+  getPushPreferences(options: RequestOptions = {}): Promise<T.PushPreferencesDto> {
+    return this.request("GET", `/api/v1/push/preferences`, { binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** PATCH /api/v1/push/preferences */
+  updatePushPreferences(body: T.UpdatePushPreferencesRequest, options: RequestOptions = {}): Promise<T.PushPreferencesDto> {
+    return this.request("PATCH", `/api/v1/push/preferences`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /api/v1/releases */
   currentRelease(query: T.CurrentReleaseQuery = {}, options: RequestOptions = {}): Promise<T.ReleaseManifestResponse> {

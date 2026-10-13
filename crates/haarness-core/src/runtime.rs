@@ -1845,7 +1845,18 @@ impl AgentRuntime {
         })
     }
 
+    /// Create a chat. With a client-chosen id that already names a chat, that
+    /// chat is returned as it is, without events or hooks: a retried create
+    /// (Cloud delivering a session's first prompt) cannot make a second one.
     pub async fn create_thread(&self, mut request: CreateThreadRequest) -> CoreResult<Thread> {
+        let chosen = request.id;
+        if let Some(id) = chosen {
+            match self.repository.get_thread(id).await {
+                Ok(existing) => return Ok(existing),
+                Err(CoreError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
         let components = self.components();
         if request.agent.is_none() {
             request.agent.clone_from(&components.config.default_agent);
@@ -1891,7 +1902,11 @@ impl AgentRuntime {
         if request.ultracode.is_none() {
             request.ultracode = Some(components.config.default_ultracode);
         }
-        let thread = self.repository.create_thread(request).await?;
+        let thread = match (self.repository.create_thread(request).await, chosen) {
+            // A concurrent create with the same id won the insert.
+            (Err(CoreError::Conflict(_)), Some(id)) => return self.repository.get_thread(id).await,
+            (result, _) => result?,
+        };
         self.publish_created_thread(&thread).await;
         if let Some(hooks) = &components.hooks {
             hooks.session_start(thread.id, &thread.agent).await;
@@ -8605,6 +8620,7 @@ impl RunnerTask {
         } else {
             self.repository
                 .create_thread(CreateThreadRequest {
+                    id: None,
                     schedule: None,
                     title: Some(title),
                     parent_id: Some(self.thread.id),

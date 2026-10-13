@@ -555,7 +555,7 @@ impl ThreadRepository for SqliteStore {
         let now = Utc::now();
         let thread = Thread {
             schedule: request.schedule,
-            id: ThreadId::new(),
+            id: request.id.unwrap_or_default(),
             // A client may still send the placeholder it knows, or nothing but
             // spaces; store this server's word for an untitled chat.
             title: request
@@ -576,12 +576,20 @@ impl ThreadRepository for SqliteStore {
             updated_at: now,
             revert: None,
         };
-        self.connection.lock().execute(
+        // A client-chosen id can name an existing chat: report the conflict
+        // instead of overwriting it (the runtime then returns that chat).
+        let inserted = self.connection.lock().execute(
             "INSERT INTO threads(id,title,parent_id,archived,agent,provider,model,created_at,updated_at,ultracode,is_subagent,schedule_json)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT(id) DO NOTHING",
             params![thread.id.to_string(), thread.title, thread.parent_id.map(|id| id.to_string()), false,
                 thread.agent, thread.provider, thread.model, time(thread.created_at), time(thread.updated_at), thread.ultracode, thread.is_subagent, thread.schedule.as_ref().map(serde_json::to_string).transpose().map_err(storage)?],
         ).map_err(storage)?;
+        if inserted == 0 {
+            return Err(CoreError::Conflict(format!(
+                "thread {} already exists",
+                thread.id
+            )));
+        }
         Ok(thread)
     }
 
@@ -1572,6 +1580,31 @@ fn storage(error: impl std::fmt::Display) -> CoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_chosen_thread_id_is_stored_once_and_never_overwritten() {
+        let store = SqliteStore::in_memory().unwrap();
+        let id = ThreadId::new();
+        let created = store
+            .create_thread(CreateThreadRequest {
+                id: Some(id),
+                title: Some("First".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(created.id, id);
+        let again = store
+            .create_thread(CreateThreadRequest {
+                id: Some(id),
+                title: Some("Second".into()),
+                ..Default::default()
+            })
+            .await;
+        assert!(matches!(again, Err(CoreError::Conflict(_))), "{again:?}");
+        assert_eq!(store.get_thread(id).await.unwrap().title, "First");
+        assert_eq!(store.list_threads(true).await.unwrap().len(), 1);
+    }
 
     #[tokio::test]
     async fn delegated_threads_are_distinct_from_forks_after_reload_and_rename() {

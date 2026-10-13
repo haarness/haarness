@@ -2718,6 +2718,93 @@ async fn authenticated_rest_turn_runs_end_to_end() {
 }
 
 #[tokio::test]
+async fn creating_a_chat_with_a_chosen_id_twice_returns_the_first_chat() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let providers = Arc::new(StaticProviderRegistry::new(vec![
+        Arc::new(Echo) as Arc<dyn ModelProvider>
+    ]));
+    let runtime = Arc::new(AgentRuntime::new(
+        store,
+        providers,
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(64),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let handle = serve(
+        listener,
+        "fixture-token",
+        ServerState {
+            browser: None,
+            management: None,
+            runtime: runtime.clone(),
+            mcp: Arc::new(NoMcp),
+            skills: Arc::new(NoSkills),
+            plugins: None,
+            workflows: None,
+            workspaces: None,
+            workspace_id: None,
+            workspace: std::env::temp_dir(),
+            project_trusted: false,
+            language: None,
+        },
+    )
+    .await
+    .unwrap();
+    let base = format!("http://{}", handle.address);
+    let client = reqwest::Client::new();
+    let info: ServerInfo = client
+        .get(format!("{base}/v1/info"))
+        .bearer_auth("fixture-token")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        info.capabilities
+            .iter()
+            .any(|capability| capability == haarness_protocol::THREAD_CREATE_ID_CAPABILITY)
+    );
+    let id = haarness_protocol::ThreadId::new();
+    let create = |title: &'static str| {
+        client
+            .post(format!("{base}/v1/threads"))
+            .bearer_auth("fixture-token")
+            .json(&serde_json::json!({"id": id, "title": title, "provider": "echo", "model": "echo-1"}))
+            .send()
+    };
+    let first = create("Fix login").await.unwrap();
+    assert_eq!(first.status(), reqwest::StatusCode::CREATED);
+    let first: Thread = first.json().await.unwrap();
+    assert_eq!(first.id, id);
+    assert_eq!(first.title, "Fix login");
+    // A retry (a lost response, a restarted worker) gets the same chat back.
+    let retried = create("Something else").await.unwrap();
+    assert_eq!(retried.status(), reqwest::StatusCode::CREATED);
+    let retried: Thread = retried.json().await.unwrap();
+    assert_eq!(retried.id, id);
+    assert_eq!(retried.title, "Fix login");
+    assert_eq!(retried.created_at, first.created_at);
+    // Concurrent creates that both find no chat: `cases/create_race.rs`.
+    let threads = runtime.list_threads(true).await.unwrap();
+    assert_eq!(threads.len(), 1, "{threads:?}");
+    let created = runtime
+        .events()
+        .subscribe(Some(0))
+        .replay
+        .into_iter()
+        .filter(|event| event.event_type == "thread.created")
+        .filter_map(|event| event.thread_id)
+        .collect::<Vec<_>>();
+    assert_eq!(created, [id], "one created event");
+    handle.shutdown().await.unwrap();
+}
+
+#[path = "cases/create_race.rs"]
+mod create_race;
+
+#[tokio::test]
 async fn forked_thread_continues_with_parent_history() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
     let provider = Capturing::default();
@@ -10351,6 +10438,235 @@ mod permission_parity;
 
 #[path = "cases/chrome.rs"]
 mod chrome;
+
+#[tokio::test]
+async fn workspace_file_routes_answer_a_missing_file_with_404_in_plain_words() {
+    let workspace =
+        std::env::temp_dir().join(format!("haarness-files-gone-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(workspace.join("docs")).unwrap();
+    std::fs::write(workspace.join("docs/readme.md"), "# Readme").unwrap();
+    // Servers run in their canonical folder (the temporary one is a symlink on macOS).
+    let workspace = workspace.canonicalize().unwrap();
+    let runtime = Arc::new(AgentRuntime::new(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Echo) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(64),
+    ));
+    let handle = serve(
+        TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        "files-fixture",
+        ServerState {
+            browser: None,
+            management: None,
+            runtime,
+            mcp: Arc::new(NoMcp),
+            skills: Arc::new(NoSkills),
+            plugins: None,
+            workflows: None,
+            workspaces: None,
+            workspace_id: None,
+            workspace: workspace.clone(),
+            project_trusted: false,
+            language: None,
+        },
+    )
+    .await
+    .unwrap();
+    let base = format!("http://{}", handle.address);
+    let http = reqwest::Client::new();
+    let get = |path: &str| {
+        http.get(format!("{base}/v1/files/{path}"))
+            .bearer_auth("files-fixture")
+            .send()
+    };
+    let answer = |response: reqwest::Response| async move {
+        (response.status(), response.text().await.unwrap())
+    };
+    let gone = |message: &str| (reqwest::StatusCode::NOT_FOUND, message.to_owned());
+    assert_eq!(
+        answer(get("content?path=docs/deleted.md").await.unwrap()).await,
+        gone("This file no longer exists")
+    );
+    assert_eq!(
+        answer(get("list?path=deleted").await.unwrap()).await,
+        gone("This folder no longer exists")
+    );
+    // A missing file has no current revision, whether or not its folder went too.
+    for path in ["docs/deleted.html", "deleted/index.html"] {
+        let (status, body) =
+            answer(get(&format!("preview/current?path={path}")).await.unwrap()).await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{path}: {body}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap()["revision"],
+            Value::Null
+        );
+    }
+    // Versions live outside the workspace: only the version itself can be gone.
+    let unknown = "0".repeat(64);
+    assert_eq!(
+        answer(
+            get(&format!("preview?path=deleted/index.html&hash={unknown}"))
+                .await
+                .unwrap()
+        )
+        .await,
+        gone("This preview version is no longer available")
+    );
+    // Other failures keep their 400 and their words.
+    assert_eq!(
+        answer(get("content?path=../outside.txt").await.unwrap()).await,
+        (
+            reqwest::StatusCode::BAD_REQUEST,
+            "Path must be relative to the workspace".to_owned()
+        )
+    );
+    assert_eq!(
+        answer(get("content?path=docs").await.unwrap()).await,
+        (
+            reqwest::StatusCode::BAD_REQUEST,
+            "Only regular files can be opened".to_owned()
+        )
+    );
+    let listed: Value = get("list?path=docs").await.unwrap().json().await.unwrap();
+    assert_eq!(listed["entries"][0]["path"], "docs/readme.md");
+    handle.shutdown().await.unwrap();
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+/// Where `preview` keeps a workspace's versions, as the server finds it.
+fn preview_versions(workspace: &std::path::Path) -> std::path::PathBuf {
+    use sha2::Digest as _;
+    let root = std::env::var_os("HAARNESS_DATA_DIR")
+        .map(|root| std::path::PathBuf::from(root).join("data"))
+        .or_else(|| {
+            std::env::var_os("HAARNESS_HOME")
+                .map(std::path::PathBuf::from)
+                .filter(|root| root.is_absolute())
+                .map(|root| root.join("data"))
+        })
+        .unwrap_or_else(|| {
+            directories::ProjectDirs::from("dev", "haarness", "haarness")
+                .unwrap()
+                .data_local_dir()
+                .to_owned()
+        });
+    let key = sha2::Sha256::digest(
+        workspace
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .as_bytes(),
+    );
+    root.join("preview").join(format!("{key:x}"))
+}
+
+#[tokio::test]
+async fn a_preview_whose_folder_was_removed_is_restored_into_a_new_folder() {
+    let base = std::env::temp_dir().join(format!("haarness-preview-gone-{}", uuid::Uuid::now_v7()));
+    let (workspace, outside) = (base.join("workspace"), base.join("outside"));
+    std::fs::create_dir_all(workspace.join("site")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(workspace.join("site/index.html"), "<h1>first</h1>").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, workspace.join("link")).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+    let shown = haarness_server::preview::PreviewTool(workspace.clone())
+        .execute(
+            serde_json::json!({"filePath": "site/index.html"}),
+            ToolContext {
+                execution: haarness_core::ExecutionSettings::default(),
+                thread_id: haarness_protocol::ThreadId::new(),
+                turn_id: haarness_protocol::TurnId::new(),
+                workspace: workspace.clone(),
+                authorized_external_paths: Vec::new(),
+                cancel: CancellationToken::new(),
+                invoker: None,
+            },
+        )
+        .await
+        .unwrap();
+    let version = shown.metadata["preview"]["version"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    std::fs::remove_dir_all(workspace.join("site")).unwrap();
+    let runtime = Arc::new(AgentRuntime::new(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Echo) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(64),
+    ));
+    let handle = serve(
+        TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        "preview-fixture",
+        ServerState {
+            browser: None,
+            management: None,
+            runtime,
+            mcp: Arc::new(NoMcp),
+            skills: Arc::new(NoSkills),
+            plugins: None,
+            workflows: None,
+            workspaces: None,
+            workspace_id: None,
+            workspace: workspace.clone(),
+            project_trusted: false,
+            language: None,
+        },
+    )
+    .await
+    .unwrap();
+    let base_url = format!("http://{}", handle.address);
+    let http = reqwest::Client::new();
+    // The file and its folder are gone: deleted, so Restore is offered.
+    let current: Value = http
+        .get(format!(
+            "{base_url}/v1/files/preview/current?path=site/index.html"
+        ))
+        .bearer_auth("preview-fixture")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(current["revision"], Value::Null);
+    let empty = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(b""));
+    let restore = |path: &str| {
+        http.post(format!("{base_url}/v1/files/preview/restore"))
+            .bearer_auth("preview-fixture")
+            .json(&serde_json::json!({"path": path, "hash": version, "revision": empty}))
+            .send()
+    };
+    let restored = restore("site/index.html").await.unwrap();
+    assert_eq!(restored.status(), reqwest::StatusCode::OK);
+    let restored: Value = restored.json().await.unwrap();
+    assert_eq!(restored["file"]["revision"], version.as_str());
+    assert_eq!(restored["backup"], empty.as_str());
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("site/index.html")).unwrap(),
+        "<h1>first</h1>"
+    );
+    // Folders are made only inside the workspace and outside Git metadata.
+    #[cfg(unix)]
+    {
+        let escaped = restore("link/gone/index.html").await.unwrap();
+        assert_eq!(escaped.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(escaped.text().await.unwrap(), "Path escapes the workspace");
+        assert!(!outside.join("gone").exists());
+    }
+    let git = restore(".git/gone/index.html").await.unwrap();
+    assert_eq!(git.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(!workspace.join(".git").exists());
+    handle.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(preview_versions(&workspace));
+    std::fs::remove_dir_all(base).unwrap();
+}
 
 #[tokio::test]
 async fn published_remote_chat_cannot_read_or_control_other_conversations() {

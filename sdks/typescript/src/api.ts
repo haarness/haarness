@@ -494,9 +494,9 @@ export class Api extends Transport {
   hostOpen(body: T.Open, options: RequestOptions = {}): Promise<T.WorkspaceInfo> {
     return this.request("POST", `/v1/host/open`, { body, binaryBody: false, binaryResponse: false, ...options });
   }
-  /** DELETE /v1/host/projects/{id} */
-  hostClose(id: string, options: RequestOptions = {}): Promise<void> {
-    return this.request("DELETE", `/v1/host/projects/${this.segment(id)}`, { binaryBody: false, binaryResponse: false, ...options });
+  /** DELETE /v1/host/projects/{workspace_id} */
+  hostClose(workspaceId: string, options: RequestOptions = {}): Promise<void> {
+    return this.request("DELETE", `/v1/host/projects/${this.segment(workspaceId)}`, { binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /s/{token} */
   readSharedSession(token: string, options: RequestOptions = {}): Promise<string> {

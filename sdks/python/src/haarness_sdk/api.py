@@ -495,9 +495,9 @@ class Api(Transport):
         """POST /v1/host/open."""
         return cast("T.WorkspaceInfo", self.request('POST', f'/v1/host/open', body=body, binary_body=False, binary_response=False, options=options))
 
-    def host_close(self, id: str, *, options: RequestOptions | None = None) -> None:
-        """DELETE /v1/host/projects/{id}."""
-        return cast("None", self.request('DELETE', f'/v1/host/projects/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+    def host_close(self, workspace_id: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /v1/host/projects/{workspace_id}."""
+        return cast("None", self.request('DELETE', f'/v1/host/projects/{self.segment(workspace_id)}', binary_body=False, binary_response=False, options=options))
 
     def read_shared_session(self, token: str, *, options: RequestOptions | None = None) -> str:
         """GET /s/{token}."""
@@ -996,9 +996,9 @@ class AsyncApi(AsyncTransport):
         """POST /v1/host/open."""
         return cast("T.WorkspaceInfo", await self.request('POST', f'/v1/host/open', body=body, binary_body=False, binary_response=False, options=options))
 
-    async def host_close(self, id: str, *, options: RequestOptions | None = None) -> None:
-        """DELETE /v1/host/projects/{id}."""
-        return cast("None", await self.request('DELETE', f'/v1/host/projects/{self.segment(id)}', binary_body=False, binary_response=False, options=options))
+    async def host_close(self, workspace_id: str, *, options: RequestOptions | None = None) -> None:
+        """DELETE /v1/host/projects/{workspace_id}."""
+        return cast("None", await self.request('DELETE', f'/v1/host/projects/{self.segment(workspace_id)}', binary_body=False, binary_response=False, options=options))
 
     async def read_shared_session(self, token: str, *, options: RequestOptions | None = None) -> str:
         """GET /s/{token}."""

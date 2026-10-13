@@ -964,6 +964,17 @@
               "null"
             ]
           },
+          "id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ThreadId",
+                "description": "Id for the new chat, chosen by the client so a retried request cannot\ncreate a second one: when a chat with this id exists, it is returned\nunchanged and nothing else in the request applies. Omitted, the server\nchooses the id."
+              }
+            ]
+          },
           "model": {
             "type": [
               "string",
@@ -6045,6 +6056,9 @@
               }
             },
             "description": ""
+          },
+          "404": {
+            "description": "This file no longer exists (plain text)"
           }
         },
         "tags": []
@@ -6107,6 +6121,9 @@
               }
             },
             "description": ""
+          },
+          "404": {
+            "description": "This folder no longer exists (plain text)"
           }
         },
         "tags": []
@@ -6143,6 +6160,9 @@
               }
             },
             "description": ""
+          },
+          "404": {
+            "description": "This preview version is no longer available (plain text)"
           }
         },
         "tags": []
@@ -6319,13 +6339,14 @@
         "tags": []
       }
     },
-    "/v1/host/projects/{id}": {
+    "/v1/host/projects/{workspace_id}": {
       "delete": {
         "operationId": "close_remote_project",
         "parameters": [
           {
+            "description": "Workspace id: `workspaces[].id` from GET /v1/host/projects, not `projects[].id`",
             "in": "path",
-            "name": "id",
+            "name": "workspace_id",
             "required": true,
             "schema": {
               "type": "string"
@@ -6337,6 +6358,7 @@
             "description": ""
           }
         },
+        "summary": "Closes a project for remote access. The id is the catalog's workspace id\n(`workspaces[].id` from `GET /v1/host/projects`), not its project id.",
         "tags": []
       }
     },

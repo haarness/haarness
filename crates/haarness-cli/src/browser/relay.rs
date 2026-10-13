@@ -527,13 +527,27 @@ mod tests {
 
     #[test]
     fn rest_urls_are_built_from_segments() {
+        let base = Url::parse("http://127.0.0.1:4096/").unwrap();
         let server = Server {
             id: "s".into(),
             workspace: "/w".into(),
             version: "0".into(),
-            base: Url::parse("http://127.0.0.1:4096/").unwrap(),
+            base: base.clone(),
             token: "t".into(),
             capable: true,
+            record: std::sync::Arc::new(super::super::discovery::Record {
+                file: "/c/workspaces/w/runtime.json".into(),
+                discovery: crate::rendezvous::RuntimeDiscovery {
+                    url: "http://127.0.0.1:4096".into(),
+                    token: "t".into(),
+                    pid: 1,
+                    workspace: Some("/w".into()),
+                    executable_fingerprint: None,
+                    access_fingerprint: None,
+                    trace_endpoint: None,
+                },
+                base,
+            }),
         };
         let api = Api::new(&server, reqwest::Client::new());
         assert_eq!(
