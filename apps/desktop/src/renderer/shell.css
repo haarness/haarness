@@ -853,6 +853,15 @@ html[dir="rtl"] :is(.session-title, .session-bar-name) {
 .dock-tab.active > button:first-child {
   color: var(--text);
 }
+/* The agent changed this panel's page while another panel was shown. */
+.dock-tab-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
 .dock-tab > .icon-button {
   width: 18px;
   height: 18px;

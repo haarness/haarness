@@ -57,7 +57,13 @@ export function createBrowserHost(
     tabs: [...e.tabs].map(([id, tab]) => e.pages.get(id)?.state() ?? tab),
     focusedTabID: e.focusedTabID,
   });
-  function publish(e: Entry, error?: string, focus = false) {
+  /**
+   * Sends the tabs to the server and the window. `focus` brings the Browser
+   * panel forward (the agent opened or focused a tab); `reveal` says the
+   * agent took the shown tab to another page, which reopens a closed panel
+   * and marks the Browser tab when another panel is showing.
+   */
+  function publish(e: Entry, error?: string, focus = false, reveal = false) {
     if (e.disposed) return;
     const inventory = state(e);
     if (e.socket.readyState === WebSocket.OPEN)
@@ -66,7 +72,7 @@ export function createBrowserHost(
       kind: "browser",
       connection: e.connection,
       id: e.thread,
-      data: { state: withIcons(e, inventory), error, focus },
+      data: { state: withIcons(e, inventory), error, focus, reveal },
     });
     clearTimeout(e.save);
     e.save = setTimeout(() => {
@@ -235,6 +241,7 @@ export function createBrowserHost(
     e: Entry,
     command: Browser.Command,
     signal: AbortSignal,
+    agent = false,
   ): Promise<Browser.Result> {
     if (signal.aborted || e.disposed)
       throw new Error(
@@ -298,7 +305,17 @@ export function createBrowserHost(
     const page = e.pages.get(a.tabID) ?? create(e, true, undefined, tab);
     await page.ready;
     const result = await page.execute(command, signal);
-    publish(e);
+    // The agent took the tab the Browser shows to another page: the Browser
+    // comes back if the user closed it. A reload is the same page again.
+    publish(
+      e,
+      undefined,
+      false,
+      agent &&
+        !command.inspect &&
+        (a.type === "navigate" || a.type === "back" || a.type === "forward") &&
+        a.tabID === e.focusedTabID,
+    );
     return result;
   }
   async function dispose(
@@ -526,7 +543,7 @@ export function createBrowserHost(
                 policy: command.policy as BrowserPolicy,
                 approved: new Set((command.target?.resources ?? (command.action.type === "tabs.open" ? [normalizeURL(command.action.url ?? "about:blank")] : [])).map(destinationOrigin).filter((origin): origin is string => !!origin)),
               };
-              const result = await execute(entry, command, abort.signal);
+              const result = await execute(entry, command, abort.signal, true);
               if (entry.access?.error) throw new Error(entry.access.error);
               outcome = { type: "success", result };
             } catch (error) {

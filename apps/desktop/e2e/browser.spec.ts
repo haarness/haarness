@@ -435,6 +435,123 @@ test("browser controls remain responsive during waits and pages yield to dialogs
   if (tabID) await tool("tabs_focus", { tabID });
 });
 
+/** The window as the user sees it: the page with each visible native browser view drawn over it. */
+async function composite(path: string) {
+  const shots = await app.evaluate(async ({ BrowserWindow }) => {
+    const win = BrowserWindow.getAllWindows()[0];
+    const views = [];
+    for (const view of win.contentView.children) {
+      if (!("webContents" in view) || !view.getVisible()) continue;
+      const contents = view.webContents as Electron.WebContents;
+      if (contents === win.webContents) continue;
+      views.push({ bounds: view.getBounds(), data: (await contents.capturePage()).toDataURL() });
+    }
+    return {
+      base: (await win.webContents.capturePage()).toDataURL(),
+      width: win.getContentSize()[0],
+      views,
+    };
+  });
+  const data = await page.evaluate(async (shots) => {
+    const load = (src: string) =>
+      new Promise<HTMLImageElement>((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = reject;
+        image.src = src;
+      });
+    const base = await load(shots.base);
+    const canvas = document.createElement("canvas");
+    canvas.width = base.naturalWidth;
+    canvas.height = base.naturalHeight;
+    const scale = base.naturalWidth / shots.width;
+    const context = canvas.getContext("2d")!;
+    context.drawImage(base, 0, 0);
+    for (const view of shots.views)
+      context.drawImage(
+        await load(view.data),
+        view.bounds.x * scale,
+        view.bounds.y * scale,
+        view.bounds.width * scale,
+        view.bounds.height * scale,
+      );
+    return canvas.toDataURL("image/png");
+  }, shots);
+  await mkdir(join(path, ".."), { recursive: true });
+  await writeFile(path, Buffer.from(data.split(",")[1], "base64"));
+}
+test("the Browser comes back when the agent takes the shown tab to another page, not for a reload or a background tab", async () => {
+  const browser = page.getByRole("region", { name: "Web browser" });
+  const sidePanel = page.locator(".side-panel");
+  const hide = async () => {
+    await page.getByRole("button", { name: "Hide side panel", exact: true }).click();
+    await expect(sidePanel).toBeHidden();
+  };
+  /** Waits for a command to settle, then checks the panel stayed as it was. */
+  const stays = async (check: () => Promise<void>) => {
+    await page.waitForTimeout(750);
+    await check();
+  };
+  await tool("tabs_focus", { tabID });
+  await expect(browser).toBeVisible();
+  // The user closed the side panel; the agent takes the shown tab elsewhere.
+  await hide();
+  await tool("navigate", { tabID, url: siteURL + "/frame" });
+  await expect(browser).toBeVisible();
+  await composite("test-results/browser-reopened.png");
+  // The user closed the Browser tab itself, leaving the panel launcher.
+  await page.getByRole("button", { name: "Close browser panel", exact: true }).click();
+  await expect(browser).toBeHidden();
+  await tool("navigate", { tabID, url: siteURL + "/popup" });
+  await expect(browser).toBeVisible();
+  // A reload is the same page again.
+  await hide();
+  await tool("reload", { tabID });
+  await stays(() => expect(sidePanel).toBeHidden());
+  // Back and Forward are other pages.
+  await tool("back", { tabID });
+  await expect(browser).toBeVisible();
+  await hide();
+  await tool("forward", { tabID });
+  await expect(browser).toBeVisible();
+  // A tab the agent keeps in the background loads pages where it is.
+  const background = (await tool("tabs_open", { url: siteURL + "/popup", focus: false })).value.id;
+  await hide();
+  await tool("navigate", { tabID: background, url: siteURL + "/frame" });
+  await stays(() => expect(sidePanel).toBeHidden());
+  // Another panel on screen keeps the side panel; the Browser tab gets a dot.
+  await page.getByRole("button", { name: "Show side panel", exact: true }).click();
+  await page.getByRole("button", { name: "Open panel", exact: true }).click();
+  await page.getByRole("button", { name: "Open Context", exact: true }).click();
+  const browserTab = page.getByRole("button", { name: "Show browser panel", exact: true });
+  await expect(page.locator(".dock-tab.active")).toContainText("Context");
+  await tool("navigate", { tabID, url: siteURL });
+  await expect(browserTab.locator(".dock-tab-dot")).toBeVisible();
+  await expect(browserTab).toHaveAttribute("aria-description", "The agent opened another page");
+  await expect(page.locator(".dock-tab.active")).toContainText("Context");
+  await expect(browser).toBeHidden();
+  await composite("test-results/browser-dot.png");
+  await browserTab.click();
+  await expect(browser).toBeVisible();
+  await expect(browserTab.locator(".dock-tab-dot")).toHaveCount(0);
+  await expect(browserTab).not.toHaveAttribute("aria-description", /./);
+  // The dot is about this chat's page; another chat shows none.
+  await page.getByRole("button", { name: "Show context panel", exact: true }).click();
+  await tool("navigate", { tabID, url: siteURL + "/frame" });
+  await expect(browserTab.locator(".dock-tab-dot")).toBeVisible();
+  await select(second);
+  await expect(browserTab.locator(".dock-tab-dot")).toHaveCount(0);
+  await select(thread);
+  await expect(page.locator(".dock-tab.active")).toContainText("Context");
+  await page.getByRole("button", { name: "Close context panel", exact: true }).click();
+  await tool("tabs_close", { tabID: background });
+  // Leave the tab on the fixture page the following tests read.
+  await tool("navigate", { tabID, url: siteURL });
+  await tool("tabs_focus", { tabID });
+  await expect(browser).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
 test("browser transport requires authentication and the owning host lease", async () => {
   const base = endpoint.url + "/v1/threads/" + thread.id + "/browser";
   const unauthorized = await fetch(base + "/tool", {
