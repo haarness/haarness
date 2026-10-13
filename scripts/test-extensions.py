@@ -66,7 +66,11 @@ class Provider(http.server.BaseHTTPRequestHandler):
         else:
             system = " ".join(str(m["content"]) for m in messages if m["role"] in ("system", "developer"))
             assert "SYSTEM_EXTENSION_V1" in system, system
-            assert "PROMPT_EXTENSION" in system, system
+            # Prompt-hook context travels with the turn, after the prompt, so
+            # the system prompt stays byte-identical from turn to turn.
+            assert "PROMPT_EXTENSION" not in system, system
+            users = " ".join(str(m["content"]) for m in messages if m["role"] == "user")
+            assert "PROMPT_EXTENSION" in users, messages
             # chat.params and chat.headers reach the wire for OpenAI-compatible providers.
             assert body.get("temperature") == 0.1, body
             assert body.get("fixture_option") == "yes", body
@@ -250,7 +254,9 @@ export default (ctx) => ({
             prepared = reports[-1]["prompt"]
             request = next(request for request in reversed(REQUESTS) if any(message.get("content") == "CHAT_ONLY" for message in request["messages"]))
             system = " ".join(message["content"] for message in request["messages"] if message["role"] in ("system", "developer"))
-            assert prepared["system_tokens"] == (len(system) + 3) // 4, (prepared, system)
+            # The estimator weighs character classes per tokenizer family, so
+            # it lands near, not exactly on, four characters per token.
+            assert len(system) / 8 < prepared["system_tokens"] < len(system) / 2, (prepared, len(system))
             assert prepared["tool_tokens"] > 0 and prepared["history_tokens"] > 0
             assert prepared["media_attachments"] == 0
 
