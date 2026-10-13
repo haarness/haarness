@@ -401,7 +401,13 @@ impl HookPort for Rewrite {
     async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
         HookDecision::default()
     }
-    async fn permission_request(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+    async fn permission_request(
+        &self,
+        _: ThreadId,
+        _: &str,
+        _: &[String],
+        _: &Value,
+    ) -> HookDecision {
         HookDecision::default()
     }
     async fn stop(&self, _: ThreadId) {}
@@ -502,7 +508,13 @@ impl HookPort for ShellEnv {
     async fn user_prompt_submit(&self, _: ThreadId, _: &str) -> HookDecision {
         HookDecision::default()
     }
-    async fn permission_request(&self, _: ThreadId, _: &str, _: &Value) -> HookDecision {
+    async fn permission_request(
+        &self,
+        _: ThreadId,
+        _: &str,
+        _: &[String],
+        _: &Value,
+    ) -> HookDecision {
         HookDecision::default()
     }
     async fn stop(&self, _: ThreadId) {}

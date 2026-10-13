@@ -167,7 +167,7 @@ correspond to runtime lifecycle events; `threadId` stands in for `sessionID`.
 | `tool.before` | `threadId`, `tool`, `arguments` | `{arguments}` replaces input before permission evaluation; `{context}` adds context; `{block}` denies execution |
 | `tool.after` | Same identity/input plus `output`, `isError` | `{context}` adds context to the tool result |
 | `tool.definition` | `toolID`, `description`, `parameters` | `{description}`, `{parameters}` rewrite the model-facing definition of that tool |
-| `permission.ask` | `threadId`, `permission`, `detail` | `{status: "allow" \| "deny" \| "ask"}` answers the prompt before the user sees it; `{reason}` explains a denial |
+| `permission.ask` | `threadId`, `permission`, `patterns`, `detail` | `{status: "allow" \| "deny" \| "ask"}` answers the prompt before the user sees it; `{reason}` explains a denial |
 | `command.execute.before` | `threadId`, `command`, `arguments` | `{block}` aborts the slash command before its template expands; `{context}` joins the turn's hook context |
 | `shell.env` | `threadId`, `cwd` | `{env}` adds environment variables to that bash tool invocation |
 | `session.start` | `threadId`, `agent`, `directory` | Observation; no result |
@@ -195,7 +195,13 @@ Where each hook fires:
 - `permission.ask` runs before the user is prompted and before command
   `PermissionRequest` hooks; `allow` and `deny` resolve the prompt, `ask` or
   no result keeps it, and a thrown error denies. A configured `deny` rule is
-  never reopened.
+  never reopened. `patterns` are what the prompt asks about and `detail` is
+  the tool's arguments. When a prompt asks about the file a path really opens
+  (a link `notes.txt -> .env` asks for `.env`), that file is asked about in a
+  call of its own, with `patterns: [".env"]` and `detail.path` set to it, so
+  an extension judges the file the tool opens rather than the link. The
+  prompt is answered only when every call allows it; a `deny` in any call
+  refuses it.
 - `command.execute.before` runs when a slash command turn starts, before its
   template expands.
 - `shell.env` runs for each `bash` tool call, after permission evaluation;

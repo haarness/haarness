@@ -34,7 +34,7 @@ export interface Hooks {
   /** Rewrite a tool's model-facing description or JSON Schema, once per tool when the registry is composed. Arguments are still validated against the tool's own contract. */
   "tool.definition"?(input: { toolID: string; description: string; parameters: Schema }, context: Context): Reply<{ description?: string; parameters?: Schema }>;
   /** Answer a permission prompt before the user sees it. Omit `status` or return "ask" to keep the prompt; a thrown error denies. */
-  "permission.ask"?(input: { threadId: string; permission: string; detail: Json }, context: Context): Reply<{ status?: "allow" | "deny" | "ask"; reason?: string }>;
+  "permission.ask"?(input: { threadId: string; permission: string; patterns: string[]; detail: Json }, context: Context): Reply<{ status?: "allow" | "deny" | "ask"; reason?: string }>;
   /** Observe or abort a slash command before its template expands. */
   "command.execute.before"?(input: { threadId: string; command: string; arguments: string }, context: Context): Reply<{ block?: string; context?: string }>;
   /** Extra environment variables for one bash tool invocation. */
