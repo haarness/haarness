@@ -1,25 +1,12 @@
 /**
- * Which pages and sites the agent may touch in Chrome. The URL helpers match
- * Desktop's (`browser/policy.ts`, `browserSiteAccess`) so one rule reads the
- * same in both browsers; they move to the shared driver at integration.
+ * Which pages and sites the agent may touch in Chrome. The URL and site-rule
+ * helpers are Desktop's, from the shared driver, so one rule reads the same
+ * in both browsers and on the server.
  */
+import { browserSiteAccess } from "@haarness/browser-driver/policy";
 import type { Access, Method, Policy } from "./browser";
 
-export function destinationOrigin(input: string): string | undefined {
-  if (!URL.canParse(input)) return;
-  const url = new URL(input);
-  return /^https?:$/.test(url.protocol) && !url.username && !url.password ? url.origin : undefined;
-}
-
-export function normalizeURL(input: string): string {
-  const value = input.trim() || "about:blank";
-  const local = /^(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])(?::\d+)?(?:[/?#]|$)/i.test(value);
-  const url =
-    value === "about:blank" || /^[a-z][a-z\d+.-]*:\/\//i.test(value) ? value : `${local ? "http" : "https"}://${value}`;
-  if (url !== "about:blank" && !destinationOrigin(url))
-    throw new Error("Only HTTP, HTTPS, and about:blank URLs are supported.");
-  return url;
-}
+export { destinationOrigin, normalizeURL, policyOrigin } from "@haarness/browser-driver/policy";
 
 /**
  * The same site with `www.` added or removed, so one approval covers both
@@ -40,23 +27,7 @@ export function wwwTwin(origin: string): string | undefined {
 
 /** Exact origins take priority; otherwise the most specific subdomain rule wins. */
 export function siteAccess(policy: Policy, origin: string): Access {
-  const match = (pattern: string) => {
-    if (pattern === origin) return true;
-    const index = pattern.indexOf("*.");
-    if (index < 0 || !origin.startsWith(pattern.slice(0, index))) return false;
-    const host = origin.slice(index),
-      suffix = pattern.slice(index + 2);
-    if (!host.endsWith(suffix)) return false;
-    const subdomain = host.slice(0, -suffix.length);
-    return subdomain.length > 1 && subdomain.endsWith(".");
-  };
-  return (
-    policy.sites
-      .filter((site) => match(site.origin))
-      .sort(
-        (a, b) => Number(a.origin.includes("*")) - Number(b.origin.includes("*")) || b.origin.length - a.origin.length,
-      )[0] ?? policy.defaults
-  );
+  return browserSiteAccess(policy, origin);
 }
 
 /**

@@ -578,23 +578,22 @@ impl Scheduler {
         for _ in 0..3 {
             match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(mut file) => {
-                    serde_json::to_writer(
-                        &mut file,
+                    let contents = serde_json::to_vec(
                         &serde_json::json!({"pid": std::process::id(), "createdAt": Utc::now()}),
                     )?;
+                    file.write_all(&contents)?;
                     file.flush()?;
-                    return Ok(Some(RunGuard { path }));
+                    return Ok(Some(RunGuard { path, contents }));
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    let stale = fs::metadata(&path)
-                        .and_then(|meta| meta.modified())
-                        .ok()
-                        .and_then(|modified| modified.elapsed().ok())
-                        .is_some_and(|age| age > Duration::from_secs(60 * 60));
-                    if !stale {
+                    let Some(stale) = abandoned_lock(&path) else {
                         return Ok(None);
+                    };
+                    // Remove only the lock judged abandoned, not one another
+                    // runner wrote since.
+                    if fs::read(&path).is_ok_and(|contents| contents == stale) {
+                        remove_if_exists(&path)?;
                     }
-                    remove_if_exists(&path)?;
                     thread::sleep(Duration::from_millis(25));
                 }
                 Err(error) => return Err(error.into()),
@@ -743,8 +742,11 @@ impl Scheduler {
     pub fn render_systemd(&self, schedule: &Schedule) -> Result<(String, String)> {
         let args = self.runner_args(schedule, RunSource::SystemdUser);
         let timer_body = match &schedule.trigger {
+            // OnUnitActiveSec= alone never fires: it counts from the
+            // service's last activation, and a new timer has none.
+            // OnActiveSec= schedules the first run from the timer's start.
             Trigger::Interval { seconds } => {
-                format!("OnUnitActiveSec={seconds}s\nAccuracySec=1s")
+                format!("OnActiveSec={seconds}s\nOnUnitActiveSec={seconds}s\nAccuracySec=1s")
             }
             Trigger::Once { at } => format!("OnCalendar={}", at.format("%Y-%m-%d %H:%M:%S UTC")),
             Trigger::Cron { expression } => expand_cron(expression)?
@@ -1002,12 +1004,123 @@ impl Scheduler {
 
 pub struct RunGuard {
     path: PathBuf,
+    /// The lock as this run wrote it.
+    contents: Vec<u8>,
 }
 
 impl Drop for RunGuard {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        // Another runner may have taken over a lock it judged abandoned; that
+        // lock is its own, not this run's to remove.
+        if fs::read(&self.path).is_ok_and(|contents| contents == self.contents) {
+            let _ = fs::remove_file(&self.path);
+        }
     }
+}
+
+/// How old a run lock must be before it counts as abandoned when nothing can
+/// tell whether its run is still going: it names no readable process, or
+/// this system cannot check the process it names.
+const UNVERIFIED_LOCK_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// A process that started this long after a lock was written did not write it.
+const PID_REUSE_MARGIN: chrono::TimeDelta = chrono::TimeDelta::seconds(60);
+
+/// What a run lock records about the run holding it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LockHolder {
+    pid: u32,
+    created_at: DateTime<Utc>,
+}
+
+/// Whether the process a lock names still runs the run that wrote it.
+enum Holder {
+    Running,
+    Gone,
+    Unknown,
+}
+
+/// The lock at `path` as read, when it no longer belongs to a running run:
+/// its process has exited, or its pid now names a process that started after
+/// the lock was written (the pid was reused, as after a restart). A run that
+/// is still going keeps its lock however long it takes.
+fn abandoned_lock(path: &Path) -> Option<Vec<u8>> {
+    let contents = match fs::read(path) {
+        Ok(contents) => contents,
+        // The run finished meanwhile: nothing is left to wait for.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Some(Vec::new()),
+        Err(_) => return None,
+    };
+    let holder = serde_json::from_slice::<LockHolder>(&contents).ok();
+    let abandoned = match holder.as_ref().map_or(Holder::Unknown, lock_holder) {
+        Holder::Running => false,
+        Holder::Gone => true,
+        // An empty lock is one being written, or one its runner never finished.
+        Holder::Unknown => fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > UNVERIFIED_LOCK_AGE),
+    };
+    abandoned.then_some(contents)
+}
+
+fn lock_holder(holder: &LockHolder) -> Holder {
+    // A process does not wait for itself; at worst its pid is a crashed
+    // run's reused, and the next run, under another pid, clears that lock.
+    if holder.pid == std::process::id() {
+        return Holder::Running;
+    }
+    #[cfg(unix)]
+    {
+        use nix::{errno::Errno, sys::signal::kill, unistd::Pid};
+        let Some(pid) = i32::try_from(holder.pid).ok().filter(|pid| *pid > 0) else {
+            return Holder::Unknown;
+        };
+        if kill(Pid::from_raw(pid), None) == Err(Errno::ESRCH) {
+            return Holder::Gone;
+        }
+        match process_started(holder.pid) {
+            Some(started) if started > holder.created_at + PID_REUSE_MARGIN => Holder::Gone,
+            Some(_) => Holder::Running,
+            None => Holder::Unknown,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        Holder::Unknown
+    }
+}
+
+/// When process `pid` started, from the elapsed time `ps` reports.
+#[cfg(unix)]
+fn process_started(pid: u32) -> Option<DateTime<Utc>> {
+    let output = Command::new("ps")
+        .args(["-o", "etime=", "-p", &pid.to_string()])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let elapsed = elapsed_seconds(String::from_utf8_lossy(&output.stdout).trim())?;
+    Some(Utc::now() - chrono::TimeDelta::seconds(elapsed))
+}
+
+/// `ps`'s POSIX elapsed time, `[[dd-]hh:]mm:ss`, in seconds.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn elapsed_seconds(text: &str) -> Option<i64> {
+    let (days, clock) = match text.split_once('-') {
+        Some((days, clock)) => (days.parse::<i64>().ok()?, clock),
+        None => (0, text),
+    };
+    let parts = clock.split(':').collect::<Vec<_>>();
+    if !(2..=3).contains(&parts.len()) {
+        return None;
+    }
+    let mut seconds = 0;
+    for part in parts {
+        seconds = seconds * 60 + part.parse::<i64>().ok()?;
+    }
+    Some(days * 86_400 + seconds)
 }
 
 #[derive(Clone, Debug)]
@@ -1947,6 +2060,18 @@ mod tests {
         assert!(service.contains("schedule\" \"trigger"));
         assert!(timer.contains("OnCalendar=Mon *-*-* 9:15:00"));
         assert!(timer.contains("Persistent=true"));
+        // An interval timer needs a first run from its own start; repeating
+        // from the last run alone never begins.
+        let interval = Schedule {
+            trigger: Trigger::Interval { seconds: 300 },
+            ..schedule
+        };
+        let (_, timer) = scheduler.render_systemd(&interval).unwrap();
+        assert!(
+            timer.contains("[Timer]\nOnActiveSec=300s\nOnUnitActiveSec=300s\nAccuracySec=1s\n"),
+            "{timer}"
+        );
+        assert!(!timer.contains("OnCalendar="));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1973,6 +2098,83 @@ mod tests {
                 .unwrap()
                 .contains("<Monday/>")
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn write_lock(scheduler: &Scheduler, schedule: &Schedule, pid: u32, age: Duration) {
+        let path = scheduler.lock_path(schedule.id);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let created = Utc::now() - chrono::TimeDelta::from_std(age).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({"pid": pid, "createdAt": created})).unwrap(),
+        )
+        .unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - age)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_live_run_keeps_its_lock_however_long_it_runs() {
+        let (root, scheduler) = fixture(Backend::Launchd);
+        let schedule = create(&scheduler, &root, Trigger::Interval { seconds: 60 });
+        write_lock(
+            &scheduler,
+            &schedule,
+            std::process::id(),
+            Duration::from_secs(2 * 60 * 60),
+        );
+        assert!(scheduler.acquire(&schedule).unwrap().is_none());
+        assert!(scheduler.lock_path(schedule.id).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_whose_run_is_gone_is_taken_at_once() {
+        let (root, scheduler) = fixture(Backend::Launchd);
+        let schedule = create(&scheduler, &root, Trigger::Interval { seconds: 60 });
+        // A run that exited a moment ago.
+        let mut exited = Command::new("true").spawn().unwrap();
+        exited.wait().unwrap();
+        write_lock(&scheduler, &schedule, exited.id(), Duration::from_secs(5));
+        assert!(scheduler.acquire(&schedule).unwrap().is_some());
+        // A live process that started after the lock was written reuses a
+        // crashed run's pid; it does not hold the lock.
+        let mut reused = Command::new("sleep").arg("30").spawn().unwrap();
+        write_lock(
+            &scheduler,
+            &schedule,
+            reused.id(),
+            Duration::from_secs(2 * 60 * 60),
+        );
+        assert!(scheduler.acquire(&schedule).unwrap().is_some());
+        // The same process, holding a lock it wrote before this check, keeps it.
+        write_lock(&scheduler, &schedule, reused.id(), Duration::ZERO);
+        assert!(scheduler.acquire(&schedule).unwrap().is_none());
+        reused.kill().unwrap();
+        reused.wait().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_finished_run_removes_only_its_own_lock() {
+        let (root, scheduler) = fixture(Backend::Launchd);
+        let schedule = create(&scheduler, &root, Trigger::Interval { seconds: 60 });
+        let guard = scheduler.acquire(&schedule).unwrap().unwrap();
+        // Another runner took the path over meanwhile.
+        write_lock(&scheduler, &schedule, 1, Duration::ZERO);
+        let other = fs::read(scheduler.lock_path(schedule.id)).unwrap();
+        drop(guard);
+        assert_eq!(fs::read(scheduler.lock_path(schedule.id)).unwrap(), other);
+        assert_eq!(elapsed_seconds("05:09"), Some(309));
+        assert_eq!(elapsed_seconds("2:05:09"), Some(7509));
+        assert_eq!(elapsed_seconds("3-02:05:09"), Some(3 * 86_400 + 7509));
+        assert_eq!(elapsed_seconds("12"), None);
         fs::remove_dir_all(root).unwrap();
     }
 

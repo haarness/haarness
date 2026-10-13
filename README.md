@@ -404,8 +404,14 @@ macOS, `systemd --user` service/timer pairs on Linux, and per-user Task
 Scheduler tasks on Windows. Interval schedules have a one-minute minimum;
 five-field cron and one-shot RFC 3339 timestamps are also accepted. Windows
 cron conversion intentionally supports the realistic daily/weekly subset and
-rejects expressions it cannot represent faithfully. One-shot jobs disable
-themselves after their terminal run, and an overlap is recorded as skipped.
+rejects expressions it cannot represent faithfully. On Linux an interval
+timer first fires one interval after it starts, then one interval after each
+run. One-shot jobs disable themselves after their terminal run, and an overlap
+is recorded as skipped. A run keeps its overlap lock for as long as it runs;
+the next run clears a lock whose process has exited, or whose process ID now
+belongs to a process started after the lock was taken. Where the process
+cannot be checked (Windows, or a lock without a readable process ID), a lock
+older than an hour is cleared.
 
 Each run creates an ordinary durable Haarness thread using the selected
 provider/model and the schedule's captured workspace. Headless runs explicitly

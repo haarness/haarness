@@ -346,6 +346,17 @@ test("a blocked site is refused, and a redirect to a blocked or unapproved site 
   expect(pixel.title).toBe("Tracked");
   expect(stack.site.requests.some((request) => request.host === "blocked.test")).toBe(false);
   expect(value<{ tabs: Tab[] }>(await stack.tool(thread, "browser_tabs_list", {})).tabs[0].title).toBe("Tracked");
+  // A trailing dot spells the same site: blocked as a page and as an image. Chrome does
+  // reach a dotted host (the image from other.test. loads), so the block is the rule's.
+  const dotted = (name: string, path: string) => stack.site.url(name, path).replace(/\.test:/, ".test.:");
+  expect(failed(await stack.tool(thread, "browser_navigate", { tabID: tab.id, url: dotted("blocked", "/") }))).toMatch(
+    /denied|blocked|not allowed/i,
+  );
+  await stack.tool(thread, "browser_navigate", { tabID: tab.id, url: stack.site.url("shop", "/pixel?from=other&dot") });
+  await expect.poll(() => stack.site.requests.some((request) => request.host === "other.test.")).toBe(true);
+  const pixelled = value<Tab>(await stack.tool(thread, "browser_navigate", { tabID: tab.id, url: stack.site.url("shop", "/pixel?from=blocked&dot") }));
+  expect(pixelled.title).toBe("Tracked");
+  expect(stack.site.requests.some((request) => request.host.startsWith("blocked.test"))).toBe(false);
 });
 
 test("Chrome's own pages are off limits even in an agent tab", async ({ stack }) => {
