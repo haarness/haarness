@@ -2786,23 +2786,9 @@ async fn creating_a_chat_with_a_chosen_id_twice_returns_the_first_chat() {
     assert_eq!(retried.id, id);
     assert_eq!(retried.title, "Fix login");
     assert_eq!(retried.created_at, first.created_at);
-    // Concurrent creates with one new id make one chat too.
-    let racing = haarness_protocol::ThreadId::new();
-    let request = || CreateThreadRequest {
-        id: Some(racing),
-        provider: Some("echo".into()),
-        model: Some("echo-1".into()),
-        ..Default::default()
-    };
-    let (left, right) = tokio::join!(
-        runtime.create_thread(request()),
-        runtime.create_thread(request())
-    );
-    assert_eq!(left.unwrap().id, racing);
-    assert_eq!(right.unwrap().id, racing);
-
+    // Concurrent creates that both find no chat: `cases/create_race.rs`.
     let threads = runtime.list_threads(true).await.unwrap();
-    assert_eq!(threads.len(), 2, "{threads:?}");
+    assert_eq!(threads.len(), 1, "{threads:?}");
     let created = runtime
         .events()
         .subscribe(Some(0))
@@ -2811,9 +2797,12 @@ async fn creating_a_chat_with_a_chosen_id_twice_returns_the_first_chat() {
         .filter(|event| event.event_type == "thread.created")
         .filter_map(|event| event.thread_id)
         .collect::<Vec<_>>();
-    assert_eq!(created, [id, racing], "one created event per chat");
+    assert_eq!(created, [id], "one created event");
     handle.shutdown().await.unwrap();
 }
+
+#[path = "cases/create_race.rs"]
+mod create_race;
 
 #[tokio::test]
 async fn forked_thread_continues_with_parent_history() {
