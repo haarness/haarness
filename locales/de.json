@@ -2403,5 +2403,8 @@
   "Chrome is turned off for this project.": "Chrome ist für dieses Projekt ausgeschaltet.",
   "{category}: {decision} by default": "{category}: standardmäßig {decision}",
   "{category} on {origin}: {decision}": "{category} auf {origin}: {decision}",
-  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Die Agentensteuerung des Browsers ist aus, daher können Agenten Chrome in diesem Projekt nicht verwenden. Schalte sie oben auf dieser Seite ein."
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Die Agentensteuerung des Browsers ist aus, daher können Agenten Chrome in diesem Projekt nicht verwenden. Schalte sie oben auf dieser Seite ein.",
+  "The provider refused {name}, so it is left out of this chat from now on.": "Der Anbieter hat {name} abgelehnt, daher bleibt es in diesem Chat ab jetzt außen vor.",
+  "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "Der Anbieter hat ein Bild abgelehnt, ohne zu sagen, welches. Daher bleibt das neueste, {name}, in diesem Chat ab jetzt außen vor.",
+  "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "Der Anbieter hat ein Bild abgelehnt, ohne zu sagen, welches. Daher bleiben die neuesten, {names}, in diesem Chat ab jetzt außen vor."
 }

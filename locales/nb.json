@@ -2403,5 +2403,8 @@
   "Chrome is turned off for this project.": "Chrome er slått av for dette prosjektet.",
   "{category}: {decision} by default": "{category}: {decision} som standard",
   "{category} on {origin}: {decision}": "{category} på {origin}: {decision}",
-  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Agentens nettleserstyring er slått av, så agenter kan ikke bruke Chrome i dette prosjektet. Slå den på øverst på denne siden."
+  "Agent browser control is off, so agents can’t use Chrome in this project. Turn it on at the top of this page.": "Agentens nettleserstyring er slått av, så agenter kan ikke bruke Chrome i dette prosjektet. Slå den på øverst på denne siden.",
+  "The provider refused {name}, so it is left out of this chat from now on.": "Leverandøren avviste {name}, så det utelates fra denne chatten fremover.",
+  "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "Leverandøren avviste et bilde uten å si hvilket, så det nyeste, {name}, utelates fra denne chatten fremover.",
+  "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "Leverandøren avviste et bilde uten å si hvilket, så de nyeste, {names}, utelates fra denne chatten fremover."
 }
