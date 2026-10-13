@@ -4060,7 +4060,9 @@ impl AgentRuntime {
         for custom in self.live_agents.read().iter() {
             if let Some(profile) = profiles.iter_mut().find(|profile| profile.id == custom.id) {
                 profile.description = custom.description.clone();
-                profile.mode = custom.mode.clone();
+                if custom.mode.is_some() {
+                    profile.mode = custom.mode.clone();
+                }
                 profile.model = custom.model.clone();
                 profile.hidden |= custom.hidden;
                 continue;
@@ -4071,7 +4073,9 @@ impl AgentRuntime {
                 description: custom.description.clone(),
                 hidden: custom.hidden,
                 max_subagents: 4,
-                mode: custom.mode.clone(),
+                // A custom agent without a mode is usable everywhere (see
+                // validate_custom_agent_mode); Claude Code agents never set one.
+                mode: Some(custom.mode.clone().unwrap_or_else(|| "all".into())),
                 model: custom.model.clone(),
             });
         }
@@ -5014,7 +5018,7 @@ impl crate::ToolInvoker for TurnToolInvoker {
             .read()
             .iter()
             .filter(|agent| {
-                !agent.hidden && matches!(agent.mode.as_deref(), Some("subagent" | "all"))
+                !agent.hidden && matches!(agent.mode.as_deref(), None | Some("subagent" | "all"))
             })
             .map(|agent| agent.id.clone())
             .collect()
