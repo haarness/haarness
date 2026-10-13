@@ -7753,8 +7753,9 @@ fn approval_names_the_file_a_linked_path_leads_to() {
     pending.permission = "read".into();
     pending.operation = "read:notes.txt".into();
     pending.detail = serde_json::json!({"path": "notes.txt"});
-    pending.patterns = vec!["notes.txt".into(), ".env".into()];
-    pending.always_patterns = vec!["read:notes.txt".into(), "read:.env".into()];
+    // Only the asks still open are listed: here the link's target.
+    pending.patterns = vec![".env".into()];
+    pending.always_patterns = vec!["read:.env".into()];
     app.pending_permissions.push(pending);
     app.permission_focus = true;
     let text = frame_text(&app, (100, 40));
