@@ -10547,6 +10547,138 @@ async fn workspace_file_routes_answer_a_missing_file_with_404_in_plain_words() {
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
+/// Where `preview` keeps a workspace's versions, as the server finds it.
+fn preview_versions(workspace: &std::path::Path) -> std::path::PathBuf {
+    use sha2::Digest as _;
+    let root = std::env::var_os("HAARNESS_DATA_DIR")
+        .map(|root| std::path::PathBuf::from(root).join("data"))
+        .or_else(|| {
+            std::env::var_os("HAARNESS_HOME")
+                .map(std::path::PathBuf::from)
+                .filter(|root| root.is_absolute())
+                .map(|root| root.join("data"))
+        })
+        .unwrap_or_else(|| {
+            directories::ProjectDirs::from("dev", "haarness", "haarness")
+                .unwrap()
+                .data_local_dir()
+                .to_owned()
+        });
+    let key = sha2::Sha256::digest(
+        workspace
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .as_bytes(),
+    );
+    root.join("preview").join(format!("{key:x}"))
+}
+
+#[tokio::test]
+async fn a_preview_whose_folder_was_removed_is_restored_into_a_new_folder() {
+    let base = std::env::temp_dir().join(format!("haarness-preview-gone-{}", uuid::Uuid::now_v7()));
+    let (workspace, outside) = (base.join("workspace"), base.join("outside"));
+    std::fs::create_dir_all(workspace.join("site")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(workspace.join("site/index.html"), "<h1>first</h1>").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, workspace.join("link")).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+    let shown = haarness_server::preview::PreviewTool(workspace.clone())
+        .execute(
+            serde_json::json!({"filePath": "site/index.html"}),
+            ToolContext {
+                execution: Default::default(),
+                thread_id: haarness_protocol::ThreadId::new(),
+                turn_id: haarness_protocol::TurnId::new(),
+                workspace: workspace.clone(),
+                authorized_external_paths: Vec::new(),
+                cancel: CancellationToken::new(),
+                invoker: None,
+            },
+        )
+        .await
+        .unwrap();
+    let version = shown.metadata["preview"]["version"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    std::fs::remove_dir_all(workspace.join("site")).unwrap();
+    let runtime = Arc::new(AgentRuntime::new(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Echo) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(64),
+    ));
+    let handle = serve(
+        TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        "preview-fixture",
+        ServerState {
+            browser: None,
+            management: None,
+            runtime,
+            mcp: Arc::new(NoMcp),
+            skills: Arc::new(NoSkills),
+            plugins: None,
+            workflows: None,
+            workspaces: None,
+            workspace_id: None,
+            workspace: workspace.clone(),
+            project_trusted: false,
+            language: None,
+        },
+    )
+    .await
+    .unwrap();
+    let base_url = format!("http://{}", handle.address);
+    let http = reqwest::Client::new();
+    // The file and its folder are gone: deleted, so Restore is offered.
+    let current: Value = http
+        .get(format!(
+            "{base_url}/v1/files/preview/current?path=site/index.html"
+        ))
+        .bearer_auth("preview-fixture")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(current["revision"], Value::Null);
+    let empty = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(b""));
+    let restore = |path: &str| {
+        http.post(format!("{base_url}/v1/files/preview/restore"))
+            .bearer_auth("preview-fixture")
+            .json(&serde_json::json!({"path": path, "hash": version, "revision": empty}))
+            .send()
+    };
+    let restored = restore("site/index.html").await.unwrap();
+    assert_eq!(restored.status(), reqwest::StatusCode::OK);
+    let restored: Value = restored.json().await.unwrap();
+    assert_eq!(restored["file"]["revision"], version.as_str());
+    assert_eq!(restored["backup"], empty.as_str());
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("site/index.html")).unwrap(),
+        "<h1>first</h1>"
+    );
+    // Folders are made only inside the workspace and outside Git metadata.
+    #[cfg(unix)]
+    {
+        let escaped = restore("link/gone/index.html").await.unwrap();
+        assert_eq!(escaped.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(escaped.text().await.unwrap(), "Path escapes the workspace");
+        assert!(!outside.join("gone").exists());
+    }
+    let git = restore(".git/gone/index.html").await.unwrap();
+    assert_eq!(git.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(!workspace.join(".git").exists());
+    handle.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(preview_versions(&workspace));
+    std::fs::remove_dir_all(base).unwrap();
+}
+
 #[tokio::test]
 async fn published_remote_chat_cannot_read_or_control_other_conversations() {
     let workspace =

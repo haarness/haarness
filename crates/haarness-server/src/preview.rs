@@ -294,14 +294,22 @@ pub async fn restore_preview(
     let hash = input.hash.clone();
     let revision = input.revision.clone();
     let (restored, backup) = tokio::task::spawn_blocking(move || {
-        let target = files::resolve(&root, &path, true)?;
-        if fs::symlink_metadata(&target).is_ok_and(|m| m.is_symlink()) {
+        // A version whose folder was removed is put back into a new one,
+        // as `current_preview` calls it deleted, not unavailable.
+        let target = match files::resolve(&root, &path, true) {
+            Ok(target) => Some(target),
+            Err((StatusCode::NOT_FOUND, _)) => None,
+            Err(error) => return Err(error),
+        };
+        if target
+            .as_ref()
+            .is_some_and(|target| fs::symlink_metadata(target).is_ok_and(|m| m.is_symlink()))
+        {
             return Err(bad("Restoring symlinks is not supported"));
         }
-        let data = if target.exists() {
-            files::bytes(&target)?
-        } else {
-            Vec::new()
+        let data = match &target {
+            Some(target) if target.exists() => files::bytes(target)?,
+            _ => Vec::new(),
         };
         if files::hash(&data) != revision {
             return Err((
@@ -309,8 +317,11 @@ pub async fn restore_preview(
                 "File changed. Compare again before restoring.".into(),
             ));
         }
-        let restored = content(path, load(&root, &hash)?);
+        let restored = content(path.clone(), load(&root, &hash)?);
         let backup = record(&root, &data)?;
+        if target.is_none() {
+            files::create_parents(&root, &path)?;
+        }
         Ok((restored, backup))
     })
     .await
