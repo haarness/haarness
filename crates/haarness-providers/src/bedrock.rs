@@ -284,6 +284,24 @@ fn bedrock_request(request: ProviderRequest) -> CoreResult<Value> {
             }
         }
     }
+    // Converse wants user and assistant turns to alternate: parallel calls
+    // share one assistant turn, their results one user turn, and a prompt
+    // followed by its stored reminder or a steered message is one user turn.
+    let mut grouped: Vec<Value> = Vec::new();
+    for message in messages {
+        if let Some(previous) = grouped
+            .last_mut()
+            .filter(|previous| previous["role"] == message["role"])
+        {
+            previous["content"]
+                .as_array_mut()
+                .unwrap()
+                .extend(message["content"].as_array().unwrap().iter().cloned());
+        } else {
+            grouped.push(message);
+        }
+    }
+    let messages = grouped;
     let max_tokens = request
         .parameters
         .max_output_tokens
@@ -642,6 +660,51 @@ mod tests {
         for stop in ["end_turn", "tool_use", "max_tokens", "stop_sequence"] {
             assert!(ProviderEvent::finish_error(stop).is_none(), "{stop}");
         }
+    }
+
+    #[test]
+    fn converse_turns_alternate_when_messages_of_one_role_follow_each_other() {
+        let text = |role: &str, content: &str| ProviderMessage::Text {
+            role: role.into(),
+            content: content.into(),
+        };
+        let call = |id: &str| ProviderMessage::ToolCall {
+            call_id: id.into(),
+            name: "read".into(),
+            arguments: json!({"path":id}),
+            provider_metadata: Value::Null,
+        };
+        let result = |id: &str| ProviderMessage::ToolResult {
+            call_id: id.into(),
+            name: "read".into(),
+            output: "ok".into(),
+            is_error: false,
+            attachments: Vec::new(),
+        };
+        let body = bedrock_request(ProviderRequest {
+            model: "test-model".into(),
+            system: "test".into(),
+            messages: vec![
+                text("user", "Read both"),
+                text("user", "<system-reminder>\nToday's date is now 2026-10-14.\n</system-reminder>"),
+                call("a"),
+                call("b"),
+                result("a"),
+                result("b"),
+                text("assistant", "Done"),
+            ],
+            tools: Vec::new(),
+            reasoning_effort: None,
+            parameters: haarness_core::RequestParameters::default(),
+            output_schema: None,
+        })
+        .unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        let roles: Vec<_> = messages.iter().map(|message| message["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["user", "assistant", "user", "assistant"]);
+        assert_eq!(messages[0]["content"].as_array().unwrap().len(), 2);
+        assert_eq!(messages[1]["content"][1]["toolUse"]["toolUseId"], "b");
+        assert_eq!(messages[2]["content"][1]["toolResult"]["toolUseId"], "b");
     }
 
     #[test]
