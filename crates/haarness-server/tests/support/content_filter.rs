@@ -105,7 +105,7 @@ async fn filtered_turn_preserves_partial_output_and_usage_without_tools_or_queue
         }
     )));
     assert!(items.iter().any(|item| matches!(&item.data, ItemData::ToolResult { call_id, is_error: true, .. } if call_id == "blocked-call")));
-    assert!(items.iter().any(|item| matches!(&item.data, ItemData::Error { message, retryable: false } if message.contains("content filter"))));
+    assert!(items.iter().any(|item| matches!(&item.data, ItemData::Error { message, retryable: false } if message.contains("safety check stopped this response"))));
     std::fs::remove_dir_all(workspace).unwrap();
 }
 
@@ -118,6 +118,9 @@ fn provider_finish_reasons_separate_policy_stops_from_ordinary_completion() {
         "RECITATION",
         "PROHIBITED_CONTENT",
         "SPII",
+        "refusal",
+        "content_filtered",
+        "guardrail_intervened",
     ] {
         assert!(matches!(
             ProviderEvent::finish_error(reason),
@@ -131,6 +134,9 @@ fn provider_finish_reasons_separate_policy_stops_from_ordinary_completion() {
         "completed",
         "MAX_TOKENS",
         "STOP",
+        "end_turn",
+        "tool_use",
+        "max_tokens",
     ] {
         assert!(ProviderEvent::finish_error(reason).is_none());
     }

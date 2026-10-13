@@ -67,7 +67,7 @@ test("agent switch discloses model and scope; filtered responses stay visible", 
     blocked = true;
     await box.fill("Show the filtered response fixture");
     await page.getByRole("button", { name: /Send message|Send guidance/ }).click();
-    await expect(page.locator(".transcript")).toContainText("content filter", { timeout: 30000 });
+    await expect(page.locator(".transcript")).toContainText("safety check stopped", { timeout: 30000 });
     await expect(page.locator(".transcript")).toContainText("PARTIAL_DESKTOP_PROOF");
     await expect.poll(async () => (await client.activeTurns()).length).toBe(0);
     await page.screenshot({ path: info.outputPath("filtered-response.png") });

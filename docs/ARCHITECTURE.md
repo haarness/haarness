@@ -55,6 +55,20 @@ and writes reports locally; it never opens the server's databases directly.
   and stable thread date. Labeled global/project instruction layers and custom
   agent role text are appended without replacing that scaffold. No private
   identity, endpoint, credential, or company environment is assumed.
+- Each request starts with the previous one byte for byte (system prompt and
+  every earlier message), so the provider's prompt cache keeps the
+  conversation. Context that changes between turns is not in the system
+  prompt: before a turn's first request the runtime stores one hidden
+  (`synthetic`) user message after the prompt with whatever applies, each in a
+  `<system-reminder>` block: `Today's date is now YYYY-MM-DD.` when the
+  computer's local date differs from the date the model last saw (the system
+  prompt names the chat's start date, in local time), the project memory index
+  when it is not the one the model last saw (the first turn, after a save, or
+  after a compaction summarized it away; `The durable project memory index is
+  now empty.` when it was cleared), and the turn's `UserPromptSubmit` and
+  command hook context. What the model last saw is read back from the stored
+  messages it can still see, so later requests replay them unchanged. The
+  logic lives in `crates/haarness-core/src/turn_context.rs`.
 
 ## Native boundary
 
