@@ -114,6 +114,54 @@ pub(crate) fn apply_request_headers(headers: &mut HeaderMap, extra: &BTreeMap<St
     }
 }
 
+/// Keep only short identifier-like values, so a log line never carries free
+/// text from the wire.
+fn identifier(value: &str) -> Option<String> {
+    (!value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')))
+    .then(|| value.to_owned())
+}
+
+/// The provider's own id for one request, from its response headers.
+pub(crate) fn request_id(headers: &HeaderMap) -> Option<String> {
+    [
+        "request-id",
+        "x-request-id",
+        "anthropic-request-id",
+        "x-amzn-requestid",
+    ]
+    .iter()
+    .find_map(|name| headers.get(*name)?.to_str().ok().and_then(identifier))
+}
+
+/// Say in the daemon log which response a provider's safety check stopped,
+/// with the ids the provider can look it up by. Other finishes log nothing.
+pub(crate) fn log_blocked_finish(
+    provider: &str,
+    reason: &str,
+    request: Option<&str>,
+    response: Option<&str>,
+) {
+    if matches!(
+        haarness_core::ProviderEvent::finish_error(reason),
+        Some(haarness_core::CoreError::ProviderBlocked(_))
+    ) {
+        tracing::warn!(
+            provider,
+            stop_reason = identifier(reason).as_deref().unwrap_or("other"),
+            request_id = request.and_then(identifier).as_deref().unwrap_or("unknown"),
+            response_id = response
+                .and_then(identifier)
+                .as_deref()
+                .unwrap_or("unknown"),
+            "provider safety check stopped the response"
+        );
+    }
+}
+
 /// Configuration for a custom provider that uses one of Haarness's native
 /// Anthropic Messages or Gemini GenerateContent transports.
 #[derive(Clone)]

@@ -537,9 +537,14 @@ impl ModelProvider for AnthropicProvider {
             .send()
             .await
             .map_err(crate::sse::transport_error)?;
+        let request_id = crate::request_id(response.headers());
+        let provider_id = self.id.clone();
         let mut events = json_stream(response, cancel);
         Ok(Box::pin(try_stream! {
             let mut tool: Option<(String,String,String,Value)> = None;
+            // message_delta carries why the response ended; message_stop reports it.
+            let mut stop_reason: Option<String> = None;
+            let mut message_id: Option<String> = None;
             let mut thinking_block: Option<Value> = None;
             let mut thinking_blocks: Vec<Value> = Vec::new();
             let mut json_output = String::new();
@@ -560,6 +565,7 @@ impl ModelProvider for AnthropicProvider {
                 let event = event?;
                 match event["type"].as_str().unwrap_or_default() {
                     "message_start" => {
+                        message_id = event.pointer("/message/id").and_then(Value::as_str).map(str::to_owned);
                         if event.pointer("/message/input_transformations").and_then(Value::as_array).is_some_and(|items| items.iter().any(|item| item["reason"] == "prefix_binding_mismatch")) {
                             tracing::warn!("Anthropic dropped preserved thinking after the conversation prefix changed");
                         }
@@ -627,7 +633,11 @@ impl ModelProvider for AnthropicProvider {
                             yield ProviderEvent::ToolCall { call_id, name, arguments, provider_metadata };
                         }
                     }},
-                    "message_delta" => if let Some(usage) = event.get("usage") {
+                    "message_delta" => {
+                        if let Some(reason) = event.pointer("/delta/stop_reason").and_then(Value::as_str) {
+                            stop_reason = Some(reason.to_owned());
+                        }
+                        if let Some(usage) = event.get("usage") {
                         // Anthropic's input_tokens excludes cache reads and
                         // writes; the event's input_tokens is the whole prompt.
                         let input = usage["input_tokens"].as_u64().unwrap_or(input_tokens);
@@ -639,13 +649,17 @@ impl ModelProvider for AnthropicProvider {
                             cache_read_tokens: read,
                             cache_write_tokens: write,
                         };
-                    },
+                    }},
                     "message_stop" => {
                         if native_json && !json_output.is_empty() {
                             let value = serde_json::from_str(&json_output).map_err(|error| CoreError::Provider(format!("Anthropic returned invalid structured output: {error}")))?;
                             yield ProviderEvent::StructuredOutput(value);
                         }
-                        yield ProviderEvent::Finished { reason: "completed".into() };
+                        // `refusal` is a stop like `end_turn` on the wire; the
+                        // runtime fails the turn on it and keeps the partial text.
+                        let reason = stop_reason.take().unwrap_or_else(|| "completed".into());
+                        crate::log_blocked_finish(&provider_id, &reason, request_id.as_deref(), message_id.as_deref());
+                        yield ProviderEvent::Finished { reason };
                     },
                     "error" => Err(CoreError::Provider(event.to_string()))?,
                     _ => {}
@@ -823,7 +837,9 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_util::sync::CancellationToken;
 
-    use haarness_core::{KeyCheck, ModelProvider, ProviderEvent, ProviderMessage, ProviderRequest};
+    use haarness_core::{
+        CoreError, KeyCheck, ModelProvider, ProviderEvent, ProviderMessage, ProviderRequest,
+    };
 
     #[test]
     fn base_url_follows_the_sdk_convention() {
@@ -1014,6 +1030,102 @@ mod tests {
         .join("\n\n")
             + "\n\n";
         ([(CONTENT_TYPE, "text/event-stream")], stream)
+    }
+
+    async fn refused_messages(
+        State(state): State<FixtureState>,
+        Json(request): Json<Value>,
+    ) -> ([(axum::http::HeaderName, &'static str); 2], String) {
+        let partial = request["messages"][0]["content"][0]["text"] == "partial";
+        state.0.lock().push(request);
+        let mut stream = vec![
+            r#"data: {"type":"message_start","message":{"id":"msg_refused","usage":{"input_tokens":12,"output_tokens":0}}}"#,
+        ];
+        if partial {
+            stream.extend([
+                r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+                r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Before the stop"}}"#,
+                r#"data: {"type":"content_block_stop","index":0}"#,
+            ]);
+        }
+        stream.extend([
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"refusal","stop_sequence":null},"usage":{"output_tokens":3}}"#,
+            r#"data: {"type":"message_stop"}"#,
+        ]);
+        (
+            [
+                (CONTENT_TYPE, "text/event-stream"),
+                (
+                    axum::http::HeaderName::from_static("request-id"),
+                    "req_fixture",
+                ),
+            ],
+            stream.join("\n\n") + "\n\n",
+        )
+    }
+
+    /// A refusal is an ordinary `message_stop` on the wire. Reported as
+    /// "completed" it ended the turn as a blank reply.
+    #[tokio::test]
+    async fn a_refusal_stop_reaches_the_runtime_as_a_blocked_finish() {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route("/messages", post(refused_messages))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = AnthropicProvider::for_test(format!("http://{address}/messages"));
+        for prompt in ["empty", "partial"] {
+            let events = provider
+                .stream(
+                    ProviderRequest {
+                        model: "claude-test".into(),
+                        system: "test".into(),
+                        messages: vec![ProviderMessage::Text {
+                            role: "user".into(),
+                            content: prompt.into(),
+                        }],
+                        tools: Vec::new(),
+                        reasoning_effort: None,
+                        parameters: haarness_core::RequestParameters::default(),
+                        output_schema: None,
+                    },
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>()
+                .await;
+            let text: String = events
+                .iter()
+                .filter_map(|event| match event {
+                    ProviderEvent::TextDelta(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                text,
+                if prompt == "partial" {
+                    "Before the stop"
+                } else {
+                    ""
+                }
+            );
+            let Some(ProviderEvent::Finished { reason }) = events.last() else {
+                panic!("the response must finish: {events:?}");
+            };
+            assert_eq!(reason, "refusal");
+            let error = ProviderEvent::finish_error(reason).expect("a refusal is not a completion");
+            assert!(matches!(error, CoreError::ProviderBlocked(_)), "{error:?}");
+            assert!(
+                error
+                    .to_string()
+                    .contains("safety check stopped this response"),
+                "{error}"
+            );
+        }
     }
 
     /// Two thinking blocks in one response are two thoughts. Streamed straight

@@ -206,8 +206,12 @@ impl ModelProvider for BedrockProvider {
         if cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
+        let request_id = crate::request_id(response.headers());
         let response: Value = response.json().await.map_err(crate::sse::transport_error)?;
         let events = bedrock_events(&response);
+        if let Some(ProviderEvent::Finished { reason }) = events.last() {
+            crate::log_blocked_finish(&self.instance.id, reason, request_id.as_deref(), None);
+        }
         Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
     }
 }
@@ -613,6 +617,31 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn converse_safety_stops_fail_the_turn_and_keep_partial_text() {
+        for stop in ["content_filtered", "guardrail_intervened"] {
+            let events = bedrock_events(&json!({
+                "output":{"message":{"content":[{"text":"Partial"}]}},
+                "usage":{"inputTokens":7,"outputTokens":1},
+                "stopReason":stop
+            }));
+            assert!(matches!(&events[0], ProviderEvent::TextDelta(text) if text == "Partial"));
+            let Some(ProviderEvent::Finished { reason }) = events.last() else {
+                panic!("Converse responses finish: {events:?}");
+            };
+            assert!(
+                matches!(
+                    ProviderEvent::finish_error(reason),
+                    Some(haarness_core::CoreError::ProviderBlocked(_))
+                ),
+                "{stop} must not read as a completed reply"
+            );
+        }
+        for stop in ["end_turn", "tool_use", "max_tokens", "stop_sequence"] {
+            assert!(ProviderEvent::finish_error(stop).is_none(), "{stop}");
+        }
     }
 
     #[test]

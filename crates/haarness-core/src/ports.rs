@@ -33,7 +33,11 @@ pub enum CoreError {
     Invalid(String),
     #[error("provider error: {0}")]
     Provider(String),
-    #[error("Response was blocked by the provider content filter ({0}).")]
+    /// The provider's safety check (a content filter, a guardrail or the
+    /// model's own refusal) stopped the response. Never retried.
+    #[error(
+        "The provider's safety check stopped this response ({0}). Send a follow-up message to try again; if it stops again, rephrase the request or choose another model."
+    )]
     ProviderBlocked(String),
     #[error("Provider response ended before completion ({0}).")]
     ProviderIncomplete(String),
@@ -388,11 +392,16 @@ pub enum ProviderEvent {
 
 impl ProviderEvent {
     /// Classify incomplete and failed responses while retaining ordinary
-    /// stop/length/tool finishes. Policy blocks must never trigger retries.
+    /// stop/length/tool finishes. Policy blocks must never trigger retries:
+    /// Anthropic's `refusal`, Bedrock's `content_filtered` and
+    /// `guardrail_intervened`, and the content filters of the others.
     pub fn finish_error(reason: &str) -> Option<CoreError> {
         let normalized = reason.to_ascii_lowercase().replace('-', "_");
         match normalized.as_str() {
             "content_filter"
+            | "content_filtered"
+            | "guardrail_intervened"
+            | "refusal"
             | "safety"
             | "recitation"
             | "blocklist"
