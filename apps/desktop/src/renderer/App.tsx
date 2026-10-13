@@ -12,6 +12,7 @@ import {
   createEffect,
   createMemo,
   lazy,
+  on,
   Suspense,
   createSignal,
   onMount,
@@ -162,7 +163,35 @@ export function App() {
     const request = state.fileRequest;
     if (request?.preview && request.connection === state.connection?.id && (!request.thread || request.thread === state.selected)) openDock("files");
   });
+  /** The agent took the Browser's tab to another page while another panel held the side panel. */
+  const [browserMoved, setBrowserMoved] = createSignal(false);
+  createEffect(() => {
+    if (dock() === "browser") setBrowserMoved(false);
+  });
+  // The dot is about the shown chat's browser; another chat starts without it.
+  createEffect(
+    on(
+      () => [state.connection?.id, state.selected],
+      () => setBrowserMoved(false),
+      { defer: true },
+    ),
+  );
+  /**
+   * The agent took the tab the Browser shows to another page. A closed side
+   * panel (or one showing only the panel launcher) opens on the Browser,
+   * also after the user closed it; another panel keeps the side panel and
+   * the Browser tab gets a dot instead. Unlike a tab the agent opens, this
+   * never leaves another page for the chat.
+   */
+  function revealBrowser() {
+    if (dock() === "browser") return;
+    if (!dockTabs().includes("browser"))
+      setDockTabs((tabs) => [...tabs, "browser"]);
+    if (dock() === null || dock() === "tools") setDock("browser");
+    else setBrowserMoved(true);
+  }
   function closeDock(value: Dock) {
+    if (value === "browser") setBrowserMoved(false);
     setDockTabs((tabs) => tabs.filter((tab) => tab !== value));
     if (dock() === value) setDock(dockTabs().at(-1) ?? "tools");
     setDockExpanded(false);
@@ -1014,10 +1043,18 @@ export function App() {
                     >
                       <button
                         aria-label={t("Show {name} panel", { name: tab })}
+                        aria-description={
+                          tab === "browser" && browserMoved()
+                            ? t("The agent opened another page")
+                            : undefined
+                        }
                         onClick={() => openDock(tab)}
                       >
                         <Icon name={dockIcons[tab]} size="sm" />
                         {t(dockNames[tab])}
+                        <Show when={tab === "browser" && browserMoved()}>
+                          <span class="dock-tab-dot" aria-hidden="true" />
+                        </Show>
                       </button>
                       <Button
                         icon="close"
@@ -1097,7 +1134,7 @@ export function App() {
               <Show when={state.connection && dock() === "context"}>
                 <ConversationContext />
               </Show>
-              <BrowserPanel visible={dockVisible() && dock() === "browser"} onOpen={() => openDock("browser")} />
+              <BrowserPanel visible={dockVisible() && dock() === "browser"} onOpen={() => openDock("browser")} onReveal={revealBrowser} />
             </aside>
           </div>
           <Show when={state.connection && state.terminal}>
