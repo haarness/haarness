@@ -426,10 +426,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
                         .join(&format!("api/v1/remote-hosts/{id}/connect"))?;
                     url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
                         .map_err(|()| anyhow::anyhow!("Invalid Cloud URL"))?;
-                    let mut handshake = url.as_str().into_client_request()?;
-                    handshake
-                        .headers_mut()
-                        .insert("authorization", format!("Bearer {bearer}").parse()?);
+                    let handshake = relay_handshake(&url, &bearer)?;
                     let link = tokio::select! {
                         () = stop.cancelled() => break,
                         link = relay_link(handshake, &target, &http, backoff.pacing.stable, &attention) => link?,
@@ -549,6 +546,21 @@ impl std::fmt::Display for Unsupported {
 }
 impl std::error::Error for Unsupported {}
 const RELAY_VERSION: u64 = 1;
+/// The upgrade header that names the relay features this connector
+/// understands. Cloud lists features in `ready` only when asked, because
+/// connectors built before features parse `ready` strictly.
+const RELAY_FEATURES_HEADER: &str = "x-haarness-relay-features";
+/// The relay's WebSocket upgrade: the bearer, and the features to offer.
+fn relay_handshake(
+    url: &reqwest::Url,
+    bearer: &str,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request> {
+    let mut handshake = url.as_str().into_client_request()?;
+    let headers = handshake.headers_mut();
+    headers.insert("authorization", format!("Bearer {bearer}").parse()?);
+    headers.insert(RELAY_FEATURES_HEADER, remote_attention::FEATURE.parse()?);
+    Ok(handshake)
+}
 /// The version and optional features a relay's first frame announces, when
 /// it is a `ready` frame. Read loosely: a newer relay may say more.
 fn relay_ready(frame: &str) -> Option<(u64, Vec<String>)> {
@@ -1733,6 +1745,22 @@ mod tests {
             }
         });
         (url, frames)
+    }
+    #[test]
+    fn the_relay_upgrade_asks_for_the_features_the_connector_understands() {
+        let url: reqwest::Url = "wss://cloud.example/api/v1/remote-hosts/1/connect"
+            .parse()
+            .unwrap();
+        let handshake = relay_handshake(&url, "token").unwrap();
+        assert_eq!(
+            handshake.uri(),
+            "wss://cloud.example/api/v1/remote-hosts/1/connect"
+        );
+        assert_eq!(handshake.headers()["authorization"], "Bearer token");
+        assert_eq!(
+            handshake.headers()["x-haarness-relay-features"],
+            "attention.v1"
+        );
     }
     #[test]
     fn a_ready_frame_announces_a_version_and_optional_features() {
