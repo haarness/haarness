@@ -1999,6 +1999,7 @@
   "Manage runtime hooks": "管理執行階段掛鉤",
   "Save and restore configuration profiles": "儲存與還原設定檔",
   "Manage and inspect Haarness plugins": "管理與檢視 Haarness 外掛程式",
+  "Browse, install and manage Haarness marketplace resources": "瀏覽、安裝及管理 Haarness 市集資源",
   "Show discovered skills": "顯示已探索的 Skill",
   "Browse/toggle tools · /tools lazy auto|always|off · /tools show|hide": "瀏覽/切換工具 · /tools lazy auto|always|off · /tools show|hide",
   "Show server and thread status": "顯示伺服器與對話狀態",

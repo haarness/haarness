@@ -1999,6 +1999,7 @@
   "Manage runtime hooks": "Administrer hooks for kjøretid",
   "Save and restore configuration profiles": "Lagre og gjenopprett konfigurasjonsprofiler",
   "Manage and inspect Haarness plugins": "Administrer og inspiser Haarness-plugins",
+  "Browse, install and manage Haarness marketplace resources": "Bla gjennom, installer og administrer ressurser fra Haarness-markedsplassen",
   "Show discovered skills": "Vis oppdagede ferdigheter",
   "Browse/toggle tools · /tools lazy auto|always|off · /tools show|hide": "Bla i/veksle verktøy · /tools lazy auto|always|off · /tools show|hide",
   "Show server and thread status": "Vis status for server og chat",

@@ -1999,6 +1999,7 @@
   "Manage runtime hooks": "أدر خطافات وقت التشغيل",
   "Save and restore configuration profiles": "احفظ ملفات تعريف الإعدادات واستعدها",
   "Manage and inspect Haarness plugins": "أدر إضافات Haarness وافحصها",
+  "Browse, install and manage Haarness marketplace resources": "تصفّح موارد سوق Haarness وثبّتها وأدرها",
   "Show discovered skills": "اعرض المهارات المكتشفة",
   "Browse/toggle tools · /tools lazy auto|always|off · /tools show|hide": "تصفّح الأدوات وبدّلها · /tools lazy auto|always|off · /tools show|hide",
   "Show server and thread status": "اعرض حالة الخادم والمحادثة",

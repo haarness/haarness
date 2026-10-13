@@ -152,19 +152,17 @@ impl App {
                 value: format!("field:{index}"),
             });
         }
-        if view.submit.is_some() {
+        if let Some(submit) = &view.submit {
+            // The button says what it does, as in Desktop's management forms.
+            let (label, description) = match submit["action"].as_str() {
+                Some("router_connect") => ("Connect", "Apply these values"),
+                Some("search") => ("Search", "Find matching resources"),
+                Some("install") => ("Install", "Install this version"),
+                _ => ("Save", "Apply these values"),
+            };
             entries.push(OptionEntry {
-                label: if view
-                    .submit
-                    .as_ref()
-                    .is_some_and(|request| request["action"] == "router_connect")
-                {
-                    "Connect"
-                } else {
-                    "Save"
-                }
-                .into(),
-                description: "Apply these values".into(),
+                label: label.into(),
+                description: description.into(),
                 value: "save".into(),
             });
         }

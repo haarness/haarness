@@ -913,6 +913,30 @@ pub fn marketplaces(data: &Path) -> BTreeMap<String, PathBuf> {
     read_map(&marketplaces_file(data))
 }
 
+/// Registered Claude-format marketplaces and what each offers, for clients
+/// (and the model) that choose a plugin to install by `name@marketplace`.
+pub fn marketplace_catalog(data: &Path) -> serde_json::Value {
+    let installed = installed(data);
+    serde_json::Value::Array(
+        marketplaces(data)
+            .into_iter()
+            .map(|(name, root)| match manifest_of(&root) {
+                Ok(manifest) => serde_json::json!({
+                    "name": name,
+                    "path": root,
+                    "plugins": manifest.plugins.iter().map(|plugin| serde_json::json!({
+                        "name": plugin.name,
+                        "install": format!("{}@{name}", plugin.name),
+                        "description": plugin.description,
+                        "installed": installed.get(&plugin.name).is_some_and(|entry| entry.marketplace == name),
+                    })).collect::<Vec<_>>(),
+                }),
+                Err(error) => serde_json::json!({"name": name, "path": root, "error": error.to_string()}),
+            })
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
