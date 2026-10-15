@@ -1,5 +1,5 @@
 import { previewInfo } from "./preview-actions";
-import type { RemoteAction, RemoteShare } from "./remote-control";
+import { shareOrder, type RemoteAction, type RemoteShare } from "./remote-control";
 import { createAttachmentDrafts } from "./attachment-drafts";
 import { applyLanguage, t } from "./i18n";
 import {
@@ -223,6 +223,7 @@ function createApp() {
    * arrives after its run moved on. */
   const workflowRuns = new Map<string, T.WorkflowRun>();
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  const shareRevisions = shareOrder();
   let leaveSettings: () => Promise<boolean> = async () => true;
   let leaveWorkspace: () => Promise<boolean> = async () => true;
   let menuHandler: (data: unknown) => void = () => {};
@@ -1933,8 +1934,15 @@ function createApp() {
       if (!state.connection || !state.selected) return;
       set("remoteControl", { action });
     },
-    setRemoteShare: (key: string, share: RemoteShare) =>
-      set("remoteShares", key, share),
+    /** Start a status read of a chat's share; pass the number to `setRemoteShare` with its answer. */
+    readRemoteShare: (key: string) => shareRevisions.begin(key),
+    /** Record a chat's share. A status read's answer (`read` set) is dropped
+     * once a later read or a dialog action has started for that chat. */
+    setRemoteShare: (key: string, share: RemoteShare, read?: number) => {
+      if (read === undefined) shareRevisions.begin(key);
+      else if (!shareRevisions.latest(key, read)) return;
+      set("remoteShares", key, share);
+    },
     /** Open the connect-a-provider dialog; `onboarding` when nothing works yet. */
     openConnect: (options: { provider?: string; onboarding?: boolean } = {}) => {
       if (!state.connection) return;

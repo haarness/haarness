@@ -166,19 +166,29 @@ export function Session() {
       : state.selected
         ? t("Review: edits and commands inside the project run without asking. By default this chat and its agents ask before using files outside the project, reading secrets such as .env, switching agents or generating paid media. Click to switch to Auto.")
         : t("Review: edits and commands inside the project run without asking. By default new chats here ask before using files outside the project, reading secrets such as .env, switching agents or generating paid media. Click to switch to Auto.");
-  // Learn whether the chat that just opened is shared, for the composer chip.
-  // The server answers from local state: no Cloud call, nothing to wait for.
+  // Learn whether the chat that just opened is shared, for the composer chip,
+  // and again after the event stream reconnects, since a share started or
+  // stopped meanwhile sends no event. The server answers from local state: no
+  // Cloud call, nothing to wait for.
   createEffect(
     on(
-      () => [state.connection?.id, state.selected, state.ready] as const,
-      ([connection, selected, ready]) => {
-        if (!connection || !selected || !ready) return;
+      () =>
+        [
+          state.connection?.id,
+          state.selected,
+          state.ready,
+          state.connectionStatus === "Connected",
+        ] as const,
+      ([connection, selected, ready, connected]) => {
+        if (!connection || !selected || !ready || !connected) return;
+        const key = sessionKey(connection, selected);
+        const read = app.readRemoteShare(key);
         void window.haarness
           .api(connection, "manageResource", [
             "remote-control",
             { action: "status", threadId: selected },
           ])
-          .then((view) => app.setRemoteShare(sessionKey(connection, selected), parseShare(view)))
+          .then((view) => app.setRemoteShare(key, parseShare(view), read))
           .catch(() => {});
       },
     ),
