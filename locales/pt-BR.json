@@ -2410,5 +2410,11 @@
   "The provider refused {name}, so it is left out of this chat from now on.": "O provedor recusou {name}, então a partir de agora ele fica de fora deste chat.",
   "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "O provedor recusou uma imagem sem dizer qual, então a mais recente, {name}, fica de fora deste chat a partir de agora.",
   "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "O provedor recusou uma imagem sem dizer qual, então as mais recentes, {names}, ficam de fora deste chat a partir de agora.",
-  "{name} is not an image Haarness can read.": "{name} não é uma imagem que o Haarness consiga ler."
+  "{name} is not an image Haarness can read.": "{name} não é uma imagem que o Haarness consiga ler.",
+  "This link could not be opened.": "Não foi possível abrir este link.",
+  "Open a project to open links to its files.": "Abra um projeto para abrir links para os arquivos dele.",
+  "Links to network locations do not open.": "Links para locais de rede não são abertos.",
+  "Only files in this project open from a link.": "Só arquivos deste projeto abrem a partir de um link.",
+  "This kind of link does not open in Haarness.": "Este tipo de link não abre no Haarness.",
+  "{path} was not found in this project.": "{path} não foi encontrado neste projeto."
 }

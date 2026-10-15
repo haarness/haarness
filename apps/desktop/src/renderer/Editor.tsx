@@ -46,6 +46,8 @@ export function Editor(props: {
   onSave?: () => void;
   onSelection?: (selection: { from: number; to: number }) => void;
   onAddContext?: () => void;
+  /** Put the cursor on this 1-based line and scroll it to the middle; a new object asks again. */
+  line?: { line: number };
 }) {
   let host!: HTMLDivElement;
   let view: EditorView | undefined;
@@ -201,6 +203,7 @@ export function Editor(props: {
   let configuredLanguage: ReturnType<typeof editorLanguage> | undefined;
   let configuredReadonly: boolean | undefined;
   let configuredWrap: boolean | undefined;
+  let revealed: { line: number } | undefined;
   createEffect(() => {
     if (!mounted()) return;
     const session = props.session;
@@ -242,6 +245,26 @@ export function Editor(props: {
           readonly.reconfigure(EditorState.readOnly.of(readOnly)),
           wrap.reconfigure(wrapping ? EditorView.lineWrapping : []),
         ],
+      });
+    }
+    // After restoring the document's own scroll, so the line wins. Queued
+    // measurements run in order, which an effect of its own would not keep.
+    const target = props.line;
+    if (target && target !== revealed) {
+      revealed = target;
+      const line = editor.state.doc.line(
+        Math.min(Math.max(1, Math.floor(target.line)), editor.state.doc.lines),
+      );
+      editor.dispatch({ selection: { anchor: line.from } });
+      editor.requestMeasure({
+        read: () => editor.lineBlockAt(line.from).top,
+        write: (top) => {
+          if (editor !== view) return;
+          editor.scrollDOM.scrollTop = Math.max(
+            0,
+            top - editor.scrollDOM.clientHeight / 2,
+          );
+        },
       });
     }
     if (switched || description !== configuredLanguage) {

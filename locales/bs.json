@@ -2410,5 +2410,11 @@
   "The provider refused {name}, so it is left out of this chat from now on.": "Provajder je odbio {name}, pa se od sada izostavlja iz ovog chata.",
   "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "Provajder je odbio sliku bez navođenja koju, pa se od sada najnovija, {name}, izostavlja iz ovog chata.",
   "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "Provajder je odbio sliku bez navođenja koju, pa se od sada najnovije, {names}, izostavljaju iz ovog chata.",
-  "{name} is not an image Haarness can read.": "{name} nije slika koju Haarness može pročitati."
+  "{name} is not an image Haarness can read.": "{name} nije slika koju Haarness može pročitati.",
+  "This link could not be opened.": "Ovaj link nije moguće otvoriti.",
+  "Open a project to open links to its files.": "Otvorite projekat da biste otvarali linkove na njegove datoteke.",
+  "Links to network locations do not open.": "Linkovi na mrežne lokacije se ne otvaraju.",
+  "Only files in this project open from a link.": "Iz linka se otvaraju samo datoteke iz ovog projekta.",
+  "This kind of link does not open in Haarness.": "Ova vrsta linka se ne otvara u Haarnessu.",
+  "{path} was not found in this project.": "{path} nije pronađen u ovom projektu."
 }

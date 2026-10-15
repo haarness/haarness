@@ -21,7 +21,12 @@ export function PreviewContent(props: { file: FileContent; fit?: boolean }) {
           }
         >
           <div class="document-preview">
-            <Markdown text={props.file.content} document />
+            {/* Relative links start from the file's own folder. */}
+            <Markdown
+              text={props.file.content}
+              document
+              base={props.file.path.replace(/\\/g, "/").replace(/\/?[^/]*$/, "")}
+            />
           </div>
         </Show>
       }
