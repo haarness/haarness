@@ -1,6 +1,6 @@
 //! Outbound Cloud connector. Local runtime and provider credentials never cross the relay.
 use super::{
-    Paths, ensure_workspace_server,
+    Paths, ensure_workspace_server_for_remote,
     reconnect::{Backoff, Link, Pacing},
     remote_attention,
 };
@@ -278,7 +278,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
             let account = status["selectedAccountId"]
                 .as_str()
                 .context("Sign in and select a Cloud account first")?;
-            let discovery = ensure_workspace_server(paths, workspace, trust).await?;
+            let discovery = ensure_workspace_server_for_remote(paths, workspace, trust).await?;
             let project = paths
                 .workspace_id
                 .clone()
@@ -404,7 +404,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
                     // Resolve the current address/token before each transport generation.
                     let discovery = tokio::select! {
                         () = stop.cancelled() => break,
-                        result = ensure_workspace_server(paths, workspace, trust) => result,
+                        result = ensure_workspace_server_for_remote(paths, workspace, trust) => result,
                     };
                     match discovery {
                         Ok(discovery) => {

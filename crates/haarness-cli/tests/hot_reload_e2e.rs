@@ -752,3 +752,69 @@ async fn unchanged_sources_neither_reload_nor_respawn_mcp_servers() {
     process.kill().await.expect("stop server");
     process.wait().await.expect("reap server");
 }
+
+/// A configuration change (a provider connected, instructions or an agent
+/// edited) reloads the runtime in place: the terminals open in Desktop or the
+/// TUI are not configuration and keep their shell, id and process.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn open_terminals_survive_configuration_reloads() {
+    let directory = TestDirectory::new();
+    let workspace = directory.0.join("workspace");
+    let data = directory.0.join("data");
+    let home = directory.0.join("home");
+    std::fs::create_dir_all(workspace.join(".haarness/agents")).expect("create project config");
+    std::fs::create_dir_all(&home).expect("create isolated home");
+    let address = unused_address().await;
+    let mut process = server_command(&workspace, &data, &home, address)
+        .spawn()
+        .expect("launch Haarness server");
+    wait_until_listening(address).await;
+    let client = Client::new();
+    let created: Value = client
+        .post(format!("http://{address}/v1/ptys"))
+        .bearer_auth(TOKEN)
+        .json(&json!({"title": "kept", "command": "/bin/sh"}))
+        .send()
+        .await
+        .expect("open a terminal")
+        .error_for_status()
+        .expect("terminal created")
+        .json()
+        .await
+        .expect("terminal JSON");
+    let id = created["id"].as_str().expect("terminal id").to_owned();
+    assert_eq!(created["status"], "running", "{created}");
+
+    std::fs::write(
+        workspace.join(".haarness/config.toml"),
+        provider_config(&["connected-provider"]),
+    )
+    .expect("connect a provider");
+    std::fs::write(workspace.join("AGENTS.md"), "Use tabs.\n").expect("write instructions");
+    std::fs::write(
+        workspace.join(".haarness/agents/reviewer.md"),
+        "---\ndescription: Reviews changes\n---\nReview carefully.\n",
+    )
+    .expect("write an agent");
+    wait_for_array_entry(
+        &client,
+        address,
+        "/providers",
+        "id",
+        "connected-provider",
+        true,
+    )
+    .await;
+    wait_for_array_entry(&client, address, "/agents", "id", "reviewer", true).await;
+
+    let kept = get_json(&client, address, &format!("/ptys/{id}")).await;
+    assert_eq!(kept["status"], "running", "{kept}");
+    assert_eq!(kept["pid"], created["pid"], "{kept}");
+    assert!(
+        array_has(&get_json(&client, address, "/ptys").await, "id", &id),
+        "the reload dropped the terminal"
+    );
+    process.kill().await.expect("stop server");
+    process.wait().await.expect("reap server");
+}

@@ -2,7 +2,7 @@
 //! never owns conversation execution; connect reuses the canonical daemon.
 use super::{
     Credential, CredentialStore, FileConfig, Paths, ensure_workspace_server,
-    inspect_workspace_server, replace_incompatible_workspace_server,
+    inspect_workspace_server, replace_incompatible_workspace_server, server_activity,
 };
 use anyhow::{Context as _, Result, bail, ensure};
 use serde::Deserialize;
@@ -103,7 +103,8 @@ async fn execute(paths: &Paths, workspace: &Path, trust: bool, request: Request)
         Request::Connect => {
             // Build freshness and wire compatibility are different concerns.
             // A compatible daemon with unfinished work must remain reachable:
-            // its permission/question may be the very thing keeping it busy.
+            // its permission/question may be the very thing keeping it busy,
+            // and replacing it would end the terminals open in it.
             if let Some(live) = inspect_workspace_server(paths, workspace).await?
                 && live.info.project_trusted == Some(trust)
                 && live.info.workspace.as_deref().is_some_and(|actual| {
@@ -115,11 +116,13 @@ async fn execute(paths: &Paths, workspace: &Path, trust: bool, request: Request)
             {
                 let client =
                     haarness_tui::api::ApiClient::new(&live.discovery.url, &live.discovery.token)?;
-                let active =
-                    tokio::time::timeout(std::time::Duration::from_secs(4), client.active_turns())
-                        .await
-                        .context("Timed out checking existing workspace activity")??;
-                if !active.is_empty() {
+                let activity = tokio::time::timeout(
+                    std::time::Duration::from_secs(4),
+                    server_activity(&client),
+                )
+                .await
+                .context("Timed out checking existing workspace activity")??;
+                if !activity.idle() {
                     return Ok(json!({"schemaVersion":1,"url":live.discovery.url,
                         "token":live.discovery.token,"workspace":workspace,
                         "workspaceId":paths.workspace_id,"upgradePending":true}));
