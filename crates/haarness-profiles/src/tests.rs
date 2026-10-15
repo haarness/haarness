@@ -116,6 +116,34 @@ fn scoped_roundtrip_preserves_assets_and_excludes_runtime_credentials_and_unrela
 }
 
 #[test]
+fn export_leaves_out_what_finder_and_macos_write_beside_configuration() {
+    let fixture = Fixture::new();
+    let roots = fixture.roots("source");
+    put(&roots.config, "agents/reviewer.md", "review instructions");
+    put(&roots.config, "agents/.DS_Store", "finder view settings");
+    put(&roots.config, "agents/._reviewer.md", "appledouble");
+    put(&roots.data, "skills/a/SKILL.md", "skill");
+    put(&roots.data, "skills/a/__MACOSX/._SKILL.md", "appledouble");
+    put(&roots.data, "skills/.DS_Store", "finder view settings");
+    put(&roots.project, ".haarness/commands/test.md", "test");
+    put(
+        &roots.project,
+        ".haarness/commands/._test.md",
+        "appledouble",
+    );
+    let archive = Archive::decode(&Archive::capture(&roots, "mac", Scope::Both).unwrap()).unwrap();
+    let names: Vec<_> = archive.files.keys().map(String::as_str).collect();
+    assert_eq!(
+        names,
+        vec![
+            "global/config/agents/reviewer.md",
+            "global/config/skills/a/SKILL.md",
+            "project/.haarness/commands/test.md",
+        ]
+    );
+}
+
+#[test]
 fn project_profile_never_captures_claude_code_files() {
     let fixture = Fixture::new();
     let roots = fixture.roots("source");
