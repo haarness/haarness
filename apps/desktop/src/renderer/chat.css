@@ -1258,6 +1258,10 @@ html[dir="rtl"] .tool-target {
   border-top-color: var(--primary);
   animation: spin 900ms linear infinite;
 }
+/* A step only turns while its turn runs; once the agent stops it rests. */
+.plan-dock:not([data-running]) .plan-spinner {
+  animation: none;
+}
 .plan-list li[data-status="completed"] .plan-check svg {
   animation: plan-done var(--slow) var(--ease);
 }

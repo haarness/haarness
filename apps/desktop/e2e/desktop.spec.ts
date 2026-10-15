@@ -875,6 +875,12 @@ test("the live plan stays above the composer, tracks progress, and follows the s
     todos.map((item) => item.content),
   );
   await expect(dock.locator(".plan-count")).toHaveText("0 of 3 completed");
+  // One round glyph per step: the step at work turns while the turn runs.
+  await expect(
+    dock.locator('li[data-status="in_progress"] .plan-spinner'),
+  ).toHaveCount(1);
+  await expect(dock.locator('li[data-status="pending"] svg')).toHaveCount(2);
+  await expect(dock).toHaveAttribute("data-running", "true");
   await toggle.click();
   await expect(dock.locator(".plan-list")).toBeHidden();
   await expect(dock.locator(".plan-preview")).toHaveText(todos[0].content);
@@ -890,6 +896,8 @@ test("the live plan stays above the composer, tracks progress, and follows the s
   );
   await finish(turn);
   await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(dock).not.toHaveAttribute("data-running", "true");
+  await expect(dock.locator(".plan-toggle .plan-spinner")).toHaveCount(1);
 
   const other = await client.createThread({
     title: "No plan here",
