@@ -558,6 +558,11 @@ fn is_provider_transient(error: &CoreError) -> bool {
     if is_provider_usage_limit(error) {
         return false;
     }
+    // A provider that sent nothing for the configured limit: its request was
+    // closed, and another may well be answered.
+    if crate::stream_stall_silence(error).is_some() {
+        return true;
+    }
     let message = message.to_ascii_lowercase();
     [
         "http 500",
@@ -834,6 +839,12 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
     let CoreError::Provider(raw) = error else {
         return error.to_string();
     };
+    if is_region_unavailable(raw) {
+        return format!(
+            "{} is not available in your country or region. Choose a model from another provider.",
+            provider.unwrap_or("This provider")
+        );
+    }
     if let Some((message, code, kind)) = provider_error_fields(raw) {
         let label = code.or_else(|| {
             kind.as_ref()
@@ -877,6 +888,12 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
         return format!(
             "Could not reach {}{place}{reason}. Check the network connection and provider endpoint, then retry.",
             provider.unwrap_or("the provider")
+        );
+    }
+    if let Some(silence) = crate::stream_stall_silence(error) {
+        return format!(
+            "{} sent nothing for {silence}, so the request was stopped. Try again, or check the network connection.",
+            provider.unwrap_or("The provider")
         );
     }
     if lower.contains("timed out") || lower.contains("timeout") {
@@ -924,6 +941,27 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
             .into();
     }
     format!("Provider error: {}", clean_error_text(raw, 600))
+}
+
+/// A provider refusing requests from where this computer is: OpenAI's
+/// `unsupported_country_region_territory`, Gemini's "User location is not
+/// supported", Bedrock's "unsupported countries, regions, or territories".
+/// Waiting does not change that, so it is never retried.
+fn is_region_unavailable(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    [
+        "unsupported_country_region_territory",
+        "country, region, or territory not supported",
+        "user location is not supported",
+        "unsupported countries, regions, or territories",
+        "not available in your country",
+        "not available in your region",
+        "unavailable in your region",
+        "restricted in your region",
+        "regional restriction",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 /// The host and port in reqwest's "error sending request for url (…)".
@@ -6831,11 +6869,23 @@ impl RunnerTask {
                                     retry_delay(&error_value, transient_retries + 1)
                             {
                                 transient_retries += 1;
+                                // Close this request before waiting, not when
+                                // the next round replaces it.
+                                drop(stream);
                                 self.wait_before_retry(transient_retries, delay, &error_value)
                                     .await?;
                                 continue 'provider_round;
                             }
-                            blocked = Some(error_value);
+                            // A provider that falls silent after it began is
+                            // recovered like a response cut short.
+                            let stalled = saw_provider_event
+                                && crate::stream_stall_silence(&error_value).is_some();
+                            blocked = Some(match error_value {
+                                CoreError::Provider(message) if stalled => {
+                                    CoreError::ProviderIncomplete(message)
+                                }
+                                error_value => error_value,
+                            });
                             break;
                         }
                     };
@@ -6959,11 +7009,20 @@ impl RunnerTask {
                             finished = true;
                             provider_span.record("gen_ai.response.finish_reasons", reason.as_str());
                             if let Some(error) = ProviderEvent::finish_error(&reason) {
-                                blocked = Some(error);
+                                // A dropped call asks the model to continue, and
+                                // the valid calls before it run instead of failing.
+                                let dropped = ProviderEvent::dropped_tool_call(&reason);
+                                recovering |= dropped;
+                                if !dropped || calls.is_empty() {
+                                    blocked = Some(error);
+                                }
                             }
                         }
                     }
                 }
+                // Nothing more is read from this request: close it now, so a
+                // recovery wait or the tools that run next do not keep it open.
+                drop(stream);
                 if !finished && blocked.is_none() {
                     blocked = Some(CoreError::ProviderIncomplete(
                         "missing completion event".into(),
@@ -7073,7 +7132,7 @@ impl RunnerTask {
                     }
                     if matches!(error, CoreError::ProviderIncomplete(_)) && recoveries < 3 {
                         recoveries += 1;
-                        recovering = partial;
+                        recovering |= partial;
                         self.set_status("retrying", None);
                         tokio::select! {
                             biased;
@@ -9713,11 +9772,14 @@ fn resolve_definition_model(
     for provider in providers {
         let models = registry.models(&provider);
         let model = match &release {
-            // A family is its newest release, by id.
+            // A family is its newest release, by version, then by id.
             None => models
                 .iter()
                 .filter(|m| m.id.to_lowercase().contains(value))
-                .max_by(|a, b| a.id.cmp(&b.id)),
+                .max_by(|a, b| {
+                    let version = crate::definitions::claude_version;
+                    (version(&a.id), &a.id).cmp(&(version(&b.id), &b.id))
+                }),
             // A release id matches the provider's spelling of the same release.
             Some(release) => models
                 .iter()
@@ -11532,6 +11594,45 @@ mod tests {
         assert!(!crate::definitions::unqualified_model(
             "anthropic/claude-opus-5-5"
         ));
+        // A family is the newest version in every provider's spelling, not the
+        // last id in text order (Bedrock's `-v1:0`, Vertex's `@date`, dates).
+        let registry = Catalog(vec![
+            provider(
+                "bedrock",
+                true,
+                &[
+                    "us.anthropic.claude-sonnet-5-5-v1:0",
+                    "us.anthropic.claude-sonnet-5-v1:0",
+                ],
+            ),
+            provider(
+                "vertex",
+                true,
+                &["claude-opus-5-5@20260901", "claude-opus-5@20260301"],
+            ),
+            provider(
+                "anthropic",
+                true,
+                &[
+                    "claude-opus-4-1-20250805",
+                    "claude-opus-4-20250514",
+                    "claude-3-7-sonnet-20250219",
+                    "claude-sonnet-4-20250514",
+                ],
+            ),
+        ]);
+        for (preferred, value, expected) in [
+            ("bedrock", "sonnet", "us.anthropic.claude-sonnet-5-5-v1:0"),
+            ("vertex", "opus", "claude-opus-5-5@20260901"),
+            ("anthropic", "opus", "claude-opus-4-1-20250805"),
+            ("anthropic", "sonnet", "claude-sonnet-4-20250514"),
+        ] {
+            assert_eq!(
+                super::resolve_definition_model(&registry, Some(preferred), value).unwrap(),
+                Some((preferred.to_owned(), expected.to_owned())),
+                "{preferred} {value}"
+            );
+        }
     }
 
     #[test]
@@ -13316,6 +13417,57 @@ mod tests {
                 Some("Anthropic")
             ),
             "Anthropic is not connected. Connect it with an API key or by signing in, then try again."
+        );
+    }
+
+    #[test]
+    fn region_refusals_name_the_provider_and_are_never_retried() {
+        for raw in [
+            "HTTP 403 Forbidden: [unsupported_country_region_territory] Country, region, or territory not supported",
+            "HTTP 400 Bad Request: User location is not supported for the API use.",
+            r#"{"error":{"code":400,"message":"User location is not supported for the API use.","status":"FAILED_PRECONDITION"}}"#,
+            "HTTP 400 Bad Request: Access to Anthropic models is not allowed from unsupported countries, regions, or territories.",
+        ] {
+            let error = CoreError::Provider(raw.into());
+            assert_eq!(
+                super::describe_error(&error, Some("Google Gemini")),
+                "Google Gemini is not available in your country or region. Choose a model from another provider.",
+                "{raw}"
+            );
+            assert!(
+                super::user_facing_error(&error).starts_with("This provider is not available"),
+                "{raw}"
+            );
+            assert!(super::retry_delay(&error, 1).is_none(), "{raw}");
+        }
+        assert!(!super::is_region_unavailable(
+            "HTTP 400 Bad Request: location is required"
+        ));
+    }
+
+    #[test]
+    fn a_silent_provider_is_named_as_silent_and_retried() {
+        let stall = crate::stream_stall(std::time::Duration::from_secs(300));
+        assert_eq!(
+            super::describe_error(&stall, Some("Anthropic")),
+            "Anthropic sent nothing for 5 minutes, so the request was stopped. Try again, or check the network connection."
+        );
+        assert_eq!(
+            super::user_facing_error(&stall),
+            "The provider sent nothing for 5 minutes, so the request was stopped. Try again, or check the network connection."
+        );
+        // Retried with the transient backoff, unlike a total-time limit, whose
+        // answer may simply be long.
+        assert_eq!(
+            super::retry_delay(&stall, 1),
+            Some(std::time::Duration::from_secs(2))
+        );
+        assert!(
+            super::retry_delay(
+                &crate::response_timeout(std::time::Duration::from_secs(900)),
+                1
+            )
+            .is_none()
         );
     }
 

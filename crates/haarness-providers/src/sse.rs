@@ -1,8 +1,8 @@
 use async_stream::try_stream;
 use futures::{Stream, StreamExt};
-use haarness_core::{CoreError, CoreResult};
+use haarness_core::{CoreError, CoreResult, StreamLimits, stream_stall};
 use serde_json::Value;
-use std::pin::Pin;
+use std::{pin::Pin, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 pub type JsonStream = Pin<Box<dyn Stream<Item = CoreResult<Value>> + Send>>;
@@ -27,15 +27,59 @@ pub(crate) fn transport_error(mut error: reqwest::Error) -> CoreError {
     })
 }
 
-pub fn json_stream(response: reqwest::Response, cancel: CancellationToken) -> JsonStream {
+/// Whether `url` names this machine, where a provider's silence is its own
+/// work (a local model reading a long prompt) rather than a lost connection.
+pub(crate) fn is_loopback(url: &reqwest::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+/// Wait for `future` at most `limit`, failing as a silent provider.
+async fn within<T>(limit: Option<Duration>, future: impl Future<Output = T>) -> CoreResult<T> {
+    match limit {
+        Some(limit) => tokio::time::timeout(limit, future)
+            .await
+            .map_err(|_| stream_stall(limit)),
+        None => Ok(future.await),
+    }
+}
+
+/// Send a streamed model request. Response headers that do not arrive within
+/// the provider's idle limit fail the request as a silent provider; dropping
+/// the returned future closes the connection.
+pub(crate) async fn send(
+    request: reqwest::RequestBuilder,
+    limits: StreamLimits,
+) -> CoreResult<reqwest::Response> {
+    let (client, request) = request.build_split();
+    let request = request.map_err(transport_error)?;
+    let limit = limits.idle(is_loopback(request.url()));
+    within(limit, client.execute(request))
+        .await?
+        .map_err(transport_error)
+}
+
+/// The response's server-sent events as JSON values. Any byte resets the idle
+/// limit, so a provider's keep-alive pings and `:` comments count as activity;
+/// a silence that outlasts it ends the stream with an error, and dropping the
+/// stream closes the connection, so the provider stops generating.
+pub fn json_stream(
+    response: reqwest::Response,
+    cancel: CancellationToken,
+    limits: StreamLimits,
+) -> JsonStream {
+    let limit = limits.idle(is_loopback(response.url()));
     Box::pin(try_stream! {
         let response = if response.status().is_success() {
             response
         } else {
             let status = response.status();
-            let detail = response
-                .text()
-                .await
+            let detail = within(limit, response.text())
+                .await?
                 .ok()
                 .and_then(|body| provider_error_detail(&body));
             let message = detail.map_or_else(
@@ -50,12 +94,23 @@ pub fn json_stream(response: reqwest::Response, cancel: CancellationToken) -> Js
         loop {
             let chunk = tokio::select! {
                 () = cancel.cancelled() => Err(CoreError::Cancelled),
-                chunk = chunks.next() => match chunk {
-                    Some(Ok(chunk)) => Ok(Some(chunk)),
-                    Some(Err(error)) => Err(transport_error(error)),
-                    None => Ok(None),
+                chunk = within(limit, chunks.next()) => match chunk {
+                    Err(stall) => Err(stall),
+                    Ok(Some(Ok(chunk))) => Ok(Some(chunk)),
+                    Ok(Some(Err(error))) => Err(transport_error(error)),
+                    Ok(None) => Ok(None),
                 }
-            }?;
+            };
+            // A finished stream keeps what it held until it is dropped: close
+            // the connection with the failure, not whenever the reader lets go.
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    drop(chunks);
+                    Err(error)?;
+                    unreachable!();
+                }
+            };
             let Some(chunk) = chunk else { break; };
             buffer.extend_from_slice(&chunk);
             while let Some(boundary) = find_boundary(&buffer) {
@@ -143,7 +198,124 @@ fn find_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_boundary, provider_error_detail};
+    use std::time::Duration;
+
+    use futures::StreamExt as _;
+    use haarness_core::StreamLimits;
+    use serde_json::json;
+    use tokio::{
+        io::{AsyncReadExt as _, AsyncWriteExt as _},
+        net::TcpListener,
+        sync::oneshot,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    use super::{find_boundary, is_loopback, json_stream, provider_error_detail, send};
+
+    /// A provider that answers with server-sent `parts`, `pause` apart, and
+    /// then stays silent with the connection open, or with no `head` never
+    /// answers at all. The receiver resolves when the client closes the
+    /// connection.
+    async fn silent_provider(
+        head: bool,
+        parts: Vec<&'static str>,
+        pause: Duration,
+    ) -> (String, oneshot::Receiver<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/messages", listener.local_addr().unwrap());
+        let (closed, observed) = oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await.unwrap();
+            if head {
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                for part in parts {
+                    socket.write_all(part.as_bytes()).await.unwrap();
+                    tokio::time::sleep(pause).await;
+                }
+            }
+            // Anything else the client sends is the rest of its request; the
+            // end of input is the connection closing.
+            while matches!(socket.read(&mut request).await, Ok(read) if read > 0) {}
+            let _ = closed.send(());
+        });
+        (url, observed)
+    }
+
+    fn idle(limit: Duration) -> StreamLimits {
+        StreamLimits {
+            idle: Some(limit),
+            total: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn keep_alive_comments_count_and_a_silent_stream_closes_its_connection() {
+        // Eight comments 300 ms apart outlast the 2 s limit together, but no
+        // single silence does.
+        let mut parts = vec![": keep-alive\n\n"; 8];
+        parts.push("data: {\"n\":1}\n\n");
+        let (url, closed) = silent_provider(true, parts, Duration::from_millis(300)).await;
+        let limits = idle(Duration::from_secs(2));
+        let response = send(reqwest::Client::new().post(&url).body("{}"), limits)
+            .await
+            .unwrap();
+        let mut events = json_stream(response, CancellationToken::new(), limits);
+        assert_eq!(events.next().await.unwrap().unwrap(), json!({"n": 1}));
+        let error = events.next().await.unwrap().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "provider error: the provider sent nothing for 2 seconds"
+        );
+        // The connection closes with the error, before anyone drops the stream.
+        tokio::time::timeout(Duration::from_secs(5), closed)
+            .await
+            .expect("the provider sees its connection close")
+            .unwrap();
+        assert!(events.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn response_headers_that_never_come_fail_as_a_silent_provider() {
+        let (url, closed) = silent_provider(false, Vec::new(), Duration::ZERO).await;
+        let error = send(
+            reqwest::Client::new().post(&url).body("{}"),
+            idle(Duration::from_millis(300)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "provider error: the provider sent nothing for 300 milliseconds"
+        );
+        tokio::time::timeout(Duration::from_secs(5), closed)
+            .await
+            .expect("the provider sees its connection close")
+            .unwrap();
+    }
+
+    #[test]
+    fn only_this_machine_counts_as_loopback() {
+        for local in [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:8000/v1",
+            "http://127.1.2.3/v1",
+            "http://[::1]:1234/v1",
+        ] {
+            assert!(is_loopback(&local.parse().unwrap()), "{local}");
+        }
+        for remote in [
+            "https://api.anthropic.com/v1/messages",
+            "http://192.168.1.20:11434/v1",
+            "http://localhost.example.com/v1",
+        ] {
+            assert!(!is_loopback(&remote.parse().unwrap()), "{remote}");
+        }
+    }
 
     #[test]
     fn recognizes_lf_and_crlf_frames() {

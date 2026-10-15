@@ -176,6 +176,14 @@ fn excluded(path: &str) -> bool {
     })
 }
 
+/// What macOS leaves beside configuration: Finder's `.DS_Store`, the
+/// AppleDouble `._name` files written on volumes without extended attributes,
+/// and the `__MACOSX` folder of an unpacked Finder zip. An export leaves them
+/// out; archives that already carry them still restore.
+fn macos_clutter(name: &str) -> bool {
+    name == ".DS_Store" || name.starts_with("._") || name == "__MACOSX"
+}
+
 fn config_path(path: &str) -> bool {
     CONFIG_FILES.contains(&path)
         || path.starts_with("plugins/local/")
@@ -653,6 +661,9 @@ fn collect(root: &Path, prefix: &str, scope: Scope, files: &mut Captured) -> Res
         .filter_entry(|entry| {
             if entry.depth() == 0 {
                 return true;
+            }
+            if entry.file_name().to_str().is_some_and(macos_clutter) {
+                return false;
             }
             let relative = entry.path().strip_prefix(root).unwrap_or(Path::new(""));
             let path = format!("{prefix}/{}", relative.to_string_lossy().replace('\\', "/"));

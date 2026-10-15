@@ -37,7 +37,7 @@ use std::{
     sync::Arc,
 };
 
-use haarness_core::{ModelProvider, ProviderRegistry};
+use haarness_core::{ModelProvider, ProviderRegistry, StreamLimits};
 use haarness_protocol::ProviderInfo;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
@@ -431,6 +431,58 @@ impl NativeProviderRegistry {
 
     pub fn insert(&mut self, provider: Arc<dyn ModelProvider>) {
         self.providers.insert(provider.id().to_owned(), provider);
+    }
+
+    /// Apply the configured `stream_idle_timeout` and `request_timeout` of
+    /// each provider id; the others keep the defaults.
+    #[must_use]
+    pub fn with_stream_limits(mut self, limits: &HashMap<String, StreamLimits>) -> Self {
+        for (id, limits) in limits {
+            if let Some(inner) = self.providers.remove(id) {
+                let provider = Arc::new(Limited {
+                    inner,
+                    limits: *limits,
+                });
+                self.providers.insert(id.clone(), provider);
+            }
+        }
+        self
+    }
+}
+
+/// A provider whose requests carry its configured stream limits.
+struct Limited {
+    inner: Arc<dyn ModelProvider>,
+    limits: StreamLimits,
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for Limited {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+    fn info(&self) -> ProviderInfo {
+        self.inner.info()
+    }
+    fn prepare_side_question(&self, request: &mut haarness_core::ProviderRequest) {
+        self.inner.prepare_side_question(request);
+    }
+    async fn refresh_models(&self, force: bool) {
+        self.inner.refresh_models(force).await;
+    }
+    async fn check_api_key(&self, key: &str) -> haarness_core::KeyCheck {
+        self.inner.check_api_key(key).await
+    }
+    fn explicit_prompt_cache_scope(&self, model: &str) -> Option<String> {
+        self.inner.explicit_prompt_cache_scope(model)
+    }
+    async fn stream(
+        &self,
+        mut request: haarness_core::ProviderRequest,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> haarness_core::CoreResult<haarness_core::ProviderStream> {
+        request.parameters.limits = self.limits;
+        self.inner.stream(request, cancel).await
     }
 }
 

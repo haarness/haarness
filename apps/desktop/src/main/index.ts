@@ -24,7 +24,7 @@ import {
   nativeImage,
 } from "electron";
 import { readFile, writeFile, realpath, stat } from "node:fs/promises";
-import { join, resolve, basename, sep } from "node:path";
+import { join, resolve, basename, sep, isAbsolute } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import {
@@ -599,9 +599,23 @@ function installHandlers() {
         label: z.string().optional(),
         trust: z.boolean().optional(),
         recent: z.string().optional(),
+        /** The folder came from a haarness:// link rather than the user's own choice. */
+        deepLink: z.boolean().optional(),
       })
       .strict()
       .parse(raw);
+    // Resolving a network path would already reach its host.
+    if (
+      input.deepLink &&
+      (!input.workspace ||
+        !isAbsolute(input.workspace) ||
+        /^[\\/]{2}/.test(input.workspace) ||
+        input.url ||
+        input.recent ||
+        input.cloudSession ||
+        input.cloudWorkspace)
+    )
+      throw new Error("A link can only open a folder on this computer");
     const recent = input.recent
       ? data().recent.find((item) => item.id === input.recent)
       : undefined;
@@ -625,7 +639,42 @@ function installHandlers() {
       if (result.canceled) return null;
       workspace = result.filePaths[0];
     }
-    if (!url) workspace = await realpath(workspace!);
+    if (input.deepLink)
+      workspace = await realpath(workspace!).catch(() => {
+        throw new Error(say("The folder in this link was not found."));
+      });
+    else if (!url) workspace = await realpath(workspace!);
+    // A haarness:// link can name any folder. One already in the sidebar
+    // opens as it was saved; any other is confirmed first and opens with its
+    // project configuration off, so a link can never start a folder's MCP
+    // servers, hooks or extensions without the user choosing to trust it.
+    let linkTrust: boolean | undefined;
+    if (input.deepLink) {
+      const saved = data().recent.find(
+        (item) => !item.remote && item.id === "local:" + workspace,
+      );
+      if (saved) linkTrust = saved.trust;
+      else {
+        const choice = await dialog.showMessageBox(win, {
+          type: "question",
+          message: say("Open “{folder}” from a link?").replace(
+            "{folder}",
+            basename(workspace!) || workspace!,
+          ),
+          detail:
+            workspace +
+            "\n\n" +
+            say(
+              "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.",
+            ),
+          buttons: [say("Open folder"), say("Cancel")],
+          defaultId: 1,
+          cancelId: 1,
+        });
+        if (choice.response !== 0) return null;
+        linkTrust = false;
+      }
+    }
     const serverId = url ? remoteLocationId(url) : "";
     const explicitAuth =
       input.password !== undefined ||
@@ -692,7 +741,10 @@ function installHandlers() {
           )
         : await connectLocal(
             workspace!,
-            input.trust ?? (input.recent ? current?.trust : undefined) ?? true,
+            linkTrust ??
+              input.trust ??
+              (input.recent ? current?.trust : undefined) ??
+              true,
           );
       const saved: Recent = {
         id: view.id,

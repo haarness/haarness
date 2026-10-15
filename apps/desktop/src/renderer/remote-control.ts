@@ -85,3 +85,21 @@ export function qrPath(rows: string[]) {
   });
   return path;
 }
+
+/**
+ * Orders what is known about each chat's share. Every status read and every
+ * write (a start, stop or view in the dialog) takes the next number, and a
+ * read's answer counts only while it is still the latest, so an answer that
+ * was overtaken cannot put back an older state.
+ */
+export function shareOrder() {
+  const latest = new Map<string, number>();
+  return {
+    begin(key: string) {
+      const next = (latest.get(key) ?? 0) + 1;
+      latest.set(key, next);
+      return next;
+    },
+    latest: (key: string, read: number) => latest.get(key) === read,
+  };
+}

@@ -1656,6 +1656,10 @@
   "choose": "odaberi",
   "reject": "odbij",
   "answer": "odgovori",
+  "scroll": "pomjeri",
+  "expand": "proširi",
+  "collapse": "skupi",
+  "lines {from}–{to} of {total}": "redovi {from}–{to} od {total}",
   "always allows": "uvijek dozvoljava",
   "Leads to {path}": "Vodi do {path}",
   "every file edit": "svako uređivanje datoteke",
@@ -2410,5 +2414,16 @@
   "The provider refused {name}, so it is left out of this chat from now on.": "Provajder je odbio {name}, pa se od sada izostavlja iz ovog chata.",
   "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "Provajder je odbio sliku bez navođenja koju, pa se od sada najnovija, {name}, izostavlja iz ovog chata.",
   "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "Provajder je odbio sliku bez navođenja koju, pa se od sada najnovije, {names}, izostavljaju iz ovog chata.",
-  "{name} is not an image Haarness can read.": "{name} nije slika koju Haarness može pročitati."
+  "{name} is not an image Haarness can read.": "{name} nije slika koju Haarness može pročitati.",
+  "This link could not be opened.": "Ovaj link nije moguće otvoriti.",
+  "Open a project to open links to its files.": "Otvorite projekat da biste otvarali linkove na njegove datoteke.",
+  "Links to network locations do not open.": "Linkovi na mrežne lokacije se ne otvaraju.",
+  "Only files in this project open from a link.": "Iz linka se otvaraju samo datoteke iz ovog projekta.",
+  "This kind of link does not open in Haarness.": "Ova vrsta linka se ne otvara u Haarnessu.",
+  "{path} was not found in this project.": "{path} nije pronađen u ovom projektu.",
+  "This Haarness link could not be opened.": "Ovaj Haarness link nije moguće otvoriti.",
+  "The folder in this link was not found.": "Mapa iz ovog linka nije pronađena.",
+  "Open “{folder}” from a link?": "Otvoriti „{folder}” iz linka?",
+  "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "Mapa se otvara s isključenom konfiguracijom projekta: MCP serveri, hookovi i proširenja u njoj se ne pokreću. Da ih uključite, otvorite mapu pomoću opcije Otvori projekat.",
+  "Open folder": "Otvori mapu"
 }

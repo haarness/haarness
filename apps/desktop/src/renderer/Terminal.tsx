@@ -9,6 +9,7 @@ import {
 } from "solid-js";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { pendingSize, type TerminalSize } from "./terminal-size";
 import "@xterm/xterm/css/xterm.css";
 import type { PtyInfo } from "@haarness/sdk";
 import { useApp } from "./state";
@@ -308,18 +309,31 @@ function TerminalView(props: { id: string }) {
           )
           .catch((error) => app.set("error", String(error))),
     );
+    // The PTY learns every size xterm takes: a panel resize, and a font size
+    // change, which refits without the panel changing size. A push waits for
+    // the size to settle and is skipped when the PTY already has that size.
+    let pushed: TerminalSize | undefined;
+    let pending: TerminalSize | undefined;
+    let push: ReturnType<typeof setTimeout> | undefined;
+    const schedule = (size: TerminalSize) => {
+      pending = pendingSize(pushed, size);
+      clearTimeout(push);
+      if (!pending) return;
+      push = setTimeout(() => {
+        const size = pending;
+        pending = undefined;
+        if (!size || disposed) return;
+        pushed = size;
+        void app.api("updatePty", props.id, size).catch(() => {});
+      }, 100);
+    };
+    const sized = terminal.onResize(({ cols, rows }) => schedule({ cols, rows }));
+    // A new or reattached PTY may have any size; give it this view's.
+    schedule({ cols: terminal.cols, rows: terminal.rows });
     let timer: ReturnType<typeof setTimeout>;
     resize = new ResizeObserver(() => {
       clearTimeout(timer);
-      timer = setTimeout(() => {
-        fit.fit();
-        void app
-          .api("updatePty", props.id, {
-            cols: terminal.cols,
-            rows: terminal.rows,
-          })
-          .catch(() => {});
-      }, 100);
+      timer = setTimeout(() => fit.fit(), 100);
     });
     resize.observe(host);
     unsubscribe = window.haarness.onEvent((event) => {
@@ -355,6 +369,8 @@ function TerminalView(props: { id: string }) {
     onCleanup(() => {
       disposed = true;
       clearTimeout(timer);
+      clearTimeout(push);
+      sized.dispose();
       input.dispose();
       resize.disconnect();
       unsubscribe();

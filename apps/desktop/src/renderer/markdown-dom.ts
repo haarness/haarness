@@ -3,6 +3,32 @@ import type { MarkdownPatch } from "./markdown-project";
 
 type Block = { html: string; start: Comment; end: Comment };
 
+const URL_ATTRIBUTES = new Set(["href", "xlink:href", "src", "srcset", "poster", "background"]);
+// Every link click goes through Markdown.tsx, which decides where it may go
+// and says why a link does not open. So a link keeps a `file:` address, a
+// file share's address or a Windows drive path, none of which can run
+// script, instead of losing it to the default rules; any other scheme those
+// rules would drop (`javascript:`, `vscode:`) becomes a placeholder that only
+// says it does not open. No other address may name a network path: an image
+// there would reach its host as soon as the reply is drawn, on Windows with
+// the user's sign-in.
+DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
+  if (!URL_ATTRIBUTES.has(data.attrName)) return;
+  if (node.nodeName === "A" && data.attrName === "href") {
+    const value = data.attrValue;
+    if (/^(?:(?:file|smb|afp|nfs|cifs|dav|davs|webdav|webdavs):|[a-z]:[\\/])/i.test(value))
+      data.forceKeepAttr = true;
+    else if (/^[a-z][a-z\d+.-]*:/i.test(value) && !/^(?:https?|mailto):/i.test(value)) {
+      // A kept attribute is not rewritten from `attrValue`, so replace it here.
+      (node as Element).setAttribute("href", "unsupported:");
+      data.forceKeepAttr = true;
+    }
+    return;
+  }
+  if (data.attrValue.split(",").some((part) => /^[\\/]{2}/.test(part.trim())))
+    data.keepAttr = false;
+});
+
 // Patch only the changed interval. Assigning textContent/innerHTML resets
 // browser Range endpoints, including a selection in an unchanged prefix.
 function text(current: Text, next: string) {

@@ -1,7 +1,7 @@
 //! Outbound Cloud connector. Local runtime and provider credentials never cross the relay.
 use super::{
-    Paths, ensure_workspace_server,
-    reconnect::{Backoff, Link, Pacing},
+    Paths, ensure_workspace_server_for_remote,
+    reconnect::{Backoff, Link, Outage, Pacing},
     remote_attention,
 };
 use anyhow::{Context, Result, ensure};
@@ -278,7 +278,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
             let account = status["selectedAccountId"]
                 .as_str()
                 .context("Sign in and select a Cloud account first")?;
-            let discovery = ensure_workspace_server(paths, workspace, trust).await?;
+            let discovery = ensure_workspace_server_for_remote(paths, workspace, trust).await?;
             let project = paths
                 .workspace_id
                 .clone()
@@ -396,51 +396,48 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
             let mut shown_title = identity["title"].as_str().unwrap_or_default().to_owned();
             let attention =
                 remote_attention::Context::new(paths, trust, remote_attention::Timing::default());
-            let mut backoff = Backoff::new(Pacing::default());
-            let mut rejected = None;
+            let mut relay = client
+                .config
+                .api_url
+                .join(&format!("api/v1/remote-hosts/{id}/connect"))?;
+            relay
+                .set_scheme(if relay.scheme() == "https" {
+                    "wss"
+                } else {
+                    "ws"
+                })
+                .map_err(|()| anyhow::anyhow!("Invalid Cloud URL"))?;
+            let mut reconnect = Reconnect::new(Pacing::default(), |line| eprintln!("{line}"));
+            // The local server is waited for on its own pacing; reaching it
+            // costs Cloud nothing.
+            let mut local = Backoff::new(Pacing::default());
             let ended: Result<()> = async {
                 loop {
                     // Daemons can be replaced by a local client upgrade or restarted after a crash.
                     // Resolve the current address/token before each transport generation.
-                    let discovery = tokio::select! {
+                    let runtime = tokio::select! {
                         () = stop.cancelled() => break,
-                        result = ensure_workspace_server(paths, workspace, trust) => result,
+                        result = local_runtime(paths, workspace, trust, &http, &mut target) => result,
                     };
-                    match discovery {
-                        Ok(discovery) => {
-                            target.url = discovery.url;
-                            target.token = discovery.token;
+                    if let Err(error) = runtime {
+                        if error.downcast_ref::<OutdatedRuntime>().is_some() {
+                            return Err(error);
                         }
-                        Err(error) => {
-                            eprintln!("Waiting for the local runtime: {error}");
-                            tokio::select! { () = stop.cancelled() => break, () = tokio::time::sleep(Duration::from_secs(5)) => {} }
-                            continue;
-                        }
+                        reconnect
+                            .outage
+                            .failed(&format!("Waiting for the local runtime: {error}"));
+                        let delay = local.wait(Link::Failed);
+                        tokio::select! {()=stop.cancelled()=>break,()=tokio::time::sleep(delay)=>{}}
+                        continue;
                     }
-                    verify_runtime(&http, &target).await?;
-                    let bearer = client.bearer(rejected.as_deref()).await?;
-                    let reauthorized = rejected.take().is_some();
-                    let mut url = client
-                        .config
-                        .api_url
-                        .join(&format!("api/v1/remote-hosts/{id}/connect"))?;
-                    url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
-                        .map_err(|()| anyhow::anyhow!("Invalid Cloud URL"))?;
-                    let handshake = relay_handshake(&url, &bearer)?;
+                    local = Backoff::new(Pacing::default());
                     let link = tokio::select! {
                         () = stop.cancelled() => break,
-                        link = relay_link(handshake, &target, &http, backoff.pacing.stable, &attention) => link?,
+                        // Boxed: a whole relay connection lives in this future.
+                        link = Box::pin(reconnect_step(&client, &relay, &target, &http, &attention, &mut reconnect)) => link?,
                         () = follow_title(&client, &http, &target, id, &file, &mut shown_title) => continue,
                     };
-                    if link == Link::Unauthorized {
-                        // One retry with a fresh token; a second refusal will not pass either.
-                        ensure!(
-                            !reauthorized,
-                            "Remote authentication rejected; sign in again or replace the expired/revoked API key"
-                        );
-                        rejected = Some(bearer);
-                    }
-                    let delay = backoff.wait(link);
+                    let delay = reconnect.backoff.wait(link);
                     tokio::select! {()=stop.cancelled()=>break,()=tokio::time::sleep(delay)=>{}}
                 }
                 Ok(())
@@ -522,14 +519,114 @@ async fn verify_runtime(http: &reqwest::Client, target: &Target) -> Result<()> {
             .json::<Value>()
             .await
     })
-    .await??;
-    ensure!(
-        info["capabilities"]
-            .as_array()
-            .is_some_and(|values| values.iter().any(|v| v == "remote-chat-scope.v1")),
-        "Restart this project's Haarness server with the current version before enabling remote access"
-    );
+    .await
+    .context("This project's Haarness server did not answer in time")??;
+    if !info["capabilities"]
+        .as_array()
+        .is_some_and(|values| values.iter().any(|v| v == "remote-chat-scope.v1"))
+    {
+        return Err(OutdatedRuntime.into());
+    }
     Ok(())
+}
+/// This project's server is from a build that cannot confine a published
+/// chat's requests; waiting does not change that, only restarting it does.
+#[derive(Debug)]
+struct OutdatedRuntime;
+impl std::fmt::Display for OutdatedRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Restart this project's Haarness server with the current version before enabling remote access")
+    }
+}
+impl std::error::Error for OutdatedRuntime {}
+/// Find this project's server (starting it when none runs) and check it can
+/// serve the relay. A server that is starting, being replaced or too busy to
+/// answer is waited for; only an [`OutdatedRuntime`] ends the connector.
+async fn local_runtime(
+    paths: &Paths,
+    workspace: &Path,
+    trust: bool,
+    http: &reqwest::Client,
+    target: &mut Target,
+) -> Result<()> {
+    let discovery = ensure_workspace_server_for_remote(paths, workspace, trust).await?;
+    target.url = discovery.url;
+    target.token = discovery.token;
+    verify_runtime(http, target).await
+}
+/// What a connector carries from one attempt to reach the relay to the next.
+struct Reconnect {
+    backoff: Backoff,
+    outage: Outage,
+    /// A bearer the relay refused, renewed before the next attempt.
+    rejected: Option<String>,
+}
+impl Reconnect {
+    fn new(pacing: Pacing, say: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        Self {
+            backoff: Backoff::new(pacing),
+            outage: Outage::new(say),
+            rejected: None,
+        }
+    }
+}
+/// One attempt to reach the relay once the local server answers: renew the
+/// bearer when it expired or was refused, connect, and serve until the
+/// connection ends. What waiting can fix (Cloud unreachable or overloaded, or
+/// a proxy answering for it) is a failed link, said once per outage; only an
+/// answer no retry changes (signed out, access revoked, a protocol this build
+/// does not speak) ends the connector.
+async fn reconnect_step(
+    client: &haarness_account::Client,
+    relay: &reqwest::Url,
+    target: &Target,
+    http: &reqwest::Client,
+    attention: &Arc<remote_attention::Context>,
+    state: &mut Reconnect,
+) -> Result<Link> {
+    let bearer = match client.bearer(state.rejected.as_deref()).await {
+        Ok(bearer) => bearer,
+        Err(error) if error.is_transient() => {
+            state.outage.failed(&format!(
+                "Could not reach Haarness Cloud to renew this computer's sign-in: {}; reconnecting",
+                renewal_failure(&error)
+            ));
+            return Ok(Link::Failed);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let reauthorized = state.rejected.take().is_some();
+    let link = relay_link(
+        relay_handshake(relay, &bearer)?,
+        target,
+        http,
+        state.backoff.pacing.stable,
+        attention,
+        &mut state.outage,
+    )
+    .await?;
+    if link == Link::Unauthorized {
+        // One retry with a fresh token; a second refusal will not pass either.
+        ensure!(
+            !reauthorized,
+            "Remote authentication rejected; sign in again or replace the expired/revoked API key"
+        );
+        state.rejected = Some(bearer);
+    }
+    Ok(link)
+}
+/// Why renewing the sign-in failed, without repeating "Could not reach".
+fn renewal_failure(error: &haarness_account::Error) -> String {
+    let haarness_account::Error::Http(error) = error else {
+        return error.to_string();
+    };
+    // reqwest names the request; the reason (refused, reset, DNS) is below it.
+    std::iter::successors(Some(error as &(dyn std::error::Error + 'static)), |error| {
+        error.source()
+    })
+    .map(ToString::to_string)
+    .collect::<Vec<_>>()
+    .join(": ")
 }
 /// The relay announced a protocol this build does not speak; reconnecting
 /// cannot fix that, only an update can.
@@ -577,24 +674,26 @@ fn relay_ready(frame: &str) -> Option<(u64, Vec<String>)> {
     Some((frame["version"].as_u64()?, features))
 }
 /// One connection to the relay, from the handshake until it ends. Only an
-/// answer that reconnecting cannot change is an error.
+/// answer that reconnecting cannot change is an error. During an outage the
+/// failures go to `outage`, and the first connection that proves itself says
+/// how many attempts it took.
 async fn relay_link(
     handshake: tokio_tungstenite::tungstenite::handshake::client::Request,
     target: &Target,
     http: &reqwest::Client,
     stable: Duration,
     attention: &Arc<remote_attention::Context>,
+    outage: &mut Outage,
 ) -> Result<Link> {
     let attempt = tokio::time::timeout(
         Duration::from_secs(10),
-        tokio_tungstenite::connect_async_with_config(
+        haarness_account::websocket::connect(
             handshake,
             Some(
                 tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
                     .max_message_size(Some(24 * 1024 * 1024))
                     .max_frame_size(Some(24 * 1024 * 1024)),
             ),
-            false,
         ),
     );
     let socket = match attempt.await {
@@ -610,34 +709,78 @@ async fn relay_link(
             anyhow::bail!("Remote host access was revoked or is no longer allowed")
         }
         Ok(Err(error)) => {
-            eprintln!("Could not reach Haarness Cloud: {error}; reconnecting");
+            outage.failed(&format!(
+                "Could not reach Haarness Cloud: {error}; reconnecting"
+            ));
             return Ok(Link::Failed);
         }
         Err(_) => {
-            eprintln!("Haarness Cloud did not answer in time; reconnecting");
+            outage.failed("Haarness Cloud did not answer in time; reconnecting");
             return Ok(Link::Failed);
         }
     };
-    println!("Remote host connected");
+    // During an outage the connection says so once it proves itself.
+    if !outage.ongoing() {
+        outage.say("Remote host connected");
+    }
     let since = tokio::time::Instant::now();
-    let mut served = false;
-    if let Err(error) = connected(
+    let (served, mut requests) = tokio::sync::watch::channel(false);
+    let session = connected(
         socket,
         target.clone(),
         http.clone(),
-        &mut served,
+        served,
         attention.clone(),
-    )
-    .await
-    {
-        if error.is::<Unsupported>() {
-            return Err(error);
+    );
+    tokio::pin!(session);
+    let proof = async {
+        tokio::select! {
+            () = tokio::time::sleep(stable) => {}
+            // A request routed here proves it at once. The sender goes with
+            // the connection, which then ends this select anyway.
+            served = async { requests.wait_for(|served| *served).await.map(|_| ()) } => {
+                if served.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
         }
-        eprintln!("Remote connection ended: {error}");
+    };
+    let mut announced = false;
+    let ended = tokio::select! {
+        ended = &mut session => ended,
+        () = proof => {
+            announced = true;
+            reconnected(outage);
+            session.await
+        }
+    };
+    let proven = announced || *requests.borrow() || since.elapsed() >= stable;
+    if proven && !announced {
+        reconnected(outage);
     }
-    Ok(Link::Ended {
-        proven: served || since.elapsed() >= stable,
-    })
+    match ended {
+        Err(error) if error.is::<Unsupported>() => return Err(error),
+        // A connection that worked ending is news; one that never proved
+        // itself is another failed attempt of the outage.
+        Err(error) if proven => outage.say(&format!("Remote connection ended: {error}")),
+        Err(error) => outage.failed(&format!("Remote connection ended: {error}; reconnecting")),
+        Ok(()) if proven => {}
+        Ok(()) => outage.failed("Remote connection ended; reconnecting"),
+    }
+    Ok(Link::Ended { proven })
+}
+/// A connection proved itself: say how long the outage before it lasted.
+fn reconnected(outage: &mut Outage) {
+    if let Some((attempts, took)) = outage.recovered() {
+        let took = if took < Duration::from_secs(120) {
+            format!("{} s", took.as_secs())
+        } else {
+            format!("{} min", took.as_secs() / 60)
+        };
+        outage.say(&format!(
+            "Remote host reconnected after {attempts} attempts in {took}"
+        ));
+    }
 }
 /// Keep why the connector gave up in its identity, so status can say so
 /// after the process is gone.
@@ -657,7 +800,7 @@ async fn connected(
     >,
     target: Target,
     http: reqwest::Client,
-    served: &mut bool,
+    served: tokio::sync::watch::Sender<bool>,
     attention: Arc<remote_attention::Context>,
 ) -> Result<()> {
     let ready = tokio::time::timeout(Duration::from_secs(10), socket.next())
@@ -759,7 +902,7 @@ async fn connected(
                             frame@Frame::Open{id,..}=>{
                                 ensure!(!active.contains_key(&id),"Duplicate relay request");
                                 // A request routed here proves the relay took this host.
-                                *served=true;
+                                served.send_replace(true);
                                 let (input,receiver)=mpsc::channel(WINDOW+2);
                                 let credit=Arc::new(Semaphore::new(WINDOW));
                                 let cancel=tokio_util::sync::CancellationToken::new();
@@ -1825,15 +1968,7 @@ mod tests {
         let (relay, _) = fake_relay(script).await;
         let root = std::env::temp_dir().join(format!("haarness-remote-backoff-{}", Uuid::now_v7()));
         let attention = attention(&Paths::new(Some(&root)).unwrap());
-        let connect = || {
-            relay_link(
-                relay.as_str().into_client_request().unwrap(),
-                &target,
-                &http,
-                pacing.stable,
-                &attention,
-            )
-        };
+        let mut outage = Outage::new(|_| {});
 
         let mut backoff = Backoff::new(pacing);
         let dropped = Link::Ended { proven: false };
@@ -1853,7 +1988,16 @@ mod tests {
             (proven, 10),
             (dropped, 20),
         ] {
-            let link = connect().await.unwrap();
+            let link = relay_link(
+                relay.as_str().into_client_request().unwrap(),
+                &target,
+                &http,
+                pacing.stable,
+                &attention,
+                &mut outage,
+            )
+            .await
+            .unwrap();
             assert_eq!(link, expected);
             let wait = backoff.wait(link);
             assert!(
@@ -1862,7 +2006,16 @@ mod tests {
             );
         }
         // A relay on another protocol stops the connector: only an update helps.
-        let error = connect().await.unwrap_err();
+        let error = relay_link(
+            relay.as_str().into_client_request().unwrap(),
+            &target,
+            &http,
+            pacing.stable,
+            &attention,
+            &mut outage,
+        )
+        .await
+        .unwrap_err();
         assert!(error.is::<Unsupported>(), "{error}");
         assert!(error.to_string().contains("Update Haarness"), "{error}");
         // Nothing listening is a plain failed connect.
@@ -1875,10 +2028,183 @@ mod tests {
             &http,
             pacing.stable,
             &attention,
+            &mut outage,
         )
         .await
         .unwrap();
         assert_eq!(link, Link::Failed);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    /// How a fake token endpoint answers one renewal.
+    #[derive(Clone, Copy)]
+    enum Renewal {
+        /// A load balancer's page while Cloud is down.
+        Unavailable,
+        /// The connection closes without an answer.
+        Dropped,
+        /// New tokens.
+        Renewed,
+        /// The refresh token was revoked.
+        Revoked,
+    }
+    /// A token endpoint that plays one answer per connection.
+    async fn fake_token_endpoint(script: Vec<Renewal>) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            for answer in script {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                if let Renewal::Dropped = answer {
+                    drop(socket);
+                    continue;
+                }
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                let header_end = loop {
+                    let read = socket.read(&mut chunk).await.unwrap();
+                    request.extend_from_slice(&chunk[..read]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                };
+                let head = String::from_utf8_lossy(&request[..header_end]).to_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                while request.len() < header_end + length {
+                    let read = socket.read(&mut chunk).await.unwrap();
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                let (status, kind, body) = match answer {
+                    Renewal::Unavailable => (
+                        "503 Service Unavailable",
+                        "text/html",
+                        "<html><body>503 Service Temporarily Unavailable</body></html>".to_owned(),
+                    ),
+                    Renewal::Renewed => (
+                        "200 OK",
+                        "application/json",
+                        json!({"access_token":"renewed","refresh_token":"next","expires_in":600})
+                            .to_string(),
+                    ),
+                    Renewal::Revoked => (
+                        "400 Bad Request",
+                        "application/json",
+                        json!({"error":"invalid_grant"}).to_string(),
+                    ),
+                    Renewal::Dropped => unreachable!(),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: {kind}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        url
+    }
+    #[tokio::test]
+    async fn a_cloud_outage_while_the_sign_in_expired_is_waited_out_and_said_once() {
+        use axum::{Json, Router, routing::get};
+        let runtime = Router::new().route(
+            "/v1/info",
+            get(|| async { Json(json!({"capabilities":["remote-chat-scope.v1"]})) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = Target {
+            url: format!("http://{}", listener.local_addr().unwrap()),
+            token: "fixture".into(),
+            project: "project".into(),
+            thread: None,
+        };
+        tokio::spawn(async move { axum::serve(listener, runtime).await.unwrap() });
+        let root = std::env::temp_dir().join(format!("haarness-remote-outage-{}", Uuid::now_v7()));
+        let cloud = fake_token_endpoint(vec![
+            Renewal::Unavailable,
+            Renewal::Unavailable,
+            Renewal::Dropped,
+            Renewal::Renewed,
+            Renewal::Revoked,
+        ])
+        .await;
+        let config =
+            haarness_account::Config::new(&cloud, root.join("account"), "haarness-cli").unwrap();
+        // The access token expired while Cloud was away.
+        haarness_account::credentials::save(
+            &config.path(),
+            &haarness_account::Credentials {
+                api_url: config.api_url.to_string(),
+                access_token: "expired".into(),
+                access_expires_at: chrono::Utc::now() - chrono::Duration::minutes(5),
+                refresh_token: "refresh".into(),
+            },
+        )
+        .unwrap();
+        let client = haarness_account::Client::new(config).unwrap();
+        let (relay, _) = fake_relay(vec![Relay::Serve]).await;
+        let relay: reqwest::Url = relay.parse().unwrap();
+        let attention = attention(&Paths::new(Some(&root)).unwrap());
+        let http = reqwest::Client::new();
+        let lines = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let heard = lines.clone();
+        let mut state = Reconnect::new(Pacing::default(), move |line| {
+            heard.lock().unwrap().push(line.to_owned());
+        });
+
+        // Cloud answers with a load balancer's page, twice, then not at all:
+        // each a failed attempt, each cause said once.
+        for said in [1, 1, 2] {
+            let link = reconnect_step(&client, &relay, &target, &http, &attention, &mut state)
+                .await
+                .unwrap();
+            assert_eq!(link, Link::Failed);
+            assert_eq!(
+                lines.lock().unwrap().len(),
+                said,
+                "{:?}",
+                lines.lock().unwrap()
+            );
+        }
+        // Back: the sign-in renews, the relay routes a request, and the
+        // connection that proves itself says how long it took.
+        let link = reconnect_step(&client, &relay, &target, &http, &attention, &mut state)
+            .await
+            .unwrap();
+        assert_eq!(link, Link::Ended { proven: true });
+        let said = lines.lock().unwrap().clone();
+        assert!(
+            said[0].starts_with("Could not reach Haarness Cloud to renew")
+                && said[0].contains("HTTP 503"),
+            "{said:?}"
+        );
+        assert!(
+            said[1].starts_with("Could not reach Haarness Cloud to renew")
+                && !said[1].contains("HTTP 503"),
+            "{said:?}"
+        );
+        assert!(
+            said[2].starts_with("Remote host reconnected after 4 attempts"),
+            "{said:?}"
+        );
+        assert!(
+            !said.iter().any(|line| line == "Remote host connected"),
+            "{said:?}"
+        );
+        // A revoked sign-in is not an outage: it ends the connector.
+        state.rejected = Some("renewed".into());
+        let error = reconnect_step(&client, &relay, &target, &http, &attention, &mut state)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<haarness_account::Error>(),
+                Some(haarness_account::Error::NotLoggedIn)
+            ),
+            "{error:#}"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
@@ -2377,6 +2703,7 @@ mod tests {
                 &http,
                 Duration::from_secs(60),
                 &attention,
+                &mut Outage::new(|_| {}),
             )
             .await
         });
@@ -2528,6 +2855,7 @@ mod tests {
                 &http,
                 Duration::from_secs(60),
                 &attention,
+                &mut Outage::new(|_| {}),
             )
             .await
         });
@@ -2586,6 +2914,7 @@ mod tests {
                 &http,
                 Duration::from_secs(60),
                 &attention,
+                &mut Outage::new(|_| {}),
             )
             .await
         });
@@ -2651,6 +2980,7 @@ mod tests {
                 &reqwest::Client::new(),
                 Duration::from_secs(60),
                 &attention,
+                &mut Outage::new(|_| {}),
             )
             .await
         })

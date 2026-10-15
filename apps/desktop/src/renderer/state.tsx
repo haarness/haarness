@@ -1,5 +1,5 @@
 import { previewInfo } from "./preview-actions";
-import type { RemoteAction, RemoteShare } from "./remote-control";
+import { shareOrder, type RemoteAction, type RemoteShare } from "./remote-control";
 import { createAttachmentDrafts } from "./attachment-drafts";
 import { applyLanguage, t } from "./i18n";
 import {
@@ -124,6 +124,9 @@ interface State extends Live {
     thread?: string;
     preview?: boolean;
     action?: "file" | "folder";
+    /** Opened from a link in a reply or a Markdown file; `line` is where to put the cursor. */
+    link?: boolean;
+    line?: number;
   } | null;
   terminal: boolean;
   ready: boolean;
@@ -137,6 +140,8 @@ interface State extends Live {
   error: string;
   permissionErrors: Record<string, Record<string, string>>;
   notice: string;
+  /** "blocked" when the notice says something was not done, such as a link that did not open. */
+  noticeTone: "done" | "blocked";
   /** The latest answer of a text or workflow command, and the goal's latest
    * message, by session key, until the chat sends again or it is dismissed. */
   commandNotes: Record<string, CommandNote | undefined>;
@@ -194,6 +199,7 @@ function createApp() {
     error: "",
     permissionErrors: {},
     notice: "",
+    noticeTone: "done",
     commandNotes: {},
     connectionStatus: "",
     drafts: {},
@@ -217,6 +223,7 @@ function createApp() {
    * arrives after its run moved on. */
   const workflowRuns = new Map<string, T.WorkflowRun>();
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  const shareRevisions = shareOrder();
   let leaveSettings: () => Promise<boolean> = async () => true;
   let leaveWorkspace: () => Promise<boolean> = async () => true;
   let menuHandler: (data: unknown) => void = () => {};
@@ -240,8 +247,11 @@ function createApp() {
   };
   const native = <V,>(input: Record<string, unknown>) =>
     window.haarness.native<V>(state.connection!.id, input);
-  function notify(text: string) {
-    set("notice", text);
+  function notify(text: string, tone: State["noticeTone"] = "done") {
+    batch(() => {
+      set("notice", text);
+      set("noticeTone", tone);
+    });
     clearTimeout(noticeTimer);
     noticeTimer = setTimeout(() => set("notice", ""), 5000);
   }
@@ -1924,8 +1934,15 @@ function createApp() {
       if (!state.connection || !state.selected) return;
       set("remoteControl", { action });
     },
-    setRemoteShare: (key: string, share: RemoteShare) =>
-      set("remoteShares", key, share),
+    /** Start a status read of a chat's share; pass the number to `setRemoteShare` with its answer. */
+    readRemoteShare: (key: string) => shareRevisions.begin(key),
+    /** Record a chat's share. A status read's answer (`read` set) is dropped
+     * once a later read or a dialog action has started for that chat. */
+    setRemoteShare: (key: string, share: RemoteShare, read?: number) => {
+      if (read === undefined) shareRevisions.begin(key);
+      else if (!shareRevisions.latest(key, read)) return;
+      set("remoteShares", key, share);
+    },
     /** Open the connect-a-provider dialog; `onboarding` when nothing works yet. */
     openConnect: (options: { provider?: string; onboarding?: boolean } = {}) => {
       if (!state.connection) return;

@@ -169,11 +169,8 @@ async fn control_connection(
     let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
         .max_message_size(Some(64 * 1024))
         .max_frame_size(Some(64 * 1024));
-    let connection = tokio::time::timeout(
-        CONNECT,
-        tokio_tungstenite::connect_async_with_config(request, Some(config), false),
-    )
-    .await;
+    let connection =
+        tokio::time::timeout(CONNECT, crate::websocket::connect(request, Some(config))).await;
     let mut socket = match connection {
         Ok(Ok((socket, _))) => socket,
         Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response)))
