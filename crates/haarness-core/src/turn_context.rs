@@ -70,6 +70,18 @@ pub fn reminder(
     (!blocks.is_empty()).then(|| blocks.join(SEPARATOR))
 }
 
+/// Whether `text` is a hidden message made by [`reminder`]: it only tells the
+/// model about the date, the memory index or hook context, and asks for
+/// nothing, so a scripted test provider answers the prompt before it.
+#[must_use]
+pub fn is_turn_reminder(text: &str) -> bool {
+    text.strip_prefix(OPEN).is_some_and(|rest| {
+        [DATE, MEMORY, NO_MEMORY, HOOKS]
+            .iter()
+            .any(|kind| rest.starts_with(kind))
+    })
+}
+
 fn memory_block(memory: &str) -> Option<String> {
     (!memory.is_empty()).then(|| format!("{OPEN}{MEMORY}{memory}{CLOSE}"))
 }
@@ -183,6 +195,24 @@ mod tests {
         let text = reminder(items, day("2026-10-01"), day(today), memory, hook)?;
         items.push(message(sequence + 1, &text, true));
         Some(text)
+    }
+
+    #[test]
+    fn every_reminder_kind_is_recognised_and_nothing_else() {
+        let mut items = Vec::new();
+        for (today, memory, hook) in [
+            ("2026-10-02", "", None),
+            ("2026-10-02", "- [Note](note.md)", None),
+            ("2026-10-02", "", None),
+            ("2026-10-02", "", Some("stamp")),
+        ] {
+            let text = turn(&mut items, today, memory, hook).unwrap();
+            assert!(is_turn_reminder(&text), "{text}");
+        }
+        assert!(!is_turn_reminder("prompt"));
+        assert!(!is_turn_reminder(
+            "<system-reminder>\nThe user sent the following message while you were working:\nhi\n</system-reminder>"
+        ));
     }
 
     #[test]
