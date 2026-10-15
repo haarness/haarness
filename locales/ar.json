@@ -1772,6 +1772,8 @@
   "shift+pgup scroll": "shift+pgup للتمرير",
   "exit closes the tab": "exit يغلق علامة التبويب",
   "{done}/{total} done": "اكتمل {done}/{total}",
+  "{done} of {total} completed": "اكتمل {done} من {total}",
+  "{count} cancelled": "أُلغي {count}",
   "ctrl+b shows the plan": "ctrl+b يعرض الخطة",
   "No loop is running": "لا توجد حلقة قيد التشغيل",
   "Loop stopped": "أُوقفت الحلقة",

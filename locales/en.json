@@ -1772,6 +1772,8 @@
   "shift+pgup scroll": "shift+pgup scroll",
   "exit closes the tab": "exit closes the tab",
   "{done}/{total} done": "{done}/{total} done",
+  "{done} of {total} completed": "{done} of {total} completed",
+  "{count} cancelled": "{count} cancelled",
   "ctrl+b shows the plan": "ctrl+b shows the plan",
   "No loop is running": "No loop is running",
   "Loop stopped": "Loop stopped",

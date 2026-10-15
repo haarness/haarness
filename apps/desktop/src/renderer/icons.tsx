@@ -31,7 +31,6 @@ import ChevronDown from "lucide-solid/icons/chevron-down";
 import ChevronUp from "lucide-solid/icons/chevron-up";
 import ChevronRight from "lucide-solid/icons/chevron-right";
 import ChartColumn from "lucide-solid/icons/chart-column";
-import Circle from "lucide-solid/icons/circle";
 import CreditCard from "lucide-solid/icons/credit-card";
 import Laptop from "lucide-solid/icons/laptop";
 import LogOut from "lucide-solid/icons/log-out";
@@ -39,6 +38,8 @@ import Play from "lucide-solid/icons/play";
 import Server from "lucide-solid/icons/server";
 import CircleAlert from "lucide-solid/icons/circle-alert";
 import CircleCheck from "lucide-solid/icons/circle-check";
+import CircleDashed from "lucide-solid/icons/circle-dashed";
+import CircleMinus from "lucide-solid/icons/circle-minus";
 import CircleHelp from "lucide-solid/icons/circle-help";
 import Cloud from "lucide-solid/icons/cloud";
 import Code from "lucide-solid/icons/code";
@@ -170,8 +171,9 @@ const catalog = {
   web: Globe,
   key: KeyRound,
   todo: ListTodo,
-  "todo-open": Circle,
+  "todo-open": CircleDashed,
   "todo-done": CircleCheck,
+  "todo-cancelled": CircleMinus,
 
   // Turn state
   send: ArrowUp,
