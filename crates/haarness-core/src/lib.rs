@@ -16,6 +16,7 @@ mod ports;
 mod prefix_warmup;
 mod runtime;
 mod side_question;
+mod stream_limits;
 mod tool_catalog;
 mod tool_validation;
 mod turn_context;
@@ -38,6 +39,10 @@ pub use ports::*;
 pub use runtime::{
     AgentRuntime, ContextUsage, DirectToolResult, EmptyToolRegistry, StaticProviderRegistry,
     shorten_title,
+};
+pub use stream_limits::{
+    DEFAULT_RESPONSE_TOTAL, DEFAULT_STREAM_IDLE, StreamLimits, response_timeout, stream_stall,
+    stream_stall_silence,
 };
 pub use tool_catalog::{LOAD_TOOL_NAME, LazyToolSettings, load_tool_definition, select_tools};
 pub use workflows::{WorkflowLogDraft, WorkflowRepository};

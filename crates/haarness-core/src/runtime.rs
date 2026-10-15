@@ -558,6 +558,11 @@ fn is_provider_transient(error: &CoreError) -> bool {
     if is_provider_usage_limit(error) {
         return false;
     }
+    // A provider that sent nothing for the configured limit: its request was
+    // closed, and another may well be answered.
+    if crate::stream_stall_silence(error).is_some() {
+        return true;
+    }
     let message = message.to_ascii_lowercase();
     [
         "http 500",
@@ -877,6 +882,12 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
         return format!(
             "Could not reach {}{place}{reason}. Check the network connection and provider endpoint, then retry.",
             provider.unwrap_or("the provider")
+        );
+    }
+    if let Some(silence) = crate::stream_stall_silence(error) {
+        return format!(
+            "{} sent nothing for {silence}, so the request was stopped. Try again, or check the network connection.",
+            provider.unwrap_or("The provider")
         );
     }
     if lower.contains("timed out") || lower.contains("timeout") {
@@ -6831,11 +6842,23 @@ impl RunnerTask {
                                     retry_delay(&error_value, transient_retries + 1)
                             {
                                 transient_retries += 1;
+                                // Close this request before waiting, not when
+                                // the next round replaces it.
+                                drop(stream);
                                 self.wait_before_retry(transient_retries, delay, &error_value)
                                     .await?;
                                 continue 'provider_round;
                             }
-                            blocked = Some(error_value);
+                            // A provider that falls silent after it began is
+                            // recovered like a response cut short.
+                            let stalled = saw_provider_event
+                                && crate::stream_stall_silence(&error_value).is_some();
+                            blocked = Some(match error_value {
+                                CoreError::Provider(message) if stalled => {
+                                    CoreError::ProviderIncomplete(message)
+                                }
+                                error_value => error_value,
+                            });
                             break;
                         }
                     };
@@ -6964,6 +6987,9 @@ impl RunnerTask {
                         }
                     }
                 }
+                // Nothing more is read from this request: close it now, so a
+                // recovery wait or the tools that run next do not keep it open.
+                drop(stream);
                 if !finished && blocked.is_none() {
                     blocked = Some(CoreError::ProviderIncomplete(
                         "missing completion event".into(),
@@ -13316,6 +13342,32 @@ mod tests {
                 Some("Anthropic")
             ),
             "Anthropic is not connected. Connect it with an API key or by signing in, then try again."
+        );
+    }
+
+    #[test]
+    fn a_silent_provider_is_named_as_silent_and_retried() {
+        let stall = crate::stream_stall(std::time::Duration::from_secs(300));
+        assert_eq!(
+            super::describe_error(&stall, Some("Anthropic")),
+            "Anthropic sent nothing for 5 minutes, so the request was stopped. Try again, or check the network connection."
+        );
+        assert_eq!(
+            super::user_facing_error(&stall),
+            "The provider sent nothing for 5 minutes, so the request was stopped. Try again, or check the network connection."
+        );
+        // Retried with the transient backoff, unlike a total-time limit, whose
+        // answer may simply be long.
+        assert_eq!(
+            super::retry_delay(&stall, 1),
+            Some(std::time::Duration::from_secs(2))
+        );
+        assert!(
+            super::retry_delay(
+                &crate::response_timeout(std::time::Duration::from_secs(900)),
+                1
+            )
+            .is_none()
         );
     }
 

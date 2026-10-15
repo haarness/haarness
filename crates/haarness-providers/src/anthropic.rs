@@ -289,6 +289,7 @@ impl ModelProvider for AnthropicProvider {
         request: ProviderRequest,
         cancel: CancellationToken,
     ) -> CoreResult<ProviderStream> {
+        let limits = request.parameters.limits;
         let key = self.resolved_api_key();
         if key.is_none() && !self.assume_authenticated && self.headers.is_empty() {
             return Err(CoreError::Provider(format!(
@@ -529,17 +530,17 @@ impl ModelProvider for AnthropicProvider {
                 HeaderValue::from_str(&key).map_err(provider_error)?,
             );
         }
-        let response = self
-            .client
-            .post(&self.endpoint)
-            .headers(headers)
-            .json(&body)
-            .send()
-            .await
-            .map_err(crate::sse::transport_error)?;
+        let response = crate::sse::send(
+            self.client
+                .post(&self.endpoint)
+                .headers(headers)
+                .json(&body),
+            limits,
+        )
+        .await?;
         let request_id = crate::request_id(response.headers());
         let provider_id = self.id.clone();
-        let mut events = json_stream(response, cancel);
+        let mut events = json_stream(response, cancel, limits);
         Ok(Box::pin(try_stream! {
             let mut tool: Option<(String,String,String,Value)> = None;
             // message_delta carries why the response ended; message_stop reports it.
