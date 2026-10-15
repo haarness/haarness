@@ -60,7 +60,11 @@ impl ModelProvider for EchoProvider {
         let mut last_tool_result = None;
         for (index, message) in request.messages.iter().enumerate() {
             match message {
-                ProviderMessage::Text { role, .. } if role == "user" => {
+                // The hidden date/memory/hook reminder stored after a prompt
+                // asks for nothing; script against the prompt itself.
+                ProviderMessage::Text { role, content }
+                    if role == "user" && !haarness_core::is_turn_reminder(content) =>
+                {
                     last_user_index = Some(index);
                 }
                 ProviderMessage::Media { role, .. } if role == "user" => {
