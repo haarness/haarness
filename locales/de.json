@@ -1772,6 +1772,8 @@
   "shift+pgup scroll": "shift+pgup scrollen",
   "exit closes the tab": "exit schließt den Tab",
   "{done}/{total} done": "{done}/{total} erledigt",
+  "{done} of {total} completed": "{done} von {total} erledigt",
+  "{count} cancelled": "{count} abgebrochen",
   "ctrl+b shows the plan": "ctrl+b zeigt den Plan",
   "No loop is running": "Es läuft keine Schleife",
   "Loop stopped": "Schleife gestoppt",

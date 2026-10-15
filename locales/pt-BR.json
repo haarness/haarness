@@ -1772,6 +1772,8 @@
   "shift+pgup scroll": "shift+pgup rolar",
   "exit closes the tab": "exit fecha a aba",
   "{done}/{total} done": "{done}/{total} concluídas",
+  "{done} of {total} completed": "{done} de {total} concluídas",
+  "{count} cancelled": "canceladas: {count}",
   "ctrl+b shows the plan": "ctrl+b mostra o plano",
   "No loop is running": "Nenhum loop em execução",
   "Loop stopped": "Loop interrompido",

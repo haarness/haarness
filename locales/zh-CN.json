@@ -1772,6 +1772,8 @@
   "shift+pgup scroll": "shift+pgup 滚动",
   "exit closes the tab": "exit 关闭标签",
   "{done}/{total} done": "已完成 {done}/{total}",
+  "{done} of {total} completed": "已完成 {done} 项，共 {total} 项",
+  "{count} cancelled": "已取消 {count} 项",
   "ctrl+b shows the plan": "ctrl+b 查看计划",
   "No loop is running": "没有正在运行的循环",
   "Loop stopped": "循环已停止",

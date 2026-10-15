@@ -1772,6 +1772,8 @@
   "shift+pgup scroll": "shift+pgup スクロール",
   "exit closes the tab": "exit でタブを閉じる",
   "{done}/{total} done": "{done}/{total} 完了",
+  "{done} of {total} completed": "{total} 件中 {done} 件完了",
+  "{count} cancelled": "{count} 件キャンセル",
   "ctrl+b shows the plan": "ctrl+b で計画を表示",
   "No loop is running": "実行中のループはありません",
   "Loop stopped": "ループを停止しました",
