@@ -73,8 +73,18 @@ export function PlanDock(props: {
   createEffect(
     on([visible, open, progress], () => {
       if (!visible() || !open()) return;
-      const frame = requestAnimationFrame(() => {
+      // After a reload the tray can mount before the window's first layout,
+      // when the list still has no height: wait until it has one.
+      let observer: ResizeObserver | undefined;
+      const reveal = () => {
         if (!list?.isConnected) return;
+        if (!list.clientHeight) {
+          observer ??= new ResizeObserver(reveal);
+          observer.observe(list);
+          return;
+        }
+        observer?.disconnect();
+        observer = undefined;
         const item = list.querySelector<HTMLElement>(
           '[data-status="in_progress"]',
         );
@@ -84,8 +94,12 @@ export function PlanDock(props: {
         if (row.top < bounds.top) list.scrollTop += row.top - bounds.top;
         else if (row.bottom > bounds.bottom)
           list.scrollTop += row.bottom - bounds.bottom;
+      };
+      const frame = requestAnimationFrame(reveal);
+      onCleanup(() => {
+        cancelAnimationFrame(frame);
+        observer?.disconnect();
       });
-      onCleanup(() => cancelAnimationFrame(frame));
     }),
   );
   return (
