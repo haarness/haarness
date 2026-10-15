@@ -409,7 +409,9 @@ test.afterAll(async () => {
       );
     } catch {}
   }
-  if (temporary) await rm(temporary, { recursive: true, force: true });
+  // A stopping server can still be writing its state as the folder goes.
+  if (temporary)
+    await rm(temporary, { recursive: true, force: true, maxRetries: 10 });
 });
 
 test("workspace opening is direct, enables project configuration, and preserves explicit settings and active work", async () => {
