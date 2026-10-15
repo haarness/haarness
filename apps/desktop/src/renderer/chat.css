@@ -1183,6 +1183,11 @@ html[dir="rtl"] .tool-target {
 .plan-toggle > svg {
   color: var(--muted);
 }
+/* The list icon takes the status column's width, so "Plan" lines up with
+   the steps below it. */
+.plan-toggle > svg:first-child {
+  margin-inline: 1px;
+}
 .plan-toggle[aria-expanded="false"] .plan-chevron {
   transform: rotate(180deg);
 }
@@ -1206,66 +1211,75 @@ html[dir="rtl"] .tool-target {
 .plan-list {
   list-style: none;
   margin: 0;
-  padding: 0 var(--s3) var(--s2);
+  padding: 0 var(--s3);
   max-height: min(160px, 22vh);
   overflow-y: auto;
   overscroll-behavior: contain;
-  font-size: var(--ui);
+  font-size: var(--ui-lg);
+  line-height: 1.45;
 }
+/* Work still ahead reads at full strength; finished steps step back. */
 .plan-list li {
   display: flex;
   align-items: flex-start;
   gap: var(--s2);
-  padding: var(--s0) 0;
+  padding: var(--s1) 0;
+  color: var(--text);
+  transition: color var(--slow) var(--ease);
+}
+.plan-list li[data-status="completed"],
+.plan-list li[data-status="cancelled"] {
   color: var(--muted);
 }
 .plan-content {
   min-width: 0;
   overflow-wrap: anywhere;
 }
+/* One round glyph per step, centred on its first line (`StepGlyph`). A
+   collapsed tray shows the current step's glyph beside its preview. */
 .plan-check {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   margin-top: 2px;
   flex: none;
-  border: 1px solid var(--muted);
-  border-radius: var(--r-xs);
-  transition:
-    background var(--fast) var(--ease),
-    border-color var(--fast) var(--ease),
-    color var(--fast) var(--ease);
+  color: var(--muted);
 }
-.plan-list li[data-status="in_progress"] {
-  color: var(--text);
+.plan-toggle > .plan-check {
+  margin-top: 0;
 }
-.plan-list li[data-status="in_progress"] .plan-check {
-  border-color: var(--primary);
-  background: var(--primary-soft);
-}
-.plan-list li[data-status="in_progress"] .plan-check::after {
-  content: "";
-  width: 6px;
-  height: 6px;
-  background: var(--primary);
+.plan-spinner {
+  width: 14.5px;
+  height: 14.5px;
   border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--primary) 24%, transparent);
+  border-top-color: var(--primary);
+  animation: spin 900ms linear infinite;
 }
-.plan-list li[data-status="completed"] .plan-check {
-  color: var(--green);
-  border-color: var(--green);
-  background: var(--green-soft);
+/* A step only turns while its turn runs; once the agent stops it rests. */
+.plan-dock:not([data-running]) .plan-spinner {
+  animation: none;
 }
-.plan-list li[data-status="cancelled"] .plan-check::after {
-  content: "";
-  width: 6px;
-  height: 1px;
-  background: var(--muted);
+.plan-list li[data-status="completed"] .plan-check svg {
+  animation: plan-done var(--slow) var(--ease);
 }
-.plan-list li[data-status="completed"] .plan-content,
+.plan-list li[data-status="completed"] .plan-check circle {
+  fill: currentColor;
+}
+.plan-list li[data-status="completed"] .plan-check path {
+  stroke: var(--raised);
+  stroke-width: 3px;
+}
 .plan-list li[data-status="cancelled"] .plan-content {
   text-decoration: line-through;
+}
+@keyframes plan-done {
+  from {
+    transform: scale(0.6);
+    opacity: 0;
+  }
 }
 
 /* Where the next message will run, docked to the top of the composer. The

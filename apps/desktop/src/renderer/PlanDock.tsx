@@ -1,7 +1,9 @@
 import { t } from "./i18n";
 import {
   For,
+  Match,
   Show,
+  Switch,
   createEffect,
   createMemo,
   createResource,
@@ -63,7 +65,11 @@ export function PlanDock(props: {
       props.items.find((item) => item.status === "pending"),
   );
   const summary = () =>
-    `${done()} of ${props.items.length} completed${cancelled() ? ` · ${cancelled()} cancelled` : ""}`;
+    t("{done} of {total} completed", {
+      done: done(),
+      total: props.items.length,
+    }) +
+    (cancelled() ? " · " + t("{count} cancelled", { count: cancelled() }) : "");
   createEffect(on(identity, () => setExpanded(undefined)));
   createEffect(
     on(settled, (value) => {
@@ -73,8 +79,18 @@ export function PlanDock(props: {
   createEffect(
     on([visible, open, progress], () => {
       if (!visible() || !open()) return;
-      const frame = requestAnimationFrame(() => {
+      // After a reload the tray can mount before the window's first layout,
+      // when the list still has no height: wait until it has one.
+      let observer: ResizeObserver | undefined;
+      const reveal = () => {
         if (!list?.isConnected) return;
+        if (!list.clientHeight) {
+          observer ??= new ResizeObserver(reveal);
+          observer.observe(list);
+          return;
+        }
+        observer?.disconnect();
+        observer = undefined;
         const item = list.querySelector<HTMLElement>(
           '[data-status="in_progress"]',
         );
@@ -84,13 +100,21 @@ export function PlanDock(props: {
         if (row.top < bounds.top) list.scrollTop += row.top - bounds.top;
         else if (row.bottom > bounds.bottom)
           list.scrollTop += row.bottom - bounds.bottom;
+      };
+      const frame = requestAnimationFrame(reveal);
+      onCleanup(() => {
+        cancelAnimationFrame(frame);
+        observer?.disconnect();
       });
-      onCleanup(() => cancelAnimationFrame(frame));
     }),
   );
   return (
     <Show when={visible()}>
-      <section class="plan-dock" aria-label={t("Plan")}>
+      <section
+        class="plan-dock"
+        aria-label={t("Plan")}
+        data-running={props.running || undefined}
+      >
         <div class="plan-header">
           <button
             class="plan-toggle"
@@ -102,6 +126,9 @@ export function PlanDock(props: {
             <Icon name="todo" size="sm" />
             <span class="plan-title">{t("Plan")}</span>
             <span class="plan-count">{summary()}</span>
+            <Show when={!open() && current()}>
+              {(step) => <StepGlyph status={step().status} />}
+            </Show>
             <span
               class="plan-preview"
               title={!open() ? current()?.content : undefined}
@@ -130,11 +157,7 @@ export function PlanDock(props: {
           <For each={props.items}>
             {(item) => (
               <li data-status={item.status}>
-                <span class="plan-check" aria-hidden="true">
-                  <Show when={item.status === "completed"}>
-                    <Icon name="check" size="xs" />
-                  </Show>
-                </span>
+                <StepGlyph status={item.status} />
                 <span class="sr-only">
                   {item.status === "in_progress"
                     ? t("In progress")
@@ -152,5 +175,25 @@ export function PlanDock(props: {
         </ul>
       </section>
     </Show>
+  );
+}
+
+/** A step's status as one round glyph: a dashed ring waiting, a turning ring
+ * at work, a filled check done, a dash dropped. */
+function StepGlyph(props: { status: TodoEntry["status"] }) {
+  return (
+    <span class="plan-check" aria-hidden="true">
+      <Switch fallback={<Icon name="todo-open" size="md" />}>
+        <Match when={props.status === "completed"}>
+          <Icon name="todo-done" size="md" />
+        </Match>
+        <Match when={props.status === "in_progress"}>
+          <span class="plan-spinner" />
+        </Match>
+        <Match when={props.status === "cancelled"}>
+          <Icon name="todo-cancelled" size="md" />
+        </Match>
+      </Switch>
+    </span>
   );
 }

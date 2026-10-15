@@ -1772,6 +1772,8 @@
   "shift+pgup scroll": "shift+pgup défiler",
   "exit closes the tab": "exit ferme l’onglet",
   "{done}/{total} done": "{done}/{total} faites",
+  "{done} of {total} completed": "{done} sur {total} terminées",
+  "{count} cancelled": "annulées : {count}",
   "ctrl+b shows the plan": "ctrl+b affiche le plan",
   "No loop is running": "Aucune boucle en cours",
   "Loop stopped": "Boucle arrêtée",

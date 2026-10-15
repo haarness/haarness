@@ -1772,6 +1772,8 @@
   "shift+pgup scroll": "shift+pgup rul",
   "exit closes the tab": "exit lukker fanen",
   "{done}/{total} done": "{done}/{total} færdige",
+  "{done} of {total} completed": "{done} af {total} fuldført",
+  "{count} cancelled": "{count} annulleret",
   "ctrl+b shows the plan": "ctrl+b viser planen",
   "No loop is running": "Ingen løkke kører",
   "Loop stopped": "Løkken er stoppet",

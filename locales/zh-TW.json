@@ -1772,6 +1772,8 @@
   "shift+pgup scroll": "shift+pgup 捲動",
   "exit closes the tab": "exit 關閉分頁",
   "{done}/{total} done": "已完成 {done}/{total}",
+  "{done} of {total} completed": "已完成 {done} 項，共 {total} 項",
+  "{count} cancelled": "已取消 {count} 項",
   "ctrl+b shows the plan": "ctrl+b 檢視計畫",
   "No loop is running": "沒有正在執行的循環",
   "Loop stopped": "循環已停止",

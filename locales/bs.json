@@ -1772,6 +1772,8 @@
   "shift+pgup scroll": "shift+pgup pomicanje",
   "exit closes the tab": "exit zatvara karticu",
   "{done}/{total} done": "Gotovo: {done}/{total}",
+  "{done} of {total} completed": "Završeno: {done} od {total}",
+  "{count} cancelled": "Otkazano: {count}",
   "ctrl+b shows the plan": "ctrl+b prikazuje plan",
   "No loop is running": "Nijedna petlja nije pokrenuta",
   "Loop stopped": "Petlja je zaustavljena",
