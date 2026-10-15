@@ -25,7 +25,18 @@ test("remote project failures give relevant next steps without exposing server d
   );
   assert.match(
     remoteProjectError(
-      new Error("needs an upgrade but still owns 1 active turn(s)"),
+      new Error(
+        "Haarness server 4242 needs an upgrade (server executable differs from this client build) but still has 1 active turn; finish or close them",
+      ),
+    ),
+    /server is busy/,
+  );
+  // A terminal open in it keeps a server as busy as a turn does.
+  assert.match(
+    remoteProjectError(
+      new Error(
+        "Haarness server 4242 needs an upgrade (server executable differs from this client build) but still has 1 open terminal (npm run dev); finish or close them",
+      ),
     ),
     /server is busy/,
   );

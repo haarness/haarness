@@ -1,5 +1,7 @@
 //! Host-level discovery delegates execution to the existing leased workspace daemons.
-use super::{Paths, ensure_workspace_server, inspect_workspace_server, server_compatibility_error};
+use super::{
+    Paths, ensure_workspace_server_for_remote, inspect_workspace_server, server_compatibility_error,
+};
 use anyhow::{Context, Result, ensure};
 use haarness_protocol::{WorkspaceInfo, WorkspaceListResponse};
 use haarness_server::remote::{
@@ -90,7 +92,7 @@ impl WorkspaceHost for Host {
             });
         }
         let paths = self.paths.scoped(&workspace.id, false)?;
-        let discovery = ensure_workspace_server(&paths, &path, self.trust).await?;
+        let discovery = ensure_workspace_server_for_remote(&paths, &path, self.trust).await?;
         Ok(WorkspaceTarget {
             url: discovery.url,
             token: discovery.token,
