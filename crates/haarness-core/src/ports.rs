@@ -362,6 +362,10 @@ pub struct RequestParameters {
     /// without it the `ChatGPT` backend caches nothing between rounds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_key: Option<String>,
+    /// How long the provider may stay silent, from its configuration. Not part
+    /// of the request on the wire.
+    #[serde(skip)]
+    pub limits: crate::StreamLimits,
 }
 
 #[derive(Debug, Clone)]
