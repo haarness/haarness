@@ -2720,6 +2720,32 @@ test("terminal expansion starts a shell and closing tabs never asks for confirma
   expect(errors).toEqual([]);
 });
 
+test("a terminal text size change gives the shell its new size", async () => {
+  const hide = page.getByRole("button", { name: "Hide terminal", exact: true });
+  if (await hide.count()) await hide.click();
+  for (const terminal of await client.listPtys())
+    await client.deletePty(terminal.id);
+  await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  await expect(page.locator(".xterm-helper-textarea")).toBeFocused();
+  await expect.poll(() => client.listPtys().then((items) => items.length)).toBe(1);
+  const pty = async () => (await client.listPtys())[0]!;
+  const shownRows = () => page.locator(".terminal-view .xterm-rows > div").count();
+  await expect.poll(async () => (await pty()).rows === (await shownRows())).toBe(true);
+  const before = await pty();
+  // A larger font fits fewer cells in the same panel, which does not resize.
+  await page.evaluate(() => window.haarness.preferences({ terminalFontSize: 22 }));
+  await expect.poll(async () => (await pty()).cols).toBeLessThan(before.cols);
+  await expect.poll(async () => (await pty()).rows).toBeLessThan(before.rows);
+  await expect.poll(async () => (await pty()).rows === (await shownRows())).toBe(true);
+  await page.evaluate(() => window.haarness.preferences({ terminalFontSize: 13 }));
+  await expect.poll(async () => (await pty()).cols).toBe(before.cols);
+  await expect.poll(async () => (await pty()).rows).toBe(before.rows);
+  await hide.click();
+  for (const terminal of await client.listPtys())
+    await client.deletePty(terminal.id);
+  expect(errors).toEqual([]);
+});
+
 test("conversation tab order survives reopening and uses horizontal keyboard controls", async () => {
   await expandPrimaryProject();
   const first = await client.createThread({
