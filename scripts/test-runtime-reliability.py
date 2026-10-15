@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import socket
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,12 @@ BINARY = Path(os.environ.get("HAARNESS_BIN", REPO / "target/debug/haarness")).re
 EVIDENCE = Path(os.environ.get("HAARNESS_FIXES_EVIDENCE", REPO / "target/runtime-reliability/e2e"))
 EVIDENCE.mkdir(parents=True, exist_ok=True)
 REQUESTS = []
+# Prompts that make the provider fall silent, and what each silent request saw:
+# when it began and when the client closed its connection.
+SILENT = ('SILENT_BEFORE', 'SILENT_AFTER', 'SILENT_ALWAYS')
+SILENCES = []
+STALLED = set()
+IDLE_LIMIT = 2
 
 
 def run(args, **kwargs):
@@ -47,6 +54,35 @@ class Provider(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+    def stall(self, marker, partial=None):
+        """Answer with headers (and optionally the start of a response and
+        keep-alive comments), then send nothing until the client hangs up."""
+        started = time.monotonic()
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream')
+        self.end_headers()
+        if partial:
+            for event in partial:
+                self.wfile.write(('data: ' + json.dumps(event) + '\n\n').encode())
+            # Comments for longer than the idle limit: they must count as activity.
+            for _ in range(6):
+                self.wfile.write(b': keep-alive\n\n')
+                self.wfile.flush()
+                time.sleep(.5)
+        self.wfile.flush()
+        closed = None
+        self.connection.settimeout(.1)
+        deadline = time.monotonic() + 60
+        while closed is None and time.monotonic() < deadline:
+            try:
+                if self.connection.recv(1) == b'':
+                    closed = time.monotonic()
+            except socket.timeout:
+                continue
+            except OSError:
+                closed = time.monotonic()
+        SILENCES.append({'marker': marker, 'started': started, 'closed': closed})
+
     def do_GET(self):
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
@@ -55,16 +91,32 @@ class Provider(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        body['_received'] = time.monotonic()
         REQUESTS.append(body)
         history = body.get('input', body.get('messages', []))
         serialized = json.dumps(history)
+        # The newest prompt marker in the history names this turn.
+        current = max(SILENT, key=serialized.rfind)
+        current = current if serialized.rfind(current) > max(serialized.rfind('MAIN_HOLD'), serialized.rfind('AFTER_DISCONNECT')) else None
+        key = (current, body.get('model'))
+        responses = self.path.endswith('/responses')
+        if current == 'SILENT_ALWAYS' or (current == 'SILENT_BEFORE' and key not in STALLED):
+            STALLED.add(key)
+            return self.stall(current)
+        if current == 'SILENT_AFTER' and key not in STALLED:
+            STALLED.add(key)
+            partial = ([{'type': 'response.output_text.delta', 'delta': 'PARTIAL_BEFORE_SILENCE'}] if responses else
+                       [{'type': 'message_start', 'message': {'usage': {'input_tokens': 21, 'output_tokens': 0}}},
+                        {'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}},
+                        {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': 'PARTIAL_BEFORE_SILENCE'}}])
+            return self.stall(current, partial)
         side = '<btw-side-question>' in serialized
         refusal = 'Tool execution is unavailable' in serialized
         result = 'MCP_COMPLETE' in serialized
         call = ('write' if side and not refusal else
                 'mcp__fixture__hold' if not side and 'MAIN_HOLD' in serialized and not result else None)
         arguments = {'path': 'FORBIDDEN_SIDE_WRITE', 'content': 'bad'} if side else {}
-        text = 'SIDE_WIRE_ANSWER' if side else 'MAIN_WIRE_ANSWER'
+        text = 'SIDE_WIRE_ANSWER' if side else 'ANSWER_AFTER_SILENCE' if current else 'MAIN_WIRE_ANSWER'
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
         self.end_headers()
@@ -99,7 +151,9 @@ try:
             (home / '.local/bin').mkdir(parents=True)
             (workspace / '.haarness').mkdir(parents=True)
             (workspace / 'AGENTS.md').write_text('PROJECT_WIRE_MARKER: explain fixture decisions briefly.\n')
-            (workspace / '.haarness/config.toml').write_text(f'[defaults]\nprovider="{provider}"\nmodel="{model}"\n[permissions]\n"*"="deny"\n"mcp__fixture__*"="allow"\n[lazy_tools]\nmode="always"\n[lsp]\nenabled=false\n')
+            # The mock is on 127.0.0.1, where providers wait as long as it takes
+            # unless configured: tune the built-in provider to a short limit.
+            (workspace / '.haarness/config.toml').write_text(f'[defaults]\nprovider="{provider}"\nmodel="{model}"\n[permissions]\n"*"="deny"\n"mcp__fixture__*"="allow"\n[lazy_tools]\nmode="always"\n[lsp]\nenabled=false\n[providers.{provider}]\nstream_idle_timeout={IDLE_LIMIT}\n')
             run(['git', 'init', '-q', str(workspace)])
             launcher = home / '.local/bin/haarness-fixture-mcp'
             launcher.write_text('#!' + sys.executable + '\n' + '''import json,os,sys,time
@@ -205,7 +259,47 @@ for line in sys.stdin:
                 until(lambda: len(REQUESTS) > offset, 'disconnected request missing')
                 assert REQUESTS[offset]['tools'] == [], 'explicit disconnect retained schemas'
                 until(lambda: not api('/turns/active'), 'disconnect check stayed active')
-                checks.append({'provider': provider, 'checks': ['launcher discovery', 'denied loader', 'wire system and schemas', 'settled tool snapshot', 'read-only refusal', 'CLI side answer', 'MCP reconnect without replay', 'explicit disconnect invalidation']})
+                # A provider that answers nothing: its request is closed when the
+                # limit passes, before the backoff, and the retry is answered.
+                def silent_turn(marker, timeout):
+                    offset, silences = len(REQUESTS), len(SILENCES)
+                    seen = len(items())
+                    start(marker)
+                    until(lambda: not api('/turns/active'), f'{marker} turn stayed active', timeout=timeout)
+                    return REQUESTS[offset:], SILENCES[silences:], items()[seen:]
+                def texts(rows): return [row['data']['text'] for row in rows if row['data']['type'] == 'assistant_message']
+                def usage(rows): return [row['data'].get('estimated', False) for row in rows if row['data']['type'] == 'usage']
+                requests, silences, rows = silent_turn('SILENT_BEFORE', 60)
+                assert len(requests) == 2 and len(silences) == 1, (len(requests), silences)
+                closed = silences[0]['closed']
+                assert closed is not None, 'the silent request was never closed'
+                assert closed - silences[0]['started'] >= IDLE_LIMIT - .2, 'closed before the idle limit'
+                assert requests[1]['_received'] - closed >= 1.5, 'closed only when the retry replaced it, not before the backoff'
+                assert texts(rows) == ['ANSWER_AFTER_SILENCE'], texts(rows)
+                assert usage(rows) == [False], usage(rows)
+                assert not any(row['data']['type'] == 'error' for row in rows)
+                requests, silences, rows = silent_turn('SILENT_AFTER', 60)
+                assert len(requests) == 2 and len(silences) == 1, (len(requests), silences)
+                closed = silences[0]['closed']
+                assert closed is not None, 'the silent request was never closed'
+                # Three seconds of comments, then the limit: comments count as activity.
+                assert closed - silences[0]['started'] >= 3 + IDLE_LIMIT - .5, closed - silences[0]['started']
+                assert requests[1]['_received'] - closed >= .2, 'closed after the recovery pause, not before it'
+                assert 'The previous provider response ended before completion' in json.dumps(requests[1]), 'no continuation'
+                assert texts(rows) == ['PARTIAL_BEFORE_SILENCE', 'ANSWER_AFTER_SILENCE'], texts(rows)
+                assert len(usage(rows)) == 2, usage(rows)
+                assert not any(row['data']['type'] == 'error' for row in rows)
+                silence_checks = ['silence before output retried', 'silence after output continued', 'keep-alive comments count']
+                if provider == 'anthropic':
+                    # Every attempt silent: five requests, then the turn says so.
+                    requests, silences, rows = silent_turn('SILENT_ALWAYS', 120)
+                    assert len(requests) == 5 and len(silences) == 5, (len(requests), len(silences))
+                    assert all(silence['closed'] is not None for silence in silences)
+                    errors = [row['data']['message'] for row in rows if row['data']['type'] == 'error']
+                    assert errors and 'sent nothing for 2 seconds, so the request was stopped' in errors[-1], errors
+                    assert 'reset' not in errors[-1].lower(), errors
+                    silence_checks.append('silent provider named after retries')
+                checks.append({'provider': provider, 'checks': ['launcher discovery', 'denied loader', 'wire system and schemas', 'settled tool snapshot', 'read-only refusal', 'CLI side answer', 'MCP reconnect without replay', 'explicit disconnect invalidation', *silence_checks]})
                 (EVIDENCE / f'{provider}-requests.json').write_text(json.dumps(REQUESTS, indent=2))
                 (EVIDENCE / f'{provider}-items.json').write_text(json.dumps(items(), indent=2))
                 print('PASS', provider, 'server/provider/MCP/CLI flow', flush=True)
