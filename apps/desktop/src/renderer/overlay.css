@@ -539,6 +539,10 @@ dialog .notifications {
   color: var(--green);
   flex: none;
 }
+/* Something did not happen, by design: say so without the alarm of an error. */
+.toast[data-tone="blocked"] svg {
+  color: var(--muted);
+}
 .error-banner {
   display: flex;
   align-items: flex-start;

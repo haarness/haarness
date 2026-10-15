@@ -38,6 +38,16 @@ export function fold(count: number, height: number) {
 }
 
 /**
+ * Whether a lane `height` tall holds the outline: the panel's smallest size
+ * (one row and its padding) between the insets, opening level with a stack
+ * at `top`. A shorter lane shows no stack, hit area or panel, so none of them
+ * reaches past its bottom edge over the composer.
+ */
+export function fits(height: number, top = TOP) {
+  return height - Math.max(INSET, top - PAD - ROW / 2) - INSET >= ROW + PAD * 2;
+}
+
+/**
  * The first prompt of each dash: every prompt, or past `max`, the first
  * prompt of each of `max` even slices, so a long session stays short.
  */

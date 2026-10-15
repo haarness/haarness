@@ -6,6 +6,7 @@ import {
   qrPath,
   remoteAction,
   remoteCommand,
+  shareOrder,
 } from "../src/renderer/remote-control";
 
 test("/remote-control and its short form choose start, status or stop", () => {
@@ -49,4 +50,19 @@ test("a server answer is checked before the dialog trusts it", () => {
 test("QR modules become one path of horizontal runs", () => {
   assert.equal(qrPath(["110", "011", "000"]), "M0 0h2v1h-2zM1 1h2v1h-2z");
   assert.equal(qrPath([]), "");
+});
+
+test("a share status answer that was overtaken does not put back an older state", () => {
+  const order = shareOrder();
+  const first = order.begin("chat");
+  const second = order.begin("chat");
+  // Two reads, as after a quick reconnect: only the later one counts.
+  assert.equal(order.latest("chat", first), false);
+  assert.equal(order.latest("chat", second), true);
+  // A start finishing in the dialog writes after a read began: the read's answer is dropped.
+  const read = order.begin("chat");
+  order.begin("chat");
+  assert.equal(order.latest("chat", read), false);
+  // Chats are ordered apart.
+  assert.equal(order.latest("other", order.begin("other")), true);
 });

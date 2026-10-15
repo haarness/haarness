@@ -14,7 +14,26 @@ export function external(value: string) {
     throw new Error("Unsupported external link");
   if (url.username || url.password)
     throw new Error("Links must not contain credentials");
+  if (url.protocol === "mailto:") return mailto(url);
   return url.href;
+}
+/** Fields a mail link may fill in. Some mail apps also honour `attach=`, which would attach a local file. */
+const MAIL_FIELDS = new Set(["to", "cc", "bcc", "subject", "body"]);
+function mailto(url: URL) {
+  const at = url.href.indexOf("?");
+  if (at < 0) return url.href;
+  const kept = url.href
+    .slice(at + 1)
+    .split("&")
+    .filter((field) => {
+      const name = field.split("=")[0];
+      try {
+        return MAIL_FIELDS.has(decodeURIComponent(name).toLowerCase());
+      } catch {
+        return false;
+      }
+    });
+  return url.href.slice(0, at) + (kept.length ? "?" + kept.join("&") : "");
 }
 export function localArgs(args: string[]) {
   const groups = new Set([

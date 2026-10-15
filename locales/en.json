@@ -2410,5 +2410,16 @@
   "The provider refused {name}, so it is left out of this chat from now on.": "The provider refused {name}, so it is left out of this chat from now on.",
   "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.",
   "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.",
-  "{name} is not an image Haarness can read.": "{name} is not an image Haarness can read."
+  "{name} is not an image Haarness can read.": "{name} is not an image Haarness can read.",
+  "This link could not be opened.": "This link could not be opened.",
+  "Open a project to open links to its files.": "Open a project to open links to its files.",
+  "Links to network locations do not open.": "Links to network locations do not open.",
+  "Only files in this project open from a link.": "Only files in this project open from a link.",
+  "This kind of link does not open in Haarness.": "This kind of link does not open in Haarness.",
+  "{path} was not found in this project.": "{path} was not found in this project.",
+  "This Haarness link could not be opened.": "This Haarness link could not be opened.",
+  "The folder in this link was not found.": "The folder in this link was not found.",
+  "Open “{folder}” from a link?": "Open “{folder}” from a link?",
+  "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.",
+  "Open folder": "Open folder"
 }

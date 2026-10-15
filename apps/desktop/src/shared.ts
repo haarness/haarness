@@ -212,6 +212,8 @@ export interface Bridge {
     label?: string;
     trust?: boolean;
     recent?: string;
+    /** From a haarness:// link: an unsaved folder is confirmed and opens untrusted. */
+    deepLink?: boolean;
   }): Promise<Connection | null>;
   voice(
     action: "start" | "stop" | "cancel",

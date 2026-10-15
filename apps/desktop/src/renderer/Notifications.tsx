@@ -9,8 +9,8 @@ export function Notifications() {
   return (
       <div class="notifications">
         <Show when={state.notice}>
-          <div class="toast" role="status">
-            <Icon name="check" size="sm" />
+          <div class="toast" role="status" data-tone={state.noticeTone}>
+            <Icon name={state.noticeTone === "blocked" ? "alert" : "check"} size="sm" />
             {/* Callers pass an English key or an already translated sentence. */}
             {t(state.notice)}
           </div>

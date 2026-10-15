@@ -2410,5 +2410,16 @@
   "The provider refused {name}, so it is left out of this chat from now on.": "提供商拒绝了 {name}，从现在起本聊天将略过它。",
   "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "提供商拒绝了一张图片但未说明是哪张，因此从现在起本聊天将略过最新的图片 {name}。",
   "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "提供商拒绝了一张图片但未说明是哪张，因此从现在起本聊天将略过最新的几张图片：{names}。",
-  "{name} is not an image Haarness can read.": "{name} 不是 Haarness 能读取的图片。"
+  "{name} is not an image Haarness can read.": "{name} 不是 Haarness 能读取的图片。",
+  "This link could not be opened.": "无法打开此链接。",
+  "Open a project to open links to its files.": "请先打开项目，再打开指向其文件的链接。",
+  "Links to network locations do not open.": "指向网络位置的链接不会打开。",
+  "Only files in this project open from a link.": "只有此项目中的文件可以通过链接打开。",
+  "This kind of link does not open in Haarness.": "此类链接无法在 Haarness 中打开。",
+  "{path} was not found in this project.": "在此项目中找不到 {path}。",
+  "This Haarness link could not be opened.": "无法打开此 Haarness 链接。",
+  "The folder in this link was not found.": "找不到此链接中的文件夹。",
+  "Open “{folder}” from a link?": "要从链接打开“{folder}”吗？",
+  "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "它会在项目配置关闭的状态下打开：此文件夹中的 MCP 服务器、钩子和扩展不会运行。若要启用它们，请通过“打开项目”打开该文件夹。",
+  "Open folder": "打开文件夹"
 }
