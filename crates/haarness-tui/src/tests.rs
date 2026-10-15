@@ -8613,6 +8613,113 @@ async fn a_new_request_starts_at_the_top_of_its_command() {
     );
 }
 
+/// Under 40 columns or 12 rows there is no room for the card, but the
+/// keyboard may already answer it: the request, its answers with their keys
+/// and the approval hint replace the bare prompt and "working".
+#[tokio::test]
+async fn a_compact_terminal_shows_the_waiting_request_and_its_answers() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.active_turn = Some(TurnId::new());
+    app.reduce(
+        long_command_event(&thread, "perm-compact", 4),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert!(app.permission_focus);
+    for (width, height) in [(39, 11), (80, 11), (120, 8)] {
+        let lines = app.lines((width, height));
+        let text: String = lines.iter().map(|line| line_text(line) + "\n").collect();
+        assert_eq!(lines.len(), height as usize);
+        assert!(
+            lines.iter().all(|line| line.width() <= width as usize),
+            "{text}"
+        );
+        let status = line_text(&lines[height as usize - 1]);
+        assert!(!status.contains("working"), "{width}x{height}: {text}");
+        assert!(
+            status.contains("Run a shell command"),
+            "{width}x{height}: {text}"
+        );
+        assert!(
+            text.contains("⚠ Run a shell command"),
+            "{width}x{height}: {text}"
+        );
+        assert!(!text.contains("Ask anything"), "{width}x{height}: {text}");
+        let answers = line_text(&lines[height as usize - 4]);
+        for label in ["Allow once  y", "Reject  n"] {
+            assert!(answers.contains(label), "{width}x{height}: {answers}");
+        }
+        let hits = app.hit_rows.borrow();
+        assert!(
+            hits.iter().any(|hit| hit.row == height as usize - 4
+                && hit.target == crate::view::frame::HitTarget::PermissionOption(0)),
+            "{width}x{height}: Allow once is not clickable"
+        );
+    }
+    // The toast would only repeat the rows above, over the conversation.
+    assert!(!frame_text(&app, (80, 11)).contains("Haarness needs approval"));
+
+    // A request picked up on reconnect or when a chat opens arrives with no
+    // event and no toast; it is shown all the same.
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.active_turn = Some(TurnId::new());
+    app.hydrate_permissions(
+        vec![haarness_protocol::PendingPermissionInfo {
+            allow_always: None,
+            explicit: false,
+            repository_scope: None,
+            permission_id: "perm-hydrated".into(),
+            operation: "bash:rm -rf build".into(),
+            detail: serde_json::json!({"command": "rm -rf build"}),
+            permission: "bash".into(),
+            patterns: vec!["rm -rf build".into()],
+            always_patterns: vec!["bash:rm -rf build".into()],
+            thread_id: thread.id,
+            root_thread_id: Some(thread.id),
+            turn_id: None,
+            agent: None,
+            created_at: Utc::now(),
+        }],
+        &offline_client(),
+    )
+    .await;
+    app.permission_focus = true;
+    let text = frame_text(&app, (80, 11));
+    assert!(
+        text.contains("⚠ Run a shell command: rm -rf build"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Allow once  y") && text.contains("Reject  n"),
+        "{text}"
+    );
+    assert!(!text.contains("working"), "{text}");
+}
+
+/// With an answer staged, the compact rows say what it grants and offer only
+/// Confirm and Cancel, like the card.
+#[tokio::test]
+async fn a_compact_terminal_names_what_a_staged_answer_grants() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(
+        long_command_event(&thread, "perm-compact-staged", 1),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE).await;
+    let text = frame_text(&app, (120, 8));
+    assert!(text.contains("⚠ always allow in every chat"), "{text}");
+    assert!(
+        text.contains("Confirm  enter") && text.contains("Cancel  esc"),
+        "{text}"
+    );
+    assert!(!text.contains("Allow once"), "{text}");
+}
+
 /// A chat switch whose mode cannot be read shows Review, never the last
 /// chat's Auto, and a server that did not answer keeps its shared modes, so
 /// this TUI never starts answering the new chat's requests itself.

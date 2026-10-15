@@ -1099,12 +1099,19 @@ impl App {
     /// Refresh the status-line hint for pending approvals, in the card's
     /// words. The chips carry their own keys, so the hint does not list them.
     pub fn update_permission_notice(&mut self) {
-        let Some(first) = self.pending_permissions.first() else {
-            return;
-        };
+        if let Some(notice) = self.permission_notice() {
+            self.notice = notice;
+        }
+    }
+
+    /// The status-line hint for pending approvals, if any wait: the first
+    /// one in the card's words while the card has the keyboard, otherwise
+    /// how many wait and how to reach them.
+    pub fn permission_notice(&self) -> Option<String> {
+        let first = self.pending_permissions.first()?;
         let summary = crate::view::approval::summary(first, self.language);
         let language = self.language;
-        self.notice = match (self.pending_permissions.len(), self.permission_focus) {
+        let notice = match (self.pending_permissions.len(), self.permission_focus) {
             (1, true) => summary,
             (count, true) => format!("[1/{count}] {summary}"),
             (1, false) => format!(
@@ -1120,6 +1127,7 @@ impl App {
                 language.text("ctrl+g to answer")
             ),
         };
+        Some(notice)
     }
 
     /// Give the keyboard back to the composer while an approval waits. With

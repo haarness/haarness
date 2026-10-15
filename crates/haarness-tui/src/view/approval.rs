@@ -791,6 +791,98 @@ fn chip_width(label: &str, key: &str) -> usize {
 /// A clickable chip row and its column ranges.
 type ChipRow = (Line, Vec<(usize, usize, HitTarget)>);
 
+/// The approval card's rows on a terminal too small to draw it.
+pub struct CompactCard {
+    /// `⚠` and the request in one line, or what a staged answer grants.
+    pub request: Line,
+    pub answers: Line,
+    /// Column ranges of the answers, each a click target.
+    pub targets: Vec<(usize, usize, HitTarget)>,
+}
+
+/// The card for a terminal too small to draw it (under 40 columns or 12
+/// rows): the request in one line (or, staged, what the answer grants) and
+/// one row of answers with their keys, each a click target. Where the row is
+/// too narrow for every answer, the highlighted one and Reject stay.
+pub fn compact_lines(app: &App, width: usize) -> Option<CompactCard> {
+    let pending = app.first_pending_permission()?;
+    let theme = &app.theme;
+    let staged = app.confirm_always.filter(|_| app.permission_focus);
+    let text = staged.map_or_else(
+        || summary(pending, app.language),
+        |choice| app.language.text(staged_lead(choice, pending)).to_owned(),
+    );
+    let headline = Line::new(vec![
+        Span::new("⚠ ", theme.accent).with_attributes(attr::BOLD),
+        Span::new(single_line(&text, width.saturating_sub(2)), theme.text),
+    ]);
+    let chips = chips(app, staged.is_some());
+    let selection = app.permission_selection.min(chips.len() - 1);
+    let reject = if staged.is_some() {
+        1
+    } else {
+        chips
+            .iter()
+            .position(|(_, key)| key == "n")
+            .unwrap_or(chips.len() - 1)
+    };
+    let mut order = vec![selection, reject];
+    order.extend(0..chips.len());
+    let mut kept = vec![false; chips.len()];
+    let mut used = 0;
+    for index in order {
+        if kept[index] {
+            continue;
+        }
+        let (label, key) = &chips[index];
+        let chip = chip_width(label, key) + usize::from(used > 0);
+        if used + chip <= width || used == 0 {
+            kept[index] = true;
+            used += chip;
+        }
+    }
+    let mut spans = Vec::new();
+    let mut targets = Vec::new();
+    let mut column = 0;
+    for (index, (label, key)) in chips.iter().enumerate().filter(|(index, _)| kept[*index]) {
+        if column > 0 {
+            spans.push(Span::new(" ", theme.muted));
+            column += 1;
+        }
+        let label = single_line(label, width.saturating_sub(key.width() + 4).max(1));
+        let selected = app.permission_focus && index == selection;
+        let (foreground, background, attributes) = if selected {
+            (theme.bg, theme.accent, attr::BOLD)
+        } else {
+            (theme.text, theme.selected, attr::NONE)
+        };
+        spans.push(
+            Span::new(format!(" {label}  "), foreground)
+                .on(background)
+                .with_attributes(attributes),
+        );
+        spans.push(
+            Span::new(
+                format!("{key} "),
+                if selected { theme.bg } else { theme.muted },
+            )
+            .on(background),
+        );
+        let chip = chip_width(&label, key);
+        targets.push((
+            column,
+            (column + chip).min(width),
+            HitTarget::PermissionOption(index),
+        ));
+        column += chip;
+    }
+    Some(CompactCard {
+        request: headline,
+        answers: Line::new(spans),
+        targets,
+    })
+}
+
 /// The chips in as many rows as the width needs, each chip its own click
 /// target: a narrow terminal wraps the choices instead of cutting Reject off
 /// the edge. The selection is painted only while the prompt owns the
