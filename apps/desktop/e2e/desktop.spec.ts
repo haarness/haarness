@@ -8912,6 +8912,51 @@ test("tool activity shows readable commands, batch steps, outputs and failures",
   expect(errors).toEqual([]);
 });
 
+test("dragging across a tool row's label selects it without opening or closing the row", async () => {
+  await expandPrimaryProject();
+  const thread = await client.createThread({
+    title: "Selectable tool rows",
+    provider: "echo",
+    model: "echo-1",
+  });
+  await page
+    .locator(".sessions")
+    .getByRole("button", { name: "Selectable tool rows", exact: true })
+    .click();
+  const turn = await client.startTurn(thread.id, {
+    requestId: crypto.randomUUID(),
+    text: "!tool read " + JSON.stringify({ path: "src/greeting.ts" }),
+  });
+  await client.waitTurn(turn.id);
+  const row = page.locator(".message.step > .tool-call").last();
+  const label = row.locator(":scope > summary .tool-target");
+  await expect(label).toContainText("greeting.ts");
+  const drag = async () => {
+    const box = (await label.boundingBox())!;
+    const y = box.y + box.height / 2;
+    await page.mouse.move(box.x + 1, y);
+    await page.mouse.down();
+    for (let step = 1; step <= 8; step++)
+      await page.mouse.move(box.x + 1 + ((box.width - 2) * step) / 8, y);
+    await page.mouse.up();
+  };
+  const selected = () => page.evaluate(() => getSelection()?.toString() ?? "");
+  await drag();
+  expect(await selected()).toContain("greeting");
+  await expect(row).not.toHaveAttribute("open");
+  // A plain click still opens the row; selecting in it then leaves it open.
+  await page.evaluate(() => getSelection()?.removeAllRanges());
+  await label.click();
+  await expect(row).toHaveAttribute("open", "");
+  await drag();
+  expect(await selected()).toContain("greeting");
+  await expect(row).toHaveAttribute("open", "");
+  // The keyboard still toggles it.
+  await row.locator(":scope > summary").press("Enter");
+  await expect(row).not.toHaveAttribute("open");
+  expect(errors).toEqual([]);
+});
+
 test("bundled ripgrep searches from chat and the integrated terminal", async () => {
   const heading = page
     .locator(".project-list .project-heading")
