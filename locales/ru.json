@@ -2416,5 +2416,10 @@
   "Links to network locations do not open.": "Ссылки на сетевые расположения не открываются.",
   "Only files in this project open from a link.": "По ссылке открываются только файлы этого проекта.",
   "This kind of link does not open in Haarness.": "Ссылки такого типа не открываются в Haarness.",
-  "{path} was not found in this project.": "{path} не найден в этом проекте."
+  "{path} was not found in this project.": "{path} не найден в этом проекте.",
+  "This Haarness link could not be opened.": "Не удалось открыть эту ссылку Haarness.",
+  "The folder in this link was not found.": "Папка из этой ссылки не найдена.",
+  "Open “{folder}” from a link?": "Открыть «{folder}» по ссылке?",
+  "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "Папка откроется с отключённой конфигурацией проекта: MCP-серверы, хуки и расширения из неё не запускаются. Чтобы включить их, откройте папку через «Открыть проект».",
+  "Open folder": "Открыть папку"
 }

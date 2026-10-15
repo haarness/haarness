@@ -39,6 +39,7 @@ import { UniversalSearch } from "./UniversalSearch";
 import { Wordmark } from "./brand";
 import { shortcutLabel, type SearchEntry } from "./search";
 import { createWorktree, resetWorktree, removeWorktree } from "./worktrees";
+import { parseDeepLink } from "../deep-link";
 type Dock = "files" | "diff" | "context" | "browser";
 
 /** Workbench panels and their launcher copy. */
@@ -575,12 +576,23 @@ export function App() {
       }
       if (input.action === "deep-link")
         void app.run(async () => {
-          const url = new URL(input.url);
-          const id = url.searchParams.get("session");
-          const workspace = url.searchParams.get("workspace");
-          if (workspace) await app.connect({ workspace });
-          if (id && state.threads.some((t) => t.id === id))
-            await app.choose(id);
+          const link = parseDeepLink(input.url);
+          if (!link)
+            return app.notify(t("This Haarness link could not be opened."), "blocked");
+          if (link.workspace) {
+            // A folder already in the sidebar opens as it is; the main process
+            // confirms any other and opens it untrusted.
+            const saved = state.recent.find(
+              (item) => !item.remote && item.workspace === link.workspace,
+            );
+            const opened = saved
+              ? await app.activateProject(saved.id)
+              : await app.connect({ workspace: link.workspace, deepLink: true });
+            if (!opened) return;
+          }
+          // Only a chat in the project now open; other projects are not searched.
+          if (link.session && state.threads.some((t) => t.id === link.session))
+            await app.choose(link.session);
         });
       return;
     }

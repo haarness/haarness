@@ -2416,5 +2416,10 @@
   "Links to network locations do not open.": "指向网络位置的链接不会打开。",
   "Only files in this project open from a link.": "只有此项目中的文件可以通过链接打开。",
   "This kind of link does not open in Haarness.": "此类链接无法在 Haarness 中打开。",
-  "{path} was not found in this project.": "在此项目中找不到 {path}。"
+  "{path} was not found in this project.": "在此项目中找不到 {path}。",
+  "This Haarness link could not be opened.": "无法打开此 Haarness 链接。",
+  "The folder in this link was not found.": "找不到此链接中的文件夹。",
+  "Open “{folder}” from a link?": "要从链接打开“{folder}”吗？",
+  "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "它会在项目配置关闭的状态下打开：此文件夹中的 MCP 服务器、钩子和扩展不会运行。若要启用它们，请通过“打开项目”打开该文件夹。",
+  "Open folder": "打开文件夹"
 }
