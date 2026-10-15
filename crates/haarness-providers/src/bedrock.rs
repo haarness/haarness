@@ -155,6 +155,7 @@ impl ModelProvider for BedrockProvider {
         if cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
+        let limits = request.parameters.limits;
         let encoded_model = encode_path_segment(&request.model);
         let url = format!(
             "{}/model/{encoded_model}/converse",
@@ -187,27 +188,38 @@ impl ModelProvider for BedrockProvider {
                 "Amazon Bedrock is not authenticated; set AWS_BEARER_TOKEN_BEDROCK, AWS credentials, or run `haarness auth login amazon-bedrock`".into(),
             ));
         }
-        let response = self
-            .client
-            .post(url)
-            .headers(headers)
-            .body(payload)
-            .send()
-            .await
-            .map_err(crate::sse::transport_error)?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let detail = response.text().await.unwrap_or_default();
-            return Err(CoreError::Provider(format!(
-                "Bedrock returned {status}: {}",
-                detail.chars().take(1000).collect::<String>()
-            )));
-        }
-        if cancel.is_cancelled() {
-            return Err(CoreError::Cancelled);
-        }
-        let request_id = crate::request_id(response.headers());
-        let response: Value = response.json().await.map_err(crate::sse::transport_error)?;
+        // Converse answers in one piece, so silence until then is normal: a
+        // limit on the whole exchange stands in for the stream's idle limit.
+        let exchange = async {
+            let response = self
+                .client
+                .post(url)
+                .headers(headers)
+                .body(payload)
+                .send()
+                .await
+                .map_err(crate::sse::transport_error)?;
+            if !response.status().is_success() {
+                let status = response.status();
+                let detail = response.text().await.unwrap_or_default();
+                return Err(CoreError::Provider(format!(
+                    "Bedrock returned {status}: {}",
+                    detail.chars().take(1000).collect::<String>()
+                )));
+            }
+            if cancel.is_cancelled() {
+                return Err(CoreError::Cancelled);
+            }
+            let request_id = crate::request_id(response.headers());
+            let response: Value = response.json().await.map_err(crate::sse::transport_error)?;
+            Ok((request_id, response))
+        };
+        let (request_id, response) = match limits.total() {
+            Some(limit) => tokio::time::timeout(limit, exchange)
+                .await
+                .map_err(|_| haarness_core::response_timeout(limit))??,
+            None => exchange.await?,
+        };
         let events = bedrock_events(&response);
         if let Some(ProviderEvent::Finished { reason }) = events.last() {
             crate::log_blocked_finish(&self.instance.id, reason, request_id.as_deref(), None);
@@ -918,5 +930,65 @@ mod tests {
         let requests = capture.0.lock();
         assert_eq!(requests[0].0["authorization"], "Bearer bedrock-token");
         assert_eq!(requests[0].1["messages"][0]["content"][0]["text"], "hi");
+    }
+
+    #[tokio::test]
+    async fn a_converse_answer_that_never_completes_fails_at_the_configured_limit() {
+        use haarness_core::ProviderRegistry as _;
+        async fn never() -> Json<Value> {
+            std::future::pending().await
+        }
+        let router = Router::new().route("/model/test-model/converse", post(never));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut registry = crate::NativeProviderRegistry::default();
+        registry.insert(Arc::new(BedrockProvider::new_with_region(
+            NativeInstance {
+                id: "amazon-bedrock".into(),
+                name: "Amazon Bedrock".into(),
+                base_url: format!("http://{address}"),
+                api_key: Some("bedrock-token".into()),
+                models: vec!["test-model".into()],
+                discover_models: false,
+                model_defaults: CompatibleModelDefaults::default(),
+                assume_authenticated: false,
+                headers: ProviderHeaders::default(),
+            },
+            None,
+            "us-east-1".into(),
+        )));
+        // `request_timeout` reaches the provider through the registry.
+        let registry = registry.with_stream_limits(&std::collections::HashMap::from([(
+            "amazon-bedrock".to_owned(),
+            haarness_core::StreamLimits {
+                idle: None,
+                total: Some(std::time::Duration::from_millis(300)),
+            },
+        )]));
+        let request = ProviderRequest {
+            model: "test-model".into(),
+            system: "system".into(),
+            messages: vec![ProviderMessage::Text {
+                role: "user".into(),
+                content: "hi".into(),
+            }],
+            tools: Vec::new(),
+            reasoning_effort: None,
+            parameters: haarness_core::RequestParameters::default(),
+            output_schema: None,
+        };
+        let Err(error) = registry
+            .get("amazon-bedrock")
+            .unwrap()
+            .stream(request, CancellationToken::new())
+            .await
+        else {
+            panic!("the request outlived its limit");
+        };
+        assert_eq!(
+            error.to_string(),
+            "provider error: the provider sent no complete response within 300 milliseconds"
+        );
     }
 }

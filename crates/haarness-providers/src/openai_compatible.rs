@@ -1165,6 +1165,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         request: ProviderRequest,
         cancel: CancellationToken,
     ) -> CoreResult<ProviderStream> {
+        let limits = request.parameters.limits;
         let models = self.live_models.get(&self.models);
         let selected = models.iter().find(|model| model.id == request.model);
         let supports_images = selected.map_or_else(
@@ -1357,10 +1358,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .post(&self.endpoint)
             .headers(headers)
             .json(&body);
-        let response = builder.send().await.map_err(crate::sse::transport_error)?;
+        let response = crate::sse::send(builder, limits).await?;
         let request_id = crate::request_id(response.headers());
         let provider_id = self.id.clone();
-        let mut events = json_stream(response, cancel);
+        let mut events = json_stream(response, cancel, limits);
         // A Cloud session's own router (the Haarness Cloud provider translates its errors itself).
         if self.server_output_limit && self.id != "haarness" {
             events = Box::pin(futures::StreamExt::map(events, |event| {
@@ -2247,6 +2248,7 @@ mod tests {
                 ]),
                 options: serde_json::Map::from_iter([("seed".to_owned(), json!(7))]),
                 cache_key: None,
+                limits: haarness_core::StreamLimits::default(),
             },
             output_schema: None,
         };

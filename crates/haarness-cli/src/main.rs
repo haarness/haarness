@@ -5967,7 +5967,8 @@ impl HotReloadController {
                 &disabled_providers,
                 Arc::new(CredentialStore::new(self.paths.auth.clone())),
             )
-            .await,
+            .await
+            .with_stream_limits(&stream_limits(&sources.file_config)),
         );
         let candidate_mcp = compose_mcp(&self.paths, &sources.file_config, Some(&self.mcp)).await;
         let candidate_skills = FilesystemSkillRegistry::new_scoped(sources.skill_roots.clone());
@@ -6649,7 +6650,8 @@ async fn application_at(
             &disabled_providers,
             Arc::new(CredentialStore::new(paths.auth.clone())),
         )
-        .await,
+        .await
+        .with_stream_limits(&stream_limits(&file_config)),
     );
     let mcp = mcp_from_config(paths, &file_config).await;
     let skills = Arc::new(FilesystemSkillRegistry::new_scoped(skill_roots));
@@ -7767,6 +7769,17 @@ fn write_provider_entry(path: &Path, id: &str, entry: Option<&ProviderSection>) 
                 "requires_auth".into(),
                 toml::Value::Boolean(entry.requires_auth),
             );
+            for (key, seconds) in [
+                ("stream_idle_timeout", entry.stream_idle_timeout),
+                ("request_timeout", entry.request_timeout),
+            ] {
+                if let Some(seconds) = seconds {
+                    provider.insert(
+                        key.into(),
+                        toml::Value::Integer(i64::try_from(seconds).unwrap_or(i64::MAX)),
+                    );
+                }
+            }
             if let Some(integration) = &entry.integration {
                 provider.insert("integration".into(), toml::Value::try_from(integration)?);
             }
@@ -7936,6 +7949,31 @@ struct ProviderSection {
     /// Set false only for an endpoint that intentionally accepts unauthenticated calls.
     requires_auth: bool,
     enabled: bool,
+    /// Seconds a streamed response may send nothing before it is given up and
+    /// retried; 0 never gives up. Default 300, or 0 on a loopback address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_idle_timeout: Option<u64>,
+    /// Seconds a response that is not streamed (Amazon Bedrock) may take in
+    /// all; 0 waits for as long as it takes. Default 900.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_timeout: Option<u64>,
+}
+impl ProviderSection {
+    /// Whether the section sets timeouts and no endpoint: in a later
+    /// configuration layer it tunes the earlier definition of its id.
+    fn tunes(&self) -> bool {
+        self.enabled
+            && self.base_url.is_none()
+            && (self.stream_idle_timeout.is_some() || self.request_timeout.is_some())
+    }
+
+    /// Whether it tunes a provider Haarness has without a definition (a
+    /// built-in one, or a local runtime it detects) instead of defining one.
+    fn tunes_builtin(&self, id: &str) -> bool {
+        self.tunes()
+            && haarness_providers::compatible_preset(id).is_none()
+            && haarness_providers::builtin_provider(id)
+    }
 }
 impl Default for ProviderSection {
     fn default() -> Self {
@@ -7957,6 +7995,8 @@ impl Default for ProviderSection {
             server_output_limit: false,
             requires_auth: true,
             enabled: true,
+            stream_idle_timeout: None,
+            request_timeout: None,
         }
     }
 }
@@ -8017,6 +8057,9 @@ fn provider_instances(
     for (id, section) in &config.providers {
         if !section.enabled {
             disabled.insert(id.clone());
+            continue;
+        }
+        if section.tunes_builtin(id) {
             continue;
         }
         let Ok(protocol) = haarness_providers::CompatibleProtocol::parse(&section.protocol) else {
@@ -8167,9 +8210,31 @@ fn provider_instances(
     (instances, disabled)
 }
 
+/// The configured stream limits by provider id (`stream_idle_timeout`,
+/// `request_timeout`); providers without either keep the defaults.
+fn stream_limits(config: &FileConfig) -> HashMap<String, haarness_core::StreamLimits> {
+    config
+        .providers
+        .iter()
+        .filter(|(_, section)| {
+            section.enabled
+                && (section.stream_idle_timeout.is_some() || section.request_timeout.is_some())
+        })
+        .map(|(id, section)| {
+            (
+                id.clone(),
+                haarness_core::StreamLimits {
+                    idle: section.stream_idle_timeout.map(Duration::from_secs),
+                    total: section.request_timeout.map(Duration::from_secs),
+                },
+            )
+        })
+        .collect()
+}
+
 fn validate_provider_definitions(config: &FileConfig) -> Result<()> {
     for (id, section) in &config.providers {
-        if !section.enabled {
+        if !section.enabled || section.tunes_builtin(id) {
             continue;
         }
         let protocol = haarness_providers::CompatibleProtocol::parse(&section.protocol)
@@ -8419,7 +8484,20 @@ fn merge_file_config(config: &mut FileConfig, project_config: FileConfig) {
     if project_config.snapshots.is_some() {
         config.snapshots = project_config.snapshots;
     }
-    config.providers.extend(project_config.providers);
+    for (id, section) in project_config.providers {
+        match config.providers.get_mut(&id) {
+            // A section that only sets timeouts tunes the definition before
+            // it instead of replacing it.
+            Some(defined) if section.tunes() => {
+                defined.stream_idle_timeout =
+                    section.stream_idle_timeout.or(defined.stream_idle_timeout);
+                defined.request_timeout = section.request_timeout.or(defined.request_timeout);
+            }
+            _ => {
+                config.providers.insert(id, section);
+            }
+        }
+    }
     if let Some(project) = project_config.compatibility {
         let base = config
             .compatibility
@@ -10131,6 +10209,10 @@ mod tests {
         wait_for_turn_client,
     };
     use super::{
+        HashMap, merge_file_config, provider_instances, stream_limits,
+        validate_provider_definitions,
+    };
+    use super::{
         IpAddr, check_network_access, jsonconfig, run_title, schedule_run_title,
         validate_custom_provider_id,
     };
@@ -10728,6 +10810,64 @@ mod tests {
         let config: FileConfig = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(config.providers.is_empty());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_timeouts_tune_built_in_providers_and_keep_earlier_definitions() {
+        let mut config: FileConfig = toml::from_str(
+            r#"
+[providers.company]
+protocol = "anthropic-messages"
+base_url = "https://models.example.test/anthropic/v1"
+models = ["company-sonnet"]
+stream_idle_timeout = 120
+
+[providers.anthropic]
+stream_idle_timeout = 600
+
+[providers.amazon-bedrock]
+request_timeout = 0
+"#,
+        )
+        .unwrap();
+        // Sections that only set a timeout define no provider of their own.
+        validate_provider_definitions(&config).unwrap();
+        let (instances, disabled) = provider_instances(&config, &HashMap::new());
+        assert_eq!(
+            instances
+                .iter()
+                .map(haarness_providers::ProviderInstance::id)
+                .collect::<Vec<_>>(),
+            ["company"]
+        );
+        assert!(disabled.is_empty());
+        let limits = stream_limits(&config);
+        assert_eq!(limits["company"].idle, Some(Duration::from_secs(120)));
+        assert_eq!(limits["anthropic"].idle, Some(Duration::from_secs(600)));
+        assert_eq!(limits["amazon-bedrock"].total, Some(Duration::ZERO));
+        assert_eq!(limits["amazon-bedrock"].idle, None);
+        // A misspelt id still needs an endpoint, so the typo is reported.
+        let unknown: FileConfig =
+            toml::from_str("[providers.anthropc]\nstream_idle_timeout = 600\n").unwrap();
+        assert!(
+            validate_provider_definitions(&unknown)
+                .unwrap_err()
+                .to_string()
+                .contains("base_url is required")
+        );
+
+        // A later layer that only sets a timeout tunes the definition.
+        let project: FileConfig =
+            toml::from_str("[providers.company]\nstream_idle_timeout = 30\n").unwrap();
+        merge_file_config(&mut config, project);
+        assert_eq!(
+            config.providers["company"].base_url.as_deref(),
+            Some("https://models.example.test/anthropic/v1")
+        );
+        assert_eq!(
+            stream_limits(&config)["company"].idle,
+            Some(Duration::from_secs(30))
+        );
     }
 
     #[test]
