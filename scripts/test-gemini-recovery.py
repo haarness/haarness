@@ -219,7 +219,7 @@ with tempfile.TemporaryDirectory(prefix='haarness-gemini-recovery-',
         assert len(REQUESTS) - offset == 1, f'region refusal was retried: {len(REQUESTS) - offset} requests'
         errors = [i['data']['message'] for i in items() if i['data']['type'] == 'error']
         assert errors and errors[-1] == ('Google Gemini is not available in your country or region. '
-                                         'Choose a model from another provider or from Haarness Cloud.'), errors
+                                         'Choose a model from another provider.'), errors
         region = pane()
         (EVIDENCE / 'tui.txt').write_text('RECOVERY\n' + recovered + '\nREGION\n' + region)
         (EVIDENCE / 'requests.json').write_text(json.dumps(REQUESTS, indent=2))

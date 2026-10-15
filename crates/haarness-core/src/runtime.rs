@@ -836,7 +836,7 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
     };
     if is_region_unavailable(raw) {
         return format!(
-            "{} is not available in your country or region. Choose a model from another provider or from Haarness Cloud.",
+            "{} is not available in your country or region. Choose a model from another provider.",
             provider.unwrap_or("This provider")
         );
     }
@@ -13405,7 +13405,7 @@ mod tests {
             let error = CoreError::Provider(raw.into());
             assert_eq!(
                 super::describe_error(&error, Some("Google Gemini")),
-                "Google Gemini is not available in your country or region. Choose a model from another provider or from Haarness Cloud.",
+                "Google Gemini is not available in your country or region. Choose a model from another provider.",
                 "{raw}"
             );
             assert!(
