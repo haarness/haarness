@@ -121,6 +121,12 @@ struct Cli {
     /// on that server, until it stops.
     #[arg(long, global = true, visible_alias = "dangerously-skip-permissions")]
     yolo: bool,
+    /// Put the chat this command opens, starts or continues in Auto: its
+    /// server then approves eligible requests once, whichever app shows the
+    /// chat, until someone switches it back to Review. Permission denials
+    /// and requests that always ask still hold.
+    #[arg(long, global = true, conflicts_with = "yolo")]
+    auto: bool,
     /// Open a specific chat by id. `--session` is an alias.
     #[arg(short = 's', long, global = true, visible_alias = "session")]
     thread: Option<Uuid>,
@@ -1447,7 +1453,10 @@ async fn main() -> Result<()> {
                 &paths,
                 workspace,
                 project_config,
-                cli.yolo,
+                haarness_tui::ApprovalLaunch {
+                    yolo: cli.yolo,
+                    auto: cli.auto,
+                },
                 cli.thread,
                 cli.continue_last,
             )
@@ -1470,14 +1479,25 @@ async fn main() -> Result<()> {
             serve_command(&paths, workspace, project_config, cli.yolo, args).await
         }
         Some(Command::Attach(args)) => {
-            attach_command(&paths, &workspace, args, cli.thread, cli.continue_last).await
+            attach_command(
+                &paths,
+                &workspace,
+                args,
+                cli.auto,
+                cli.thread,
+                cli.continue_last,
+            )
+            .await
         }
         Some(Command::Tui(args)) => {
             tui_command(
                 &paths,
                 &workspace,
                 project_config,
-                cli.yolo,
+                haarness_tui::ApprovalLaunch {
+                    yolo: cli.yolo,
+                    auto: cli.auto,
+                },
                 args,
                 cli.thread,
                 cli.continue_last,
@@ -1489,7 +1509,10 @@ async fn main() -> Result<()> {
                 &paths,
                 workspace,
                 project_config,
-                cli.yolo,
+                haarness_tui::ApprovalLaunch {
+                    yolo: cli.yolo,
+                    auto: cli.auto,
+                },
                 cli.thread,
                 cli.continue_last,
                 args,
@@ -1521,7 +1544,10 @@ async fn main() -> Result<()> {
                 &paths,
                 &current_workspace.id,
                 project_config,
-                cli.yolo,
+                haarness_tui::ApprovalLaunch {
+                    yolo: cli.yolo,
+                    auto: cli.auto,
+                },
                 cli.thread,
                 cli.continue_last,
                 command,
@@ -1754,6 +1780,10 @@ const GLOBAL_SCOPES: &[(&str, GlobalScope)] = &[
     ),
     (
         "continue_last",
+        GlobalScope::Only(&["tui", "run", "attach", "worktree"]),
+    ),
+    (
+        "auto",
         GlobalScope::Only(&["tui", "run", "attach", "worktree"]),
     ),
     (
@@ -2896,7 +2926,7 @@ async fn workspace_command(
     paths: &Paths,
     current_workspace_id: &str,
     trust: bool,
-    yolo: bool,
+    approvals: haarness_tui::ApprovalLaunch,
     thread: Option<Uuid>,
     continue_last: bool,
     command: WorkspaceCommand,
@@ -2972,7 +3002,7 @@ async fn workspace_command(
                     &target_paths,
                     PathBuf::from(&workspace.path),
                     trust,
-                    yolo,
+                    approvals,
                     thread,
                     continue_last,
                 )
@@ -3753,7 +3783,7 @@ async fn interactive(
     paths: &Paths,
     workspace: PathBuf,
     trust: bool,
-    yolo: bool,
+    mut approvals: haarness_tui::ApprovalLaunch,
     thread: Option<Uuid>,
     continue_last: bool,
 ) -> Result<()> {
@@ -3772,7 +3802,7 @@ async fn interactive(
             resume,
             runtime_endpoint_resolver(&active_paths, &active_workspace),
             workspace_server_restarter(&active_paths, &active_workspace, trust),
-            yolo,
+            approvals,
         )
         .await?;
         let Some(path) = selected else {
@@ -3782,9 +3812,11 @@ async fn interactive(
         active_paths = paths.scoped(&workspace.id, false)?;
         active_workspace = PathBuf::from(workspace.path);
         // An explicit session belongs to the workspace it was supplied for;
-        // switching restores the target's own most-recent root instead.
+        // switching restores the target's own most-recent root instead, and
+        // `--auto` was said of the chat this command opened, not that one.
         initial_thread = None;
         resume = true;
+        approvals.auto = false;
     }
 }
 /// `haarness serve` listens here unless `--port` says otherwise.
@@ -3838,6 +3870,7 @@ async fn serve_command(
             SocketAddr::new(args.host, port),
             token.unwrap_or_else(random_token),
             Some(access),
+            BusyServer::Refuse,
         )
         .await?;
         println!(
@@ -3959,6 +3992,7 @@ async fn attach_command(
     paths: &Paths,
     workspace: &Path,
     args: AttachArgs,
+    auto: bool,
     thread: Option<Uuid>,
     continue_last: bool,
 ) -> Result<()> {
@@ -3968,7 +4002,8 @@ async fn attach_command(
     require_terminal()?;
     let (server, token) =
         attached_endpoint(paths, &args.url, args.token, args.authentication).await?;
-    haarness_tui::run_attached_with_auth(&server, token, thread, continue_last, args.fork).await?;
+    haarness_tui::run_attached_with_auth(&server, token, thread, continue_last, args.fork, auto)
+        .await?;
     // Keep the local workspace argument meaningful for diagnostics and parity
     // with the other entrypoints; execution itself belongs to server /v1/info.
     tracing::debug!(workspace = %workspace.display(), server = %server, "attached TUI exited");
@@ -4090,7 +4125,7 @@ async fn tui_command(
     paths: &Paths,
     workspace: &Path,
     trust: bool,
-    yolo: bool,
+    mut approvals: haarness_tui::ApprovalLaunch,
     args: TuiArgs,
     thread: Option<Uuid>,
     continue_last: bool,
@@ -4108,6 +4143,7 @@ async fn tui_command(
             thread,
             continue_last,
             args.fork,
+            approvals.auto,
         )
         .await;
     }
@@ -4127,7 +4163,7 @@ async fn tui_command(
             fork,
             runtime_endpoint_resolver(&active_paths, &active_workspace),
             workspace_server_restarter(&active_paths, &active_workspace, trust),
-            yolo,
+            approvals,
         )
         .await?;
         let Some(path) = selected else {
@@ -4139,6 +4175,7 @@ async fn tui_command(
         initial_thread = None;
         resume = true;
         fork = false;
+        approvals.auto = false;
     }
 }
 /// Whether reading stdin would return immediately (data waiting, or the
@@ -4167,11 +4204,12 @@ async fn run_command(
     paths: &Paths,
     workspace: PathBuf,
     trust: bool,
-    yolo: bool,
+    approvals: haarness_tui::ApprovalLaunch,
     requested_thread: Option<Uuid>,
     continue_last: bool,
     args: RunArgs,
 ) -> Result<()> {
+    let yolo = approvals.yolo;
     let json_output = args.format == RunFormat::Json;
     let mut chat = None;
     let result = async {
@@ -4219,6 +4257,11 @@ async fn run_command(
             let discovery = ensure_workspace_server(paths, &workspace, trust).await?;
             haarness_tui::api::ApiClient::new(&discovery.url, &discovery.token)?
         };
+        // Checked before a chat exists, so a refusal leaves no empty chat
+        // behind.
+        if approvals.auto {
+            require_shared_approval_modes(&client).await?;
+        }
         // Checked before a chat exists, so a typo leaves no empty chat behind.
         let requested_model = if args.provider.is_some() || args.model.is_some() {
             Some(requested_run_model(
@@ -4265,6 +4308,14 @@ async fn run_command(
                 }
             };
         chat = Some(thread.id);
+        // `--auto` puts the chat itself in Auto, before anything runs in it:
+        // the server then answers its eligible requests once, for this run,
+        // its agents and workflows, and whatever runs in it later, and every
+        // app shows the chat in Auto. What always asks is still asked below.
+        if approvals.auto {
+            let set = set_chat_auto(&client, thread.id).await;
+            discard_refused_chat(&client, &thread, created, set).await?;
+        }
         let (provider, model) = requested_model.unzip();
         let goal = args.goal;
         stop_on_signal(&client, thread.id, goal, async {
@@ -4448,6 +4499,37 @@ fn run_attachments(files: &[PathBuf]) -> Result<Vec<String>> {
 /// A run's start was refused (an unknown command, agent or variant): a chat
 /// this run made for it holds nothing, so it is archived rather than left in
 /// the recent list. A continued chat stays as it was.
+/// `--auto` needs a server that keeps the approval mode per chat; an older
+/// one only has the per-run `--yolo`.
+async fn require_shared_approval_modes(client: &haarness_tui::api::ApiClient) -> Result<()> {
+    let info = client.info().await?;
+    if !info
+        .capabilities
+        .iter()
+        .any(|capability| capability == haarness_protocol::APPROVAL_MODE_CAPABILITY)
+    {
+        anyhow::bail!(
+            "This Haarness server cannot keep a chat in Auto; update it, or pass --yolo to approve this run's requests"
+        );
+    }
+    Ok(())
+}
+
+/// Put a chat in Auto on its server, whatever it was.
+async fn set_chat_auto(client: &haarness_tui::api::ApiClient, thread: ThreadId) -> Result<()> {
+    client
+        .set_approval_mode(
+            thread,
+            &haarness_protocol::SetApprovalModeRequest {
+                mode: haarness_protocol::ApprovalModeSetting::Auto,
+                revision: None,
+            },
+        )
+        .await
+        .context("Could not put this chat in Auto")?;
+    Ok(())
+}
+
 async fn discard_refused_chat<T>(
     client: &haarness_tui::api::ApiClient,
     thread: &Thread,
@@ -5966,7 +6048,8 @@ impl HotReloadController {
                 &disabled_providers,
                 Arc::new(CredentialStore::new(self.paths.auth.clone())),
             )
-            .await,
+            .await
+            .with_stream_limits(&stream_limits(&sources.file_config)),
         );
         let candidate_mcp = compose_mcp(&self.paths, &sources.file_config, Some(&self.mcp)).await;
         let candidate_skills = FilesystemSkillRegistry::new_scoped(sources.skill_roots.clone());
@@ -6648,7 +6731,8 @@ async fn application_at(
             &disabled_providers,
             Arc::new(CredentialStore::new(paths.auth.clone())),
         )
-        .await,
+        .await
+        .with_stream_limits(&stream_limits(&file_config)),
     );
     let mcp = mcp_from_config(paths, &file_config).await;
     let skills = Arc::new(FilesystemSkillRegistry::new_scoped(skill_roots));
@@ -7766,6 +7850,17 @@ fn write_provider_entry(path: &Path, id: &str, entry: Option<&ProviderSection>) 
                 "requires_auth".into(),
                 toml::Value::Boolean(entry.requires_auth),
             );
+            for (key, seconds) in [
+                ("stream_idle_timeout", entry.stream_idle_timeout),
+                ("request_timeout", entry.request_timeout),
+            ] {
+                if let Some(seconds) = seconds {
+                    provider.insert(
+                        key.into(),
+                        toml::Value::Integer(i64::try_from(seconds).unwrap_or(i64::MAX)),
+                    );
+                }
+            }
             if let Some(integration) = &entry.integration {
                 provider.insert("integration".into(), toml::Value::try_from(integration)?);
             }
@@ -7935,6 +8030,31 @@ struct ProviderSection {
     /// Set false only for an endpoint that intentionally accepts unauthenticated calls.
     requires_auth: bool,
     enabled: bool,
+    /// Seconds a streamed response may send nothing before it is given up and
+    /// retried; 0 never gives up. Default 300, or 0 on a loopback address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_idle_timeout: Option<u64>,
+    /// Seconds a response that is not streamed (Amazon Bedrock) may take in
+    /// all; 0 waits for as long as it takes. Default 900.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_timeout: Option<u64>,
+}
+impl ProviderSection {
+    /// Whether the section sets timeouts and no endpoint: in a later
+    /// configuration layer it tunes the earlier definition of its id.
+    fn tunes(&self) -> bool {
+        self.enabled
+            && self.base_url.is_none()
+            && (self.stream_idle_timeout.is_some() || self.request_timeout.is_some())
+    }
+
+    /// Whether it tunes a provider Haarness has without a definition (a
+    /// built-in one, or a local runtime it detects) instead of defining one.
+    fn tunes_builtin(&self, id: &str) -> bool {
+        self.tunes()
+            && haarness_providers::compatible_preset(id).is_none()
+            && haarness_providers::builtin_provider(id)
+    }
 }
 impl Default for ProviderSection {
     fn default() -> Self {
@@ -7956,6 +8076,8 @@ impl Default for ProviderSection {
             server_output_limit: false,
             requires_auth: true,
             enabled: true,
+            stream_idle_timeout: None,
+            request_timeout: None,
         }
     }
 }
@@ -8016,6 +8138,9 @@ fn provider_instances(
     for (id, section) in &config.providers {
         if !section.enabled {
             disabled.insert(id.clone());
+            continue;
+        }
+        if section.tunes_builtin(id) {
             continue;
         }
         let Ok(protocol) = haarness_providers::CompatibleProtocol::parse(&section.protocol) else {
@@ -8166,9 +8291,31 @@ fn provider_instances(
     (instances, disabled)
 }
 
+/// The configured stream limits by provider id (`stream_idle_timeout`,
+/// `request_timeout`); providers without either keep the defaults.
+fn stream_limits(config: &FileConfig) -> HashMap<String, haarness_core::StreamLimits> {
+    config
+        .providers
+        .iter()
+        .filter(|(_, section)| {
+            section.enabled
+                && (section.stream_idle_timeout.is_some() || section.request_timeout.is_some())
+        })
+        .map(|(id, section)| {
+            (
+                id.clone(),
+                haarness_core::StreamLimits {
+                    idle: section.stream_idle_timeout.map(Duration::from_secs),
+                    total: section.request_timeout.map(Duration::from_secs),
+                },
+            )
+        })
+        .collect()
+}
+
 fn validate_provider_definitions(config: &FileConfig) -> Result<()> {
     for (id, section) in &config.providers {
-        if !section.enabled {
+        if !section.enabled || section.tunes_builtin(id) {
             continue;
         }
         let protocol = haarness_providers::CompatibleProtocol::parse(&section.protocol)
@@ -8418,7 +8565,20 @@ fn merge_file_config(config: &mut FileConfig, project_config: FileConfig) {
     if project_config.snapshots.is_some() {
         config.snapshots = project_config.snapshots;
     }
-    config.providers.extend(project_config.providers);
+    for (id, section) in project_config.providers {
+        match config.providers.get_mut(&id) {
+            // A section that only sets timeouts tunes the definition before
+            // it instead of replacing it.
+            Some(defined) if section.tunes() => {
+                defined.stream_idle_timeout =
+                    section.stream_idle_timeout.or(defined.stream_idle_timeout);
+                defined.request_timeout = section.request_timeout.or(defined.request_timeout);
+            }
+            _ => {
+                config.providers.insert(id, section);
+            }
+        }
+    }
     if let Some(project) = project_config.compatibility {
         let base = config
             .compatibility
@@ -9341,6 +9501,128 @@ async fn discover_workspace_server(
     Ok(Some(live.discovery))
 }
 
+/// What stopping a project's server would end or leave unanswered: its turns,
+/// the terminals open in it, the approvals and questions waiting on someone,
+/// and its running or paused workflows. Desktop's worktree reset and removal
+/// refuse on the same list.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ServerActivity {
+    turns: usize,
+    /// The titles of the terminals still running.
+    terminals: Vec<String>,
+    approvals: usize,
+    questions: usize,
+    workflows: usize,
+}
+
+impl ServerActivity {
+    pub(crate) fn idle(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl std::fmt::Display for ServerActivity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn count(value: usize, one: &str, many: &str) -> String {
+            format!("{value} {}", if value == 1 { one } else { many })
+        }
+        let mut parts = Vec::new();
+        if self.turns > 0 {
+            parts.push(count(self.turns, "active turn", "active turns"));
+        }
+        if !self.terminals.is_empty() {
+            // Named, so the person can tell which shell holds the server.
+            let shown = self
+                .terminals
+                .iter()
+                .take(3)
+                .map(|title| title.chars().take(40).collect::<String>())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let more = self.terminals.len().saturating_sub(3);
+            parts.push(format!(
+                "{} ({shown}{})",
+                count(self.terminals.len(), "open terminal", "open terminals"),
+                if more > 0 {
+                    format!(" and {more} more")
+                } else {
+                    String::new()
+                }
+            ));
+        }
+        if self.approvals > 0 {
+            parts.push(count(
+                self.approvals,
+                "pending approval",
+                "pending approvals",
+            ));
+        }
+        if self.questions > 0 {
+            parts.push(count(
+                self.questions,
+                "unanswered question",
+                "unanswered questions",
+            ));
+        }
+        if self.workflows > 0 {
+            parts.push(count(
+                self.workflows,
+                "running workflow",
+                "running workflows",
+            ));
+        }
+        formatter.write_str(&parts.join(", "))
+    }
+}
+
+/// Read what a server is doing. A server too old to have one of these lists
+/// (it answers 404 or 400) has nothing of that kind; any other failure fails
+/// the whole read, so an unknown state is never taken for idle.
+pub(crate) async fn server_activity(
+    client: &haarness_tui::api::ApiClient,
+) -> Result<ServerActivity> {
+    fn absent<T>(result: Result<Vec<T>>) -> Result<Vec<T>> {
+        match result {
+            Err(error)
+                if haarness_tui::api::refusal_status(&error).is_some_and(|status| {
+                    status == reqwest::StatusCode::NOT_FOUND
+                        || status == reqwest::StatusCode::BAD_REQUEST
+                }) =>
+            {
+                Ok(Vec::new())
+            }
+            other => other,
+        }
+    }
+    let (turns, terminals, approvals, questions, workflows) = tokio::try_join!(
+        client.active_turns(),
+        async { absent(client.ptys().await) },
+        async { absent(client.pending_permissions().await) },
+        async { absent(client.pending_questions().await) },
+        async { absent(client.workflow_runs(500).await) },
+    )?;
+    Ok(ServerActivity {
+        turns: turns.len(),
+        terminals: terminals
+            .into_iter()
+            .filter(|terminal| terminal.status == haarness_protocol::PtyStatus::Running)
+            .map(|terminal| terminal.title)
+            .collect(),
+        approvals: approvals.len(),
+        questions: questions.len(),
+        workflows: workflows
+            .iter()
+            .filter(|run| {
+                matches!(
+                    run.status,
+                    haarness_protocol::WorkflowRunStatus::Running
+                        | haarness_protocol::WorkflowRunStatus::Paused
+                )
+            })
+            .count(),
+    })
+}
+
 async fn replace_incompatible_workspace_server(
     paths: &Paths,
     expected_workspace: &Path,
@@ -9356,9 +9638,10 @@ async fn replace_incompatible_workspace_server(
     } else {
         haarness_server::remote::ProjectBusy::OtherSetting
     };
-    let active = match tokio::time::timeout(Duration::from_millis(750), client.active_turns()).await
+    let activity = match tokio::time::timeout(Duration::from_millis(750), server_activity(&client))
+        .await
     {
-        Ok(Ok(active)) => active,
+        Ok(Ok(activity)) => activity,
         Ok(Err(error)) => {
             return Err(error.context(busy).context(format!(
                 "cannot safely replace Haarness server {} ({reason}) because its activity endpoint is unavailable; stop it explicitly with `haarness --workspace '{}' serve --stop`",
@@ -9376,12 +9659,11 @@ async fn replace_incompatible_workspace_server(
             )));
         }
     };
-    if !active.is_empty() {
+    if !activity.idle() {
         return Err(
             anyhow::Error::new(busy).context(format!(
-                "Haarness server {} needs an upgrade ({reason}) but still owns {} active turn(s); wait for them to finish or stop it explicitly with `haarness --workspace '{}' serve --stop`",
+                "Haarness server {} needs an upgrade ({reason}) but still has {activity}; finish or close them, or stop it explicitly with `haarness --workspace '{}' serve --stop`",
                 live.discovery.pid,
-                active.len(),
                 expected_workspace.display()
             )),
         );
@@ -9430,6 +9712,11 @@ async fn replace_incompatible_workspace_server(
 /// serves every chat in the folder, so it would keep approving for all of
 /// them until `serve --stop`. `run`, ACP and the TUI approve their own
 /// requests instead; only `haarness serve --yolo` makes a yolo server.
+///
+/// A server of another Haarness build that is still busy (a turn, an open
+/// terminal, a waiting approval) is used as it is, with a notice, when it
+/// speaks this build's API and runs with the same project configuration
+/// setting; the next client to find it idle replaces it.
 async fn ensure_workspace_server(
     paths: &Paths,
     workspace: &Path,
@@ -9443,8 +9730,44 @@ async fn ensure_workspace_server(
         SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0),
         random_token(),
         None,
+        BusyServer::Reuse,
     )
     .await
+}
+
+/// [`ensure_workspace_server`] for requests that arrive through Haarness
+/// Cloud: a busy server of another build or setting is refused with
+/// [`haarness_server::remote::ProjectBusy`] instead of being used as it is,
+/// because Cloud's requests must not drive a server this build cannot vouch
+/// for.
+pub(crate) async fn ensure_workspace_server_for_remote(
+    paths: &Paths,
+    workspace: &Path,
+    trust: bool,
+) -> Result<RuntimeDiscovery> {
+    ensure_workspace_server_at(
+        paths,
+        workspace,
+        trust,
+        false,
+        SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0),
+        random_token(),
+        None,
+        BusyServer::Refuse,
+    )
+    .await
+}
+
+/// What a client does with a running server it would replace (another
+/// build, or the other project configuration setting) while that server
+/// still works or holds something open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BusyServer {
+    /// Refuse with [`haarness_server::remote::ProjectBusy`].
+    Refuse,
+    /// Use it as it is when it speaks this build's API and runs with the
+    /// requested setting; refuse otherwise.
+    Reuse,
 }
 
 /// The daemon keeps the OTEL settings it started with. A client that asks for
@@ -9471,6 +9794,7 @@ fn warn_trace_endpoint_mismatch(discovery: &RuntimeDiscovery) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ensure_workspace_server_at(
     paths: &Paths,
     workspace: &Path,
@@ -9479,6 +9803,7 @@ async fn ensure_workspace_server_at(
     address: SocketAddr,
     token: String,
     access: Option<haarness_server::auth::ServerAccess>,
+    busy: BusyServer,
 ) -> Result<RuntimeDiscovery> {
     // Coordinate independent launchers as well as multiple desktop windows.
     // Keep this lease separate from the daemon's lifetime lease.
@@ -9518,7 +9843,30 @@ async fn ensure_workspace_server_at(
             (live.info.project_trusted != Some(trust))
                 .then(|| "project configuration setting changed".to_owned())
         }) {
-            replace_incompatible_workspace_server(paths, workspace, live, &reason).await?;
+            let reusable = busy == BusyServer::Reuse
+                && server_compatibility_error(&live.info).is_none()
+                && live.info.project_trusted == Some(trust);
+            let discovery = live.discovery.clone();
+            match replace_incompatible_workspace_server(paths, workspace, live, &reason).await {
+                Ok(()) => {}
+                // Replacing it would end what it still holds; the person keeps
+                // working on it, and a later client replaces it once idle.
+                Err(error)
+                    if reusable
+                        && error
+                            .downcast_ref::<haarness_server::remote::ProjectBusy>()
+                            .is_some() =>
+                {
+                    let notice = format!("{error}. Using it as it is meanwhile.");
+                    tracing::warn!("{notice}");
+                    if io::stderr().is_terminal() {
+                        eprintln!("haarness: {notice}");
+                    }
+                    warn_trace_endpoint_mismatch(&discovery);
+                    return Ok(discovery);
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             warn_trace_endpoint_mismatch(&live.discovery);
             return Ok(live.discovery);
@@ -9860,6 +10208,35 @@ mod tests {
         );
     }
 
+    /// `--auto` belongs to the commands that open a chat, and says something
+    /// different from `--yolo`, so the two are not combined.
+    #[test]
+    fn auto_is_offered_where_a_chat_opens_and_never_beside_yolo() {
+        let launch = super::Cli::try_parse_from(["haarness", "--auto"]).unwrap();
+        assert!(launch.auto && launch.command.is_none() && !launch.yolo);
+        let run = super::Cli::try_parse_from(["haarness", "run", "--auto", "hello"]).unwrap();
+        assert!(run.auto && matches!(run.command, Some(super::Command::Run(_))));
+        assert!(super::Cli::try_parse_from(["haarness", "--auto", "--yolo"]).is_err());
+        assert!(super::Cli::try_parse_from(["haarness", "run", "--yolo", "--auto", "x"]).is_err());
+        let mut command = super::cli_command();
+        for name in ["run", "tui", "attach"] {
+            let help = command
+                .find_subcommand_mut(name)
+                .unwrap()
+                .render_help()
+                .to_string();
+            assert!(help.contains("--auto"), "{name}: {help}");
+        }
+        for name in ["serve", "doctor", "acp"] {
+            let help = command
+                .find_subcommand_mut(name)
+                .unwrap()
+                .render_help()
+                .to_string();
+            assert!(!help.contains("--auto"), "{name}: {help}");
+        }
+    }
+
     #[test]
     fn a_server_port_is_read_from_its_url() {
         assert_eq!(super::url_port("http://127.0.0.1:41000"), Some(41000));
@@ -9920,7 +10297,8 @@ mod tests {
         PTY_CAPABILITY, ProviderInfo, QuestionReply, RequestId, ServerInfo, StartTurnRequest,
         ThreadId, TurnId, WORKSPACE_HISTORY_CAPABILITY,
     };
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use haarness_server::remote::ProjectBusy;
+    use serde_json::json;
     use tokio_util::sync::CancellationToken;
 
     use super::{
@@ -9939,6 +10317,10 @@ mod tests {
         Approver, NO_MODEL_CONNECTED, RunWatch, TurnStatus, default_run_model_client,
         describe_permission, discard_refused_chat, requested_run_model, run_attachments,
         wait_for_turn_client,
+    };
+    use super::{
+        HashMap, merge_file_config, provider_instances, stream_limits,
+        validate_provider_definitions,
     };
     use super::{
         IpAddr, check_network_access, jsonconfig, run_title, schedule_run_title,
@@ -10541,6 +10923,64 @@ mod tests {
     }
 
     #[test]
+    fn provider_timeouts_tune_built_in_providers_and_keep_earlier_definitions() {
+        let mut config: FileConfig = toml::from_str(
+            r#"
+[providers.company]
+protocol = "anthropic-messages"
+base_url = "https://models.example.test/anthropic/v1"
+models = ["company-sonnet"]
+stream_idle_timeout = 120
+
+[providers.anthropic]
+stream_idle_timeout = 600
+
+[providers.amazon-bedrock]
+request_timeout = 0
+"#,
+        )
+        .unwrap();
+        // Sections that only set a timeout define no provider of their own.
+        validate_provider_definitions(&config).unwrap();
+        let (instances, disabled) = provider_instances(&config, &HashMap::new());
+        assert_eq!(
+            instances
+                .iter()
+                .map(haarness_providers::ProviderInstance::id)
+                .collect::<Vec<_>>(),
+            ["company"]
+        );
+        assert!(disabled.is_empty());
+        let limits = stream_limits(&config);
+        assert_eq!(limits["company"].idle, Some(Duration::from_secs(120)));
+        assert_eq!(limits["anthropic"].idle, Some(Duration::from_secs(600)));
+        assert_eq!(limits["amazon-bedrock"].total, Some(Duration::ZERO));
+        assert_eq!(limits["amazon-bedrock"].idle, None);
+        // A misspelt id still needs an endpoint, so the typo is reported.
+        let unknown: FileConfig =
+            toml::from_str("[providers.anthropc]\nstream_idle_timeout = 600\n").unwrap();
+        assert!(
+            validate_provider_definitions(&unknown)
+                .unwrap_err()
+                .to_string()
+                .contains("base_url is required")
+        );
+
+        // A later layer that only sets a timeout tunes the definition.
+        let project: FileConfig =
+            toml::from_str("[providers.company]\nstream_idle_timeout = 30\n").unwrap();
+        merge_file_config(&mut config, project);
+        assert_eq!(
+            config.providers["company"].base_url.as_deref(),
+            Some("https://models.example.test/anthropic/v1")
+        );
+        assert_eq!(
+            stream_limits(&config)["company"].idle,
+            Some(Duration::from_secs(30))
+        );
+    }
+
+    #[test]
     fn run_titles_end_at_a_word_and_schedules_use_local_time() {
         use chrono::TimeZone as _;
         let at = chrono::FixedOffset::east_opt(9 * 3600)
@@ -10891,104 +11331,116 @@ mod tests {
         assert!(local_server_compatibility_error(&live).is_some());
     }
 
-    #[tokio::test]
-    async fn incompatible_idle_workspace_server_is_stopped_before_replacement() {
-        let root = std::env::temp_dir().join(format!(
-            "haarness-stale-server-test-{}",
-            uuid::Uuid::now_v7()
-        ));
-        let workspace = root.join("workspace");
-        let state_root = root.join("state");
-        fs::create_dir_all(&workspace).unwrap();
-        let paths = Paths::new(Some(&state_root)).unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let discovery = RuntimeDiscovery {
-            url: format!("http://{address}"),
-            token: "test-token".into(),
-            pid: 4242,
-            workspace: Some(workspace.display().to_string()),
-            executable_fingerprint: None,
-            access_fingerprint: None,
-            trace_endpoint: None,
-        };
-        write_runtime(&paths, &discovery).unwrap();
-        let runtime_path = paths.runtime.clone();
-        let server = tokio::spawn(async move {
-            let mut requests = Vec::new();
-            for _ in 0..2 {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                let mut chunk = [0_u8; 1024];
-                loop {
-                    let read = socket.read(&mut chunk).await.unwrap();
-                    request.extend_from_slice(&chunk[..read]);
-                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                let request = String::from_utf8(request).unwrap();
-                let (status, body) = if request.starts_with("GET /v1/turns/active ") {
-                    ("200 OK", "[]")
-                } else if request.starts_with("POST /v1/shutdown ") {
-                    ("202 Accepted", "")
-                } else {
-                    panic!("unexpected stale-server request: {request}");
-                };
-                let response = format!(
-                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                socket.write_all(response.as_bytes()).await.unwrap();
-                let shutdown = request.starts_with("POST /v1/shutdown ");
-                requests.push(request);
-                if shutdown {
-                    fs::remove_file(&runtime_path).unwrap();
-                }
-            }
-            requests
-        });
-
-        let info = fixture_server_info(Vec::new());
-        replace_incompatible_workspace_server(
-            &paths,
-            &workspace,
-            LiveWorkspaceServer { discovery, info },
-            "missing history capability",
-        )
-        .await
-        .unwrap();
-
-        assert!(!paths.runtime.exists());
-        let requests = server.await.unwrap();
-        assert!(requests[0].starts_with("GET /v1/turns/active "));
-        assert!(requests[1].starts_with("POST /v1/shutdown "));
-        fs::remove_dir_all(root).unwrap();
+    /// What a fake project server reports while a replacement test asks it.
+    #[derive(Clone, Default)]
+    struct FakeActivity {
+        turns: serde_json::Value,
+        ptys: serde_json::Value,
+        /// The activity lists answer with this status instead of a list.
+        refuse: Option<axum::http::StatusCode>,
+        /// The activity lists answer only after this long.
+        delay: Duration,
     }
 
-    #[tokio::test]
-    async fn incompatible_busy_workspace_server_is_kept_and_reported_as_busy() {
-        let root = std::env::temp_dir().join(format!(
-            "haarness-busy-server-test-{}",
-            uuid::Uuid::now_v7()
-        ));
-        let workspace = root.join("workspace");
-        fs::create_dir_all(&workspace).unwrap();
-        let paths = Paths::new(Some(&root.join("state"))).unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let discovery = RuntimeDiscovery {
-            url: format!("http://{address}"),
-            token: "test-token".into(),
-            pid: 4242,
-            workspace: Some(workspace.display().to_string()),
-            executable_fingerprint: Some("other-build".into()),
-            access_fingerprint: None,
-            trace_endpoint: None,
-        };
-        write_runtime(&paths, &discovery).unwrap();
+    /// A project server of another build for the replacement tests. It
+    /// answers `info` and the activity lists from `activity`, and a shutdown
+    /// removes its runtime record and makes it unreachable, as a real one does.
+    #[derive(Clone)]
+    struct FakeServer {
+        activity: Arc<parking_lot::Mutex<FakeActivity>>,
+        info: ServerInfo,
+        requests: Arc<parking_lot::Mutex<Vec<String>>>,
+        stopped: Arc<std::sync::atomic::AtomicBool>,
+        runtime: PathBuf,
+    }
+
+    impl FakeServer {
+        async fn start(info: ServerInfo, runtime: PathBuf) -> (Self, std::net::SocketAddr) {
+            use axum::{
+                Json, Router,
+                extract::{Request, State},
+                http::StatusCode,
+                response::{IntoResponse, Response},
+                routing::{any, get, post},
+            };
+            async fn activity(State(fake): State<FakeServer>, request: Request) -> Response {
+                fake.requests
+                    .lock()
+                    .push(format!("{} {}", request.method(), request.uri().path()));
+                let current = fake.activity.lock().clone();
+                tokio::time::sleep(current.delay).await;
+                if let Some(status) = current.refuse {
+                    return (status, Json(json!({}))).into_response();
+                }
+                let body = match request.uri().path() {
+                    "/v1/turns/active" => current.turns,
+                    "/v1/ptys" => current.ptys,
+                    _ => json!([]),
+                };
+                Json(if body.is_null() { json!([]) } else { body }).into_response()
+            }
+            async fn server_info(State(fake): State<FakeServer>) -> Response {
+                if fake.stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+                Json(fake.info.clone()).into_response()
+            }
+            async fn shutdown(State(fake): State<FakeServer>) -> StatusCode {
+                fake.requests.lock().push("POST /v1/shutdown".into());
+                fake.stopped
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = fs::remove_file(&fake.runtime);
+                StatusCode::ACCEPTED
+            }
+            let fake = Self {
+                activity: Arc::default(),
+                info,
+                requests: Arc::default(),
+                stopped: Arc::default(),
+                runtime,
+            };
+            let router = Router::new()
+                .route("/v1/info", get(server_info))
+                .route("/v1/shutdown", post(shutdown))
+                .route("/v1/{*rest}", any(activity))
+                .with_state(fake.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            (fake, address)
+        }
+
+        fn set(&self, activity: FakeActivity) {
+            *self.activity.lock() = activity;
+        }
+
+        fn shutdowns(&self) -> usize {
+            self.requests
+                .lock()
+                .iter()
+                .filter(|request| request.as_str() == "POST /v1/shutdown")
+                .count()
+        }
+    }
+
+    fn fake_terminal(title: &str, status: haarness_protocol::PtyStatus) -> serde_json::Value {
+        serde_json::to_value(haarness_protocol::PtyInfo {
+            id: haarness_protocol::PtyId::new(),
+            title: title.into(),
+            command: "/bin/zsh".into(),
+            args: Vec::new(),
+            cwd: "/".into(),
+            status,
+            pid: Some(4243),
+            cols: 80,
+            rows: 24,
+        })
+        .unwrap()
+    }
+
+    fn fake_running_turn() -> serde_json::Value {
         let now = chrono::Utc::now();
-        let running = serde_json::to_string(&[haarness_protocol::Turn {
+        serde_json::to_value([haarness_protocol::Turn {
             id: haarness_protocol::TurnId::new(),
             thread_id: haarness_protocol::ThreadId::new(),
             request_id: haarness_protocol::RequestId::new(),
@@ -11001,35 +11453,94 @@ mod tests {
             created_at: now,
             updated_at: now,
         }])
-        .unwrap();
-        // A server that is working, one whose activity is unknown, one too
-        // busy to say in time, and a server of this build that is working
-        // with the other project configuration setting.
-        let server = tokio::spawn(async move {
-            let mut requests = Vec::new();
-            for (status, body, delay) in [
-                ("200 OK", running.as_str(), 0),
-                ("404 Not Found", "{}", 0),
-                ("200 OK", "[]", 1500),
-                ("200 OK", running.as_str(), 0),
-            ] {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                let mut chunk = [0_u8; 1024];
-                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    let read = socket.read(&mut chunk).await.unwrap();
-                    request.extend_from_slice(&chunk[..read]);
-                }
-                tokio::time::sleep(Duration::from_millis(delay)).await;
-                let response = format!(
-                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = socket.write_all(response.as_bytes()).await;
-                requests.push(String::from_utf8(request).unwrap());
-            }
-            requests
+        .unwrap()
+    }
+
+    /// A data directory whose runtime record points at a fake server of
+    /// another build for `workspace`.
+    async fn fake_other_build(
+        root: &std::path::Path,
+        trusted: bool,
+    ) -> (Paths, PathBuf, FakeServer, RuntimeDiscovery) {
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+        let paths = Paths::new(Some(&root.join("state"))).unwrap();
+        let mut info = fixture_server_info(vec![
+            WORKSPACE_HISTORY_CAPABILITY.into(),
+            PTY_CAPABILITY.into(),
+        ]);
+        info.workspace = Some(workspace.display().to_string());
+        info.project_trusted = Some(trusted);
+        let (fake, address) = FakeServer::start(info, paths.runtime.clone()).await;
+        let discovery = RuntimeDiscovery {
+            url: format!("http://{address}"),
+            token: "test-token".into(),
+            pid: 4242,
+            workspace: Some(workspace.display().to_string()),
+            executable_fingerprint: Some("other-build".into()),
+            access_fingerprint: None,
+            trace_endpoint: None,
+        };
+        write_runtime(&paths, &discovery).unwrap();
+        (paths, workspace, fake, discovery)
+    }
+
+    #[tokio::test]
+    async fn incompatible_idle_workspace_server_is_stopped_before_replacement() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-stale-server-test-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let (paths, workspace, fake, discovery) = fake_other_build(&root, true).await;
+        // A terminal that already exited holds nothing open.
+        fake.set(FakeActivity {
+            ptys: json!([fake_terminal(
+                "old shell",
+                haarness_protocol::PtyStatus::Exited
+            )]),
+            ..FakeActivity::default()
         });
+        replace_incompatible_workspace_server(
+            &paths,
+            &workspace,
+            LiveWorkspaceServer {
+                discovery,
+                info: fixture_server_info(Vec::new()),
+            },
+            "missing history capability",
+        )
+        .await
+        .unwrap();
+
+        assert!(!paths.runtime.exists());
+        let requests = fake.requests.lock().clone();
+        for asked in [
+            "GET /v1/turns/active",
+            "GET /v1/ptys",
+            "GET /v1/permissions",
+            "GET /v1/questions",
+            "GET /v1/workflows/runs",
+        ] {
+            assert!(
+                requests.iter().any(|request| request == asked),
+                "{requests:?}"
+            );
+        }
+        assert_eq!(
+            requests.last().map(String::as_str),
+            Some("POST /v1/shutdown")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn incompatible_busy_workspace_server_is_kept_and_reported_as_busy() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-busy-server-test-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let (paths, workspace, fake, discovery) = fake_other_build(&root, true).await;
         let info = fixture_server_info(vec![
             WORKSPACE_HISTORY_CAPABILITY.into(),
             PTY_CAPABILITY.into(),
@@ -11038,17 +11549,66 @@ mod tests {
             executable_fingerprint: current_executable_fingerprint().ok(),
             ..discovery.clone()
         };
-        let other_build = (
-            &discovery,
-            "server executable differs from this client build",
-            haarness_server::remote::ProjectBusy::OtherBuild,
-        );
-        let other_setting = (
-            &this_build,
-            "project configuration setting changed",
-            haarness_server::remote::ProjectBusy::OtherSetting,
-        );
-        for (live, reason, busy) in [other_build, other_build, other_build, other_setting] {
+        let running = FakeActivity {
+            turns: fake_running_turn(),
+            ..FakeActivity::default()
+        };
+        let terminals = FakeActivity {
+            ptys: json!([
+                fake_terminal("npm run dev", haarness_protocol::PtyStatus::Running),
+                fake_terminal("old shell", haarness_protocol::PtyStatus::Exited),
+            ]),
+            ..FakeActivity::default()
+        };
+        // A server that is working, one with a terminal open, one whose
+        // activity is unknown, one too busy to say in time, and a server of
+        // this build that is working with the other project configuration
+        // setting.
+        let cases = [
+            (
+                &discovery,
+                running.clone(),
+                ProjectBusy::OtherBuild,
+                "1 active turn",
+            ),
+            (
+                &discovery,
+                terminals,
+                ProjectBusy::OtherBuild,
+                "1 open terminal (npm run dev)",
+            ),
+            (
+                &discovery,
+                FakeActivity {
+                    refuse: Some(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
+                    ..FakeActivity::default()
+                },
+                ProjectBusy::OtherBuild,
+                "activity endpoint is unavailable",
+            ),
+            (
+                &discovery,
+                FakeActivity {
+                    delay: Duration::from_millis(1500),
+                    ..FakeActivity::default()
+                },
+                ProjectBusy::OtherBuild,
+                "did not say in time",
+            ),
+            (
+                &this_build,
+                running,
+                ProjectBusy::OtherSetting,
+                "1 active turn",
+            ),
+        ];
+        for (live, activity, busy, says) in cases {
+            fake.set(activity);
+            let reason = if busy == ProjectBusy::OtherBuild {
+                "server executable differs from this client build"
+            } else {
+                "project configuration setting changed"
+            };
             let error = replace_incompatible_workspace_server(
                 &paths,
                 &workspace,
@@ -11062,26 +11622,78 @@ mod tests {
             .unwrap_err();
             // The host gateway answers remote clients from the marker alone.
             assert_eq!(
-                error.downcast_ref::<haarness_server::remote::ProjectBusy>(),
+                error.downcast_ref::<ProjectBusy>(),
                 Some(&busy),
                 "{error:#}"
             );
-            // The person at the computer still gets the pid and the command.
+            // The person at the computer still gets what holds the server, its
+            // pid and the command.
             let local = error.to_string();
             assert!(
-                local.contains("4242") && local.contains("serve --stop"),
+                local.contains(says) && local.contains("4242") && local.contains("serve --stop"),
                 "{local}"
             );
             assert!(paths.runtime.exists(), "a busy server is never replaced");
         }
-        let requests = server.await.unwrap();
-        assert!(
-            requests
-                .iter()
-                .all(|request| request.starts_with("GET /v1/turns/active ")),
-            "{requests:?}"
-        );
+        assert_eq!(fake.shutdowns(), 0);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_busy_server_of_another_build_is_used_as_it_is_but_never_from_cloud() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-busy-reuse-test-{}", uuid::Uuid::now_v7()));
+        let (paths, workspace, fake, discovery) = fake_other_build(&root, true).await;
+        fake.set(FakeActivity {
+            ptys: json!([fake_terminal(
+                "npm run dev",
+                haarness_protocol::PtyStatus::Running
+            )]),
+            ..FakeActivity::default()
+        });
+        // The person at this computer keeps the server and its terminal.
+        let reused = super::ensure_workspace_server(&paths, &workspace, true)
+            .await
+            .unwrap();
+        assert_eq!(reused.url, discovery.url);
+        // Cloud's requests are refused with the marker the gateway answers from.
+        let error = super::ensure_workspace_server_for_remote(&paths, &workspace, true)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<ProjectBusy>(),
+            Some(&ProjectBusy::OtherBuild),
+            "{error:#}"
+        );
+        // Nor is one running with the other project configuration setting.
+        let error = super::ensure_workspace_server(&paths, &workspace, false)
+            .await
+            .unwrap_err();
+        assert!(
+            error.downcast_ref::<ProjectBusy>().is_some()
+                && error.to_string().contains("1 open terminal (npm run dev)"),
+            "{error:#}"
+        );
+        assert_eq!(fake.shutdowns(), 0);
+        assert!(paths.runtime.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn server_activity_names_what_keeps_a_server_busy() {
+        let activity = super::ServerActivity {
+            turns: 1,
+            terminals: vec!["zsh".into(), "npm run dev".into(), "a".into(), "b".into()],
+            approvals: 2,
+            questions: 1,
+            workflows: 0,
+        };
+        assert!(!activity.idle());
+        assert_eq!(
+            activity.to_string(),
+            "1 active turn, 4 open terminals (zsh, npm run dev, a and 1 more), 2 pending approvals, 1 unanswered question"
+        );
+        assert!(super::ServerActivity::default().idle());
     }
 
     #[test]

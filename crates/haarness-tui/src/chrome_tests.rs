@@ -812,8 +812,8 @@ fn a_chrome_card_shows_the_call_it_approves() {
     );
     assert!(frame.contains("ref: e12"), "{frame}");
 
-    // A script longer than the card ends on an ellipsis row, and the
-    // choices stay on screen.
+    // A script longer than the card scrolls inside it, and the choices stay
+    // on screen.
     let mut pending = chrome_permission(&thread, "long");
     pending.detail = serde_json::json!({
         "script": (1..=40).map(|line| format!("step{line}();")).collect::<Vec<_>>().join("\n"),
@@ -822,7 +822,7 @@ fn a_chrome_card_shows_the_call_it_approves() {
     let frame = frame_text(&app, (100, 40));
     assert!(frame.contains("step1();"), "{frame}");
     assert!(!frame.contains("step40();"), "{frame}");
-    assert!(frame.contains("  …"), "{frame}");
+    assert!(frame.contains("lines 1–10 of "), "{frame}");
     assert!(frame.contains("Allow once  y"), "{frame}");
 }
 

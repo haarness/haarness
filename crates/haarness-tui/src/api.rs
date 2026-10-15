@@ -1627,7 +1627,8 @@ impl ApiClient {
             if let Some(value) = endpoint.auth.header().and_then(|value| value.parse().ok()) {
                 request.headers_mut().insert("authorization", value);
             }
-            let socket = match tokio_tungstenite::connect_async(request).await {
+            // An attached server behind HTTPS is checked as its HTTP API is.
+            let socket = match haarness_account::websocket::connect(request, None).await {
                 Ok((socket, _)) => socket,
                 Err(error) => {
                     if error.to_string().contains("404") {

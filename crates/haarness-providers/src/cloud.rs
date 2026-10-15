@@ -47,7 +47,7 @@ fn configured_models(
             let defaults = instance.model_defaults;
             let known_reasoning = match catalog_provider {
                 "openai" => id.starts_with('o') || id.starts_with("gpt-5"),
-                "gemini" => id.starts_with("gemini-2.5") || id.starts_with("gemini-3"),
+                "gemini" => id.starts_with("gemini-2.5") || crate::gemini::uses_thinking_level(&id),
                 _ => false,
             };
             let mut model = ModelInfo {

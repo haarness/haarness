@@ -91,14 +91,16 @@ fi
 mkdir -p "$test_root/config/skills/demo"
 printf -- '---\ndescription: Demo e2e skill\n---\nSkill payload for the tmux gate.\n' > "$test_root/config/skills/demo/SKILL.md"
 mkdir -p "$test_root/ws"
-printf -- 'png fixture' > "$test_root/ws/dropped image.png"
+# Attachments are judged by their bytes, so image fixtures must be real images.
+png_fixture() { printf '\211\120\116\107\015\012\032\012\000\000\000\015\111\110\104\122\000\000\000\001\000\000\000\001\010\006\000\000\000\037\025\304\211\000\000\000\013\111\104\101\124\170\234\143\140\000\002\000\000\005\000\001\172\136\253\077\000\000\000\000\111\105\116\104\256\102\140\202' > "$1"; }
+png_fixture "$test_root/ws/dropped image.png"
 printf -- '%%PDF-1.4\n1 0 obj<<>>endobj\n%%%%EOF\n' > "$test_root/ws/dropped report.pdf"
 mkdir -p "$test_root/external-list"
 printf -- 'approved external fixture\n' > "$test_root/external-list/visible.txt"
 mkdir -p "$test_root/ws/.haarness/workflows"
 printf -- 'export const meta = { name: "tmux-demo", phases: ["verify"] }\nphase("verify")\nlog("tmux workflow fixture")\nreturn { value: args.value }\n' > "$test_root/ws/.haarness/workflows/tmux-demo.js"
 mkdir -p "$test_root/00-dot-nav"
-printf -- 'parent png fixture' > "$test_root/00-dot-nav/parent image.png"
+png_fixture "$test_root/00-dot-nav/parent image.png"
 mkdir -p "$test_root/config/themes"
 printf -- '[dark]\nbg = "#102030"\n' > "$test_root/config/themes/e2e.toml"
 # Parity defaults auto-run bash/writes; the e2e approval stanzas exercise the

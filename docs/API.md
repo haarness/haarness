@@ -149,8 +149,14 @@ monotonic byte `cursor`; reconnecting with the last acknowledged cursor replays
 the missing range from a bounded two-megabyte buffer. Lifecycle changes also
 publish `pty.created`, `pty.updated`, `pty.exited`, and `pty.deleted` SSE events.
 Disconnecting a socket never terminates its process. DELETE does, as does
-graceful server shutdown. PTYs intentionally do not survive server restart and
-their output is never persisted in SQLite. `pty.v1` advertises this contract.
+graceful server shutdown. A configuration hot reload (a provider connected,
+settings, instructions or agents edited) does not: terminals are not part of
+the runtime generation and keep their process, id and buffer. PTYs
+intentionally do not survive server restart and their output is never
+persisted in SQLite, so a client that would replace a server of another build
+leaves it running while a terminal is open (see
+[Desktop project model](DESKTOP-PROJECT-MODEL.md)). `pty.v1` advertises this
+contract.
 
 SSE envelopes include `schemaVersion`, `serverInstanceId`, monotonic `eventId`, type, relevant domain IDs, payload, and timestamp. `GET /v1/info` exposes `eventCursor`: snapshot-first clients capture it before REST hydration and connect with that value as `Last-Event-ID`, closing the snapshot/delta race. Reconnects continue from the last applied event. A changed server instance or `resync_required` means clients must replace items, todos, the process-wide `/v1/turns/active` snapshot, pending requests, and thread snapshots from REST. SSE connections are observers: disconnecting, switching threads, or creating a new thread never cancels execution. Pending questions are root-scoped structured records (question, child thread, root thread, turn, choices, and creation time); `question.requested` adds one and `question.resolved` removes exactly that ID, so parallel child questions never overwrite each other. A question must be answerable: the `question` tool rejects a call that turns free-form answers off (`custom: false`) without offering a choice.
 

@@ -1656,6 +1656,10 @@
   "choose": "elegir",
   "reject": "rechazar",
   "answer": "responder",
+  "scroll": "desplazar",
+  "expand": "expandir",
+  "collapse": "contraer",
+  "lines {from}–{to} of {total}": "líneas {from}–{to} de {total}",
   "always allows": "siempre permite",
   "Leads to {path}": "Lleva a {path}",
   "every file edit": "cada edición de archivo",
@@ -2410,5 +2414,16 @@
   "The provider refused {name}, so it is left out of this chat from now on.": "El proveedor rechazó {name}, así que a partir de ahora se omite en este chat.",
   "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "El proveedor rechazó una imagen sin decir cuál, así que a partir de ahora se omite en este chat la más reciente, {name}.",
   "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "El proveedor rechazó una imagen sin decir cuál, así que a partir de ahora se omiten en este chat las más recientes: {names}.",
-  "{name} is not an image Haarness can read.": "{name} no es una imagen que Haarness pueda leer."
+  "{name} is not an image Haarness can read.": "{name} no es una imagen que Haarness pueda leer.",
+  "This link could not be opened.": "No se pudo abrir este enlace.",
+  "Open a project to open links to its files.": "Abre un proyecto para abrir enlaces a sus archivos.",
+  "Links to network locations do not open.": "Los enlaces a ubicaciones de red no se abren.",
+  "Only files in this project open from a link.": "Desde un enlace solo se abren archivos de este proyecto.",
+  "This kind of link does not open in Haarness.": "Este tipo de enlace no se abre en Haarness.",
+  "{path} was not found in this project.": "No se encontró {path} en este proyecto.",
+  "This Haarness link could not be opened.": "No se pudo abrir este enlace de Haarness.",
+  "The folder in this link was not found.": "No se encontró la carpeta de este enlace.",
+  "Open “{folder}” from a link?": "¿Abrir «{folder}» desde un enlace?",
+  "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "Se abre con la configuración del proyecto desactivada: los servidores MCP, hooks y extensiones de esta carpeta no se ejecutan. Para activarlos, abre la carpeta con «Abrir proyecto».",
+  "Open folder": "Abrir carpeta"
 }

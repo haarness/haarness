@@ -30,18 +30,38 @@ impl App {
     /// Read the server's Auto/Review setting for the open chat. A server
     /// that predates shared modes leaves this TUI's own switch in charge.
     pub async fn refresh_approval_mode(&mut self, client: &ApiClient) {
-        self.approval_server = client.info().await.is_ok_and(|info| {
-            info.capabilities
-                .iter()
-                .any(|capability| capability == haarness_protocol::APPROVAL_MODE_CAPABILITY)
-        });
+        // A server that does not answer has not lost its shared modes: turning
+        // this TUI's own switch back on with the last chat's Auto would answer
+        // the new chat's requests from here.
+        match client.info().await {
+            Ok(info) => {
+                self.approval_server = info
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == haarness_protocol::APPROVAL_MODE_CAPABILITY);
+            }
+            Err(error) => tracing::debug!(%error, "could not read the server's capabilities"),
+        }
         if !self.approval_server {
             self.approval_mode = None;
             return;
         }
         match client.approval_mode(self.thread.id).await {
             Ok(info) => self.show_approval_mode(info),
-            Err(error) => tracing::debug!(%error, "could not read the approval mode"),
+            Err(error) => {
+                tracing::debug!(%error, "could not read the approval mode");
+                // Never show another chat's mode as this one's: until the
+                // server says otherwise (its next change event, or ctrl+y),
+                // this chat reads as Review, the mode that answers nothing.
+                if self
+                    .approval_mode
+                    .as_ref()
+                    .is_none_or(|info| info.thread_id != self.thread.id)
+                {
+                    self.approval_mode = None;
+                    self.auto_permissions = false;
+                }
+            }
         }
     }
 
@@ -1079,12 +1099,19 @@ impl App {
     /// Refresh the status-line hint for pending approvals, in the card's
     /// words. The chips carry their own keys, so the hint does not list them.
     pub fn update_permission_notice(&mut self) {
-        let Some(first) = self.pending_permissions.first() else {
-            return;
-        };
+        if let Some(notice) = self.permission_notice() {
+            self.notice = notice;
+        }
+    }
+
+    /// The status-line hint for pending approvals, if any wait: the first
+    /// one in the card's words while the card has the keyboard, otherwise
+    /// how many wait and how to reach them.
+    pub fn permission_notice(&self) -> Option<String> {
+        let first = self.pending_permissions.first()?;
         let summary = crate::view::approval::summary(first, self.language);
         let language = self.language;
-        self.notice = match (self.pending_permissions.len(), self.permission_focus) {
+        let notice = match (self.pending_permissions.len(), self.permission_focus) {
             (1, true) => summary,
             (count, true) => format!("[1/{count}] {summary}"),
             (1, false) => format!(
@@ -1100,6 +1127,7 @@ impl App {
                 language.text("ctrl+g to answer")
             ),
         };
+        Some(notice)
     }
 
     /// Give the keyboard back to the composer while an approval waits. With

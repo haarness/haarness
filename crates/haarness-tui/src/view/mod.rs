@@ -230,10 +230,20 @@ impl App {
         }
         if width < 40 || height < 12 {
             self.max_viewport_offset.set(0);
-            let mut lines = compact_frame(self, width, height);
             let mut hits = Vec::new();
+            let mut lines = compact_frame(self, width, height, &mut hits);
             apply_dialog(self, &mut lines, &mut hits, width, height);
-            apply_toast(self, &mut lines, &mut hits, width, height);
+            // As in the full frame, the approval rows are the attention
+            // surface; a toast repeating them would cover them.
+            let toast_repeats_card = self.first_pending_permission().is_some()
+                && matches!(self.overlay, Overlay::None)
+                && self
+                    .notification_toast
+                    .as_ref()
+                    .is_some_and(|toast| toast.approval);
+            if !toast_repeats_card {
+                apply_toast(self, &mut lines, &mut hits, width, height);
+            }
             return self.finish_frame(lines, hits, height);
         }
         let sidebar_width = self.sidebar_width(width);
@@ -605,23 +615,42 @@ impl App {
     }
 }
 
-fn compact_frame(app: &App, width: usize, height: usize) -> Vec<Line> {
+fn compact_frame(
+    app: &App,
+    width: usize,
+    height: usize,
+    hits: &mut Vec<frame::HitRegion>,
+) -> Vec<Line> {
     let mut lines = vec![Line::empty(); height];
     if height == 0 {
         return lines;
     }
     lines[0] = Line::plain(single_line("haarness", width), app.theme.primary);
+    // The keyboard may already answer a waiting request here, so it is never
+    // hidden: its subject, its answers, and the hint in the status row.
+    let card_owns_keys = app.permission_focus && app.first_pending_permission().is_some();
+    let notice = app.permission_notice();
     if height >= 3 {
         if !app.is_child_view() {
-            let prompt = if app.composer.is_empty() {
+            let prompt = if app.composer.is_empty() && card_owns_keys {
+                app.language
+                    .text("Answer the approval above · ctrl+g to type")
+            } else if app.composer.is_empty() {
                 "Ask anything…"
             } else {
                 app.composer.text()
             };
-            lines[height - 3] = Line::plain(single_line(prompt, width), app.theme.text);
+            let tone = if card_owns_keys {
+                app.theme.muted
+            } else {
+                app.theme.text
+            };
+            lines[height - 3] = Line::plain(single_line(prompt, width), tone);
         }
         lines[height - 2] = Line::plain("─".repeat(width), app.theme.hairline());
-        let status = if app.active_turn.is_some() {
+        let status = if let Some(notice) = &notice {
+            notice.as_str()
+        } else if app.active_turn.is_some() {
             "working · ctrl+c twice to interrupt"
         } else {
             app.notice.as_str()
@@ -632,6 +661,25 @@ fn compact_frame(app: &App, width: usize, height: usize) -> Vec<Line> {
             Span::new(status, app.theme.muted).on(app.theme.surface),
             Span::new(" ".repeat(padding), app.theme.muted).on(app.theme.surface),
         ]);
+    }
+    if let Some(card) = approval::compact_lines(app, width) {
+        // Above the prompt when there is room; on a tinier screen the answers
+        // win over the title and then the prompt, and the status row still
+        // names the request.
+        let answers_row = height.saturating_sub(4);
+        if height >= 5 {
+            lines[height - 5] = card.request;
+        }
+        lines[answers_row] = card.answers;
+        for (start, end, target) in card.targets {
+            hits.push(frame::HitRegion {
+                row: answers_row,
+                start,
+                end,
+                target,
+                paint_hover: true,
+            });
+        }
     }
     lines
 }

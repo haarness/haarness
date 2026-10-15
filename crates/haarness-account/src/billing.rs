@@ -486,7 +486,7 @@ async fn connection(
         .max_frame_size(Some(64 * 1024));
     let mut socket = match tokio::time::timeout(
         Duration::from_secs(5),
-        tokio_tungstenite::connect_async_with_config(request, Some(config), false),
+        crate::websocket::connect(request, Some(config)),
     )
     .await
     {

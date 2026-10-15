@@ -1656,6 +1656,10 @@
   "choose": "ยืนยัน",
   "reject": "ปฏิเสธ",
   "answer": "ตอบ",
+  "scroll": "เลื่อน",
+  "expand": "ขยาย",
+  "collapse": "ยุบ",
+  "lines {from}–{to} of {total}": "บรรทัด {from}–{to} จาก {total}",
   "always allows": "อนุญาตเสมอ",
   "Leads to {path}": "ชี้ไปที่ {path}",
   "every file edit": "การแก้ไขไฟล์ทั้งหมด",
@@ -2410,5 +2414,16 @@
   "The provider refused {name}, so it is left out of this chat from now on.": "ผู้ให้บริการปฏิเสธ {name} จึงจะไม่ส่งรูปนี้ในแชตนี้อีกต่อไป",
   "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "ผู้ให้บริการปฏิเสธรูปภาพโดยไม่ระบุว่ารูปใด จึงจะไม่ส่งรูปล่าสุด {name} ในแชตนี้อีกต่อไป",
   "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "ผู้ให้บริการปฏิเสธรูปภาพโดยไม่ระบุว่ารูปใด จึงจะไม่ส่งรูปล่าสุด ({names}) ในแชตนี้อีกต่อไป",
-  "{name} is not an image Haarness can read.": "{name} ไม่ใช่รูปภาพที่ Haarness อ่านได้"
+  "{name} is not an image Haarness can read.": "{name} ไม่ใช่รูปภาพที่ Haarness อ่านได้",
+  "This link could not be opened.": "ไม่สามารถเปิดลิงก์นี้ได้",
+  "Open a project to open links to its files.": "เปิดโปรเจกต์ก่อนเพื่อเปิดลิงก์ไปยังไฟล์ในโปรเจกต์",
+  "Links to network locations do not open.": "ลิงก์ไปยังตำแหน่งบนเครือข่ายจะไม่เปิด",
+  "Only files in this project open from a link.": "เปิดจากลิงก์ได้เฉพาะไฟล์ในโปรเจกต์นี้เท่านั้น",
+  "This kind of link does not open in Haarness.": "ลิงก์ประเภทนี้เปิดใน Haarness ไม่ได้",
+  "{path} was not found in this project.": "ไม่พบ {path} ในโปรเจกต์นี้",
+  "This Haarness link could not be opened.": "ไม่สามารถเปิดลิงก์ Haarness นี้ได้",
+  "The folder in this link was not found.": "ไม่พบโฟลเดอร์ในลิงก์นี้",
+  "Open “{folder}” from a link?": "เปิด “{folder}” จากลิงก์หรือไม่",
+  "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "โฟลเดอร์จะเปิดโดยปิดการกำหนดค่าโปรเจกต์ไว้: เซิร์ฟเวอร์ MCP ฮุก และส่วนขยายในโฟลเดอร์นี้จะไม่ทำงาน หากต้องการเปิดใช้งาน ให้เปิดโฟลเดอร์ด้วย “เปิดโปรเจกต์”",
+  "Open folder": "เปิดโฟลเดอร์"
 }

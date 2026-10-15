@@ -103,7 +103,8 @@ haarness run --format json "List the open TODOs"   # newline-delimited JSON reco
 
 `haarness run` uses your default model, else a connected provider's. With no terminal to ask at
 (a script, CI), a permission request is refused and the run stops, naming what was asked: allow
-it with a permission rule, or pass `--yolo` where the damage is bounded. Ctrl-C stops the run's
+it with a permission rule, or pass `--yolo` where the damage is bounded. `--auto` instead puts
+the chat in Auto, where it stays for every app until switched back. Ctrl-C stops the run's
 work on the server and exits with status 130. See
 [Run a prompt from a script or CI](https://haarness.ai/docs/cli/headless-runs).
 
@@ -642,6 +643,18 @@ models = ["gemini-2.5-pro"]
 # Suppress a preset or local-runtime auto-detection.
 [providers.ollama]
 enabled = false
+
+# Tune a provider Haarness already has (built in, or a local runtime it
+# detects) without redefining it. A response that sends nothing, not even a
+# keep-alive, for this many seconds is closed and retried; 0 never gives up.
+# Default 300, or 0 for a provider on this machine (localhost, 127.0.0.1, ::1).
+[providers.anthropic]
+stream_idle_timeout = 600
+
+# Bedrock's Converse answers in one piece, so it has a limit on the whole
+# answer instead (default 900 seconds; 0 waits as long as it takes).
+[providers.amazon-bedrock]
+request_timeout = 1800
 
 [mcp.files]
 transport = "stdio"

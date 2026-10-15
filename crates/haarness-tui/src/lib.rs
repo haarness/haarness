@@ -155,12 +155,14 @@ pub async fn run_attached_with_auth(
     initial_thread: Option<uuid::Uuid>,
     continue_last: bool,
     fork: bool,
+    open_in_auto: bool,
 ) -> Result<()> {
     Box::pin(run_with_client(
         ApiClient::with_auth(server, auth)?.with_attachment_uploads(),
         initial_thread,
         continue_last,
         fork,
+        open_in_auto,
     ))
     .await
     .map(|_| ())
@@ -177,6 +179,7 @@ pub async fn run_attached_with_resolver(
             .with_remote_endpoint_resolver(resolver)
             .with_attachment_uploads(),
         None,
+        false,
         false,
         false,
     ))
@@ -197,6 +200,7 @@ pub async fn resume_attached_with_resolver(
         None,
         true,
         false,
+        false,
     ))
     .await
     .map(|_| ())
@@ -211,8 +215,7 @@ pub async fn resume_attached_with_resolver(
 /// switched to, once the terminal has been restored, so the CLI can start
 /// that workspace's own server without nesting TUIs.
 /// `restarter` brings the workspace server back if it stops or crashes while
-/// the TUI is open. `yolo` approves what this TUI's own conversations ask,
-/// for as long as it runs (see [`ApiClient::with_auto_approve`]).
+/// the TUI is open. `approvals` says how the launch answers approvals.
 pub async fn run_with_thread_and_resolver_switching(
     server: &str,
     token: &str,
@@ -220,7 +223,7 @@ pub async fn run_with_thread_and_resolver_switching(
     continue_last: bool,
     resolver: EndpointResolver,
     restarter: ServerRestarter,
-    yolo: bool,
+    approvals: ApprovalLaunch,
 ) -> Result<Option<PathBuf>> {
     run_with_thread_and_resolver_fork_switching(
         server,
@@ -230,9 +233,20 @@ pub async fn run_with_thread_and_resolver_switching(
         false,
         resolver,
         restarter,
-        yolo,
+        approvals,
     )
     .await
+}
+
+/// How a launch answers approvals, from its command line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ApprovalLaunch {
+    /// `--yolo`: this TUI approves what its own conversations ask, for as
+    /// long as it runs (see [`ApiClient::with_auto_approve`]).
+    pub yolo: bool,
+    /// `--auto`: the chat the launch opens goes to Auto on its server, so
+    /// every app shows it and the server answers its eligible requests.
+    pub auto: bool,
 }
 
 /// As [`run_with_thread_and_resolver_switching`], forking the selected or
@@ -246,16 +260,17 @@ pub async fn run_with_thread_and_resolver_fork_switching(
     fork: bool,
     resolver: EndpointResolver,
     restarter: ServerRestarter,
-    yolo: bool,
+    approvals: ApprovalLaunch,
 ) -> Result<Option<PathBuf>> {
     Box::pin(run_with_client(
         ApiClient::new(server, token)?
             .with_endpoint_resolver(resolver)
             .with_server_restarter(restarter)
-            .with_auto_approve(yolo),
+            .with_auto_approve(approvals.yolo),
         initial_thread,
         continue_last,
         fork,
+        approvals.auto,
     ))
     .await
 }
@@ -265,6 +280,7 @@ async fn run_with_client(
     initial_thread: Option<uuid::Uuid>,
     continue_last: bool,
     fork: bool,
+    auto: bool,
 ) -> Result<Option<PathBuf>> {
     let initial_info = client.info().await.ok();
     let providers = client.providers().await.unwrap_or_default();
@@ -379,6 +395,12 @@ async fn run_with_client(
         &client,
     )
     .await;
+    // `--auto`: the chat opens in Auto on its server, as ctrl+y would put
+    // it, so the server answers what is eligible (including what already
+    // waits) and every other app shows the same mode.
+    if auto {
+        app.change_approval_mode(true, &client).await;
+    }
     app.sync_prompt_history(&client);
     servers::restore_drafts(&mut app, &client)?;
     // First run: nothing can answer a prompt yet, so connecting is the first

@@ -184,3 +184,104 @@ async fn explicit_api_key_is_account_bound_redacted_and_never_falls_back_to_oaut
     server.abort();
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn a_renewal_cloud_cannot_answer_is_transient_and_a_refused_one_is_not() {
+    use axum::response::IntoResponse as _;
+    use haarness_account::Error;
+    let answers = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route(
+            "/oauth/token",
+            post(|State(answers): State<Arc<AtomicUsize>>| async move {
+                match answers.fetch_add(1, Ordering::SeqCst) {
+                    // A load balancer's page while Cloud restarts.
+                    0 => (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        [("content-type", "text/html")],
+                        "<html><body>503 Service Temporarily Unavailable</body></html>",
+                    )
+                        .into_response(),
+                    1 => (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        Json(json!({"error": "rate_limited"})),
+                    )
+                        .into_response(),
+                    2 => Json(json!({"access_token": "renewed", "refresh_token": "next", "expires_in": 600}))
+                        .into_response(),
+                    _ => (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": "invalid_grant"})),
+                    )
+                        .into_response(),
+                }
+            }),
+        )
+        .with_state(answers.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let offline_url = format!("http://{}", closed.local_addr().unwrap());
+    drop(closed);
+    let dir = std::env::temp_dir().join(format!("haarness-account-test-{}", uuid::Uuid::now_v7()));
+    let expired = |config: &Config| {
+        credentials::save(
+            &config.path(),
+            &Credentials {
+                api_url: config.api_url.to_string(),
+                access_token: "expired".into(),
+                refresh_token: "refresh".into(),
+                access_expires_at: Utc::now() - Duration::minutes(5),
+            },
+        )
+        .unwrap();
+    };
+    let config = Config::new(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        dir.join("online"),
+        "haarness-cli",
+    )
+    .unwrap();
+    let server = tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
+    expired(&config);
+    let client = Client::new(config.clone()).unwrap();
+    for status in [503, 429] {
+        let error = client.bearer(None).await.unwrap_err();
+        assert!(
+            matches!(&error, Error::Api { status: got, .. } if *got == status)
+                && error.is_transient(),
+            "{error:?}"
+        );
+        // A passing outage keeps the sign-in for the next attempt.
+        assert!(credentials::load(&config.path()).unwrap().is_some());
+    }
+    // Nothing listening at all.
+    let offline = Config::new(&offline_url, dir.join("offline"), "haarness-cli").unwrap();
+    expired(&offline);
+    let error = Client::new(offline)
+        .unwrap()
+        .bearer(None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::Http(_)) && error.is_transient(),
+        "{error:?}"
+    );
+    // Back: the renewal goes through.
+    assert_eq!(client.bearer(None).await.unwrap(), "renewed");
+    // A revoked refresh token is no outage.
+    let error = client.bearer(Some("renewed")).await.unwrap_err();
+    assert!(
+        matches!(error, Error::NotLoggedIn) && !error.is_transient(),
+        "{error:?}"
+    );
+    assert!(!Error::Other("authorization_pending".into()).is_transient());
+    assert!(
+        !Error::Api {
+            status: 401,
+            message: String::new()
+        }
+        .is_transient()
+    );
+    server.abort();
+    std::fs::remove_dir_all(dir).unwrap();
+}
