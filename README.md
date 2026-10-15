@@ -643,6 +643,18 @@ models = ["gemini-2.5-pro"]
 [providers.ollama]
 enabled = false
 
+# Tune a provider Haarness already has (built in, or a local runtime it
+# detects) without redefining it. A response that sends nothing, not even a
+# keep-alive, for this many seconds is closed and retried; 0 never gives up.
+# Default 300, or 0 for a provider on this machine (localhost, 127.0.0.1, ::1).
+[providers.anthropic]
+stream_idle_timeout = 600
+
+# Bedrock's Converse answers in one piece, so it has a limit on the whole
+# answer instead (default 900 seconds; 0 waits as long as it takes).
+[providers.amazon-bedrock]
+request_timeout = 1800
+
 [mcp.files]
 transport = "stdio"
 command = "my-mcp-server"
