@@ -243,6 +243,20 @@ pub fn claude_release(id: &str) -> Option<String> {
     (release.len() > "claude-".len()).then(|| release.replace('.', "-"))
 }
 
+/// A Claude release's version, to tell which of two is newer: `[5, 5]` for
+/// `claude-sonnet-5-5`, `us.anthropic.claude-sonnet-5-5-v1:0` and
+/// `claude-sonnet-5-5@20260901` alike, `[3, 7]` for `claude-3-7-sonnet-20250219`.
+/// A snapshot date is not part of it. Comparing ids as text puts Sonnet 5 after
+/// Sonnet 5.5 on Bedrock (`-v` sorts after `-5`) and on Vertex (`@` after `-`).
+pub fn claude_version(id: &str) -> Vec<u32> {
+    claude_release(id)
+        .unwrap_or_else(|| id.to_ascii_lowercase())
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty() && part.len() < 4)
+        .filter_map(|part| part.parse().ok())
+        .collect()
+}
+
 /// Whether a definition's `model` may leave out the provider: a family, or a
 /// Claude release id such as `claude-sonnet-5-5`, as Claude Code writes them.
 pub fn unqualified_model(value: &str) -> bool {
@@ -746,6 +760,21 @@ pub fn approval_rules(tools: &[String]) -> Vec<crate::PermissionRule> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn claude_versions_ignore_routing_and_snapshot_dates() {
+        for (id, version) in [
+            ("claude-sonnet-5-5", &[5, 5][..]),
+            ("anthropic/claude-sonnet-5.5", &[5, 5]),
+            ("us.anthropic.claude-sonnet-5-5-v1:0", &[5, 5]),
+            ("us.anthropic.claude-sonnet-5-v1:0", &[5]),
+            ("claude-opus-5@20260301", &[5]),
+            ("claude-opus-4-1-20250805", &[4, 1]),
+            ("claude-3-7-sonnet-20250219", &[3, 7]),
+            ("anthropic.claude-3-5-sonnet-20241022-v2:0", &[3, 5]),
+        ] {
+            assert_eq!(claude_version(id), version, "{id}");
+        }
+    }
     #[test]
     fn yaml_preserves_structures_and_multiline_metadata() {
         let (front, body) = markdown("---\r\nname: example\r\ndescription: >-\r\n  First line\r\n  second line\r\ntools:\r\n  - Read\r\n  - Grep\r\nmetadata:\r\n  author: test\r\n---\r\nBody\r\n").unwrap();

@@ -357,6 +357,9 @@ async fn gemini_thinking_controls_and_parallel_signed_call_ids() {
             "thinkingLevel",
             json!("medium"),
         ),
+        // Gemini 4 thinks at a level and has no `minimal` (a 400, like a budget).
+        ("gemini-4-argon", "minimal", "thinkingLevel", json!("low")),
+        ("gemini-4-argon", "medium", "thinkingLevel", json!("medium")),
         ("gemini-2.5-flash", "minimal", "thinkingBudget", json!(0)),
         ("gemini-2.5-pro", "low", "thinkingBudget", json!(2048)),
         ("gemini-2.5-pro", "minimal", "thinkingBudget", json!(128)),
@@ -379,7 +382,10 @@ async fn gemini_thinking_controls_and_parallel_signed_call_ids() {
         );
         assert_eq!(contents[1]["parts"][1]["functionCall"]["id"], "call_2");
         assert_eq!(contents[2]["parts"][1]["functionResponse"]["id"], "call_2");
-        if model.starts_with("gemini-3.7") || model.starts_with("gemini-3.8") {
+        if model.starts_with("gemini-3.7")
+            || model.starts_with("gemini-3.8")
+            || model.starts_with("gemini-4")
+        {
             assert!(
                 !provider.info().models[0]
                     .reasoning_efforts
