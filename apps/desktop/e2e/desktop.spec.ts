@@ -11526,6 +11526,29 @@ test("conversation outline keeps text clear of its stack and hides where there i
   await expect(outline()).toHaveCount(0);
 });
 
+test("conversation outline opens nothing past a very short lane and opens again once it grows", async () => {
+  await page.setViewportSize({ width: 1420, height: 940 });
+  await outlineSession(["short lane one", "short lane two", "short lane three"]);
+  await expect(outlineDashes()).toHaveCount(3);
+  await openOutlineOn(0);
+  await expect(page.locator(".outline-panel")).toBeVisible();
+  // A window this short leaves the transcript less room than the panel's smallest size.
+  await page.setViewportSize({ width: 1420, height: 230 });
+  await expect.poll(() => page.locator(".transcript").evaluate((element) => element.clientHeight)).toBeLessThan(64);
+  await expect(outline()).toHaveAttribute("hidden", "");
+  await expect(page.locator(".outline-panel")).toHaveCount(0);
+  await expect(outlineDashes().first()).toBeHidden();
+  await page.screenshot({ path: "test-results/outline-short-lane.png" });
+  await page.setViewportSize({ width: 1420, height: 940 });
+  await expect(outline()).not.toHaveAttribute("hidden", "");
+  await page.mouse.move(700, 600);
+  await expect(outline()).toHaveAttribute("data-state", "folded");
+  await openOutlineOn(1);
+  await expect(page.locator(".outline-panel")).toBeVisible();
+  await page.mouse.move(700, 600);
+  expect(errors).toEqual([]);
+});
+
 test("conversation outline is operable by assistive technology and mirrors in right-to-left languages", async () => {
   await page.setViewportSize({ width: 1420, height: 940 });
   const long = (text: string) =>
