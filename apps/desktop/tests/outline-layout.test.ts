@@ -8,6 +8,7 @@ import {
   ROW,
   ROWS_MAX,
   TOP,
+  fits,
   fold,
   markAt,
   promptTitle,
@@ -69,6 +70,16 @@ test("a short lane keeps the panel inside it", () => {
   const box = unfold(30, 0, TOP, 300);
   assert.ok(box.top + box.size <= 300 - INSET);
   assert.equal(rowAt(30, -50, box.top, box.scroll), -1);
+});
+
+test("a lane too short for the panel's smallest size shows no outline at all", () => {
+  const smallest = INSET + ROW + PAD * 2 + INSET;
+  assert.equal(fits(smallest, fold(5, smallest).top), true);
+  for (const height of [smallest - 1, 30, 12, 0, -20])
+    assert.equal(fits(height, fold(5, height).top), false, String(height));
+  // Where it shows, the panel opens inside the lane.
+  const box = unfold(5, 0, TOP, smallest);
+  assert.ok(box.size > 0 && box.top + box.size <= smallest - INSET);
 });
 
 test("the reading prompt is the last one above the reading line, or the newest at the end", () => {

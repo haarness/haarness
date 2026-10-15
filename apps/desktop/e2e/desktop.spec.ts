@@ -2720,6 +2720,32 @@ test("terminal expansion starts a shell and closing tabs never asks for confirma
   expect(errors).toEqual([]);
 });
 
+test("a terminal text size change gives the shell its new size", async () => {
+  const hide = page.getByRole("button", { name: "Hide terminal", exact: true });
+  if (await hide.count()) await hide.click();
+  for (const terminal of await client.listPtys())
+    await client.deletePty(terminal.id);
+  await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  await expect(page.locator(".xterm-helper-textarea")).toBeFocused();
+  await expect.poll(() => client.listPtys().then((items) => items.length)).toBe(1);
+  const pty = async () => (await client.listPtys())[0]!;
+  const shownRows = () => page.locator(".terminal-view .xterm-rows > div").count();
+  await expect.poll(async () => (await pty()).rows === (await shownRows())).toBe(true);
+  const before = await pty();
+  // A larger font fits fewer cells in the same panel, which does not resize.
+  await page.evaluate(() => window.haarness.preferences({ terminalFontSize: 22 }));
+  await expect.poll(async () => (await pty()).cols).toBeLessThan(before.cols);
+  await expect.poll(async () => (await pty()).rows).toBeLessThan(before.rows);
+  await expect.poll(async () => (await pty()).rows === (await shownRows())).toBe(true);
+  await page.evaluate(() => window.haarness.preferences({ terminalFontSize: 13 }));
+  await expect.poll(async () => (await pty()).cols).toBe(before.cols);
+  await expect.poll(async () => (await pty()).rows).toBe(before.rows);
+  await hide.click();
+  for (const terminal of await client.listPtys())
+    await client.deletePty(terminal.id);
+  expect(errors).toEqual([]);
+});
+
 test("conversation tab order survives reopening and uses horizontal keyboard controls", async () => {
   await expandPrimaryProject();
   const first = await client.createThread({
@@ -8912,6 +8938,51 @@ test("tool activity shows readable commands, batch steps, outputs and failures",
   expect(errors).toEqual([]);
 });
 
+test("dragging across a tool row's label selects it without opening or closing the row", async () => {
+  await expandPrimaryProject();
+  const thread = await client.createThread({
+    title: "Selectable tool rows",
+    provider: "echo",
+    model: "echo-1",
+  });
+  await page
+    .locator(".sessions")
+    .getByRole("button", { name: "Selectable tool rows", exact: true })
+    .click();
+  const turn = await client.startTurn(thread.id, {
+    requestId: crypto.randomUUID(),
+    text: "!tool read " + JSON.stringify({ path: "src/greeting.ts" }),
+  });
+  await client.waitTurn(turn.id);
+  const row = page.locator(".message.step > .tool-call").last();
+  const label = row.locator(":scope > summary .tool-target");
+  await expect(label).toContainText("greeting.ts");
+  const drag = async () => {
+    const box = (await label.boundingBox())!;
+    const y = box.y + box.height / 2;
+    await page.mouse.move(box.x + 1, y);
+    await page.mouse.down();
+    for (let step = 1; step <= 8; step++)
+      await page.mouse.move(box.x + 1 + ((box.width - 2) * step) / 8, y);
+    await page.mouse.up();
+  };
+  const selected = () => page.evaluate(() => getSelection()?.toString() ?? "");
+  await drag();
+  expect(await selected()).toContain("greeting");
+  await expect(row).not.toHaveAttribute("open");
+  // A plain click still opens the row; selecting in it then leaves it open.
+  await page.evaluate(() => getSelection()?.removeAllRanges());
+  await label.click();
+  await expect(row).toHaveAttribute("open", "");
+  await drag();
+  expect(await selected()).toContain("greeting");
+  await expect(row).toHaveAttribute("open", "");
+  // The keyboard still toggles it.
+  await row.locator(":scope > summary").press("Enter");
+  await expect(row).not.toHaveAttribute("open");
+  expect(errors).toEqual([]);
+});
+
 test("bundled ripgrep searches from chat and the integrated terminal", async () => {
   const heading = page
     .locator(".project-list .project-heading")
@@ -11453,6 +11524,29 @@ test("conversation outline keeps text clear of its stack and hides where there i
   await send("only one outline prompt");
   await expect(page.locator(".transcript")).toContainText("Echo: only one outline prompt");
   await expect(outline()).toHaveCount(0);
+});
+
+test("conversation outline opens nothing past a very short lane and opens again once it grows", async () => {
+  await page.setViewportSize({ width: 1420, height: 940 });
+  await outlineSession(["short lane one", "short lane two", "short lane three"]);
+  await expect(outlineDashes()).toHaveCount(3);
+  await openOutlineOn(0);
+  await expect(page.locator(".outline-panel")).toBeVisible();
+  // A window this short leaves the transcript less room than the panel's smallest size.
+  await page.setViewportSize({ width: 1420, height: 230 });
+  await expect.poll(() => page.locator(".transcript").evaluate((element) => element.clientHeight)).toBeLessThan(64);
+  await expect(outline()).toHaveAttribute("hidden", "");
+  await expect(page.locator(".outline-panel")).toHaveCount(0);
+  await expect(outlineDashes().first()).toBeHidden();
+  await page.screenshot({ path: "test-results/outline-short-lane.png" });
+  await page.setViewportSize({ width: 1420, height: 940 });
+  await expect(outline()).not.toHaveAttribute("hidden", "");
+  await page.mouse.move(700, 600);
+  await expect(outline()).toHaveAttribute("data-state", "folded");
+  await openOutlineOn(1);
+  await expect(page.locator(".outline-panel")).toBeVisible();
+  await page.mouse.move(700, 600);
+  expect(errors).toEqual([]);
 });
 
 test("conversation outline is operable by assistive technology and mirrors in right-to-left languages", async () => {

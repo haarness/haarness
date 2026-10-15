@@ -2410,5 +2410,16 @@
   "The provider refused {name}, so it is left out of this chat from now on.": "Dostawca odrzucił {name}, więc od teraz jest pomijany w tym czacie.",
   "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "Dostawca odrzucił obraz, nie podając który, więc od teraz najnowszy, {name}, jest pomijany w tym czacie.",
   "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "Dostawca odrzucił obraz, nie podając który, więc od teraz najnowsze, {names}, są pomijane w tym czacie.",
-  "{name} is not an image Haarness can read.": "{name} nie jest obrazem, który Haarness może odczytać."
+  "{name} is not an image Haarness can read.": "{name} nie jest obrazem, który Haarness może odczytać.",
+  "This link could not be opened.": "Nie udało się otworzyć tego linku.",
+  "Open a project to open links to its files.": "Otwórz projekt, aby otwierać linki do jego plików.",
+  "Links to network locations do not open.": "Linki do lokalizacji sieciowych nie są otwierane.",
+  "Only files in this project open from a link.": "Z linku można otwierać tylko pliki z tego projektu.",
+  "This kind of link does not open in Haarness.": "Ten rodzaj linku nie otwiera się w Haarness.",
+  "{path} was not found in this project.": "Nie znaleziono {path} w tym projekcie.",
+  "This Haarness link could not be opened.": "Nie udało się otworzyć tego linku Haarness.",
+  "The folder in this link was not found.": "Nie znaleziono folderu z tego linku.",
+  "Open “{folder}” from a link?": "Otworzyć „{folder}” z linku?",
+  "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "Folder zostanie otwarty z wyłączoną konfiguracją projektu: serwery MCP, hooki i rozszerzenia z tego folderu nie będą działać. Aby je włączyć, otwórz folder za pomocą „Otwórz projekt”.",
+  "Open folder": "Otwórz folder"
 }
