@@ -67,6 +67,16 @@ recent models priced by OpenRouter, with where the app's fallback disagrees. Fix
 add the entry in haarness-cloud from the provider's page with today's `checked`
 date, then `--sync` copies the table here.
 
+## Gemini 4 thinking: 2026-10-15
+
+Gemini 3 and every later generation (the version is read from the id, so a
+discovered `gemini-4-argon` counts) take `thinkingLevel`; Gemini 2.5 and older,
+and unversioned ids such as `gemini-flash-latest`, keep `thinkingBudget`.
+Through Vertex, Gemini 4 Argon answers `minimal` or any budget with a 400, as
+3.1 Pro and 3.7/3.8 Flash do, so Gemini 4 and later offer low, medium and high,
+and a `none` or `minimal` effort is sent as `low`. Argon has no catalog or price
+entry yet; discovery supplies it.
+
 ## API and metadata update: 2026-10-10
 
 New since the last update: Claude Sonnet 5.5 and Haiku 5.5, GPT-6.1 Sol, Gemini

@@ -267,7 +267,7 @@ impl ModelProvider for GeminiProvider {
             body["toolConfig"] = json!({"functionCallingConfig":{"mode":"ANY"}});
         }
         if let Some(effort) = request.reasoning_effort.as_deref() {
-            if request.model.starts_with("gemini-3") {
+            if uses_thinking_level(&request.model) {
                 let level = match effort {
                     "none" | "minimal"
                         if gemini_reasoning_efforts(&request.model).contains(&"minimal") =>
@@ -400,10 +400,30 @@ fn without_max_items(mut schema: Value) -> Value {
     schema
 }
 
+/// The generation a Gemini model id names: 3 for `gemini-3.8-flash` and
+/// `gemini-3-pro-preview`, 4 for `gemini-4-argon`, nothing for an alias such
+/// as `gemini-flash-latest`. A `models/` or provider prefix is ignored.
+fn gemini_generation(id: &str) -> Option<u32> {
+    let name = id.rsplit('/').next()?.strip_prefix("gemini-")?;
+    let digits = name
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(name.len());
+    name[..digits].parse().ok()
+}
+
+/// Gemini 3 and later think at a `thinkingLevel`. Through Vertex, Gemini 4
+/// Argon, 3.1 Pro and 3.7/3.8 Flash answer a `thinkingBudget` with a 400.
+pub(crate) fn uses_thinking_level(id: &str) -> bool {
+    gemini_generation(id).is_some_and(|generation| generation >= 3)
+}
+
 fn gemini_reasoning_efforts(id: &str) -> Vec<&'static str> {
+    // Gemini 4 Argon answers `minimal` with a 400, as 3.7/3.8 Flash and 3.1
+    // Pro do; later generations are assumed to follow them.
     if id.starts_with("gemini-3.8-flash")
         || id.starts_with("gemini-3.7-flash")
         || id.starts_with("gemini-3.1-pro")
+        || gemini_generation(id).is_some_and(|generation| generation >= 4)
     {
         vec!["low", "medium", "high"]
     } else if id.starts_with("gemini-3-pro") || id.starts_with("gemini-2.5-pro") {
@@ -664,6 +684,7 @@ mod tests {
 
     use super::{
         GeminiProvider, api_key_from, discovered_model, discovered_model_for, gemini_contents,
+        gemini_reasoning_efforts, uses_thinking_level,
     };
 
     #[derive(Clone, Default)]
@@ -898,6 +919,43 @@ mod tests {
             declaration["parametersJsonSchema"]["additionalProperties"],
             false
         );
+    }
+
+    #[test]
+    fn gemini_three_and_later_think_at_a_level_and_four_has_no_minimal() {
+        for (id, level, efforts) in [
+            (
+                "gemini-2.5-flash",
+                false,
+                &["minimal", "low", "medium", "high"][..],
+            ),
+            ("gemini-2.5-pro", false, &["low", "high"]),
+            (
+                "gemini-flash-latest",
+                false,
+                &["minimal", "low", "medium", "high"],
+            ),
+            (
+                "gemini-3-flash-preview",
+                true,
+                &["minimal", "low", "medium", "high"],
+            ),
+            ("gemini-3.8-flash", true, &["low", "medium", "high"]),
+            ("gemini-4-argon", true, &["low", "medium", "high"]),
+            ("gemini-4.1-flash", true, &["low", "medium", "high"]),
+            ("models/gemini-12-pro", true, &["low", "medium", "high"]),
+        ] {
+            assert_eq!(uses_thinking_level(id), level, "{id}");
+            assert_eq!(gemini_reasoning_efforts(id), efforts, "{id}");
+        }
+        // A model Gemini's list returns before the catalog knows it.
+        let argon = discovered_model(&json!({
+            "name": "models/gemini-4-argon",
+            "supportedGenerationMethods": ["generateContent"],
+            "thinking": true
+        }))
+        .unwrap();
+        assert_eq!(argon.reasoning_efforts, ["low", "medium", "high"]);
     }
 
     #[test]
