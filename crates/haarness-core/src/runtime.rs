@@ -9719,11 +9719,14 @@ fn resolve_definition_model(
     for provider in providers {
         let models = registry.models(&provider);
         let model = match &release {
-            // A family is its newest release, by id.
+            // A family is its newest release, by version, then by id.
             None => models
                 .iter()
                 .filter(|m| m.id.to_lowercase().contains(value))
-                .max_by(|a, b| a.id.cmp(&b.id)),
+                .max_by(|a, b| {
+                    let version = crate::definitions::claude_version;
+                    (version(&a.id), &a.id).cmp(&(version(&b.id), &b.id))
+                }),
             // A release id matches the provider's spelling of the same release.
             Some(release) => models
                 .iter()
@@ -11538,6 +11541,45 @@ mod tests {
         assert!(!crate::definitions::unqualified_model(
             "anthropic/claude-opus-5-5"
         ));
+        // A family is the newest version in every provider's spelling, not the
+        // last id in text order (Bedrock's `-v1:0`, Vertex's `@date`, dates).
+        let registry = Catalog(vec![
+            provider(
+                "bedrock",
+                true,
+                &[
+                    "us.anthropic.claude-sonnet-5-5-v1:0",
+                    "us.anthropic.claude-sonnet-5-v1:0",
+                ],
+            ),
+            provider(
+                "vertex",
+                true,
+                &["claude-opus-5-5@20260901", "claude-opus-5@20260301"],
+            ),
+            provider(
+                "anthropic",
+                true,
+                &[
+                    "claude-opus-4-1-20250805",
+                    "claude-opus-4-20250514",
+                    "claude-3-7-sonnet-20250219",
+                    "claude-sonnet-4-20250514",
+                ],
+            ),
+        ]);
+        for (preferred, value, expected) in [
+            ("bedrock", "sonnet", "us.anthropic.claude-sonnet-5-5-v1:0"),
+            ("vertex", "opus", "claude-opus-5-5@20260901"),
+            ("anthropic", "opus", "claude-opus-4-1-20250805"),
+            ("anthropic", "sonnet", "claude-sonnet-4-20250514"),
+        ] {
+            assert_eq!(
+                super::resolve_definition_model(&registry, Some(preferred), value).unwrap(),
+                Some((preferred.to_owned(), expected.to_owned())),
+                "{preferred} {value}"
+            );
+        }
     }
 
     #[test]
