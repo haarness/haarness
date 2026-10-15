@@ -8406,6 +8406,44 @@ async fn a_short_terminal_trims_the_card_not_the_prompt() {
     }
 }
 
+/// A chat switch whose mode cannot be read shows Review, never the last
+/// chat's Auto, and a server that did not answer keeps its shared modes, so
+/// this TUI never starts answering the new chat's requests itself.
+#[tokio::test]
+async fn an_unreadable_mode_after_a_chat_switch_reads_as_review() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let previous = ThreadId::new();
+    app.approval_server = true;
+    app.auto_permissions = true;
+    app.approval_mode = Some(haarness_protocol::ApprovalModeInfo {
+        thread_id: previous,
+        mode: haarness_protocol::ApprovalMode::Auto,
+        source_thread_id: previous,
+        explicit: true,
+        revision: "1".into(),
+    });
+    app.refresh_approval_mode(&offline_client()).await;
+    assert!(app.approval_server);
+    assert!(!app.auto_permissions);
+    assert!(app.approval_mode.is_none());
+    assert!(frame_text(&app, (140, 40)).contains("approvals: review"));
+
+    // The open chat's own mode, once read, survives a failed re-read.
+    let info = haarness_protocol::ApprovalModeInfo {
+        thread_id: thread.id,
+        mode: haarness_protocol::ApprovalMode::Auto,
+        source_thread_id: thread.id,
+        explicit: true,
+        revision: "2".into(),
+    };
+    app.approval_mode = Some(info.clone());
+    app.auto_permissions = true;
+    app.refresh_approval_mode(&offline_client()).await;
+    assert_eq!(app.approval_mode, Some(info));
+    assert!(app.auto_permissions);
+}
+
 /// The card is the attention surface whenever it shows; the toast and the
 /// status hint repeat it in its own plain words, never the wire's rule key.
 #[tokio::test]
@@ -14626,10 +14664,32 @@ async fn yolo_answers_its_own_conversation_once_and_leaves_the_rest() {
     assert_eq!(cards, ["always-asks"]);
     assert!(frame_text(&app, (140, 40)).contains("approvals: --yolo"));
 
-    // Opening a chat with requests already waiting answers its own only
-    // (the first response is the server info hydration reads).
-    let (client, server) =
-        workspace_http_status_client(vec![(200, "{}".into()), (200, "{}".into())], false).await;
+    // Opening a chat with requests already waiting answers its own only,
+    // though the chat is in Review on a server that keeps modes (hydration
+    // first reads the server's info and the chat's mode).
+    let info = serde_json::json!({
+        "name": "haarness",
+        "version": "0",
+        "schemaVersion": haarness_protocol::SCHEMA_VERSION,
+        "serverInstanceId": uuid::Uuid::now_v7(),
+        "capabilities": [haarness_protocol::APPROVAL_MODE_CAPABILITY],
+    });
+    let mode = serde_json::json!({
+        "threadId": thread.id,
+        "mode": "review",
+        "sourceThreadId": thread.id,
+        "explicit": false,
+        "revision": "0",
+    });
+    let (client, server) = workspace_http_status_client(
+        vec![
+            (200, info.to_string()),
+            (200, mode.to_string()),
+            (200, "{}".into()),
+        ],
+        false,
+    )
+    .await;
     let waiting = |id: &str, thread_id, root| haarness_protocol::PendingPermissionInfo {
         allow_always: None,
         explicit: false,
@@ -14656,10 +14716,11 @@ async fn yolo_answers_its_own_conversation_once_and_leaves_the_rest() {
     .await;
     let requests = server.await.unwrap();
     assert!(
-        requests[1].contains("/permissions/waiting"),
+        requests[2].contains("/permissions/waiting"),
         "{requests:#?}"
     );
     assert!(app.pending_permissions.is_empty());
+    assert!(app.approval_server && !app.auto_permissions);
 }
 
 #[tokio::test]
