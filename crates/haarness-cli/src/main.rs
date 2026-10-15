@@ -121,6 +121,12 @@ struct Cli {
     /// on that server, until it stops.
     #[arg(long, global = true, visible_alias = "dangerously-skip-permissions")]
     yolo: bool,
+    /// Put the chat this command opens, starts or continues in Auto: its
+    /// server then approves eligible requests once, whichever app shows the
+    /// chat, until someone switches it back to Review. Permission denials
+    /// and requests that always ask still hold.
+    #[arg(long, global = true, conflicts_with = "yolo")]
+    auto: bool,
     /// Open a specific chat by id. `--session` is an alias.
     #[arg(short = 's', long, global = true, visible_alias = "session")]
     thread: Option<Uuid>,
@@ -1447,7 +1453,10 @@ async fn main() -> Result<()> {
                 &paths,
                 workspace,
                 project_config,
-                cli.yolo,
+                haarness_tui::ApprovalLaunch {
+                    yolo: cli.yolo,
+                    auto: cli.auto,
+                },
                 cli.thread,
                 cli.continue_last,
             )
@@ -1470,14 +1479,25 @@ async fn main() -> Result<()> {
             serve_command(&paths, workspace, project_config, cli.yolo, args).await
         }
         Some(Command::Attach(args)) => {
-            attach_command(&paths, &workspace, args, cli.thread, cli.continue_last).await
+            attach_command(
+                &paths,
+                &workspace,
+                args,
+                cli.auto,
+                cli.thread,
+                cli.continue_last,
+            )
+            .await
         }
         Some(Command::Tui(args)) => {
             tui_command(
                 &paths,
                 &workspace,
                 project_config,
-                cli.yolo,
+                haarness_tui::ApprovalLaunch {
+                    yolo: cli.yolo,
+                    auto: cli.auto,
+                },
                 args,
                 cli.thread,
                 cli.continue_last,
@@ -1489,7 +1509,10 @@ async fn main() -> Result<()> {
                 &paths,
                 workspace,
                 project_config,
-                cli.yolo,
+                haarness_tui::ApprovalLaunch {
+                    yolo: cli.yolo,
+                    auto: cli.auto,
+                },
                 cli.thread,
                 cli.continue_last,
                 args,
@@ -1521,7 +1544,10 @@ async fn main() -> Result<()> {
                 &paths,
                 &current_workspace.id,
                 project_config,
-                cli.yolo,
+                haarness_tui::ApprovalLaunch {
+                    yolo: cli.yolo,
+                    auto: cli.auto,
+                },
                 cli.thread,
                 cli.continue_last,
                 command,
@@ -1754,6 +1780,10 @@ const GLOBAL_SCOPES: &[(&str, GlobalScope)] = &[
     ),
     (
         "continue_last",
+        GlobalScope::Only(&["tui", "run", "attach", "worktree"]),
+    ),
+    (
+        "auto",
         GlobalScope::Only(&["tui", "run", "attach", "worktree"]),
     ),
     (
@@ -2896,7 +2926,7 @@ async fn workspace_command(
     paths: &Paths,
     current_workspace_id: &str,
     trust: bool,
-    yolo: bool,
+    approvals: haarness_tui::ApprovalLaunch,
     thread: Option<Uuid>,
     continue_last: bool,
     command: WorkspaceCommand,
@@ -2972,7 +3002,7 @@ async fn workspace_command(
                     &target_paths,
                     PathBuf::from(&workspace.path),
                     trust,
-                    yolo,
+                    approvals,
                     thread,
                     continue_last,
                 )
@@ -3753,7 +3783,7 @@ async fn interactive(
     paths: &Paths,
     workspace: PathBuf,
     trust: bool,
-    yolo: bool,
+    mut approvals: haarness_tui::ApprovalLaunch,
     thread: Option<Uuid>,
     continue_last: bool,
 ) -> Result<()> {
@@ -3772,7 +3802,7 @@ async fn interactive(
             resume,
             runtime_endpoint_resolver(&active_paths, &active_workspace),
             workspace_server_restarter(&active_paths, &active_workspace, trust),
-            yolo,
+            approvals,
         )
         .await?;
         let Some(path) = selected else {
@@ -3782,9 +3812,11 @@ async fn interactive(
         active_paths = paths.scoped(&workspace.id, false)?;
         active_workspace = PathBuf::from(workspace.path);
         // An explicit session belongs to the workspace it was supplied for;
-        // switching restores the target's own most-recent root instead.
+        // switching restores the target's own most-recent root instead, and
+        // `--auto` was said of the chat this command opened, not that one.
         initial_thread = None;
         resume = true;
+        approvals.auto = false;
     }
 }
 /// `haarness serve` listens here unless `--port` says otherwise.
@@ -3959,6 +3991,7 @@ async fn attach_command(
     paths: &Paths,
     workspace: &Path,
     args: AttachArgs,
+    auto: bool,
     thread: Option<Uuid>,
     continue_last: bool,
 ) -> Result<()> {
@@ -3968,7 +4001,8 @@ async fn attach_command(
     require_terminal()?;
     let (server, token) =
         attached_endpoint(paths, &args.url, args.token, args.authentication).await?;
-    haarness_tui::run_attached_with_auth(&server, token, thread, continue_last, args.fork).await?;
+    haarness_tui::run_attached_with_auth(&server, token, thread, continue_last, args.fork, auto)
+        .await?;
     // Keep the local workspace argument meaningful for diagnostics and parity
     // with the other entrypoints; execution itself belongs to server /v1/info.
     tracing::debug!(workspace = %workspace.display(), server = %server, "attached TUI exited");
@@ -4090,7 +4124,7 @@ async fn tui_command(
     paths: &Paths,
     workspace: &Path,
     trust: bool,
-    yolo: bool,
+    mut approvals: haarness_tui::ApprovalLaunch,
     args: TuiArgs,
     thread: Option<Uuid>,
     continue_last: bool,
@@ -4108,6 +4142,7 @@ async fn tui_command(
             thread,
             continue_last,
             args.fork,
+            approvals.auto,
         )
         .await;
     }
@@ -4127,7 +4162,7 @@ async fn tui_command(
             fork,
             runtime_endpoint_resolver(&active_paths, &active_workspace),
             workspace_server_restarter(&active_paths, &active_workspace, trust),
-            yolo,
+            approvals,
         )
         .await?;
         let Some(path) = selected else {
@@ -4139,6 +4174,7 @@ async fn tui_command(
         initial_thread = None;
         resume = true;
         fork = false;
+        approvals.auto = false;
     }
 }
 /// Whether reading stdin would return immediately (data waiting, or the
@@ -4167,11 +4203,12 @@ async fn run_command(
     paths: &Paths,
     workspace: PathBuf,
     trust: bool,
-    yolo: bool,
+    approvals: haarness_tui::ApprovalLaunch,
     requested_thread: Option<Uuid>,
     continue_last: bool,
     args: RunArgs,
 ) -> Result<()> {
+    let yolo = approvals.yolo;
     let json_output = args.format == RunFormat::Json;
     let mut chat = None;
     let result = async {
@@ -4219,6 +4256,11 @@ async fn run_command(
             let discovery = ensure_workspace_server(paths, &workspace, trust).await?;
             haarness_tui::api::ApiClient::new(&discovery.url, &discovery.token)?
         };
+        // Checked before a chat exists, so a refusal leaves no empty chat
+        // behind.
+        if approvals.auto {
+            require_shared_approval_modes(&client).await?;
+        }
         // Checked before a chat exists, so a typo leaves no empty chat behind.
         let requested_model = if args.provider.is_some() || args.model.is_some() {
             Some(requested_run_model(
@@ -4265,6 +4307,14 @@ async fn run_command(
                 }
             };
         chat = Some(thread.id);
+        // `--auto` puts the chat itself in Auto, before anything runs in it:
+        // the server then answers its eligible requests once, for this run,
+        // its agents and workflows, and whatever runs in it later, and every
+        // app shows the chat in Auto. What always asks is still asked below.
+        if approvals.auto {
+            let set = set_chat_auto(&client, thread.id).await;
+            discard_refused_chat(&client, &thread, created, set).await?;
+        }
         let (provider, model) = requested_model.unzip();
         let goal = args.goal;
         stop_on_signal(&client, thread.id, goal, async {
@@ -4448,6 +4498,37 @@ fn run_attachments(files: &[PathBuf]) -> Result<Vec<String>> {
 /// A run's start was refused (an unknown command, agent or variant): a chat
 /// this run made for it holds nothing, so it is archived rather than left in
 /// the recent list. A continued chat stays as it was.
+/// `--auto` needs a server that keeps the approval mode per chat; an older
+/// one only has the per-run `--yolo`.
+async fn require_shared_approval_modes(client: &haarness_tui::api::ApiClient) -> Result<()> {
+    let info = client.info().await?;
+    if !info
+        .capabilities
+        .iter()
+        .any(|capability| capability == haarness_protocol::APPROVAL_MODE_CAPABILITY)
+    {
+        anyhow::bail!(
+            "This Haarness server cannot keep a chat in Auto; update it, or pass --yolo to approve this run's requests"
+        );
+    }
+    Ok(())
+}
+
+/// Put a chat in Auto on its server, whatever it was.
+async fn set_chat_auto(client: &haarness_tui::api::ApiClient, thread: ThreadId) -> Result<()> {
+    client
+        .set_approval_mode(
+            thread,
+            &haarness_protocol::SetApprovalModeRequest {
+                mode: haarness_protocol::ApprovalModeSetting::Auto,
+                revision: None,
+            },
+        )
+        .await
+        .context("Could not put this chat in Auto")?;
+    Ok(())
+}
+
 async fn discard_refused_chat<T>(
     client: &haarness_tui::api::ApiClient,
     thread: &Thread,
@@ -9858,6 +9939,35 @@ mod tests {
                 .unwrap()
                 .continue_last
         );
+    }
+
+    /// `--auto` belongs to the commands that open a chat, and says something
+    /// different from `--yolo`, so the two are not combined.
+    #[test]
+    fn auto_is_offered_where_a_chat_opens_and_never_beside_yolo() {
+        let launch = super::Cli::try_parse_from(["haarness", "--auto"]).unwrap();
+        assert!(launch.auto && launch.command.is_none() && !launch.yolo);
+        let run = super::Cli::try_parse_from(["haarness", "run", "--auto", "hello"]).unwrap();
+        assert!(run.auto && matches!(run.command, Some(super::Command::Run(_))));
+        assert!(super::Cli::try_parse_from(["haarness", "--auto", "--yolo"]).is_err());
+        assert!(super::Cli::try_parse_from(["haarness", "run", "--yolo", "--auto", "x"]).is_err());
+        let mut command = super::cli_command();
+        for name in ["run", "tui", "attach"] {
+            let help = command
+                .find_subcommand_mut(name)
+                .unwrap()
+                .render_help()
+                .to_string();
+            assert!(help.contains("--auto"), "{name}: {help}");
+        }
+        for name in ["serve", "doctor", "acp"] {
+            let help = command
+                .find_subcommand_mut(name)
+                .unwrap()
+                .render_help()
+                .to_string();
+            assert!(!help.contains("--auto"), "{name}: {help}");
+        }
     }
 
     #[test]

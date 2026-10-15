@@ -103,7 +103,8 @@ haarness run --format json "List the open TODOs"   # newline-delimited JSON reco
 
 `haarness run` uses your default model, else a connected provider's. With no terminal to ask at
 (a script, CI), a permission request is refused and the run stops, naming what was asked: allow
-it with a permission rule, or pass `--yolo` where the damage is bounded. Ctrl-C stops the run's
+it with a permission rule, or pass `--yolo` where the damage is bounded. `--auto` instead puts
+the chat in Auto, where it stays for every app until switched back. Ctrl-C stops the run's
 work on the server and exits with status 130. See
 [Run a prompt from a script or CI](https://haarness.ai/docs/cli/headless-runs).
 
