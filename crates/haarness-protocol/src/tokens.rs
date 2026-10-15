@@ -765,6 +765,7 @@ mod tests {
             ("o4-mini", Tokenizer::OpenAi),
             ("gpt-5.2-codex", Tokenizer::OpenAi),
             ("gemini-3.8-flash", Tokenizer::Gemini),
+            ("google/gemini-4-argon", Tokenizer::Gemini),
             ("router/google/gemini-3.1-pro-preview", Tokenizer::Gemini),
             ("qwen3:0.6b", Tokenizer::Generic),
             ("deepseek/deepseek-v4", Tokenizer::Generic),

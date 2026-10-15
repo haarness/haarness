@@ -105,6 +105,7 @@ mod tests {
             "anthropic/claude-sonnet-5",
             "anthropic/claude-opus-4.6",
             "anthropic/claude-sonnet-4.6",
+            "google/gemini-4-argon",
             "google/gemini-3.8-flash",
             "google/gemini-3.5-flash",
             "google/gemini-3.5-flash-lite",

@@ -67,15 +67,25 @@ recent models priced by OpenRouter, with where the app's fallback disagrees. Fix
 add the entry in haarness-cloud from the provider's page with today's `checked`
 date, then `--sync` copies the table here.
 
-## Gemini 4 thinking: 2026-10-15
+## Gemini 4 Argon: 2026-10-15
 
-Gemini 3 and every later generation (the version is read from the id, so a
-discovered `gemini-4-argon` counts) take `thinkingLevel`; Gemini 2.5 and older,
-and unversioned ids such as `gemini-flash-latest`, keep `thinkingBudget`.
-Through Vertex, Gemini 4 Argon answers `minimal` or any budget with a 400, as
-3.1 Pro and 3.7/3.8 Flash do, so Gemini 4 and later offer low, medium and high,
-and a `none` or `minimal` effort is sent as `low`. Argon has no catalog or price
-entry yet; discovery supplies it.
+Gemini 3 and every later generation (the version is read from the id) take
+`thinkingLevel`; Gemini 2.5 and older, and unversioned ids such as
+`gemini-flash-latest`, keep `thinkingBudget`. Gemini 4 Argon (`gemini-4-argon`)
+answers `minimal` with a 400 on the Gemini API, as 3.1 Pro and 3.7/3.8 Flash
+do, so Gemini 4 and later offer low, medium and high, and a `none` or `minimal`
+effort is sent as `low`. The Gemini API still accepts a `thinkingBudget` for
+Argon, but through Vertex any budget is refused, so Haarness never sends one.
+
+Argon is in the catalog with a 1,048,576-token window and the 32,768 output
+tokens the Models API lists. Probes found tools in `AUTO` and forced `ANY`
+modes (including the array bounds that break forced calling on older models),
+JSON-schema output, images, PDFs, `countTokens`, `temperature` and implicit
+cache hits all working; there is no explicit caching. Its reviewed price is
+$2/$10 per million (cached input $0.10) through 2026-11-30 and $4/$20 (cached
+input $0.20) from 2026-12-01, with no long-context tier: the price table has no
+dated prices, so the entry's note carries the change and the table must be
+updated by hand on that date.
 
 ## API and metadata update: 2026-10-10
 
