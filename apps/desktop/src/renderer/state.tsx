@@ -124,6 +124,9 @@ interface State extends Live {
     thread?: string;
     preview?: boolean;
     action?: "file" | "folder";
+    /** Opened from a link in a reply or a Markdown file; `line` is where to put the cursor. */
+    link?: boolean;
+    line?: number;
   } | null;
   terminal: boolean;
   ready: boolean;
@@ -137,6 +140,8 @@ interface State extends Live {
   error: string;
   permissionErrors: Record<string, Record<string, string>>;
   notice: string;
+  /** "blocked" when the notice says something was not done, such as a link that did not open. */
+  noticeTone: "done" | "blocked";
   /** The latest answer of a text or workflow command, and the goal's latest
    * message, by session key, until the chat sends again or it is dismissed. */
   commandNotes: Record<string, CommandNote | undefined>;
@@ -194,6 +199,7 @@ function createApp() {
     error: "",
     permissionErrors: {},
     notice: "",
+    noticeTone: "done",
     commandNotes: {},
     connectionStatus: "",
     drafts: {},
@@ -240,8 +246,11 @@ function createApp() {
   };
   const native = <V,>(input: Record<string, unknown>) =>
     window.haarness.native<V>(state.connection!.id, input);
-  function notify(text: string) {
-    set("notice", text);
+  function notify(text: string, tone: State["noticeTone"] = "done") {
+    batch(() => {
+      set("notice", text);
+      set("noticeTone", tone);
+    });
     clearTimeout(noticeTimer);
     noticeTimer = setTimeout(() => set("notice", ""), 5000);
   }

@@ -2410,5 +2410,11 @@
   "The provider refused {name}, so it is left out of this chat from now on.": "Sağlayıcı {name} görselini reddetti; bundan sonra bu sohbette dışarıda bırakılacak.",
   "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "Sağlayıcı hangisi olduğunu söylemeden bir görseli reddetti; bu yüzden en yeni görsel, {name}, bundan sonra bu sohbette dışarıda bırakılacak.",
   "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "Sağlayıcı hangisi olduğunu söylemeden bir görseli reddetti; bu yüzden en yeni görseller, {names}, bundan sonra bu sohbette dışarıda bırakılacak.",
-  "{name} is not an image Haarness can read.": "{name}, Haarness'ın okuyabileceği bir görsel değil."
+  "{name} is not an image Haarness can read.": "{name}, Haarness'ın okuyabileceği bir görsel değil.",
+  "This link could not be opened.": "Bu bağlantı açılamadı.",
+  "Open a project to open links to its files.": "Dosyalarına giden bağlantıları açmak için bir proje açın.",
+  "Links to network locations do not open.": "Ağ konumlarına giden bağlantılar açılmaz.",
+  "Only files in this project open from a link.": "Bağlantıdan yalnızca bu projedeki dosyalar açılır.",
+  "This kind of link does not open in Haarness.": "Bu tür bağlantılar Haarness’ta açılmaz.",
+  "{path} was not found in this project.": "{path} bu projede bulunamadı."
 }

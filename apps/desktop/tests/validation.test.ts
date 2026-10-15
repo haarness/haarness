@@ -8,6 +8,10 @@ test("external navigation cannot invoke local executables, files or embedded cre
     "javascript:alert(1)",
     "data:text/html,test",
     "https://user:secret@example.test",
+    "smb://server/share",
+    "\\\\server\\share",
+    "//server/share",
+    "afp://server/share",
   ])
     assert.throws(() => external(url));
   assert.equal(
@@ -16,6 +20,15 @@ test("external navigation cannot invoke local executables, files or embedded cre
   );
   assert.equal(
     external("mailto:hello@example.test"),
+    "mailto:hello@example.test",
+  );
+  // Some mail apps attach a local file named by `attach=`; only the message fields stay.
+  assert.equal(
+    external("mailto:hello@example.test?subject=Hi%20there&attach=/Users/me/.ssh/id_ed25519&Attachment=x&body=b"),
+    "mailto:hello@example.test?subject=Hi%20there&body=b",
+  );
+  assert.equal(
+    external("mailto:hello@example.test?attach=%2Fetc%2Fpasswd"),
     "mailto:hello@example.test",
   );
 });

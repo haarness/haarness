@@ -317,6 +317,8 @@ export function Explorer() {
     pendingSaves.set(value.editor, pending);
     return pending;
   }
+  /** Where the editor puts the cursor for a link to `path:line`, once per click. */
+  const [jump, setJump] = createSignal<{ path: string; line: number }>();
   createEffect(() => {
     const request = app.state.fileRequest;
     if (!request) return;
@@ -325,9 +327,38 @@ export function Explorer() {
     void app.run(() =>
       request.action
         ? create(request.action === "folder")
-        : open(request.path, request),
+        : request.link
+          ? openLink(request.path, request.line)
+          : open(request.path, request),
     );
   });
+  /** A link's target: a file opens (at its line), a folder opens in the tree,
+   * and anything else is named as missing rather than shown as a server error. */
+  async function openLink(path: string, line?: number) {
+    const id = app.state.connection?.id;
+    const generation = workspaceGeneration;
+    // A link to the project itself has nothing more to open than the panel.
+    if (!id || !path) return;
+    try {
+      await open(path);
+    } catch (error) {
+      const folder = await window.haarness
+        .files(id, "list", { path })
+        .then(() => true, () => false);
+      if (generation !== workspaceGeneration) return;
+      if (folder) return reveal(path + "/");
+      // The server's words for a missing file and for a link that leads out of the project.
+      const message = error instanceof Error ? error.message : String(error);
+      if (/no longer exists/i.test(message))
+        app.notify(t("{path} was not found in this project.", { path }), "blocked");
+      else if (/escapes the workspace/i.test(message))
+        app.notify(t("Only files in this project open from a link."), "blocked");
+      else throw error;
+      return;
+    }
+    if (line && generation === workspaceGeneration && selected() === path)
+      setJump({ path, line });
+  }
   app.registerSearch("editor", () => {
     if (!app.state.connection) return [];
     const action = (run: () => unknown) => () => {
@@ -748,6 +779,7 @@ export function Explorer() {
                     onSave={() => app.run(save)}
                     onSelection={setSelection}
                     onAddContext={() => void app.run(attachContext)}
+                    line={jump()?.path === value().path ? jump() : undefined}
                   />
                 </Show>
                 </>}><PreviewContent file={{ ...value(), content: edits()[value().path] ?? value().content }} /></Show>

@@ -161,7 +161,7 @@ export function App() {
   }
   createEffect(() => {
     const request = state.fileRequest;
-    if (request?.preview && request.connection === state.connection?.id && (!request.thread || request.thread === state.selected)) openDock("files");
+    if ((request?.preview || request?.link) && request.connection === state.connection?.id && (!request.thread || request.thread === state.selected)) openDock("files");
   });
   /** The agent took the Browser's tab to another page while another panel held the side panel. */
   const [browserMoved, setBrowserMoved] = createSignal(false);

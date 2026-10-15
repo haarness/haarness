@@ -2410,5 +2410,11 @@
   "The provider refused {name}, so it is left out of this chat from now on.": "Leverandøren avviste {name}, så det utelates fra denne chatten fremover.",
   "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "Leverandøren avviste et bilde uten å si hvilket, så det nyeste, {name}, utelates fra denne chatten fremover.",
   "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "Leverandøren avviste et bilde uten å si hvilket, så de nyeste, {names}, utelates fra denne chatten fremover.",
-  "{name} is not an image Haarness can read.": "{name} er ikke et bilde Haarness kan lese."
+  "{name} is not an image Haarness can read.": "{name} er ikke et bilde Haarness kan lese.",
+  "This link could not be opened.": "Lenken kunne ikke åpnes.",
+  "Open a project to open links to its files.": "Åpne et prosjekt for å åpne lenker til filene i det.",
+  "Links to network locations do not open.": "Lenker til nettverksplasseringer åpnes ikke.",
+  "Only files in this project open from a link.": "Bare filer i dette prosjektet kan åpnes fra en lenke.",
+  "This kind of link does not open in Haarness.": "Denne typen lenke åpnes ikke i Haarness.",
+  "{path} was not found in this project.": "Fant ikke {path} i dette prosjektet."
 }

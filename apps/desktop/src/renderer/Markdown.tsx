@@ -1,11 +1,46 @@
+import { t } from "./i18n";
 import { useApp } from "./state";
 import { createEffect, onCleanup } from "solid-js";
 import { createMarkdownClient } from "./markdown-client";
 import { createMarkdownDOM } from "./markdown-dom";
+import { linkTarget } from "./link-target";
 
-/** `document` renders a Markdown file, where a lone newline is not a line break. */
-export function Markdown(props: { text: string; live?: boolean; document?: boolean }) {
+/**
+ * `document` renders a Markdown file, where a lone newline is not a line
+ * break. `base` is the folder its relative links start from (the file's own
+ * folder); a reply's links start from the project.
+ */
+export function Markdown(props: { text: string; live?: boolean; document?: boolean; base?: string }) {
   const app = useApp();
+  /** Web links leave through the desktop's link check; file links open in the Files panel. */
+  function follow(href: string) {
+    const connection = app.state.connection;
+    const thread = app.state.selected;
+    const target = linkTarget(href, { root: connection?.workspace ?? "", base: props.base });
+    if (target.kind === "web") {
+      void window.haarness
+        .openLink(connection?.id, thread, target.url)
+        .catch(() => app.notify(t("This link could not be opened."), "blocked"));
+    } else if (target.kind === "file") {
+      if (!connection) return app.notify(t("Open a project to open links to its files."), "blocked");
+      app.set("fileRequest", {
+        connection: connection.id,
+        path: target.path,
+        sequence: Date.now(),
+        thread: thread || undefined,
+        link: true,
+        ...(target.line ? { line: target.line } : {}),
+      });
+    } else if (target.kind === "refused")
+      app.notify(
+        target.reason === "network"
+          ? t("Links to network locations do not open.")
+          : target.reason === "outside"
+            ? t("Only files in this project open from a link.")
+            : t("This kind of link does not open in Haarness."),
+        "blocked",
+      );
+  }
   let host!: HTMLDivElement;
   let patch: ReturnType<typeof createMarkdownDOM> | undefined;
   let disposed = false;
@@ -67,8 +102,8 @@ export function Markdown(props: { text: string; live?: boolean; document?: boole
         const link = target.closest("a");
         if (link) {
           event.preventDefault();
-          const connection = app.state.connection?.id, thread = app.state.selected;
-          void window.haarness.openLink(connection, thread, link.href).catch((error) => app.notify(String(error)));
+          // The written address: `link.href` would resolve a path against this window's own file.
+          follow(link.getAttribute("href") ?? "");
         }
       }}
     />

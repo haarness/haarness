@@ -2410,5 +2410,11 @@
   "The provider refused {name}, so it is left out of this chat from now on.": "Провайдер отклонил {name}, поэтому теперь это изображение не отправляется в этом чате.",
   "The provider refused an image without saying which, so the newest one, {name}, is left out of this chat from now on.": "Провайдер отклонил изображение, не указав какое, поэтому теперь самое новое, {name}, не отправляется в этом чате.",
   "The provider refused an image without saying which, so the newest ones, {names}, are left out of this chat from now on.": "Провайдер отклонил изображение, не указав какое, поэтому теперь самые новые ({names}) не отправляются в этом чате.",
-  "{name} is not an image Haarness can read.": "{name} — не изображение, которое Haarness может прочитать."
+  "{name} is not an image Haarness can read.": "{name} — не изображение, которое Haarness может прочитать.",
+  "This link could not be opened.": "Не удалось открыть эту ссылку.",
+  "Open a project to open links to its files.": "Откройте проект, чтобы открывать ссылки на его файлы.",
+  "Links to network locations do not open.": "Ссылки на сетевые расположения не открываются.",
+  "Only files in this project open from a link.": "По ссылке открываются только файлы этого проекта.",
+  "This kind of link does not open in Haarness.": "Ссылки такого типа не открываются в Haarness.",
+  "{path} was not found in this project.": "{path} не найден в этом проекте."
 }
