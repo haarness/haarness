@@ -1772,6 +1772,8 @@
   "shift+pgup scroll": "shift+pgup เลื่อน",
   "exit closes the tab": "exit เพื่อปิดแท็บ",
   "{done}/{total} done": "เสร็จแล้ว {done}/{total}",
+  "{done} of {total} completed": "เสร็จสิ้น {done} จาก {total}",
+  "{count} cancelled": "ยกเลิก {count}",
   "ctrl+b shows the plan": "ctrl+b เพื่อดูแผน",
   "No loop is running": "ไม่มีลูปที่กำลังทำงาน",
   "Loop stopped": "หยุดลูปแล้ว",

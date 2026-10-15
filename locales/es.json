@@ -1772,6 +1772,8 @@
   "shift+pgup scroll": "shift+pgup desplazar",
   "exit closes the tab": "exit cierra la pestaña",
   "{done}/{total} done": "{done}/{total} hechas",
+  "{done} of {total} completed": "{done} de {total} completadas",
+  "{count} cancelled": "canceladas: {count}",
   "ctrl+b shows the plan": "ctrl+b muestra el plan",
   "No loop is running": "No hay ningún bucle en marcha",
   "Loop stopped": "Bucle detenido",

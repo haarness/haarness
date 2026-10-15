@@ -1772,6 +1772,8 @@
   "shift+pgup scroll": "shift+pgup przewiń",
   "exit closes the tab": "exit zamyka kartę",
   "{done}/{total} done": "Gotowe: {done}/{total}",
+  "{done} of {total} completed": "Ukończono {done} z {total}",
+  "{count} cancelled": "Anulowano: {count}",
   "ctrl+b shows the plan": "ctrl+b pokazuje plan",
   "No loop is running": "Żadna pętla nie działa",
   "Loop stopped": "Pętla zatrzymana",

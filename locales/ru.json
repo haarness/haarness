@@ -1772,6 +1772,8 @@
   "shift+pgup scroll": "shift+pgup прокрутка",
   "exit closes the tab": "exit закрывает вкладку",
   "{done}/{total} done": "Готово: {done}/{total}",
+  "{done} of {total} completed": "Выполнено {done} из {total}",
+  "{count} cancelled": "Отменено: {count}",
   "ctrl+b shows the plan": "ctrl+b показывает план",
   "No loop is running": "Цикл не запущен",
   "Loop stopped": "Цикл остановлен",

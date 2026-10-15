@@ -1772,6 +1772,8 @@
   "shift+pgup scroll": "shift+pgup kaydır",
   "exit closes the tab": "exit sekmeyi kapatır",
   "{done}/{total} done": "{done}/{total} tamamlandı",
+  "{done} of {total} completed": "{total} adımdan {done} tamamlandı",
+  "{count} cancelled": "{count} iptal edildi",
   "ctrl+b shows the plan": "ctrl+b planı gösterir",
   "No loop is running": "Çalışan bir döngü yok",
   "Loop stopped": "Döngü durduruldu",
