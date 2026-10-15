@@ -6959,7 +6959,13 @@ impl RunnerTask {
                             finished = true;
                             provider_span.record("gen_ai.response.finish_reasons", reason.as_str());
                             if let Some(error) = ProviderEvent::finish_error(&reason) {
-                                blocked = Some(error);
+                                // A dropped call asks the model to continue, and
+                                // the valid calls before it run instead of failing.
+                                let dropped = ProviderEvent::dropped_tool_call(&reason);
+                                recovering |= dropped;
+                                if !dropped || calls.is_empty() {
+                                    blocked = Some(error);
+                                }
                             }
                         }
                     }
@@ -7073,7 +7079,7 @@ impl RunnerTask {
                     }
                     if matches!(error, CoreError::ProviderIncomplete(_)) && recoveries < 3 {
                         recoveries += 1;
-                        recovering = partial;
+                        recovering |= partial;
                         self.set_status("retrying", None);
                         tokio::select! {
                             biased;

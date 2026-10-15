@@ -409,14 +409,31 @@ impl ProviderEvent {
             | "spii"
             | "image_safety"
             | "image_prohibited_content" => Some(CoreError::ProviderBlocked(reason.to_owned())),
-            "" | "unknown" | "other" | "incomplete" => {
-                Some(CoreError::ProviderIncomplete(reason.to_owned()))
-            }
+            // Gemini's dropped calls (see `dropped_tool_call`) are incomplete
+            // responses too, not finished ones with an empty answer.
+            ""
+            | "unknown"
+            | "other"
+            | "incomplete"
+            | "malformed_function_call"
+            | "unexpected_tool_call" => Some(CoreError::ProviderIncomplete(reason.to_owned())),
             "error" | "failed" => Some(CoreError::Provider(
                 "provider ended the response with an error".into(),
             )),
             _ => None,
         }
+    }
+
+    /// Gemini drops a function call it cannot parse, or one naming a tool it
+    /// was not offered, and ends the response with `MALFORMED_FUNCTION_CALL`
+    /// or `UNEXPECTED_TOOL_CALL`, often right after valid parallel calls. The
+    /// response is incomplete rather than failed: the valid calls can run and
+    /// the model can issue the dropped one again.
+    pub fn dropped_tool_call(reason: &str) -> bool {
+        matches!(
+            reason.to_ascii_lowercase().replace('-', "_").as_str(),
+            "malformed_function_call" | "unexpected_tool_call"
+        )
     }
 }
 
@@ -797,4 +814,30 @@ pub trait RepositoryApprovalStore: Send + Sync {
     fn identity(&self) -> &str;
     fn load(&self) -> CoreResult<Vec<crate::PermissionRule>>;
     fn save(&self, rules: &[crate::PermissionRule]) -> CoreResult<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gemini_dropped_calls_finish_incomplete_not_complete_or_failed() {
+        for reason in [
+            "MALFORMED_FUNCTION_CALL",
+            "malformed_function_call",
+            "UNEXPECTED_TOOL_CALL",
+        ] {
+            assert!(ProviderEvent::dropped_tool_call(reason), "{reason}");
+            assert!(
+                matches!(
+                    ProviderEvent::finish_error(reason),
+                    Some(CoreError::ProviderIncomplete(kept)) if kept == reason
+                ),
+                "{reason}"
+            );
+        }
+        for reason in ["STOP", "tool_calls", "OTHER", "SAFETY", "error"] {
+            assert!(!ProviderEvent::dropped_tool_call(reason), "{reason}");
+        }
+    }
 }
