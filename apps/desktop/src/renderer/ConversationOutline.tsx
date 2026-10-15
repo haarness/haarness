@@ -1,6 +1,6 @@
 import { t } from "./i18n";
-import { For, Index, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
-import { EDGE, PAD, ROW, fold, rowAt, sliceOf, slices, unfold, visible } from "./outline-layout";
+import { For, Index, Show, createEffect, createMemo, createSignal, onCleanup, onMount, untrack } from "solid-js";
+import { EDGE, PAD, ROW, fits, fold, rowAt, sliceOf, slices, unfold, visible } from "./outline-layout";
 import "./outline.css";
 
 /** Width of the hit area over the dashes at rest, from the leading edge. */
@@ -38,6 +38,7 @@ export function ConversationOutline(props: {
   const order = createMemo(() => new Map(props.prompts().map((item, i) => [item.id, i] as const)));
   const starts = createMemo(() => slices(count()), [], { equals: sameList });
   const folded = createMemo(() => fold(starts().length, props.height()));
+  const shown = createMemo(() => fits(props.height(), folded().top));
   const current = createMemo(() => {
     const id = props.reading();
     return id ? (order().get(id) ?? -1) : -1;
@@ -48,7 +49,7 @@ export function ConversationOutline(props: {
   const [scrolled, setScrolled] = createSignal(0);
   const box = createMemo(() => {
     const value = open();
-    return value && unfold(count(), value.anchor, value.y, props.height(), folded().top);
+    return value && shown() && unfold(count(), value.anchor, value.y, props.height(), folded().top);
   });
   // Only the rows in view, plus a few either side, are in the DOM.
   const rows = createMemo(
@@ -78,10 +79,16 @@ export function ConversationOutline(props: {
     clearTimeout(linger);
     linger = setTimeout(close, LINGER);
   };
+  // A lane that became too short closes the panel rather than keeping it
+  // half-open, so the next pointer move after it grows opens it afresh.
+  createEffect(() => {
+    if (!shown() && untrack(open)) close();
+  });
   const local = (event: MouseEvent) => event.clientY - (lane?.getBoundingClientRect().top ?? 0);
   // A list longer than the panel starts scrolled to the dash the pointer
   // opened on: the prompt being read when that dash's slice holds it.
   const openAt = (y: number) => {
+    if (!shown()) return;
     const list = starts();
     const pitch = folded().pitch;
     const slot = pitch > 0 ? Math.max(0, Math.min(list.length - 1, Math.round((y - folded().top) / pitch))) : 0;
@@ -100,6 +107,7 @@ export function ConversationOutline(props: {
     <nav
       ref={lane}
       class="outline"
+      hidden={!shown()}
       data-state={box() ? "open" : "folded"}
       aria-label={t("Chat outline")}
     >
@@ -128,7 +136,8 @@ export function ConversationOutline(props: {
         class="outline-lane"
         style={{
           top: `${folded().top - 14}px`,
-          height: `${folded().pitch * Math.max(starts().length - 1, 0) + 28}px`,
+          // Never past the lane's bottom edge.
+          height: `${Math.min(folded().pitch * Math.max(starts().length - 1, 0) + 28, props.height() - folded().top + 14)}px`,
           width: `${LANE}px`,
         }}
         onPointerMove={(event) => {
