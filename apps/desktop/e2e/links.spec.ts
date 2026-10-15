@@ -12,6 +12,7 @@ test.describe.configure({ mode: "serial" });
 
 let app: ElectronApplication, page: Page, client: Haarness;
 let temporary: string, workspace: string, other: string;
+let binary: string, env: Record<string, string>;
 const errors: string[] = [];
 
 type Box = { message: string; detail?: string; buttons?: string[]; cancelId?: number };
@@ -40,8 +41,8 @@ test.beforeAll(async () => {
     join(workspace, "docs/guide.md"),
     "# Guide\n\nRead [the source](../src/a.ts#L120) or [elsewhere](../../outside.md).\n",
   );
-  const binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
-  const env: Record<string, string> = {
+  binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
+  env = {
     ...(process.env as Record<string, string>),
     HAARNESS_BIN: binary,
     HAARNESS_HOME: join(temporary, "home"),
@@ -88,6 +89,21 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   client?.close();
   await app?.close();
+  // The project servers outlive the app; stop both, the linked one as it was
+  // opened (with its project configuration off).
+  for (const [directory, flag] of [
+    [workspace, "--trust-project"],
+    [other, "--disable-project-config"],
+  ]) {
+    if (!directory) continue;
+    try {
+      execFileSync(binary, ["--workspace", directory, flag, "serve", "--stop"], {
+        env,
+        stdio: "ignore",
+        timeout: 30_000,
+      });
+    } catch {}
+  }
   if (temporary) await rm(temporary, { recursive: true, force: true }).catch(() => {});
 });
 
