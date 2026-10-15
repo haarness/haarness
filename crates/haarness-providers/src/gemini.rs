@@ -701,6 +701,19 @@ mod tests {
         ([(CONTENT_TYPE, "text/event-stream")], stream.into())
     }
 
+    async fn malformed_call(
+        State(state): State<FixtureState>,
+        Json(request): Json<Value>,
+    ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+        state.0.lock().push(request);
+        let stream = r#"data: {"responseId":"response-1","candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"read","args":{"path":"a.txt"}},"thoughtSignature":"sig"}]}}]}
+
+data: {"responseId":"response-1","candidates":[{"content":{"role":"model"},"finishReason":"MALFORMED_FUNCTION_CALL","finishMessage":"Malformed function call: call:read{path:b.txt"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3}}
+
+"#;
+        ([(CONTENT_TYPE, "text/event-stream")], stream.into())
+    }
+
     #[test]
     fn api_key_lookup_uses_google_then_gemini_then_compatibility_name() {
         let mut requested = Vec::new();
@@ -956,6 +969,56 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(argon.reasoning_efforts, ["low", "medium", "high"]);
+    }
+
+    #[tokio::test]
+    async fn a_dropped_call_after_a_valid_one_streams_the_call_then_an_incomplete_finish() {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route(
+                "/models/gemini-4-argon:streamGenerateContent",
+                post(malformed_call),
+            )
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = GeminiProvider::for_test(format!("http://{address}"));
+        let events = provider
+            .stream(
+                ProviderRequest {
+                    model: "gemini-4-argon".into(),
+                    system: "test".into(),
+                    messages: vec![ProviderMessage::Text {
+                        role: "user".into(),
+                        content: "read both".into(),
+                    }],
+                    tools: vec![],
+                    reasoning_effort: Some("minimal".into()),
+                    parameters: haarness_core::RequestParameters::default(),
+                    output_schema: None,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>()
+            .await;
+        assert!(matches!(&events[0], ProviderEvent::ToolCall { name, .. } if name == "read"));
+        let Some(ProviderEvent::Finished { reason }) = events.last() else {
+            panic!("{events:?}");
+        };
+        assert!(ProviderEvent::dropped_tool_call(reason));
+        assert!(matches!(
+            ProviderEvent::finish_error(reason),
+            Some(haarness_core::CoreError::ProviderIncomplete(_))
+        ));
+        // Gemini 4 has no `minimal` and no thinking budget.
+        assert_eq!(
+            state.0.lock()[0]["generationConfig"]["thinkingConfig"],
+            json!({"thinkingLevel": "low", "includeThoughts": true})
+        );
     }
 
     #[test]
