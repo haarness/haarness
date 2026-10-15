@@ -173,6 +173,7 @@ test("Haarness account signs in through a browser, discovers Cloud models, and s
         ["openai/gpt-6-astra", ["low", "medium", "high", "xhigh", "max"]],
         ["anthropic/claude-sonnet-4.6", ["low", "medium", "high", "max"]],
         ["anthropic/claude-haiku-4.5", ["low", "medium", "high"]],
+        ["google/gemini-4-argon", ["low", "medium", "high"]],
         ["google/gemini-3.8-flash", ["low", "medium", "high"]],
         ["google/gemini-3.5-flash-lite", ["minimal", "low", "medium", "high"]],
       ] as const;

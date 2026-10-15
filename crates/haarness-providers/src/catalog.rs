@@ -233,6 +233,8 @@ const CATALOG: &[(&str, &[CatalogEntry])] = &[
     (
         "gemini",
         &[
+            // Probed 2026-10-15: the Models API lists 32,768 output tokens.
+            entry("gemini-4-argon", 1_048_576, 32_768, None),
             entry("gemini-3.8-flash", 1_048_576, 65_536, None),
             entry(
                 "gemini-3.7-flash",
@@ -585,6 +587,7 @@ mod tests {
             ("openai", "gpt-6.1-sol", 2.0, 10.0),
             ("openai", "gpt-6-sol", 2.0, 10.0),
             ("openai", "gpt-5.5", 5.0, 30.0),
+            ("gemini", "gemini-4-argon", 2.0, 10.0),
             ("gemini", "gemini-3.8-flash", 0.75, 3.75),
             ("gemini", "gemini-3.1-pro-preview", 2.0, 12.0),
             // Fallback prices for models the table does not list.
