@@ -52,9 +52,11 @@ impl ModelProvider for Scripted {
             .unwrap()
             .pop_front()
             .unwrap_or_else(|| vec![ProviderEvent::TextDelta("Recovered".into())]);
-        events.push(ProviderEvent::Finished {
-            reason: "done".into(),
-        });
+        if !matches!(events.last(), Some(ProviderEvent::Finished { .. })) {
+            events.push(ProviderEvent::Finished {
+                reason: "done".into(),
+            });
+        }
         Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
     }
 }
@@ -197,6 +199,57 @@ async fn provider_receives_field_feedback_then_corrects_and_reads_real_file() {
     assert!(requests[2].messages.iter().any(|message| matches!(message,
         ProviderMessage::ToolResult { name, output, is_error: false, .. }
             if name == "read" && output.contains("real file contents"))));
+}
+
+fn malformed() -> ProviderEvent {
+    ProviderEvent::Finished {
+        reason: "MALFORMED_FUNCTION_CALL".into(),
+    }
+}
+
+fn asks_to_continue(request: &ProviderRequest) -> bool {
+    matches!(request.messages.last(), Some(ProviderMessage::Text { role, content })
+        if role == "user" && content.contains("ended before completion"))
+}
+
+#[tokio::test]
+async fn gemini_malformed_call_alone_is_retried_with_the_recovery_note() {
+    let fixture = Fixture::new(RuntimeConfig::default());
+    let items = fixture.run(vec![vec![malformed()]]).await;
+    assert!(items.iter().any(
+        |item| matches!(&item.data, ItemData::AssistantMessage { text } if text == "Recovered")
+    ));
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(&item.data, ItemData::Error { .. }))
+    );
+    let requests = fixture.provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(!asks_to_continue(&requests[0]));
+    assert!(asks_to_continue(&requests[1]));
+}
+
+#[tokio::test]
+async fn gemini_malformed_call_runs_the_valid_calls_before_it_and_continues() {
+    let fixture = Fixture::new(RuntimeConfig::default());
+    let items = fixture
+        .run(vec![vec![
+            call("valid", "Read", json!({"path":"sample.txt"})),
+            malformed(),
+        ]])
+        .await;
+    assert!(items.iter().any(|item| matches!(&item.data,
+        ItemData::ToolResult { call_id, output, is_error: false, .. }
+            if call_id == "valid" && output.contains("real file contents"))));
+    assert!(items.iter().any(
+        |item| matches!(&item.data, ItemData::AssistantMessage { text } if text == "Recovered")
+    ));
+    let requests = fixture.provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].messages.iter().any(|message| matches!(message,
+        ProviderMessage::ToolResult { call_id, is_error: false, .. } if call_id == "valid")));
+    assert!(asks_to_continue(&requests[1]));
 }
 
 #[tokio::test]
