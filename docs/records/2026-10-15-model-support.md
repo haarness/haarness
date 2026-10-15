@@ -46,4 +46,6 @@ another session) and the live-Cloud Desktop account spec, which needs one.
 - The price table has no dated prices. Cloud will bill Argon at $2/$10 after Google's
   price doubles on 2026-12-01 unless the entry is updated by hand that day (Gemini 3.8
   Flash has the same kind of note for 2027-01-01). A `from` date per price would let the
-  table carry both.
+  table carry both. Done the same day: an entry's `changes` schedules dated prices
+  (MODELS.md, Prices), and Argon's December price and the 3.8/3.6 Flash prices from
+  2027-01-01 are scheduled in both copies of the table.

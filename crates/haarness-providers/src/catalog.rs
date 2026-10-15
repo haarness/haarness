@@ -8,11 +8,13 @@
 //!
 //! Prices come first from `model-prices.json`, Haarness's reviewed price
 //! table: provider list prices checked by hand against each provider's price
-//! page, the same file Haarness Cloud bills from. The catalog's own prices are
-//! the fallback for models the table does not list.
+//! page, the same file Haarness Cloud bills from, including the price changes
+//! a provider has announced for a date. The catalog's own prices are the
+//! fallback for models the table does not list.
 
 use std::sync::LazyLock;
 
+use chrono::NaiveDate;
 use haarness_protocol::{LongContextPricing, ModelInfo, ModelPricing};
 use serde::{Deserialize, Deserializer};
 
@@ -346,6 +348,16 @@ struct ReviewedPrice {
     id: String,
     #[serde(default)]
     aliases: Vec<String>,
+    /// The rates until the first scheduled change.
+    #[serde(flatten)]
+    rates: ReviewedRates,
+    /// Announced price changes in date order.
+    #[serde(default)]
+    changes: Vec<ReviewedChange>,
+}
+
+#[derive(Deserialize)]
+struct ReviewedRates {
     #[serde(deserialize_with = "rate")]
     input: f64,
     #[serde(deserialize_with = "rate")]
@@ -356,6 +368,27 @@ struct ReviewedPrice {
     cache_write: f64,
     #[serde(default)]
     long_context: Option<ReviewedTier>,
+}
+
+/// Every rate from 00:00 UTC on `from`, as Cloud bills it; a tier the change
+/// does not list is gone from that day.
+#[derive(Deserialize)]
+struct ReviewedChange {
+    from: NaiveDate,
+    #[serde(flatten)]
+    rates: ReviewedRates,
+}
+
+impl ReviewedPrice {
+    /// The rates in force on `day` (UTC): the latest change that has come,
+    /// else the entry's own.
+    fn rates_on(&self, day: NaiveDate) -> &ReviewedRates {
+        self.changes
+            .iter()
+            .filter(|change| change.from <= day)
+            .max_by_key(|change| change.from)
+            .map_or(&self.rates, |change| &change.rates)
+    }
 }
 
 #[derive(Deserialize)]
@@ -409,17 +442,25 @@ fn reviewed(model_id: &str) -> Option<&'static ReviewedPrice> {
     })
 }
 
-/// A model's list price: the reviewed table's when it lists the model (by id,
-/// alias or dated snapshot, from any provider), else the catalog's fallback.
+/// A model's list price today (UTC): the reviewed table's when it lists the
+/// model (by id, alias or dated snapshot, from any provider), else the
+/// catalog's fallback.
 #[must_use]
 pub fn pricing(provider: &str, model_id: &str) -> Option<ModelPricing> {
+    pricing_on(provider, model_id, chrono::Utc::now().date_naive())
+}
+
+/// `pricing` on `day` (UTC): a scheduled change applies from its `from` date,
+/// as in Haarness Cloud's billing.
+fn pricing_on(provider: &str, model_id: &str, day: NaiveDate) -> Option<ModelPricing> {
     if let Some(price) = reviewed(model_id) {
+        let rates = price.rates_on(day);
         return Some(ModelPricing {
-            input: price.input,
-            output: price.output,
-            cache_read: price.cache_read,
-            cache_write: price.cache_write,
-            long_context: price.long_context.as_ref().map(|tier| LongContextPricing {
+            input: rates.input,
+            output: rates.output,
+            cache_read: rates.cache_read,
+            cache_write: rates.cache_write,
+            long_context: rates.long_context.as_ref().map(|tier| LongContextPricing {
                 above_input_tokens: tier.above_input_tokens,
                 input: tier.input,
                 output: tier.output,
@@ -517,7 +558,13 @@ pub fn annotate(provider: &str, mut info: ModelInfo) -> ModelInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{annotate, lookup, pricing, reviewed, ships};
+    use chrono::NaiveDate;
+
+    use super::{annotate, lookup, pricing, pricing_on, reviewed, ships};
+
+    fn day(date: &str) -> NaiveDate {
+        date.parse().unwrap()
+    }
 
     #[test]
     fn only_listed_models_and_their_snapshots_are_shipped() {
@@ -594,7 +641,7 @@ mod tests {
             ("openai", "gpt-5.4", 2.5, 15.0),
             ("anthropic", "claude-opus-4-1-20250805", 15.0, 75.0),
         ] {
-            let price = pricing(provider, model)
+            let price = pricing_on(provider, model, day("2026-10-15"))
                 .unwrap_or_else(|| panic!("{provider}/{model} has no price"));
             assert!(
                 (price.input - input).abs() < f64::EPSILON
@@ -602,6 +649,62 @@ mod tests {
                 "{provider}/{model}: {price:?}"
             );
         }
+    }
+
+    #[test]
+    fn scheduled_price_changes_apply_from_their_day() {
+        let argon = |date: &str| pricing_on("gemini", "gemini-4-argon", day(date)).unwrap();
+        let november = argon("2026-11-30");
+        assert!((november.input - 2.0).abs() < f64::EPSILON);
+        assert!((november.output - 10.0).abs() < f64::EPSILON);
+        assert!((november.cache_read - 0.1).abs() < f64::EPSILON);
+        assert!((november.cache_write - 2.0).abs() < f64::EPSILON);
+        for date in ["2026-12-01", "2027-06-30"] {
+            let december = argon(date);
+            assert!((december.input - 4.0).abs() < f64::EPSILON, "{date}");
+            assert!((december.output - 20.0).abs() < f64::EPSILON, "{date}");
+            assert!((december.cache_read - 0.2).abs() < f64::EPSILON, "{date}");
+            assert!((december.cache_write - 4.0).abs() < f64::EPSILON, "{date}");
+            assert!(december.long_context.is_none(), "{date}");
+        }
+        // Routed ids and aliases follow the same schedule.
+        let routed = pricing_on("router", "google/gemini-4-argon", day("2026-12-01")).unwrap();
+        assert!((routed.input - 4.0).abs() < f64::EPSILON);
+        let flash = |date: &str| {
+            pricing_on("gemini", "gemini-3.8-flash", day(date))
+                .unwrap()
+                .input
+        };
+        assert!((flash("2026-12-31") - 0.75).abs() < f64::EPSILON);
+        assert!((flash("2027-01-01") - 1.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn a_change_replaces_every_rate_and_the_latest_one_wins() {
+        let price: super::ReviewedPrice = serde_json::from_str(
+            r#"{
+                "id": "openai/example",
+                "input": "1", "output": "2", "cache_read": "0.1", "cache_write": "1",
+                "long_context": {"above_input_tokens": 1000, "input": "2", "output": "4", "cache_read": "0.2", "cache_write": "2"},
+                "changes": [
+                    {"from": "2026-12-01", "input": "3", "output": "6", "cache_read": "0.3", "cache_write": "3",
+                     "long_context": {"above_input_tokens": 2000, "input": "6", "output": "12", "cache_read": "0.6", "cache_write": "6"}},
+                    {"from": "2027-01-01", "input": "5", "output": "10", "cache_read": "0.5", "cache_write": "5"}
+                ],
+                "source": "https://example.com/pricing",
+                "checked": "2026-10-15"
+            }"#,
+        )
+        .unwrap();
+        let input = |date: &str| price.rates_on(day(date)).input;
+        assert!((input("2026-11-30") - 1.0).abs() < f64::EPSILON);
+        assert!((input("2026-12-01") - 3.0).abs() < f64::EPSILON);
+        assert!((input("2026-12-31") - 3.0).abs() < f64::EPSILON);
+        assert!((input("2027-01-01") - 5.0).abs() < f64::EPSILON);
+        let tier = price.rates_on(day("2026-12-15")).long_context.as_ref();
+        assert_eq!(tier.unwrap().above_input_tokens, 2000);
+        // A change that lists no tier ends the tier.
+        assert!(price.rates_on(day("2027-01-01")).long_context.is_none());
     }
 
     #[test]
@@ -704,20 +807,37 @@ mod tests {
         let flash = pricing("gemini", "gemini-3.8-flash").unwrap();
         assert!((flash.cache_write - flash.input).abs() < f64::EPSILON);
         for price in super::REVIEWED.iter() {
-            let rates = [
-                price.input,
-                price.output,
-                price.cache_read,
-                price.cache_write,
-            ];
+            // Haarness Cloud refuses a table whose changes are out of order.
             assert!(
-                rates.iter().all(|rate| rate.is_finite() && *rate >= 0.0),
-                "{}",
+                price
+                    .changes
+                    .windows(2)
+                    .all(|pair| pair[0].from < pair[1].from),
+                "{}: changes must be in date order, one per date",
                 price.id
             );
-            assert!(price.cache_read <= price.input, "{}", price.id);
-            if let Some(tier) = &price.long_context {
-                assert!(tier.input > price.input, "{}", price.id);
+            let schedule = std::iter::once((None, &price.rates)).chain(
+                price
+                    .changes
+                    .iter()
+                    .map(|change| (Some(change.from), &change.rates)),
+            );
+            for (from, rates) in schedule {
+                let all = [
+                    rates.input,
+                    rates.output,
+                    rates.cache_read,
+                    rates.cache_write,
+                ];
+                assert!(
+                    all.iter().all(|rate| rate.is_finite() && *rate >= 0.0),
+                    "{} {from:?}",
+                    price.id
+                );
+                assert!(rates.cache_read <= rates.input, "{} {from:?}", price.id);
+                if let Some(tier) = &rates.long_context {
+                    assert!(tier.input > rates.input, "{} {from:?}", price.id);
+                }
             }
         }
     }
