@@ -2416,5 +2416,10 @@
   "Links to network locations do not open.": "Linkovi na mrežne lokacije se ne otvaraju.",
   "Only files in this project open from a link.": "Iz linka se otvaraju samo datoteke iz ovog projekta.",
   "This kind of link does not open in Haarness.": "Ova vrsta linka se ne otvara u Haarnessu.",
-  "{path} was not found in this project.": "{path} nije pronađen u ovom projektu."
+  "{path} was not found in this project.": "{path} nije pronađen u ovom projektu.",
+  "This Haarness link could not be opened.": "Ovaj Haarness link nije moguće otvoriti.",
+  "The folder in this link was not found.": "Mapa iz ovog linka nije pronađena.",
+  "Open “{folder}” from a link?": "Otvoriti „{folder}” iz linka?",
+  "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "Mapa se otvara s isključenom konfiguracijom projekta: MCP serveri, hookovi i proširenja u njoj se ne pokreću. Da ih uključite, otvorite mapu pomoću opcije Otvori projekat.",
+  "Open folder": "Otvori mapu"
 }

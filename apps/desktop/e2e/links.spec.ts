@@ -180,3 +180,52 @@ test("file links in a reply open project files in the Files panel; others say wh
   expect((await calls()).shell).toEqual([["openExternal", "mailto:me@example.test?subject=Hi"]]);
   expect(errors).toEqual([]);
 });
+
+test("a haarness:// link opens a saved folder directly and confirms any other, which opens untrusted", async ({}, info) => {
+  test.setTimeout(180000);
+  const deepLink = (url: string) =>
+    app.evaluate(({ BrowserWindow }, url) => {
+      BrowserWindow.getAllWindows()[0]!.webContents.send("haarness:event", {
+        kind: "menu",
+        data: { action: "deep-link", url },
+      });
+    }, url);
+  const projects = () => page.evaluate(() => window.haarness.projects());
+  const linked = "haarness://open?workspace=" + encodeURIComponent(` ${other} `);
+
+  // Declined: nothing opens and nothing is saved.
+  await app.evaluate(() => void ((globalThis as unknown as { calls: Calls }).calls.answer = 1));
+  await deepLink(linked);
+  await expect.poll(async () => (await calls()).boxes.length).toBe(1);
+  const box = (await calls()).boxes[0]!;
+  expect(box.message).toBe("Open “linked project” from a link?");
+  expect(box.detail).toContain(other);
+  expect(box.detail).toContain("MCP servers, hooks and extensions in this folder do not run");
+  expect(box.buttons).toEqual(["Open folder", "Cancel"]);
+  expect(box.cancelId).toBe(1);
+  await page.waitForTimeout(500);
+  expect((await projects()).some((item) => item.workspace === other)).toBe(false);
+
+  // Accepted: the folder opens with its project configuration off.
+  await app.evaluate(() => void ((globalThis as unknown as { calls: Calls }).calls.answer = 0));
+  await deepLink(linked);
+  await expect.poll(async () => (await calls()).boxes.length).toBe(2);
+  await expect
+    .poll(async () => (await projects()).find((item) => item.workspace === other)?.trust)
+    .toBe(false);
+  await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 90000 });
+  await page.screenshot({ path: info.outputPath("deep-link-untrusted.png") });
+
+  // A folder already in the sidebar opens as saved, without asking, at the linked chat.
+  const thread = (await client.listThreads()).find((item) => item.title === "Link fixture")!;
+  await deepLink(`haarness://open?workspace=${encodeURIComponent(workspace)}&session=%20${thread.id}%20`);
+  await expect(page.locator(".session-bar")).toContainText("Link fixture", { timeout: 90000 });
+  expect((await calls()).boxes.length).toBe(2);
+  expect((await projects()).find((item) => item.workspace === workspace)?.trust).toBe(true);
+
+  // A network folder is refused before anything looks at it.
+  await deepLink("haarness://open?workspace=" + encodeURIComponent("//server/share"));
+  await expect(toast()).toHaveText("This Haarness link could not be opened.");
+  expect((await calls()).boxes.length).toBe(2);
+  expect(errors).toEqual([]);
+});

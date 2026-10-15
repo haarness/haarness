@@ -2416,5 +2416,10 @@
   "Links to network locations do not open.": "Les liens vers des emplacements réseau ne s’ouvrent pas.",
   "Only files in this project open from a link.": "Seuls les fichiers de ce projet s’ouvrent depuis un lien.",
   "This kind of link does not open in Haarness.": "Ce type de lien ne s’ouvre pas dans Haarness.",
-  "{path} was not found in this project.": "{path} est introuvable dans ce projet."
+  "{path} was not found in this project.": "{path} est introuvable dans ce projet.",
+  "This Haarness link could not be opened.": "Impossible d’ouvrir ce lien Haarness.",
+  "The folder in this link was not found.": "Le dossier de ce lien est introuvable.",
+  "Open “{folder}” from a link?": "Ouvrir « {folder} » depuis un lien ?",
+  "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "Le dossier s’ouvre avec la configuration du projet désactivée : ses serveurs MCP, hooks et extensions ne s’exécutent pas. Pour les activer, ouvrez le dossier avec « Ouvrir un projet ».",
+  "Open folder": "Ouvrir le dossier"
 }

@@ -2416,5 +2416,10 @@
   "Links to network locations do not open.": "Ağ konumlarına giden bağlantılar açılmaz.",
   "Only files in this project open from a link.": "Bağlantıdan yalnızca bu projedeki dosyalar açılır.",
   "This kind of link does not open in Haarness.": "Bu tür bağlantılar Haarness’ta açılmaz.",
-  "{path} was not found in this project.": "{path} bu projede bulunamadı."
+  "{path} was not found in this project.": "{path} bu projede bulunamadı.",
+  "This Haarness link could not be opened.": "Bu Haarness bağlantısı açılamadı.",
+  "The folder in this link was not found.": "Bu bağlantıdaki klasör bulunamadı.",
+  "Open “{folder}” from a link?": "“{folder}” bir bağlantıdan açılsın mı?",
+  "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "Klasör proje yapılandırması kapalı olarak açılır: içindeki MCP sunucuları, kancalar ve uzantılar çalışmaz. Bunları açmak için klasörü Proje aç ile açın.",
+  "Open folder": "Klasörü aç"
 }

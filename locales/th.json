@@ -2416,5 +2416,10 @@
   "Links to network locations do not open.": "ลิงก์ไปยังตำแหน่งบนเครือข่ายจะไม่เปิด",
   "Only files in this project open from a link.": "เปิดจากลิงก์ได้เฉพาะไฟล์ในโปรเจกต์นี้เท่านั้น",
   "This kind of link does not open in Haarness.": "ลิงก์ประเภทนี้เปิดใน Haarness ไม่ได้",
-  "{path} was not found in this project.": "ไม่พบ {path} ในโปรเจกต์นี้"
+  "{path} was not found in this project.": "ไม่พบ {path} ในโปรเจกต์นี้",
+  "This Haarness link could not be opened.": "ไม่สามารถเปิดลิงก์ Haarness นี้ได้",
+  "The folder in this link was not found.": "ไม่พบโฟลเดอร์ในลิงก์นี้",
+  "Open “{folder}” from a link?": "เปิด “{folder}” จากลิงก์หรือไม่",
+  "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "โฟลเดอร์จะเปิดโดยปิดการกำหนดค่าโปรเจกต์ไว้: เซิร์ฟเวอร์ MCP ฮุก และส่วนขยายในโฟลเดอร์นี้จะไม่ทำงาน หากต้องการเปิดใช้งาน ให้เปิดโฟลเดอร์ด้วย “เปิดโปรเจกต์”",
+  "Open folder": "เปิดโฟลเดอร์"
 }

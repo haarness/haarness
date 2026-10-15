@@ -2416,5 +2416,10 @@
   "Links to network locations do not open.": "指向網路位置的連結不會開啟。",
   "Only files in this project open from a link.": "只有此專案中的檔案可以透過連結開啟。",
   "This kind of link does not open in Haarness.": "此類連結無法在 Haarness 中開啟。",
-  "{path} was not found in this project.": "在此專案中找不到 {path}。"
+  "{path} was not found in this project.": "在此專案中找不到 {path}。",
+  "This Haarness link could not be opened.": "無法開啟此 Haarness 連結。",
+  "The folder in this link was not found.": "找不到此連結中的資料夾。",
+  "Open “{folder}” from a link?": "要從連結開啟「{folder}」嗎？",
+  "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "它會在專案設定停用的狀態下開啟：此資料夾中的 MCP 伺服器、掛鉤和擴充功能不會執行。若要啟用它們，請透過「開啟專案」開啟該資料夾。",
+  "Open folder": "開啟資料夾"
 }

@@ -2416,5 +2416,10 @@
   "Links to network locations do not open.": "ネットワーク上の場所へのリンクは開きません。",
   "Only files in this project open from a link.": "リンクから開けるのは、このプロジェクト内のファイルだけです。",
   "This kind of link does not open in Haarness.": "この種類のリンクは Haarness では開きません。",
-  "{path} was not found in this project.": "このプロジェクトに {path} が見つかりません。"
+  "{path} was not found in this project.": "このプロジェクトに {path} が見つかりません。",
+  "This Haarness link could not be opened.": "この Haarness リンクを開けませんでした。",
+  "The folder in this link was not found.": "このリンクのフォルダーが見つかりません。",
+  "Open “{folder}” from a link?": "リンクから「{folder}」を開きますか？",
+  "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "プロジェクト設定を無効にした状態で開きます。このフォルダーの MCP サーバー、フック、拡張機能は実行されません。有効にするには、「プロジェクトを開く」でフォルダーを開いてください。",
+  "Open folder": "フォルダーを開く"
 }

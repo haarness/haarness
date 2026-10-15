@@ -2416,5 +2416,10 @@
   "Links to network locations do not open.": "Lenker til nettverksplasseringer åpnes ikke.",
   "Only files in this project open from a link.": "Bare filer i dette prosjektet kan åpnes fra en lenke.",
   "This kind of link does not open in Haarness.": "Denne typen lenke åpnes ikke i Haarness.",
-  "{path} was not found in this project.": "Fant ikke {path} i dette prosjektet."
+  "{path} was not found in this project.": "Fant ikke {path} i dette prosjektet.",
+  "This Haarness link could not be opened.": "Denne Haarness-lenken kunne ikke åpnes.",
+  "The folder in this link was not found.": "Fant ikke mappen i denne lenken.",
+  "Open “{folder}” from a link?": "Vil du åpne «{folder}» fra en lenke?",
+  "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "Mappen åpnes med prosjektkonfigurasjonen slått av: MCP-servere, hooks og utvidelser i den kjører ikke. Åpne mappen med Åpne prosjekt for å slå dem på.",
+  "Open folder": "Åpne mappe"
 }
