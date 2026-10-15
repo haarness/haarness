@@ -59,13 +59,35 @@ snapshot of OpenRouter's list prices; Cloud prices those from OpenRouter's live
 catalogue. Prices a provider reports with its models (OpenRouter, Haarness Cloud)
 win over both.
 
+A provider's announced price change goes in the entry's `changes`, so nobody has
+to edit the table on the day:
+
+```json
+"changes": [
+  {"from": "2026-12-01", "input": "4", "output": "20", "cache_read": "0.2", "cache_write": "4"}
+]
+```
+
+Each change lists every rate billed from 00:00 UTC on its `from` date,
+`long_context` included (a change without one ends the tier), in date order, one
+per date. The latest change whose date has come replaces the entry's own rates;
+before the first, the entry's own rates apply. Cloud prices each pricebook import
+by its UTC date, and its import task wakes just after midnight UTC when a change
+is due, publishing a new pricebook version within a minute or so of the change;
+the app prices by the computer's clock in UTC. Once a change is in force and has
+been checked on the provider's page, fold it into the entry's own rates.
+
 Nothing checks these prices automatically. Monthly, and when a model ships, run
 `python3 scripts/check-model-prices.py`. It lists table entries whose OpenRouter
 price now differs (the provider changed its price, or OpenRouter is wrong; an
 entry's `note` explains a known difference), entries not checked for 30 days, and
-recent models priced by OpenRouter, with where the app's fallback disagrees. Fix or
-add the entry in haarness-cloud from the provider's page with today's `checked`
-date, then `--sync` copies the table here.
+recent models priced by OpenRouter, with where the app's fallback disagrees. It
+also lists every scheduled change and flags one due within 14 days (`--due`), so
+its price is confirmed on the provider's page before Cloud starts billing it, and
+one that adds or ends a long-context tier. The script reads OpenRouter's catalogue
+but never a provider's page: confirming a price is a person's job. Fix or add the
+entry in haarness-cloud from the provider's page with today's `checked` date,
+then `--sync` copies the table here.
 
 ## Gemini 4 Argon: 2026-10-15
 
@@ -83,9 +105,10 @@ modes (including the array bounds that break forced calling on older models),
 JSON-schema output, images, PDFs, `countTokens`, `temperature` and implicit
 cache hits all working; there is no explicit caching. Its reviewed price is
 $2/$10 per million (cached input $0.10) through 2026-11-30 and $4/$20 (cached
-input $0.20) from 2026-12-01, with no long-context tier: the price table has no
-dated prices, so the entry's note carries the change and the table must be
-updated by hand on that date.
+input $0.20) from 2026-12-01, with no long-context tier. The entry schedules the
+December price in `changes` (see [Prices](#prices)), so Cloud bills it from
+00:00 UTC that day without an edit; Gemini 3.8 and 3.6 Flash schedule their
+2027-01-01 doubling the same way.
 
 ## API and metadata update: 2026-10-10
 

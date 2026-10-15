@@ -11,15 +11,21 @@ embeds an identical copy in `crates/haarness-providers/src/`. Every model the ta
 OpenRouter's catalogue: Cloud imports it hourly, the app keeps a snapshot in `catalog.rs`. Nothing reviews either
 automatically, so this reports:
 
-- table entries whose OpenRouter price differs: the provider changed its price, or OpenRouter is wrong (an entry's
-  `note` explains a known difference, which is shown but not counted);
+- price changes the table schedules (an entry's `changes`), flagging one due within `--due` days so its new price
+  is confirmed on the provider's page before Cloud starts billing it, and one that adds or ends a long-context tier;
+- table entries whose OpenRouter price differs from today's rates: the provider changed its price, or OpenRouter is
+  wrong (an entry's `note` explains a known difference, and OpenRouter may already list a scheduled change's price;
+  both are shown but not counted);
 - table entries not checked for `--stale` days;
 - recent OpenAI, Anthropic and Gemini models the table does not list, which Cloud bills at OpenRouter's price,
   and where the app's fallback price disagrees with it;
 - whether the app's copy of the table matches haarness-cloud's.
 
 To fix an entry, or to add a model, open the provider's page, write its numbers and today's `checked` date into
-haarness-cloud's `config/model-prices.json`, run this with `--sync`, and deploy Cloud. Needs the network.
+haarness-cloud's `config/model-prices.json`, run this with `--sync`, and deploy Cloud. When a provider announces a
+price for a later date, add it to the entry's `changes` instead: `{"from": "YYYY-MM-DD", ...}` with every rate,
+`long_context` included, billed from 00:00 UTC that day. Needs the network for OpenRouter's catalogue; nothing is
+fetched from the providers' own pages.
 """
 import argparse
 import datetime
@@ -136,15 +142,87 @@ def differences(ours, listed):
     return found
 
 
-def table_prices(entry):
-    tier = entry.get("long_context")
+def rates_on(entry, day):
+    """The rates billed on `day` (UTC): the latest change whose `from` date has come, else the entry's own."""
+    started = [change for change in entry.get("changes", []) if datetime.date.fromisoformat(change["from"]) <= day]
+    return max(started, key=lambda change: change["from"], default=entry)
+
+
+def table_prices(rates):
+    tier = rates.get("long_context")
     return (
-        float(entry["input"]),
-        float(entry["output"]),
-        float(entry["cache_read"]),
-        float(entry["cache_write"]),
+        float(rates["input"]),
+        float(rates["output"]),
+        float(rates["cache_read"]),
+        float(rates["cache_write"]),
         tier and (tier["above_input_tokens"], float(tier["input"]), float(tier["output"])),
     )
+
+
+def rate_changes(old, new):
+    """What a scheduled change does to the rates before it, e.g. `2/10 → 4/20, cache read 0.1 → 0.2`."""
+    (oi, oo, ocr, ocw, otier), (ni, no, ncr, ncw, ntier) = table_prices(old), table_prices(new)
+    found = [f"{oi:g}/{oo:g} → {ni:g}/{no:g}"] if (oi, oo) != (ni, no) else []
+    found += [f"{name} {a:g} → {b:g}" for name, a, b in (("cache read", ocr, ncr), ("cache write", ocw, ncw)) if a != b]
+    if otier and not ntier:
+        found.append("ends the long-context tier")
+    elif ntier and not otier:
+        found.append(f"adds a long-context tier, {ntier[1]:g}/{ntier[2]:g} over {ntier[0]}")
+    elif old.get("long_context") != new.get("long_context"):
+        found.append(f"long-context {otier[1]:g}/{otier[2]:g} over {otier[0]} → {ntier[1]:g}/{ntier[2]:g} over {ntier[0]}")
+    return ", ".join(found) or "no rate changes"
+
+
+def schedule_problems(entry):
+    """Changes Cloud would refuse (or misread): a missing rate, a bad date, dates out of order."""
+    problems, previous = [], None
+    for change in entry.get("changes", []):
+        missing = [name for name in ("from", "input", "output", "cache_read", "cache_write") if name not in change]
+        if missing:
+            problems.append(f"a change lacks {', '.join(missing)}")
+            continue
+        try:
+            day = datetime.date.fromisoformat(change["from"])
+        except ValueError:
+            day = None
+        if day is None or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", change["from"]):
+            problems.append(f"`from` {change['from']!r} is not YYYY-MM-DD")
+            continue
+        if previous and day <= previous:
+            problems.append(f"changes out of date order at {day}")
+        previous = day
+    return problems
+
+
+def report_changes(table, today, due):
+    """Print the table's scheduled changes in date order; returns how many need a look."""
+    print("Scheduled price changes (an entry's `changes`):")
+    attention, rows = 0, []
+    for entry in table:
+        if problems := schedule_problems(entry):
+            print(f"  {entry['id']}: " + "; ".join(problems))
+            attention += 1
+            continue
+        before = entry
+        for change in entry.get("changes", []):
+            rows.append((change["from"], entry, before, change))
+            before = change
+    for start, entry, before, change in sorted(rows, key=lambda row: row[0]):
+        days = (datetime.date.fromisoformat(start) - today).days
+        what = rate_changes(before, change)
+        if days <= 0:
+            when = "in force; fold it into the entry's own rates at its next check"
+        elif days <= due:
+            when = f"in {days} days: confirm it on {entry['source']}"
+            attention += 1
+        else:
+            when = f"in {days} days"
+        # A change that adds or ends a tier is unusual: counted unless the entry's note speaks to it.
+        tiers = "long-context tier" in what and days > 0 and not entry.get("note")
+        attention += tiers
+        print(f"  {start} {entry['id']}: {what}; {when}" + (" (check the tier)" if tiers else ""))
+    print(f"  {len(rows)} scheduled; each is due a look {due} days before it takes effect at 00:00 UTC.\n")
+    return attention
 
 
 def main():
@@ -152,6 +230,7 @@ def main():
     parser.add_argument("--all", action="store_true", help="also list models released more than a year ago")
     parser.add_argument("--days", type=int, default=365, help="what counts as a recent release (default 365)")
     parser.add_argument("--stale", type=int, default=30, help="days before an entry is due a check (default 30)")
+    parser.add_argument("--due", type=int, default=14, help="days before a scheduled change is due a look (default 14)")
     parser.add_argument("--sync", action="store_true", help="copy haarness-cloud's config/model-prices.json first")
     args = parser.parse_args()
 
@@ -168,9 +247,12 @@ def main():
         return 1
 
     table = json.loads(TABLE.read_text())["models"]
+    # Cloud prices each import by its UTC date.
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    attention += report_changes(table, today, args.due)
+    table = [entry for entry in table if not schedule_problems(entry)]
     with urllib.request.urlopen(SOURCE, timeout=30) as response:
         models = {model["id"]: model for model in json.load(response)["data"]}
-    today = datetime.date.today()
 
     print("Reviewed table (model-prices.json):")
     for entry in table:
@@ -178,12 +260,20 @@ def main():
         age = (today - datetime.date.fromisoformat(entry["checked"])).days
         stale = [f"checked {age} days ago"] if age > args.stale else []
         found = [] if entry["id"] in models else ["not on OpenRouter"]
+        upcoming = [change for change in entry.get("changes", []) if datetime.date.fromisoformat(change["from"]) > today]
+        ahead = None
         for name in (entry["id"], *entry.get("aliases", [])):
             if name in models:
                 prefix = "" if name == entry["id"] else f"{name.split('/')[1]}: "
-                found += [prefix + problem for problem in differences(table_prices(entry), listed_prices(models[name], provider))]
-        # A difference the entry's note explains is shown, not counted; so is a model OpenRouter lacks.
-        known = entry.get("note") if found else None
+                listed = listed_prices(models[name], provider)
+                problems = differences(table_prices(rates_on(entry, today)), listed)
+                if problems and (
+                    change := next((c for c in upcoming if not differences(table_prices(c), listed)), None)
+                ):
+                    ahead = f"OpenRouter already lists the price from {change['from']}"
+                found += [prefix + problem for problem in problems]
+        # A difference the entry's note or schedule explains is shown, not counted; so is a model OpenRouter lacks.
+        known = (ahead or entry.get("note")) if found else None
         attention += bool(stale) or (not known and any(problem != "not on OpenRouter" for problem in found))
         if stale or found:
             print(f"  {entry['id']}: " + "; ".join(stale + found) + (f"\n      note: {known}" if known else ""))
@@ -208,7 +298,7 @@ def main():
         if (entry := reviewed(table, model_id)) is not None:
             # A dated snapshot: the app uses the entry; Cloud bills OpenRouter's price.
             app = f"app uses {entry['id']}"
-            app_problems = differences(table_prices(entry), listed)
+            app_problems = differences(table_prices(rates_on(entry, today)), listed)
         elif (fallback := lookup(entries, provider, name)) is None or fallback[1] is None:
             app, app_problems = "app shows no price", ["no app price"]
         else:
