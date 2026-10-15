@@ -834,6 +834,12 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
     let CoreError::Provider(raw) = error else {
         return error.to_string();
     };
+    if is_region_unavailable(raw) {
+        return format!(
+            "{} is not available in your country or region. Choose a model from another provider or from Haarness Cloud.",
+            provider.unwrap_or("This provider")
+        );
+    }
     if let Some((message, code, kind)) = provider_error_fields(raw) {
         let label = code.or_else(|| {
             kind.as_ref()
@@ -924,6 +930,27 @@ fn describe_error(error: &CoreError, provider: Option<&str>) -> String {
             .into();
     }
     format!("Provider error: {}", clean_error_text(raw, 600))
+}
+
+/// A provider refusing requests from where this computer is: OpenAI's
+/// `unsupported_country_region_territory`, Gemini's "User location is not
+/// supported", Bedrock's "unsupported countries, regions, or territories".
+/// Waiting does not change that, so it is never retried.
+fn is_region_unavailable(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    [
+        "unsupported_country_region_territory",
+        "country, region, or territory not supported",
+        "user location is not supported",
+        "unsupported countries, regions, or territories",
+        "not available in your country",
+        "not available in your region",
+        "unavailable in your region",
+        "restricted in your region",
+        "regional restriction",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 /// The host and port in reqwest's "error sending request for url (…)".
@@ -13365,6 +13392,31 @@ mod tests {
             ),
             "Anthropic is not connected. Connect it with an API key or by signing in, then try again."
         );
+    }
+
+    #[test]
+    fn region_refusals_name_the_provider_and_are_never_retried() {
+        for raw in [
+            "HTTP 403 Forbidden: [unsupported_country_region_territory] Country, region, or territory not supported",
+            "HTTP 400 Bad Request: User location is not supported for the API use.",
+            r#"{"error":{"code":400,"message":"User location is not supported for the API use.","status":"FAILED_PRECONDITION"}}"#,
+            "HTTP 400 Bad Request: Access to Anthropic models is not allowed from unsupported countries, regions, or territories.",
+        ] {
+            let error = CoreError::Provider(raw.into());
+            assert_eq!(
+                super::describe_error(&error, Some("Google Gemini")),
+                "Google Gemini is not available in your country or region. Choose a model from another provider or from Haarness Cloud.",
+                "{raw}"
+            );
+            assert!(
+                super::user_facing_error(&error).starts_with("This provider is not available"),
+                "{raw}"
+            );
+            assert!(super::retry_delay(&error, 1).is_none(), "{raw}");
+        }
+        assert!(!super::is_region_unavailable(
+            "HTTP 400 Bad Request: location is required"
+        ));
     }
 
     #[test]

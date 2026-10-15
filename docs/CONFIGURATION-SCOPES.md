@@ -176,6 +176,8 @@ Incomplete provider streams retain partial text and usage and receive at most th
 
 Gemini drops a function call it cannot parse, or one naming a tool it was not offered, and ends the response with `MALFORMED_FUNCTION_CALL` or `UNEXPECTED_TOOL_CALL`. Those responses count as incomplete rather than finished with an empty answer: the next request asks the model to continue, so it can issue the call again. Valid calls that arrived before the dropped one run as usual instead of being closed with an error, and only a response with no valid call uses up one of the three recovery attempts.
 
+A provider that refuses requests from this country or region (OpenAI's `unsupported_country_region_territory`, Gemini's "User location is not supported", Bedrock's "unsupported countries, regions, or territories") fails the turn at once, without retries, and says to choose a model from another provider or from Haarness Cloud.
+
 Language servers stop after ten idle minutes by default. Configure `[lsp] idle_timeout_ms` and `max_clients` (default 6) to adjust retention per workspace daemon. Active operations, including diagnostic waits, are protected. At capacity, the oldest idle client is stopped; when all clients are busy, optional language work reports a capacity error. Reaped clients restart on demand without a failure backoff.
 
 A subagent whose configured model is absent from its authenticated provider's catalog uses the parent's model and includes a substitution notice in foreground and background task results. A family or bare Claude id that no configured provider lists counts as absent. An explicit model argument takes precedence. Unknown providers and authentication/configuration errors are reported instead of triggering fallback.
