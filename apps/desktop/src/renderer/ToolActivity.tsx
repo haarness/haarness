@@ -11,6 +11,7 @@ import {
 } from "solid-js";
 import { Icon } from "./ui";
 import { Shimmer } from "./Shimmer";
+import { markSelection, selectedByClick, type SelectionMark } from "./selection-click";
 import {
   batchLabel,
   batchSteps,
@@ -42,6 +43,7 @@ export function ToolActivity(props: {
   waiting?: boolean;
 }) {
   const [open, setOpen] = createSignal(!!props.expanded);
+  let pressed: SelectionMark | undefined;
   createEffect(() => setOpen(!!props.expanded));
   const batch = createMemo(() =>
     !props.nested && toolName(props.name) === "batch"
@@ -109,7 +111,14 @@ export function ToolActivity(props: {
       open={open()}
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
-      <summary>
+      <summary
+        // A drag that selects the command or path is for copying, not for opening the row.
+        onPointerDown={(event) => (pressed = markSelection(event))}
+        onClick={(event) => {
+          if (selectedByClick(event.currentTarget, event, pressed)) event.preventDefault();
+          pressed = undefined;
+        }}
+      >
         <span class="tool-mark" aria-hidden="true">
           <Icon name={shape().icon} size="sm" />
         </span>
