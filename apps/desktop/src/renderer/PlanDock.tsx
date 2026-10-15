@@ -110,7 +110,11 @@ export function PlanDock(props: {
   );
   return (
     <Show when={visible()}>
-      <section class="plan-dock" aria-label={t("Plan")}>
+      <section
+        class="plan-dock"
+        aria-label={t("Plan")}
+        data-running={props.running || undefined}
+      >
         <div class="plan-header">
           <button
             class="plan-toggle"
