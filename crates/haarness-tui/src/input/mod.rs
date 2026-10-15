@@ -428,6 +428,22 @@ pub async fn handle_key(app: &mut App, key: KeyEvent, client: &ApiClient) -> Res
                         move_permission_selection(app, -1);
                         return Ok(AppAction::Continue);
                     }
+                    // Reading the rest of a long command keeps a staged
+                    // answer staged: that is when it is worth re-reading.
+                    KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown if plain => {
+                        let page = app.permission_fit.get().shown.max(1).cast_signed();
+                        app.scroll_permission_subject(match key.code {
+                            KeyCode::Up => -1,
+                            KeyCode::Down => 1,
+                            KeyCode::PageUp => -page,
+                            _ => page,
+                        });
+                        return Ok(AppAction::Continue);
+                    }
+                    KeyCode::Char('e') if key.modifiers == KeyModifiers::CONTROL => {
+                        app.toggle_permission_subject();
+                        return Ok(AppAction::Continue);
+                    }
                     KeyCode::Enter if plain => {
                         if let Some(staged) = app.confirm_always {
                             if app.permission_selection == 0 {
