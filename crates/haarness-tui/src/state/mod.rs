@@ -130,6 +130,32 @@ impl PermissionChoice {
     }
 }
 
+/// Where the approval card's subject (a long command, say) is scrolled to,
+/// and whether it is expanded, for the request it was moved on: any other
+/// request starts at its first row, collapsed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PermissionScroll {
+    pub permission_id: String,
+    /// First subject row shown; the card clamps it to what it can show.
+    pub offset: usize,
+    /// The subject takes every row the card can spare, not just its first
+    /// few.
+    pub expanded: bool,
+}
+
+/// How the approval card's subject fitted the last frame, so the keys that
+/// move it act on what the person saw: nothing to scroll means arrows do
+/// nothing, and expanding is offered only where it shows more.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SubjectFit {
+    /// Largest useful offset.
+    pub max_offset: usize,
+    /// Subject rows on screen; page keys move by this much.
+    pub shown: usize,
+    /// Expanding would show more rows than the collapsed card does.
+    pub expandable: bool,
+}
+
 /// Live progress of one child-agent task, keyed by its `task` call id and fed
 /// by `task.updated` events from the server.
 #[derive(Clone)]
@@ -675,6 +701,10 @@ pub struct App {
     /// `permission_choices`, or into confirm/cancel while `confirm_always`
     /// is staged.
     pub permission_selection: usize,
+    /// The approval card's subject scroll, for the request it belongs to.
+    pub permission_scroll: Option<PermissionScroll>,
+    /// How that subject fitted the most recently rendered card.
+    pub permission_fit: std::cell::Cell<SubjectFit>,
     /// What the current thread's running turn is doing (turn.status).
     pub phase: Option<PhaseInfo>,
     /// Every unanswered question in this root conversation, oldest first.
@@ -958,6 +988,8 @@ impl App {
             confirm_always: None,
             permission_typed: None,
             permission_selection: 0,
+            permission_scroll: None,
+            permission_fit: std::cell::Cell::new(SubjectFit::default()),
             phase: None,
             pending_questions: Vec::new(),
             question_selection: 0,
@@ -2758,6 +2790,62 @@ impl App {
 
     pub fn first_pending_permission(&self) -> Option<&PendingPermissionInfo> {
         self.pending_permissions.first()
+    }
+
+    /// The approval card's subject scroll for request `id`: its offset and
+    /// whether it is expanded. A request nobody moved starts at the top.
+    pub fn permission_scroll_of(&self, id: &str) -> (usize, bool) {
+        self.permission_scroll
+            .as_ref()
+            .filter(|scroll| scroll.permission_id == id)
+            .map_or((0, false), |scroll| (scroll.offset, scroll.expanded))
+    }
+
+    /// Scroll the first request's subject by `rows` (negative is up), within
+    /// what the last frame could show. False when there is nothing to move.
+    pub fn scroll_permission_subject(&mut self, rows: isize) -> bool {
+        let fit = self.permission_fit.get();
+        let Some(id) = self
+            .first_pending_permission()
+            .map(|pending| pending.permission_id.clone())
+        else {
+            return false;
+        };
+        if fit.max_offset == 0 {
+            return false;
+        }
+        let (offset, expanded) = self.permission_scroll_of(&id);
+        let offset = offset
+            .min(fit.max_offset)
+            .saturating_add_signed(rows)
+            .min(fit.max_offset);
+        self.permission_scroll = Some(PermissionScroll {
+            permission_id: id,
+            offset,
+            expanded,
+        });
+        true
+    }
+
+    /// Expand the first request's subject to every row the card can spare,
+    /// or collapse it back. Expanding is offered only where it shows more.
+    pub fn toggle_permission_subject(&mut self) -> bool {
+        let Some(id) = self
+            .first_pending_permission()
+            .map(|pending| pending.permission_id.clone())
+        else {
+            return false;
+        };
+        let (offset, expanded) = self.permission_scroll_of(&id);
+        if !expanded && !self.permission_fit.get().expandable {
+            return false;
+        }
+        self.permission_scroll = Some(PermissionScroll {
+            permission_id: id,
+            offset,
+            expanded: !expanded,
+        });
+        true
     }
     /// Queued follow-ups the running turn has not consumed yet, oldest first.
     /// These are delivery state, not conversation content: they wait in the
