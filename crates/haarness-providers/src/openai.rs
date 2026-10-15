@@ -507,6 +507,7 @@ impl ModelProvider for OpenAiProvider {
         request: ProviderRequest,
         cancel: CancellationToken,
     ) -> CoreResult<ProviderStream> {
+        let limits = request.parameters.limits;
         let auth = self.request_auth().await?;
         let subscription = matches!(auth, RequestAuth::OAuth { .. });
         let model = {
@@ -667,9 +668,9 @@ impl ModelProvider for OpenAiProvider {
             request = request.headers(headers);
         }
         request = request.json(&body);
-        let response = request.send().await.map_err(crate::sse::transport_error)?;
+        let response = crate::sse::send(request, limits).await?;
         let request_id = crate::request_id(response.headers());
-        let mut events = json_stream(response, cancel.clone());
+        let mut events = json_stream(response, cancel.clone(), limits);
         Ok(Box::pin(try_stream! {
             // Reasoning streams as indexed parts, each a self-contained
             // summary or thought whose deltas carry no trailing break. Passed
