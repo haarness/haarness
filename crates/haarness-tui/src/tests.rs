@@ -8406,6 +8406,213 @@ async fn a_short_terminal_trims_the_card_not_the_prompt() {
     }
 }
 
+/// A shell request whose command runs `lines` lines: `printf line-NN`.
+fn long_command_event(thread: &Thread, id: &str, lines: usize) -> haarness_protocol::EventEnvelope {
+    let command = (1..=lines)
+        .map(|line| format!("printf line-{line:02} >> multi.txt"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fixture_event(
+        "permission.requested",
+        thread.id,
+        thread.id,
+        serde_json::json!({
+            "permissionId": id,
+            "permission": "bash",
+            "operation": "bash:printf *",
+            "patterns": ["printf *"],
+            "alwaysPatterns": ["bash:printf *"],
+            "detail": {"command": command},
+        }),
+    )
+}
+
+async fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    crate::input::handle_key(app, KeyEvent::new(code, modifiers), &offline_client())
+        .await
+        .unwrap();
+}
+
+/// A command longer than the card's rows is read in place: the arrows and
+/// page keys scroll it, ctrl+e expands it, the row under it says which part
+/// is shown, and every answer stays on screen the whole time.
+#[tokio::test]
+async fn a_long_command_scrolls_and_expands_inside_the_card() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(
+        long_command_event(&thread, "perm-long", 12),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    assert!(app.permission_focus);
+    let answers = |text: &str| {
+        ["Allow once", "Always", "Reject", "Once + Auto"]
+            .iter()
+            .all(|label| text.contains(label))
+    };
+    let text = frame_text(&app, (100, 40));
+    assert!(text.contains("$ printf line-01"), "{text}");
+    assert!(
+        text.contains("line-04") && !text.contains("line-05"),
+        "{text}"
+    );
+    assert!(text.contains("lines 1–4 of 12"), "{text}");
+    assert!(
+        text.contains("↑↓ scroll") && text.contains("ctrl+e expand"),
+        "{text}"
+    );
+    assert!(answers(&text), "{text}");
+
+    for _ in 0..20 {
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+    }
+    let text = frame_text(&app, (100, 40));
+    assert!(
+        text.contains("line-12") && !text.contains("line-08"),
+        "{text}"
+    );
+    assert!(text.contains("lines 9–12 of 12"), "{text}");
+    assert!(answers(&text), "{text}");
+    press(&mut app, KeyCode::PageUp, KeyModifiers::NONE).await;
+    let text = frame_text(&app, (100, 40));
+    assert!(text.contains("lines 5–8 of 12"), "{text}");
+    press(&mut app, KeyCode::Up, KeyModifiers::NONE).await;
+    assert!(frame_text(&app, (100, 40)).contains("lines 4–7 of 12"));
+
+    // Expanded, the whole command fits a tall terminal, and the row says how
+    // to collapse it again.
+    press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL).await;
+    let text = frame_text(&app, (100, 40));
+    for line in 1..=12 {
+        assert!(text.contains(&format!("line-{line:02}")), "{line}: {text}");
+    }
+    assert!(
+        text.contains("ctrl+e collapse") && !text.contains("lines "),
+        "{text}"
+    );
+    assert!(answers(&text), "{text}");
+    press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL).await;
+    let text = frame_text(&app, (100, 40));
+    assert!(
+        text.contains("ctrl+e expand") && text.contains(" of 12"),
+        "{text}"
+    );
+
+    // Re-reading the command does not drop an answer that waits for its
+    // confirming press, and does not answer anything.
+    press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE).await;
+    assert_eq!(app.confirm_always, Some('a'));
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+    press(&mut app, KeyCode::PageDown, KeyModifiers::NONE).await;
+    assert_eq!(app.confirm_always, Some('a'));
+    assert_eq!(app.pending_permissions.len(), 1);
+    let text = frame_text(&app, (100, 40));
+    assert!(
+        text.contains("Confirm") && text.contains("Cancel"),
+        "{text}"
+    );
+}
+
+/// A command that fits keeps the card it had: no position or key row, and
+/// the arrows have nothing to move.
+#[tokio::test]
+async fn a_command_that_fits_shows_no_scroll_row() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(
+        long_command_event(&thread, "perm-short-command", 3),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    let text = frame_text(&app, (100, 40));
+    assert!(
+        text.contains("line-01") && text.contains("line-03"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("scroll") && !text.contains("ctrl+e") && !text.contains("lines "),
+        "{text}"
+    );
+    assert!(text.contains("esc reject"), "{text}");
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+    press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL).await;
+    assert!(app.permission_scroll.is_none());
+    assert_eq!(frame_text(&app, (100, 40)), text);
+}
+
+/// On a short terminal the command gets the rows the answers leave: it still
+/// scrolls through to its last line, and no answer leaves the screen.
+#[tokio::test]
+async fn a_short_terminal_scrolls_the_command_and_keeps_every_answer() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    app.reduce(
+        long_command_event(&thread, "perm-short-scroll", 12),
+        &offline_client(),
+    )
+    .await
+    .unwrap();
+    for (width, height) in [(80, 12), (80, 20), (100, 24), (160, 44)] {
+        app.permission_scroll = None;
+        let lines = app.lines((width, height));
+        assert_eq!(lines.len(), height as usize);
+        let text: String = lines.iter().map(|line| line_text(line) + "\n").collect();
+        assert!(
+            text.contains("line-01") && text.contains(" of 12"),
+            "{width}x{height}: {text}"
+        );
+        for _ in 0..12 {
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+            let lines = app.lines((width, height));
+            let text: String = lines.iter().map(|line| line_text(line) + "\n").collect();
+            for label in ["Allow once", "Reject", "Once + Auto"] {
+                assert!(
+                    text.contains(label),
+                    "{width}x{height} lost {label}: {text}"
+                );
+            }
+            assert!(
+                lines.iter().all(|line| line.width() <= width as usize),
+                "{text}"
+            );
+        }
+        let text = frame_text(&app, (width, height));
+        assert!(text.contains("line-12"), "{width}x{height}: {text}");
+        assert!(text.contains("of 12"), "{width}x{height}: {text}");
+    }
+}
+
+/// The next request starts at its own first line, collapsed, whatever the
+/// one before it was scrolled to.
+#[tokio::test]
+async fn a_new_request_starts_at_the_top_of_its_command() {
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);
+    let client = offline_client();
+    app.reduce(long_command_event(&thread, "perm-first", 12), &client)
+        .await
+        .unwrap();
+    app.reduce(long_command_event(&thread, "perm-second", 12), &client)
+        .await
+        .unwrap();
+    let _ = frame_text(&app, (100, 40));
+    press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL).await;
+    for _ in 0..6 {
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE).await;
+    }
+    assert!(app.permission_scroll.is_some());
+    app.permission_answered("perm-first");
+    let text = frame_text(&app, (100, 40));
+    assert!(text.contains("$ printf line-01"), "{text}");
+    assert!(
+        text.contains("lines 1–4 of 12") && text.contains("ctrl+e expand"),
+        "{text}"
+    );
+}
+
 /// A chat switch whose mode cannot be read shows Review, never the last
 /// chat's Auto, and a server that did not answer keeps its shared modes, so
 /// this TUI never starts answering the new chat's requests itself.

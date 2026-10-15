@@ -17,12 +17,13 @@ use haarness_opentui::{Line, Span, attr};
 use haarness_protocol::PendingPermissionInfo;
 
 use crate::locale::Language;
-use crate::state::{App, PermissionChoice};
+use crate::state::{App, PermissionChoice, SubjectFit};
 use crate::theme::Theme;
 use crate::view::frame::{HitTarget, TaggedLines};
 use crate::view::span::single_line;
 
-/// Context rows the panel gives a long command before eliding.
+/// Rows the collapsed panel gives a long command; the rest scrolls or
+/// expands into view.
 const MAX_CONTEXT_ROWS: usize = 4;
 /// A Chrome request is answered for the exact call it shows: its site lines
 /// and then the call's own script, address or text, so it gets more room.
@@ -342,7 +343,9 @@ pub fn staged_lead(choice: char, pending: &PendingPermissionInfo) -> &'static st
 /// add detail give way first (the change preview, the spacer, the "always
 /// allows" row, the subject's later rows, the key hints), while the title,
 /// the subject's first row, what a staged answer grants and every choice
-/// stay on screen.
+/// stay on screen. A subject longer than its rows scrolls (↑↓, page keys)
+/// and expands (ctrl+e) inside the card, so the whole command can be read
+/// before it is answered.
 pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
     let mut panel = TaggedLines::default();
     let Some(pending) = app.first_pending_permission() else {
@@ -402,22 +405,56 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
     });
     let chips = chip_rows(app, width, staged.is_some());
     let footer = footer(app, width.saturating_sub(RAIL.width()), staged.is_some());
+    let (scrolled, expanded) = app.permission_scroll_of(&pending.permission_id);
+    // Expanded, the subject may take every row the card can spare.
+    let cap = if expanded {
+        subject_rows.len().max(subject_cap)
+    } else {
+        subject_cap
+    };
 
     // Spend the rows beyond the essentials, most useful first.
     let essential = 1 + usize::from(!subject_rows.is_empty()) + lead_rows.len() + chips.len();
     let mut room = max_rows.saturating_sub(essential);
-    let mut take = |wanted: usize| {
-        let granted = wanted.min(room);
-        room -= granted;
-        granted
+    let rule_count = staged_rules.len().min(MAX_CONTEXT_ROWS).min(room);
+    room -= rule_count;
+    let footer_rows = usize::from(!footer.is_empty());
+    // A subject longer than the rows it gets scrolls, and a row under it says
+    // which part is on screen and which keys move it. That row comes before
+    // the footer: the chips name their own keys, but nothing else says the
+    // command goes on past what is shown.
+    let overflows = subject_rows.len() > cap
+        || subject_rows.len().saturating_sub(1) > room.saturating_sub(footer_rows);
+    let show_scroll =
+        !subject_rows.is_empty() && (overflows || expanded) && spend(&mut room, 1) == 1;
+    let show_footer = spend(&mut room, footer_rows) == 1;
+    let subject_count = if subject_rows.is_empty() {
+        0
+    } else {
+        1 + spend(&mut room, subject_rows.len().min(cap) - 1)
     };
-    let rule_count = take(staged_rules.len().min(MAX_CONTEXT_ROWS));
-    let show_footer = take(usize::from(!footer.is_empty())) == 1;
-    let wanted_subject =
-        subject_rows.len().min(subject_cap) + usize::from(subject_rows.len() > subject_cap);
-    let subject_count = (1 + take(wanted_subject.saturating_sub(1))).min(subject_rows.len());
-    let show_allows = take(usize::from(allows.is_some())) == 1;
-    let show_spacer = take(1) == 1;
+    let offset = if show_scroll {
+        scrolled.min(subject_rows.len() - subject_count)
+    } else {
+        0
+    };
+    let fit = SubjectFit {
+        max_offset: if show_scroll {
+            subject_rows.len() - subject_count
+        } else {
+            0
+        },
+        shown: subject_count,
+        // Collapsed at its cap with rows to spare: expanding shows more.
+        expandable: show_scroll
+            && !expanded
+            && subject_count < subject_rows.len()
+            && subject_count == subject_cap
+            && room > 0,
+    };
+    app.permission_fit.set(fit);
+    let show_allows = spend(&mut room, usize::from(allows.is_some())) == 1;
+    let show_spacer = spend(&mut room, 1) == 1;
     // A preview needs its blank row and at least one changed line.
     let mut change_count = 0;
     if !change.is_empty() && room >= 2 {
@@ -458,19 +495,17 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
 
     if !subject_rows.is_empty() {
         let command = pending.detail.get("command").is_some();
-        let truncated = subject_rows.len() > subject_count.min(subject_cap);
-        // A truncated subject ends on its own "…" row, unless the terminal
-        // only has room for one, which then ends in the ellipsis itself.
-        let (rows, ellipsis_row) = if !truncated {
-            (subject_count, false)
-        } else if subject_count >= 2 {
-            ((subject_count - 1).min(subject_cap), true)
-        } else {
-            (1, false)
-        };
-        for (index, row) in subject_rows.iter().take(rows).enumerate() {
+        // With no row to say how to scroll, a subject cut short ends in an
+        // ellipsis on the one row the terminal has for it.
+        let truncated = !show_scroll && subject_count < subject_rows.len();
+        for (index, row) in subject_rows
+            .iter()
+            .enumerate()
+            .skip(offset)
+            .take(subject_count)
+        {
             let prefix = if command && index == 0 { "$ " } else { "  " };
-            let text = if truncated && !ellipsis_row {
+            let text = if truncated {
                 format!(
                     "{prefix}{}",
                     single_line(&format!("{row} …"), inner.saturating_sub(2))
@@ -486,14 +521,17 @@ pub fn approval_lines(app: &App, width: usize, max_rows: usize) -> TaggedLines {
                 focused,
             );
         }
-        if ellipsis_row {
-            push_row(
-                &mut panel,
-                vec![Span::new("  …", theme.muted).on(theme.overlay)],
-                width,
-                theme,
-                focused,
-            );
+        if show_scroll {
+            let hidden = subject_count < subject_rows.len();
+            let mut spans = vec![Span::new("  ", theme.muted).on(theme.overlay)];
+            spans.extend(scroll_hint(
+                app,
+                hidden.then(|| (offset + 1, offset + subject_count, subject_rows.len())),
+                fit.expandable,
+                expanded,
+                inner.saturating_sub(2),
+            ));
+            push_row(&mut panel, spans, width, theme, focused);
         }
     }
 
@@ -638,6 +676,71 @@ fn change_preview(pending: &PendingPermissionInfo, width: usize) -> Vec<(char, S
 /// One panel row: accent rail, content, surface background to the edge.
 /// Unfocused rows are tagged so a click anywhere on the card gives the
 /// prompt the keyboard.
+/// Give up to `wanted` of the card's spare rows; what is left stays in `room`.
+fn spend(room: &mut usize, wanted: usize) -> usize {
+    let granted = wanted.min(*room);
+    *room -= granted;
+    granted
+}
+
+/// The row under a subject that scrolls: which of its rows are on screen,
+/// and, while the card has the keyboard, the keys that move it. Expanding is
+/// offered only where it shows more, and an expanded subject always says how
+/// to collapse. Hints that do not fit `width` drop from the end.
+fn scroll_hint(
+    app: &App,
+    window: Option<(usize, usize, usize)>,
+    expandable: bool,
+    expanded: bool,
+    width: usize,
+) -> Vec<Span> {
+    let theme = &app.theme;
+    let surface = theme.overlay;
+    let language = app.language;
+    let mut pairs = Vec::new();
+    if app.permission_focus {
+        if window.is_some() {
+            pairs.push(("↑↓", "scroll"));
+        }
+        if expanded {
+            pairs.push(("ctrl+e", "collapse"));
+        } else if expandable {
+            pairs.push(("ctrl+e", "expand"));
+        }
+    }
+    let position = window.map(|(from, to, total)| {
+        single_line(
+            &language.format(
+                "lines {from}–{to} of {total}",
+                &[
+                    ("from", &from.to_string()),
+                    ("to", &to.to_string()),
+                    ("total", &total.to_string()),
+                ],
+            ),
+            width,
+        )
+    });
+    let mut count = pairs.len();
+    loop {
+        let mut spans = Vec::new();
+        if let Some(position) = &position {
+            spans.push(Span::new(position.clone(), theme.muted).on(surface));
+        }
+        for (key, action) in pairs.iter().take(count) {
+            if !spans.is_empty() {
+                spans.push(Span::new(" · ", theme.muted).on(surface));
+            }
+            spans.push(Span::new((*key).to_owned(), theme.text).on(surface));
+            spans.push(Span::new(format!(" {}", language.text(action)), theme.muted).on(surface));
+        }
+        if count == 0 || spans.iter().map(Span::width).sum::<usize>() <= width {
+            return spans;
+        }
+        count -= 1;
+    }
+}
+
 fn push_row(
     panel: &mut TaggedLines,
     mut spans: Vec<Span>,
