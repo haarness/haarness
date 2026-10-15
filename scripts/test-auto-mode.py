@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Real Haarness server + real OpenTUI in tmux: Auto/Review permission lifecycle."""
+"""Real Haarness server + real OpenTUI in tmux: Auto/Review permission lifecycle,
+the approval card at several terminal sizes, and the --auto flag.
+
+HAARNESS_E2E_FRAMES names a folder for captured frames (ANSI and text);
+by default they land beside the other evidence."""
 import json, os, pathlib, shlex, subprocess, tempfile, time, urllib.request, uuid
 
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/release/haarness')).resolve()
@@ -12,6 +16,8 @@ env = dict(os.environ, HAARNESS_DATA_DIR=str(root/'data'), HAARNESS_TEST_PROVIDE
 name = 'haarness-auto-' + str(os.getpid())
 endpoint = None
 checks = []
+frames = pathlib.Path(os.environ.get('HAARNESS_E2E_FRAMES') or root/'frames')
+frames.mkdir(parents=True, exist_ok=True)
 
 def run(args, **kwargs):
     return subprocess.run(args, check=True, text=True, capture_output=True, **kwargs).stdout
@@ -31,7 +37,11 @@ def until(check, label, seconds=25):
         if check():
             return
         time.sleep(.08)
-    raise AssertionError(label)
+    try:
+        pane = capture()
+    except subprocess.CalledProcessError:
+        pane = '(no pane)'
+    raise AssertionError(label+'\n'+pane)
 
 def capture():
     return run(['tmux','capture-pane','-p','-t',name+':0.0'])
@@ -42,12 +52,32 @@ def keys(*keys):
 def command(text):
     keys('C-u')
     run(['tmux','send-keys','-l','-t',name+':0.0',text])
+    # Enter before the last keys are drawn can complete a shorter command.
+    until(lambda:text in capture(),'typed command not shown: '+text)
     keys('Enter')
 
-def launch(thread, mode='review'):
-    args=['env',*[k+'='+env[k] for k in ['HAARNESS_DATA_DIR','HAARNESS_TEST_PROVIDER','HAARNESS_DEFAULT_PROVIDER','HAARNESS_DEFAULT_MODEL']],str(binary),'--workspace',str(workspace),'--trust-project','--thread',thread]
-    run(['tmux','new-session','-d','-x','160','-y','40','-s',name,shlex.join(args)])
+def card(pane):
+    """The approval card's rows, from its ⚠ title to its answers: the
+    transcript above repeats the command as it was sent."""
+    rows=pane.split('\n')
+    tops=[index for index,row in enumerate(rows) if '⚠ ' in row]
+    if not tops:
+        return ''
+    end=next((index for index in range(tops[-1],len(rows)) if 'Allow once' in rows[index] or 'Confirm' in rows[index]),len(rows)-1)
+    return '\n'.join(rows[tops[-1]:end+1])
+
+def launch(thread, mode='review', width=160, height=40, extra=()):
+    args=['env',*[k+'='+env[k] for k in ['HAARNESS_DATA_DIR','HAARNESS_TEST_PROVIDER','HAARNESS_DEFAULT_PROVIDER','HAARNESS_DEFAULT_MODEL']],str(binary),'--workspace',str(workspace),'--trust-project',*extra,'--thread',thread]
+    run(['tmux','new-session','-d','-x',str(width),'-y',str(height),'-s',name,shlex.join(args)])
     until(lambda:mode in capture(), mode+' mode not visible at launch')
+
+def resize(width, height):
+    run(['tmux','resize-window','-t',name+':0','-x',str(width),'-y',str(height)])
+
+def save(label):
+    """Keep what the pane shows, colours included, for a person to look at."""
+    (frames/(label+'.ansi')).write_text(run(['tmux','capture-pane','-p','-e','-t',name+':0.0']))
+    (frames/(label+'.txt')).write_text(capture())
 
 def start(thread, text):
     return api('/v1/threads/'+thread+'/turns', {'requestId':str(uuid.uuid4()),'text':text})
@@ -144,6 +174,71 @@ try:
     fresh=[item['id'] for item in api('/v1/threads') if item['title'] in ('New chat','New thread')][-1]
     until(lambda:api('/v1/threads/'+fresh+'/approval-mode')['mode']=='auto','/new did not start in Auto')
     check('/new starts in the open chat\'s mode')
+
+    # A long command is read in full on the card, at every size, while its
+    # answers stay on screen; under 12 rows the card shrinks to one line.
+    run(['tmux','kill-session','-t',name])
+    review=api('/v1/threads', {'title':'Long command verification','provider':'echo','model':'echo-1'})['id']
+    long_command='\n'.join(f'printf "line-{n:02}\\n" >> multi.txt' for n in range(1,13))
+    start(review,'!tool bash '+json.dumps({'command':long_command}))
+    until(lambda:len(api('/v1/permissions'))==1,'the long command did not ask')
+    launch(review,width=160,height=44)
+    answers=lambda pane:all(label in pane for label in ('Allow once','Reject'))
+    for width,height in [(160,44),(100,24),(80,20),(80,12)]:
+        resize(width,height)
+        until(lambda:'$ printf "line-01' in card(capture()) and ' of 12' in card(capture()),f'{width}x{height}: the card did not open on the first lines')
+        shown=card(capture())
+        assert answers(shown) and 'line-12' not in shown, shown
+        if (width,height) in ((160,44),(80,12)):
+            save(f'card-{width}x{height}-top')
+        keys('-N','12','Down')
+        until(lambda:'line-12' in card(capture()) and '–12 of 12' in card(capture()),f'{width}x{height}: Down did not reach the last line')
+        shown=card(capture())
+        assert answers(shown) and 'line-01' not in shown, shown
+        if (width,height) in ((160,44),(80,12)):
+            save(f'card-{width}x{height}-end')
+        keys('-N','12','Up')
+        until(lambda:'$ printf "line-01' in card(capture()) and 'line-12' not in card(capture()),f'{width}x{height}: Up did not return to the first line')
+    resize(160,44)
+    keys('C-e')
+    until(lambda:'ctrl+e collapse' in card(capture()),'ctrl+e did not expand the command')
+    shown=card(capture())
+    assert all(f'line-{n:02}' in shown for n in range(1,13)) and answers(shown), shown
+    save('card-160x44-expanded')
+    keys('C-e')
+    until(lambda:'ctrl+e expand' in card(capture()),'ctrl+e did not collapse the command')
+    assert not (workspace/'multi.txt').exists()
+    check('a long command scrolls and expands inside the card at 160x44, 100x24, 80x20 and 80x12, its answers always on screen')
+    resize(80,11)
+    # The compact row names the request with its command; the card's title
+    # does not.
+    until(lambda:'⚠ Run a shell command: printf' in capture() and len(capture().rstrip('\n').split('\n'))<=11,'the compact frame hid the request')
+    pane=capture()
+    rows=pane.rstrip('\n').split('\n')
+    assert 'Allow once  y' in pane and 'Reject  n' in pane, pane
+    assert 'working' not in rows[-1] and 'Run a shell command' in rows[-1], pane
+    save('compact-80x11')
+    keys('y')
+    proof('multi.txt',''.join(f'line-{n:02}\n' for n in range(1,13)))
+    check('under 12 rows the request, its answers and the approval hint stay on screen, and y runs it')
+
+    # --auto: the chat goes to Auto on the server, so every client sees it.
+    run(['tmux','kill-session','-t',name])
+    flagged=api('/v1/threads', {'title':'Auto flag verification','provider':'echo','model':'echo-1'})['id']
+    start(flagged,'!tool bash '+json.dumps({'command':'printf flag-proof > flag.txt'}))
+    until(lambda:len(api('/v1/permissions'))==1,'a new chat did not ask before --auto')
+    launch(flagged,'approvals: auto',extra=['--auto'])
+    proof('flag.txt','flag-proof')
+    assert api('/v1/threads/'+flagged+'/approval-mode')['mode']=='auto'
+    check('haarness --auto opens the chat in Auto on the server and releases the request waiting in it')
+    plain=subprocess.run([str(binary),'--workspace',str(workspace),'run','--title','Plain run','!tool bash '+json.dumps({'command':'printf plain-proof > plain.txt'})],env=env,input='',text=True,capture_output=True,timeout=120)
+    finished()
+    assert not (workspace/'plain.txt').exists(), plain.stderr
+    run([str(binary),'--workspace',str(workspace),'run','--auto','--title','Run auto flag','!tool bash '+json.dumps({'command':'printf run-auto-proof > run-auto.txt'})],env=env,input='',timeout=120)
+    proof('run-auto.txt','run-auto-proof')
+    ran=[item['id'] for item in api('/v1/threads') if item['title']=='Run auto flag']
+    assert len(ran)==1 and api('/v1/threads/'+ran[0]+'/approval-mode')['mode']=='auto', ran
+    check('haarness run --auto puts its chat in Auto, so a run nobody watches gets its requests approved; a plain run is refused')
     print(f'{len(checks)} real-server TUI scenarios passed. Evidence: {root}',flush=True)
     (root/'tui.txt').write_text(capture())
 finally:
