@@ -60,6 +60,22 @@ pub enum Error {
     Http(#[from] reqwest::Error),
 }
 
+impl Error {
+    /// Whether trying again later may succeed: Cloud or the network on the
+    /// way was unreachable or overloaded (408, 429, 5xx), or something other
+    /// than Cloud answered (a proxy's or captive portal's page, which is not
+    /// Cloud's JSON). A refused sign-in, a rejected key, a request Cloud
+    /// turned down and local file problems are not.
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Http(_) | Self::Json(_) => true,
+            Self::Api { status, .. } => matches!(*status, 408 | 429 | 500..),
+            Self::NotLoggedIn | Self::Config(_) | Self::Other(_) | Self::Io(_) => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub api_url: Url,
@@ -297,10 +313,28 @@ impl Client {
             .send()
             .await?;
         let status = response.status();
-        let value: Value = response.json().await?;
+        // While Cloud restarts or is overloaded a load balancer or proxy may
+        // answer with its own page: keep the status, so a passing outage is
+        // not taken for a refused sign-in.
+        let unavailable = || Error::Api {
+            status: status.as_u16(),
+            message: format!(
+                "Haarness Cloud could not renew the sign-in right now (HTTP {}). Retry shortly.",
+                status.as_u16()
+            ),
+        };
+        let bytes = response.bytes().await?;
+        let value: Value = match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(_) if !status.is_success() => return Err(unavailable()),
+            Err(error) => return Err(error.into()),
+        };
         if !status.is_success() {
             if value["error"] == "invalid_grant" {
                 return Err(Error::NotLoggedIn);
+            }
+            if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
+                return Err(unavailable());
             }
             return Err(Error::Other(
                 value["error"].as_str().unwrap_or("Sign-in failed").into(),
