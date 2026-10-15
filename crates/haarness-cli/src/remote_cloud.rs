@@ -587,14 +587,13 @@ async fn relay_link(
 ) -> Result<Link> {
     let attempt = tokio::time::timeout(
         Duration::from_secs(10),
-        tokio_tungstenite::connect_async_with_config(
+        haarness_account::websocket::connect(
             handshake,
             Some(
                 tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
                     .max_message_size(Some(24 * 1024 * 1024))
                     .max_frame_size(Some(24 * 1024 * 1024)),
             ),
-            false,
         ),
     );
     let socket = match attempt.await {

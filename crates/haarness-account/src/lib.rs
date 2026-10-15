@@ -6,6 +6,7 @@ pub mod credentials;
 pub mod loopback;
 pub mod pkce;
 pub mod routers;
+pub mod websocket;
 
 use chrono::{DateTime, Utc};
 pub use credentials::Credentials;
