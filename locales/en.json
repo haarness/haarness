@@ -2427,5 +2427,6 @@
   "The folder in this link was not found.": "The folder in this link was not found.",
   "Open “{folder}” from a link?": "Open “{folder}” from a link?",
   "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.",
-  "Open folder": "Open folder"
+  "Open folder": "Open folder",
+  "Earlier terminal output is no longer available": "Earlier terminal output is no longer available"
 }

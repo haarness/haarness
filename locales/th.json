@@ -2427,5 +2427,6 @@
   "The folder in this link was not found.": "ไม่พบโฟลเดอร์ในลิงก์นี้",
   "Open “{folder}” from a link?": "เปิด “{folder}” จากลิงก์หรือไม่",
   "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "โฟลเดอร์จะเปิดโดยปิดการกำหนดค่าโปรเจกต์ไว้: เซิร์ฟเวอร์ MCP ฮุก และส่วนขยายในโฟลเดอร์นี้จะไม่ทำงาน หากต้องการเปิดใช้งาน ให้เปิดโฟลเดอร์ด้วย “เปิดโปรเจกต์”",
-  "Open folder": "เปิดโฟลเดอร์"
+  "Open folder": "เปิดโฟลเดอร์",
+  "Earlier terminal output is no longer available": "เอาต์พุตก่อนหน้าของเทอร์มินัลไม่มีให้ใช้แล้ว"
 }

@@ -2427,5 +2427,6 @@
   "The folder in this link was not found.": "このリンクのフォルダーが見つかりません。",
   "Open “{folder}” from a link?": "リンクから「{folder}」を開きますか？",
   "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "プロジェクト設定を無効にした状態で開きます。このフォルダーの MCP サーバー、フック、拡張機能は実行されません。有効にするには、「プロジェクトを開く」でフォルダーを開いてください。",
-  "Open folder": "フォルダーを開く"
+  "Open folder": "フォルダーを開く",
+  "Earlier terminal output is no longer available": "以前のターミナル出力はもう利用できません"
 }

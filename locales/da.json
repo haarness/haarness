@@ -2427,5 +2427,6 @@
   "The folder in this link was not found.": "Mappen i dette link blev ikke fundet.",
   "Open “{folder}” from a link?": "Vil du åbne “{folder}” fra et link?",
   "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "Mappen åbnes med projektkonfigurationen slået fra: MCP-servere, hooks og udvidelser i den kører ikke. Åbn mappen med Åbn projekt for at slå dem til.",
-  "Open folder": "Åbn mappe"
+  "Open folder": "Åbn mappe",
+  "Earlier terminal output is no longer available": "Tidligere terminaloutput er ikke længere tilgængeligt"
 }
