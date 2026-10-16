@@ -2432,5 +2432,12 @@
   "Next tab": "Próxima aba",
   "Previous tab": "Aba anterior",
   "In the chats, terminal, files, browser or side panel that has the keyboard": "Nas conversas, no terminal, nos arquivos, no navegador ou no painel lateral que tem o teclado",
-  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Anexe uma imagem, um PDF ou um arquivo de áudio ou vídeo. Para referenciar código-fonte, use o caminho dele no espaço de trabalho."
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Anexe uma imagem, um PDF ou um arquivo de áudio ou vídeo. Para referenciar código-fonte, use o caminho dele no espaço de trabalho.",
+  "Show and hide Haarness from any app": "Mostrar e ocultar o Haarness a partir de qualquer app",
+  "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.": "Traz o Haarness para a frente a partir de qualquer app e o oculta de novo quando está na frente. Enquanto estiver ativado, os outros apps não recebem mais a combinação.",
+  "Global shortcut": "Atalho global",
+  "Click and press the keys, including a modifier key.": "Clique e pressione as teclas, incluindo uma tecla modificadora.",
+  "Use a modifier key and one more key, such as {keys}.": "Use uma tecla modificadora e mais uma tecla, como {keys}.",
+  "{keys} belongs to the system. Choose another shortcut.": "{keys} pertence ao sistema. Escolha outro atalho.",
+  "Another app or the system already uses {keys}. Choose another shortcut.": "Outro app ou o sistema já usa {keys}. Escolha outro atalho."
 }

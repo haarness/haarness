@@ -2432,5 +2432,12 @@
   "Next tab": "次のタブ",
   "Previous tab": "前のタブ",
   "In the chats, terminal, files, browser or side panel that has the keyboard": "キーボード操作中のチャット、ターミナル、ファイル、ブラウザ、またはサイドパネルで",
-  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "画像、PDF、音声、または動画ファイルを添付してください。ソースコードを参照するには、ワークスペース内のパスを使用してください。"
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "画像、PDF、音声、または動画ファイルを添付してください。ソースコードを参照するには、ワークスペース内のパスを使用してください。",
+  "Show and hide Haarness from any app": "どのアプリからでも Haarness を表示・非表示にする",
+  "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.": "どのアプリからでも Haarness を前面に表示し、前面にあるときは再び隠します。オンの間、他のアプリはこの組み合わせを受け取らなくなります。",
+  "Global shortcut": "グローバルショートカット",
+  "Click and press the keys, including a modifier key.": "クリックして、修飾キーを含むキーを押してください。",
+  "Use a modifier key and one more key, such as {keys}.": "修飾キーともう 1 つのキーを使ってください（例: {keys}）。",
+  "{keys} belongs to the system. Choose another shortcut.": "{keys} はシステムが使用しています。別のショートカットを選んでください。",
+  "Another app or the system already uses {keys}. Choose another shortcut.": "別のアプリまたはシステムがすでに {keys} を使用しています。別のショートカットを選んでください。"
 }

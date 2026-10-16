@@ -6,6 +6,8 @@ import { createBrowserHost } from "./browser-host";
 import { chromeSetup, revealChromeExtension, setupChromeOnLaunch } from "./chrome-setup";
 import { createAttachmentDraftStorage } from "./attachment-drafts";
 import { translate } from "../localization";
+import { globalAccelerator, globalShortcutError, type GlobalShortcut } from "../global-shortcut";
+import { shortcutLabel } from "../renderer/search";
 /** Native dialogs speak the language chosen in Settings, like the menus do. */
 const say = (key: string) => translate(data().preferences.language, key);
 import { authorizationHeaders, type ServerAuth } from "@haarness/sdk";
@@ -22,6 +24,7 @@ import {
   powerMonitor,
   nativeTheme,
   nativeImage,
+  globalShortcut,
 } from "electron";
 import { readFile, writeFile, realpath, stat } from "node:fs/promises";
 import { join, resolve, basename, sep, isAbsolute } from "node:path";
@@ -520,10 +523,33 @@ function installHandlers() {
     updateConfigured: !!process.env.HAARNESS_UPDATE_URL,
   }));
   handle("preferences", async (_, input) => {
-    const value = await preferences(input);
+    // A shortcut another app holds is refused before it is saved, and the
+    // one saved before stays registered.
+    const shortcut = (input as { globalShortcut?: GlobalShortcut } | undefined)?.globalShortcut;
+    const problem = shortcut && globalShortcutError(shortcut.keys, process.platform, say);
+    if (problem) throw new Error(problem);
+    if (shortcut && !registerShortcut(shortcut)) {
+      registerShortcut();
+      throw new Error(
+        say("Another app or the system already uses {keys}. Choose another shortcut.").replace(
+          "{keys}",
+          shortcutLabel(shortcut.keys, process.platform),
+        ),
+      );
+    }
+    const value = await preferences(input).catch((error) => {
+      if (shortcut) registerShortcut();
+      throw error;
+    });
     menu();
     broadcast({ kind: "menu", data: { action: "preferences", value } });
     return value;
+  });
+  // While Settings records a new global shortcut, the current one must not
+  // hide the window.
+  handle("globalShortcut", (_, action: unknown) => {
+    shortcutSuspended = action === "suspend";
+    registerShortcut();
   });
   const attachmentDraftStorage = createAttachmentDraftStorage(join(app.getPath("userData"), "attachment-drafts"));
   handle("attachmentDraft", (_, key: string, value: unknown) => attachmentDraftStorage(key, value));
@@ -1207,6 +1233,44 @@ function installHandlers() {
     return { available: updateAvailable, info: result?.updateInfo };
   });
 }
+/**
+ * The system-wide shortcut (Settings → Keyboard shortcuts, off by default):
+ * from another app it brings Haarness's last window to the front, and with
+ * Haarness in front it hides it again (minimizes it outside macOS).
+ */
+let registeredShortcut = "";
+let shortcutSuspended = false;
+function toggleFromShortcut() {
+  const focused = BrowserWindow.getFocusedWindow();
+  if (focused && windows.has(focused)) {
+    if (process.platform === "darwin") app.hide();
+    else focused.minimize();
+    return;
+  }
+  const win = [...windows].at(-1);
+  if (!win) return void createWindow();
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+  if (process.platform === "darwin") app.focus({ steal: true });
+}
+/** Registers `value` (the saved one by default) in place of the current one;
+ * false when another app or the system holds it, with nothing registered. */
+function registerShortcut(value: GlobalShortcut = data().preferences.globalShortcut) {
+  if (registeredShortcut) globalShortcut.unregister(registeredShortcut);
+  registeredShortcut = "";
+  const accelerator = value.enabled ? globalAccelerator(value.keys) : undefined;
+  if (!accelerator) return true;
+  try {
+    if (!globalShortcut.register(accelerator, toggleFromShortcut)) return false;
+  } catch {
+    return false;
+  }
+  // While Settings records a new one, a free combination is only tried.
+  if (shortcutSuspended) globalShortcut.unregister(accelerator);
+  else registeredShortcut = accelerator;
+  return true;
+}
 function createWindow() {
   if (!initialized || quitting) return;
   const state = data().values.window as
@@ -1488,6 +1552,7 @@ else {
       installHandlers();
       startBillingWatch(state => broadcast({ kind: "menu", data: { action: "account-billing", state } }));
       menu();
+      registerShortcut();
       initialized = true;
       createWindow();
       void refreshProjects().catch(() => {});
@@ -1511,7 +1576,10 @@ else {
   app.on("window-all-closed", () => {
     if (process.platform !== "darwin") app.quit();
   });
-  app.on("will-quit", () => uiSession?.dispose());
+  app.on("will-quit", () => {
+    globalShortcut.unregisterAll();
+    uiSession?.dispose();
+  });
   app.on("before-quit", () => {
     stopBillingWatch();
     browserHost.dispose();

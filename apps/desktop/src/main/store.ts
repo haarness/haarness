@@ -15,6 +15,7 @@ import {
 import { migrateProjectlessLocations } from "../projects";
 import { migrateServers } from "../servers";
 import { themeIds } from "../themes";
+import { globalShortcutError } from "../global-shortcut";
 interface Data {
   preferences: Preferences;
   recent: Recent[];
@@ -39,7 +40,7 @@ export async function load() {
     state = {
       ...state,
       ...raw,
-      preferences: { ...defaults, ...raw.preferences, shortcuts: { ...defaults.shortcuts, ...raw.preferences?.shortcuts }, language: displayLanguage(raw.preferences?.language) },
+      preferences: { ...defaults, ...raw.preferences, shortcuts: { ...defaults.shortcuts, ...raw.preferences?.shortcuts }, globalShortcut: { ...defaults.globalShortcut, ...raw.preferences?.globalShortcut }, language: displayLanguage(raw.preferences?.language) },
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT")
@@ -163,6 +164,10 @@ export async function preferences(input: Partial<Preferences>) {
         tabNext: z.string(),
         tabPrev: z.string(),
       }),
+      globalShortcut: z.object({
+        enabled: z.boolean(),
+        keys: z.string().max(100),
+      }),
     })
     .parse({ ...state.preferences, ...input });
   if (
@@ -198,6 +203,12 @@ export async function preferences(input: Partial<Preferences>) {
         "Use unique shortcuts such as Mod+Shift+E.",
       ),
     );
+  const problem = globalShortcutError(
+    candidate.globalShortcut.keys,
+    process.platform,
+    (key) => translate(state.preferences.language, key),
+  );
+  if (problem) throw new Error(problem);
   state.preferences = candidate;
   await persist();
   return candidate;

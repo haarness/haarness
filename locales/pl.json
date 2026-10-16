@@ -2432,5 +2432,12 @@
   "Next tab": "Następna karta",
   "Previous tab": "Poprzednia karta",
   "In the chats, terminal, files, browser or side panel that has the keyboard": "W czatach, terminalu, plikach, przeglądarce lub panelu bocznym, który ma klawiaturę",
-  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Dołącz obraz, plik PDF, audio lub wideo. Aby wskazać kod źródłowy, użyj jego ścieżki w obszarze roboczym."
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Dołącz obraz, plik PDF, audio lub wideo. Aby wskazać kod źródłowy, użyj jego ścieżki w obszarze roboczym.",
+  "Show and hide Haarness from any app": "Pokazuj i ukrywaj Haarness z dowolnej aplikacji",
+  "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.": "Przenosi Haarness na wierzch z dowolnej aplikacji i ponownie go ukrywa, gdy jest na wierzchu. Gdy to jest włączone, inne aplikacje nie otrzymują już tej kombinacji.",
+  "Global shortcut": "Skrót globalny",
+  "Click and press the keys, including a modifier key.": "Kliknij i naciśnij klawisze, w tym klawisz modyfikujący.",
+  "Use a modifier key and one more key, such as {keys}.": "Użyj klawisza modyfikującego i jeszcze jednego klawisza, np. {keys}.",
+  "{keys} belongs to the system. Choose another shortcut.": "{keys} należy do systemu. Wybierz inny skrót.",
+  "Another app or the system already uses {keys}. Choose another shortcut.": "Inna aplikacja lub system już używa {keys}. Wybierz inny skrót."
 }
