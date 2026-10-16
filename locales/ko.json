@@ -2431,5 +2431,6 @@
   "Earlier terminal output is no longer available": "이전 터미널 출력은 더 이상 사용할 수 없습니다",
   "Next tab": "다음 탭",
   "Previous tab": "이전 탭",
-  "In the chats, terminal, files, browser or side panel that has the keyboard": "키보드 포커스가 있는 채팅, 터미널, 파일, 브라우저 또는 사이드 패널에서"
+  "In the chats, terminal, files, browser or side panel that has the keyboard": "키보드 포커스가 있는 채팅, 터미널, 파일, 브라우저 또는 사이드 패널에서",
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "이미지, PDF, 오디오 또는 동영상 파일을 첨부하세요. 소스 코드를 참조하려면 작업 공간의 경로를 사용하세요."
 }

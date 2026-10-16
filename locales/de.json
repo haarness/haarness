@@ -2431,5 +2431,6 @@
   "Earlier terminal output is no longer available": "Frühere Terminalausgabe ist nicht mehr verfügbar",
   "Next tab": "Nächster Tab",
   "Previous tab": "Vorheriger Tab",
-  "In the chats, terminal, files, browser or side panel that has the keyboard": "In den Chats, im Terminal, in den Dateien, im Browser oder im Seitenbereich mit dem Tastaturfokus"
+  "In the chats, terminal, files, browser or side panel that has the keyboard": "In den Chats, im Terminal, in den Dateien, im Browser oder im Seitenbereich mit dem Tastaturfokus",
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Hänge ein Bild, ein PDF oder eine Audio- oder Videodatei an. Um auf Quellcode zu verweisen, verwende seinen Pfad im Arbeitsbereich."
 }

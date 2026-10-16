@@ -2431,5 +2431,6 @@
   "Earlier terminal output is no longer available": "Wcześniejsze dane wyjściowe terminala nie są już dostępne",
   "Next tab": "Następna karta",
   "Previous tab": "Poprzednia karta",
-  "In the chats, terminal, files, browser or side panel that has the keyboard": "W czatach, terminalu, plikach, przeglądarce lub panelu bocznym, który ma klawiaturę"
+  "In the chats, terminal, files, browser or side panel that has the keyboard": "W czatach, terminalu, plikach, przeglądarce lub panelu bocznym, który ma klawiaturę",
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Dołącz obraz, plik PDF, audio lub wideo. Aby wskazać kod źródłowy, użyj jego ścieżki w obszarze roboczym."
 }

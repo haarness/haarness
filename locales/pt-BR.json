@@ -2431,5 +2431,6 @@
   "Earlier terminal output is no longer available": "A saída anterior do terminal não está mais disponível",
   "Next tab": "Próxima aba",
   "Previous tab": "Aba anterior",
-  "In the chats, terminal, files, browser or side panel that has the keyboard": "Nas conversas, no terminal, nos arquivos, no navegador ou no painel lateral que tem o teclado"
+  "In the chats, terminal, files, browser or side panel that has the keyboard": "Nas conversas, no terminal, nos arquivos, no navegador ou no painel lateral que tem o teclado",
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Anexe uma imagem, um PDF ou um arquivo de áudio ou vídeo. Para referenciar código-fonte, use o caminho dele no espaço de trabalho."
 }

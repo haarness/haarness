@@ -171,6 +171,9 @@ export interface BrowserLayout { visible:boolean; bounds:{x:number;y:number;widt
 export interface BrowserTab { id:string; url:string; title:string; loading:boolean; canGoBack:boolean; canGoForward:boolean; generation:number; /** Desktop-only: the site icon as a small data URL. */ favicon?: string }
 export interface BrowserState { tabs:BrowserTab[]; focusedTabID:string|null }
 export interface Bridge {
+  /** Where a dropped or pasted file is on this computer, or "" for one
+   * that has no path. */
+  pathForFile(file: File): string;
   account(input: { action: string; id?: string; name?: string; repo?: string; configuration?: Record<string, unknown>; page?: string; device?: boolean }): Promise<any>;
   openLink(connection: string | undefined, thread: string | undefined | null, url: string): Promise<"external" | "browser">;
   browserData(connection: string, input?: { action: "get" | "remove" | "clear" | "save"; kind?: "history" | "downloads" | "all"; id?: string }): Promise<import("./browser-settings").BrowserData>;

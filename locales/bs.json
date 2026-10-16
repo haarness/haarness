@@ -2431,5 +2431,6 @@
   "Earlier terminal output is no longer available": "Raniji izlaz terminala više nije dostupan",
   "Next tab": "Sljedeća kartica",
   "Previous tab": "Prethodna kartica",
-  "In the chats, terminal, files, browser or side panel that has the keyboard": "U razgovorima, terminalu, datotekama, pregledniku ili bočnom panelu koji ima tastaturu"
+  "In the chats, terminal, files, browser or side panel that has the keyboard": "U razgovorima, terminalu, datotekama, pregledniku ili bočnom panelu koji ima tastaturu",
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Priložite sliku, PDF, audio ili video datoteku. Da biste uputili na izvorni kod, koristite njegovu putanju u radnom prostoru."
 }
