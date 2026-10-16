@@ -9,7 +9,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Write as _,
     fs::{self, File, OpenOptions},
-    io::Write as _,
+    io::{Read as _, Write as _},
     path::{Path, PathBuf},
     process::{Command, Output},
     sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, mpsc},
@@ -110,9 +110,29 @@ impl WorkspaceManager {
 
     /// Register an existing directory as a local workspace. Re-registering is
     /// idempotent and refreshes its branch and last-opened timestamp.
+    ///
+    /// Git and the folder are consulted before the registry lock is taken, so
+    /// a folder whose git stalls holds up only this call, never every other
+    /// registry read. A managed checkout's identity is checked against the
+    /// registry as it was read; the update refuses if that entry changed
+    /// meanwhile.
     pub fn register_local(&self, path: &Path) -> Result<WorkspaceInfo> {
         let path = canonical_directory(path)?;
         let identity = project_identity(&path)?;
+        let branch = git_branch(&path);
+        let snapshot = self.read_registry_locked()?;
+        let verified = match snapshot
+            .workspaces
+            .iter()
+            .find(|workspace| same_path(Path::new(&workspace.path), &path))
+        {
+            Some(workspace) if workspace.managed => {
+                let project = project_for(&snapshot, workspace)?;
+                verify_workspace_identity(workspace, project)?;
+                Some(managed_identity(workspace, project))
+            }
+            _ => None,
+        };
         self.with_registry_mut(|registry| {
             let now = Utc::now();
             let project_id = if let Some(project) = registry
@@ -141,12 +161,14 @@ impl WorkspaceManager {
                 if registry.workspaces[index].managed {
                     let workspace = &registry.workspaces[index];
                     let project = project_for(registry, workspace)?;
-                    verify_workspace_identity(workspace, project)?;
+                    if verified.as_ref() != Some(&managed_identity(workspace, project)) {
+                        return Err(registry_changed());
+                    }
                 }
                 let workspace = &mut registry.workspaces[index];
                 workspace.last_opened_at = now;
                 workspace.exists = true;
-                workspace.branch = git_branch(&path);
+                workspace.branch.clone_from(&branch);
                 if !workspace.managed {
                     workspace.project_id = project_id;
                     workspace.kind = if identity.linked {
@@ -169,7 +191,7 @@ impl WorkspaceManager {
                     WorkspaceKind::Local
                 },
                 managed: false,
-                branch: git_branch(&path),
+                branch,
                 from_ref: None,
                 base_commit: None,
                 created_at: now,
@@ -182,12 +204,12 @@ impl WorkspaceManager {
     }
 
     /// Register every directory that exists, as `register_local` does, all at
-    /// once and waiting at most a second, and return those registered in
-    /// time. Desktop sends every folder of its sidebar with each project-list
-    /// request; one that has not answered by then (a network volume that went
-    /// away, a privacy prompt nobody is there to answer) is left as registered
-    /// before, and is registered when its look returns.
-    pub fn register_existing(&self, directories: &[PathBuf]) -> Result<Vec<WorkspaceInfo>> {
+    /// once and waiting at most a second. Desktop sends every folder of its
+    /// sidebar with each project-list request; one that has not answered by
+    /// then (a slow network volume, one that went away, a privacy prompt
+    /// nobody is there to answer) is left as registered before and returned
+    /// as pending, for the caller to finish without holding its answer.
+    pub fn register_existing(&self, directories: &[PathBuf]) -> Result<Registered> {
         let manager = self.clone();
         register_folders(
             directories,
@@ -288,22 +310,41 @@ impl WorkspaceManager {
     /// Resolve and mark a workspace as most recently opened. Starting or
     /// attaching its workspace-scoped server is a client responsibility.
     pub fn open_workspace(&self, reference: &str) -> Result<WorkspaceInfo> {
+        // As in `register_local`, the folder and git are consulted outside
+        // the registry lock, against the registry as it was read.
+        let snapshot = self.read_registry_locked()?;
+        let workspace = resolve_workspace(&snapshot, reference)?.clone();
+        if !Path::new(&workspace.path).is_dir() {
+            return Err(WorkspaceError::Conflict(format!(
+                "workspace directory is missing: {}",
+                workspace.path
+            )));
+        }
+        let verified = if workspace.managed {
+            let project = project_for(&snapshot, &workspace)?;
+            verify_workspace_identity(&workspace, project)?;
+            Some(managed_identity(&workspace, project))
+        } else {
+            None
+        };
+        let branch = git_branch(Path::new(&workspace.path));
         self.with_registry_mut(|registry| {
-            let workspace = resolve_workspace(registry, reference)?.clone();
-            if !Path::new(&workspace.path).is_dir() {
-                return Err(WorkspaceError::Conflict(format!(
-                    "workspace directory is missing: {}",
-                    workspace.path
-                )));
-            }
-            if workspace.managed {
-                let project = project_for(registry, &workspace)?;
-                verify_workspace_identity(&workspace, project)?;
+            let current = resolve_workspace(registry, &workspace.id)?;
+            let unchanged = current.path == workspace.path
+                && current.managed == workspace.managed
+                && match &verified {
+                    Some(verified) => {
+                        *verified == managed_identity(current, project_for(registry, current)?)
+                    }
+                    None => true,
+                };
+            if !unchanged {
+                return Err(registry_changed());
             }
             let workspace = resolve_workspace_mut(registry, &workspace.id)?;
             workspace.exists = true;
             workspace.last_opened_at = Utc::now();
-            workspace.branch = git_branch(Path::new(&workspace.path));
+            workspace.branch = branch;
             Ok(workspace.clone())
         })
     }
@@ -935,6 +976,21 @@ fn write_workspace_identity(path: &Path, workspace_id: &str) -> Result<()> {
     file.sync_all().map_err(io_error)
 }
 
+/// What `verify_workspace_identity` checked a managed checkout against, so an
+/// update made after checking it outside the registry lock can tell whether
+/// the entry changed meanwhile.
+fn managed_identity(workspace: &WorkspaceInfo, project: &ProjectInfo) -> (String, String, String) {
+    (
+        workspace.id.clone(),
+        workspace.path.clone(),
+        project.root.clone(),
+    )
+}
+
+fn registry_changed() -> WorkspaceError {
+    WorkspaceError::Conflict("the workspace changed while it was being checked; try again".into())
+}
+
 fn verify_workspace_identity(workspace: &WorkspaceInfo, project: &ProjectInfo) -> Result<()> {
     let path = Path::new(&workspace.path);
     if !path.is_dir() {
@@ -1354,25 +1410,41 @@ fn look_at_once<T: Send + 'static>(
 /// What registering a directory found: `None` when it is not a directory.
 type Registration = Option<Result<WorkspaceInfo>>;
 
+/// What `WorkspaceManager::register_existing` did.
+#[derive(Debug, Default)]
+pub struct Registered {
+    /// The directories registered in time.
+    pub workspaces: Vec<WorkspaceInfo>,
+    /// The directories that had not answered by then, or whose earlier look
+    /// in this process is still out. Their look registers them when it
+    /// returns, if the process still runs.
+    pub pending: Vec<PathBuf>,
+}
+
 /// Register `directories` through `register`, all at once, waiting at most
 /// `patience`; see `WorkspaceManager::register_existing`.
 fn register_folders(
     directories: &[PathBuf],
     register: Arc<dyn Fn(&Path) -> Registration + Send + Sync>,
     patience: Duration,
-) -> Result<Vec<WorkspaceInfo>> {
-    look_at_once(directories, register, patience, |_, _| {})
-        .into_iter()
-        .flatten()
-        .flatten()
-        .collect()
+) -> Result<Registered> {
+    let mut registered = Registered::default();
+    let found = look_at_once(directories, register, patience, |_, _| {});
+    for (directory, answer) in directories.iter().zip(found) {
+        match answer {
+            None => registered.pending.push(directory.clone()),
+            Some(None) => {}
+            Some(Some(workspace)) => registered.workspaces.push(workspace?),
+        }
+    }
+    Ok(registered)
 }
 
 /// The branch checked out in `path`, as `git symbolic-ref HEAD` names it, read
 /// from the repository's HEAD file instead of starting git once per folder
-/// and listing. A HEAD this cannot read plainly (another ref storage, a
-/// linked HEAD, an unusual layout) is asked of git. For display only: removal
-/// asks git itself (`git_branch`).
+/// and listing. A HEAD this cannot read plainly (another ref storage, an
+/// unusual layout) is asked of git. For display only: removal asks git
+/// itself (`git_branch`).
 fn head_branch(path: &Path) -> Option<String> {
     match read_head(path) {
         Some(Head::Branch(name)) => Some(name),
@@ -1388,6 +1460,26 @@ enum Head {
     Other,
 }
 
+/// The most read from a `.git` pointer or a HEAD file: either holds one line.
+const SMALL_FILE: u64 = 4096;
+
+/// The text of `path` when `metadata` (read before opening it) says it is a
+/// regular file of at most `SMALL_FILE` bytes; `None` for a device, a FIFO,
+/// a folder or a larger file, so a hostile `.git` or HEAD can neither block a
+/// listing nor fill its memory.
+fn small_file(metadata: &fs::Metadata, path: &Path) -> Option<String> {
+    if !metadata.is_file() || metadata.len() > SMALL_FILE {
+        return None;
+    }
+    let mut text = String::new();
+    File::open(path)
+        .ok()?
+        .take(SMALL_FILE)
+        .read_to_string(&mut text)
+        .ok()?;
+    Some(text)
+}
+
 /// `None` when only git can tell.
 fn read_head(path: &Path) -> Option<Head> {
     let Some(marker) = path
@@ -1400,16 +1492,34 @@ fn read_head(path: &Path) -> Option<Head> {
     let git_dir = if marker.is_dir() {
         marker
     } else {
-        // A linked worktree or submodule: `gitdir: <path>`, relative to its folder.
-        let pointer = fs::read_to_string(&marker).ok()?;
+        // A linked worktree or submodule: `gitdir: <path>`, relative to its
+        // folder. Anything else (a device, a FIFO, a huge file) is no
+        // repository this or git could read, and is not handed to git.
+        let Some(pointer) = small_file(&fs::metadata(&marker).ok()?, &marker) else {
+            return Some(Head::Other);
+        };
         let target = pointer.strip_prefix("gitdir:")?.trim();
         marker.parent()?.join(target)
     };
     let head = git_dir.join("HEAD");
-    if !fs::symlink_metadata(&head).ok()?.is_file() {
-        return None;
+    let metadata = fs::symlink_metadata(&head).ok()?;
+    // Older Git links HEAD to the branch's ref. The link is read, never
+    // followed: git itself would read whatever it points at to its end.
+    if metadata.file_type().is_symlink() {
+        let target = fs::read_link(&head).ok()?;
+        return Some(
+            match target
+                .to_str()
+                .and_then(|target| target.strip_prefix("refs/heads/"))
+            {
+                Some(name) if !name.is_empty() => Head::Branch(name.to_owned()),
+                _ => Head::Other,
+            },
+        );
     }
-    let content = fs::read_to_string(head).ok()?;
+    let Some(content) = small_file(&metadata, &head) else {
+        return Some(Head::Other);
+    };
     let content = content.trim_end();
     if let Some(reference) = content.strip_prefix("ref: ") {
         return match reference.strip_prefix("refs/heads/") {
@@ -1627,6 +1737,68 @@ mod tests {
         assert!(read_head(&reftable).is_none());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_hostile_git_file_or_head_neither_blocks_a_listing_nor_fills_its_memory() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("haarness-hostile-head-{}", Uuid::now_v7()));
+        let folder = |name: &str| {
+            let folder = root.join(name);
+            fs::create_dir_all(folder.join("inner")).unwrap();
+            folder
+        };
+        let fifo = |path: &Path| {
+            let made = Command::new("mkfifo").arg(path).status().unwrap();
+            assert!(made.success());
+        };
+        let zero_marker = folder("zero-marker");
+        symlink("/dev/zero", zero_marker.join(".git")).unwrap();
+        let fifo_marker = folder("fifo-marker");
+        fifo(&fifo_marker.join(".git"));
+        let fifo_head = folder("fifo-head");
+        fs::create_dir(fifo_head.join(".git")).unwrap();
+        fifo(&fifo_head.join(".git/HEAD"));
+        let zero_head = folder("zero-head");
+        fs::create_dir(zero_head.join(".git")).unwrap();
+        symlink("/dev/zero", zero_head.join(".git/HEAD")).unwrap();
+        let huge_head = folder("huge-head");
+        fs::create_dir(huge_head.join(".git")).unwrap();
+        fs::write(
+            huge_head.join(".git/HEAD"),
+            format!("ref: refs/heads/{}", "x".repeat(8192)),
+        )
+        .unwrap();
+        // A HEAD that older Git links to the branch's ref still names it.
+        let linked_head = folder("linked-head");
+        fs::create_dir(linked_head.join(".git")).unwrap();
+        symlink("refs/heads/main", linked_head.join(".git/HEAD")).unwrap();
+        let cases = [
+            (zero_marker, None),
+            (fifo_marker, None),
+            (fifo_head, None),
+            (zero_head, None),
+            (huge_head, None),
+            (linked_head, Some("main")),
+        ];
+        let (sender, answers) = mpsc::channel();
+        let paths: Vec<_> = cases.iter().map(|(path, _)| path.join("inner")).collect();
+        std::thread::spawn(move || {
+            for path in paths {
+                // Each is answered from the files alone, never handed to git.
+                let read = read_head(&path).is_some();
+                let _ = sender.send((path.clone(), read, head_branch(&path)));
+            }
+        });
+        for (_, expected) in cases {
+            let (path, read, branch) = answers
+                .recv_timeout(Duration::from_secs(30))
+                .expect("a hostile .git or HEAD blocked the read");
+            assert!(read, "{path:?} was handed to git");
+            assert_eq!(branch.as_deref(), expected, "{path:?}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     static SLOW_STARTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     static SLOW_RELEASED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -1733,7 +1905,9 @@ mod tests {
             Duration::from_secs(2),
         )
         .unwrap();
+        assert_eq!(registered.pending, std::slice::from_ref(&slow));
         let names: Vec<_> = registered
+            .workspaces
             .iter()
             .map(|workspace| workspace.name.as_str())
             .collect();
@@ -1747,7 +1921,8 @@ mod tests {
             Duration::from_millis(200),
         )
         .unwrap();
-        assert!(again.is_empty());
+        assert!(again.workspaces.is_empty());
+        assert_eq!(again.pending, std::slice::from_ref(&slow));
         assert_eq!(REGISTER_STARTED.load(SeqCst), 1);
 
         // Once it answers, its late registration counts.
