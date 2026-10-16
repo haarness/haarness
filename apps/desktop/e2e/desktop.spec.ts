@@ -7197,15 +7197,32 @@ test("worktree view groups sessions, isolates drafts and terminals, and manages 
     .getByRole("button", { name: "New chat in Project folder", exact: true })
     .click();
   await expect(composer).toHaveValue("Local starter draft");
+  // The switch to the checkout takes a moment (here its first step, saving
+  // which checkouts are open, is held for 1.5 s). The message box waits for
+  // it: typed sooner, the text would land in the draft of the chat being
+  // left, and Send would then send the checkout's saved draft.
+  await app.evaluate(({ ipcMain }) => {
+    const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, (...args: any[]) => unknown> })._invokeHandlers;
+    const original = handlers.get("haarness:storage")!;
+    ipcMain.removeHandler("haarness:storage");
+    ipcMain.handle("haarness:storage", async (event, key, value) => {
+      if (key !== "worktree-expansion:v1") return original(event, key, value);
+      ipcMain.removeHandler("haarness:storage");
+      ipcMain.handle("haarness:storage", original);
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      return original(event, key, value);
+    });
+  });
   await tree
     .getByRole("button", { name: "New chat in Sidebar feature", exact: true })
     .click();
-  await send(
-    '!tool bash {"command":"pwd; printf sidebar-proof > sidebar-proof.txt"}',
-  );
+  const sidebarCommand =
+    '!tool bash {"command":"pwd; printf sidebar-proof > sidebar-proof.txt"}';
+  await send(sidebarCommand);
   await expect(
     page.getByRole("button", { name: "Allow once", exact: true }),
   ).toBeVisible();
+  await expect(page.locator("article.message.user").last()).toContainText("sidebar-proof");
   const thread = (await request<{ id: string }[]>("listThreads"))[0];
   await request("updateThread", [
     thread.id,

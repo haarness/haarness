@@ -1926,7 +1926,8 @@ export function Session() {
                   controls.busy() ||
                   !project() ||
                   !state.ready ||
-                  !!state.openingProject
+                  !!state.openingProject ||
+                  state.switching
                 }
                 placeholder={
                   !project()
@@ -2191,7 +2192,7 @@ export function Session() {
                       submitting() ||
                       controls.busy() ||
                       stopping() ||
-                      (!showStop() && !state.ready) ||
+                      (!showStop() && (!state.ready || state.switching)) ||
                       (!showStop() &&
                         !draft().trim() &&
                         !attachments().length &&
