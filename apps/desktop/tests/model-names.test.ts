@@ -19,3 +19,24 @@ test("friendly names preserve live catalog names and unknown deployment IDs", ()
     "Claude Sonnet 4.5 (2025-09-29)",
   );
 });
+test("Bedrock Claude ids read by the model they name", () => {
+  for (const [id, name] of [
+    ["apac.anthropic.claude-sonnet-5-5-v1:0", "Claude Sonnet 5.5"],
+    ["anthropic.claude-opus-4-6-v1", "Claude Opus 4.6"],
+    [
+      "us-gov.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "Claude Haiku 4.5 (2025-10-01)",
+    ],
+    [
+      "amazon-bedrock/au.anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "Claude Sonnet 4.5 (2025-09-29)",
+    ],
+  ])
+    assert.equal(modelDisplayName(id, id), name, id);
+  for (const id of [
+    "apac.anthropic.claude-sonnet-9-9-v1:0",
+    "mycorp.claude-sonnet-5-5",
+    "meta.llama3-70b-instruct-v1:0",
+  ])
+    assert.equal(modelDisplayName(id), id);
+});
