@@ -570,6 +570,14 @@ function GlobalShortcutRows() {
   const app = useApp();
   const value = () => app.state.preferences.globalShortcut;
   let field!: HTMLInputElement;
+  // Settings closing with the field focused sends no blur.
+  let recording = false;
+  const resume = () => {
+    if (!recording) return;
+    recording = false;
+    void window.haarness.globalShortcut("resume");
+  };
+  onCleanup(resume);
   // A refused combination leaves the saved one in the field.
   const save = (next: GlobalShortcut) =>
     app.run(async () => {
@@ -610,8 +618,11 @@ function GlobalShortcutRows() {
           aria-label={t("Global shortcut")}
           value={value().keys}
           disabled={!value().enabled}
-          onFocus={() => void window.haarness.globalShortcut("suspend")}
-          onBlur={() => void window.haarness.globalShortcut("resume")}
+          onFocus={() => {
+            recording = true;
+            void window.haarness.globalShortcut("suspend");
+          }}
+          onBlur={resume}
           onKeyDown={(event) => {
             const chord = recordChord(event, app.state.platform);
             if (!chord) return;
