@@ -5,6 +5,7 @@ the approval card at several terminal sizes, and the --auto flag.
 HAARNESS_E2E_FRAMES names a folder for captured frames (ANSI and text);
 by default they land beside the other evidence."""
 import json, os, pathlib, shlex, subprocess, tempfile, time, urllib.request, uuid
+import e2e_scratch
 
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/release/haarness')).resolve()
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-auto-e2e-')).resolve()
@@ -184,22 +185,32 @@ try:
     until(lambda:len(api('/v1/permissions'))==1,'the long command did not ask')
     launch(review,width=160,height=44)
     answers=lambda pane:all(label in pane for label in ('Allow once','Reject'))
+    def whole_card(test,label):
+        """The card once `test` holds and its answers are drawn, from that
+        same capture: under load a capture can land between its rows."""
+        seen={}
+        def ready():
+            seen['card']=card(capture())
+            return test(seen['card']) and answers(seen['card'])
+        until(ready,label)
+        return seen['card']
     for width,height in [(160,44),(100,24),(80,20),(80,12)]:
         resize(width,height)
-        until(lambda:'$ printf "line-01' in card(capture()) and ' of 12' in card(capture()),f'{width}x{height}: the card did not open on the first lines')
-        shown=card(capture())
-        assert answers(shown) and 'line-12' not in shown, shown
+        shown=whole_card(lambda top:'$ printf "line-01' in top and ' of 12' in top,f'{width}x{height}: the card did not open on the first lines')
+        assert 'line-12' not in shown, shown
         if (width,height) in ((160,44),(80,12)):
             save(f'card-{width}x{height}-top')
         keys('-N','12','Down')
-        until(lambda:'line-12' in card(capture()) and '–12 of 12' in card(capture()),f'{width}x{height}: Down did not reach the last line')
-        shown=card(capture())
-        assert answers(shown) and 'line-01' not in shown, shown
+        shown=whole_card(lambda end:'line-12' in end and '–12 of 12' in end,f'{width}x{height}: Down did not reach the last line')
+        assert 'line-01' not in shown, shown
         if (width,height) in ((160,44),(80,12)):
             save(f'card-{width}x{height}-end')
         keys('-N','12','Up')
         until(lambda:'$ printf "line-01' in card(capture()) and 'line-12' not in card(capture()),f'{width}x{height}: Up did not return to the first line')
     resize(160,44)
+    # Press ctrl+e once the TUI has redrawn at the new width (its rule spans
+    # the window), not while it is still handling the resize.
+    until(lambda:'━'*150 in capture(),'the TUI did not redraw at 160 columns')
     keys('C-e')
     until(lambda:'ctrl+e collapse' in card(capture()),'ctrl+e did not expand the command')
     shown=card(capture())
@@ -239,8 +250,9 @@ try:
     ran=[item['id'] for item in api('/v1/threads') if item['title']=='Run auto flag']
     assert len(ran)==1 and api('/v1/threads/'+ran[0]+'/approval-mode')['mode']=='auto', ran
     check('haarness run --auto puts its chat in Auto, so a run nobody watches gets its requests approved; a plain run is refused')
-    print(f'{len(checks)} real-server TUI scenarios passed. Evidence: {root}',flush=True)
+    print(f'{len(checks)} real-server TUI scenarios passed.',flush=True)
     (root/'tui.txt').write_text(capture())
 finally:
     subprocess.run(['tmux','kill-session','-t',name],capture_output=True)
     subprocess.run([str(binary),'--workspace',str(workspace),'serve','--stop'],env=env,capture_output=True,timeout=30)
+    e2e_scratch.settle(root)

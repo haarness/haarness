@@ -14,6 +14,14 @@ request into the shared chat so each connection proves itself at once.
    stopped) for 60 s, and start it again on the same port.
 3. The connector must still run, renew the sign-in once Cloud is back,
    reconnect, and have said one "Could not reach" and one "reconnected" line.
+4. Freeze the fake Cloud (SIGSTOP) for 60 s, as a network stall under a
+   working connection: nothing answers, not even new connects. The connector
+   must notice within its heartbeat and serve again once Cloud answers.
+5. Let the relay take each connection and then go silent before it proves
+   itself, as a flaky network does, six times: each must count as a failed
+   attempt, never as one of the drops that earn waits of minutes, and the
+   attempts stay a heartbeat plus at most 10 s apart (the wait between
+   attempts for five minutes after a working connection ends).
 """
 
 import datetime
@@ -29,6 +37,8 @@ import tempfile
 import time
 import urllib.request
 import uuid
+
+import e2e_scratch
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -85,8 +95,14 @@ def serve(port: int, chat: str, events: str, project: str) -> None:
         ws = web.WebSocketResponse(autoping=True)
         await ws.prepare(request)
         state["connected"] += 1
-        log("relay_open", bearer=bearer.removeprefix("Bearer "))
+        # While this flag exists the relay answers nothing after `ready`, not
+        # even pings, as a network that stalls does.
+        quiet = os.path.exists(os.path.join(os.path.dirname(events), "quiet"))
+        log("relay_open", bearer=bearer.removeprefix("Bearer "), quiet=quiet)
         await ws.send_str(json.dumps({"type": "ready", "version": 1}))
+        if quiet:
+            await asyncio.sleep(600)
+            return ws
         request_id = str(uuid.uuid4())
         await ws.send_str(
             json.dumps(
@@ -248,6 +264,51 @@ def main() -> None:
         assert renewals and bearers and bearers[0].startswith("renewed-"), (renewals, bearers)
         assert status["connected"] is True
         assert connector.poll() is None
+
+        # A network stall under the working connection.
+        marker = len(connector_log.read_text())
+        stalled = time.time()
+        os.kill(cloud.pid, signal.SIGSTOP)
+        try:
+            wait_for(lambda: "Remote connection ended" in connector_log.read_text()[marker:], 45, "the stall to be noticed")
+            noticed = time.time()
+            time.sleep(max(0.0, stalled + 60 - time.time()))
+        finally:
+            os.kill(cloud.pid, signal.SIGCONT)
+        resumed = time.time()
+        wait_for(lambda: any(e["event"] == "served" and e["at"] > resumed for e in events(event_log)), 60, "a relayed request after the stall")
+        served = min(e["at"] for e in events(event_log) if e["event"] == "served" and e["at"] > resumed)
+        result.update(
+            stall_noticed_seconds=round(noticed - stalled),
+            stall_reconnect_seconds=round(served - resumed, 1),
+            stall_lines=[line for line in connector_log.read_text()[marker:].splitlines() if line.strip()],
+        )
+        assert noticed - stalled <= 40, result["stall_lines"]
+        assert served - resumed <= 20, result
+
+        # A flaky network: connections that go silent before they prove themselves.
+        (root / "quiet").write_text("")
+        marker = len(connector_log.read_text())
+        cloud.kill()
+        cloud.wait()
+        flaky = time.time()
+        cloud = start_cloud()
+
+        def silent() -> list[float]:
+            return [e["at"] for e in events(event_log) if e["event"] == "relay_open" and e.get("quiet") and e["at"] > flaky]
+
+        wait_for(lambda: len(silent()) >= 6, 360, "six silent connections")
+        (root / "quiet").unlink()
+        opens = silent()
+        gaps = [round(later - earlier, 1) for earlier, later in zip(opens, opens[1:])]
+        steady = time.time()
+        wait_for(lambda: any(e["event"] == "served" and e["at"] > steady for e in events(event_log)), 90, "a relayed request after the flaky network")
+        flaky_lines = [line for line in connector_log.read_text()[marker:].splitlines() if line.strip()]
+        result.update(silent_connection_gaps=gaps, flaky_lines=flaky_lines)
+        assert not any("dropped" in line for line in flaky_lines), flaky_lines
+        # A heartbeat (25 s) and a wait of at most 10 s apart; a drop's cooldown would add a minute.
+        assert max(gaps) < 50, gaps
+        assert connector.poll() is None
         result["verdict"] = "PASS"
     finally:
         print(json.dumps(result, indent=2))
@@ -259,6 +320,9 @@ def main() -> None:
                 os.killpg(connector.pid, signal.SIGKILL)
         cloud.kill()
         subprocess.run(base + ["serve", "--stop"], env=env, capture_output=True, timeout=60)
+        # A state folder named on the command line is the caller's to keep.
+        if len(sys.argv) <= 1:
+            e2e_scratch.settle(root)
 
 
 if __name__ == "__main__":

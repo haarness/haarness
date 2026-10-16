@@ -12,7 +12,11 @@ daemon in a private data folder shows that:
    `system` and the second request starts with the first one's messages; each stamp is in
    the messages, not the system prompt;
 3. a chat that began days ago (its `created_at` edited in the store) is told today's date
-   once, and the next turn replays that reminder instead of adding another.
+   once, and the next turn replays that reminder instead of adding another;
+4. a `general` subagent started from a plan chat and one started from a build chat send a
+   byte-identical tool list and system prompt, so the second reads the cached prefix the first
+   wrote: the plan chat's browser and write ceiling refuses those tools when called, it does not
+   take them out of the list.
 
 Usage: python3 scripts/test-prompt-stability.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_EVIDENCE the evidence folder).
@@ -83,6 +87,11 @@ class Anthropic(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         REQUESTS.append(body)
         prompt = ' '.join(texts(body)[-4:])
+        last = body['messages'][-1]['content']
+        answered = isinstance(last, list) and any(block.get('type') == 'tool_result' for block in last)
+        dispatch = next((word for word in ('DISPATCH_PLAN', 'DISPATCH_BUILD') if word in prompt), None)
+        if dispatch and not answered:
+            return self.task(body, 'CHILD_FROM_' + dispatch.split('_')[1] + ' list the project files')
         refuse = 'REFUSE' in prompt
         partial = 'REFUSE_PARTIAL' in prompt
         self.send_response(200)
@@ -98,9 +107,26 @@ class Anthropic(http.server.BaseHTTPRequestHandler):
         events += [{'type': 'message_delta', 'delta': {'stop_reason': 'refusal' if refuse else 'end_turn', 'stop_sequence': None},
                     'usage': {'output_tokens': 3}},
                    {'type': 'message_stop'}]
+        self.stream(events)
+
+    def stream(self, events):
         for event in events:
             self.wfile.write(('event: ' + event['type'] + '\ndata: ' + json.dumps(event) + '\n\n').encode())
         self.wfile.flush()
+
+    def task(self, body, prompt):
+        """Delegate `prompt` to a `general` subagent."""
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream')
+        self.end_headers()
+        call = {'prompt': prompt, 'agent': 'general', 'description': 'list files'}
+        self.stream([{'type': 'message_start', 'message': {'id': f'msg_e2e_{len(REQUESTS)}', 'usage': {'input_tokens': 40, 'output_tokens': 0}}},
+                     {'type': 'content_block_start', 'index': 0,
+                      'content_block': {'type': 'tool_use', 'id': f'toolu_{len(REQUESTS)}', 'name': 'task', 'input': {}}},
+                     {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'input_json_delta', 'partial_json': json.dumps(call)}},
+                     {'type': 'content_block_stop', 'index': 0},
+                     {'type': 'message_delta', 'delta': {'stop_reason': 'tool_use', 'stop_sequence': None}, 'usage': {'output_tokens': 3}},
+                     {'type': 'message_stop'}])
 
 
 service = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Anthropic)
@@ -256,6 +282,39 @@ try:
     (EVIDENCE / 'date-requests.json').write_text(json.dumps([first, second], indent=2))
     checks.append({'date reminder': [f'system says {began_local}', f'told {today} once', 'replayed unchanged']})
     print('PASS date reminder for an old chat', flush=True)
+
+    # 4. Subagents of a plan chat and of a build chat share one cached prefix. This workspace
+    # denies every tool, so it runs in a second one with the default rules.
+    agents_workspace = root / 'agents-workspace'
+    (agents_workspace / '.haarness').mkdir(parents=True, exist_ok=True)
+    (agents_workspace / '.haarness/config.toml').write_text(
+        f'[defaults]\nprovider="anthropic"\nmodel="{MODEL}"\n[lsp]\nenabled=false\n')
+    run(['git', 'init', '-q', str(agents_workspace)])
+    agents_args = [str(BINARY), '--workspace', str(agents_workspace), '--trust-project']
+    second_connection = json.loads(run(agents_args + ['desktop'], input='{"action":"connect"}', env=env, timeout=120))
+    try:
+        first_connection, connection = connection, second_connection
+        children = {}
+        for agent in ('plan', 'build'):
+            parent = api('/threads', {'title': f'{agent} parent', 'provider': 'anthropic', 'model': MODEL, 'agent': agent})['id']
+            assert turn(parent, f'DISPATCH_{agent.upper()} please')['status'] == 'completed'
+            marker = f'CHILD_FROM_{agent.upper()}'
+            children[agent] = next(body for body in REQUESTS if any(text.startswith(marker) for text in texts(body)))
+    finally:
+        connection = first_connection
+        subprocess.run(agents_args + ['serve', '--stop'], env=env, capture_output=True, timeout=60)
+    under_plan, under_build = children['plan'], children['build']
+    (EVIDENCE / 'subagent-requests.json').write_text(json.dumps(children, indent=2))
+    plan_tools = [tool['name'] for tool in under_plan['tools']]
+    build_tools = [tool['name'] for tool in under_build['tools']]
+    missing = sorted(set(build_tools) - set(plan_tools))
+    assert not missing, f'the plan chat\'s subagent lacks {missing}'
+    assert clean(under_plan['tools']) == clean(under_build['tools']), 'the subagents sent different tool lists'
+    assert json.dumps(clean(under_plan['system'])) == json.dumps(clean(under_build['system'])), 'the subagents sent different system prompts'
+    assert 'browser_navigate' in plan_tools and 'write' in plan_tools, plan_tools
+    checks.append({'subagent prefix': [f'{len(plan_tools)} tools identical under a plan and a build chat',
+                                       'system identical', 'browser_navigate and write listed under the plan chat']})
+    print(f'PASS subagents of a plan chat and a build chat send one prefix ({len(plan_tools)} tools)', flush=True)
     (EVIDENCE / 'results.json').write_text(json.dumps(checks, indent=2))
 finally:
     subprocess.run(['tmux', 'kill-session', '-t', session], capture_output=True)

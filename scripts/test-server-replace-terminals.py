@@ -21,6 +21,8 @@ import tempfile
 import time
 import urllib.request
 
+import e2e_scratch
+
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
 
@@ -106,6 +108,9 @@ def main() -> None:
         for build in (build_b, build_a):
             cli(build, "serve", "--stop")
         time.sleep(1)
+        # A state folder named on the command line is the caller's to keep.
+        if len(sys.argv) <= 1:
+            e2e_scratch.settle(root)
 
 
 if __name__ == "__main__":

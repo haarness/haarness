@@ -10704,6 +10704,18 @@ mod permission_parity;
 #[path = "cases/chrome.rs"]
 mod chrome;
 
+#[path = "cases/unattended.rs"]
+mod unattended;
+
+#[path = "cases/turn_panic.rs"]
+mod turn_panic;
+
+#[path = "cases/session_start.rs"]
+mod session_start;
+
+#[path = "cases/inherited_ceilings.rs"]
+mod inherited_ceilings;
+
 #[tokio::test]
 async fn workspace_file_routes_answer_a_missing_file_with_404_in_plain_words() {
     let workspace =

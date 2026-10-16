@@ -471,8 +471,12 @@ impl NativeMcpRegistry {
                 }
                 Err(ActivationError::Core(error)) => {
                     entry.info.status = "failed".into();
-                    entry.info.detail =
-                        Some(format!("connection failed: {}", concise_error(&error)));
+                    // Clients, the model's `mcp_manage` and logs show this:
+                    // a URL in it keeps its host but not its credentials.
+                    entry.info.detail = Some(format!(
+                        "connection failed: {}",
+                        haarness_core::redact::urls_in(&concise_error(&error))
+                    ));
                     return Err(error);
                 }
             };
@@ -1024,13 +1028,13 @@ fn spawn_worker(
                     arguments,
                     reply,
                 } => {
-                    let mut params = CallToolRequestParams::new(tool);
+                    let mut params = CallToolRequestParams::new(tool.clone());
                     params.arguments = arguments.as_object().cloned();
                     let result = peer
                         .call_tool(params)
                         .await
                         .map_err(mcp_error)
-                        .and_then(to_output);
+                        .and_then(|result| to_output(result, &tool));
                     let _ = reply.send(result);
                 }
                 WorkerCommand::Resources { reply } => {
@@ -1395,7 +1399,7 @@ fn parse_sse_event(event: &[u8]) -> Option<(String, String)> {
     (!data.is_empty()).then(|| (kind, data.join("\n")))
 }
 
-fn to_output(result: rmcp::model::CallToolResult) -> CoreResult<ToolOutput> {
+fn to_output(result: rmcp::model::CallToolResult, tool: &str) -> CoreResult<ToolOutput> {
     let mut text_parts = Vec::new();
     let mut attachments = Vec::new();
     let mut attachment_bytes = 0usize;
@@ -1415,9 +1419,28 @@ fn to_output(result: rmcp::model::CallToolResult) -> CoreResult<ToolOutput> {
             other => text_parts.push(serde_json::to_string(other).unwrap_or_default()),
         }
     }
+    // A tool that declares an output schema may return its result only as
+    // structured content, with no text beside it (no content at all, or only
+    // images, audio or links). The model and workflows read text, so it
+    // becomes the text.
+    let has_text = result.content.iter().any(|content| match content {
+        rmcp::model::ContentBlock::Text(text) => !text.text.is_empty(),
+        rmcp::model::ContentBlock::Resource(embedded) => matches!(
+            &embedded.resource,
+            rmcp::model::ResourceContents::TextResourceContents { text, .. } if !text.is_empty()
+        ),
+        _ => false,
+    });
+    if !has_text && let Some(structured) = &result.structured_content {
+        text_parts.push(structured.to_string());
+    }
     let text = text_parts.join("\n");
     if result.is_error == Some(true) {
-        Err(CoreError::Tool(text))
+        Err(CoreError::Tool(if text.is_empty() {
+            format!("MCP tool {tool} failed without saying why")
+        } else {
+            text
+        }))
     } else {
         let mut metadata = result.structured_content.unwrap_or(Value::Null);
         if !attachments.is_empty() {
@@ -1449,6 +1472,7 @@ fn count_mcp_attachment(encoded: &str, total: &mut usize) -> CoreResult<()> {
 /// A server that could not be reached reads as that, with the innermost
 /// reason ("Connection refused"), not as rmcp's transport type names.
 fn initialize_error(error: &(dyn std::error::Error + 'static), url: &str) -> CoreError {
+    let url = haarness_core::redact::url(url);
     let text = error.to_string();
     if text.contains("error sending request") {
         if let Some(cause) = std::iter::successors(Some(error), |error| error.source()).last()
@@ -2338,7 +2362,7 @@ mod tests {
             rmcp::model::ContentBlock::image("iVBORw0KGgo=", "image/png"),
             rmcp::model::ContentBlock::audio("SUQz", "audio/mpeg"),
         ]);
-        let output = to_output(result).unwrap();
+        let output = to_output(result, "media").unwrap();
         assert!(output.text.contains("generated media"));
         assert_eq!(
             output.metadata["attachments"],
@@ -2356,11 +2380,66 @@ mod tests {
             "image/png",
         )]);
         assert!(
-            to_output(result)
+            to_output(result, "media")
                 .unwrap_err()
                 .to_string()
                 .contains("base64")
         );
+    }
+
+    #[test]
+    fn structured_content_is_the_text_of_a_result_that_has_none() {
+        let structured = serde_json::json!({"temperature": 21, "unit": "C"});
+        // Only structured content, as a tool with an output schema may answer.
+        let mut result = rmcp::model::CallToolResult::structured(structured.clone());
+        result.content.clear();
+        let output = to_output(result, "weather").unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&output.text).unwrap(),
+            structured
+        );
+        assert_eq!(output.metadata, structured);
+        // Only an image beside it.
+        let mut result = rmcp::model::CallToolResult::structured(structured.clone());
+        result.content = vec![rmcp::model::ContentBlock::image(
+            "iVBORw0KGgo=",
+            "image/png",
+        )];
+        let output = to_output(result, "chart").unwrap();
+        assert!(output.text.contains("[image/png image attachment]"));
+        assert!(
+            output.text.contains(r#""temperature":21"#),
+            "{}",
+            output.text
+        );
+        assert_eq!(output.metadata["temperature"], 21);
+        assert_eq!(
+            output.metadata["attachments"],
+            serde_json::json!(["data:image/png;base64,iVBORw0KGgo="])
+        );
+        // Text beside it is the answer, as before.
+        let mut result =
+            rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+                "It is 21 C",
+            )]);
+        result.structured_content = Some(structured.clone());
+        assert_eq!(to_output(result, "weather").unwrap().text, "It is 21 C");
+    }
+
+    #[test]
+    fn a_failed_call_without_text_still_says_what_failed() {
+        let error = to_output(rmcp::model::CallToolResult::error(Vec::new()), "deploy")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("MCP tool deploy failed without saying why"),
+            "{error}"
+        );
+        let mut result =
+            rmcp::model::CallToolResult::structured_error(serde_json::json!({"code": "E42"}));
+        result.content.clear();
+        let error = to_output(result, "deploy").unwrap_err().to_string();
+        assert!(error.contains("E42"), "{error}");
     }
 }
 

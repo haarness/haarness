@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { Bridge, DesktopEvent } from "../shared";
 const invoke = async (channel: string, ...args: unknown[]) => {
   const response = await ipcRenderer.invoke("haarness:" + channel, ...args);
@@ -6,7 +6,16 @@ const invoke = async (channel: string, ...args: unknown[]) => {
   return response.value;
 };
 const bridge: Bridge = {
+  // Never throws: a file the page made itself has no path.
+  pathForFile: (file) => {
+    try {
+      return webUtils.getPathForFile(file);
+    } catch {
+      return "";
+    }
+  },
   account: (input) => invoke("account", input),
+  globalShortcut: (action) => invoke("globalShortcut", action),
   openLink: (connection, thread, url) => invoke("openLink", connection, thread, url),
   browserData: (connection, input) => invoke("browserData", connection, input),
   browserAttach:(connection,thread)=>invoke("browserAttach",connection,thread),

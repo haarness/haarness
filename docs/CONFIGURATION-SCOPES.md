@@ -149,7 +149,7 @@ The `hooks` object in any configuration layer (and `hooks/hooks.json` in a plugi
 
 | Event | When | Payload beyond the common fields | Matcher compares |
 | --- | --- | --- | --- |
-| `SessionStart` | a thread is created | `source` (`startup`), `agent` | `source` |
+| `SessionStart` | a chat is created; not a chat started inside another (a task subagent, a workflow's thread or agent), so a slow hook never holds up their first prompt | `source` (`startup`), `agent` | `source` |
 | `UserPromptSubmit` | a root turn starts | `prompt` | — |
 | `PreToolUse` / `PermissionRequest` | before a tool runs / before the user is prompted | `tool_name`, `tool_input`; `PermissionRequest` adds `permission_patterns` | tool name (Claude aliases accepted) |
 | `PostToolUse` / `PostToolUseFailure` | after a tool finishes | `tool_name`, `tool_input`, `tool_response`, `error` | tool name |
@@ -166,7 +166,7 @@ The `hooks` object in any configuration layer (and `hooks/hooks.json` in a plugi
 
 `tool_input` carries the tool's own arguments (`path`, `command`, …). For `PermissionRequest`, `tool_name` is the permission asked (`read`, `edit`, `bash`, `external_directory`, …) and `permission_patterns` what the prompt asks about. A file tool also asks about the file it really opens when links or `..` lead elsewhere, and the hook is asked about that file in a run of its own, with `tool_input.path` set to it: for a link `notes.txt -> .env`, the hook sees `.env`, not `notes.txt`. The prompt is answered only when every run allows it, and a deny in any run refuses it. For the same reason a `PreToolUse` allow, given for the path the tool names, never answers an ask about where that path leads. See [where a file really is](PERMISSIONS-AND-EXECUTION.md#secret-files).
 
-Any other non-zero exit is a non-blocking error: the action continues and the daemon log records one `hook command failed` warning with the event, the command's program name, its exit code or signal and the start of its redacted stderr. Every block is logged once at INFO as `hook blocked`. The configured command line is never logged; see [observability](OBSERVABILITY.md#diagnostic-log-lines).
+Any other non-zero exit is a non-blocking error: the action continues and the daemon log records one `hook command failed` warning with the event, the chat it ran for (`session`), the command's program name, its exit code or signal and the start of its redacted stderr. Every block is logged once at INFO as `hook blocked`. The configured command line is never logged; see [observability](OBSERVABILITY.md#diagnostic-log-lines).
 
 `SessionStart`, `SessionEnd`, `TurnEnd`, `Notification`, `FileChanged` and `ConfigChange` are observational: their output is logged, never applied. The desktop hook editor accepts these lifecycle events. `PostCompact` and `StopFailure` are observational: hook output never changes the compaction or retries a failed response. Cancellation does not emit `StopFailure`. JavaScript extensions receive the matching `session.start`, `session.end`, `session.compacted`, `chat.turn.failed`, `chat.turn.end` and `config` hooks; see [extensions](EXTENSIONS.md#hooks).
 

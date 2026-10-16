@@ -274,6 +274,24 @@ pub(super) fn promote(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A test database in a folder of its own, removed with its journal files
+    /// even when the test fails.
+    struct Scratch(std::path::PathBuf);
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            let root = std::env::temp_dir().join(format!("haarness-{label}-{}", Uuid::now_v7()));
+            std::fs::create_dir_all(&root).unwrap();
+            Self(root)
+        }
+        fn database(&self) -> std::path::PathBuf {
+            self.0.join("store.db")
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
     fn message(text: &str) -> PendingInput {
         PendingInput {
             preview: None,
@@ -285,7 +303,8 @@ mod tests {
     }
     #[tokio::test]
     async fn deferred_input_storage_is_durable_idempotent_and_thread_scoped() {
-        let path = std::env::temp_dir().join(format!("haarness-input-{}.db", Uuid::now_v7()));
+        let scratch = Scratch::new("input");
+        let path = scratch.database();
         let store = SqliteStore::open(&path).unwrap();
         let thread = store
             .create_thread(CreateThreadRequest::default())
@@ -410,7 +429,8 @@ mod tests {
     }
     #[tokio::test]
     async fn deferred_input_storage_concurrent_edit_has_one_winner() {
-        let path = std::env::temp_dir().join(format!("haarness-input-race-{}.db", Uuid::now_v7()));
+        let scratch = Scratch::new("input-race");
+        let path = scratch.database();
         let store = Arc::new(SqliteStore::open(&path).unwrap());
         let other = Arc::new(SqliteStore::open(&path).unwrap());
         let thread = store

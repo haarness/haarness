@@ -92,8 +92,9 @@ export function searchEntries(entries: SearchEntry[], query: string) {
 
 /**
  * Does a key event match a shortcut such as `Mod+K`, `Shift+Tab` or `Tab`?
- * `Mod` is Command on macOS and Control elsewhere. Every modifier must match
- * exactly, so `Tab` does not fire when Shift is held.
+ * `Mod` is Command on macOS and Control elsewhere, and `Ctrl` is Control
+ * everywhere (so `Ctrl+Tab` means the same keys on every platform). Every
+ * modifier must match exactly, so `Tab` does not fire when Shift is held.
  */
 export function matchesShortcut(
   event: Pick<
@@ -111,15 +112,15 @@ export function matchesShortcut(
   const key = parts.pop();
   if (!key) return false;
   const wants = (name: string) => parts.includes(name);
-  const primary = platform === "darwin" ? event.metaKey : event.ctrlKey;
-  if (wants("mod") !== primary) return false;
+  const mac = platform === "darwin";
+  // Off macOS, Mod and Ctrl are one key.
+  const primary = mac ? event.metaKey : event.ctrlKey;
+  if ((wants("mod") || (!mac && wants("ctrl"))) !== primary) return false;
   if (wants("shift") !== event.shiftKey) return false;
   if (wants("alt") !== event.altKey) return false;
-  // With Mod claiming one of them, only the other is still free to check.
-  if (!wants("mod")) {
-    if (wants("ctrl") !== event.ctrlKey) return false;
-    if (wants("meta") !== event.metaKey) return false;
-  }
+  // The other of Command and Control is still free to check.
+  if (mac ? wants("ctrl") !== event.ctrlKey : wants("meta") !== event.metaKey)
+    return false;
   const pressed = event.key.toLowerCase();
   // The recorder stores keys by physical key (`event.code`): with Option held
   // macOS reports ⌥Z as "Ω", and Shift turns "." into ">".

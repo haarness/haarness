@@ -2427,5 +2427,17 @@
   "The folder in this link was not found.": "Bu bağlantıdaki klasör bulunamadı.",
   "Open “{folder}” from a link?": "“{folder}” bir bağlantıdan açılsın mı?",
   "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "Klasör proje yapılandırması kapalı olarak açılır: içindeki MCP sunucuları, kancalar ve uzantılar çalışmaz. Bunları açmak için klasörü Proje aç ile açın.",
-  "Open folder": "Klasörü aç"
+  "Open folder": "Klasörü aç",
+  "Earlier terminal output is no longer available": "Önceki terminal çıktısı artık kullanılamıyor",
+  "Next tab": "Sonraki sekme",
+  "Previous tab": "Önceki sekme",
+  "In the chats, terminal, files, browser or side panel that has the keyboard": "Klavyenin bulunduğu sohbetlerde, terminalde, dosyalarda, tarayıcıda veya yan panelde",
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Bir görsel, PDF, ses veya video dosyası ekleyin. Kaynak koda başvurmak için çalışma alanındaki yolunu kullanın.",
+  "Show and hide Haarness from any app": "Haarness’ı herhangi bir uygulamadan göster ve gizle",
+  "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.": "Haarness’ı herhangi bir uygulamadan öne getirir, öndeyken yeniden gizler. Açıkken diğer uygulamalar bu tuş birleşimini artık almaz.",
+  "Global shortcut": "Genel kısayol",
+  "Click and press the keys, including a modifier key.": "Tıklayın ve bir değiştirici tuş dahil tuşlara basın.",
+  "Use a modifier key and one more key, such as {keys}.": "Bir değiştirici tuş ve bir tuş daha kullanın, örneğin {keys}.",
+  "{keys} belongs to the system. Choose another shortcut.": "{keys} sisteme ait. Başka bir kısayol seçin.",
+  "Another app or the system already uses {keys}. Choose another shortcut.": "{keys} başka bir uygulama veya sistem tarafından kullanılıyor. Başka bir kısayol seçin."
 }

@@ -10,3 +10,39 @@ export type TerminalSize = { cols: number; rows: number };
 export function pendingSize(pushed: TerminalSize | undefined, next: TerminalSize) {
   return pushed?.cols === next.cols && pushed?.rows === next.rows ? undefined : next;
 }
+
+/**
+ * Pushes the sizes xterm takes to the PTY once they settle (`delay` after the
+ * last one), skipping a size the PTY already has. A push that fails is
+ * forgotten, so asking for that size again (as a reconnect does) sends it
+ * instead of skipping it as already pushed.
+ */
+export function sizePusher(
+  send: (size: TerminalSize) => Promise<unknown>,
+  delay = 100,
+) {
+  let pushed: TerminalSize | undefined;
+  let pending: TerminalSize | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let disposed = false;
+  return {
+    schedule(size: TerminalSize) {
+      pending = pendingSize(pushed, size);
+      clearTimeout(timer);
+      if (!pending || disposed) return;
+      timer = setTimeout(() => {
+        const size = pending;
+        pending = undefined;
+        if (!size || disposed) return;
+        pushed = size;
+        void send(size).catch(() => {
+          if (pushed === size) pushed = undefined;
+        });
+      }, delay);
+    },
+    dispose() {
+      disposed = true;
+      clearTimeout(timer);
+    },
+  };
+}

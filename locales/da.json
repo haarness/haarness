@@ -2427,5 +2427,17 @@
   "The folder in this link was not found.": "Mappen i dette link blev ikke fundet.",
   "Open “{folder}” from a link?": "Vil du åbne “{folder}” fra et link?",
   "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "Mappen åbnes med projektkonfigurationen slået fra: MCP-servere, hooks og udvidelser i den kører ikke. Åbn mappen med Åbn projekt for at slå dem til.",
-  "Open folder": "Åbn mappe"
+  "Open folder": "Åbn mappe",
+  "Earlier terminal output is no longer available": "Tidligere terminaloutput er ikke længere tilgængeligt",
+  "Next tab": "Næste fane",
+  "Previous tab": "Forrige fane",
+  "In the chats, terminal, files, browser or side panel that has the keyboard": "I chats, terminal, filer, browser eller sidepanel, der har tastaturet",
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Vedhæft et billede, en PDF eller en lyd- eller videofil. Brug kildekodens sti i arbejdsområdet for at henvise til den.",
+  "Show and hide Haarness from any app": "Vis og skjul Haarness fra enhver app",
+  "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.": "Bringer Haarness frem fra enhver app og skjuler den igen, når den er forrest. Mens den er slået til, modtager andre apps ikke længere kombinationen.",
+  "Global shortcut": "Global genvej",
+  "Click and press the keys, including a modifier key.": "Klik, og tryk på tasterne, inklusive en modifikatortast.",
+  "Use a modifier key and one more key, such as {keys}.": "Brug en modifikatortast og én tast mere, f.eks. {keys}.",
+  "{keys} belongs to the system. Choose another shortcut.": "{keys} hører til systemet. Vælg en anden genvej.",
+  "Another app or the system already uses {keys}. Choose another shortcut.": "En anden app eller systemet bruger allerede {keys}. Vælg en anden genvej."
 }

@@ -12,6 +12,8 @@ import time
 from uuid import uuid4
 import zlib
 
+import e2e_scratch
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "sdks/tests"))
 from server import Fixture, BINARY
@@ -111,4 +113,4 @@ finally:
     subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True)
     subprocess.run(["tmux", "delete-buffer", "-b", session], capture_output=True)
     fixture.close()
-    print("Evidence retained:", evidence, flush=True)
+    e2e_scratch.settle(evidence)

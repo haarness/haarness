@@ -83,7 +83,7 @@ impl WorkflowRuntimeAdapter {
     ) -> Result<haarness_core::DirectToolResult, HostError> {
         let runtime = self.runtime()?;
         let tool_cancel = cancellation.child_token();
-        let call = runtime.run_direct_tool(thread_id, name, arguments, tool_cancel.clone());
+        let call = runtime.run_workflow_tool(thread_id, name, arguments, tool_cancel.clone());
         tokio::pin!(call);
         match timeout_ms {
             Some(timeout_ms) => {

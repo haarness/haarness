@@ -2191,6 +2191,40 @@ test("file drops attach across the chat area and preserve text drop behavior", a
   await invalid.dispose();
 });
 
+test("a dropped file that is not media goes into the message as its path at the caret, and undo takes it out", async () => {
+  await newSession();
+  const chat = page.getByRole("region", { name: "Chat", exact: true });
+  const input = page.getByRole("textbox", { name: "Message", exact: true });
+  const before = "Hello\n\nsee this path: ";
+  const after = "\n\nAlso!";
+  await input.fill(before + after);
+  // The caret sits in the middle line, then the focus leaves the message box.
+  await input.evaluate((element: HTMLTextAreaElement, at) => {
+    element.setSelectionRange(at, at);
+    element.blur();
+  }, before.length);
+  const spec = join(workspace, "docs", "drop spec.md");
+  const transfer = await page.evaluateHandle((path) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(["# spec"], "drop spec.md", { type: "text/markdown" }));
+    // A file the page makes has no path of its own; a real drop's file URL
+    // names it, as Electron's own path would.
+    transfer.setData("text/uri-list", "file://" + encodeURI(path));
+    return transfer;
+  }, spec);
+  for (const type of ["dragenter", "dragover", "drop"])
+    await page.locator(".conversation-empty h2").dispatchEvent(type, { dataTransfer: transfer });
+  await expect(input).toHaveValue(before + '"docs/drop spec.md"' + after);
+  await expect(input).toBeFocused();
+  await expect(page.locator(".composer-attachments")).toHaveCount(0);
+  await expect(chat).not.toHaveClass(/file-drop-active/);
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+z" : "Control+z");
+  await expect(input).toHaveValue(before + after);
+  await transfer.dispose();
+  await input.fill("");
+  expect(errors).toEqual([]);
+});
+
 /** A Cmd+V as the focused element receives it: synthetic, so nothing is
  * inserted natively and only the app's own handling shows. */
 async function pasteFocused(data: { file?: string; text?: string }) {
@@ -2753,6 +2787,329 @@ test("a terminal text size change gives the shell its new size", async () => {
   await hide.click();
   for (const terminal of await client.listPtys())
     await client.deletePty(terminal.id);
+  expect(errors).toEqual([]);
+});
+
+test("a terminal shown again does not answer the queries in its replayed output", async () => {
+  const hide = page.getByRole("button", { name: "Hide terminal", exact: true });
+  const toggle = page.getByRole("button", { name: "Toggle terminal", exact: true });
+  if (await hide.count()) await hide.click();
+  for (const terminal of await client.listPtys())
+    await client.deletePty(terminal.id);
+  await toggle.click();
+  const input = page.locator(".xterm-helper-textarea");
+  await expect(input).toBeFocused();
+  // Outside the project, so later tests' changed-file lists stay as they were.
+  const live = join(temporary, "replay-live.txt");
+  const typed = join(temporary, "replay-typed.txt");
+  // Ask for the device attributes: xterm answers, and `read` takes the live
+  // answer. Then `cat` records everything the shell receives from here on.
+  await input.fill(
+    `printf '\\033[c'; read -rs -t 3 -d c reply; printf '%s' "\${#reply}" > ${live}; cat -v > ${typed}`,
+  );
+  await input.press("Enter");
+  await expect
+    .poll(() => readFile(live, "utf8").catch(() => ""))
+    .toMatch(/^[1-9]\d*$/);
+  // Shown again, the terminal replays its output, the `ESC[c` included.
+  await hide.click();
+  await toggle.click();
+  await expect(input).toBeFocused();
+  await expect(page.locator(".terminal-view .xterm-rows")).toContainText("replay-typed.txt");
+  await page.waitForTimeout(300);
+  await input.pressSequentially("done");
+  await input.press("Enter");
+  await input.press("Control+d");
+  // Only the typed line reached `cat`: no `^[[?1;2c` answer to the replay.
+  await expect.poll(() => readFile(typed, "utf8").catch(() => "")).toBe("done\n");
+  await hide.click();
+  for (const terminal of await client.listPtys())
+    await client.deletePty(terminal.id);
+  expect(errors).toEqual([]);
+});
+
+test("a terminal still reaches its shell after a long burst of output", async () => {
+  test.setTimeout(300_000);
+  const hide = page.getByRole("button", { name: "Hide terminal", exact: true });
+  if (await hide.count()) await hide.click();
+  for (const terminal of await client.listPtys())
+    await client.deletePty(terminal.id);
+  await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  const input = page.locator(".xterm-helper-textarea");
+  await expect(input).toBeFocused();
+  const done = join(temporary, "burst-done.txt");
+  const after = join(temporary, "burst-after.txt");
+  // Far more output than the server buffers for a reader that falls behind.
+  await input.fill(
+    `yes haarness-burst | head -n 1000000; printf done > ${done}; echo burst-$((6*7))-end`,
+  );
+  await input.press("Enter");
+  await expect
+    .poll(() => readFile(done, "utf8").catch(() => ""), { timeout: 120_000 })
+    .toBe("done");
+  // The view catches up with the end of the burst (the echo prints a text
+  // the command line does not hold).
+  await expect(page.locator(".terminal-view .xterm-rows")).toContainText(
+    "burst-42-end",
+    { timeout: 120_000 },
+  );
+  await input.fill(`printf alive > ${after}`);
+  await input.press("Enter");
+  await expect
+    .poll(() => readFile(after, "utf8").catch(() => ""), { timeout: 30_000 })
+    .toBe("alive");
+  await hide.click();
+  for (const terminal of await client.listPtys())
+    await client.deletePty(terminal.id);
+  expect(errors).toEqual([]);
+});
+
+test("a chat read again after a compaction keeps a reply that arrived during the read", async () => {
+  await showChat();
+  await newSession();
+  await send("history-landing-proof");
+  const transcript = page.locator(".transcript");
+  await expect(transcript).toContainText("Echo: history-landing-proof");
+  let thread = "";
+  let sequence = 0;
+  for (const item of await client.listThreads()) {
+    const items = await client.listItems(item.id);
+    if (items.some((value) => value.data.type === "user_message" && value.data.text === "history-landing-proof")) {
+      thread = item.id;
+      sequence = Math.max(...items.map((value) => value.sequence));
+    }
+  }
+  expect(thread).not.toBe("");
+  const info = await client.info();
+  const connection = "local:" + workspace;
+  // A compaction mid-turn, then the turn's next reply, which the server
+  // writes after it answered the history read the compaction asks for.
+  await app.evaluate(
+    ({ BrowserWindow }, input) => {
+      const contents = BrowserWindow.getAllWindows()[0].webContents;
+      const event = (eventId: number, type: string, payload: unknown) => ({
+        kind: "server",
+        connection: input.connection,
+        data: {
+          eventId,
+          type,
+          payload,
+          threadId: input.thread,
+          serverInstanceId: input.instance,
+          schemaVersion: "1",
+          createdAt: new Date().toISOString(),
+        },
+      });
+      contents.send("haarness:event", event(input.eventId, "thread.compacted", {}));
+      contents.send(
+        "haarness:event",
+        event(input.eventId + 1, "item.created", {
+          id: "history-landing-reply",
+          threadId: input.thread,
+          sequence: input.sequence + 1,
+          createdAt: new Date().toISOString(),
+          data: { type: "assistant_message", text: "Arrived during the history read" },
+        }),
+      );
+    },
+    {
+      connection,
+      thread,
+      instance: info.serverInstanceId,
+      eventId: (info.eventCursor ?? 0) + 1_000_000,
+      sequence,
+    },
+  );
+  await expect(transcript).toContainText("Arrived during the history read");
+  // The read lands within moments; the reply is still there after it.
+  await page.waitForTimeout(3000);
+  await expect(transcript).toContainText("Arrived during the history read");
+  await expect(transcript).toContainText("Echo: history-landing-proof");
+  // Follow the real event stream again (the fixture's event ids ran ahead).
+  await app.evaluate(({ BrowserWindow }, connection) => {
+    BrowserWindow.getAllWindows()[0].webContents.send("haarness:event", {
+      kind: "server",
+      connection,
+      data: { type: "resync_required" },
+    });
+  }, connection);
+  await expect(transcript).not.toContainText("Arrived during the history read");
+  await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
+  expect(errors).toEqual([]);
+});
+
+test("Ctrl+Tab steps the tabs of the panel that has the keyboard, and the shell gets nothing", async () => {
+  test.setTimeout(240_000);
+  const hide = page.getByRole("button", { name: "Hide terminal", exact: true });
+  if (await hide.count()) await hide.click();
+  for (const terminal of await client.listPtys())
+    await client.deletePty(terminal.id);
+  await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  const input = page.locator(".xterm-helper-textarea");
+  await expect(input).toBeFocused();
+  await expect.poll(() => client.listPtys().then((items) => items.length)).toBe(1);
+  // A single tab takes the key and changes nothing.
+  await page.keyboard.press("Control+Tab");
+  await expect(input).toBeFocused();
+  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await expect.poll(() => client.listPtys().then((items) => items.length)).toBe(2);
+  const [one, two] = await client.listPtys().then((items) =>
+    items.sort((a, b) => a.id.localeCompare(b.id)),
+  );
+  await client.updatePty(one.id, { title: "Cycle one" });
+  await client.updatePty(two.id, { title: "Cycle two" });
+  const current = page.locator('.terminal-tabs [aria-current="true"]');
+  await expect(current).toHaveText(/Cycle (one|two)/);
+  await expect(input).toBeFocused();
+  const shown = (await current.textContent())!.trim();
+  const other = shown === "Cycle one" ? "Cycle two" : "Cycle one";
+  // The shown terminal records what its shell receives.
+  const typed = join(temporary, "cycle-typed.txt");
+  await input.fill(`cat -v > ${typed}`);
+  await input.press("Enter");
+  // Two terminals: forward and back both land on the other one, and the
+  // keyboard goes with the step, into the terminal shown.
+  await page.keyboard.press("Control+Tab");
+  await expect(current).toHaveText(other);
+  await expect(input).toBeFocused();
+  await page.keyboard.press("Control+Shift+Tab");
+  await expect(current).toHaveText(shown);
+  await expect(input).toBeFocused();
+  await expect(page.locator(".terminal-view .xterm-rows")).toContainText("cycle-typed.txt");
+  await page.waitForTimeout(300);
+  await input.pressSequentially("done");
+  await input.press("Enter");
+  await input.press("Control+d");
+  await expect.poll(() => readFile(typed, "utf8").catch(() => "")).toBe("done\n");
+  await hide.click();
+  for (const terminal of await client.listPtys())
+    await client.deletePty(terminal.id);
+
+  // Open files in the Files panel.
+  await writeFile(join(workspace, "cycle-a.txt"), "cycle a\n");
+  await writeFile(join(workspace, "cycle-b.txt"), "cycle b\n");
+  await showChat();
+  await openProjectPanel("Files");
+  for (const name of ["cycle-a.txt", "cycle-b.txt"])
+    await page.getByRole("button", { name, exact: true }).first().click();
+  const file = page.locator('.file-tabs [aria-current="true"]');
+  await expect(file).toHaveText("cycle-b.txt");
+  await file.focus();
+  await page.keyboard.press("Control+Tab");
+  await expect(file).toHaveText("cycle-a.txt");
+  // The keyboard is on the tab shown, so the next press keeps stepping.
+  await expect(file).toBeFocused();
+  await page.keyboard.press("Control+Shift+Tab");
+  await expect(file).toHaveText("cycle-b.txt");
+  await expect(page.locator(".cm-content")).toContainText("cycle b");
+  for (const name of ["cycle-a.txt", "cycle-b.txt"]) {
+    await page.getByRole("button", { name: "Close " + name, exact: true }).click();
+    await rm(join(workspace, name));
+  }
+
+  // Chat tabs from the message box.
+  await newSession();
+  await send("cycle chat one");
+  const transcript = page.locator(".transcript");
+  await expect(transcript).toContainText("Echo: cycle chat one");
+  await page.getByRole("button", { name: "New chat tab", exact: true }).click();
+  await send("cycle chat two");
+  await expect(transcript).toContainText("Echo: cycle chat two");
+  const message = page.getByRole("textbox", { name: "Message", exact: true });
+  await message.focus();
+  await page.keyboard.press("Control+Shift+Tab");
+  await expect(transcript).toContainText("Echo: cycle chat one");
+  await expect(message).toBeFocused();
+  await page.keyboard.press("Control+Tab");
+  await expect(transcript).toContainText("Echo: cycle chat two");
+  await expect(message).toBeFocused();
+  // Outside every panel (the sidebar) the key is left alone.
+  await page.getByRole("button", { name: "Search", exact: true }).focus();
+  await page.keyboard.press("Control+Tab");
+  await expect(transcript).toContainText("Echo: cycle chat two");
+  expect(errors).toEqual([]);
+});
+
+test("the global shortcut is off until turned on, registers only a free combination and keeps the saved one", async () => {
+  const registered = (accelerator: string) =>
+    app.evaluate(({ globalShortcut }, value) => globalShortcut.isRegistered(value), accelerator);
+  // Rare combinations, so the test never holds a key another app uses.
+  await page.evaluate(() =>
+    window.haarness.preferences({ globalShortcut: { enabled: false, keys: "Ctrl+Alt+Shift+F9" } }),
+  );
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const settings = page.getByRole("dialog", { name: "Settings", exact: true });
+  await settings.getByRole("button", { name: "Keyboard shortcuts", exact: true }).click();
+  const toggle = settings.getByRole("switch", { name: "Show and hide Haarness from any app", exact: true });
+  const field = settings.getByRole("textbox", { name: "Global shortcut", exact: true });
+  await expect(toggle).not.toBeChecked();
+  await expect(field).toBeDisabled();
+  expect(await registered("Control+Alt+Shift+F9")).toBe(false);
+  await toggle.click();
+  await expect(toggle).toBeChecked();
+  await expect.poll(() => registered("Control+Alt+Shift+F9")).toBe(true);
+  // Recording another combination moves the registration to it.
+  await field.focus();
+  await page.keyboard.press("Control+Alt+Shift+F8");
+  await expect(field).toHaveValue("Ctrl+Alt+Shift+F8");
+  // Held off while the field records, in use again once it is left.
+  expect(await registered("Control+Alt+Shift+F8")).toBe(false);
+  await field.blur();
+  await expect.poll(() => registered("Control+Alt+Shift+F8")).toBe(true);
+  expect(await registered("Control+Alt+Shift+F9")).toBe(false);
+  // One the system keeps is refused, and the field shows the saved one again.
+  await field.focus();
+  await page.keyboard.press("Meta+Space");
+  await expect(settings.getByRole("alert")).toContainText("belongs to the system");
+  await settings.getByRole("button", { name: "Dismiss error", exact: true }).click();
+  await expect(field).toHaveValue("Ctrl+Alt+Shift+F8");
+  // One another app holds is refused too, and the saved one stays in use.
+  await app.evaluate(({ globalShortcut }) => globalShortcut.register("Control+Alt+Shift+F7", () => {}));
+  await field.focus();
+  await page.keyboard.press("Control+Alt+Shift+F7");
+  await expect(settings.getByRole("alert")).toContainText("already uses");
+  await settings.getByRole("button", { name: "Dismiss error", exact: true }).click();
+  await expect(field).toHaveValue("Ctrl+Alt+Shift+F8");
+  await field.blur();
+  await expect.poll(() => registered("Control+Alt+Shift+F8")).toBe(true);
+  await app.evaluate(({ globalShortcut }) => globalShortcut.unregister("Control+Alt+Shift+F7"));
+  // The window reloads while the field records: the shortcut is in use
+  // again all the same.
+  await field.focus();
+  await expect.poll(() => registered("Control+Alt+Shift+F8")).toBe(false);
+  await page.reload();
+  await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60_000 });
+  await expect.poll(() => registered("Control+Alt+Shift+F8")).toBe(true);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await settings.getByRole("button", { name: "Keyboard shortcuts", exact: true }).click();
+  // Turning it off releases the combination and keeps the choice.
+  await toggle.click();
+  await expect(toggle).not.toBeChecked();
+  await expect.poll(() => registered("Control+Alt+Shift+F8")).toBe(false);
+  await expect(field).toHaveValue("Ctrl+Alt+Shift+F8");
+  expect(
+    await page.evaluate(async () => (await window.haarness.boot()).preferences.globalShortcut),
+  ).toEqual({ enabled: false, keys: "Ctrl+Alt+Shift+F8" });
+  await page.keyboard.press("Escape");
+  await expect(settings).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("a slash command's message shows what the command expanded to while the chat is open, as after reopening", async () => {
+  await showChat();
+  await newSession();
+  await send("/ui-layout-short expand-proof");
+  await expect(page.locator(".transcript")).toContainText("Echo:");
+  // The server keeps the message as the command expanded it.
+  let stored = "";
+  for (const thread of await client.listThreads()) {
+    const found = (await client.listItems(thread.id)).find(
+      (item) => item.data.type === "user_message" && item.data.text.includes("Return UI command evidence."),
+    );
+    if (found?.data.type === "user_message") stored = found.data.text;
+  }
+  expect(stored).not.toBe("");
+  await expect(page.locator("article.message.user").last()).toContainText("Return UI command evidence.");
   expect(errors).toEqual([]);
 });
 
@@ -6840,15 +7197,32 @@ test("worktree view groups sessions, isolates drafts and terminals, and manages 
     .getByRole("button", { name: "New chat in Project folder", exact: true })
     .click();
   await expect(composer).toHaveValue("Local starter draft");
+  // The switch to the checkout takes a moment (here its first step, saving
+  // which checkouts are open, is held for 1.5 s). The message box waits for
+  // it: typed sooner, the text would land in the draft of the chat being
+  // left, and Send would then send the checkout's saved draft.
+  await app.evaluate(({ ipcMain }) => {
+    const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, (...args: any[]) => unknown> })._invokeHandlers;
+    const original = handlers.get("haarness:storage")!;
+    ipcMain.removeHandler("haarness:storage");
+    ipcMain.handle("haarness:storage", async (event, key, value) => {
+      if (key !== "worktree-expansion:v1") return original(event, key, value);
+      ipcMain.removeHandler("haarness:storage");
+      ipcMain.handle("haarness:storage", original);
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      return original(event, key, value);
+    });
+  });
   await tree
     .getByRole("button", { name: "New chat in Sidebar feature", exact: true })
     .click();
-  await send(
-    '!tool bash {"command":"pwd; printf sidebar-proof > sidebar-proof.txt"}',
-  );
+  const sidebarCommand =
+    '!tool bash {"command":"pwd; printf sidebar-proof > sidebar-proof.txt"}';
+  await send(sidebarCommand);
   await expect(
     page.getByRole("button", { name: "Allow once", exact: true }),
   ).toBeVisible();
+  await expect(page.locator("article.message.user").last()).toContainText("sidebar-proof");
   const thread = (await request<{ id: string }[]>("listThreads"))[0];
   await request("updateThread", [
     thread.id,
@@ -8948,6 +9322,39 @@ test("tool activity shows readable commands, batch steps, outputs and failures",
   expect(errors).toEqual([]);
 });
 
+test("a tool row's tooltip shows a multi-line command as written", async () => {
+  await expandPrimaryProject();
+  const thread = await client.createThread({
+    title: "Multi-line command tooltip",
+    provider: "echo",
+    model: "echo-1",
+  });
+  await page
+    .locator(".sessions")
+    .getByRole("button", { name: "Multi-line command tooltip", exact: true })
+    .click();
+  const command = "printf one\nprintf two";
+  const turn = await client.startTurn(thread.id, {
+    requestId: crypto.randomUUID(),
+    text: "!tool bash " + JSON.stringify({ command }),
+  });
+  // Only the call's arguments matter: refuse it if it asks.
+  let finished = false;
+  const done = client.waitTurn(turn.id).then(() => (finished = true));
+  while (!finished) {
+    const asked = (await client.listPermissions()).find((item) => item.threadId === thread.id);
+    if (asked) await client.replyPermission(asked.permissionId, { decision: "reject" });
+    await Promise.race([done, new Promise((resolve) => setTimeout(resolve, 200))]);
+  }
+  const label = page
+    .locator(".message.step > .tool-call")
+    .last()
+    .locator(":scope > summary .tool-target");
+  await expect(label).toHaveText("printf one printf two");
+  await expect(label).toHaveAttribute("title", command);
+  expect(errors).toEqual([]);
+});
+
 test("dragging across a tool row's label selects it without opening or closing the row", async () => {
   await expandPrimaryProject();
   const thread = await client.createThread({
@@ -8967,8 +9374,20 @@ test("dragging across a tool row's label selects it without opening or closing t
   const row = page.locator(".message.step > .tool-call").last();
   const label = row.locator(":scope > summary .tool-target");
   await expect(label).toContainText("greeting.ts");
+  // An opened row draws its body a moment later, and the transcript keeps
+  // its end in view, so the label moves up: measure it once it is still.
+  const settled = async () => {
+    let last = "";
+    for (let read = 0; read < 50; read++) {
+      const box = (await label.boundingBox())!;
+      if (JSON.stringify(box) === last) return box;
+      last = JSON.stringify(box);
+      await page.waitForTimeout(100);
+    }
+    return (await label.boundingBox())!;
+  };
   const drag = async () => {
-    const box = (await label.boundingBox())!;
+    const box = await settled();
     const y = box.y + box.height / 2;
     await page.mouse.move(box.x + 1, y);
     await page.mouse.down();

@@ -1,3 +1,4 @@
+import { defaultGlobalShortcut, type GlobalShortcut } from "./global-shortcut";
 import type * as Types from "@haarness/sdk";
 import type { ThemeId } from "./themes";
 import type { Attachment } from "./attachments";
@@ -47,6 +48,8 @@ export interface Preferences {
   diffLayout: "split" | "unified";
   terminalFontSize: number;
   shortcuts: Record<string, string>;
+  /** Shows and hides Haarness from any app; off by default. */
+  globalShortcut: GlobalShortcut;
   language: string;
 }
 export const defaults: Preferences = {
@@ -83,7 +86,11 @@ export const defaults: Preferences = {
     // keep moving keyboard focus, so the defaults are chords.
     agentNext: "Mod+.",
     agentPrev: "Mod+Shift+.",
+    // Matched wherever the keyboard is: the tabs of the panel that has it.
+    tabNext: "Ctrl+Tab",
+    tabPrev: "Ctrl+Shift+Tab",
   },
+  globalShortcut: defaultGlobalShortcut,
   language: "en",
 };
 /**
@@ -101,6 +108,48 @@ export function migrateAgentKeys(shortcuts: Preferences["shortcuts"]) {
   return next.agentNext === shortcuts.agentNext && next.agentPrev === shortcuts.agentPrev
     ? shortcuts
     : next;
+}
+/**
+ * The keys a shortcut stands for on `platform`, spelled one way: Mod is
+ * Command on macOS and Control elsewhere, so off macOS `Mod+Tab` and
+ * `Ctrl+Tab` are the same keys.
+ */
+export function shortcutKeys(value: string, platform: string) {
+  const parts = value.toLowerCase().split("+").map((part) => part.trim()).filter(Boolean);
+  const key = parts.pop() ?? "";
+  const modifiers = parts.map((part) =>
+    part === "mod" ? (platform === "darwin" ? "meta" : "ctrl") : part,
+  );
+  return [...new Set(modifiers)].sort().concat(key).join("+");
+}
+/** Whether two of `shortcuts` press the same keys; an unset one ("") is none. */
+export function shortcutsClash(shortcuts: Record<string, string>, platform: string) {
+  const keys = Object.values(shortcuts).filter(Boolean).map((value) => shortcutKeys(value, platform));
+  return new Set(keys).size !== keys.length;
+}
+/** Shortcuts that may be left unset. */
+export const optionalShortcuts = new Set(["tabNext", "tabPrev"]);
+/**
+ * The tab steps (Ctrl+Tab, Ctrl+Shift+Tab) came after people chose their own
+ * keys. A tab default that is already another action's key in `saved` (a
+ * `Mod+Tab` agent key off macOS, say) is left unset, so that action keeps
+ * it and Settings still saves; a tab key saved before is kept as it is.
+ */
+export function migrateTabKeys(
+  saved: Record<string, string> | undefined,
+  shortcuts: Preferences["shortcuts"],
+  platform: string,
+) {
+  let next = shortcuts;
+  for (const name of optionalShortcuts) {
+    if (!next[name] || (saved && name in saved)) continue;
+    const mine = shortcutKeys(next[name], platform);
+    const taken = Object.entries(next).some(
+      ([other, value]) => other !== name && !optionalShortcuts.has(other) && value && shortcutKeys(value, platform) === mine,
+    );
+    if (taken) next = { ...next, [name]: "" };
+  }
+  return next;
 }
 export interface SavedServer {
   id: string;
@@ -168,6 +217,11 @@ export interface BrowserLayout { visible:boolean; bounds:{x:number;y:number;widt
 export interface BrowserTab { id:string; url:string; title:string; loading:boolean; canGoBack:boolean; canGoForward:boolean; generation:number; /** Desktop-only: the site icon as a small data URL. */ favicon?: string }
 export interface BrowserState { tabs:BrowserTab[]; focusedTabID:string|null }
 export interface Bridge {
+  /** Where a dropped or pasted file is on this computer, or "" for one
+   * that has no path. */
+  pathForFile(file: File): string;
+  /** Holds the global shortcut off while Settings records a new one. */
+  globalShortcut(action: "suspend" | "resume"): Promise<void>;
   account(input: { action: string; id?: string; name?: string; repo?: string; configuration?: Record<string, unknown>; page?: string; device?: boolean }): Promise<any>;
   openLink(connection: string | undefined, thread: string | undefined | null, url: string): Promise<"external" | "browser">;
   browserData(connection: string, input?: { action: "get" | "remove" | "clear" | "save"; kind?: "history" | "downloads" | "all"; id?: string }): Promise<import("./browser-settings").BrowserData>;
@@ -263,12 +317,13 @@ export interface Bridge {
   /** Shows the unpacked Haarness for Chrome folder the last report named. */
   chromeReveal(): Promise<void>;
   reveal(connection: string, path?: string): Promise<void>;
+  /** `write` answers false when the terminal has no connection now. */
   terminal(
     connection: string,
     action: "connect" | "write" | "detach",
     id: string,
     input?: unknown,
-  ): Promise<void>;
+  ): Promise<unknown>;
   update(action: "check" | "download" | "install"): Promise<unknown>;
   onEvent(callback: (event: DesktopEvent) => void): () => void;
 }
