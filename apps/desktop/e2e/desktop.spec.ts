@@ -3073,6 +3073,15 @@ test("the global shortcut is off until turned on, registers only a free combinat
   await field.blur();
   await expect.poll(() => registered("Control+Alt+Shift+F8")).toBe(true);
   await app.evaluate(({ globalShortcut }) => globalShortcut.unregister("Control+Alt+Shift+F7"));
+  // The window reloads while the field records: the shortcut is in use
+  // again all the same.
+  await field.focus();
+  await expect.poll(() => registered("Control+Alt+Shift+F8")).toBe(false);
+  await page.reload();
+  await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60_000 });
+  await expect.poll(() => registered("Control+Alt+Shift+F8")).toBe(true);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await settings.getByRole("button", { name: "Keyboard shortcuts", exact: true }).click();
   // Turning it off releases the combination and keeps the choice.
   await toggle.click();
   await expect(toggle).not.toBeChecked();
