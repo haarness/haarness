@@ -1137,6 +1137,8 @@ mod tests {
             pacing: Pacing {
                 retry: Duration::from_millis(50),
                 retry_max: Duration::from_millis(200),
+                recover_for: Duration::ZERO,
+                recover_max: Duration::from_millis(200),
                 stable: Duration::from_secs(30),
                 drops: u32::MAX,
                 cooldown: Duration::from_millis(200),

@@ -410,7 +410,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
             let mut reconnect = Reconnect::new(Pacing::default(), |line| eprintln!("{line}"));
             // The local server is waited for on its own pacing; reaching it
             // costs Cloud nothing.
-            let mut local = Backoff::new(Pacing::default());
+            let mut local = Backoff::new(LOCAL_PACING);
             let ended: Result<()> = async {
                 loop {
                     // Daemons can be replaced by a local client upgrade or restarted after a crash.
@@ -430,7 +430,7 @@ pub async fn run(paths: &Paths, workspace: &Path, trust: bool, args: RemoteArgs)
                         tokio::select! {()=stop.cancelled()=>break,()=tokio::time::sleep(delay)=>{}}
                         continue;
                     }
-                    local = Backoff::new(Pacing::default());
+                    local = Backoff::new(LOCAL_PACING);
                     let link = tokio::select! {
                         () = stop.cancelled() => break,
                         // Boxed: a whole relay connection lives in this future.
@@ -539,6 +539,17 @@ impl std::fmt::Display for OutdatedRuntime {
     }
 }
 impl std::error::Error for OutdatedRuntime {}
+/// Waiting for the local server: 1 s, doubling to 30 s.
+const LOCAL_PACING: Pacing = Pacing {
+    retry: Duration::from_secs(1),
+    retry_max: Duration::from_secs(30),
+    recover_for: Duration::ZERO,
+    recover_max: Duration::from_secs(30),
+    stable: Duration::from_secs(60),
+    drops: u32::MAX,
+    cooldown: Duration::from_secs(30),
+    cooldown_max: Duration::from_secs(30),
+};
 /// Find this project's server (starting it when none runs) and check it can
 /// serve the relay. A server that is starting, being replaced or too busy to
 /// answer is waited for; only an [`OutdatedRuntime`] ends the connector.
@@ -601,6 +612,7 @@ async fn reconnect_step(
         target,
         http,
         state.backoff.pacing.stable,
+        RELAY_SILENCE,
         attention,
         &mut state.outage,
     )
@@ -642,6 +654,26 @@ impl std::fmt::Display for Unsupported {
     }
 }
 impl std::error::Error for Unsupported {}
+/// The connection ended from this side for a reason that says nothing about
+/// the relay: it stayed silent past the heartbeat, did not take a frame in
+/// time (the network stalled), or the local server changed. Before the
+/// connection proved itself this is a failed attempt, not a drop, so a flaky
+/// network never earns the long waits meant for a relay that keeps dropping.
+#[derive(Debug)]
+struct Interrupted(&'static str);
+impl std::fmt::Display for Interrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for Interrupted {}
+/// How long the relay may stay silent before the connection counts as
+/// stalled. The connector pings five times in that period, and Cloud answers
+/// each ping.
+const RELAY_SILENCE: Duration = Duration::from_secs(25);
+/// How long one frame may take to leave; a stalled network fills the socket's
+/// buffer and the send then waits for as long as TCP keeps retrying.
+const RELAY_SEND: Duration = Duration::from_secs(10);
 const RELAY_VERSION: u64 = 1;
 /// The upgrade header that names the relay features this connector
 /// understands. Cloud lists features in `ready` only when asked, because
@@ -682,6 +714,7 @@ async fn relay_link(
     target: &Target,
     http: &reqwest::Client,
     stable: Duration,
+    silence: Duration,
     attention: &Arc<remote_attention::Context>,
     outage: &mut Outage,
 ) -> Result<Link> {
@@ -731,6 +764,7 @@ async fn relay_link(
         http.clone(),
         served,
         attention.clone(),
+        silence,
     );
     tokio::pin!(session);
     let proof = async {
@@ -758,6 +792,7 @@ async fn relay_link(
     if proven && !announced {
         reconnected(outage);
     }
+    let interrupted = matches!(&ended, Err(error) if error.is::<Interrupted>());
     match ended {
         Err(error) if error.is::<Unsupported>() => return Err(error),
         // A connection that worked ending is news; one that never proved
@@ -766,6 +801,9 @@ async fn relay_link(
         Err(error) => outage.failed(&format!("Remote connection ended: {error}; reconnecting")),
         Ok(()) if proven => {}
         Ok(()) => outage.failed("Remote connection ended; reconnecting"),
+    }
+    if interrupted && !proven {
+        return Ok(Link::Failed);
     }
     Ok(Link::Ended { proven })
 }
@@ -802,6 +840,7 @@ async fn connected(
     http: reqwest::Client,
     served: tokio::sync::watch::Sender<bool>,
     attention: Arc<remote_attention::Context>,
+    silence: Duration,
 ) -> Result<()> {
     let ready = tokio::time::timeout(Duration::from_secs(10), socket.next())
         .await?
@@ -878,12 +917,17 @@ async fn connected(
     let mut jobs = JoinSet::new();
     // The request each job serves, so one that panics is still logged and released.
     let mut requests: HashMap<tokio::task::Id, (Uuid, String)> = HashMap::new();
-    let mut tick = tokio::time::interval(Duration::from_secs(5));
+    let mut tick = tokio::time::interval(silence / 5);
     let mut last_message = tokio::time::Instant::now();
     loop {
         tokio::select! {
-            ()=runtime_lost.cancelled()=>anyhow::bail!("Local runtime changed; reconnecting"),
-            _=tick.tick()=>{ensure!(last_message.elapsed()<Duration::from_secs(25),"Relay heartbeat timed out");socket.send(Message::Ping(vec![1].into())).await?;},
+            ()=runtime_lost.cancelled()=>return Err(Interrupted("Local runtime changed").into()),
+            _=tick.tick()=>{
+                if last_message.elapsed()>=silence {
+                    return Err(Interrupted("Relay heartbeat timed out").into());
+                }
+                send_frame(&mut socket,Message::Ping(vec![1].into())).await?;
+            },
             completed=jobs.join_next_with_id(),if !jobs.is_empty()=>match completed {
                 Some(Ok((task,id)))=>{requests.remove(&task);active.remove(&id);},
                 Some(Err(error))=>if let Some((id,label))=requests.remove(&error.id()) {
@@ -893,7 +937,7 @@ async fn connected(
                 },
                 None=>{},
             },
-            frame=outgoing.recv()=>{let Some(frame)=frame else {break};tokio::time::timeout(Duration::from_secs(10),socket.send(Message::Text(serde_json::to_string(&frame)?.into()))).await??;},
+            frame=outgoing.recv()=>{let Some(frame)=frame else {break};send_frame(&mut socket,Message::Text(serde_json::to_string(&frame)?.into())).await?;},
             frame=socket.next()=>{
                 match frame.context("Relay closed")?? {
                     Message::Text(value)=>{
@@ -934,6 +978,18 @@ async fn connected(
     // Dropping JoinSet also cancels requests on every error exit. Accepted turns live in the daemon.
     jobs.abort_all();
     Ok(())
+}
+/// Send one frame to the relay, as a stall once it takes longer than `RELAY_SEND`.
+async fn send_frame(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    message: Message,
+) -> Result<()> {
+    match tokio::time::timeout(RELAY_SEND, socket.send(message)).await {
+        Ok(sent) => Ok(sent?),
+        Err(_) => Err(Interrupted("Relay did not take a frame in time").into()),
+    }
 }
 /// How the connector log names a relayed request: its method and path. The
 /// query, headers and body never reach the log, and the remote side cannot
@@ -1813,14 +1869,14 @@ mod tests {
         }
         // Cloud unreachable meanwhile: the short backoff, capped, and the
         // drop count stays.
-        assert!(about(backoff.wait(Link::Failed), 30_000));
+        assert!(about(backoff.wait(Link::Failed), 60_000));
         assert!(about(backoff.wait(dropped), 600_000));
         // A connection that lasted, then its next drop, start over.
         assert!(about(backoff.wait(Link::Ended { proven: true }), 1000));
         assert!(about(backoff.wait(dropped), 2000));
 
         let mut backoff = Backoff::new(Pacing::default());
-        for seconds in [1, 2, 4, 8, 16, 30, 30] {
+        for seconds in [1, 2, 4, 8, 16, 32, 60, 60] {
             assert!(about(backoff.wait(Link::Failed), seconds * 1000));
         }
     }
@@ -1952,6 +2008,8 @@ mod tests {
         let pacing = Pacing {
             retry: Duration::from_millis(10),
             retry_max: Duration::from_millis(40),
+            recover_for: Duration::ZERO,
+            recover_max: Duration::from_millis(40),
             stable: Duration::from_millis(300),
             drops: 4,
             cooldown: Duration::from_millis(100),
@@ -1993,6 +2051,7 @@ mod tests {
                 &target,
                 &http,
                 pacing.stable,
+                RELAY_SILENCE,
                 &attention,
                 &mut outage,
             )
@@ -2011,6 +2070,7 @@ mod tests {
             &target,
             &http,
             pacing.stable,
+            RELAY_SILENCE,
             &attention,
             &mut outage,
         )
@@ -2027,6 +2087,7 @@ mod tests {
             &target,
             &http,
             pacing.stable,
+            RELAY_SILENCE,
             &attention,
             &mut outage,
         )
@@ -2034,6 +2095,64 @@ mod tests {
         .unwrap();
         assert_eq!(link, Link::Failed);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_connection_that_stalls_before_it_proves_itself_is_a_failed_attempt_not_a_drop() {
+        use axum::{Json, Router, routing::get};
+        let runtime = Router::new().route(
+            "/v1/info",
+            get(|| async { Json(json!({"capabilities":["remote-chat-scope.v1"]})) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = Target {
+            url: format!("http://{}", listener.local_addr().unwrap()),
+            token: "fixture".into(),
+            project: "project".into(),
+            thread: None,
+        };
+        tokio::spawn(async move { axum::serve(listener, runtime).await.unwrap() });
+        let http = reqwest::Client::new();
+        // A relay that answers nothing after `ready` (the network stalled),
+        // twice, then one that drops the connection at once.
+        let mut relays = Vec::new();
+        for step in [
+            Relay::Hold(Duration::from_secs(30)),
+            Relay::Hold(Duration::from_secs(30)),
+            Relay::Drop,
+        ] {
+            relays.push(fake_relay(vec![step]).await.0);
+        }
+        let root = std::env::temp_dir().join(format!("haarness-remote-stall-{}", Uuid::now_v7()));
+        let attention = attention(&Paths::new(Some(&root)).unwrap());
+        let said = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let heard = said.clone();
+        let mut outage = Outage::new(move |line| heard.lock().unwrap().push(line.to_owned()));
+        let expected = [Link::Failed, Link::Failed, Link::Ended { proven: false }];
+        for (relay, expected) in relays.iter().zip(expected) {
+            let started = std::time::Instant::now();
+            let link = relay_link(
+                relay.as_str().into_client_request().unwrap(),
+                &target,
+                &http,
+                Duration::from_secs(60),
+                Duration::from_millis(250),
+                &attention,
+                &mut outage,
+            )
+            .await
+            .unwrap();
+            assert_eq!(link, expected);
+            // Ended by the connector's heartbeat, long before the relay lets go.
+            assert!(started.elapsed() < Duration::from_secs(10), "{link:?}");
+        }
+        let said = said.lock().unwrap().clone();
+        assert!(
+            said.iter()
+                .any(|line| line
+                    == "Remote connection ended: Relay heartbeat timed out; reconnecting"),
+            "{said:?}"
+        );
+        std::fs::remove_dir_all(root).ok();
     }
     /// How a fake token endpoint answers one renewal.
     #[derive(Clone, Copy)]
@@ -2702,6 +2821,7 @@ mod tests {
                 &target,
                 &http,
                 Duration::from_secs(60),
+                RELAY_SILENCE,
                 &attention,
                 &mut Outage::new(|_| {}),
             )
@@ -2854,6 +2974,7 @@ mod tests {
                 &target,
                 &http,
                 Duration::from_secs(60),
+                RELAY_SILENCE,
                 &attention,
                 &mut Outage::new(|_| {}),
             )
@@ -2913,6 +3034,7 @@ mod tests {
                 &target,
                 &http,
                 Duration::from_secs(60),
+                RELAY_SILENCE,
                 &attention,
                 &mut Outage::new(|_| {}),
             )
@@ -2979,6 +3101,7 @@ mod tests {
                 &target,
                 &reqwest::Client::new(),
                 Duration::from_secs(60),
+                RELAY_SILENCE,
                 &attention,
                 &mut Outage::new(|_| {}),
             )
