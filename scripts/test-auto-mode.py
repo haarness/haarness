@@ -185,17 +185,24 @@ try:
     until(lambda:len(api('/v1/permissions'))==1,'the long command did not ask')
     launch(review,width=160,height=44)
     answers=lambda pane:all(label in pane for label in ('Allow once','Reject'))
+    def whole_card(test,label):
+        """The card once `test` holds and its answers are drawn, from that
+        same capture: under load a capture can land between its rows."""
+        seen={}
+        def ready():
+            seen['card']=card(capture())
+            return test(seen['card']) and answers(seen['card'])
+        until(ready,label)
+        return seen['card']
     for width,height in [(160,44),(100,24),(80,20),(80,12)]:
         resize(width,height)
-        until(lambda:'$ printf "line-01' in card(capture()) and ' of 12' in card(capture()),f'{width}x{height}: the card did not open on the first lines')
-        shown=card(capture())
-        assert answers(shown) and 'line-12' not in shown, shown
+        shown=whole_card(lambda top:'$ printf "line-01' in top and ' of 12' in top,f'{width}x{height}: the card did not open on the first lines')
+        assert 'line-12' not in shown, shown
         if (width,height) in ((160,44),(80,12)):
             save(f'card-{width}x{height}-top')
         keys('-N','12','Down')
-        until(lambda:'line-12' in card(capture()) and '–12 of 12' in card(capture()),f'{width}x{height}: Down did not reach the last line')
-        shown=card(capture())
-        assert answers(shown) and 'line-01' not in shown, shown
+        shown=whole_card(lambda end:'line-12' in end and '–12 of 12' in end,f'{width}x{height}: Down did not reach the last line')
+        assert 'line-01' not in shown, shown
         if (width,height) in ((160,44),(80,12)):
             save(f'card-{width}x{height}-end')
         keys('-N','12','Up')
