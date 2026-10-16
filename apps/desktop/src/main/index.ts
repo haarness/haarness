@@ -5,6 +5,7 @@ import { browserData, removeBrowserData, saveBrowserDownload } from "./browser-d
 import { createBrowserHost } from "./browser-host";
 import { chromeSetup, revealChromeExtension, setupChromeOnLaunch } from "./chrome-setup";
 import { createAttachmentDraftStorage } from "./attachment-drafts";
+import { terminalSockets } from "./terminal-sockets";
 import { translate } from "../localization";
 import { globalAccelerator, globalShortcutError, type GlobalShortcut } from "../global-shortcut";
 import { shortcutLabel } from "../renderer/search";
@@ -117,7 +118,7 @@ const subscriptions = new Map<string, { owner: number; client: Haarness }>();
 if (process.env.HAARNESS_DESKTOP_TEST === "1" && process.env.HAARNESS_TELEMETRY === undefined)
   process.env.HAARNESS_TELEMETRY = "0";
 const commandOwners = new Map<string, number>();
-const terminals = new Map<string, { owner: number; socket: PtyConnection }>();
+const terminals = terminalSockets<PtyConnection>();
 const projectTransaction = createProjectQueue();
 const worktreeOperations = new Set<string>();
 const voice = createVoiceInput((locale) =>
@@ -987,11 +988,10 @@ function installHandlers() {
     "terminal",
     async (win, id: string, action: string, pty: string, input: unknown) => {
       const key = win.id + ":" + id + ":" + pty;
-      // A socket the view let go of ends without a "closed" event.
-      const previous = terminals.get(key);
       if (action === "detach") {
-        terminals.delete(key);
-        previous?.socket.close();
+        // Only the view's own socket: a newer view of the terminal keeps its.
+        // A socket the view let go of ends without a "closed" event.
+        terminals.detach(key, z.string().max(100).parse(input));
         return;
       }
       if (action === "write") {
@@ -999,16 +999,24 @@ function installHandlers() {
           .array(z.number().int().min(0).max(255))
           .max(65536)
           .parse(input);
-        await terminals.get(key)?.socket.send(new Uint8Array(value));
-        return;
+        // False while there is no socket, so the view keeps the input for
+        // the reconnect instead of losing it.
+        const current = terminals.get(key);
+        if (!current) return false;
+        current.socket.send(new Uint8Array(value));
+        return true;
       }
       if (action !== "connect") throw new Error("Unknown terminal action");
-      terminals.delete(key);
-      previous?.socket.close();
+      const request = z
+        .object({ cursor: z.number().int().min(0), view: z.string().min(1).max(100) })
+        .parse(input);
+      terminals.begin(key, request.view);
       const socket = await connection(id).client.connectPty(pty, {
-        cursor: typeof input === "number" ? input : 0,
+        cursor: request.cursor,
       });
-      terminals.set(key, { owner: win.id, socket });
+      if (!terminals.accept(key, request.view, win.id, socket))
+        throw new Error("Terminal connection replaced");
+      const view = request.view;
       void (async () => {
         let failure: string | undefined;
         try {
@@ -1019,8 +1027,8 @@ function installHandlers() {
               id: pty,
               data:
                 message instanceof Uint8Array
-                  ? { bytes: Array.from(message) }
-                  : message,
+                  ? { bytes: Array.from(message), view }
+                  : { ...message, view },
             });
         } catch (error) {
           failure = String(error);
@@ -1028,13 +1036,12 @@ function installHandlers() {
           // The server ends a socket whose reader fell behind, and a network
           // or server outage ends it too. Unless the view detached or
           // connected again, tell it, so it reconnects from its cursor.
-          if (terminals.get(key)?.socket === socket) {
-            terminals.delete(key);
+          if (terminals.ended(key, socket)) {
             send(win, {
               kind: "pty",
               connection: id,
               id: pty,
-              data: { type: "closed", ...(failure ? { error: failure } : {}) },
+              data: { type: "closed", view, ...(failure ? { error: failure } : {}) },
             });
           }
         }
@@ -1363,11 +1370,7 @@ function createWindow() {
         subscriptions.delete(id);
         item.client.close();
       }
-    for (const [id, item] of terminals)
-      if (item.owner === win.id) {
-        item.socket.close();
-        terminals.delete(id);
-      }
+    terminals.close(win.id);
   });
   if (process.env.ELECTRON_RENDERER_URL)
     void win.loadURL(process.env.ELECTRON_RENDERER_URL);
@@ -1587,7 +1590,7 @@ else {
     for (const watch of notificationWatches.values()) watch.stop();
     voice.stop();
     for (const item of subscriptions.values()) item.client.close();
-    for (const item of terminals.values()) item.socket.close();
+    terminals.closeAll();
     for (const child of commands.values()) stopCommand(child);
   });
 }
