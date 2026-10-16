@@ -435,6 +435,8 @@ Tool availability is enforced twice: disabled schemas are omitted from provider 
 
 Marketplace plugin sources accept `.` or `./` when the marketplace root is itself the plugin. Git sources (`github`, `url`, `git-subdir`) honour `ref` (a branch or tag) and `sha` (a full commit id, which wins), so `install` and `update` fetch exactly the pinned commit; a `url` source may also name a `path` inside the repository. Other relative sources must identify a safe in-marketplace path, while `git-subdir` must identify a real child path. Haarness materializes relative plugins into an owned cache, preserves internal symlinks, excludes `.git`, rejects symlinks that escape the plugin root, and never removes the registered marketplace when uninstalling a root-source plugin.
 
+An MCP tool's text, images and audio reach the model as its result. A tool that answers with structured content and no text (as one with an output schema may, or beside only an image, audio or a link) has that content passed on as JSON text, to the model and to a workflow's `tool()` call alike; a failure with no text at all says which tool failed.
+
 The commercial extension boundary is provider-neutral. Remote MCP authorization uses only public OAuth metadata discovery, authorization code + PKCE, optional dynamic client registration, and owner-only local credential storage. Haarness contains no company-internal identity broker, authentication transport, hostname, marketplace, or service dependency.
 
 ## Providers
