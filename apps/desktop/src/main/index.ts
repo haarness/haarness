@@ -548,8 +548,9 @@ function installHandlers() {
   });
   // While Settings records a new global shortcut, the current one must not
   // hide the window.
-  handle("globalShortcut", (_, action: unknown) => {
-    shortcutSuspended = action === "suspend";
+  handle("globalShortcut", (win, action: unknown) => {
+    if (action !== "suspend") return resumeShortcut(win.id);
+    shortcutSuspendedBy = win.id;
     registerShortcut();
   });
   const attachmentDraftStorage = createAttachmentDraftStorage(join(app.getPath("userData"), "attachment-drafts"));
@@ -1246,7 +1247,15 @@ function installHandlers() {
  * Haarness in front it hides it again (minimizes it outside macOS).
  */
 let registeredShortcut = "";
-let shortcutSuspended = false;
+/** The window whose Settings is recording a new global shortcut. */
+let shortcutSuspendedBy: number | undefined;
+/** Recording ends with the window that started it (closed, reloaded or
+ * crashed), so the shortcut never stays off. */
+function resumeShortcut(win: number) {
+  if (shortcutSuspendedBy !== win) return;
+  shortcutSuspendedBy = undefined;
+  registerShortcut();
+}
 function toggleFromShortcut() {
   const focused = BrowserWindow.getFocusedWindow();
   if (focused && windows.has(focused)) {
@@ -1274,7 +1283,7 @@ function registerShortcut(value: GlobalShortcut = data().preferences.globalShort
     return false;
   }
   // While Settings records a new one, a free combination is only tried.
-  if (shortcutSuspended) globalShortcut.unregister(accelerator);
+  if (shortcutSuspendedBy !== undefined) globalShortcut.unregister(accelerator);
   else registeredShortcut = accelerator;
   return true;
 }
@@ -1339,6 +1348,7 @@ function createWindow() {
     },
   );
   win.webContents.on("render-process-gone", () => {
+    resumeShortcut(win.id);
     voice.stop(win.id);
     if (!quitting && !win.isDestroyed())
       void dialog
@@ -1359,8 +1369,12 @@ function createWindow() {
     data().values.window = { width, height };
     void persist();
   });
-  win.webContents.on("did-start-navigation", () => browserHost.hide(win));
+  win.webContents.on("did-start-navigation", () => {
+    browserHost.hide(win);
+    resumeShortcut(win.id);
+  });
   win.on("closed", () => {
+    resumeShortcut(win.id);
     voice.stop(win.id);
     windows.delete(win);
     notificationReady.delete(win.id);
