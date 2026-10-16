@@ -4931,8 +4931,16 @@ impl RunWatch {
                         reply(PermissionReplyDecision::Reject),
                     )
                     .await;
+                let rule = allow_rule_example(&pending).map_or_else(
+                    || "with a permission rule".to_owned(),
+                    |rule| {
+                        format!(
+                            "by adding {rule} to haarness.json in the project or ~/.config/haarness/haarness.json"
+                        )
+                    },
+                );
                 anyhow::bail!(
-                    "Stopped: the agent asked to {request}, and nobody can approve that in this run. Allow it with a permission rule, or run again with --yolo to approve every request."
+                    "Stopped: the agent asked to {request}, and nobody can approve that in this run. Allow it {rule}, or run again with --yolo to approve every request."
                 );
             }
             let decision = if pending.explicit {
@@ -5206,6 +5214,36 @@ fn describe_permission(pending: &haarness_protocol::PendingPermissionInfo) -> St
         Some(subject) => format!("{kind} ({subject})"),
         None => kind,
     }
+}
+
+/// The configuration that would let a run without a person do what this
+/// request asks, such as `{"permission":{"bash":{"git push *":"allow"}}}`,
+/// built from the rules an **Always** answer would add. `None` for requests
+/// no rule should settle: an agent switch names one chat, and allowing the
+/// loop guard would turn it off.
+fn allow_rule_example(pending: &haarness_protocol::PendingPermissionInfo) -> Option<String> {
+    let rules: Vec<String> = if pending.always_patterns.is_empty() {
+        pending
+            .patterns
+            .iter()
+            .map(|pattern| format!("{}:{pattern}", pending.permission))
+            .collect()
+    } else {
+        pending.always_patterns.clone()
+    };
+    let mut permission = serde_json::Map::new();
+    for rule in &rules {
+        let (kind, pattern) = rule.split_once(':')?;
+        if matches!(kind, "agent_switch" | "doom_loop" | "browser_site" | "") {
+            return None;
+        }
+        permission
+            .entry(kind)
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()?
+            .insert(pattern.to_owned(), serde_json::json!("allow"));
+    }
+    (!permission.is_empty()).then(|| serde_json::json!({"permission": permission}).to_string())
 }
 
 /// "Working · 12s · Ctrl-C to stop" on stderr while a run waits, so a slow
@@ -10340,9 +10378,9 @@ mod tests {
         write_runtime,
     };
     use super::{
-        Approver, NO_MODEL_CONNECTED, RunWatch, TurnStatus, default_run_model_client,
-        describe_permission, discard_refused_chat, requested_run_model, run_attachments,
-        wait_for_turn_client,
+        Approver, NO_MODEL_CONNECTED, RunWatch, TurnStatus, allow_rule_example,
+        default_run_model_client, describe_permission, discard_refused_chat, requested_run_model,
+        run_attachments, wait_for_turn_client,
     };
     use super::{
         HashMap, merge_file_config, provider_instances, stream_limits,
@@ -12464,6 +12502,15 @@ request_timeout = 0
             "{error}"
         );
         assert!(error.contains("--yolo"), "{error}");
+        // It names the rule that would allow it, and where it goes.
+        let folder = root.canonicalize().unwrap();
+        assert!(
+            error.contains(&format!(
+                r#"by adding {{"permission":{{"external_directory":{{"{}/*":"allow"}}}}}} to haarness.json in the project or ~/.config/haarness/haarness.json"#,
+                folder.display()
+            )),
+            "{error}"
+        );
         assert!(!outside.exists());
         assert!(client.pending_permissions().await.unwrap().is_empty());
         let stopped = tokio::time::timeout(Duration::from_secs(5), async {
@@ -12964,6 +13011,51 @@ request_timeout = 0
             describe_permission(&pending),
             "generate an image or video (image:generate)"
         );
+    }
+
+    #[test]
+    fn a_refused_run_names_the_rule_that_would_allow_it() {
+        let mut pending: haarness_protocol::PendingPermissionInfo =
+            serde_json::from_value(serde_json::json!({
+                "permissionId": "p",
+                "operation": "bash:git push origin main",
+                "permission": "bash",
+                "patterns": ["git push origin main"],
+                "alwaysPatterns": ["bash:git push *"],
+                "detail": {"command": "git push origin main"},
+                "threadId": uuid::Uuid::now_v7(),
+                "createdAt": "2026-10-16T00:00:00Z",
+            }))
+            .unwrap();
+        assert_eq!(
+            allow_rule_example(&pending).as_deref(),
+            Some(r#"{"permission":{"bash":{"git push *":"allow"}}}"#)
+        );
+        // Several rules, and quotes, come out as valid configuration.
+        pending.always_patterns = vec![
+            "external_directory:/data/\"x\"/*".into(),
+            "read:/data/\"x\"/a.txt".into(),
+        ];
+        let rule: serde_json::Value =
+            serde_json::from_str(&allow_rule_example(&pending).unwrap()).unwrap();
+        assert_eq!(
+            rule,
+            serde_json::json!({"permission": {
+                "external_directory": {"/data/\"x\"/*": "allow"},
+                "read": {"/data/\"x\"/a.txt": "allow"},
+            }})
+        );
+        // Without remembered rules, the asked patterns stand in.
+        pending.always_patterns.clear();
+        assert_eq!(
+            allow_rule_example(&pending).as_deref(),
+            Some(r#"{"permission":{"bash":{"git push origin main":"allow"}}}"#)
+        );
+        // An agent switch and the loop guard are not settled by a rule.
+        for kind in ["agent_switch", "doom_loop"] {
+            pending.always_patterns = vec![format!("{kind}:x")];
+            assert_eq!(allow_rule_example(&pending), None, "{kind}");
+        }
     }
 
     #[tokio::test]
