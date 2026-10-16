@@ -2084,7 +2084,13 @@ impl AgentRuntime {
             (result, _) => result?,
         };
         self.publish_created_thread(&thread).await;
-        if let Some(hooks) = &components.hooks {
+        // A chat started inside another (a workflow's thread or one of its
+        // agents) is not a session start, as for task subagents and Claude
+        // Code's subagents: a slow SessionStart hook would hold up each
+        // workflow agent's first prompt.
+        if thread.parent_id.is_none()
+            && let Some(hooks) = &components.hooks
+        {
             hooks.session_start(thread.id, &thread.agent).await;
         }
         Ok(thread)
