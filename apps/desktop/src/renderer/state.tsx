@@ -42,7 +42,7 @@ import {
   type NotificationTarget,
 } from "../shared";
 import { cloudServers, localServer, serverKey, serverProjects } from "../servers";
-import { freshChat, reduceEvent, type Live } from "./sync";
+import { freshChat, landItems, reduceEvent, type Live } from "./sync";
 import { themeColors } from "../themes";
 import {
   cleanProjectMeta,
@@ -215,6 +215,9 @@ function createApp() {
     reconnectAttempt = 0,
     stopped = false;
   const journals = new Set<T.EventEnvelope[]>();
+  // The latest history read of the open chat after a revert or compaction;
+  // an older one landing later is dropped.
+  let historyReads = 0;
   let tabHistory: string[] = [];
   let lastCursor = 0,
     lastInstance = "",
@@ -1814,13 +1817,19 @@ function createApp() {
     ) {
       const connection = state.connection?.id;
       const selected = state.selected;
+      const read = ++historyReads;
+      // A compaction happens mid-turn, and the turn goes on: what it writes
+      // while this read is in flight arrives as events, not in the read.
+      const journal: T.EventEnvelope[] = [];
+      journals.add(journal);
       void api<T.Item[]>("listItems", selected)
         .then((items) => {
           if (
             state.connection?.id === connection &&
-            state.selected === selected
+            state.selected === selected &&
+            read === historyReads
           )
-            set("items", items);
+            set("items", landItems(items, journal, selected));
         })
         .catch((error) => {
           if (
@@ -1828,7 +1837,8 @@ function createApp() {
             state.selected === selected
           )
             set("error", String(error));
-        });
+        })
+        .finally(() => journals.delete(journal));
     }
   });
   const systemTheme = matchMedia("(prefers-color-scheme: dark)");
