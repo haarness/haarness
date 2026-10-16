@@ -109,6 +109,48 @@ export function migrateAgentKeys(shortcuts: Preferences["shortcuts"]) {
     ? shortcuts
     : next;
 }
+/**
+ * The keys a shortcut stands for on `platform`, spelled one way: Mod is
+ * Command on macOS and Control elsewhere, so off macOS `Mod+Tab` and
+ * `Ctrl+Tab` are the same keys.
+ */
+export function shortcutKeys(value: string, platform: string) {
+  const parts = value.toLowerCase().split("+").map((part) => part.trim()).filter(Boolean);
+  const key = parts.pop() ?? "";
+  const modifiers = parts.map((part) =>
+    part === "mod" ? (platform === "darwin" ? "meta" : "ctrl") : part,
+  );
+  return [...new Set(modifiers)].sort().concat(key).join("+");
+}
+/** Whether two of `shortcuts` press the same keys; an unset one ("") is none. */
+export function shortcutsClash(shortcuts: Record<string, string>, platform: string) {
+  const keys = Object.values(shortcuts).filter(Boolean).map((value) => shortcutKeys(value, platform));
+  return new Set(keys).size !== keys.length;
+}
+/** Shortcuts that may be left unset. */
+export const optionalShortcuts = new Set(["tabNext", "tabPrev"]);
+/**
+ * The tab steps (Ctrl+Tab, Ctrl+Shift+Tab) came after people chose their own
+ * keys. A tab default that is already another action's key in `saved` (a
+ * `Mod+Tab` agent key off macOS, say) is left unset, so that action keeps
+ * it and Settings still saves; a tab key saved before is kept as it is.
+ */
+export function migrateTabKeys(
+  saved: Record<string, string> | undefined,
+  shortcuts: Preferences["shortcuts"],
+  platform: string,
+) {
+  let next = shortcuts;
+  for (const name of optionalShortcuts) {
+    if (!next[name] || (saved && name in saved)) continue;
+    const mine = shortcutKeys(next[name], platform);
+    const taken = Object.entries(next).some(
+      ([other, value]) => other !== name && !optionalShortcuts.has(other) && value && shortcutKeys(value, platform) === mine,
+    );
+    if (taken) next = { ...next, [name]: "" };
+  }
+  return next;
+}
 export interface SavedServer {
   id: string;
   label: string;

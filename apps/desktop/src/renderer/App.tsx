@@ -285,13 +285,13 @@ export function App() {
         let frames = 300;
         const land = () => {
           if (state.selected !== id) return;
-          if (loading() && frames-- > 0) return void requestAnimationFrame(land);
+          if (loading() && frames-- > 0) return void setTimeout(land, 16);
           if (composer)
             document.querySelector<HTMLElement>("[data-composer-input]")?.focus();
           else if (!from?.isConnected || from.closest("[data-cycle-tab]") || document.activeElement !== from)
             tabButton(document.querySelector(".session-bar"), id)?.focus();
         };
-        requestAnimationFrame(land);
+        land();
       },
     }),
   );
