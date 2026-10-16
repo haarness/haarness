@@ -454,59 +454,86 @@ async fn failed_at_once(runtime: &AgentRuntime, thread: haarness_protocol::Threa
         })
 }
 
-#[tokio::test]
-async fn a_scheduled_run_and_everything_it_starts_fail_at_once_instead_of_waiting() {
-    let fixture = chrome(RuntimeConfig::default(), false);
-    let runtime = &fixture.runtime;
-    let root = scheduled_thread(runtime).await;
-    // The run itself, as the scheduler starts it.
-    let mut request = turn_request(NAVIGATE);
+/// The turn a schedule starts in the chat it created: it approves its own
+/// requests and nobody can answer it.
+fn scheduled_request(text: &str) -> StartTurnRequest {
+    let mut request = turn_request(text);
     request.auto_approve = true;
     request.tools = Some(std::collections::HashMap::from([(
         "question".into(),
         false,
     )]));
-    let turn = runtime.start_turn(root.id, request).await.unwrap();
+    request
+}
+
+#[tokio::test]
+async fn a_scheduled_run_and_everything_it_starts_fail_at_once_instead_of_waiting() {
+    let fixture = chrome(RuntimeConfig::default(), false);
+    let runtime = &fixture.runtime;
+    // The run itself, as the scheduler starts it.
+    let root = scheduled_thread(runtime).await;
+    let turn = runtime
+        .start_turn(root.id, scheduled_request(NAVIGATE))
+        .await
+        .unwrap();
     assert_eq!(
         wait_done(runtime, &turn).await.status,
         TurnStatus::Completed
     );
     assert!(failed_at_once(runtime, root.id).await);
-    // A subagent it delegates to through the task tool, whatever its turn's
-    // own flags say.
+    // A subagent another run delegates to through the task tool.
+    let delegating = scheduled_thread(runtime).await;
     let task = json!({"prompt": NAVIGATE, "agent": "general", "description": "open the inbox"});
     let turn = runtime
-        .start_turn(root.id, turn_request(&format!("!tool task {task}")))
+        .start_turn(
+            delegating.id,
+            scheduled_request(&format!("!tool task {task}")),
+        )
         .await
         .unwrap();
     assert_eq!(
         wait_done(runtime, &turn).await.status,
         TurnStatus::Completed
     );
-    let mut subagents = Vec::new();
-    for id in runtime.thread_tree_ids(root.id).await.unwrap() {
-        if id != root.id {
-            subagents.push(id);
-        }
-    }
+    let subagents: Vec<_> = runtime
+        .thread_tree_ids(delegating.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|id| *id != delegating.id)
+        .collect();
     assert_eq!(subagents.len(), 1, "{subagents:?}");
     assert!(failed_at_once(runtime, subagents[0]).await);
-    // A workflow it starts: the run's thread and an agent under it.
-    let workflow = child_thread(runtime, subagents[0]).await;
-    let agent = child_thread(runtime, workflow.id).await;
+    // A workflow a third run starts, as the workflow host does while that
+    // run's turn is running: the run's thread and an agent under it.
+    let starting = scheduled_thread(runtime).await;
     let turn = runtime
-        .start_turn(agent.id, turn_request(NAVIGATE))
+        .start_turn(
+            starting.id,
+            scheduled_request(r#"!tool bash {"command":"sleep 3"}"#),
+        )
+        .await
+        .unwrap();
+    let workflow = child_thread(runtime, starting.id).await;
+    let agent = child_thread(runtime, workflow.id).await;
+    assert_eq!(
+        wait_done(runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    // Both still belong to the run after its turn ended.
+    let agent_turn = runtime
+        .start_workflow_agent_turn(workflow.id, agent.id, turn_request(NAVIGATE), None)
         .await
         .unwrap();
     assert_eq!(
-        wait_done(runtime, &turn).await.status,
+        wait_done(runtime, &agent_turn).await.status,
         TurnStatus::Completed
     );
     assert!(failed_at_once(runtime, agent.id).await);
     // The workflow's own tool calls (ctx.tool, the browser tool API) take
     // the direct path, and fail the same way.
     let direct = runtime
-        .run_direct_tool(
+        .run_workflow_tool(
             workflow.id,
             "browser_navigate",
             json!({"url":SITE}),
@@ -526,6 +553,35 @@ async fn a_scheduled_run_and_everything_it_starts_fail_at_once_instead_of_waitin
         assert!(runtime.scheduled_run(thread).await);
     }
     assert!(!runtime.scheduled_run(echo_thread(runtime).await.id).await);
+}
+
+#[tokio::test]
+async fn a_person_in_a_scheduled_chat_or_its_fork_is_asked() {
+    // Later turns in a run's chat, and anything in a fork of it, have a
+    // person to answer: the Chrome site is asked, not refused.
+    let fixture = chrome(RuntimeConfig::default(), false);
+    let runtime = &fixture.runtime;
+    let root = scheduled_thread(runtime).await;
+    let turn = runtime
+        .start_turn(root.id, scheduled_request("nightly summary"))
+        .await
+        .unwrap();
+    wait_done(runtime, &turn).await;
+    let fork = runtime.fork_thread(root.id, None, None).await.unwrap();
+    for thread in [root.id, fork.id] {
+        let turn = runtime
+            .start_turn(thread, turn_request(NAVIGATE))
+            .await
+            .unwrap();
+        let pending = explicit_prompt(runtime, thread).await;
+        answer(runtime, &pending.permission_id, Reply::Once).await;
+        assert_eq!(
+            wait_done(runtime, &turn).await.status,
+            TurnStatus::Completed
+        );
+        assert!(!failed_at_once(runtime, thread).await);
+    }
+    assert_eq!(fixture.executions.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
