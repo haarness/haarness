@@ -5,7 +5,7 @@ in a server's URL or command arguments, while the rest stays readable.
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-mcp-redaction.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
 """
-import json, os, pathlib, subprocess, tempfile, time, urllib.request, uuid
+import json, os, pathlib, subprocess, tempfile, time, urllib.error, urllib.request, uuid
 import e2e_scratch
 
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve()
@@ -26,7 +26,7 @@ timeoutMs = 2000
 [mcp.local]
 transport = "stdio"
 command = "/nonexistent/fixture-mcp"
-args = ["--api-key", "fixture-arg-secret", "--token=fixture-flag-secret", "--region", "eu"]
+args = ["--api-key", "fixture-arg-secret", "--token", "fixture-flag-secret", "--region", "eu"]
 enabled = false
 ''')
 env = {k: v for k, v in os.environ.items() if not k.startswith('HAARNESS_')}
@@ -66,7 +66,7 @@ try:
     assert keyed['config']['url'] == 'http://<redacted>@127.0.0.1:9/mcp?api_key=<redacted>&region=eu', keyed
     local = json.loads(cli('mcp', 'get', 'local'))
     clean(json.dumps(local), 'mcp get')
-    assert local['config']['args'] == ['--api-key', '<redacted>', '--token=<redacted>', '--region', 'eu'], local
+    assert local['config']['args'] == ['--api-key', '<redacted>', '--token', '<redacted>', '--region', 'eu'], local
     shown = cli('mcp', 'get', 'keyed', '--show-secrets')
     assert 'fixture-url-secret' in shown and 'hunter2' in shown, shown
     check('haarness mcp get hides URL and argument credentials and shows them with --show-secrets')
@@ -88,8 +88,25 @@ try:
     kept = json.loads(cli('mcp', 'get', 'keyed', '--show-secrets'))['config']['url']
     assert kept == 'http://someone:hunter2@127.0.0.1:9/mcp?api_key=fixture-url-secret&region=eu', kept
     kept = json.loads(cli('mcp', 'get', 'local', '--show-secrets'))['config']['args']
-    assert kept == ['--api-key', 'fixture-arg-secret', '--token=fixture-flag-secret', '--region', 'eu'], kept
+    assert kept == ['--api-key', 'fixture-arg-secret', '--token', 'fixture-flag-secret', '--region', 'eu'], kept
     check('the settings view and edit form hide them, and saving the form unchanged keeps the real values')
+
+    # Edited arguments (as the model's mcp_manage or a person sends them): each hidden value stays
+    # with its own flag, and one that cannot be matched is refused rather than guessed.
+    def edit_args(values): return api('/manage/mcp', {'action': 'edit', 'name': 'local', 'scope': 'global', 'args': values})
+    def saved_args(): return json.loads(cli('mcp', 'get', 'local', '--show-secrets'))['config']['args']
+    edit_args(['--token', '<redacted>', '--api-key', '<redacted>', '--region', 'eu'])
+    assert saved_args() == ['--token', 'fixture-flag-secret', '--api-key', 'fixture-arg-secret', '--region', 'eu'], saved_args()
+    edit_args(['--token', '<redacted>'])
+    assert saved_args() == ['--token', 'fixture-flag-secret'], saved_args()
+    try:
+        edit_args(['--api-key', '<redacted>'])
+        raise AssertionError('an unmatched hidden value was saved')
+    except urllib.error.HTTPError as error:
+        message = error.read().decode()
+        assert 'in full' in message, message
+    assert saved_args() == ['--token', 'fixture-flag-secret'], saved_args()
+    check('reordered and shortened arguments keep each hidden value with its flag; an unmatched one is refused')
 
     thread = api('/threads', {'title': 'MCP settings', 'provider': 'echo', 'model': 'echo-1', 'agent': 'build'})['id']
     api(f'/threads/{thread}/turns', {'requestId': str(uuid.uuid4()), 'text': '!tool mcp_manage {"action":"list"}'})
