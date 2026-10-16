@@ -9,6 +9,7 @@ import { Button, Icon, ask, confirm, Empty } from "./ui";
 import { Editor, type EditorSession } from "./Editor";
 import { fileContext } from "./prompt-context";
 import { shortcutLabel, shortcutText } from "./search";
+import { registerCyclePanel } from "./tab-cycle";
 /** `changed` is the file on disk when it moved on under unsaved edits. */
 type OpenFile = FileContent & { editor: EditorSession; mode?: "preview" | "code"; pin?: string; changed?: FileContent };
 const emptyHash =
@@ -125,6 +126,15 @@ export function Explorer() {
     workspaceGeneration++;
     searchGeneration++;
   });
+  // Ctrl+Tab in the Files panel steps its open files.
+  onCleanup(
+    registerCyclePanel({
+      id: "files",
+      tabs: () => tabs().map((item) => item.path),
+      active: () => selected(),
+      select,
+    }),
+  );
   function select(path: string) {
     selectionGeneration++;
     setSelected(path);
@@ -551,7 +561,7 @@ export function Explorer() {
     setVersion((v) => v + 1);
   }
   return (
-    <section class="explorer">
+    <section class="explorer" data-cycle-panel="files">
       <div class="panel-toolbar">
         <input
           class="panel-search"
@@ -614,6 +624,8 @@ export function Explorer() {
                 {(item) => (
                   <div classList={{ active: item.path === selected() }}>
                     <button
+                      data-cycle-tab={item.path}
+                      aria-current={item.path === selected() ? "true" : undefined}
                       title={
                         item.path +
                         " · " +

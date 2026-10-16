@@ -2904,6 +2904,98 @@ test("a chat read again after a compaction keeps a reply that arrived during the
   expect(errors).toEqual([]);
 });
 
+test("Ctrl+Tab steps the tabs of the panel that has the keyboard, and the shell gets nothing", async () => {
+  test.setTimeout(240_000);
+  const hide = page.getByRole("button", { name: "Hide terminal", exact: true });
+  if (await hide.count()) await hide.click();
+  for (const terminal of await client.listPtys())
+    await client.deletePty(terminal.id);
+  await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  const input = page.locator(".xterm-helper-textarea");
+  await expect(input).toBeFocused();
+  await expect.poll(() => client.listPtys().then((items) => items.length)).toBe(1);
+  // A single tab takes the key and changes nothing.
+  await page.keyboard.press("Control+Tab");
+  await expect(input).toBeFocused();
+  await page.getByRole("button", { name: "New terminal", exact: true }).click();
+  await expect.poll(() => client.listPtys().then((items) => items.length)).toBe(2);
+  const [one, two] = await client.listPtys().then((items) =>
+    items.sort((a, b) => a.id.localeCompare(b.id)),
+  );
+  await client.updatePty(one.id, { title: "Cycle one" });
+  await client.updatePty(two.id, { title: "Cycle two" });
+  const current = page.locator('.terminal-tabs [aria-current="true"]');
+  await expect(current).toHaveText(/Cycle (one|two)/);
+  await expect(input).toBeFocused();
+  const shown = (await current.textContent())!.trim();
+  const other = shown === "Cycle one" ? "Cycle two" : "Cycle one";
+  // The shown terminal records what its shell receives.
+  const typed = join(temporary, "cycle-typed.txt");
+  await input.fill(`cat -v > ${typed}`);
+  await input.press("Enter");
+  // Two terminals: forward and back both land on the other one, and the
+  // keyboard goes with the step, into the terminal shown.
+  await page.keyboard.press("Control+Tab");
+  await expect(current).toHaveText(other);
+  await expect(input).toBeFocused();
+  await page.keyboard.press("Control+Shift+Tab");
+  await expect(current).toHaveText(shown);
+  await expect(input).toBeFocused();
+  await expect(page.locator(".terminal-view .xterm-rows")).toContainText("cycle-typed.txt");
+  await page.waitForTimeout(300);
+  await input.pressSequentially("done");
+  await input.press("Enter");
+  await input.press("Control+d");
+  await expect.poll(() => readFile(typed, "utf8").catch(() => "")).toBe("done\n");
+  await hide.click();
+  for (const terminal of await client.listPtys())
+    await client.deletePty(terminal.id);
+
+  // Open files in the Files panel.
+  await writeFile(join(workspace, "cycle-a.txt"), "cycle a\n");
+  await writeFile(join(workspace, "cycle-b.txt"), "cycle b\n");
+  await showChat();
+  await openProjectPanel("Files");
+  for (const name of ["cycle-a.txt", "cycle-b.txt"])
+    await page.getByRole("button", { name, exact: true }).first().click();
+  const file = page.locator('.file-tabs [aria-current="true"]');
+  await expect(file).toHaveText("cycle-b.txt");
+  await file.focus();
+  await page.keyboard.press("Control+Tab");
+  await expect(file).toHaveText("cycle-a.txt");
+  // The keyboard is on the tab shown, so the next press keeps stepping.
+  await expect(file).toBeFocused();
+  await page.keyboard.press("Control+Shift+Tab");
+  await expect(file).toHaveText("cycle-b.txt");
+  await expect(page.locator(".cm-content")).toContainText("cycle b");
+  for (const name of ["cycle-a.txt", "cycle-b.txt"]) {
+    await page.getByRole("button", { name: "Close " + name, exact: true }).click();
+    await rm(join(workspace, name));
+  }
+
+  // Chat tabs from the message box.
+  await newSession();
+  await send("cycle chat one");
+  const transcript = page.locator(".transcript");
+  await expect(transcript).toContainText("Echo: cycle chat one");
+  await page.getByRole("button", { name: "New chat tab", exact: true }).click();
+  await send("cycle chat two");
+  await expect(transcript).toContainText("Echo: cycle chat two");
+  const message = page.getByRole("textbox", { name: "Message", exact: true });
+  await message.focus();
+  await page.keyboard.press("Control+Shift+Tab");
+  await expect(transcript).toContainText("Echo: cycle chat one");
+  await expect(message).toBeFocused();
+  await page.keyboard.press("Control+Tab");
+  await expect(transcript).toContainText("Echo: cycle chat two");
+  await expect(message).toBeFocused();
+  // Outside every panel (the sidebar) the key is left alone.
+  await page.getByRole("button", { name: "Search", exact: true }).focus();
+  await page.keyboard.press("Control+Tab");
+  await expect(transcript).toContainText("Echo: cycle chat two");
+  expect(errors).toEqual([]);
+});
+
 test("conversation tab order survives reopening and uses horizontal keyboard controls", async () => {
   await expandPrimaryProject();
   const first = await client.createThread({

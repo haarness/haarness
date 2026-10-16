@@ -2428,5 +2428,8 @@
   "Open “{folder}” from a link?": "เปิด “{folder}” จากลิงก์หรือไม่",
   "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "โฟลเดอร์จะเปิดโดยปิดการกำหนดค่าโปรเจกต์ไว้: เซิร์ฟเวอร์ MCP ฮุก และส่วนขยายในโฟลเดอร์นี้จะไม่ทำงาน หากต้องการเปิดใช้งาน ให้เปิดโฟลเดอร์ด้วย “เปิดโปรเจกต์”",
   "Open folder": "เปิดโฟลเดอร์",
-  "Earlier terminal output is no longer available": "เอาต์พุตก่อนหน้าของเทอร์มินัลไม่มีให้ใช้แล้ว"
+  "Earlier terminal output is no longer available": "เอาต์พุตก่อนหน้าของเทอร์มินัลไม่มีให้ใช้แล้ว",
+  "Next tab": "แท็บถัดไป",
+  "Previous tab": "แท็บก่อนหน้า",
+  "In the chats, terminal, files, browser or side panel that has the keyboard": "ในแชท เทอร์มินัล ไฟล์ เบราว์เซอร์ หรือแผงด้านข้างที่แป้นพิมพ์อยู่"
 }

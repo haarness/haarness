@@ -16,6 +16,7 @@ import type { PtyInfo } from "@haarness/sdk";
 import { useApp } from "./state";
 import { Button, ask } from "./ui";
 import { createOrdering } from "./Sortable";
+import { registerCyclePanel } from "./tab-cycle";
 
 // A quick hide/reopen can remount the panel before shell creation returns.
 // Share startup by connection so that gesture still opens exactly one shell.
@@ -132,6 +133,16 @@ export function TerminalPanel() {
       setClosing((ids) => ids.filter((id) => id !== tab.id));
     }
   }
+  // Ctrl+Tab in the terminal steps its tabs; the shown terminal takes the
+  // keyboard once it connects, as after a click.
+  onCleanup(
+    registerCyclePanel({
+      id: "terminal",
+      tabs: () => order.ordered(),
+      active: () => selected(),
+      select: setSelected,
+    }),
+  );
   app.registerSearch("terminal", () => [
     {
       key: "terminal-new",
@@ -163,7 +174,7 @@ export function TerminalPanel() {
       : []),
   ]);
   return (
-    <section class="terminal-panel">
+    <section class="terminal-panel" data-cycle-panel="terminal">
       <div class="terminal-tabs">
         <For each={order.ordered()}>
           {(id) => {
@@ -178,6 +189,8 @@ export function TerminalPanel() {
                 )}
               >
                 <button
+                  data-cycle-tab={id}
+                  aria-current={id === selected() ? "true" : undefined}
                   onClick={() => setSelected(id)}
                   onDblClick={() =>
                     app.run(async () => {

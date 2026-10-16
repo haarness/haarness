@@ -564,14 +564,19 @@ function Shortcuts() {
               value={value}
               onKeyDown={(event) => {
                 // Record a chord instead of making people spell "Mod+Shift+E".
-                const mod = app.state.platform === "darwin" ? event.metaKey : event.ctrlKey;
-                if ((!mod && !event.altKey) || ["Meta", "Control", "Shift", "Alt"].includes(event.key))
+                // On macOS Control is a key of its own (Ctrl+Tab), elsewhere
+                // it is Mod.
+                const mac = app.state.platform === "darwin";
+                const mod = mac ? event.metaKey : event.ctrlKey;
+                const ctrl = mac && event.ctrlKey;
+                if ((!mod && !ctrl && !event.altKey) || ["Meta", "Control", "Shift", "Alt"].includes(event.key))
                   return;
                 event.preventDefault();
                 const key = physicalKey(event.code)
                   ?? (event.key.length === 1 ? event.key.toUpperCase() : event.key);
                 event.currentTarget.value = [
                   mod && "Mod",
+                  ctrl && "Ctrl",
                   event.altKey && "Alt",
                   event.shiftKey && "Shift",
                   key,

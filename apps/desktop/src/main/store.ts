@@ -160,6 +160,8 @@ export async function preferences(input: Partial<Preferences>) {
         browser: z.string(),
         agentNext: z.string(),
         agentPrev: z.string(),
+        tabNext: z.string(),
+        tabPrev: z.string(),
       }),
     })
     .parse({ ...state.preferences, ...input });
@@ -172,15 +174,15 @@ export async function preferences(input: Partial<Preferences>) {
   )
     throw new Error("Invalid appearance setting");
   // Menu shortcuts become native accelerators, so they need a modifier and a
-  // single character. Composer shortcuts are matched in the message box and
-  // may also be a bare named key, such as Tab for people who want the TUI's.
+  // single character. Composer and tab shortcuts are matched in the page and
+  // may also use a named key, such as Tab for people who want the TUI's.
   const KEY = "[a-z0-9,.;/\\[\\]\\\\\\-=`]|F(?:[1-9]|1[0-9]|2[0-4])";
   const NAMED = `${KEY}|Tab|Enter|Space|Escape|Backspace|Up|Down|Left|Right`;
   const MODIFIER = "Mod|Ctrl|Alt|Shift|Meta";
   const accelerator = new RegExp(
     `^(${MODIFIER})(\\+(${MODIFIER}))*\\+(${KEY})$`, "i");
   const composer = new RegExp(`^((${MODIFIER})\\+)*(${NAMED})$`, "i");
-  const composerKeys = new Set(["agentNext", "agentPrev"]);
+  const composerKeys = new Set(["agentNext", "agentPrev", "tabNext", "tabPrev"]);
   const shortcuts = Object.values(candidate.shortcuts);
   if (
     Object.entries(candidate.shortcuts).some(([name, value]) =>

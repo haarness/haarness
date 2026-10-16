@@ -83,6 +83,9 @@ export const defaults: Preferences = {
     // keep moving keyboard focus, so the defaults are chords.
     agentNext: "Mod+.",
     agentPrev: "Mod+Shift+.",
+    // Matched wherever the keyboard is: the tabs of the panel that has it.
+    tabNext: "Ctrl+Tab",
+    tabPrev: "Ctrl+Shift+Tab",
   },
   language: "en",
 };
