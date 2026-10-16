@@ -275,12 +275,13 @@ export interface Bridge {
   /** Shows the unpacked Haarness for Chrome folder the last report named. */
   chromeReveal(): Promise<void>;
   reveal(connection: string, path?: string): Promise<void>;
+  /** `write` answers false when the terminal has no connection now. */
   terminal(
     connection: string,
     action: "connect" | "write" | "detach",
     id: string,
     input?: unknown,
-  ): Promise<void>;
+  ): Promise<unknown>;
   update(action: "check" | "download" | "install"): Promise<unknown>;
   onEvent(callback: (event: DesktopEvent) => void): () => void;
 }

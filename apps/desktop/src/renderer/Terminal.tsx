@@ -10,7 +10,7 @@ import {
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { sizePusher } from "./terminal-size";
-import { reconnectDelay, replayGate, writeChunks } from "./terminal-stream";
+import { inputQueue, reconnectDelay, shownOutput, terminalStream, writeChunks } from "./terminal-stream";
 import "@xterm/xterm/css/xterm.css";
 import type { PtyInfo } from "@haarness/sdk";
 import { useApp } from "./state";
@@ -30,10 +30,12 @@ async function ensureTerminal(connection: string) {
         "listPtys",
         [],
       );
-      if (!tabs.length)
-        await window.haarness.api(connection, "createPty", [
+      if (!tabs.length) {
+        const item = await window.haarness.api<PtyInfo>(connection, "createPty", [
           { cols: 100, rows: 20 },
         ]);
+        shownOutput.started(connection + ":" + item.id);
+      }
     })();
     openings.set(connection, pending);
   }
@@ -68,6 +70,7 @@ export function TerminalPanel() {
         [],
       );
       if (id === generation && connection === app.state.connection?.id) {
+        shownOutput.keep(connection + ":", values.map((value) => value.id));
         setTabs(values);
         if (!values.some((value) => value.id === selected()))
           setSelected(values[0]?.id ?? "");
@@ -85,6 +88,7 @@ export function TerminalPanel() {
       const item = await window.haarness.api<PtyInfo>(connection, "createPty", [
         { cols: 100, rows: 20 },
       ]);
+      shownOutput.started(connection + ":" + item.id);
       if (disposed || connection !== app.state.connection?.id) return;
       await refresh();
       if (!disposed && connection === app.state.connection?.id)
@@ -133,14 +137,17 @@ export function TerminalPanel() {
       setClosing((ids) => ids.filter((id) => id !== tab.id));
     }
   }
-  // Ctrl+Tab in the terminal steps its tabs; the shown terminal takes the
-  // keyboard once it connects, as after a click.
+  // Ctrl+Tab in the terminal steps its tabs, and the keyboard goes into the
+  // terminal shown: its view is drawn as soon as the tab is selected, so the
+  // next press is still the terminal's, connected or not.
+  let panel!: HTMLElement;
   onCleanup(
     registerCyclePanel({
       id: "terminal",
       tabs: () => order.ordered(),
       active: () => selected(),
       select: setSelected,
+      keep: () => panel.querySelector<HTMLElement>(".xterm-helper-textarea")?.focus(),
     }),
   );
   app.registerSearch("terminal", () => [
@@ -174,7 +181,7 @@ export function TerminalPanel() {
       : []),
   ]);
   return (
-    <section class="terminal-panel" data-cycle-panel="terminal">
+    <section class="terminal-panel" data-cycle-panel="terminal" ref={panel}>
       <div class="terminal-tabs">
         <For each={order.ordered()}>
           {(id) => {
@@ -312,15 +319,42 @@ function TerminalView(props: { id: string }) {
       fit.fit();
     });
     fit.fit();
-    // Answers xterm gives to queries in replayed output stay out of the shell.
-    const gate = replayGate((done) => terminal.write("", done));
+    // This view's own connection: main ignores a late connect or detach of
+    // a view of the same terminal that was replaced.
+    const view = crypto.randomUUID();
+    const key = connection + ":" + props.id;
+    const stream = terminalStream({
+      write: (bytes, done) => terminal.write(bytes, done),
+      shown: () => shownOutput.get(key),
+      show: (end) => shownOutput.set(key, end),
+    });
+    // What xterm sends while a key, mouse, focus or paste event is being
+    // handled is the person at the terminal, and always goes to the shell;
+    // xterm answers the output it parses later, in a task of its own.
+    const typing = () => {
+      const event = (window as { event?: Event }).event;
+      return event instanceof UIEvent || event instanceof ClipboardEvent;
+    };
+    // Input while the connection is down waits for the reconnect.
+    let live = false;
+    let order = 0;
+    const waiting = inputQueue();
+    const send = (bytes: Uint8Array) => {
+      const position = order++;
+      if (!live) return waiting.add(position, bytes);
+      void window.haarness
+        .terminal(connection, "write", props.id, Array.from(bytes))
+        .then((sent) => {
+          if (sent !== false) return;
+          live = false;
+          waiting.add(position, bytes);
+        })
+        .catch((error) => app.set("error", String(error)));
+    };
     const input = terminal.onData((data) => {
-      if (!gate.open()) return;
+      if (!typing() && !stream.open()) return;
       // A long paste goes in several writes; IPC keeps them in order.
-      for (const chunk of writeChunks(new TextEncoder().encode(data)))
-        void window.haarness
-          .terminal(connection, "write", props.id, Array.from(chunk))
-          .catch((error) => app.set("error", String(error)));
+      for (const chunk of writeChunks(new TextEncoder().encode(data))) send(chunk);
     });
     // The PTY learns every size xterm takes: a panel resize, and a font size
     // change, which refits without the panel changing size. A push waits for
@@ -345,46 +379,58 @@ function TerminalView(props: { id: string }) {
       const data = event.data as {
         bytes?: number[];
         type?: string;
+        start?: number;
         end?: number;
         truncated?: boolean;
+        view?: string;
       };
-      if (data.type === "replay") gate.replay();
-      if (data.bytes) terminal.write(new Uint8Array(data.bytes));
-      if (data.type === "cursor") {
-        gate.cursor();
-        if (typeof data.end === "number") cursor = data.end;
+      if (data.view && data.view !== view) return;
+      if (data.type === "replay" && typeof data.start === "number" && typeof data.end === "number") {
+        shownOutput.adopt(key, data.end);
+        stream.replay(Math.min(Math.max(requested, data.start), data.end));
+      }
+      if (data.bytes) stream.bytes(new Uint8Array(data.bytes));
+      if (data.type === "cursor" && typeof data.end === "number") {
+        stream.cursor(data.end);
+        cursor = data.end;
         attempt = 0;
       }
       if (data.truncated && data.type === "replay")
         terminal.writeln(
           "\r\n[" + t("Earlier terminal output is no longer available") + "]\r\n",
         );
-      if (data.type === "closed") reconnect();
+      if (data.type === "closed") {
+        live = false;
+        reconnect();
+      }
     });
     // The output this view has, as the server counts it. When the socket
     // ends (the server drops a reader that fell behind, or the network or
     // server went away), the view connects again from there, so the shell
     // keeps its keys and the missed output is replayed once.
     let cursor = 0;
+    let requested = 0;
     let attempt = 0;
     let retry: ReturnType<typeof setTimeout> | undefined;
     let focused = false;
-    const connect = () =>
+    const connect = () => {
+      requested = cursor;
       void window.haarness
-        .terminal(connection, "connect", props.id, cursor)
+        .terminal(connection, "connect", props.id, { cursor, view })
         .then(() => {
-          if (disposed) {
-            void window.haarness.terminal(connection, "detach", props.id);
-            return;
-          }
+          if (disposed) return;
           if (!focused) terminal.focus();
           focused = true;
+          live = true;
+          for (const bytes of waiting.take()) send(bytes);
           sizes.schedule({ cols: terminal.cols, rows: terminal.rows });
         })
         .catch((error) => {
+          if (disposed) return;
           if (!focused) app.set("error", String(error));
           reconnect();
         });
+    };
     function reconnect() {
       if (disposed) return;
       clearTimeout(retry);
@@ -409,7 +455,7 @@ function TerminalView(props: { id: string }) {
       input.dispose();
       resize.disconnect();
       unsubscribe();
-      void window.haarness.terminal(connection, "detach", props.id);
+      void window.haarness.terminal(connection, "detach", props.id, view);
       terminal.dispose();
     });
   });
