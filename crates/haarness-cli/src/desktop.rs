@@ -24,6 +24,11 @@ enum Request {
         #[serde(default)]
         directories: Vec<PathBuf>,
     },
+    /// Sent by `projects` to a detached copy of this command: register the
+    /// folders it could not wait for, however long they take.
+    Register {
+        directories: Vec<PathBuf>,
+    },
     Configuration,
     ReadConfiguration {
         id: String,
@@ -65,12 +70,15 @@ async fn execute(paths: &Paths, workspace: &Path, trust: bool, request: Request)
     match request {
         Request::Projects { directories } => {
             let manager = paths.workspace_manager()?;
-            // A sidebar folder that hangs (a network volume that went away)
-            // is left as registered before instead of holding the request.
-            let project_ids: std::collections::HashSet<_> = manager
-                .register_existing(&directories)?
-                .into_iter()
-                .map(|registered| registered.project_id)
+            // A sidebar folder that does not answer within a second (a slow
+            // network volume, one that went away) is left as registered
+            // before instead of holding the request, and registered by a
+            // detached copy of this command that can wait for it.
+            let mut registered = manager.register_existing(&directories)?;
+            let project_ids: std::collections::HashSet<_> = registered
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.project_id.clone())
                 .collect();
             // Opening an existing linked checkout also makes its primary
             // project folder selectable, without starting either daemon.
@@ -81,10 +89,29 @@ async fn execute(paths: &Paths, workspace: &Path, trust: bool, request: Request)
                 .filter(|project| project_ids.contains(&project.id))
                 .map(|project| PathBuf::from(project.root))
                 .collect();
-            manager.register_existing(&roots)?;
+            registered
+                .pending
+                .extend(manager.register_existing(&roots)?.pending);
+            if !registered.pending.is_empty()
+                && let Err(error) = register_later(paths, workspace, &registered.pending)
+            {
+                tracing::warn!(%error, "could not start registering slow project folders");
+            }
             Ok(serde_json::to_value(
                 manager.list(paths.workspace_id.as_deref())?,
             )?)
+        }
+        Request::Register { directories } => {
+            let manager = paths.workspace_manager()?;
+            let locks = paths.cache.join("registrations");
+            fs::create_dir_all(&locks)?;
+            std::thread::scope(|scope| {
+                for directory in &directories {
+                    let (manager, locks) = (&manager, &locks);
+                    scope.spawn(move || register_waiting(manager, locks, directory));
+                }
+            });
+            Ok(json!({}))
         }
         Request::Asset { kind, input } => {
             let service = super::management::ManagementService::new(
@@ -256,6 +283,71 @@ fn read(path: &Path) -> Result<String> {
     file.read_to_string(&mut text)?;
     ensure!(text.len() as u64 <= LIMIT, "Configuration exceeds 4 MiB");
     Ok(text)
+}
+
+/// Register `directories` in a detached copy of this command, so the
+/// answer to Desktop does not wait for them. Its output goes nowhere and it
+/// outlives this process.
+fn register_later(paths: &Paths, workspace: &Path, directories: &[PathBuf]) -> Result<()> {
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    if let Some(root) = &paths.root {
+        command.arg("--data-dir").arg(root);
+    }
+    command
+        .arg("--workspace")
+        .arg(workspace)
+        .args(["--disable-project-config", "desktop"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    let mut child = command.spawn()?;
+    let request = json!({"action": "register", "directories": directories});
+    child
+        .stdin
+        .take()
+        .context("registration input")?
+        .write_all(request.to_string().as_bytes())?;
+    Ok(())
+}
+
+/// Register one folder however long it takes, and the project of a linked
+/// checkout with it. A folder another registration already waits on is
+/// skipped, so a folder that hangs holds one waiting process, not one per
+/// Desktop request.
+fn register_waiting(
+    manager: &haarness_workspaces::WorkspaceManager,
+    locks: &Path,
+    directory: &Path,
+) {
+    let key = format!(
+        "{:x}",
+        Sha256::digest(directory.to_string_lossy().as_bytes())
+    );
+    let Ok(lock) = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(locks.join(&key[..16]))
+    else {
+        return;
+    };
+    if fs2::FileExt::try_lock_exclusive(&lock).is_err() || !directory.is_dir() {
+        return;
+    }
+    let Ok(workspace) = manager.register_local(directory) else {
+        return;
+    };
+    if let Ok(project) = manager.project_for_workspace(&workspace.id) {
+        let root = Path::new(&project.root);
+        if root != directory && root.is_dir() {
+            let _ = manager.register_local(root);
+        }
+    }
 }
 
 fn revision(text: &str) -> String {
@@ -434,6 +526,58 @@ mod tests {
                 ("repository".into(), Some("main".into())),
             ]
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_detached_registration_waits_for_every_folder_and_a_linked_checkouts_project() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-desktop-register-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let paths = Paths::new(Some(&root.join("home"))).unwrap();
+        let repository = root.join("repository");
+        let linked = root.join("linked");
+        let plain = root.join("plain");
+        fs::create_dir_all(&repository).unwrap();
+        fs::create_dir_all(&plain).unwrap();
+        let git = |arguments: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["-c", "user.email=t@example.invalid", "-c", "user.name=T"])
+                .args(arguments)
+                .output()
+                .unwrap()
+                .status;
+            assert!(status.success(), "git {arguments:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            linked.to_str().unwrap(),
+        ]);
+        let request: Request = serde_json::from_value(json!({
+            "action": "register",
+            "directories": [linked, plain, root.join("missing")],
+        }))
+        .unwrap();
+        execute(&paths, &plain, false, request).await.unwrap();
+        let mut names: Vec<_> = paths
+            .workspace_manager()
+            .unwrap()
+            .registered()
+            .unwrap()
+            .into_iter()
+            .map(|workspace| workspace.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, ["linked", "plain", "repository"]);
         fs::remove_dir_all(root).unwrap();
     }
 
