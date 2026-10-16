@@ -1,3 +1,4 @@
+import { defaultGlobalShortcut, type GlobalShortcut } from "./global-shortcut";
 import type * as Types from "@haarness/sdk";
 import type { ThemeId } from "./themes";
 import type { Attachment } from "./attachments";
@@ -47,6 +48,8 @@ export interface Preferences {
   diffLayout: "split" | "unified";
   terminalFontSize: number;
   shortcuts: Record<string, string>;
+  /** Shows and hides Haarness from any app; off by default. */
+  globalShortcut: GlobalShortcut;
   language: string;
 }
 export const defaults: Preferences = {
@@ -87,6 +90,7 @@ export const defaults: Preferences = {
     tabNext: "Ctrl+Tab",
     tabPrev: "Ctrl+Shift+Tab",
   },
+  globalShortcut: defaultGlobalShortcut,
   language: "en",
 };
 /**
@@ -174,6 +178,8 @@ export interface Bridge {
   /** Where a dropped or pasted file is on this computer, or "" for one
    * that has no path. */
   pathForFile(file: File): string;
+  /** Holds the global shortcut off while Settings records a new one. */
+  globalShortcut(action: "suspend" | "resume"): Promise<void>;
   account(input: { action: string; id?: string; name?: string; repo?: string; configuration?: Record<string, unknown>; page?: string; device?: boolean }): Promise<any>;
   openLink(connection: string | undefined, thread: string | undefined | null, url: string): Promise<"external" | "browser">;
   browserData(connection: string, input?: { action: "get" | "remove" | "clear" | "save"; kind?: "history" | "downloads" | "all"; id?: string }): Promise<import("./browser-settings").BrowserData>;

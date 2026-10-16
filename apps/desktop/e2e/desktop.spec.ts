@@ -3030,6 +3030,62 @@ test("Ctrl+Tab steps the tabs of the panel that has the keyboard, and the shell 
   expect(errors).toEqual([]);
 });
 
+test("the global shortcut is off until turned on, registers only a free combination and keeps the saved one", async () => {
+  const registered = (accelerator: string) =>
+    app.evaluate(({ globalShortcut }, value) => globalShortcut.isRegistered(value), accelerator);
+  // Rare combinations, so the test never holds a key another app uses.
+  await page.evaluate(() =>
+    window.haarness.preferences({ globalShortcut: { enabled: false, keys: "Ctrl+Alt+Shift+F9" } }),
+  );
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const settings = page.getByRole("dialog", { name: "Settings", exact: true });
+  await settings.getByRole("button", { name: "Keyboard shortcuts", exact: true }).click();
+  const toggle = settings.getByRole("switch", { name: "Show and hide Haarness from any app", exact: true });
+  const field = settings.getByRole("textbox", { name: "Global shortcut", exact: true });
+  await expect(toggle).not.toBeChecked();
+  await expect(field).toBeDisabled();
+  expect(await registered("Control+Alt+Shift+F9")).toBe(false);
+  await toggle.click();
+  await expect(toggle).toBeChecked();
+  await expect.poll(() => registered("Control+Alt+Shift+F9")).toBe(true);
+  // Recording another combination moves the registration to it.
+  await field.focus();
+  await page.keyboard.press("Control+Alt+Shift+F8");
+  await expect(field).toHaveValue("Ctrl+Alt+Shift+F8");
+  // Held off while the field records, in use again once it is left.
+  expect(await registered("Control+Alt+Shift+F8")).toBe(false);
+  await field.blur();
+  await expect.poll(() => registered("Control+Alt+Shift+F8")).toBe(true);
+  expect(await registered("Control+Alt+Shift+F9")).toBe(false);
+  // One the system keeps is refused, and the field shows the saved one again.
+  await field.focus();
+  await page.keyboard.press("Meta+Space");
+  await expect(settings.getByRole("alert")).toContainText("belongs to the system");
+  await settings.getByRole("button", { name: "Dismiss error", exact: true }).click();
+  await expect(field).toHaveValue("Ctrl+Alt+Shift+F8");
+  // One another app holds is refused too, and the saved one stays in use.
+  await app.evaluate(({ globalShortcut }) => globalShortcut.register("Control+Alt+Shift+F7", () => {}));
+  await field.focus();
+  await page.keyboard.press("Control+Alt+Shift+F7");
+  await expect(settings.getByRole("alert")).toContainText("already uses");
+  await settings.getByRole("button", { name: "Dismiss error", exact: true }).click();
+  await expect(field).toHaveValue("Ctrl+Alt+Shift+F8");
+  await field.blur();
+  await expect.poll(() => registered("Control+Alt+Shift+F8")).toBe(true);
+  await app.evaluate(({ globalShortcut }) => globalShortcut.unregister("Control+Alt+Shift+F7"));
+  // Turning it off releases the combination and keeps the choice.
+  await toggle.click();
+  await expect(toggle).not.toBeChecked();
+  await expect.poll(() => registered("Control+Alt+Shift+F8")).toBe(false);
+  await expect(field).toHaveValue("Ctrl+Alt+Shift+F8");
+  expect(
+    await page.evaluate(async () => (await window.haarness.boot()).preferences.globalShortcut),
+  ).toEqual({ enabled: false, keys: "Ctrl+Alt+Shift+F8" });
+  await page.keyboard.press("Escape");
+  await expect(settings).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
 test("conversation tab order survives reopening and uses horizontal keyboard controls", async () => {
   await expandPrimaryProject();
   const first = await client.createThread({

@@ -1,3 +1,4 @@
+import type { GlobalShortcut } from "../global-shortcut";
 import { createSettingsSearch } from "./settings-search";
 import { physicalKey, searchEntries, shortcutLabel } from "./search";
 import { SettingRow as Row } from "./SettingRow";
@@ -541,6 +542,92 @@ function General() {
     </>
   );
 }
+/**
+ * A chord as a shortcut field records it, so nobody has to spell
+ * "Mod+Shift+E": undefined until a key other than a modifier is pressed with
+ * Command, Control or Option. On macOS Control is a key of its own
+ * (Ctrl+Tab); elsewhere it is Mod.
+ */
+function recordChord(event: KeyboardEvent, platform: string) {
+  const mac = platform === "darwin";
+  const mod = mac ? event.metaKey : event.ctrlKey;
+  const ctrl = mac && event.ctrlKey;
+  if ((!mod && !ctrl && !event.altKey) || ["Meta", "Control", "Shift", "Alt"].includes(event.key))
+    return;
+  const key = physicalKey(event.code)
+    ?? (event.code === "Space" ? "Space" : event.key.length === 1 ? event.key.toUpperCase() : event.key);
+  return [
+    mod && "Mod",
+    ctrl && "Ctrl",
+    event.altKey && "Alt",
+    event.shiftKey && "Shift",
+    key,
+  ].filter(Boolean).join("+");
+}
+/** Show and hide Haarness from any app: a switch, off by default, and the
+ * combination, recorded like the other shortcuts. */
+function GlobalShortcutRows() {
+  const app = useApp();
+  const value = () => app.state.preferences.globalShortcut;
+  let field!: HTMLInputElement;
+  // A refused combination leaves the saved one in the field.
+  const save = (next: GlobalShortcut) =>
+    app.run(async () => {
+      try {
+        await app.settings({ globalShortcut: next });
+      } finally {
+        field.value = value().keys;
+      }
+    });
+  return (
+    <>
+      <Row
+        title="Show and hide Haarness from any app"
+        description="Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination."
+      >
+        <input
+          type="checkbox"
+          role="switch"
+          aria-label={t("Show and hide Haarness from any app")}
+          checked={value().enabled}
+          onChange={(event) => {
+            const enabled = event.currentTarget.checked;
+            event.currentTarget.checked = value().enabled;
+            void save({ ...value(), enabled });
+          }}
+        />
+      </Row>
+      <Row
+        title="Global shortcut"
+        description="Click and press the keys, including a modifier key."
+      >
+        <kbd class="shortcut-preview" dir="ltr" aria-hidden="true">
+          {shortcutLabel(value().keys, app.state.platform)}
+        </kbd>
+        <input
+          ref={field}
+          class="shortcut-input"
+          aria-label={t("Global shortcut")}
+          value={value().keys}
+          disabled={!value().enabled}
+          onFocus={() => void window.haarness.globalShortcut("suspend")}
+          onBlur={() => void window.haarness.globalShortcut("resume")}
+          onKeyDown={(event) => {
+            const chord = recordChord(event, app.state.platform);
+            if (!chord) return;
+            event.preventDefault();
+            event.currentTarget.value = chord;
+            if (chord !== value().keys) void save({ ...value(), keys: chord });
+          }}
+          onChange={(event) => {
+            const keys = event.currentTarget.value.trim();
+            if (keys !== value().keys) void save({ ...value(), keys });
+          }}
+        />
+      </Row>
+    </>
+  );
+}
 function Shortcuts() {
   const app = useApp();
   return (
@@ -563,24 +650,10 @@ function Shortcuts() {
               aria-label={t("Shortcut {name}", { name })}
               value={value}
               onKeyDown={(event) => {
-                // Record a chord instead of making people spell "Mod+Shift+E".
-                // On macOS Control is a key of its own (Ctrl+Tab), elsewhere
-                // it is Mod.
-                const mac = app.state.platform === "darwin";
-                const mod = mac ? event.metaKey : event.ctrlKey;
-                const ctrl = mac && event.ctrlKey;
-                if ((!mod && !ctrl && !event.altKey) || ["Meta", "Control", "Shift", "Alt"].includes(event.key))
-                  return;
+                const chord = recordChord(event, app.state.platform);
+                if (!chord) return;
                 event.preventDefault();
-                const key = physicalKey(event.code)
-                  ?? (event.key.length === 1 ? event.key.toUpperCase() : event.key);
-                event.currentTarget.value = [
-                  mod && "Mod",
-                  ctrl && "Ctrl",
-                  event.altKey && "Alt",
-                  event.shiftKey && "Shift",
-                  key,
-                ].filter(Boolean).join("+");
+                event.currentTarget.value = chord;
                 event.currentTarget.dispatchEvent(new Event("change"));
               }}
               onChange={(event) =>
@@ -597,6 +670,7 @@ function Shortcuts() {
           </Row>
         )}
       </For>
+      <GlobalShortcutRows />
       <Row title="New line">
         <kbd dir="ltr">{shortcutLabel("Shift+Enter", app.state.platform)}</kbd>
       </Row>

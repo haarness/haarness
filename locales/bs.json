@@ -2432,5 +2432,12 @@
   "Next tab": "Sljedeća kartica",
   "Previous tab": "Prethodna kartica",
   "In the chats, terminal, files, browser or side panel that has the keyboard": "U razgovorima, terminalu, datotekama, pregledniku ili bočnom panelu koji ima tastaturu",
-  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Priložite sliku, PDF, audio ili video datoteku. Da biste uputili na izvorni kod, koristite njegovu putanju u radnom prostoru."
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Priložite sliku, PDF, audio ili video datoteku. Da biste uputili na izvorni kod, koristite njegovu putanju u radnom prostoru.",
+  "Show and hide Haarness from any app": "Prikaži i sakrij Haarness iz bilo koje aplikacije",
+  "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.": "Dovodi Haarness u prvi plan iz bilo koje aplikacije i ponovo ga skriva kada je u prvom planu. Dok je uključeno, druge aplikacije više ne primaju tu kombinaciju.",
+  "Global shortcut": "Globalna prečica",
+  "Click and press the keys, including a modifier key.": "Kliknite i pritisnite tipke, uključujući modifikatorsku tipku.",
+  "Use a modifier key and one more key, such as {keys}.": "Koristite modifikatorsku tipku i još jednu tipku, npr. {keys}.",
+  "{keys} belongs to the system. Choose another shortcut.": "{keys} pripada sistemu. Odaberite drugu prečicu.",
+  "Another app or the system already uses {keys}. Choose another shortcut.": "Druga aplikacija ili sistem već koristi {keys}. Odaberite drugu prečicu."
 }

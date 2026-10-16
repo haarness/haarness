@@ -2432,5 +2432,12 @@
   "Next tab": "แท็บถัดไป",
   "Previous tab": "แท็บก่อนหน้า",
   "In the chats, terminal, files, browser or side panel that has the keyboard": "ในแชท เทอร์มินัล ไฟล์ เบราว์เซอร์ หรือแผงด้านข้างที่แป้นพิมพ์อยู่",
-  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "แนบรูปภาพ PDF ไฟล์เสียง หรือไฟล์วิดีโอ หากต้องการอ้างอิงซอร์สโค้ด ให้ใช้พาธในพื้นที่ทำงาน"
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "แนบรูปภาพ PDF ไฟล์เสียง หรือไฟล์วิดีโอ หากต้องการอ้างอิงซอร์สโค้ด ให้ใช้พาธในพื้นที่ทำงาน",
+  "Show and hide Haarness from any app": "แสดงและซ่อน Haarness จากแอปใดก็ได้",
+  "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.": "นำ Haarness ขึ้นมาด้านหน้าจากแอปใดก็ได้ และซ่อนอีกครั้งเมื่ออยู่ด้านหน้า ขณะเปิดใช้งาน แอปอื่นจะไม่ได้รับคีย์ผสมนี้อีก",
+  "Global shortcut": "ทางลัดส่วนกลาง",
+  "Click and press the keys, including a modifier key.": "คลิกแล้วกดแป้น รวมถึงแป้นปรับแต่ง",
+  "Use a modifier key and one more key, such as {keys}.": "ใช้แป้นปรับแต่งร่วมกับแป้นอื่นอีกหนึ่งแป้น เช่น {keys}",
+  "{keys} belongs to the system. Choose another shortcut.": "{keys} เป็นของระบบ โปรดเลือกทางลัดอื่น",
+  "Another app or the system already uses {keys}. Choose another shortcut.": "แอปอื่นหรือระบบใช้ {keys} อยู่แล้ว โปรดเลือกทางลัดอื่น"
 }
