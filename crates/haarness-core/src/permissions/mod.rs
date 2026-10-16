@@ -247,7 +247,9 @@ impl PermissionEngine {
     /// The other ways to write a path operation's file, each with whether it
     /// is absolute: the project-relative path of an absolute one inside the
     /// project (also through a link such as macOS's `/tmp` for
-    /// `/private/tmp`), or the absolute paths of a relative one.
+    /// `/private/tmp`), or the absolute paths of a relative one and its
+    /// plain relative form (`./secrets/key`, `src/../vendor/lib.rs` and
+    /// `build/` are `secrets/key`, `vendor/lib.rs` and `build`).
     fn path_spellings(&self, operation: &str) -> Vec<(String, bool)> {
         let Some(workspace) = &self.workspace else {
             return Vec::new();
@@ -285,6 +287,13 @@ impl PermissionEngine {
                 spellings.push((format!("{permission}:{relative}"), false));
             }
         } else {
+            if let Some(plain) = plain_relative(given) {
+                let plain = plain.to_string_lossy();
+                let plain = if plain.is_empty() { "." } else { &plain };
+                if plain != target {
+                    spellings.push((format!("{permission}:{plain}"), false));
+                }
+            }
             for base in [&configured, &root] {
                 let absolute = format!(
                     "{permission}:{}",
@@ -564,6 +573,25 @@ pub(crate) fn names_inside(workspace: &Path, value: &str) -> bool {
     } else {
         normalize_absolute(&root.join(given)).starts_with(&root)
     }
+}
+
+/// A relative path with `.`, `..` and trailing separators taken lexically,
+/// or `None` when it climbs out of the folder it is relative to.
+fn plain_relative(path: &Path) -> Option<PathBuf> {
+    let mut plain = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !plain.pop() {
+                    return None;
+                }
+            }
+            Component::Normal(value) => plain.push(value),
+            Component::Prefix(_) | Component::RootDir => return None,
+        }
+    }
+    Some(plain)
 }
 
 fn normalize_absolute(path: &Path) -> PathBuf {
@@ -1181,6 +1209,22 @@ mod tests {
             engine.evaluate("list:/work/project/build"),
             PermissionDecision::Ask
         );
+        // `./`, `..` inside the project and a trailing separator are the
+        // same file or folder.
+        for operation in [
+            "read:./secrets/key",
+            "read:src/../secrets/key",
+            "edit:./vendor/lib.rs",
+            "write:src/../vendor/lib.rs",
+        ] {
+            assert_eq!(
+                engine.evaluate(operation),
+                PermissionDecision::Deny,
+                "{operation}"
+            );
+        }
+        assert_eq!(engine.evaluate("list:build/"), PermissionDecision::Ask);
+        assert_eq!(engine.evaluate("list:./build"), PermissionDecision::Ask);
         // The deny names the rule as written.
         assert_eq!(
             engine

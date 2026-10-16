@@ -8392,8 +8392,7 @@ impl RunnerTask {
         for plan in plans {
             let mut asked = Vec::new();
             for pattern in &plan.patterns {
-                if PermissionEngine::new(self.skill_rules.lock().clone())
-                    .evaluate(&plan.operation(pattern))
+                if self.skill_engine().evaluate(&plan.operation(pattern))
                     == PermissionDecision::Deny
                 {
                     return Err(CoreError::PermissionDenied(
@@ -8437,8 +8436,7 @@ impl RunnerTask {
                             && ((hook_permission == Some(PermissionDecision::Allow)
                                 && !plan.is_resolved(pattern))
                                 || (evaluation.matched.is_none()
-                                    && PermissionEngine::new(self.skill_rules.lock().clone())
-                                        .evaluate(&plan.operation(pattern))
+                                    && self.skill_engine().evaluate(&plan.operation(pattern))
                                         == PermissionDecision::Allow)) => {}
                     PermissionDecision::Ask => asked.push(pattern.clone()),
                     PermissionDecision::Allow => {}
@@ -8576,6 +8574,14 @@ impl RunnerTask {
     fn permission_engine(&self, agent: &str) -> PermissionEngine {
         let session_rules = self.session_rules.lock();
         self.permission_engine_with_session_rules(agent, &session_rules)
+    }
+
+    /// The active skill's rules, matching path rules by either spelling of a
+    /// project file like the turn's own rules.
+    fn skill_engine(&self) -> PermissionEngine {
+        let mut engine = PermissionEngine::new(self.skill_rules.lock().clone());
+        engine.set_workspace(&self.workspace);
+        engine
     }
 
     fn permission_engine_for_tool(&self, agent: &str, tool: &str) -> PermissionEngine {
@@ -11168,15 +11174,36 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         // per-path rules apply; one prompt covers them all.
         if let Some(input) = arguments.get("input").and_then(serde_json::Value::as_str) {
             if let Ok(parsed) = crate::patch::parse_patch(input) {
+                // A moved file's destination is edited too, and each path
+                // also meets the rules for the file it really opens.
+                let mut patterns: Vec<String> = Vec::new();
+                let mut resolved = Vec::new();
+                for operation in &parsed {
+                    let destination = match operation {
+                        crate::patch::FileOp::Update {
+                            move_to: Some(target),
+                            ..
+                        } => Some(target.as_str()),
+                        _ => None,
+                    };
+                    for path in std::iter::once(operation.path()).chain(destination) {
+                        if !patterns.iter().any(|known| known == path) {
+                            patterns.push(path.to_owned());
+                        }
+                        if let Some(pattern) = resolved_file_pattern(workspace, path)
+                            && !patterns.contains(&pattern)
+                        {
+                            resolved.push((pattern.clone(), pattern.clone()));
+                            patterns.push(pattern);
+                        }
+                    }
+                }
                 plans.push(AskPlan {
                     permission: "edit".into(),
-                    patterns: parsed
-                        .iter()
-                        .map(|operation| operation.path().to_owned())
-                        .collect(),
+                    patterns,
                     always: vec!["*".into()],
                     external_paths: Vec::new(),
-                    resolved: Vec::new(),
+                    resolved,
                 });
                 return plans;
             }
@@ -13416,6 +13443,54 @@ mod tests {
                 assert_eq!(plan.always, vec!["*"]);
             }
         }
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn a_patch_meets_the_rules_for_every_file_it_touches_and_moves_to() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-patch-paths-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::create_dir_all(workspace.join("vendor")).unwrap();
+        std::fs::write(workspace.join("src/old.rs"), "a\n").unwrap();
+        let patch = "*** Begin Patch\n\
+            *** Update File: src/old.rs\n\
+            *** Move to: vendor/lib.rs\n\
+            @@\n-a\n+b\n\
+            *** Add File: src/../vendor/new.rs\n+c\n\
+            *** End Patch";
+        let plan = super::ask_plans("apply_patch", &json!({"input": patch}), &workspace).remove(0);
+        assert_eq!(plan.permission, "edit");
+        assert_eq!(
+            plan.patterns,
+            vec![
+                "src/old.rs",
+                "vendor/lib.rs",
+                "src/../vendor/new.rs",
+                "vendor/new.rs"
+            ]
+        );
+        assert_eq!(
+            plan.resolved,
+            vec![("vendor/new.rs".to_owned(), "vendor/new.rs".to_owned())]
+        );
+        let mut engine = crate::PermissionEngine::build_defaults();
+        engine.set_workspace(&workspace);
+        engine.add_rule(crate::PermissionRule {
+            pattern: "edit:vendor/*".into(),
+            decision: crate::PermissionDecision::Deny,
+        });
+        let denied: Vec<_> = plan
+            .patterns
+            .iter()
+            .filter(|pattern| {
+                engine.evaluate(&plan.operation(pattern)) == crate::PermissionDecision::Deny
+            })
+            .collect();
+        assert_eq!(
+            denied,
+            vec!["vendor/lib.rs", "src/../vendor/new.rs", "vendor/new.rs"]
+        );
         std::fs::remove_dir_all(workspace).unwrap();
     }
 
