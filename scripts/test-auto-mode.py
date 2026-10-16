@@ -208,6 +208,9 @@ try:
         keys('-N','12','Up')
         until(lambda:'$ printf "line-01' in card(capture()) and 'line-12' not in card(capture()),f'{width}x{height}: Up did not return to the first line')
     resize(160,44)
+    # Press ctrl+e once the TUI has redrawn at the new width (its rule spans
+    # the window), not while it is still handling the resize.
+    until(lambda:'━'*150 in capture(),'the TUI did not redraw at 160 columns')
     keys('C-e')
     until(lambda:'ctrl+e collapse' in card(capture()),'ctrl+e did not expand the command')
     shown=card(capture())
