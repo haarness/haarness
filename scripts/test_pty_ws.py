@@ -122,6 +122,33 @@ async def main():
     request("DELETE", f"/v1/ptys/{pty_id}")
     assert request("GET", "/v1/ptys") == []
 
+    # Under an endless flood the socket falls behind at once and the server
+    # closes it so the client can catch up; a Ctrl+C sent on it must still
+    # reach the program first.
+    flood = request(
+        "POST",
+        "/v1/ptys",
+        {"title": "flood", "command": "/usr/bin/yes", "args": [], "cols": 80, "rows": 24},
+    )
+    await asyncio.sleep(1)
+    async with websockets.connect(
+        f"{ws_url}/v1/ptys/{flood['id']}/connect?cursor=0",
+        additional_headers=headers,
+        max_size=None,
+    ) as socket:
+        await socket.send(b"\x03")
+        deadline = asyncio.get_running_loop().time() + 5
+        try:
+            while asyncio.get_running_loop().time() < deadline:
+                await asyncio.wait_for(socket.recv(), 1)
+        except (asyncio.TimeoutError, websockets.ConnectionClosed):
+            pass
+    deadline = time.monotonic() + 5
+    while request("GET", f"/v1/ptys/{flood['id']}")["status"] != "exited":
+        assert time.monotonic() < deadline, "Ctrl+C sent during a flood never reached the program"
+        await asyncio.sleep(0.1)
+    request("DELETE", f"/v1/ptys/{flood['id']}")
+
     cleanup = request(
         "POST",
         "/v1/ptys",
