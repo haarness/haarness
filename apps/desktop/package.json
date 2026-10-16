@@ -92,7 +92,13 @@
       "entitlements": "assets/entitlements.mac.plist",
       "extendInfo": {
         "NSMicrophoneUsageDescription": "Haarness uses the microphone when you start dictation to turn your voice into message text.",
-        "NSSpeechRecognitionUsageDescription": "Haarness uses macOS speech recognition to turn your voice into editable message text."
+        "NSSpeechRecognitionUsageDescription": "Haarness uses macOS speech recognition to turn your voice into editable message text.",
+        "NSCameraUsageDescription": "Haarness lets commands you run, in its terminal or through the agent, use a camera once you allow it.",
+        "NSCalendarsUsageDescription": "Haarness lets commands you run, in its terminal or through the agent, use your calendars once you allow it.",
+        "NSCalendarsFullAccessUsageDescription": "Haarness lets commands you run, in its terminal or through the agent, use your calendars once you allow it.",
+        "NSRemindersUsageDescription": "Haarness lets commands you run, in its terminal or through the agent, use your reminders once you allow it.",
+        "NSRemindersFullAccessUsageDescription": "Haarness lets commands you run, in its terminal or through the agent, use your reminders once you allow it.",
+        "NSAppleEventsUsageDescription": "Haarness lets commands you run, in its terminal or through the agent, control other apps with AppleScript once you allow it."
       },
       "entitlementsInherit": "assets/entitlements.mac.plist"
     },
