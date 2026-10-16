@@ -102,3 +102,37 @@ test("a history read keeps what the running turn wrote while it was in flight", 
   // Nothing arrived meanwhile: the read is the history.
   assert.deepEqual(landItems(read, [], "thread"), read);
 });
+
+test("a slash command's message shows what the command expanded to, live and after a read", () => {
+  const [state, set] = createStore<Live>({
+    selected: "thread",
+    threads: [],
+    items: [],
+    turns: [],
+    streams: {},
+    permissions: [],
+    questions: [],
+  });
+  const message = (text: string): Item => ({
+    id: "message",
+    threadId: "thread",
+    turnId: "turn",
+    sequence: 1,
+    createdAt: "2026-10-16T00:00:00Z",
+    data: { type: "user_message", text },
+  });
+  const event = (type: string, payload: unknown) =>
+    ({ eventId: 1, type, payload, serverInstanceId: "instance" }) as EventEnvelope;
+  reduceEvent(state, set, event("item.created", message("/review src")));
+  reduceEvent(state, set, event("item.updated", message("Review src carefully.")));
+  assert.deepEqual(
+    state.items.map((item) => item.data.type === "user_message" && item.data.text),
+    ["Review src carefully."],
+  );
+  // Another chat's rewrite leaves this one alone.
+  reduceEvent(state, set, event("item.updated", { ...message("elsewhere"), threadId: "other" }));
+  assert.equal(state.items.length, 1);
+  // A read sent before the rewrite still lands with it.
+  const landed = landItems([message("/review src")], [event("item.updated", message("Review src carefully."))], "thread");
+  assert.equal(landed[0].data.type === "user_message" && landed[0].data.text, "Review src carefully.");
+});
