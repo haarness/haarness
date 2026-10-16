@@ -674,6 +674,8 @@ const RELAY_SILENCE: Duration = Duration::from_secs(25);
 /// How long one frame may take to leave; a stalled network fills the socket's
 /// buffer and the send then waits for as long as TCP keeps retrying.
 const RELAY_SEND: Duration = Duration::from_secs(10);
+/// How long a new connection may wait for the relay's `ready`.
+const RELAY_READY: Duration = Duration::from_secs(10);
 const RELAY_VERSION: u64 = 1;
 /// The upgrade header that names the relay features this connector
 /// understands. Cloud lists features in `ready` only when asked, because
@@ -842,8 +844,11 @@ async fn connected(
     attention: Arc<remote_attention::Context>,
     silence: Duration,
 ) -> Result<()> {
-    let ready = tokio::time::timeout(Duration::from_secs(10), socket.next())
-        .await?
+    // The relay has as long to say it is ready as it may stay silent later,
+    // at most 10 s; a stall right after connecting is no drop either.
+    let ready = tokio::time::timeout(silence.min(RELAY_READY), socket.next())
+        .await
+        .map_err(|_| Interrupted("Relay did not say it was ready in time"))?
         .context("Relay closed")??;
     let ready = match &ready {
         Message::Text(value) => relay_ready(value),
@@ -1886,6 +1891,8 @@ mod tests {
         Drop,
         /// Say ready and keep the socket this long.
         Hold(Duration),
+        /// Take the socket but say nothing, not even ready, for this long.
+        Mute(Duration),
         /// Route one request here and wait for its answer.
         Serve,
         /// Announce another protocol version.
@@ -1910,12 +1917,14 @@ mod tests {
                     }
                     _ => json!({"type":"ready","version":1}),
                 };
-                socket
-                    .send(Message::Text(ready.to_string().into()))
-                    .await
-                    .unwrap();
+                if !matches!(step, Relay::Mute(_)) {
+                    socket
+                        .send(Message::Text(ready.to_string().into()))
+                        .await
+                        .unwrap();
+                }
                 match step {
-                    Relay::Hold(time) => tokio::time::sleep(time).await,
+                    Relay::Hold(time) | Relay::Mute(time) => tokio::time::sleep(time).await,
                     Relay::Serve => {
                         let open = json!({"type":"open","id":Uuid::now_v7(),"method":"GET",
                             "path":"/v1/info","headers":[],"body":"","websocket":false,"thread":null});
@@ -2113,11 +2122,14 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, runtime).await.unwrap() });
         let http = reqwest::Client::new();
         // A relay that answers nothing after `ready` (the network stalled),
-        // twice, then one that drops the connection at once.
+        // twice, one that never says `ready`, twice, then one that drops the
+        // connection at once.
         let mut relays = Vec::new();
         for step in [
             Relay::Hold(Duration::from_secs(30)),
             Relay::Hold(Duration::from_secs(30)),
+            Relay::Mute(Duration::from_secs(30)),
+            Relay::Mute(Duration::from_secs(30)),
             Relay::Drop,
         ] {
             relays.push(fake_relay(vec![step]).await.0);
@@ -2127,7 +2139,24 @@ mod tests {
         let said = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let heard = said.clone();
         let mut outage = Outage::new(move |line| heard.lock().unwrap().push(line.to_owned()));
-        let expected = [Link::Failed, Link::Failed, Link::Ended { proven: false }];
+        let expected = [
+            Link::Failed,
+            Link::Failed,
+            Link::Failed,
+            Link::Failed,
+            Link::Ended { proven: false },
+        ];
+        // Two drops in a row would already earn an hour's wait here.
+        let mut backoff = Backoff::new(Pacing {
+            retry: Duration::from_millis(1),
+            retry_max: Duration::from_millis(50),
+            recover_for: Duration::ZERO,
+            recover_max: Duration::from_millis(50),
+            stable: Duration::from_secs(60),
+            drops: 2,
+            cooldown: Duration::from_secs(3600),
+            cooldown_max: Duration::from_secs(3600),
+        });
         for (relay, expected) in relays.iter().zip(expected) {
             let started = std::time::Instant::now();
             let link = relay_link(
@@ -2144,12 +2173,18 @@ mod tests {
             assert_eq!(link, expected);
             // Ended by the connector's heartbeat, long before the relay lets go.
             assert!(started.elapsed() < Duration::from_secs(10), "{link:?}");
+            assert!(backoff.wait(link) <= Duration::from_millis(50), "{link:?}");
         }
         let said = said.lock().unwrap().clone();
         assert!(
             said.iter()
                 .any(|line| line
                     == "Remote connection ended: Relay heartbeat timed out; reconnecting"),
+            "{said:?}"
+        );
+        assert!(
+            said.iter().any(|line| line
+                == "Remote connection ended: Relay did not say it was ready in time; reconnecting"),
             "{said:?}"
         );
         std::fs::remove_dir_all(root).ok();
