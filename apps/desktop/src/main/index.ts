@@ -119,6 +119,15 @@ if (process.env.HAARNESS_DESKTOP_TEST === "1" && process.env.HAARNESS_TELEMETRY 
   process.env.HAARNESS_TELEMETRY = "0";
 const commandOwners = new Map<string, number>();
 const terminals = terminalSockets<PtyConnection>();
+// End-to-end tests end terminal sockets as a server or network outage does.
+if (process.env.HAARNESS_DESKTOP_TEST === "1")
+  Object.assign(globalThis, { haarnessTerminalSockets: terminals });
+/** Whether a terminal socket still takes input. The SDK keeps its WebSocket
+ * to itself; while that cannot be read, the socket counts as open. */
+function socketOpen(socket: PtyConnection) {
+  const state = (socket as unknown as { socket?: { readyState?: number } }).socket?.readyState;
+  return state === undefined || state === 1;
+}
 const projectTransaction = createProjectQueue();
 const worktreeOperations = new Set<string>();
 const voice = createVoiceInput((locale) =>
@@ -1000,10 +1009,12 @@ function installHandlers() {
           .array(z.number().int().min(0).max(255))
           .max(65536)
           .parse(input);
-        // False while there is no socket, so the view keeps the input for
-        // the reconnect instead of losing it.
+        // False while there is no open socket, so the view keeps the input
+        // for the reconnect instead of losing it. A socket the server closed
+        // (it drops a reader that fell behind) stays listed until its last
+        // output is forwarded, and what is sent on it meanwhile is lost.
         const current = terminals.get(key);
-        if (!current) return false;
+        if (!current || !socketOpen(current.socket)) return false;
         current.socket.send(new Uint8Array(value));
         return true;
       }

@@ -23,11 +23,14 @@ test.beforeAll(async () => {
   await mkdir(join(workspace, ".haarness"), { recursive: true });
   await writeFile(join(workspace, ".haarness/config.toml"), '[defaults]\nprovider="echo"\nmodel="echo-1"\n');
   // Like fish or nvim at start, the shell asks the terminal for its device
-  // attributes and waits for the answer, then records what it got.
+  // attributes and waits for the answer, then records what it got. It asks
+  // a second after it starts, so a test can have it ask while no view of the
+  // terminal is connected.
   const shell = join(temporary, "query-shell");
   await writeFile(
     shell,
     `#!/bin/bash
+sleep 1
 printf '\\033[c'
 if IFS= read -rs -t 10 -d c reply; then printf 'answered:%s' "\${#reply}"; else printf none; fi >> ${JSON.stringify(join(temporary, "start-answers.txt"))}
 printf '\\n' >> ${JSON.stringify(join(temporary, "start-answers.txt"))}
@@ -92,9 +95,15 @@ async function prompt() {
 }
 
 test("a new terminal answers the query its shell sends as it starts, and one shown again answers nothing twice", async () => {
-  await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  const toggle = page.getByRole("button", { name: "Toggle terminal", exact: true });
+  await toggle.click();
   await expect(input()).toBeFocused();
-  // The shell asked before the panel connected: the answer still arrives.
+  // Hidden at once, the panel is not connected when the shell asks; shown
+  // again, it replays the question, which it never showed, and answers it.
+  await page.getByRole("button", { name: "Hide terminal", exact: true }).click();
+  await page.waitForTimeout(2000);
+  expect(await read("start-answers.txt")).toBe("");
+  await toggle.click();
   await expect.poll(() => read("start-answers.txt")).toBe("answered:6\n");
   await prompt();
   await input().fill(`cat -v > ${join(temporary, "typed.txt")}`);
@@ -113,31 +122,43 @@ test("a new terminal answers the query its shell sends as it starts, and one sho
   expect(errors).toEqual([]);
 });
 
-test("Ctrl+C typed during an endless burst of output reaches the shell", async () => {
-  test.setTimeout(240_000);
+test("keys typed while a terminal's connection is down reach the shell once it is back", async () => {
   await prompt();
-  await input().fill("yes haarness-burst");
+  const keys = join(temporary, "keys.txt");
+  await input().fill(`cat -v > ${keys}`);
   await input().press("Enter");
-  // The server drops a reader this far behind and the panel reconnects,
-  // over and over; keys typed meanwhile wait for the connection.
-  await expect(rows()).toContainText("haarness-burst");
-  await page.waitForTimeout(3000);
-  await input().press("Control+c");
-  await expect(rows()).toContainText("query-shell$", { timeout: 60_000 });
-  await input().fill(`printf alive > ${join(temporary, "alive.txt")}`);
+  await expect.poll(() => readFile(keys, "utf8").then(() => true, () => false)).toBe(true);
+  // The socket ends as in an outage, and the panel connects again a moment
+  // later; what is typed in between waits for it instead of vanishing.
+  await app.evaluate(() => {
+    const sockets = (globalThis as unknown as { haarnessTerminalSockets: { all(): { close(): void }[] } })
+      .haarnessTerminalSockets;
+    for (const socket of sockets.all()) socket.close();
+  });
+  await input().pressSequentially("kept");
   await input().press("Enter");
-  await expect.poll(() => read("alive.txt"), { timeout: 60_000 }).toBe("alive");
+  await input().press("Control+d");
+  await expect.poll(() => read("keys.txt")).toBe("kept\n");
   expect(errors).toEqual([]);
 });
 
 test("stepping through terminals quickly leaves the one shown connected", async () => {
   test.setTimeout(240_000);
+  if (!(await page.locator(".terminal-panel").count()))
+    await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  await expect(input()).toBeFocused();
+  await expect.poll(async () => (await read("start-answers.txt")).length).toBeGreaterThan(0);
   const add = page.getByRole("button", { name: "New terminal", exact: true });
-  for (let count = 2; count <= 3; count++) {
+  // Each new terminal is shown until its shell has its answer: a terminal
+  // no view shows answers nothing until one does.
+  const first = (await client.listPtys()).length;
+  for (let count = first + 1; count <= first + 2; count++) {
     await add.click();
     await expect.poll(() => client.listPtys().then((items) => items.length)).toBe(count);
+    await expect.poll(async () => (await read("start-answers.txt")).split("\n").filter(Boolean)).toEqual(
+      Array(count).fill("answered:6"),
+    );
   }
-  await expect.poll(() => read("start-answers.txt")).toBe("answered:6\n".repeat(3));
   await expect(input()).toBeFocused();
   for (let press = 0; press < 7; press++) await page.keyboard.press("Control+Tab");
   await expect(input()).toBeFocused();
