@@ -9348,8 +9348,20 @@ test("dragging across a tool row's label selects it without opening or closing t
   const row = page.locator(".message.step > .tool-call").last();
   const label = row.locator(":scope > summary .tool-target");
   await expect(label).toContainText("greeting.ts");
+  // An opened row draws its body a moment later, and the transcript keeps
+  // its end in view, so the label moves up: measure it once it is still.
+  const settled = async () => {
+    let last = "";
+    for (let read = 0; read < 50; read++) {
+      const box = (await label.boundingBox())!;
+      if (JSON.stringify(box) === last) return box;
+      last = JSON.stringify(box);
+      await page.waitForTimeout(100);
+    }
+    return (await label.boundingBox())!;
+  };
   const drag = async () => {
-    const box = (await label.boundingBox())!;
+    const box = await settled();
     const y = box.y + box.height / 2;
     await page.mouse.move(box.x + 1, y);
     await page.mouse.down();
