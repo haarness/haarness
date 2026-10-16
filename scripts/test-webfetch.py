@@ -6,6 +6,7 @@ Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-webfetch.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
 """
 import http.server, json, os, pathlib, subprocess, tempfile, threading, time, urllib.request, uuid
+import e2e_scratch
 
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve()
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-webfetch-', dir=os.environ.get('HAARNESS_E2E_DIR'))).resolve()
@@ -156,8 +157,9 @@ try:
     check(f'Stop ends a fetch whose body never finishes ({elapsed:.1f} s)')
 
     (root/'result.json').write_text(json.dumps({'passed': True, 'checks': checks}, indent=2))
-    print(f'PASS {len(checks)} webfetch scenarios. Evidence: {root}', flush=True)
+    print(f'PASS {len(checks)} webfetch scenarios.', flush=True)
 finally:
     release.set()
     if url: subprocess.run([str(binary), '--workspace', str(workspace), 'serve', '--stop'], env=env, capture_output=True, timeout=35)
     web.shutdown(); web.server_close()
+    e2e_scratch.settle(root)

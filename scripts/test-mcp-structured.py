@@ -5,6 +5,7 @@ Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-mcp-structured.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
 """
 import json, os, pathlib, subprocess, sys, tempfile, time, urllib.request, uuid
+import e2e_scratch
 
 repo = pathlib.Path(__file__).resolve().parents[1]
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve()
@@ -78,6 +79,7 @@ try:
     check('a workflow tool() call to that MCP tool returns the structured content as its output')
 
     (root/'result.json').write_text(json.dumps({'passed': True, 'checks': checks}, indent=2))
-    print(f'PASS {len(checks)} MCP structured-content scenarios. Evidence: {root}', flush=True)
+    print(f'PASS {len(checks)} MCP structured-content scenarios.', flush=True)
 finally:
     if url: subprocess.run([str(binary), '--workspace', str(workspace), 'serve', '--stop'], env=env, capture_output=True, timeout=35)
+    e2e_scratch.settle(root)
