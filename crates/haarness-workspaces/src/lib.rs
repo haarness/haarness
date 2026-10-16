@@ -6,11 +6,14 @@
 //! workspace's activity lease to be free.
 
 use std::{
+    collections::{HashMap, HashSet},
     fmt::Write as _,
     fs::{self, File, OpenOptions},
     io::Write as _,
     path::{Path, PathBuf},
     process::{Command, Output},
+    sync::{LazyLock, Mutex, MutexGuard, PoisonError, mpsc},
+    time::{Duration, Instant},
 };
 
 use chrono::Utc;
@@ -198,6 +201,11 @@ impl WorkspaceManager {
         project_for(&registry, workspace).cloned()
     }
 
+    /// Every project and workspace, each folder looked at for whether it
+    /// still exists and its branch. The registry lock is released first, and
+    /// a folder that does not answer within a second shows as last recorded
+    /// (see `refresh_folders`), so a slow folder never holds up the list or
+    /// another process's registry access.
     pub fn list(&self, current_workspace_id: Option<&str>) -> Result<WorkspaceListResponse> {
         let mut registry = self.read_registry_locked()?;
         refresh_existence(&mut registry);
@@ -1190,17 +1198,191 @@ fn workspace_index(registry: &Registry, reference: &str) -> Result<usize> {
     }
 }
 
-fn refresh_existence(registry: &mut Registry) {
-    for workspace in &mut registry.workspaces {
-        refresh_workspace(workspace);
+/// How long a listing waits for its folders before it shows the ones that
+/// have not answered as last recorded. A folder on a network volume that went
+/// away, or behind a privacy prompt nobody is there to answer, can hold one
+/// file-system call for minutes; the remote connector lists every few
+/// seconds, and the TUI and Desktop project lists wait on it.
+const PROBE_PATIENCE: Duration = Duration::from_secs(1);
+
+/// What looking at a registered folder found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Folder {
+    exists: bool,
+    branch: Option<String>,
+}
+
+impl Folder {
+    fn probe(path: &Path) -> Self {
+        let exists = path.is_dir();
+        Self {
+            exists,
+            branch: exists.then(|| head_branch(path)).flatten(),
+        }
+    }
+
+    fn apply(&self, workspace: &mut WorkspaceInfo) {
+        workspace.exists = self.exists;
+        if self.exists {
+            workspace.branch.clone_from(&self.branch);
+        }
     }
 }
 
+/// Probes of folders that have not answered yet, and what each such probe
+/// found once it answered after its listing stopped waiting. A folder that
+/// hangs holds one thread, never one per listing, and a slow one still shows
+/// what it last answered.
+#[derive(Default)]
+struct Probes {
+    running: HashSet<PathBuf>,
+    late: HashMap<PathBuf, Folder>,
+}
+
+static PROBES: LazyLock<Mutex<Probes>> = LazyLock::new(Mutex::default);
+
+fn probes() -> MutexGuard<'static, Probes> {
+    PROBES.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn refresh_existence(registry: &mut Registry) {
+    refresh_folders(&mut registry.workspaces, Folder::probe, PROBE_PATIENCE);
+}
+
 fn refresh_workspace(workspace: &mut WorkspaceInfo) {
-    workspace.exists = Path::new(&workspace.path).is_dir();
-    if workspace.exists {
-        workspace.branch = git_branch(Path::new(&workspace.path));
+    refresh_folders(
+        std::slice::from_mut(workspace),
+        Folder::probe,
+        PROBE_PATIENCE,
+    );
+}
+
+/// Look at every folder at once, each on its own thread, and wait at most
+/// `patience` for them. A folder that has not answered keeps its recorded
+/// `exists` and `branch`, or what its last late probe found.
+fn refresh_folders(
+    workspaces: &mut [WorkspaceInfo],
+    probe: fn(&Path) -> Folder,
+    patience: Duration,
+) {
+    let (sender, answers) = mpsc::channel();
+    let mut asked = 0;
+    for (index, workspace) in workspaces.iter_mut().enumerate() {
+        let path = PathBuf::from(&workspace.path);
+        {
+            let mut probes = probes();
+            if probes.running.contains(&path) {
+                if let Some(folder) = probes.late.get(&path) {
+                    folder.apply(workspace);
+                }
+                continue;
+            }
+            probes.running.insert(path.clone());
+        }
+        let sender = sender.clone();
+        let spawned = std::thread::Builder::new()
+            .name("haarness-folder-probe".into())
+            .spawn({
+                let path = path.clone();
+                move || {
+                    let folder = probe(&path);
+                    let mut probes = probes();
+                    probes.running.remove(&path);
+                    // The listing stopped waiting: keep the answer for the next one.
+                    if let Err(mpsc::SendError((_, folder))) = sender.send((index, folder)) {
+                        probes.late.insert(path, folder);
+                    }
+                }
+            });
+        if spawned.is_ok() {
+            asked += 1;
+        } else {
+            probes().running.remove(&path);
+        }
     }
+    drop(sender);
+    let deadline = Instant::now() + patience;
+    let mut answered = vec![false; workspaces.len()];
+    while asked > 0 {
+        let Ok((index, folder)) =
+            answers.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        else {
+            break;
+        };
+        asked -= 1;
+        answered[index] = true;
+        let workspace = &mut workspaces[index];
+        probes().late.remove(Path::new(&workspace.path));
+        folder.apply(workspace);
+    }
+    if asked > 0 {
+        let probes = probes();
+        for (workspace, _) in workspaces
+            .iter_mut()
+            .zip(answered)
+            .filter(|(_, answered)| !answered)
+        {
+            if let Some(folder) = probes.late.get(Path::new(&workspace.path)) {
+                folder.apply(workspace);
+            }
+        }
+    }
+}
+
+/// The branch checked out in `path`, as `git symbolic-ref HEAD` names it, read
+/// from the repository's HEAD file instead of starting git once per folder
+/// and listing. A HEAD this cannot read plainly (another ref storage, a
+/// linked HEAD, an unusual layout) is asked of git. For display only: removal
+/// asks git itself (`git_branch`).
+fn head_branch(path: &Path) -> Option<String> {
+    match read_head(path) {
+        Some(Head::Branch(name)) => Some(name),
+        Some(Head::Other) => None,
+        None => git_branch(path),
+    }
+}
+
+enum Head {
+    /// `ref: refs/heads/<name>`.
+    Branch(String),
+    /// Detached, another kind of ref, or no repository at all.
+    Other,
+}
+
+/// `None` when only git can tell.
+fn read_head(path: &Path) -> Option<Head> {
+    let Some(marker) = path
+        .ancestors()
+        .map(|folder| folder.join(".git"))
+        .find(|marker| fs::symlink_metadata(marker).is_ok())
+    else {
+        return Some(Head::Other);
+    };
+    let git_dir = if marker.is_dir() {
+        marker
+    } else {
+        // A linked worktree or submodule: `gitdir: <path>`, relative to its folder.
+        let pointer = fs::read_to_string(&marker).ok()?;
+        let target = pointer.strip_prefix("gitdir:")?.trim();
+        marker.parent()?.join(target)
+    };
+    let head = git_dir.join("HEAD");
+    if !fs::symlink_metadata(&head).ok()?.is_file() {
+        return None;
+    }
+    let content = fs::read_to_string(head).ok()?;
+    let content = content.trim_end();
+    if let Some(reference) = content.strip_prefix("ref: ") {
+        return match reference.strip_prefix("refs/heads/") {
+            // The reftable format keeps HEAD in its tables and this placeholder in the file.
+            Some(".invalid") => None,
+            Some(name) if !name.is_empty() => Some(Head::Branch(name.to_owned())),
+            _ => Some(Head::Other),
+        };
+    }
+    let detached =
+        matches!(content.len(), 40 | 64) && content.bytes().all(|byte| byte.is_ascii_hexdigit());
+    detached.then_some(Head::Other)
 }
 
 fn unique_name(registry: &Registry, requested: &str) -> String {
@@ -1371,6 +1553,111 @@ mod tests {
                 .unwrap()
                 .git
         );
+    }
+
+    #[test]
+    fn listing_reads_the_branch_from_head_as_git_names_it() {
+        let fixture = Fixture::new();
+        let linked = fixture.create("parallel");
+        let subdirectory = fixture.repository.join("src");
+        fs::create_dir(&subdirectory).unwrap();
+        let plain = fixture.root.join("plain");
+        fs::create_dir(&plain).unwrap();
+        let detached = fixture.root.join("detached");
+        command(
+            &fixture.repository,
+            ["worktree", "add", "--detach", detached.to_str().unwrap()],
+        );
+        command(&fixture.repository, ["checkout", "-b", "feature/head"]);
+        for path in [
+            fixture.repository.as_path(),
+            Path::new(&linked.path),
+            &subdirectory,
+            &plain,
+            &detached,
+        ] {
+            assert!(read_head(path).is_some(), "{path:?} needed git");
+            assert_eq!(head_branch(path), git_branch(path), "{path:?}");
+        }
+        assert_eq!(head_branch(&subdirectory).as_deref(), Some("feature/head"));
+        assert_eq!(head_branch(&detached), None);
+        // The reftable format's placeholder HEAD is left to git.
+        let reftable = fixture.root.join("reftable");
+        fs::create_dir_all(reftable.join(".git")).unwrap();
+        fs::write(reftable.join(".git/HEAD"), "ref: refs/heads/.invalid\n").unwrap();
+        assert!(read_head(&reftable).is_none());
+    }
+
+    static SLOW_STARTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static SLOW_RELEASED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// A folder named `slow` hangs until the test releases its probe (as a
+    /// network volume that went away does); any other folder is looked at.
+    fn gated_probe(path: &Path) -> Folder {
+        use std::sync::atomic::Ordering::SeqCst;
+        if path.file_name().is_none_or(|name| name != "slow") {
+            return Folder::probe(path);
+        }
+        let probe = SLOW_STARTED.fetch_add(1, SeqCst) + 1;
+        while SLOW_RELEASED.load(SeqCst) < probe {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Folder {
+            exists: true,
+            branch: Some(format!("late-{probe}")),
+        }
+    }
+
+    #[test]
+    fn a_folder_that_does_not_answer_shows_as_recorded_and_is_probed_once() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let root = std::env::temp_dir().join(format!("haarness-slow-folder-{}", Uuid::now_v7()));
+        let fast = root.join("fast");
+        fs::create_dir_all(&fast).unwrap();
+        let slow = root.join("slow");
+        let entry = |path: &Path, exists: bool, branch: &str| WorkspaceInfo {
+            id: Uuid::now_v7().to_string(),
+            project_id: "project".into(),
+            name: path_name(path),
+            path: path.display().to_string(),
+            kind: WorkspaceKind::Local,
+            managed: false,
+            branch: Some(branch.into()),
+            from_ref: None,
+            base_commit: None,
+            created_at: Utc::now(),
+            last_opened_at: Utc::now(),
+            exists,
+        };
+        let mut workspaces = vec![entry(&fast, false, "old"), entry(&slow, true, "recorded")];
+        let patience = Duration::from_secs(2);
+
+        // The hanging folder keeps what was recorded; the other is looked at.
+        let started = Instant::now();
+        refresh_folders(&mut workspaces, gated_probe, patience);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(workspaces[0].exists);
+        assert_eq!(workspaces[0].branch, None);
+        assert_eq!(workspaces[1].branch.as_deref(), Some("recorded"));
+        assert_eq!(SLOW_STARTED.load(SeqCst), 1);
+
+        // While its probe is out, the next listing does not start another.
+        refresh_folders(&mut workspaces, gated_probe, patience);
+        assert_eq!(SLOW_STARTED.load(SeqCst), 1);
+        assert_eq!(workspaces[1].branch.as_deref(), Some("recorded"));
+
+        // It answers late; a listing that again waits in vain shows that answer.
+        SLOW_RELEASED.store(1, SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while probes().running.contains(&slow) {
+            assert!(Instant::now() < deadline, "the late probe never finished");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        refresh_folders(&mut workspaces, gated_probe, patience);
+        assert_eq!(SLOW_STARTED.load(SeqCst), 2);
+        assert_eq!(workspaces[1].branch.as_deref(), Some("late-1"));
+        SLOW_RELEASED.store(2, SeqCst);
+        fs::remove_dir_all(root).unwrap();
     }
 
     struct Fixture {
