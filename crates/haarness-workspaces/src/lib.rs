@@ -12,7 +12,7 @@ use std::{
     io::Write as _,
     path::{Path, PathBuf},
     process::{Command, Output},
-    sync::{LazyLock, Mutex, MutexGuard, PoisonError, mpsc},
+    sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, mpsc},
     time::{Duration, Instant},
 };
 
@@ -179,6 +179,21 @@ impl WorkspaceManager {
             registry.workspaces.push(workspace.clone());
             Ok(workspace)
         })
+    }
+
+    /// Register every directory that exists, as `register_local` does, all at
+    /// once and waiting at most a second, and return those registered in
+    /// time. Desktop sends every folder of its sidebar with each project-list
+    /// request; one that has not answered by then (a network volume that went
+    /// away, a privacy prompt nobody is there to answer) is left as registered
+    /// before, and is registered when its look returns.
+    pub fn register_existing(&self, directories: &[PathBuf]) -> Result<Vec<WorkspaceInfo>> {
+        let manager = self.clone();
+        register_folders(
+            directories,
+            Arc::new(move |path: &Path| path.is_dir().then(|| manager.register_local(path))),
+            PROBE_PATIENCE,
+        )
     }
 
     /// Registry metadata only: startup must not probe unrelated directories.
@@ -1229,10 +1244,10 @@ impl Folder {
     }
 }
 
-/// Probes of folders that have not answered yet, and what each such probe
-/// found once it answered after its listing stopped waiting. A folder that
-/// hangs holds one thread, never one per listing, and a slow one still shows
-/// what it last answered.
+/// Folders being looked at (listed or registered) that have not answered yet,
+/// and what a listing's probe found once it answered after the listing
+/// stopped waiting. A folder that hangs holds one thread, never one per call,
+/// and a slow one still shows what it last answered.
 #[derive(Default)]
 struct Probes {
     running: HashSet<PathBuf>,
@@ -1265,68 +1280,92 @@ fn refresh_folders(
     probe: fn(&Path) -> Folder,
     patience: Duration,
 ) {
+    let paths: Vec<PathBuf> = workspaces
+        .iter()
+        .map(|workspace| PathBuf::from(&workspace.path))
+        .collect();
+    // The listing stopped waiting: keep the answer for the next one.
+    let found = look_at_once(&paths, Arc::new(probe), patience, |path, folder| {
+        probes().late.insert(path, folder);
+    });
+    let mut probes = probes();
+    for ((workspace, path), folder) in workspaces.iter_mut().zip(&paths).zip(found) {
+        if let Some(folder) = folder {
+            probes.late.remove(path);
+            folder.apply(workspace);
+        } else if let Some(folder) = probes.late.get(path) {
+            folder.apply(workspace);
+        }
+    }
+}
+
+/// Run `look` on every path at once, each on its own thread, and wait at most
+/// `patience` for them all. A path whose earlier look has not returned is not
+/// looked at again, so a folder that hangs holds one thread, never one per
+/// call. A path's answer is `None` when it did not come in time or an earlier
+/// look is still out; `late` gets each answer that came after the wait ended.
+fn look_at_once<T: Send + 'static>(
+    paths: &[PathBuf],
+    look: Arc<dyn Fn(&Path) -> T + Send + Sync>,
+    patience: Duration,
+    late: fn(PathBuf, T),
+) -> Vec<Option<T>> {
     let (sender, answers) = mpsc::channel();
     let mut asked = 0;
-    for (index, workspace) in workspaces.iter_mut().enumerate() {
-        let path = PathBuf::from(&workspace.path);
-        {
-            let mut probes = probes();
-            if probes.running.contains(&path) {
-                if let Some(folder) = probes.late.get(&path) {
-                    folder.apply(workspace);
-                }
-                continue;
-            }
-            probes.running.insert(path.clone());
+    for (index, path) in paths.iter().enumerate() {
+        if !probes().running.insert(path.clone()) {
+            continue;
         }
         let sender = sender.clone();
+        let look = Arc::clone(&look);
         let spawned = std::thread::Builder::new()
             .name("haarness-folder-probe".into())
             .spawn({
                 let path = path.clone();
                 move || {
-                    let folder = probe(&path);
-                    let mut probes = probes();
-                    probes.running.remove(&path);
-                    // The listing stopped waiting: keep the answer for the next one.
-                    if let Err(mpsc::SendError((_, folder))) = sender.send((index, folder)) {
-                        probes.late.insert(path, folder);
+                    let answer = look(&path);
+                    if let Err(mpsc::SendError((_, answer))) = sender.send((index, answer)) {
+                        late(path.clone(), answer);
                     }
+                    probes().running.remove(&path);
                 }
             });
         if spawned.is_ok() {
             asked += 1;
         } else {
-            probes().running.remove(&path);
+            probes().running.remove(path);
         }
     }
     drop(sender);
     let deadline = Instant::now() + patience;
-    let mut answered = vec![false; workspaces.len()];
+    let mut found: Vec<Option<T>> = std::iter::repeat_with(|| None).take(paths.len()).collect();
     while asked > 0 {
-        let Ok((index, folder)) =
+        let Ok((index, answer)) =
             answers.recv_timeout(deadline.saturating_duration_since(Instant::now()))
         else {
             break;
         };
         asked -= 1;
-        answered[index] = true;
-        let workspace = &mut workspaces[index];
-        probes().late.remove(Path::new(&workspace.path));
-        folder.apply(workspace);
+        found[index] = Some(answer);
     }
-    if asked > 0 {
-        let probes = probes();
-        for (workspace, _) in workspaces
-            .iter_mut()
-            .zip(answered)
-            .filter(|(_, answered)| !answered)
-        {
-            if let Some(folder) = probes.late.get(Path::new(&workspace.path)) {
-                folder.apply(workspace);
-            }
-        }
-    }
+    found
+}
+
+/// What registering a directory found: `None` when it is not a directory.
+type Registration = Option<Result<WorkspaceInfo>>;
+
+/// Register `directories` through `register`, all at once, waiting at most
+/// `patience`; see `WorkspaceManager::register_existing`.
+fn register_folders(
+    directories: &[PathBuf],
+    register: Arc<dyn Fn(&Path) -> Registration + Send + Sync>,
+    patience: Duration,
+) -> Result<Vec<WorkspaceInfo>> {
+    look_at_once(directories, register, patience, |_, _| {})
+        .into_iter()
+        .flatten()
+        .flatten()
+        .collect()
 }
 
 /// The branch checked out in `path`, as `git symbolic-ref HEAD` names it, read
@@ -1658,6 +1697,78 @@ mod tests {
         assert_eq!(workspaces[1].branch.as_deref(), Some("late-1"));
         SLOW_RELEASED.store(2, SeqCst);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    static REGISTER_STARTED: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    static REGISTER_RELEASED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    #[test]
+    fn registering_sidebar_folders_does_not_wait_on_one_that_hangs() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let fixture = Fixture::new();
+        let fast = fixture.root.join("fast");
+        let slow = fixture.root.join("slow");
+        fs::create_dir_all(&fast).unwrap();
+        fs::create_dir_all(&slow).unwrap();
+        let missing = fixture.root.join("missing");
+        let manager = fixture.manager.clone();
+        // `slow` hangs until the test lets it go, as a network volume that
+        // went away does; then it registers as usual.
+        let register: Arc<dyn Fn(&Path) -> Registration + Send + Sync> =
+            Arc::new(move |path: &Path| {
+                if path.file_name().is_some_and(|name| name == "slow") {
+                    REGISTER_STARTED.fetch_add(1, SeqCst);
+                    while !REGISTER_RELEASED.load(SeqCst) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+                path.is_dir().then(|| manager.register_local(path))
+            });
+
+        let registered = register_folders(
+            &[fast.clone(), slow.clone(), missing],
+            Arc::clone(&register),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let names: Vec<_> = registered
+            .iter()
+            .map(|workspace| workspace.name.as_str())
+            .collect();
+        assert_eq!(names, ["fast"]);
+        assert_eq!(REGISTER_STARTED.load(SeqCst), 1);
+
+        // The next request does not look at it again while it hangs.
+        let again = register_folders(
+            std::slice::from_ref(&slow),
+            Arc::clone(&register),
+            Duration::from_millis(200),
+        )
+        .unwrap();
+        assert!(again.is_empty());
+        assert_eq!(REGISTER_STARTED.load(SeqCst), 1);
+
+        // Once it answers, its late registration counts.
+        REGISTER_RELEASED.store(true, SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while probes().running.contains(&slow) {
+            assert!(
+                Instant::now() < deadline,
+                "the late registration never finished"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let slow = fs::canonicalize(&slow).unwrap();
+        assert!(
+            fixture
+                .manager
+                .registered()
+                .unwrap()
+                .iter()
+                .any(|workspace| Path::new(&workspace.path) == slow)
+        );
     }
 
     struct Fixture {

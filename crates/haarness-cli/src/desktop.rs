@@ -65,20 +65,23 @@ async fn execute(paths: &Paths, workspace: &Path, trust: bool, request: Request)
     match request {
         Request::Projects { directories } => {
             let manager = paths.workspace_manager()?;
-            let mut project_ids = std::collections::HashSet::new();
-            for directory in directories {
-                if directory.is_dir() {
-                    let registered = manager.register_local(&directory)?;
-                    project_ids.insert(registered.project_id);
-                }
-            }
+            // A sidebar folder that hangs (a network volume that went away)
+            // is left as registered before instead of holding the request.
+            let project_ids: std::collections::HashSet<_> = manager
+                .register_existing(&directories)?
+                .into_iter()
+                .map(|registered| registered.project_id)
+                .collect();
             // Opening an existing linked checkout also makes its primary
             // project folder selectable, without starting either daemon.
-            for project in manager.list(None)?.projects {
-                if project_ids.contains(&project.id) && Path::new(&project.root).is_dir() {
-                    manager.register_local(Path::new(&project.root))?;
-                }
-            }
+            let roots: Vec<PathBuf> = manager
+                .list(None)?
+                .projects
+                .into_iter()
+                .filter(|project| project_ids.contains(&project.id))
+                .map(|project| PathBuf::from(project.root))
+                .collect();
+            manager.register_existing(&roots)?;
             Ok(serde_json::to_value(
                 manager.list(paths.workspace_id.as_deref())?,
             )?)
@@ -364,6 +367,72 @@ mod tests {
         assert_eq!(
             read(&paths.config.with_file_name("haarness.json")).unwrap(),
             saved["text"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn projects_register_sidebar_folders_and_the_project_of_a_linked_checkout() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-desktop-projects-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let paths = Paths::new(Some(&root.join("home"))).unwrap();
+        let repository = root.join("repository");
+        let linked = root.join("linked");
+        let plain = root.join("plain");
+        fs::create_dir_all(&repository).unwrap();
+        fs::create_dir_all(&plain).unwrap();
+        let git = |arguments: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["-c", "user.email=t@example.invalid", "-c", "user.name=T"])
+                .args(arguments)
+                .output()
+                .unwrap()
+                .status;
+            assert!(status.success(), "git {arguments:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            linked.to_str().unwrap(),
+        ]);
+        let listed = execute(
+            &paths,
+            &plain,
+            false,
+            Request::Projects {
+                directories: vec![linked.clone(), plain.clone(), root.join("missing")],
+            },
+        )
+        .await
+        .unwrap();
+        let mut workspaces: Vec<(String, Option<String>)> = listed["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|workspace| {
+                (
+                    workspace["name"].as_str().unwrap().to_owned(),
+                    workspace["branch"].as_str().map(str::to_owned),
+                )
+            })
+            .collect();
+        workspaces.sort();
+        assert_eq!(
+            workspaces,
+            [
+                ("linked".into(), Some("linked".into())),
+                ("plain".into(), None),
+                ("repository".into(), Some("main".into())),
+            ]
         );
         fs::remove_dir_all(root).unwrap();
     }
