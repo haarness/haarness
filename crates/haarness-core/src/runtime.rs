@@ -169,12 +169,42 @@ pub struct ContextUsage {
     pub compact_at: u64,
 }
 
+/// How the turn that started some work answers approvals, kept by that work
+/// (a workflow's thread and agents) after the turn ends. Only work the turn
+/// started carries it: a person's own turn or `!` command in such a chat
+/// never does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RunStance {
+    /// The turn approved its own requests once (a schedule, `run --yolo`,
+    /// ACP, a `--yolo` terminal UI).
+    auto_approve: bool,
+    /// Nobody can answer the turn: a schedule's run. A request that needs a
+    /// person fails at once instead of waiting.
+    unattended: bool,
+}
+
+/// Chats a schedule created whose run has not started yet, and the stance
+/// each workflow thread took from the turn that started it.
+#[derive(Default)]
+struct RunStances {
+    scheduled: DashMap<ThreadId, ()>,
+    started: DashMap<ThreadId, RunStance>,
+}
+
+impl RunStances {
+    fn of(&self, thread: ThreadId) -> Option<RunStance> {
+        self.started.get(&thread).map(|stance| *stance)
+    }
+}
+
 struct ActiveTurn {
     id: TurnId,
     request_id: RequestId,
     /// Propagated to workflow-owned turns so a headless scheduled run cannot
     /// stall as soon as it delegates work to an agent node.
     auto_approve: bool,
+    /// A schedule's run, or work it started: nobody can answer it.
+    unattended: bool,
     cancel: CancellationToken,
     /// Queue callers wait for this during both launch setup and terminal
     /// closure rather than mistaking either transient state for a conflict.
@@ -266,6 +296,7 @@ struct BackgroundTask {
     ready: Notify,
     delivery_started: AtomicBool,
     delivery_auto_approve: bool,
+    delivery_unattended: bool,
     delivery_tools: Option<HashMap<String, bool>>,
     suppress_delivery: AtomicBool,
     delivered: AtomicBool,
@@ -1188,6 +1219,7 @@ pub struct AgentRuntime {
     /// Concurrent child agents' first requests for one prompt prefix: the
     /// first goes alone so the others can read the cache it writes.
     prefix_warmup: crate::prefix_warmup::PrefixWarmup,
+    run_stances: Arc<RunStances>,
 }
 
 #[derive(Clone)]
@@ -1321,6 +1353,7 @@ impl AgentRuntime {
             queue_pauses: Arc::new(DashMap::new()),
             approval_modes,
             prefix_warmup: crate::prefix_warmup::PrefixWarmup::default(),
+            run_stances: Arc::new(RunStances::default()),
         }
     }
 
@@ -1676,7 +1709,7 @@ impl AgentRuntime {
         let tools = request
             .preview
             .map(|preview| HashMap::from([("preview".into(), preview)]));
-        self.queue_input_with_options(thread_id, request, false, tools)
+        self.queue_input_with_options(thread_id, request, false, false, tools)
             .await
     }
 
@@ -1817,6 +1850,7 @@ impl AgentRuntime {
                     Vec::new(),
                     None,
                     Some(queue.revision),
+                    false,
                 )
                 .await;
             return match turn {
@@ -1896,6 +1930,7 @@ impl AgentRuntime {
         thread_id: ThreadId,
         mut request: QueueInputRequest,
         auto_approve: bool,
+        unattended: bool,
         tools: Option<HashMap<String, bool>>,
     ) -> CoreResult<QueueInputResponse> {
         if request.text.trim().is_empty() && request.attachments.is_empty() {
@@ -1936,7 +1971,7 @@ impl AgentRuntime {
                 continue;
             }
             match self
-                .start_turn(
+                .start_turn_with_ceilings(
                     thread_id,
                     StartTurnRequest {
                         request_id: request.request_id,
@@ -1956,6 +1991,10 @@ impl AgentRuntime {
                         tools: tools.clone(),
                         command: None,
                     },
+                    Vec::new(),
+                    None,
+                    None,
+                    unattended,
                 )
                 .await
             {
@@ -2084,6 +2123,25 @@ impl AgentRuntime {
             (result, _) => result?,
         };
         self.publish_created_thread(&thread).await;
+        if thread.schedule.is_some() {
+            self.run_stances.scheduled.insert(thread.id, ());
+        }
+        // A workflow's thread keeps how the turn that started it answers
+        // approvals, and its agents' threads keep the workflow's.
+        if let Some(parent) = thread.parent_id {
+            let stance = self
+                .active
+                .get(&parent)
+                .map(|active| RunStance {
+                    auto_approve: active.auto_approve,
+                    unattended: active.unattended,
+                })
+                .or_else(|| self.run_stances.of(parent))
+                .unwrap_or_default();
+            if stance != RunStance::default() {
+                self.run_stances.started.insert(thread.id, stance);
+            }
+        }
         // A chat started inside another (a workflow's thread or one of its
         // agents) is not a session start, as for task subagents and Claude
         // Code's subagents: a slow SessionStart hook would hold up each
@@ -3350,8 +3408,37 @@ impl AgentRuntime {
         &self,
         thread_id: ThreadId,
         name: &str,
+        arguments: serde_json::Value,
+        cancel: CancellationToken,
+    ) -> CoreResult<DirectToolResult> {
+        self.run_direct_tool_as(thread_id, name, arguments, cancel, RunStance::default())
+            .await
+    }
+
+    /// [`run_direct_tool`](Self::run_direct_tool) for a workflow's own
+    /// `ctx.tool()` and `ctx.shell()` calls: they follow the turn that
+    /// started the workflow. A schedule's or `run --yolo` turn approves them
+    /// once, and a schedule's refuses at once what needs a person, also after
+    /// that turn ends. A person's call in the same chat is asked as usual.
+    pub async fn run_workflow_tool(
+        &self,
+        thread_id: ThreadId,
+        name: &str,
+        arguments: serde_json::Value,
+        cancel: CancellationToken,
+    ) -> CoreResult<DirectToolResult> {
+        let stance = self.run_stances.of(thread_id).unwrap_or_default();
+        self.run_direct_tool_as(thread_id, name, arguments, cancel, stance)
+            .await
+    }
+
+    async fn run_direct_tool_as(
+        &self,
+        thread_id: ThreadId,
+        name: &str,
         mut arguments: serde_json::Value,
         cancel: CancellationToken,
+        stance: RunStance,
     ) -> CoreResult<DirectToolResult> {
         if cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
@@ -3602,10 +3689,9 @@ impl AgentRuntime {
             } else {
                 format!("{}: {}", plan.permission, asked.join("  "))
             };
-            // Same rule as model calls: a scheduled run's workflow or tool
-            // call cannot get a person's answer, so it fails now.
-            if (explicit || forced) && scheduled_lineage(self.repository.as_ref(), thread_id).await
-            {
+            // Same rule as model calls: a scheduled run's workflow cannot
+            // get a person's answer, so it fails now.
+            if (explicit || forced) && stance.unattended {
                 allowed = Err(if explicit {
                     cannot_ask(&explicit_operations)
                 } else {
@@ -3616,7 +3702,7 @@ impl AgentRuntime {
             // A workflow's own tool calls follow the turn that started it: a
             // schedule, `run --yolo`, ACP or a `--yolo` terminal UI approves
             // them once, as it does its agents' requests.
-            if !forced && !explicit && self.lineage_auto_approves(&thread).await {
+            if !forced && !explicit && stance.auto_approve {
                 tracing::info!(thread = %thread_id, operation, "approved once (unattended run)");
                 continue;
             }
@@ -4408,7 +4494,7 @@ impl AgentRuntime {
         thread_id: ThreadId,
         request: StartTurnRequest,
     ) -> CoreResult<Turn> {
-        self.start_turn_with_ceilings(thread_id, request, Vec::new(), None, None)
+        self.start_turn_with_ceilings(thread_id, request, Vec::new(), None, None, false)
             .await
     }
 
@@ -4423,11 +4509,18 @@ impl AgentRuntime {
         mut request: StartTurnRequest,
         output_schema: Option<serde_json::Value>,
     ) -> CoreResult<Turn> {
-        if self
+        // The agent follows the turn that started the workflow, while it runs
+        // and, through the stance the workflow's threads keep, after it ends.
+        let stance = self
             .active
             .get(&authority_thread_id)
-            .is_some_and(|active| active.auto_approve)
-        {
+            .map(|active| RunStance {
+                auto_approve: active.auto_approve,
+                unattended: active.unattended,
+            })
+            .unwrap_or_default();
+        let kept = self.run_stances.of(thread_id).unwrap_or_default();
+        if stance.auto_approve || kept.auto_approve {
             request.auto_approve = true;
             request
                 .tools
@@ -4437,8 +4530,15 @@ impl AgentRuntime {
         let inherited_ceilings = self
             .permission_boundary_for_lineage(authority_thread_id)
             .await?;
-        self.start_turn_with_ceilings(thread_id, request, inherited_ceilings, output_schema, None)
-            .await
+        self.start_turn_with_ceilings(
+            thread_id,
+            request,
+            inherited_ceilings,
+            output_schema,
+            None,
+            stance.unattended || kept.unattended,
+        )
+        .await
     }
 
     async fn start_turn_with_ceilings(
@@ -4448,6 +4548,7 @@ impl AgentRuntime {
         inherited_ceilings: Vec<Vec<PermissionRule>>,
         output_schema: Option<serde_json::Value>,
         queue_revision: Option<u64>,
+        unattended: bool,
     ) -> CoreResult<Turn> {
         let _reload = self.reload_gate.read().await;
         request.attachments = crate::attachments::admit_off_executor(
@@ -4587,6 +4688,10 @@ impl AgentRuntime {
         if !created {
             return Ok(turn);
         }
+        // The first turn in a chat a schedule created is the schedule's run,
+        // started with its own approvals. Later turns there are a person's.
+        let first_of_schedule = self.run_stances.scheduled.remove(&thread_id).is_some();
+        let unattended = unattended || (first_of_schedule && request.auto_approve);
         // Install a non-accepting launch reservation immediately after the
         // durable Running turn exists. Every remaining setup operation is
         // fallible; without this reservation, concurrent input can enter the
@@ -4597,6 +4702,7 @@ impl AgentRuntime {
             id: turn.id,
             request_id: turn.request_id,
             auto_approve: request.auto_approve,
+            unattended,
             cancel: cancel.clone(),
             changed: Notify::new(),
             accepting: AsyncMutex::new(false),
@@ -4791,6 +4897,8 @@ impl AgentRuntime {
             approval_modes: self.approval_modes.clone(),
             answer_steer: AtomicBool::new(false),
             prefix_warmup: self.prefix_warmup.clone(),
+            run_stances: self.run_stances.clone(),
+            unattended,
         });
         // A real message, or Send on a queued one, resumes a paused queue.
         if !task.request.synthetic {
@@ -4838,7 +4946,13 @@ impl AgentRuntime {
                 synthetic: true,
             };
             if let Err(error) = self
-                .queue_input_with_options(thread_id, request, false, task.request.tools.clone())
+                .queue_input_with_options(
+                    thread_id,
+                    request,
+                    false,
+                    false,
+                    task.request.tools.clone(),
+                )
                 .await
             {
                 tracing::warn!(%error, thread = %thread_id, "could not answer steering after stop");
@@ -4930,31 +5044,6 @@ impl AgentRuntime {
             }
         }
         engine.boundary()
-    }
-
-    /// Whether a chat above `thread` approves its own requests once: a
-    /// running turn started that way (a schedule, `run --yolo`, ACP, a
-    /// `--yolo` terminal UI), or a schedule's chat, which nobody watches
-    /// even after its turn ends. The chat itself does not count: a person
-    /// running `!` there is asked.
-    async fn lineage_auto_approves(&self, thread: &Thread) -> bool {
-        let mut seen = HashSet::from([thread.id]);
-        let mut current = thread.parent_id;
-        while let Some(id) = current.filter(|id| seen.insert(*id)) {
-            if self
-                .active
-                .get(&id)
-                .is_some_and(|active| active.auto_approve)
-            {
-                return true;
-            }
-            match self.repository.get_thread(id).await {
-                Ok(parent) if parent.schedule.is_some() => return true,
-                Ok(parent) => current = parent.parent_id,
-                Err(_) => return false,
-            }
-        }
-        false
     }
 
     async fn permission_boundary_for_lineage(
@@ -5221,6 +5310,12 @@ struct RunnerTask {
     /// Set when a stop leaves unread steering for a continuation to answer.
     answer_steer: AtomicBool,
     prefix_warmup: crate::prefix_warmup::PrefixWarmup,
+    run_stances: Arc<RunStances>,
+    /// A turn nobody can answer: a schedule's run and the subagents and
+    /// results it starts. A `--yolo` client (the terminal UI, `haarness
+    /// run`, ACP) still has a person to ask, and so does anyone who later
+    /// types in that chat or a fork of it.
+    unattended: bool,
 }
 
 struct TurnToolInvoker {
@@ -8475,13 +8570,6 @@ impl RunnerTask {
         Ok(output)
     }
 
-    /// A turn nobody can answer: part of a scheduled run. A `--yolo` client
-    /// (the terminal UI, `haarness run`, ACP) and the agents and workflows it
-    /// starts still have a person to ask, however their tools are masked.
-    async fn unattended(&self) -> bool {
-        scheduled_lineage(self.repository.as_ref(), self.thread.id).await
-    }
-
     /// The effective permission engine for this turn: agent defaults →
     /// configured rules → session approvals, bounded by ceilings (the plan
     /// agent's write boundary, and for child agents the parent's ruleset).
@@ -8552,7 +8640,7 @@ impl RunnerTask {
         // A run nobody watches (a schedule) cannot get a person's answer:
         // fail now instead of waiting forever. That includes the requests
         // that ask every time, such as Cloud actions that spend money.
-        if (explicit || forced) && self.unattended().await {
+        if (explicit || forced) && self.unattended {
             return Err(CoreError::PermissionDenied(if explicit {
                 cannot_ask(&explicit_operations)
             } else {
@@ -9201,10 +9289,12 @@ impl RunnerTask {
         // the admission lock, so `turn.started` must never describe a runner
         // whose cancellation token is not reachable yet.
         let cancel = self.cancel.child_token();
+        let unattended = self.unattended;
         let active = Arc::new(ActiveTurn {
             id: turn.id,
             request_id: turn.request_id,
             auto_approve: request.auto_approve,
+            unattended,
             cancel: cancel.clone(),
             changed: Notify::new(),
             accepting: AsyncMutex::new(false),
@@ -9299,6 +9389,8 @@ impl RunnerTask {
             approval_modes: self.approval_modes.clone(),
             answer_steer: AtomicBool::new(false),
             prefix_warmup: self.prefix_warmup.clone(),
+            run_stances: self.run_stances.clone(),
+            unattended: self.unattended,
         });
         child_task.publish_task_update("running");
         let task = Arc::new(BackgroundTask {
@@ -9323,6 +9415,7 @@ impl RunnerTask {
             ready: Notify::new(),
             delivery_started: AtomicBool::new(false),
             delivery_auto_approve: self.request.auto_approve,
+            delivery_unattended: self.unattended,
             // Preserve detached/headless restrictions (notably a disabled
             // question tool) without pinning an interactive session to an old
             // agent's transient tool mask after the user switches agents.
@@ -9486,6 +9579,7 @@ impl RunnerTask {
                         synthetic: true,
                     },
                     task.delivery_auto_approve,
+                    task.delivery_unattended,
                     task.delivery_tools.clone(),
                 )
                 .await;
@@ -9537,6 +9631,7 @@ impl RunnerTask {
             queue_pauses: self.queue_pauses.clone(),
             approval_modes: self.approval_modes.clone(),
             prefix_warmup: self.prefix_warmup.clone(),
+            run_stances: self.run_stances.clone(),
         }
     }
 }

@@ -204,20 +204,50 @@ async fn pending_for(
     }
     panic!("no approval was requested");
 }
-/// A direct `bash` call in `thread` that must ask: rejected once it does.
-async fn still_asks(runtime: &Arc<AgentRuntime>, thread: haarness_protocol::ThreadId) {
-    let call = tokio::spawn({
-        let runtime = runtime.clone();
-        async move {
+/// Who makes a direct call: a workflow's own `ctx.tool`/`ctx.shell`, or a
+/// person (`!`, the browser tool API).
+#[derive(Clone, Copy)]
+enum Caller {
+    Workflow,
+    Person,
+}
+async fn direct(
+    runtime: &AgentRuntime,
+    caller: Caller,
+    thread: haarness_protocol::ThreadId,
+    tool: &str,
+    arguments: Value,
+) -> haarness_core::DirectToolResult {
+    match caller {
+        Caller::Workflow => {
             runtime
-                .run_direct_tool(
-                    thread,
-                    "bash",
-                    json!({"command":"echo asked"}),
-                    CancellationToken::new(),
-                )
+                .run_workflow_tool(thread, tool, arguments, CancellationToken::new())
                 .await
         }
+        Caller::Person => {
+            runtime
+                .run_direct_tool(thread, tool, arguments, CancellationToken::new())
+                .await
+        }
+    }
+    .unwrap()
+}
+/// A direct call in `thread` that must ask: rejected once it does.
+async fn still_asks(
+    runtime: &Arc<AgentRuntime>,
+    caller: Caller,
+    thread: haarness_protocol::ThreadId,
+    tool: &str,
+) {
+    let call = tokio::spawn({
+        let runtime = runtime.clone();
+        let tool = tool.to_owned();
+        let arguments = if tool == "bash" {
+            json!({"command":"echo asked"})
+        } else {
+            json!({})
+        };
+        async move { direct(&runtime, caller, thread, &tool, arguments).await }
     });
     let pending = pending_for(runtime, thread).await;
     runtime
@@ -230,8 +260,28 @@ async fn still_asks(runtime: &Arc<AgentRuntime>, thread: haarness_protocol::Thre
         )
         .await
         .unwrap();
-    assert!(call.await.unwrap().unwrap().is_error);
+    assert!(call.await.unwrap().is_error);
 }
+/// Start `request` in `thread` holding its turn open, create a workflow's
+/// thread and an agent's under it as the workflow host does while that turn
+/// runs, then let the turn end.
+async fn workflow_started_by(
+    fixture: &Unattended,
+    thread: haarness_protocol::ThreadId,
+    request: StartTurnRequest,
+) -> (Thread, Thread) {
+    let runtime = &fixture.runtime;
+    let turn = runtime.start_turn(thread, request).await.unwrap();
+    let workflow = child_thread(runtime, thread).await;
+    let agent = child_thread(runtime, workflow.id).await;
+    fixture.hold.notify_one();
+    assert_eq!(
+        wait_done(runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    (workflow, agent)
+}
+const HOLD: &str = "!tool hold_fixture {}";
 
 #[tokio::test]
 async fn a_scheduled_run_refuses_a_request_that_always_asks_instead_of_waiting() {
@@ -247,22 +297,23 @@ async fn a_scheduled_run_refuses_a_request_that_always_asks_instead_of_waiting()
         TurnStatus::Completed
     );
     assert!(refused_at_once(runtime, root.id).await);
-    // A workflow's own call under the run is refused the same way.
-    let workflow = child_thread(runtime, root.id).await;
-    let direct = runtime
-        .run_direct_tool(
-            workflow.id,
-            "spend_fixture",
-            json!({}),
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    assert!(direct.is_error);
+    // A workflow another run starts is refused the same way, also after
+    // that run's turn ended.
+    let other = scheduled_thread(runtime).await;
+    let (workflow, _) = workflow_started_by(&fixture, other.id, approving(HOLD)).await;
+    let refused = direct(
+        runtime,
+        Caller::Workflow,
+        workflow.id,
+        "spend_fixture",
+        json!({}),
+    )
+    .await;
+    assert!(refused.is_error);
     assert!(
-        direct.output.text.contains(REFUSED),
+        refused.output.text.contains(REFUSED),
         "{}",
-        direct.output.text
+        refused.output.text
     );
     assert!(runtime.pending_permissions().is_empty());
     assert_eq!(fixture.executions.load(Ordering::SeqCst), 0);
@@ -296,93 +347,103 @@ async fn a_workflow_started_by_a_scheduled_run_approves_its_own_tool_calls_once(
     let fixture = unattended();
     let runtime = &fixture.runtime;
     let root = scheduled_thread(runtime).await;
-    let workflow = child_thread(runtime, root.id).await;
-    let agent = child_thread(runtime, workflow.id).await;
-    // No turn is running in the schedule's chat any more: nobody watches it.
+    let (workflow, agent) = workflow_started_by(&fixture, root.id, approving(HOLD)).await;
+    // The run's turn has ended: nobody watches its workflow either.
     for thread in [workflow.id, agent.id] {
-        let direct = runtime
-            .run_direct_tool(
-                thread,
-                "bash",
-                json!({"command":"echo unattended"}),
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-        assert!(!direct.is_error, "{}", direct.output.text);
-        assert!(direct.output.text.contains("unattended"));
+        let call = direct(
+            runtime,
+            Caller::Workflow,
+            thread,
+            "bash",
+            json!({"command":"echo unattended"}),
+        )
+        .await;
+        assert!(!call.is_error, "{}", call.output.text);
+        assert!(call.output.text.contains("unattended"));
     }
     assert!(runtime.pending_permissions().is_empty());
-    // A person's own `!` command in the schedule's chat is still asked, and
-    // so is a workflow's call under an ordinary chat.
-    still_asks(runtime, root.id).await;
+    // A person's own `!` command in the schedule's chat is still asked.
+    still_asks(runtime, Caller::Person, root.id, "bash").await;
+    // A workflow under an ordinary chat asks too.
     let chat = echo_thread(runtime).await;
-    still_asks(runtime, child_thread(runtime, chat.id).await.id).await;
+    still_asks(
+        runtime,
+        Caller::Workflow,
+        child_thread(runtime, chat.id).await.id,
+        "bash",
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn a_workflow_follows_the_running_turn_that_approves_its_own_requests() {
+async fn a_person_in_a_scheduled_chat_or_its_fork_is_asked() {
+    // The run is over; someone opens its chat, or forks it, and works there.
+    let fixture = unattended();
+    let runtime = &fixture.runtime;
+    let root = scheduled_thread(runtime).await;
+    let turn = runtime
+        .start_turn(root.id, approving("nightly summary"))
+        .await
+        .unwrap();
+    wait_done(runtime, &turn).await;
+    let fork = runtime.fork_thread(root.id, None, None).await.unwrap();
+    for thread in [root.id, fork.id] {
+        // A workflow the person's turn starts asks, and so does what always
+        // asks: neither is approved nor refused on the run's behalf.
+        let (workflow, agent) = workflow_started_by(&fixture, thread, turn_request(HOLD)).await;
+        for workflow_thread in [workflow.id, agent.id] {
+            still_asks(runtime, Caller::Workflow, workflow_thread, "bash").await;
+        }
+        still_asks(runtime, Caller::Workflow, workflow.id, "spend_fixture").await;
+        // The person's `!` command and their model call that always asks.
+        still_asks(runtime, Caller::Person, thread, "bash").await;
+        let turn = runtime
+            .start_turn(thread, turn_request("!tool spend_fixture {}"))
+            .await
+            .unwrap();
+        let pending = pending_for(runtime, thread).await;
+        runtime
+            .reply_permission(
+                &pending.permission_id,
+                PermissionReply {
+                    decision: Reply::Once,
+                    feedback: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            wait_done(runtime, &turn).await.status,
+            TurnStatus::Completed
+        );
+        assert!(!refused_at_once(runtime, thread).await);
+    }
+    assert_eq!(fixture.executions.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn a_workflow_follows_the_turn_that_approves_its_own_requests() {
     // `haarness run --yolo`, ACP or a `--yolo` terminal UI: the chat's turn
-    // approves its own requests, and so does a workflow it is waiting on.
+    // approves its own requests, and so does a workflow it starts, also
+    // after the turn ends.
     let fixture = unattended();
     let runtime = &fixture.runtime;
     let chat = echo_thread(runtime).await;
-    let workflow = child_thread(runtime, chat.id).await;
-    let turn = runtime
-        .start_turn(chat.id, approving("!tool hold_fixture {}"))
-        .await
-        .unwrap();
-    for _ in 0..500 {
-        if runtime.items(chat.id, None).await.unwrap().iter().any(
-            |item| matches!(&item.data, ItemData::ToolCall { name, .. } if name == "hold_fixture"),
-        ) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let direct = runtime
-        .run_direct_tool(
-            workflow.id,
+    let (workflow, agent) = workflow_started_by(&fixture, chat.id, approving(HOLD)).await;
+    for thread in [workflow.id, agent.id] {
+        let call = direct(
+            runtime,
+            Caller::Workflow,
+            thread,
             "bash",
             json!({"command":"echo followed"}),
-            CancellationToken::new(),
         )
-        .await
-        .unwrap();
-    assert!(!direct.is_error, "{}", direct.output.text);
+        .await;
+        assert!(!call.is_error, "{}", call.output.text);
+    }
     // The request that always asks is still a person's.
-    let spend = tokio::spawn({
-        let runtime = runtime.clone();
-        let workflow = workflow.id;
-        async move {
-            runtime
-                .run_direct_tool(
-                    workflow,
-                    "spend_fixture",
-                    json!({}),
-                    CancellationToken::new(),
-                )
-                .await
-        }
-    });
-    let pending = pending_for(runtime, workflow.id).await;
-    runtime
-        .reply_permission(
-            &pending.permission_id,
-            PermissionReply {
-                decision: Reply::Reject,
-                feedback: None,
-            },
-        )
-        .await
-        .unwrap();
-    assert!(spend.await.unwrap().unwrap().is_error);
-    fixture.hold.notify_one();
-    assert_eq!(
-        wait_done(runtime, &turn).await.status,
-        TurnStatus::Completed
-    );
-    // Once that turn ends, the workflow's calls ask again.
-    still_asks(runtime, workflow.id).await;
+    still_asks(runtime, Caller::Workflow, workflow.id, "spend_fixture").await;
+    // So is the person's own `!` command in that chat.
+    still_asks(runtime, Caller::Person, chat.id, "bash").await;
     assert_eq!(fixture.executions.load(Ordering::SeqCst), 0);
 }
