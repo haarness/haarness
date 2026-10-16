@@ -3586,17 +3586,29 @@ impl AgentRuntime {
                 .filter(|operation| tool.explicit_approval(&arguments, operation))
                 .collect();
             let explicit = !explicit_operations.is_empty();
-            // Same rule as model calls: a scheduled run's workflow or tool
-            // call cannot get a person's answer, so it fails now.
-            if explicit && scheduled_lineage(self.repository.as_ref(), thread_id).await {
-                allowed = Err(cannot_ask(&explicit_operations));
-                break;
-            }
             let operation = if asked.len() == 1 {
                 format!("{}:{}", plan.permission, asked[0])
             } else {
                 format!("{}: {}", plan.permission, asked.join("  "))
             };
+            // Same rule as model calls: a scheduled run's workflow or tool
+            // call cannot get a person's answer, so it fails now.
+            if (explicit || forced) && scheduled_lineage(self.repository.as_ref(), thread_id).await
+            {
+                allowed = Err(if explicit {
+                    cannot_ask(&explicit_operations)
+                } else {
+                    cannot_ask_forced(&operation)
+                });
+                break;
+            }
+            // A workflow's own tool calls follow the turn that started it: a
+            // schedule, `run --yolo`, ACP or a `--yolo` terminal UI approves
+            // them once, as it does its agents' requests.
+            if !forced && !explicit && self.lineage_auto_approves(&thread).await {
+                tracing::info!(thread = %thread_id, operation, "approved once (unattended run)");
+                continue;
+            }
             let always_rules = plan.always_rules();
             // Same rule as model calls: a chat in Auto approves eligible
             // requests once, ordered with mode changes by the gate.
@@ -4907,6 +4919,31 @@ impl AgentRuntime {
             }
         }
         engine.boundary()
+    }
+
+    /// Whether a chat above `thread` approves its own requests once: a
+    /// running turn started that way (a schedule, `run --yolo`, ACP, a
+    /// `--yolo` terminal UI), or a schedule's chat, which nobody watches
+    /// even after its turn ends. The chat itself does not count: a person
+    /// running `!` there is asked.
+    async fn lineage_auto_approves(&self, thread: &Thread) -> bool {
+        let mut seen = HashSet::from([thread.id]);
+        let mut current = thread.parent_id;
+        while let Some(id) = current.filter(|id| seen.insert(*id)) {
+            if self
+                .active
+                .get(&id)
+                .is_some_and(|active| active.auto_approve)
+            {
+                return true;
+            }
+            match self.repository.get_thread(id).await {
+                Ok(parent) if parent.schedule.is_some() => return true,
+                Ok(parent) => current = parent.parent_id,
+                Err(_) => return false,
+            }
+        }
+        false
     }
 
     async fn permission_boundary_for_lineage(
@@ -8479,11 +8516,14 @@ impl RunnerTask {
         let always_rules = plan.always_rules();
         let explicit = !explicit_operations.is_empty();
         // A run nobody watches (a schedule) cannot get a person's answer:
-        // fail now instead of waiting forever.
-        if explicit && self.unattended().await {
-            return Err(CoreError::PermissionDenied(cannot_ask(
-                &explicit_operations,
-            )));
+        // fail now instead of waiting forever. That includes the requests
+        // that ask every time, such as Cloud actions that spend money.
+        if (explicit || forced) && self.unattended().await {
+            return Err(CoreError::PermissionDenied(if explicit {
+                cannot_ask(&explicit_operations)
+            } else {
+                cannot_ask_forced(&operation)
+            }));
         }
         let automatic = self.config.auto_approve || self.request.auto_approve;
         if automatic && !forced && !explicit {
@@ -10678,6 +10718,13 @@ fn cannot_ask(operations: &[String]) -> String {
     format!(
         "Chrome needs the user's approval for {} and this run cannot ask. Ask the user to allow it in an interactive chat, then retry.",
         explicit_origins(operations)
+    )
+}
+
+/// Why a scheduled run's request that always asks failed instead of waiting.
+fn cannot_ask_forced(operation: &str) -> String {
+    format!(
+        "'{operation}' needs the user's approval every time, and this scheduled run cannot ask. Do not retry it here; ask the user to do it in an interactive chat."
     )
 }
 
