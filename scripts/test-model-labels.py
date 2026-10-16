@@ -6,6 +6,7 @@ Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-model-labels.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
 """
 import json, os, pathlib, subprocess, tempfile, urllib.request
+import e2e_scratch
 
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve()
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-model-labels-', dir=os.environ.get('HAARNESS_E2E_DIR'))).resolve()
@@ -63,6 +64,7 @@ try:
               for model in provider['models']}
     assert served == EXPECTED, served
     print('PASS the server gives clients (TUI, Desktop, iOS) the same names', flush=True)
-    print(f'PASS 2 model label scenarios. Evidence: {root}', flush=True)
+    print(f'PASS 2 model label scenarios.', flush=True)
 finally:
     if url: subprocess.run([str(binary), '--workspace', str(workspace), 'serve', '--stop'], env=env, capture_output=True, timeout=35)
+    e2e_scratch.settle(root)

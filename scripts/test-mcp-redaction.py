@@ -6,6 +6,7 @@ Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-mcp-redaction.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
 """
 import json, os, pathlib, subprocess, tempfile, time, urllib.request, uuid
+import e2e_scratch
 
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve()
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-mcp-redaction-', dir=os.environ.get('HAARNESS_E2E_DIR'))).resolve()
@@ -100,6 +101,7 @@ try:
     check('the model reading MCP settings with mcp_manage sees no credentials')
 
     (root/'result.json').write_text(json.dumps({'passed': True, 'checks': checks}, indent=2))
-    print(f'PASS {len(checks)} MCP redaction scenarios. Evidence: {root}', flush=True)
+    print(f'PASS {len(checks)} MCP redaction scenarios.', flush=True)
 finally:
     if url: subprocess.run([str(binary), '--workspace', str(workspace), 'serve', '--stop'], env=env, capture_output=True, timeout=35)
+    e2e_scratch.settle(root)
