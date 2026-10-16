@@ -20,6 +20,7 @@ import {
   toolInput,
   toolName,
   toolOutput,
+  toolTitle,
   toolFailed,
   toolVerb,
   ranInChrome,
@@ -126,7 +127,7 @@ export function ToolActivity(props: {
             a finished one simply rests. The word stays for screen readers. */}
         <Shimmer class="tool-label" active={live()}>
           <strong>{verb()}</strong>
-          <span class="tool-target" title={shape().target}>
+          <span class="tool-target" title={toolTitle(props.args, shape().target)}>
             {shape().target}
           </span>
           <Show when={stats()}>

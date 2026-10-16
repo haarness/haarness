@@ -435,7 +435,8 @@ export function batchLabel(steps: BatchStep[]) {
   const actions = [...new Set(steps.map((step) => batchDone[batchGroup(step.name)]))];
   return phraseList(actions.map((action) => t(action)));
 }
-export function toolTarget(args: unknown): string {
+/** The argument a tool row names, as the call wrote it. */
+function targetText(args: unknown): string {
   if (!args || typeof args !== "object") return "";
   const record = args as Record<string, unknown>;
   for (const key of [
@@ -451,13 +452,25 @@ export function toolTarget(args: unknown): string {
     "name",
   ]) {
     const value = record[key];
-    if (typeof value === "string" && value.trim())
-      return value.replace(/\s+/g, " ").trim();
+    if (typeof value === "string" && value.trim()) return value.trim();
   }
   const first = Object.values(record).find(
     (value) => typeof value === "string" && value.trim(),
   );
-  return typeof first === "string" ? first.replace(/\s+/g, " ").trim() : "";
+  return typeof first === "string" ? first.trim() : "";
+}
+export function toolTarget(args: unknown): string {
+  return targetText(args).replace(/\s+/g, " ");
+}
+/**
+ * A tool row's tooltip: the whole target with its line breaks, so a
+ * multi-line command reads as written, not as the one flattened line the row
+ * has room for. A target the row words itself ("the project folder") is
+ * shown as the row shows it.
+ */
+export function toolTitle(args: unknown, target: string): string {
+  const text = targetText(args);
+  return text.replace(/\s+/g, " ") === target ? text : target;
 }
 // A permission detail is usually a shell command; show that line plainly and
 // keep the raw payload only when there is nothing better to say.

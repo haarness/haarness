@@ -9278,6 +9278,39 @@ test("tool activity shows readable commands, batch steps, outputs and failures",
   expect(errors).toEqual([]);
 });
 
+test("a tool row's tooltip shows a multi-line command as written", async () => {
+  await expandPrimaryProject();
+  const thread = await client.createThread({
+    title: "Multi-line command tooltip",
+    provider: "echo",
+    model: "echo-1",
+  });
+  await page
+    .locator(".sessions")
+    .getByRole("button", { name: "Multi-line command tooltip", exact: true })
+    .click();
+  const command = "printf one\nprintf two";
+  const turn = await client.startTurn(thread.id, {
+    requestId: crypto.randomUUID(),
+    text: "!tool bash " + JSON.stringify({ command }),
+  });
+  // Only the call's arguments matter: refuse it if it asks.
+  let finished = false;
+  const done = client.waitTurn(turn.id).then(() => (finished = true));
+  while (!finished) {
+    const asked = (await client.listPermissions()).find((item) => item.threadId === thread.id);
+    if (asked) await client.replyPermission(asked.permissionId, { decision: "reject" });
+    await Promise.race([done, new Promise((resolve) => setTimeout(resolve, 200))]);
+  }
+  const label = page
+    .locator(".message.step > .tool-call")
+    .last()
+    .locator(":scope > summary .tool-target");
+  await expect(label).toHaveText("printf one printf two");
+  await expect(label).toHaveAttribute("title", command);
+  expect(errors).toEqual([]);
+});
+
 test("dragging across a tool row's label selects it without opening or closing the row", async () => {
   await expandPrimaryProject();
   const thread = await client.createThread({
