@@ -10707,6 +10707,9 @@ mod chrome;
 #[path = "cases/unattended.rs"]
 mod unattended;
 
+#[path = "cases/turn_panic.rs"]
+mod turn_panic;
+
 #[tokio::test]
 async fn workspace_file_routes_answer_a_missing_file_with_404_in_plain_words() {
     let workspace =

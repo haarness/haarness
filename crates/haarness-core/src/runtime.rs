@@ -5707,8 +5707,21 @@ impl RunnerTask {
             haarness.agent.depth = i64::from(self.depth),
         )
     )]
+    /// Run the turn with a panic counted as its failure, so the cleanup
+    /// below still ends it and frees the chat. Uncaught, the panic ended
+    /// only this task: the chat stayed busy until the server restarted, and
+    /// a background server's stderr, where the panic was printed, goes
+    /// nowhere.
+    async fn run_contained(self: Arc<Self>) -> CoreResult<()> {
+        use futures::FutureExt as _;
+        std::panic::AssertUnwindSafe(self.run_inner())
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|panic| Err(turn_panicked(panic.as_ref())))
+    }
+
     async fn run_with_cleanup(self: Arc<Self>) -> CoreResult<()> {
-        let mut result = Arc::clone(&self).run_inner().await;
+        let mut result = Arc::clone(&self).run_contained().await;
         if result.is_err() {
             // Stop new queue writes immediately, but keep the matching active
             // reservation installed until goal state and the durable turn are
@@ -5729,7 +5742,7 @@ impl RunnerTask {
                 ) && !is_provider_usage_limit(error_value)
             });
             if retryable && self.has_unconsumed_queued().await {
-                result = Arc::clone(&self).run_inner().await;
+                result = Arc::clone(&self).run_contained().await;
             }
 
             // A cancellation, usage limit, or failed retry can still leave an
@@ -10719,6 +10732,21 @@ fn cannot_ask(operations: &[String]) -> String {
         "Chrome needs the user's approval for {} and this run cannot ask. Ask the user to allow it in an interactive chat, then retry.",
         explicit_origins(operations)
     )
+}
+
+/// The error a turn ends with when its code panicked. The panic itself, with
+/// where it happened, is in the log (see the CLI's panic hook).
+fn turn_panicked(panic: &(dyn std::any::Any + Send)) -> CoreError {
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or("no message");
+    let message: String = message.chars().take(200).collect();
+    tracing::error!(error = %message, "a turn stopped on a panic");
+    CoreError::Tool(format!(
+        "Haarness stopped this turn after an internal error ({message}). The details are in the Haarness log; send a message to continue."
+    ))
 }
 
 /// Why a scheduled run's request that always asks failed instead of waiting.
