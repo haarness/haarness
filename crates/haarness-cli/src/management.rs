@@ -2465,7 +2465,7 @@ fn apply_mcp_edit(entry: &mut McpConfigureRequest, input: &Value) -> Result<()> 
         entry.command = Some(command.into());
     }
     if input.get("args").is_some() {
-        entry.args = string_array(input, "args")?;
+        entry.args = edited_secret_args(&entry.args, string_array(input, "args")?)?;
     }
     let environment = if input.get("environment").is_some() {
         "environment"
@@ -2476,7 +2476,18 @@ fn apply_mcp_edit(entry: &mut McpConfigureRequest, input: &Value) -> Result<()> 
         entry.env = edited_secret_map(&entry.env, string_map(input, environment)?)?;
     }
     if let Some(url) = optional_string(input, "url") {
-        entry.url = Some(url.into());
+        // The displayed URL hides credentials; sent back unchanged, it
+        // keeps the URL it stands for.
+        let unchanged = entry
+            .url
+            .as_deref()
+            .is_some_and(|existing| haarness_core::redact::url(existing) == url);
+        if url.contains(haarness_core::redact::REDACTED) && !unchanged {
+            bail!("Provide the full URL: it still contains a hidden part");
+        }
+        if !unchanged {
+            entry.url = Some(url.into());
+        }
     }
     if input.get("headers").is_some() {
         entry.headers = edited_secret_map(&entry.headers, string_map(input, "headers")?)?;
@@ -2508,6 +2519,27 @@ fn edited_secret_map(
         }
     }
     Ok(next)
+}
+
+/// Arguments sent back as displayed keep the values their hidden parts stand
+/// for; a hidden part anywhere else must be given in full.
+fn edited_secret_args(existing: &[String], next: Vec<String>) -> Result<Vec<String>> {
+    let shown = haarness_core::redact::args(existing);
+    next.into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            if !value.contains(haarness_core::redact::REDACTED) {
+                return Ok(value);
+            }
+            match (shown.get(index), existing.get(index)) {
+                (Some(shown), Some(existing)) if *shown == value => Ok(existing.clone()),
+                _ => bail!(
+                    "Provide argument {} in full: it still contains a hidden part",
+                    index + 1
+                ),
+            }
+        })
+        .collect()
 }
 
 fn validate_mcp_entry(entry: &McpConfigureRequest) -> Result<()> {
@@ -2593,15 +2625,7 @@ fn mcp_entries(path: &Path) -> Result<BTreeMap<String, McpConfigureRequest>> {
 }
 
 fn redact_mcp(entry: &McpConfigureRequest) -> Result<Value> {
-    let mut value = serde_json::to_value(entry)?;
-    for field in ["env", "headers"] {
-        if let Some(values) = value.get_mut(field).and_then(Value::as_object_mut) {
-            for value in values.values_mut() {
-                *value = Value::String("<redacted>".into());
-            }
-        }
-    }
-    Ok(value)
+    mcp_config_for_display(entry, false)
 }
 
 fn changed(action: &str, resource: &str, name: &str, path: &Path, restart: bool) -> Value {
@@ -3338,7 +3362,7 @@ mod tests {
                 "mcp",
                 &json!({
                     "action":"add","name":"fixture-mcp","scope":"local","type":"remote",
-                    "url":"http://127.0.0.1:9/mcp","enabled":false,
+                    "url":"http://127.0.0.1:9/mcp?api_key=fixture-key","enabled":false,
                     "headers":{"Authorization":"Bearer fixture-secret"},
                     "oauth":true,"oauthClientId":"fixture-client","oauthScopes":["read","write"]
                 }),
@@ -3356,31 +3380,72 @@ mod tests {
             read_mcp_entry(&mcp_config_target(&paths, &workspace, true), "fixture-mcp").unwrap();
         assert_eq!(mcp_add["config"]["headers"]["Authorization"], "<redacted>");
         assert_eq!(persisted.headers["Authorization"], "Bearer fixture-secret");
+        assert_eq!(
+            mcp_add["config"]["url"],
+            "http://127.0.0.1:9/mcp?api_key=<redacted>"
+        );
+        assert!(!mcp_detail.to_string().contains("fixture-key"));
+        let elsewhere = json!({"action":"edit","name":"fixture-mcp","scope":"local",
+            "url":"http://127.0.0.1:10/mcp?api_key=<redacted>"});
+        assert!(
+            service
+                .mcp(&elsewhere)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Provide the full URL")
+        );
         let mut edit = mcp_detail["config"].clone();
         edit["action"] = json!("edit");
         edit["name"] = json!("fixture-mcp");
         edit["scope"] = json!("local");
         service.mcp(&edit).await.unwrap();
+        let edited =
+            read_mcp_entry(&mcp_config_target(&paths, &workspace, true), "fixture-mcp").unwrap();
+        assert_eq!(edited.headers["Authorization"], "Bearer fixture-secret");
         assert_eq!(
-            read_mcp_entry(&mcp_config_target(&paths, &workspace, true), "fixture-mcp")
-                .unwrap()
-                .headers["Authorization"],
-            "Bearer fixture-secret"
+            edited.url.as_deref(),
+            Some("http://127.0.0.1:9/mcp?api_key=fixture-key")
         );
         assert_eq!(persisted.oauth, Some(true));
         assert_eq!(persisted.oauth_client_id.as_deref(), Some("fixture-client"));
         assert_eq!(persisted.oauth_scopes, ["read", "write"]);
         let local_add = json!({
             "action":"add","name":"desktop-local","scope":"global","type":"local",
-            "command":"/path with spaces/server","args":["--path","/a b","--flag=x=y"],
+            "command":"/path with spaces/server",
+            "args":["--path","/a b","--flag=x=y","--api-key","fixture-arg-secret"],
             "environment":{"FIXTURE_TOKEN":"fixture=secret with spaces","EMPTY":""},"enabled":false
         });
         let result = service.desktop_asset("mcp", &local_add).await.unwrap();
         assert_eq!(result["config"]["env"]["FIXTURE_TOKEN"], "<redacted>");
         assert!(!result.to_string().contains("fixture=secret"));
+        assert!(!result.to_string().contains("fixture-arg-secret"));
+        assert_eq!(
+            result["config"]["args"],
+            json!(["--path", "/a b", "--flag=x=y", "--api-key", "<redacted>"])
+        );
         let target = mcp_config_target(&paths, &workspace, false);
+        let arguments = [
+            "--path",
+            "/a b",
+            "--flag=x=y",
+            "--api-key",
+            "fixture-arg-secret",
+        ];
+        assert_eq!(
+            read_mcp_entry(&target, "desktop-local").unwrap().args,
+            arguments
+        );
+        // Arguments sent back as displayed keep their hidden values.
+        service
+            .mcp(
+                &json!({"action":"edit","name":"desktop-local","scope":"global",
+                "args": result["config"]["args"]}),
+            )
+            .await
+            .unwrap();
         let local = read_mcp_entry(&target, "desktop-local").unwrap();
-        assert_eq!(local.args, ["--path", "/a b", "--flag=x=y"]);
+        assert_eq!(local.args, arguments);
         assert_eq!(local.env["FIXTURE_TOKEN"], "fixture=secret with spaces");
         assert_eq!(local.env["EMPTY"], "");
         let before = fs::read(&target).unwrap();
