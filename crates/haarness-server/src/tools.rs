@@ -1317,8 +1317,44 @@ fn web_client() -> reqwest::Client {
             env!("CARGO_PKG_VERSION"),
             " (+https://github.com/haarness/haarness)"
         ))
+        // A redirect to another host is not followed: the fetch returns its
+        // address, and fetching that is the model's next call, checked
+        // against the permission rules, so an allowed address cannot lead
+        // past a denied one. The first URL in `previous` is the one asked for.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() > 10 {
+                attempt.error("too many redirects")
+            } else if attempt
+                .previous()
+                .first()
+                .is_some_and(|first| same_host_redirect(first, attempt.url()))
+            {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
         .build()
         .expect("the static WebFetch HTTP client configuration is valid")
+}
+
+/// Whether a redirect stays on the host a fetch asked for: the same host and
+/// port, or the same host moving from http to https on the default ports.
+fn same_host_redirect(from: &url::Url, to: &url::Url) -> bool {
+    let host = |url: &url::Url| {
+        url.host_str()
+            .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
+    };
+    if host(from).is_none() || host(from) != host(to) {
+        return false;
+    }
+    match (from.scheme(), to.scheme()) {
+        (from_scheme, to_scheme) if from_scheme == to_scheme => {
+            from.port_or_known_default() == to.port_or_known_default()
+        }
+        ("http", "https") => from.port().is_none() && to.port().is_none(),
+        _ => false,
+    }
 }
 
 /// A server can hold the connection open or never finish the body, so a
@@ -1346,13 +1382,28 @@ async fn webfetch(
 
 /// Reads `url` for webfetch; `webfetch` bounds it in time and by Stop.
 async fn fetch_page(client: &reqwest::Client, url: url::Url, raw: bool) -> CoreResult<ToolOutput> {
-    let response = client
-        .get(url.clone())
-        .send()
-        .await
-        .map_err(tool_error)?
-        .error_for_status()
-        .map_err(tool_error)?;
+    let response = client.get(url.clone()).send().await.map_err(tool_error)?;
+    // `web_client` follows redirects on the same host only, so a redirect
+    // that arrives here leads to another host.
+    if response.status().is_redirection()
+        && let Some(target) = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|location| response.url().join(location).ok())
+    {
+        return Ok(ToolOutput {
+            text: format!(
+                "{} redirects (HTTP {}) to {target}, which is on another host, so the redirect \
+                 was not followed. Call webfetch with {target} to read it; that fetch is \
+                 checked against the permission rules like any other.",
+                response.url(),
+                response.status().as_u16(),
+            ),
+            metadata: json!({"redirect": target.as_str()}),
+        });
+    }
+    let response = response.error_for_status().map_err(tool_error)?;
     let html_content_type = response
         .headers()
         .get("content-type")
@@ -5795,6 +5846,66 @@ mod webfetch_tests {
             skill_catalog: Arc::from(""),
             instructions: Arc::new(InstructionDiscovery::default()),
         }
+    }
+
+    #[test]
+    fn redirects_are_followed_only_on_the_host_asked_for() {
+        let url = |value: &str| url::Url::parse(value).unwrap();
+        for (from, to, followed) in [
+            ("http://a.example/x", "http://a.example/y", true),
+            ("http://a.example/", "https://a.example/", true),
+            ("https://a.example/", "https://A.EXAMPLE./login", true),
+            ("http://a.example:8080/", "http://a.example:8080/y", true),
+            ("https://a.example/", "http://a.example/", false),
+            ("http://a.example:8080/", "https://a.example/", false),
+            ("https://a.example/", "https://a.example:8443/", false),
+            ("https://a.example/", "https://b.example/", false),
+            ("https://a.example/", "https://sub.a.example/", false),
+        ] {
+            assert_eq!(
+                same_host_redirect(&url(from), &url(to)),
+                followed,
+                "{from} -> {to}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_another_host_is_reported_and_not_followed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let target = format!("http://localhost:{}/elsewhere", address.port());
+        let location = target.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = accept_request(&listener).await;
+            let head = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(head.as_bytes()).await.unwrap();
+            drop(stream);
+            // A followed redirect would arrive here as a second connection.
+            tokio::time::timeout(Duration::from_secs(2), listener.accept())
+                .await
+                .is_ok()
+        });
+        let tool = webfetch_tool();
+        let output = tool
+            .execute(
+                json!({"url": format!("http://{address}/start")}),
+                composite_context(&tool.workspace),
+            )
+            .await
+            .unwrap();
+        assert!(output.text.contains("another host"), "{}", output.text);
+        assert!(
+            output
+                .text
+                .contains(&format!("Call webfetch with {target}")),
+            "{}",
+            output.text
+        );
+        assert_eq!(output.metadata["redirect"], target);
+        assert!(!server.await.unwrap(), "the redirect was followed");
     }
 
     const CHUNKED_HEAD: &[u8] =
