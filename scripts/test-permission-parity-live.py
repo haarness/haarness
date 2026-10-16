@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real-model skill/helper/extension proof, with isolated state and persisted records."""
 import json,os,pathlib,subprocess,tempfile,time,urllib.request,uuid
+import e2e_scratch
 root=pathlib.Path(tempfile.mkdtemp(prefix='haarness-parity-live-')).resolve();ws=root/'workspace';ws.mkdir();home=root/'home';config=home/'config';config.mkdir(parents=True)
 binary=str(pathlib.Path(os.environ.get('HAARNESS_BIN','target/debug/haarness')).resolve())
 env={k:v for k,v in os.environ.items() if not k.startswith('HAARNESS_')};env.update(HAARNESS_HOME=str(home),HAARNESS_DATA_DIR=str(root/'data'))
@@ -47,4 +48,4 @@ try:
  (root/'results.json').write_text(json.dumps(summary,indent=2));print('PASS real-model skill, dynamic context approval, installed helper, extension, shell timeout 0, and read-back:',root,flush=True)
 finally:
  subprocess.run([binary,'--workspace',str(ws),'serve','--stop'],env=env,capture_output=True,timeout=30)
- print('Evidence retained:',root,flush=True)
+ e2e_scratch.settle(root)

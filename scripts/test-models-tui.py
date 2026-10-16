@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Model refresh through a real local server and tmux-driven terminal renderer."""
 import http.server,json,os,pathlib,shlex,subprocess,tempfile,threading,time
+import e2e_scratch
 binary=pathlib.Path(os.environ.get('HAARNESS_BIN','target/release/haarness')).resolve()
 root=pathlib.Path(tempfile.mkdtemp(prefix='haarness-models-tui-')).resolve()
 workspace=root/'workspace'
@@ -53,9 +54,10 @@ try:
     models.clear();keys('Escape');time.sleep(1.1);command('/models')
     until(lambda:'Welcome to Haarness' in capture() and 'Haarness needs an AI model' in capture(),'Empty catalog did not offer provider setup')
     (root/'empty.txt').write_text(capture())
-    print('PASS real TUI: friendly name, connected-only picker, refresh, selection, empty catalog. Evidence: '+str(root),flush=True)
+    print('PASS real TUI: friendly name, connected-only picker, refresh, selection, empty catalog.',flush=True)
 finally:
     subprocess.run(['tmux','kill-session','-t',name],capture_output=True)
     if endpoint:
         subprocess.run([str(binary),'--workspace',str(workspace),'serve','--stop'],env=env,capture_output=True,timeout=30)
     service.shutdown();service.server_close()
+    e2e_scratch.settle(root)

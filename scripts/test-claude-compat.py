@@ -4,6 +4,7 @@ Uses Echo for deterministic tool requests; writes only within an isolated worksp
 Pass --real-plugins to also install and customize Anthropic's public plugin-dev.
 """
 import json, os, pathlib, subprocess, tempfile, urllib.request, urllib.error, sys
+import e2e_scratch
 repo=pathlib.Path(__file__).resolve().parents[1]
 root=pathlib.Path(tempfile.mkdtemp(prefix='haarness-claude-compat-'))
 workspace=root/'workspace';workspace.mkdir();state=root/'state';home=root/'home';home.mkdir()
@@ -98,7 +99,7 @@ try:
   check('manifest-free public plugin skills qualified','plugin-dev:plugin-structure' in skills)
   response=api('/manage/assets',{'kind':'skill','action':'customize','name':'Plugin Structure','scope':'local','description':'Edited structure','instructions':'EDITED_PUBLIC_SKILL'})
   check('public legacy skill customize',not response.get('http'),response)
- print('Haarness plugin compatibility E2E passed. Evidence:',root/'results.json',flush=True)
+ print('Haarness plugin compatibility E2E passed.',flush=True)
 finally:
  print('Server cleanup:',cli('serve','--stop')['code'],flush=True)
- print('Evidence retained in',root,flush=True)
+ e2e_scratch.settle(root)

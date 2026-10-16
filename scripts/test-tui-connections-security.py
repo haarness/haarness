@@ -3,6 +3,7 @@
 All changes are confined to a fresh data root; provider traffic uses local fixtures.
 """
 import http.server,json,os,pathlib,shlex,subprocess,tempfile,threading,time,urllib.request,urllib.error,uuid
+import e2e_scratch
 binary=pathlib.Path(os.environ.get('HAARNESS_BIN','target/debug/haarness')).resolve()
 root=pathlib.Path(tempfile.mkdtemp(prefix='haarness-tui-parity-')).resolve()
 workspace=root/'workspace'; workspace.mkdir()
@@ -120,10 +121,10 @@ try:
     palette('servers');choose('Second test host');choose('Connect');until(lambda:'draft belongs to second' in capture(),'Saved host draft missing after restart')
     palette('servers');choose('Projects on this server');choose('another-project');until(lambda:'draft survives remote client restart' in capture(),'Project draft missing after restart');evidence('remote-draft-after-restart')
     (root/'result.json').write_text(json.dumps({'passed':True,'checks':['ordinary workspace and permitted external writes','host networking','retired policy ignored','private frozen share preview','public HTML escaping','share revoke','tmux server switching','per-server drafts','host project gateway and real turn']},indent=2))
-    print('PASS connections, permissions, sharing and tmux. Evidence: '+str(root),flush=True)
+    print('PASS connections, permissions, sharing and tmux.',flush=True)
 finally:
     subprocess.run(['tmux','kill-session','-t',name],capture_output=True)
     if endpoint:subprocess.run([str(binary),'--workspace',str(workspace),'serve','--stop'],env=env,capture_output=True,timeout=35)
     if endpoint2:subprocess.run([str(binary),'--workspace',str(second/'workspace'),'serve','--stop'],env=env2,capture_output=True,timeout=35)
     if env2 and (second/'another-project').exists():subprocess.run([str(binary),'--workspace',str(second/'another-project'),'serve','--stop'],env=env2,capture_output=True,timeout=35)
-    outside.unlink(missing_ok=True);service.shutdown();service.server_close();print('Artifacts: '+str(root),flush=True)
+    outside.unlink(missing_ok=True);service.shutdown();service.server_close();e2e_scratch.settle(root)

@@ -10,6 +10,8 @@ import time
 import urllib.request
 import uuid
 
+import e2e_scratch
+
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("HAARNESS_BIN", ROOT / "target/debug/haarness")).resolve()
 
@@ -109,6 +111,7 @@ def main():
                 run([str(BINARY), "--workspace", str(workspace), "serve", "--stop"], env=env)
             except Exception:
                 pass
+        e2e_scratch.settle(root)
 
 
 if __name__ == "__main__":

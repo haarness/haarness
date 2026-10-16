@@ -3,6 +3,7 @@
 All changes are confined to a fresh data root; provider traffic uses local fixtures.
 """
 import http.server,json,os,pathlib,shlex,subprocess,tempfile,threading,time,urllib.request,urllib.error,uuid
+import e2e_scratch
 binary=pathlib.Path(os.environ.get('HAARNESS_BIN','target/debug/haarness')).resolve()
 root=pathlib.Path(tempfile.mkdtemp(prefix='haarness-tui-parity-')).resolve()
 workspace=root/'workspace'; workspace.mkdir()
@@ -189,9 +190,9 @@ for line in sys.stdin:
     until(lambda:not any(p['id']=='fixture-ui' for p in api('/providers')),'Profile restore did not replace configuration')
     evidence('final')
     (root/'result.json').write_text(json.dumps({'passed':True,'server':endpoint['url'],'workspace':str(workspace),'checks':['authentication','memory CRUD/conflict','hooks execution','profiles capture/restore','scoped custom provider edits/removal/conflicts','PKCE remote callback/cancel','custom provider/credential','native schedule execution','model reasoning','agent filtering','TUI forms','stash','range snapshots','keybindings','usage','favorites']},indent=2))
-    print('PASS parity API + tmux. Evidence: '+str(root),flush=True)
+    print('PASS parity API + tmux.',flush=True)
 finally:
     subprocess.run(['tmux','kill-session','-t',name],capture_output=True)
     if endpoint:subprocess.run([str(binary),'--workspace',str(workspace),'serve','--stop'],env=env,capture_output=True,timeout=35)
     service.shutdown();service.server_close()
-    print('Artifacts: '+str(root),flush=True)
+    e2e_scratch.settle(root)

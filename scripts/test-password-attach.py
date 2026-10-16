@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real server + CLI + tmux verification for optional password authentication."""
 import base64, json, os, pathlib, shlex, subprocess, tempfile, time, urllib.request, urllib.error, urllib.parse
+import e2e_scratch
 
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve()
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-password-attach-')).resolve()
@@ -98,4 +99,6 @@ for mode, password in [('anonymous', ''), ('password', '日本:attach-password')
     finally:
         subprocess.run(['tmux', 'kill-session', '-t', session], capture_output=True)
         subprocess.run([str(binary), '--workspace', str(workspace), 'serve', '--stop'], env=env, capture_output=True, timeout=40)
-print('Evidence: ' + str(evidence), flush=True)
+if os.environ.get('HAARNESS_EVIDENCE_DIR'):
+    print('Evidence: ' + str(evidence), flush=True)
+e2e_scratch.settle(root)

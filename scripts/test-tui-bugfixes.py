@@ -10,6 +10,8 @@ import tempfile
 import time
 import urllib.request
 
+import e2e_scratch
+
 repo = Path(__file__).resolve().parents[1]
 binary = str(Path(os.environ.get('HAARNESS_BIN', repo / 'target/debug/haarness')).resolve())
 root = Path(tempfile.mkdtemp(prefix='haarness-tui-regressions-')).resolve()
@@ -203,3 +205,4 @@ finally:
     subprocess.run(['tmux', '-L', socket, 'kill-server'], capture_output=True)
     if endpoint:
         subprocess.run(args + ['serve', '--stop'], env=env, capture_output=True, timeout=30)
+    e2e_scratch.settle(root)

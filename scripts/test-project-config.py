@@ -16,6 +16,8 @@ import urllib.error
 import uuid
 from pathlib import Path
 
+import e2e_scratch
+
 repo = Path(__file__).resolve().parents[1]
 binary = Path(os.environ.get("HAARNESS_BIN", repo / "target/debug/haarness")).resolve()
 root = Path(tempfile.mkdtemp(prefix="haarness-project-config-")).resolve()
@@ -259,11 +261,10 @@ try:
         write(root / "live-items.json", json.dumps(items, indent=2))
         calls = [item["data"].get("name", "") for item in items if item["data"]["type"] == "tool_call"]
         check("Real model invokes the project skill and MCP", "skill" in calls and "mcp__fixture__read_marker" in calls and marker in json.dumps(tool_results(items)))
-    print("Evidence:", root, flush=True)
 finally:
     for session in sessions:
         subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True)
     for folder in [project, other]:
         try: cli("serve", "--stop", workspace=folder)
         except Exception: pass
-    print("Fixtures retained:", root, flush=True)
+    e2e_scratch.settle(root)
