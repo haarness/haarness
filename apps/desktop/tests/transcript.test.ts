@@ -9,6 +9,7 @@ import {
   shortPath,
   toolChanges,
   toolTarget,
+  toolTitle,
   batchSteps,
   batchLabel,
   toolActivity,
@@ -237,6 +238,16 @@ test("the target is the one argument a reader scans for", () => {
   );
   assert.equal(toolTarget({ count: 3 }), "");
   assert.equal(toolTarget(undefined), "");
+});
+
+test("a tool row's tooltip keeps a multi-line command as written", () => {
+  const command = "cat <<'EOF' > notes.md\n# Notes\n\n  - one\nEOF\n";
+  const target = toolTarget({ command, timeout: 30 });
+  assert.equal(target, "cat <<'EOF' > notes.md # Notes - one EOF");
+  assert.equal(toolTitle({ command, timeout: 30 }, target), command.trim());
+  // A target the row words itself is shown as the row shows it.
+  assert.equal(toolTitle({ path: "." }, "the project folder"), "the project folder");
+  assert.equal(toolTitle(undefined, ""), "");
 });
 
 test("edits are recognised as changes, other calls are not", () => {
