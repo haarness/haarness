@@ -79,6 +79,13 @@ const APPLY_PATCH_DESCRIPTION: &str = "Apply a V4A patch envelope across one or 
 const BASH_DESCRIPTION: &str = "Run a terminal command through the workspace shell. Use bash for builds, tests, git, package managers, process inspection, and other terminal operations. Do not use it for ordinary file reading, listing, searching, writing, or editing when read, list, glob, grep, write, edit, or apply_patch can express the operation more clearly. Ripgrep (rg) is bundled and available on PATH for searches requiring flags or pipelines beyond the grep/glob tools; no installation is needed. Use workdir instead of 'cd <dir> && ...'. Quote paths containing spaces. timeout is milliseconds, defaults to the configured deadline (normally 120000), and has no fixed upper limit; set 0 for no deadline. Output includes the exit code and combined stdout/stderr. Do not create commits or push unless the user explicitly asks, and do not use destructive git or filesystem operations without clear authorization.";
 
 const WEBFETCH_DESCRIPTION: &str = "Fetch a fully formed HTTP or HTTPS URL as a read-only operation. HTML is converted to markdown by default; use format='raw' only when the original response body is required. Prefer a more targeted connected tool when one exists for the requested service or data. Large results may be truncated with a path to the full output.";
+/// A body larger than this is refused while it is read: a server that sends
+/// no Content-Length, or a wrong one, cannot fill memory.
+const WEBFETCH_MAX_BYTES: usize = 6 * 1024 * 1024;
+/// One fetch, redirects and body included. The tool has no timeout argument
+/// (its schema is part of every cached prompt), and a page that never
+/// finishes must still end the call.
+const WEBFETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 const QUESTION_DESCRIPTION: &str = "Ask the user one blocking question when a material requirement or decision cannot be resolved from the request, repository, or other available context. Keep the prompt concise and provide mutually exclusive choices when useful. Free-form answers are enabled by default, so do not add an Other or catch-all choice. Set multiple=true only when more than one choice may be selected. If recommending an option, put it first and suffix its label with '(Recommended)'. Do not ask for clarification when a safe, scoped assumption or local inspection can resolve it.";
 
@@ -1312,6 +1319,93 @@ fn web_client() -> reqwest::Client {
         ))
         .build()
         .expect("the static WebFetch HTTP client configuration is valid")
+}
+
+/// A server can hold the connection open or never finish the body, so a
+/// fetch has a deadline and Stop abandons it.
+async fn webfetch(
+    client: &reqwest::Client,
+    url: url::Url,
+    raw: bool,
+    cancel: &tokio_util::sync::CancellationToken,
+    deadline: Duration,
+) -> CoreResult<ToolOutput> {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(CoreError::Cancelled),
+        result = tokio::time::timeout(deadline, fetch_page(client, url, raw)) => {
+            result.unwrap_or_else(|_| {
+                Err(CoreError::Tool(format!(
+                    "The page did not finish loading within {} seconds",
+                    deadline.as_secs()
+                )))
+            })
+        }
+    }
+}
+
+/// Reads `url` for webfetch; `webfetch` bounds it in time and by Stop.
+async fn fetch_page(client: &reqwest::Client, url: url::Url, raw: bool) -> CoreResult<ToolOutput> {
+    let response = client
+        .get(url.clone())
+        .send()
+        .await
+        .map_err(tool_error)?
+        .error_for_status()
+        .map_err(tool_error)?;
+    let html_content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("text/html"));
+    let Some(body) = read_limited(response, WEBFETCH_MAX_BYTES).await? else {
+        tracing::info!(
+            host = url.host_str().unwrap_or_default(),
+            limit = WEBFETCH_MAX_BYTES,
+            "webfetch response too large"
+        );
+        return Err(CoreError::Tool(
+            "Response too large (over the 6 MiB webfetch limit)".into(),
+        ));
+    };
+    let mut text = String::from_utf8_lossy(&body).into_owned();
+    // HTML pages become markdown so the model reads content, not markup
+    // soup; sniff the body when the header is absent.
+    let looks_like_html = html_content_type
+        || text.trim_start().get(..15).is_some_and(|head| {
+            head.to_ascii_lowercase().starts_with("<!doctype html")
+                || head.to_ascii_lowercase().starts_with("<html")
+        });
+    if !raw && looks_like_html {
+        if let Ok(markdown) = htmd::convert(&text) {
+            text = markdown;
+        }
+    }
+    truncate_output(text).await
+}
+
+/// A response body, or `None` when it is larger than `limit` bytes. The
+/// declared length is checked first, and a body sent without one (or with a
+/// wrong one) is read only up to the limit; dropping the response closes
+/// the connection.
+async fn read_limited(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> CoreResult<Option<Vec<u8>>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Ok(None);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(tool_error)? {
+        if body.len() + chunk.len() > limit {
+            return Ok(None);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(Some(body))
 }
 
 struct ScheduleTool {
@@ -2993,34 +3087,8 @@ impl Tool for BuiltinTool {
                 if url.host_str().is_none() {
                     return Err(CoreError::Invalid("webfetch URL has no hostname".into()));
                 }
-                let response = self
-                    .client
-                    .get(url)
-                    .send()
-                    .await
-                    .map_err(tool_error)?
-                    .error_for_status()
-                    .map_err(tool_error)?;
-                let html_content_type = response
-                    .headers()
-                    .get("content-type")
-                    .and_then(|value| value.to_str().ok())
-                    .is_some_and(|value| value.contains("text/html"));
-                let mut text = response.text().await.map_err(tool_error)?;
                 let raw = args.get("format").and_then(serde_json::Value::as_str) == Some("raw");
-                // HTML pages become markdown so the model reads content, not
-                // markup soup; sniff the body when the header is absent.
-                let looks_like_html = html_content_type
-                    || text.trim_start().get(..15).is_some_and(|head| {
-                        head.to_ascii_lowercase().starts_with("<!doctype html")
-                            || head.to_ascii_lowercase().starts_with("<html")
-                    });
-                if !raw && looks_like_html {
-                    if let Ok(markdown) = htmd::convert(&text) {
-                        text = markdown;
-                    }
-                }
-                truncate_output(text).await
+                webfetch(&self.client, url, raw, &context.cancel, WEBFETCH_TIMEOUT).await
             }
             Kind::Todo | Kind::TodoWrite | Kind::TodoRead => Err(CoreError::Tool(
                 "todo state is managed by the runtime task coordinator".into(),
@@ -3464,23 +3532,15 @@ async fn generate_media_from_endpoint(
         response = request.send() => response.map_err(tool_error)?,
     };
     let status = response.status();
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_GENERATION_RESPONSE_BYTES as u64)
-    {
-        return Err(CoreError::Tool(
-            "media generation response exceeds the 72 MiB transport limit".into(),
-        ));
-    }
     let bytes = tokio::select! {
         () = cancel.cancelled() => return Err(CoreError::Cancelled),
-        bytes = response.bytes() => bytes.map_err(tool_error)?,
+        bytes = read_limited(response, MAX_GENERATION_RESPONSE_BYTES) => bytes?,
     };
-    if bytes.len() > MAX_GENERATION_RESPONSE_BYTES {
+    let Some(bytes) = bytes else {
         return Err(CoreError::Tool(
             "media generation response exceeds the 72 MiB transport limit".into(),
         ));
-    }
+    };
     if !status.is_success() {
         let detail = String::from_utf8_lossy(&bytes);
         return Err(CoreError::Tool(format!(
@@ -5676,6 +5736,199 @@ mod webfetch_tests {
                 "{request}"
             );
         }
+    }
+
+    /// Accepts one connection and reads its request head.
+    async fn accept_request(listener: &tokio::net::TcpListener) -> (tokio::net::TcpStream, String) {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let count = stream.read(&mut buffer).await.unwrap();
+            if count == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..count]);
+        }
+        (stream, String::from_utf8_lossy(&request).into_owned())
+    }
+
+    fn webfetch_tool() -> BuiltinTool {
+        BuiltinTool {
+            kind: Kind::WebFetch,
+            workspace: std::env::current_dir().unwrap(),
+            client: web_client(),
+            skills: None,
+            skill_catalog: Arc::from(""),
+            instructions: Arc::new(InstructionDiscovery::default()),
+        }
+    }
+
+    const CHUNKED_HEAD: &[u8] =
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+
+    fn chunk(size: usize) -> Vec<u8> {
+        format!("{size:x}\r\n{}\r\n", "a".repeat(size)).into_bytes()
+    }
+
+    #[tokio::test]
+    async fn stops_reading_a_body_without_length_once_it_passes_the_limit() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = accept_request(&listener).await;
+            stream.write_all(CHUNKED_HEAD).await.unwrap();
+            let chunk = chunk(64 * 1024);
+            let mut sent = 0_usize;
+            // Endless: only the client closing the connection ends it.
+            while stream.write_all(&chunk).await.is_ok() {
+                sent += 64 * 1024;
+            }
+            sent
+        });
+        let tool = webfetch_tool();
+        let error = tool
+            .execute(
+                json!({"url": format!("http://{address}/endless")}),
+                composite_context(&tool.workspace),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Response too large"), "{error}");
+        let sent = tokio::time::timeout(Duration::from_secs(20), server)
+            .await
+            .expect("the fetch closed the connection")
+            .unwrap();
+        // Socket buffers hold some of what was sent past the limit.
+        assert!(sent < WEBFETCH_MAX_BYTES + 16 * 1024 * 1024, "{sent}");
+    }
+
+    #[tokio::test]
+    async fn refuses_a_declared_length_over_the_limit_without_reading_it() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = accept_request(&listener).await;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n",
+                WEBFETCH_MAX_BYTES + 1
+            );
+            stream.write_all(head.as_bytes()).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        let tool = webfetch_tool();
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            tool.execute(
+                json!({"url": format!("http://{address}/large")}),
+                composite_context(&tool.workspace),
+            ),
+        )
+        .await
+        .expect("refused before any body arrived")
+        .unwrap_err();
+        assert!(error.to_string().contains("Response too large"), "{error}");
+        server.abort();
+    }
+
+    /// A server that sends its head and one chunk, then holds the
+    /// connection open without finishing the body.
+    async fn stalled_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = accept_request(&listener).await;
+            stream.write_all(CHUNKED_HEAD).await.unwrap();
+            stream.write_all(&chunk(16)).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(120)).await;
+        });
+        (address, server)
+    }
+
+    #[tokio::test]
+    async fn stop_abandons_a_fetch_whose_body_never_finishes() {
+        let (address, server) = stalled_server().await;
+        let tool = webfetch_tool();
+        let context = composite_context(&tool.workspace);
+        let cancel = context.cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            cancel.cancel();
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            tool.execute(json!({"url": format!("http://{address}/stall")}), context),
+        )
+        .await
+        .expect("Stop ended the fetch");
+        assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_fetch_whose_body_never_finishes_ends_at_its_deadline() {
+        let (address, server) = stalled_server().await;
+        let url = url::Url::parse(&format!("http://{address}/stall")).unwrap();
+        let error = webfetch(
+            &web_client(),
+            url,
+            false,
+            &CancellationToken::new(),
+            Duration::from_millis(300),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("did not finish loading"),
+            "{error}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_limited_read_stops_at_its_limit() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, request) = accept_request(&listener).await;
+                stream.write_all(CHUNKED_HEAD).await.unwrap();
+                let chunks = if request.contains("/small") {
+                    1
+                } else {
+                    usize::MAX
+                };
+                for _ in 0..chunks {
+                    if stream.write_all(&chunk(1024)).await.is_err() {
+                        break;
+                    }
+                }
+                let _ = stream.write_all(b"0\r\n\r\n").await;
+            }
+        });
+        let client = reqwest::Client::new();
+        let small = client
+            .get(format!("http://{address}/small"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            read_limited(small, 4096)
+                .await
+                .unwrap()
+                .map(|body| body.len()),
+            Some(1024)
+        );
+        let endless = client
+            .get(format!("http://{address}/endless"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(read_limited(endless, 4096).await.unwrap(), None);
+        tokio::time::timeout(Duration::from_secs(20), server)
+            .await
+            .expect("the read closed the connection")
+            .unwrap();
     }
 
     struct EchoInvoker;
