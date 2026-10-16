@@ -1636,6 +1636,47 @@ async fn tunnel_request(
     let host = broker.host(thread, Some(lease))?;
     host_tunnel(host, action, input).await
 }
+/// One tunnel attempt per address. Desktop's built-in browser reaches every
+/// site through these tunnels, so on a network that answers AAAA but drops
+/// IPv6, an IPv6 address tried first with no limit of its own would use the
+/// whole connect timeout and IPv4 would never be tried.
+const TUNNEL_ATTEMPT: Duration = Duration::from_secs(3);
+
+/// Connects to `host`, IPv4 addresses first, each for at most
+/// `TUNNEL_ATTEMPT`.
+async fn dial(host: &str, port: u16) -> std::io::Result<TcpStream> {
+    let addresses = tokio::net::lookup_host((host, port)).await?.collect();
+    dial_each(ipv4_first(addresses), TUNNEL_ATTEMPT).await
+}
+
+/// IPv4 before IPv6, each family in the resolver's order.
+fn ipv4_first(mut addresses: Vec<std::net::SocketAddr>) -> Vec<std::net::SocketAddr> {
+    addresses.sort_by_key(std::net::SocketAddr::is_ipv6);
+    addresses
+}
+
+async fn dial_each(
+    addresses: Vec<std::net::SocketAddr>,
+    attempt: Duration,
+) -> std::io::Result<TcpStream> {
+    let mut last = None;
+    for address in addresses {
+        match tokio::time::timeout(attempt, TcpStream::connect(address)).await {
+            Ok(Ok(socket)) => return Ok(socket),
+            Ok(Err(error)) => last = Some(error),
+            Err(_) => {
+                last = Some(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("{address} did not answer"),
+                ));
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "the host has no address")
+    }))
+}
+
 async fn host_tunnel(host: Arc<Host>, action: &str, input: Value) -> CoreResult<Value> {
     if action == "open" {
         if host.tunnels.lock().len() >= 128 {
@@ -1655,7 +1696,7 @@ async fn host_tunnel(host: Arc<Host>, action: &str, input: Value) -> CoreResult<
             .and_then(|port| u16::try_from(port).ok())
             .filter(|port| *port > 0)
             .ok_or_else(|| error("Invalid tunnel port"))?;
-        let socket = tokio::select! {()=host.closed.cancelled()=>return Err(error(RECOVERY)),value=tokio::time::timeout(Duration::from_secs(10),TcpStream::connect((hostname,port)))=>value.map_err(error)?.map_err(error)?};
+        let socket = tokio::select! {()=host.closed.cancelled()=>return Err(error(RECOVERY)),value=tokio::time::timeout(Duration::from_secs(10),dial(hostname,port))=>value.map_err(error)?.map_err(error)?};
         socket.set_nodelay(true).map_err(error)?;
         let (read, write) = socket.into_split();
         let id = uuid::Uuid::now_v7().to_string();
@@ -2029,6 +2070,48 @@ mod tests {
         });
         broker.hosts.lock().insert(thread, host.clone());
         (host, rx)
+    }
+    #[test]
+    fn tunnels_try_ipv4_addresses_first() {
+        let address = |value: &str| value.parse::<std::net::SocketAddr>().unwrap();
+        let resolved = [
+            "[2001:db8::1]:443",
+            "192.0.2.1:443",
+            "[2001:db8::2]:443",
+            "192.0.2.2:443",
+        ]
+        .map(address)
+        .to_vec();
+        assert_eq!(
+            ipv4_first(resolved),
+            [
+                "192.0.2.1:443",
+                "192.0.2.2:443",
+                "[2001:db8::1]:443",
+                "[2001:db8::2]:443"
+            ]
+            .map(address)
+            .to_vec()
+        );
+    }
+    #[tokio::test]
+    async fn a_tunnel_moves_past_an_address_that_never_answers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live = listener.local_addr().unwrap();
+        // 100::/64 is the IPv6 discard prefix: a dial there is dropped, or
+        // refused at once where the machine has no IPv6 route.
+        let dropped = format!("[100::1]:{}", live.port()).parse().unwrap();
+        let started = std::time::Instant::now();
+        let socket = dial_each(vec![dropped, live], Duration::from_millis(300))
+            .await
+            .unwrap();
+        assert_eq!(socket.peer_addr().unwrap(), live);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(
+            dial_each(vec![dropped], Duration::from_millis(300))
+                .await
+                .is_err()
+        );
     }
     #[tokio::test]
     async fn legacy_hosts_cannot_run_restricted_site_policies() {
