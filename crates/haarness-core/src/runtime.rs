@@ -3379,6 +3379,7 @@ impl AgentRuntime {
             *self.repository_rules.lock() = store.load()?;
         }
         let mut engine = components.config.permission_defaults(&thread.agent, name);
+        engine.set_workspace(&self.workspace);
         for rule in self.repository_rules.lock().iter().cloned() {
             engine.add_repository_grant(rule);
         }
@@ -8435,6 +8436,7 @@ impl RunnerTask {
         session_rules: &[PermissionRule],
     ) -> PermissionEngine {
         let mut engine = self.config.permission_defaults(agent, tool);
+        engine.set_workspace(&self.workspace);
         for rule in self.repository_rules.lock().iter().cloned() {
             engine.add_repository_grant(rule);
         }
