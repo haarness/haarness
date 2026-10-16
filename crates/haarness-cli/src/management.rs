@@ -2521,25 +2521,48 @@ fn edited_secret_map(
     Ok(next)
 }
 
-/// Arguments sent back as displayed keep the values their hidden parts stand
-/// for; a hidden part anywhere else must be given in full.
+/// Arguments sent back with hidden parts keep the values those parts stand
+/// for. A list sent back exactly as displayed is unchanged. Otherwise each
+/// hidden value is matched by what identifies it (its own text, as in
+/// `--token=<redacted>`, or for a bare value the flag before it, as in
+/// `--api-key <redacted>`), and only when exactly one argument fits; a
+/// value that cannot be matched must be given in full, so a reordered or
+/// shortened list never puts one secret in another's place.
 fn edited_secret_args(existing: &[String], next: Vec<String>) -> Result<Vec<String>> {
+    use haarness_core::redact::REDACTED;
+    fn key(args: &[String], index: usize) -> (Option<&str>, &str) {
+        let previous = (args[index] == REDACTED)
+            .then(|| index.checked_sub(1).map(|previous| args[previous].as_str()))
+            .flatten();
+        (previous, args[index].as_str())
+    }
     let shown = haarness_core::redact::args(existing);
-    next.into_iter()
-        .enumerate()
-        .map(|(index, value)| {
-            if !value.contains(haarness_core::redact::REDACTED) {
-                return Ok(value);
+    if next == shown {
+        return Ok(existing.to_vec());
+    }
+    let mut used = BTreeSet::new();
+    let mut restored = Vec::with_capacity(next.len());
+    for (index, value) in next.iter().enumerate() {
+        if !value.contains(REDACTED) {
+            restored.push(value.clone());
+            continue;
+        }
+        let wanted = key(&next, index);
+        let mut matches = (0..shown.len())
+            .filter(|&candidate| shown[candidate].contains(REDACTED))
+            .filter(|&candidate| key(&shown, candidate) == wanted);
+        match (matches.next(), matches.next()) {
+            (Some(candidate), None) if used.insert(candidate) => {
+                restored.push(existing[candidate].clone());
             }
-            match (shown.get(index), existing.get(index)) {
-                (Some(shown), Some(existing)) if *shown == value => Ok(existing.clone()),
-                _ => bail!(
-                    "Provide argument {} in full: it still contains a hidden part",
-                    index + 1
-                ),
-            }
-        })
-        .collect()
+            _ => bail!(
+                "Give argument {} ({value}) in full: its hidden value cannot be matched to \
+                 the one it stood for",
+                index + 1
+            ),
+        }
+    }
+    Ok(restored)
 }
 
 fn validate_mcp_entry(entry: &McpConfigureRequest) -> Result<()> {
@@ -3265,6 +3288,55 @@ mod tests {
                 .contains("has no plugin missing")
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hidden_mcp_arguments_are_restored_only_where_they_match() {
+        let args = |values: &[&str]| values.iter().map(|value| (*value).to_owned()).collect();
+        let existing: Vec<String> = args(&["--api-key", "AAA", "--token", "BBB", "--token=CCC"]);
+        let hidden = "<redacted>";
+        // Sent back as displayed: unchanged.
+        let shown = haarness_core::redact::args(&existing);
+        assert_eq!(
+            edited_secret_args(&existing, shown.clone()).unwrap(),
+            existing
+        );
+        // A shortened list keeps each value with its own flag.
+        assert_eq!(
+            edited_secret_args(&existing, args(&["--token", hidden])).unwrap(),
+            args(&["--token", "BBB"])
+        );
+        // Swapped pairs keep their values.
+        assert_eq!(
+            edited_secret_args(
+                &existing,
+                args(&[
+                    "--token",
+                    hidden,
+                    "--api-key",
+                    hidden,
+                    "--token=<redacted>",
+                    "-v"
+                ])
+            )
+            .unwrap(),
+            args(&["--token", "BBB", "--api-key", "AAA", "--token=CCC", "-v"])
+        );
+        // A hidden value under another flag, or used twice, is refused.
+        for next in [
+            args(&["--secret", hidden]),
+            args(&["--token", hidden, "--token", hidden]),
+            args(&["--api-key=<redacted>"]),
+        ] {
+            let error = edited_secret_args(&existing, next).unwrap_err().to_string();
+            assert!(error.contains("in full"), "{error}");
+        }
+        // Two values behind the same flag cannot be told apart once moved,
+        // but come back unchanged.
+        let headers: Vec<String> = args(&["-H", "A: 1", "-H", "B: 2", "--x"]);
+        let shown = haarness_core::redact::args(&headers);
+        assert_eq!(edited_secret_args(&headers, shown).unwrap(), headers);
+        assert!(edited_secret_args(&headers, args(&["-H", hidden])).is_err());
     }
 
     #[tokio::test]
