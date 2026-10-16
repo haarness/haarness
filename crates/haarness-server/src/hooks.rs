@@ -205,6 +205,7 @@ impl ConfiguredHooks {
             Err(error) => {
                 tracing::warn!(
                     event = %label.event,
+                    session = label.session.as_deref(),
                     tool = label.tool.as_deref(),
                     program = %label.program,
                     %error,
@@ -423,6 +424,9 @@ const SCAN_CHARS: usize = 2000;
 /// program its command starts, never the configured command line.
 struct HookLabel {
     event: String,
+    /// The chat the hook ran for, so a slow or failing hook can be traced to
+    /// the session that started it.
+    session: Option<String>,
     tool: Option<String>,
     program: String,
 }
@@ -431,6 +435,10 @@ impl HookLabel {
     fn new(entry: &HookEntry, payload: &Value) -> Self {
         Self {
             event: entry.event.clone(),
+            session: payload
+                .get("session_id")
+                .and_then(Value::as_str)
+                .map(|session| log_text(session, PROGRAM_CHARS)),
             tool: payload
                 .get("tool_name")
                 .and_then(Value::as_str)
@@ -448,6 +456,7 @@ impl HookLabel {
         );
         tracing::warn!(
             event = %self.event,
+            session = self.session.as_deref(),
             tool = self.tool.as_deref(),
             program = %self.program,
             code = status.code(),
@@ -461,6 +470,7 @@ impl HookLabel {
     fn wait_failed(&self, error: &std::io::Error, asynchronous: bool) {
         tracing::warn!(
             event = %self.event,
+            session = self.session.as_deref(),
             tool = self.tool.as_deref(),
             program = %self.program,
             asynchronous = asynchronous.then_some(true),
@@ -472,6 +482,7 @@ impl HookLabel {
     fn timed_out(&self, timeout: Duration, asynchronous: bool) {
         tracing::warn!(
             event = %self.event,
+            session = self.session.as_deref(),
             tool = self.tool.as_deref(),
             program = %self.program,
             timeout_secs = timeout.as_secs(),
@@ -496,6 +507,7 @@ impl HookLabel {
         ) {
             tracing::info!(
                 event = %self.event,
+                session = self.session.as_deref(),
                 tool = self.tool.as_deref(),
                 program = %self.program,
                 code,
@@ -505,6 +517,7 @@ impl HookLabel {
         } else {
             tracing::debug!(
                 event = %self.event,
+                session = self.session.as_deref(),
                 program = %self.program,
                 code,
                 reason = %reason,
@@ -1896,6 +1909,13 @@ mod tests {
         let blocked = capture.matching("hook blocked");
         assert_eq!(blocked.len(), 3, "{:?}", capture.lines());
         assert!(blocked.iter().all(|line| line.starts_with("INFO ")));
+        // Each line names the chat the hook ran for.
+        assert!(
+            blocked
+                .iter()
+                .all(|line| line.contains(&format!(" session={thread}"))),
+            "{blocked:?}"
+        );
         for (line, expected) in blocked.iter().zip([
             [
                 " tool=bash",

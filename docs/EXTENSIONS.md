@@ -181,7 +181,8 @@ correspond to runtime lifecycle events; `threadId` stands in for `sessionID`.
 
 Where each hook fires:
 
-- `session.start` when a thread is created; `session.end` when a thread is
+- `session.start` when a chat is created, but not a chat started inside
+  another (a task subagent, a workflow's thread or agent); `session.end` when a thread is
   archived (Haarness has no thread deletion). `chat.turn.end` follows `stop`
   for every completed root turn; token and cost totals are not part of the
   payload yet.
