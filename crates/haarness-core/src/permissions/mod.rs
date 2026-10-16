@@ -46,7 +46,15 @@ pub struct PermissionEngine {
     /// a later rule or session approval allows. Used for the plan agent and
     /// for child agents inheriting their parent's boundary.
     ceilings: Vec<PermissionRule>,
+    /// The project folder, when known: `read`, `edit` and `list` rules then
+    /// name a project file however the call spelled its path.
+    workspace: Option<PathBuf>,
 }
+
+/// Permissions whose patterns are file paths. A rule for one of them written
+/// relative to the project also names the file's absolute path, and an
+/// absolute rule its project-relative one.
+const PATH_PERMISSIONS: [&str; 3] = ["read", "edit", "list"];
 
 /// The built-in `read` rules for environment secrets, in order (last match
 /// wins). Packages ship `.env` files, often as test fixtures, so a file
@@ -84,7 +92,15 @@ impl PermissionEngine {
             session_rules: Vec::new(),
             repository_grants: Vec::new(),
             ceilings: Vec::new(),
+            workspace: None,
         }
+    }
+
+    /// Let path rules name a file in `workspace` by either spelling: a model
+    /// may read `/project/secrets/key` while the rule says `secrets/*`, or
+    /// the other way round. Rules starting with `*` match as written.
+    pub fn set_workspace(&mut self, workspace: &Path) {
+        self.workspace = Some(workspace.to_path_buf());
     }
 
     /// Ordinary tools run by default. External paths and environment secrets
@@ -175,12 +191,10 @@ impl PermissionEngine {
     #[must_use]
     pub fn evaluate_detailed(&self, operation: &str) -> Evaluation {
         let operation = normalize_operation_alias(operation);
+        let spellings = self.path_spellings(&operation);
+        let names = |rule: &&PermissionRule| rule_names(rule, &operation, &spellings);
         // Ceilings first and independently: their deny is final.
-        if let Some(ceiling) = self
-            .ceilings
-            .iter()
-            .rfind(|rule| wildcard_match(&rule.pattern, operation.as_ref()))
-        {
+        if let Some(ceiling) = self.ceilings.iter().rfind(names) {
             if ceiling.decision == PermissionDecision::Deny {
                 return Evaluation {
                     decision: PermissionDecision::Deny,
@@ -188,18 +202,9 @@ impl PermissionEngine {
                 };
             }
         }
-        let configured = self
-            .rules
-            .iter()
-            .rfind(|rule| wildcard_match(&rule.pattern, operation.as_ref()));
-        let grant = self
-            .session_rules
-            .iter()
-            .rfind(|rule| wildcard_match(&rule.pattern, operation.as_ref()));
-        let repository = self
-            .repository_grants
-            .iter()
-            .rfind(|rule| wildcard_match(&rule.pattern, operation.as_ref()));
+        let configured = self.rules.iter().rfind(names);
+        let grant = self.session_rules.iter().rfind(names);
+        let repository = self.repository_grants.iter().rfind(names);
         // An "always" answer or sharing consent never reopens a configured
         // deny: `always` on `git push origin` must not allow a denied
         // `git push --force`.
@@ -212,6 +217,60 @@ impl PermissionEngine {
             decision: matched.map_or(PermissionDecision::Ask, |rule| rule.decision),
             matched: matched.map(|rule| rule.pattern.clone()),
         }
+    }
+
+    /// The other ways to write a path operation's file, each with whether it
+    /// is absolute: the project-relative path of an absolute one inside the
+    /// project (also through a link such as macOS's `/tmp` for
+    /// `/private/tmp`), or the absolute paths of a relative one.
+    fn path_spellings(&self, operation: &str) -> Vec<(String, bool)> {
+        let Some(workspace) = &self.workspace else {
+            return Vec::new();
+        };
+        let Some((permission, target)) = operation.split_once(':') else {
+            return Vec::new();
+        };
+        if !PATH_PERMISSIONS.contains(&permission)
+            || target.is_empty()
+            || target == "*"
+            || target.starts_with('~')
+        {
+            return Vec::new();
+        }
+        let configured = normalize_absolute(workspace);
+        let root = workspace
+            .canonicalize()
+            .unwrap_or_else(|_| configured.clone());
+        let given = Path::new(target);
+        let mut spellings = Vec::new();
+        if given.is_absolute() {
+            let named = normalize_absolute(given);
+            let relative = named
+                .strip_prefix(&configured)
+                .or_else(|_| named.strip_prefix(&root))
+                .map(Path::to_path_buf)
+                .or_else(|_| {
+                    resolve_permission_path(workspace, target)
+                        .strip_prefix(&root)
+                        .map(Path::to_path_buf)
+                });
+            if let Ok(relative) = relative {
+                let relative = relative.to_string_lossy();
+                let relative = if relative.is_empty() { "." } else { &relative };
+                spellings.push((format!("{permission}:{relative}"), false));
+            }
+        } else {
+            for base in [&configured, &root] {
+                let absolute = format!(
+                    "{permission}:{}",
+                    normalize_absolute(&base.join(given)).to_string_lossy()
+                );
+                if !spellings.iter().any(|(known, _)| known == &absolute) {
+                    spellings.push((absolute, true));
+                }
+            }
+        }
+        spellings
     }
 
     /// Whether a tool is categorically unavailable and should therefore be
@@ -231,6 +290,29 @@ impl PermissionEngine {
             canonical_tool_permission(tool),
         ) || ruleset_disables_tool(self.ceilings.iter(), canonical_tool_permission(tool))
     }
+}
+
+/// Whether `rule` covers `operation`, as written or, for a path rule, by the
+/// file's other spelling: a relative rule meets the project-relative path and
+/// an absolute rule the absolute one. A rule starting with `*` (the built-in
+/// secret rules) or `~` matches as written, so it means what it always did.
+fn rule_names(rule: &PermissionRule, operation: &str, spellings: &[(String, bool)]) -> bool {
+    if wildcard_match(&rule.pattern, operation) {
+        return true;
+    }
+    if spellings.is_empty() {
+        return false;
+    }
+    let Some((_, target)) = rule.pattern.split_once(':') else {
+        return false;
+    };
+    if target.is_empty() || target.starts_with(['*', '~']) {
+        return false;
+    }
+    let absolute = Path::new(target).is_absolute();
+    spellings.iter().any(|(spelled, spelled_absolute)| {
+        *spelled_absolute == absolute && wildcard_match(&rule.pattern, spelled)
+    })
 }
 
 fn ruleset_disables_browser<'a>(
@@ -956,5 +1038,112 @@ mod tests {
             PermissionDecision::Allow
         );
         assert_eq!(engine.evaluate("bash:cargo run"), PermissionDecision::Ask);
+    }
+
+    #[test]
+    fn path_rules_name_a_project_file_by_either_spelling() {
+        let project = Path::new("/work/project");
+        let mut engine = PermissionEngine::build_defaults();
+        engine.add_rule(rule("read:secrets/*", PermissionDecision::Deny));
+        engine.add_rule(rule(
+            "edit:/work/project/vendor/*",
+            PermissionDecision::Deny,
+        ));
+        engine.add_rule(rule("list:build", PermissionDecision::Ask));
+        // Without the project folder, rules match the path as written.
+        assert_eq!(
+            engine.evaluate("read:/work/project/secrets/key"),
+            PermissionDecision::Allow
+        );
+        engine.set_workspace(project);
+        for operation in [
+            "read:secrets/key",
+            "read:/work/project/secrets/key",
+            "read:/work/project/./src/../secrets/key",
+            "edit:vendor/lib.rs",
+            "write:vendor/lib.rs",
+            "edit:/work/project/vendor/lib.rs",
+        ] {
+            assert_eq!(
+                engine.evaluate(operation),
+                PermissionDecision::Deny,
+                "{operation}"
+            );
+        }
+        assert_eq!(
+            engine.evaluate("list:/work/project/build"),
+            PermissionDecision::Ask
+        );
+        // The deny names the rule as written.
+        assert_eq!(
+            engine
+                .evaluate_detailed("read:/work/project/secrets/key")
+                .matched
+                .as_deref(),
+            Some("read:secrets/*")
+        );
+        // Outside the project, or another permission, nothing changes.
+        for operation in [
+            "read:/elsewhere/secrets/key",
+            "read:../secrets/key",
+            "bash:cat /work/project/secrets/key",
+            "read:/work/project-other/secrets/key",
+        ] {
+            assert_eq!(
+                engine.evaluate(operation),
+                PermissionDecision::Allow,
+                "{operation}"
+            );
+        }
+    }
+
+    #[test]
+    fn rules_starting_with_a_star_still_match_only_as_written() {
+        // A project inside a node_modules folder: a relative `.env` read asks
+        // as before, although its absolute path is inside node_modules.
+        let mut engine = PermissionEngine::build_defaults();
+        engine.set_workspace(Path::new("/work/node_modules/project"));
+        assert_eq!(engine.evaluate("read:.env"), PermissionDecision::Ask);
+        assert_eq!(
+            engine.evaluate("read:/work/node_modules/project/.env"),
+            PermissionDecision::Allow
+        );
+        // Ceilings and grants follow the same matching as configured rules.
+        let mut child = PermissionEngine::build_defaults();
+        child.set_workspace(Path::new("/work/project"));
+        child.add_ceiling(rule("edit:generated/*", PermissionDecision::Deny));
+        child.approve_always("read:/work/project/notes/.env");
+        assert_eq!(
+            child.evaluate("edit:/work/project/generated/a.rs"),
+            PermissionDecision::Deny
+        );
+        assert_eq!(child.evaluate("read:notes/.env"), PermissionDecision::Allow);
+    }
+
+    #[test]
+    fn a_project_path_through_a_folder_link_is_still_a_project_path() {
+        // macOS keeps temporary folders under /private/var, also reachable
+        // as /var: a rule for the project meets a path through either.
+        let project = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("haarness-path-rules-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(project.join("secrets")).unwrap();
+        let mut engine = PermissionEngine::build_defaults();
+        engine.add_rule(rule("read:secrets/*", PermissionDecision::Deny));
+        engine.set_workspace(&project);
+        let canonical = project.join("secrets/key").to_string_lossy().into_owned();
+        assert_eq!(
+            engine.evaluate(&format!("read:{canonical}")),
+            PermissionDecision::Deny
+        );
+        if let Some(alias) = canonical.strip_prefix("/private") {
+            assert_eq!(
+                engine.evaluate(&format!("read:{alias}")),
+                PermissionDecision::Deny,
+                "{alias}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&project);
     }
 }
