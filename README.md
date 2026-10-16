@@ -254,7 +254,7 @@ haarness mcp prompt files review --arguments '{"target":"src"}'
 haarness mcp disconnect files
 haarness mcp reconnect files
 haarness mcp logout protected
-haarness mcp get remote # redacts env/header values; add --show-secrets explicitly
+haarness mcp get remote # hides env/header values and URL/argument credentials; add --show-secrets explicitly
 haarness mcp disable remote
 haarness mcp tools files
 haarness workflow list
@@ -434,6 +434,8 @@ Explicit administration requests expose `skill_manage`, `plugin_manage`, `mcp_ma
 Tool availability is enforced twice: disabled schemas are omitted from provider requests, and a fabricated/direct call is rejected before execution. Lazy mode applies after permissions and intent gating. Essential coding tools and configured pins remain resident; optional native/MCP schemas are replaced by the compact `load_tool` search schema when the estimated savings crosses the `auto` threshold (or unconditionally in `always` mode). A loaded schema appears on the next provider round and remains promoted for that session, with a 64-tool bound. Catalog estimates use deterministic serialized-schema bytes rather than claiming model-specific tokenizer precision.
 
 Marketplace plugin sources accept `.` or `./` when the marketplace root is itself the plugin. Git sources (`github`, `url`, `git-subdir`) honour `ref` (a branch or tag) and `sha` (a full commit id, which wins), so `install` and `update` fetch exactly the pinned commit; a `url` source may also name a `path` inside the repository. Other relative sources must identify a safe in-marketplace path, while `git-subdir` must identify a real child path. Haarness materializes relative plugins into an owned cache, preserves internal symlinks, excludes `.git`, rejects symlinks that escape the plugin root, and never removes the registered marketplace when uninstalling a root-source plugin.
+
+MCP settings never show their credentials, wherever they are displayed (`haarness mcp get`, the TUI and Desktop settings, the model's `mcp_manage` tool): environment and header values, a password or user name in the server URL, credential-named query parameters such as `?api_key=`, and command arguments such as `--api-key VALUE`, `--token=VALUE` or `-H 'Authorization: …'` read `<redacted>`, while the host, path and other arguments stay readable. A setting saved back unchanged keeps the values it stands for. A server that cannot be reached is named the same way in its status.
 
 An MCP tool's text, images and audio reach the model as its result. A tool that answers with structured content and no text (as one with an output schema may, or beside only an image, audio or a link) has that content passed on as JSON text, to the model and to a workflow's `tool()` call alike; a failure with no text at all says which tool failed.
 

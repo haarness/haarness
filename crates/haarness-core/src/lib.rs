@@ -14,6 +14,7 @@ pub mod patch;
 mod permissions;
 mod ports;
 mod prefix_warmup;
+pub mod redact;
 mod runtime;
 mod side_question;
 mod stream_limits;

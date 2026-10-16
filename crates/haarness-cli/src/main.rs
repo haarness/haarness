@@ -657,15 +657,17 @@ enum McpCommand {
         #[arg(long, visible_alias = "local")]
         project: bool,
     },
-    /// Show one MCP configuration. Environment and header values are redacted
-    /// unless --show-secrets is explicitly supplied.
+    /// Show one MCP configuration. Environment and header values, and
+    /// credentials in the URL or arguments, are redacted unless
+    /// --show-secrets is explicitly supplied.
     Get {
         /// MCP server name.
         name: String,
         /// Use this project's configuration instead of the global one.
         #[arg(long, visible_alias = "local")]
         project: bool,
-        /// Show environment and header values instead of hiding them.
+        /// Show environment and header values and URL and argument
+        /// credentials instead of hiding them.
         #[arg(long)]
         show_secrets: bool,
     },
@@ -7565,6 +7567,7 @@ fn mcp_config_for_display(
     entry: &McpConfigureRequest,
     show_secrets: bool,
 ) -> Result<serde_json::Value> {
+    use haarness_core::redact;
     let mut value = serde_json::to_value(entry)?;
     if !show_secrets {
         for field in ["env", "headers"] {
@@ -7573,12 +7576,21 @@ fn mcp_config_for_display(
                 .and_then(serde_json::Value::as_object_mut)
             {
                 for value in values.values_mut() {
-                    *value = serde_json::Value::String("<redacted>".into());
+                    *value = serde_json::Value::String(redact::REDACTED.into());
                 }
             }
         }
         if value.get("headersHelper").is_some() {
-            value["headersHelper"] = serde_json::Value::String("<redacted>".into());
+            value["headersHelper"] = serde_json::Value::String(redact::REDACTED.into());
+        }
+        // A server URL may carry a key in its user name or query, and a
+        // local server's arguments a `--api-key` value; the rest of each
+        // stays readable.
+        if let Some(url) = &entry.url {
+            value["url"] = serde_json::Value::String(redact::url(url).into_owned());
+        }
+        if !entry.args.is_empty() {
+            value["args"] = serde_json::json!(redact::args(&entry.args));
         }
     }
     Ok(value)
@@ -10789,10 +10801,66 @@ mod tests {
 
         let redacted = mcp_config_for_display(&entry, false).unwrap();
         assert_eq!(redacted["headers"]["Authorization"], "<redacted>");
+        assert_eq!(redacted["url"], "https://example.test/mcp");
         let explicit = mcp_config_for_display(&entry, true).unwrap();
         assert_eq!(explicit["headers"]["Authorization"], "Bearer ${TOKEN}");
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mcp_display_hides_credentials_in_urls_and_arguments() {
+        let remote = McpConfigureRequest {
+            transport: "streamable_http".into(),
+            command: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: None,
+            url: Some("https://user:hunter2@mcp.example.test/mcp?api_key=sk-1&region=eu".into()),
+            headers: BTreeMap::new(),
+            headers_helper: None,
+            timeout_ms: None,
+            oauth: None,
+            oauth_client_id: None,
+            oauth_scopes: Vec::new(),
+            enabled: true,
+        };
+        let shown = mcp_config_for_display(&remote, false).unwrap();
+        assert_eq!(
+            shown["url"],
+            "https://<redacted>@mcp.example.test/mcp?api_key=<redacted>&region=eu"
+        );
+        assert_eq!(
+            mcp_config_for_display(&remote, true).unwrap()["url"],
+            remote.url.as_deref().unwrap()
+        );
+        let local = McpConfigureRequest {
+            transport: "stdio".into(),
+            command: Some("npx".into()),
+            args: [
+                "-y",
+                "@acme/mcp",
+                "--api-key",
+                "sk-live-1",
+                "--region",
+                "eu",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            url: None,
+            ..remote
+        };
+        assert_eq!(
+            mcp_config_for_display(&local, false).unwrap()["args"],
+            serde_json::json!([
+                "-y",
+                "@acme/mcp",
+                "--api-key",
+                "<redacted>",
+                "--region",
+                "eu"
+            ])
+        );
     }
 
     #[test]

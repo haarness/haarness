@@ -471,8 +471,12 @@ impl NativeMcpRegistry {
                 }
                 Err(ActivationError::Core(error)) => {
                     entry.info.status = "failed".into();
-                    entry.info.detail =
-                        Some(format!("connection failed: {}", concise_error(&error)));
+                    // Clients, the model's `mcp_manage` and logs show this:
+                    // a URL in it keeps its host but not its credentials.
+                    entry.info.detail = Some(format!(
+                        "connection failed: {}",
+                        haarness_core::redact::urls_in(&concise_error(&error))
+                    ));
                     return Err(error);
                 }
             };
@@ -1468,6 +1472,7 @@ fn count_mcp_attachment(encoded: &str, total: &mut usize) -> CoreResult<()> {
 /// A server that could not be reached reads as that, with the innermost
 /// reason ("Connection refused"), not as rmcp's transport type names.
 fn initialize_error(error: &(dyn std::error::Error + 'static), url: &str) -> CoreError {
+    let url = haarness_core::redact::url(url);
     let text = error.to_string();
     if text.contains("error sending request") {
         if let Some(cause) = std::iter::successors(Some(error), |error| error.source()).last()
