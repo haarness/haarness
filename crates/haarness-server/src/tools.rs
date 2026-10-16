@@ -1377,11 +1377,23 @@ async fn fetch_page(client: &reqwest::Client, url: url::Url, raw: bool) -> CoreR
                 || head.to_ascii_lowercase().starts_with("<html")
         });
     if !raw && looks_like_html {
-        if let Ok(markdown) = htmd::convert(&text) {
+        if let Some(markdown) = html_to_markdown(&text) {
             text = markdown;
         }
     }
     truncate_output(text).await
+}
+
+/// htmd writes the text of `script` and `style` like any other block, so a
+/// page's inline JavaScript and CSS would read as its content.
+fn html_to_markdown(html: &str) -> Option<String> {
+    htmd::HtmlToMarkdown::builder()
+        .skip_tags(vec![
+            "script", "style", "noscript", "template", "iframe", "object", "embed",
+        ])
+        .build()
+        .convert(html)
+        .ok()
 }
 
 /// A response body, or `None` when it is larger than `limit` bytes. The
@@ -5661,15 +5673,36 @@ mod webfetch_tests {
 
     #[test]
     fn html_converts_to_readable_markdown() {
-        let html = "<!doctype html><html><body><h1>Title</h1>\
+        let html = "<!doctype html><html><head><title>Page</title>\
+                    <style>body { color: red }</style><script>headScript()</script></head>\
+                    <body><h1>Title</h1>\
                     <p>Hello <strong>world</strong></p>\
                     <ul><li>one</li><li>two</li></ul>\
-                    <script>ignore me</script></body></html>";
-        let markdown = htmd::convert(html).unwrap();
+                    <script>ignore me</script><noscript>enable scripts</noscript>\
+                    <p>after the script</p></body></html>";
+        let markdown = html_to_markdown(html).unwrap();
         assert!(markdown.contains("# Title"), "{markdown}");
         assert!(markdown.contains("**world**"), "{markdown}");
         assert!(markdown.contains("one"), "{markdown}");
-        assert!(!markdown.contains("script"), "{markdown}");
+        assert!(markdown.contains("after the script"), "{markdown}");
+        for hidden in ["ignore me", "headScript", "color: red", "enable scripts"] {
+            assert!(!markdown.contains(hidden), "{hidden}: {markdown}");
+        }
+    }
+
+    #[test]
+    fn html_keeps_text_outside_any_element() {
+        assert_eq!(
+            html_to_markdown("bare-nonce-314159\n").as_deref(),
+            Some("bare-nonce-314159")
+        );
+        let markdown =
+            html_to_markdown("<p>kept</p><script>dropped()</script><style>p{}</style> tail")
+                .unwrap();
+        assert!(markdown.contains("kept"), "{markdown}");
+        assert!(markdown.contains("tail"), "{markdown}");
+        assert!(!markdown.contains("dropped"), "{markdown}");
+        assert!(!markdown.contains("p{}"), "{markdown}");
     }
 
     #[tokio::test]

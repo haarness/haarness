@@ -451,7 +451,8 @@ Anthropic, and Bedrock accept PDF/images; Gemini accepts PDF/image/audio/video.
 OpenAI-compatible Chat endpoints receive their native file, image, or MP3/WAV
 shape where available, but the selected gateway and model remain authoritative.
 
-`webfetch` reads one HTTP or HTTPS address. Reading stops as soon as a response
+`webfetch` reads one HTTP or HTTPS address and turns an HTML page into Markdown,
+leaving out its scripts, styles and embedded frames. Reading stops as soon as a response
 passes 6 MiB, also when the server sends no length or a wrong one; a fetch that
 has not finished after 60 seconds ends with an error, and Stop ends it at once.
 
