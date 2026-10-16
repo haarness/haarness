@@ -1788,7 +1788,7 @@ impl Tool for WorkflowTool {
                 "Do not start a workflow for ordinary conversation, a focused edit, or a short sequential task. At most one top-level workflow should normally be active for a request. Child agents and workflow agents cannot create nested workflows unless their author explicitly grants tools.workflow=true.",
                 "Reusable files live under .haarness/workflows/<name>.ts; compatible legacy workflow roots are also discovered.",
                 "For a one-off inline workflow, prefer the restricted portable form: export const meta = { name: 'audit', phases: ['scan'] }; phase('scan'); const results = await parallel([() => agent('inspect A'), () => agent('inspect B')], { concurrencyLimit: 2 }); return results. Portable bodies expose args, phase, status, log, agent, tool, shell, workflow, parallel, and pipeline without direct filesystem/process/network globals.",
-                "Use read to list workflows or return one source; start with exactly one of name, source, or path; wait/inspect/cancel/pause/resume/delete operate on a runID.",
+                "Use read to list workflows or return one source; start with exactly one of name, source, or path; wait/inspect/cancel/pause/resume/delete operate on a runID. name is the invocation read lists: a plugin's workflow is plugin:name.",
                 "When source or path is supplied for start, it is authoritative and name is ignored. Do not include name expecting an additional lookup.",
                 "start may set workflow-wide agent, model, and variant defaults; an individual agent call and phase model/variant metadata take precedence.",
                 "Use create only when the user explicitly asks to persist the inline source. Creation never overwrites an existing file.",
@@ -1801,9 +1801,9 @@ impl Tool for WorkflowTool {
                     "action": {
                         "type": "string",
                         "enum": ["read", "start", "wait", "inspect", "create", "cancel", "pause", "resume", "delete"],
-                        "description":"read lists workflows or reads one by name; start requires exactly one of name, path, or source; wait, inspect, cancel, pause, resume, and delete require runID; create persists source."
+                        "description":"read lists workflows or reads one by its invocation (name); start requires exactly one of name, path, or source; wait, inspect, cancel, pause, resume, and delete require runID; create persists source."
                     },
-                    "name": {"type": "string", "description":"Existing workflow name for read or start-by-name; required with source for create. Omit for start when path or source is supplied."},
+                    "name": {"type": "string", "description":"An existing workflow's invocation, exactly as read lists it, for read or start-by-name: a plugin's workflow is plugin:name (such as shipping:audit), never its bare name. Required with source for create. Omit for start when path or source is supplied."},
                     "args": {"description":"JSON value passed to the workflow. Native workflow arguments must match its declaration."},
                     "runID": {"type": "string", "description":"Exact workflow run UUID returned by start. Required for wait, inspect, cancel, pause, resume, and delete."},
                     "source": {"type": "string", "description":"Inline workflow source for a one-off start or explicit create. For start, use source without name."},
