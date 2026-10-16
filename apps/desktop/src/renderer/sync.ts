@@ -29,16 +29,18 @@ function merge<V extends { id: string }>(items: V[], value: V) {
 }
 /**
  * A chat's history as a read returned it, plus the items `events` (what
- * arrived while the read was in flight) created in `thread` after it. The
- * read is the server's copy of everything it holds; an item created after
- * the server answered is not in it, and setting the read alone would drop
- * that item, and with it a reply whose streamed text it had replaced.
+ * arrived while the read was in flight) created in `thread` after it, and
+ * their rewrites. The read is the server's copy of everything it holds; an
+ * item created after the server answered is not in it, and setting the read
+ * alone would drop that item, and with it a reply whose streamed text it had
+ * replaced. A rewrite is the item's final form, so it wins either way.
  */
 export function landItems(read: T.Item[], events: T.EventEnvelope[], thread: string) {
   const items = new Map(read.map((item) => [item.id, item]));
   for (const event of events) {
     const item = event.payload as T.Item;
-    if (event.type === "item.created" && item?.id && item.threadId === thread && !items.has(item.id))
+    if (!item?.id || item.threadId !== thread) continue;
+    if (event.type === "item.updated" || (event.type === "item.created" && !items.has(item.id)))
       items.set(item.id, item);
   }
   return [...items.values()].sort((a, b) => a.sequence - b.sequence);
@@ -85,6 +87,15 @@ export function reduceEvent<S extends Live>(
           ),
       }),
     );
+  }
+  // A slash command's message is rewritten to what the command expanded to
+  // once it runs; the open chat shows that, as it does after a reopen.
+  if (event.type === "item.updated" && payload.id) {
+    const item = payload as T.Item;
+    if (item.threadId === state.selected)
+      update("items", (items) =>
+        merge(items, item).sort((a, b) => a.sequence - b.sequence),
+      );
   }
   if (event.type === "item.created" && payload.id) {
     const item = payload as T.Item;

@@ -3086,6 +3086,24 @@ test("the global shortcut is off until turned on, registers only a free combinat
   expect(errors).toEqual([]);
 });
 
+test("a slash command's message shows what the command expanded to while the chat is open, as after reopening", async () => {
+  await showChat();
+  await newSession();
+  await send("/ui-layout-short expand-proof");
+  await expect(page.locator(".transcript")).toContainText("Echo:");
+  // The server keeps the message as the command expanded it.
+  let stored = "";
+  for (const thread of await client.listThreads()) {
+    const found = (await client.listItems(thread.id)).find(
+      (item) => item.data.type === "user_message" && item.data.text.includes("Return UI command evidence."),
+    );
+    if (found?.data.type === "user_message") stored = found.data.text;
+  }
+  expect(stored).not.toBe("");
+  await expect(page.locator("article.message.user").last()).toContainText("Return UI command evidence.");
+  expect(errors).toEqual([]);
+});
+
 test("conversation tab order survives reopening and uses horizontal keyboard controls", async () => {
   await expandPrimaryProject();
   const first = await client.createThread({
