@@ -3412,9 +3412,7 @@ impl AgentRuntime {
             }
         }
         if let Some(parent_id) = thread.parent_id {
-            for rule in self.permission_boundary_for_lineage(parent_id).await? {
-                engine.add_ceiling(rule);
-            }
+            engine.add_inherited_ceiling(self.permission_boundary_for_lineage(parent_id).await?);
         }
         let tool = components.tools.get(name).ok_or_else(|| {
             unknown_tool(
@@ -3433,6 +3431,13 @@ impl AgentRuntime {
                     .map(|tool| tool.name),
             )
         })?;
+        if !engine.hides_tool(name)
+            && let Some(rule) = engine.inherited_tool_denial(name)
+        {
+            return Err(CoreError::PermissionDenied(inherited_tool_refusal(
+                name, rule,
+            )));
+        }
         if engine.disables_tool(name) {
             return Err(CoreError::PermissionDenied(format!(
                 "tool {name} is disabled by permission policy. Do not retry this action."
@@ -4440,7 +4445,7 @@ impl AgentRuntime {
         &self,
         thread_id: ThreadId,
         mut request: StartTurnRequest,
-        inherited_ceilings: Vec<PermissionRule>,
+        inherited_ceilings: Vec<Vec<PermissionRule>>,
         output_schema: Option<serde_json::Value>,
         queue_revision: Option<u64>,
     ) -> CoreResult<Turn> {
@@ -4901,7 +4906,7 @@ impl AgentRuntime {
         );
     }
 
-    fn permission_boundary(&self, agent: &AgentSnapshot) -> Vec<PermissionRule> {
+    fn permission_boundary(&self, agent: &AgentSnapshot) -> Vec<Vec<PermissionRule>> {
         let components = self.components();
         let mut engine = components.config.permission_defaults(&agent.id, "");
         for rule in self.repository_rules.lock().iter().cloned() {
@@ -4955,7 +4960,7 @@ impl AgentRuntime {
     async fn permission_boundary_for_lineage(
         &self,
         authority_thread_id: ThreadId,
-    ) -> CoreResult<Vec<PermissionRule>> {
+    ) -> CoreResult<Vec<Vec<PermissionRule>>> {
         // Walk the authority lineage, not only the immediate launch thread.
         // A build-profile workflow started by a plan-bounded child must not
         // discard the original plan ceiling for either agents or direct tools.
@@ -5177,7 +5182,7 @@ struct RunnerTask {
     parent: Option<ParentLink>,
     /// Ceiling rules a child agent inherits from its parent — evaluated
     /// independently, so a child can never escalate past its parent.
-    inherited_ceilings: Vec<PermissionRule>,
+    inherited_ceilings: Vec<Vec<PermissionRule>>,
     /// Schema-constrained final output requested by a workflow-owned turn.
     /// Normal user and nested task turns always leave this unset.
     output_schema: Option<serde_json::Value>,
@@ -6694,7 +6699,11 @@ impl RunnerTask {
                 // denied tool only invites guaranteed failures. Default child
                 // agents also cannot recursively spawn tasks, so hide `task`
                 // rather than letting the model discover that ceiling by
-                // repeatedly calling it.
+                // repeatedly calling it. A boundary inherited from the chat
+                // that started this one never hides a tool: it differs
+                // between sessions of one agent, and the tools lead the
+                // cached prompt prefix those sessions share. Such a tool is
+                // refused when called, naming the parent's rule.
                 let permission_engine = self.permission_engine(agent);
                 let catalog = self.tools.list();
                 let eligible_tools = catalog
@@ -6704,7 +6713,7 @@ impl RunnerTask {
                         self.tool_enabled(&tool.name)
                             && !(self.depth >= self.config.execution.subagent_depth
                                 && tool.name == "task")
-                            && !permission_engine.disables_tool(&tool.name)
+                            && !permission_engine.hides_tool(&tool.name)
                             && (goal_for_request.is_some() || !is_goal_tool(&tool.name))
                     })
                     .collect::<Vec<_>>();
@@ -6720,7 +6729,7 @@ impl RunnerTask {
                 // Deferring an allowed tool is only useful when its loader is
                 // callable under this turn's permissions and explicit mask.
                 if !self.tool_enabled(LOAD_TOOL_NAME)
-                    || permission_engine.disables_tool(LOAD_TOOL_NAME)
+                    || permission_engine.hides_tool(LOAD_TOOL_NAME)
                 {
                     lazy_settings.mode = haarness_protocol::LazyToolMode::Off;
                 }
@@ -7663,6 +7672,14 @@ impl RunnerTask {
                 .collect::<Vec<_>>();
             return Err(unknown_tool(name, available));
         }
+        if self.tool_enabled(name)
+            && !engine.hides_tool(name)
+            && let Some(rule) = engine.inherited_tool_denial(name)
+        {
+            return Err(CoreError::PermissionDenied(inherited_tool_refusal(
+                name, rule,
+            )));
+        }
         if !self.tool_enabled(name)
             || engine.disables_tool(name)
             || (self.depth >= self.config.execution.subagent_depth && name == "task")
@@ -8513,9 +8530,7 @@ impl RunnerTask {
                 engine.add_rule(rule);
             }
         }
-        for rule in self.inherited_ceilings.iter().cloned() {
-            engine.add_ceiling(rule);
-        }
+        engine.add_inherited_ceiling(self.inherited_ceilings.iter().cloned());
         engine
     }
 
@@ -10730,6 +10745,14 @@ fn with_target_path(arguments: &serde_json::Value, path: &str) -> serde_json::Va
         object.insert("path".into(), json!(path));
     }
     arguments
+}
+
+/// Why a tool listed for this agent is refused: the chat that started it
+/// denies the whole tool.
+fn inherited_tool_refusal(tool: &str, rule: &str) -> String {
+    format!(
+        "tool {tool} is denied by the rule '{rule}' of the chat or agent that started this one, which no rule here can lift. Do not retry it; do this part another way or report it to that agent."
+    )
 }
 
 /// Why a scheduled run's Chrome site gate failed instead of waiting.
