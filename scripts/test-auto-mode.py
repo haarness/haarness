@@ -5,6 +5,7 @@ the approval card at several terminal sizes, and the --auto flag.
 HAARNESS_E2E_FRAMES names a folder for captured frames (ANSI and text);
 by default they land beside the other evidence."""
 import json, os, pathlib, shlex, subprocess, tempfile, time, urllib.request, uuid
+import e2e_scratch
 
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/release/haarness')).resolve()
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-auto-e2e-')).resolve()
@@ -239,8 +240,9 @@ try:
     ran=[item['id'] for item in api('/v1/threads') if item['title']=='Run auto flag']
     assert len(ran)==1 and api('/v1/threads/'+ran[0]+'/approval-mode')['mode']=='auto', ran
     check('haarness run --auto puts its chat in Auto, so a run nobody watches gets its requests approved; a plain run is refused')
-    print(f'{len(checks)} real-server TUI scenarios passed. Evidence: {root}',flush=True)
+    print(f'{len(checks)} real-server TUI scenarios passed.',flush=True)
     (root/'tui.txt').write_text(capture())
 finally:
     subprocess.run(['tmux','kill-session','-t',name],capture_output=True)
     subprocess.run([str(binary),'--workspace',str(workspace),'serve','--stop'],env=env,capture_output=True,timeout=30)
+    e2e_scratch.settle(root)

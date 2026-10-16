@@ -46,7 +46,9 @@ Also, depending on the change:
 - **Desktop**: `npm --prefix apps/desktop run typecheck`, `npm --prefix apps/desktop test`,
   and the relevant Playwright flow with `npm --prefix apps/desktop run test:e2e -- --grep '…'`.
 - **TUI**: exercise the change in a real terminal; the `scripts/test-*-tmux.*` scripts show
-  how the existing flows are driven.
+  how the existing flows are driven. The Python end-to-end scripts remove their temporary
+  folder when they pass and keep it, printing where, when they fail; set
+  `HAARNESS_E2E_KEEP=1` to keep it either way (`scripts/e2e_scratch.py`).
 - **User-visible text**: add matching keys to every locale file in `locales/` (see
   [`locales/README.md`](locales/README.md)); Desktop must stay correct right-to-left in Arabic.
 

@@ -38,6 +38,8 @@ import time
 import urllib.request
 import uuid
 
+import e2e_scratch
+
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
 
@@ -318,6 +320,9 @@ def main() -> None:
                 os.killpg(connector.pid, signal.SIGKILL)
         cloud.kill()
         subprocess.run(base + ["serve", "--stop"], env=env, capture_output=True, timeout=60)
+        # A state folder named on the command line is the caller's to keep.
+        if len(sys.argv) <= 1:
+            e2e_scratch.settle(root)
 
 
 if __name__ == "__main__":

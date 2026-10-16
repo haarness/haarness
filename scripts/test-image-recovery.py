@@ -24,6 +24,8 @@ import urllib.request
 import uuid
 import zlib
 
+import e2e_scratch
+
 REPO = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get('HAARNESS_BIN', REPO / 'target/debug/haarness')).resolve()
 EVIDENCE = Path(os.environ.get('HAARNESS_IMAGE_EVIDENCE', REPO / 'target/image-recovery/e2e'))
@@ -269,5 +271,7 @@ finally:
     if connection:
         subprocess.run(args + ['serve', '--stop'], env=env, capture_output=True, timeout=60)
     service.shutdown()
-    if os.environ.get('HAARNESS_IMAGE_KEEP') != '1':
-        shutil.rmtree(root, ignore_errors=True)
+    if os.environ.get('HAARNESS_IMAGE_KEEP') == '1':
+        print(f'Evidence retained in {root}', flush=True)
+    else:
+        e2e_scratch.settle(root)

@@ -12,6 +12,8 @@ import time
 import urllib.error
 import urllib.request
 
+import e2e_scratch
+
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("HAARNESS_BIN", ROOT / "target/debug/haarness")).resolve()
 ENTERED = threading.Event()
@@ -146,6 +148,7 @@ def main():
             except Exception:
                 pass
         service.shutdown()
+        e2e_scratch.settle(root)
 
 
 if __name__ == "__main__":
