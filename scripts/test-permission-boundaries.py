@@ -88,8 +88,10 @@ def api(connection, path):
 
 def case_paths():
     """Path rules name a project file by either spelling."""
-    paths = project('paths', {'permission': {'read': {'secrets/*': 'deny'},
-                                             'edit': {str(root / 'paths' / 'vendor') + '/*': 'deny'}}})
+    paths = project('paths', {'permission': {
+        'read': {'secrets/*': 'deny'},
+        'edit': {str(root / 'paths' / 'vendor') + '/*': 'deny', 'generated/*': 'deny'},
+        'list': {'build': 'deny'}}})
     (paths / 'secrets').mkdir()
     (paths / 'secrets' / 'key.txt').write_text('TOPSECRET-VALUE\n')
     absolute = json.dumps({'path': str(paths / 'secrets' / 'key.txt')})
@@ -101,6 +103,22 @@ def case_paths():
     assert f"denied by permission rule 'edit:{paths}/vendor/*'" in output, output
     assert not (paths / 'vendor' / 'lib.rs').exists()
     passed('a relative read deny refuses an absolute path, and an absolute edit deny a relative write')
+    # `./`, a trailing slash, `..` inside a patch and a patch's move target.
+    output = haarness(paths, 'run', '!tool read {"path":"./secrets/key.txt"}').stdout
+    assert 'TOPSECRET-VALUE' not in output and "denied by permission rule 'read:secrets/*'" in output, output
+    output = haarness(paths, 'run', '!tool write {"path":"./generated/a.rs","content":"x"}').stdout
+    assert "denied by permission rule 'edit:generated/*'" in output, output
+    (paths / 'build').mkdir()
+    output = haarness(paths, 'run', '!tool list {"path":"build/"}').stdout
+    assert "denied by permission rule 'list:build'" in output, output
+    (paths / 'src').mkdir()
+    (paths / 'src' / 'old.rs').write_text('a\n')
+    for patch in ('*** Begin Patch\n*** Add File: src/../generated/b.rs\n+b\n*** End Patch',
+                  '*** Begin Patch\n*** Update File: src/old.rs\n*** Move to: generated/moved.rs\n@@\n-a\n+moved\n*** End Patch'):
+        output = haarness(paths, 'run', '!tool apply_patch ' + json.dumps({'input': patch})).stdout
+        assert "denied by permission rule 'edit:generated/*'" in output, output
+    assert not (paths / 'generated').exists() and (paths / 'src' / 'old.rs').read_text() == 'a\n'
+    passed('./, a trailing slash, .. in a patch and a patch\'s Move to meet the same rules')
 
 
 def case_headless():
@@ -126,8 +144,8 @@ def case_schedules():
     start = json.dumps({'action': 'start', 'name': 'nightly'})
     haarness(scheduled, 'schedule', 'add', '--name', 'nightly-workflow', '--every', '1d',
              '--prompt', f'!tool workflow {start}')
-    run = json.loads(haarness(scheduled, 'schedule', 'run', 'nightly-workflow', '--json').stdout)
-    assert run['status'] == 'success', run
+    nightly = json.loads(haarness(scheduled, 'schedule', 'run', 'nightly-workflow', '--json').stdout)
+    assert nightly['status'] == 'success', nightly
     until(lambda: (scheduled / 'shell-marker.txt').exists(), "the scheduled workflow's shell call waited for a person")
     delete = json.dumps({'action': 'delete', 'id': '01900000-0000-7000-8000-000000000000'})
     haarness(scheduled, 'schedule', 'add', '--name', 'cloud-delete', '--every', '1d',
@@ -137,6 +155,26 @@ def case_schedules():
     assert "needs the user's approval every time, and this scheduled run cannot ask" in run['response'], run
     assert api(connect(scheduled), '/permissions') == [], 'a scheduled run left an approval waiting'
     passed("a scheduled run's workflow shell call runs, and a Cloud delete is refused at once")
+    # Someone forks last night's run and works there: they are asked, for the
+    # workflow their turn starts and for what always asks.
+    (scheduled / '.haarness' / 'workflows' / 'manual.ts').write_text(
+        'import { workflow } from "@haarness-ai/plugin"\n'
+        'export default workflow({ name: "manual", async run(args, ctx) {\n'
+        '  await ctx.shell("echo FORK_SHELL_RAN > fork-marker.txt")\n'
+        '  return "done"\n} })\n')
+    manual = json.dumps({'action': 'start', 'name': 'manual'})
+    haarness(scheduled, '--session', nightly['threadId'], 'run', '--fork', f'!tool workflow {manual}')
+    connection = connect(scheduled)
+    waiting = until(lambda: [pending for pending in api(connection, '/permissions')
+                             if 'FORK_SHELL_RAN' in pending['operation']], 'the fork\'s workflow did not ask')
+    time.sleep(1)
+    assert not (scheduled / 'fork-marker.txt').exists(), "the fork's workflow ran without asking"
+    result = haarness(scheduled, '--session', nightly['threadId'], 'run', '--fork',
+                      f'!tool cloud_agent_manage {delete}', check=False)
+    assert result.returncode != 0, result.stdout
+    assert 'which always needs an answer, and nobody can give one in this run' in result.stderr, result.stderr
+    assert 'this scheduled run cannot ask' not in result.stdout + result.stderr, result.stdout
+    passed('a fork of a scheduled run asks a person, for its workflow and for a Cloud delete')
 
 
 def case_session_start():
