@@ -35,7 +35,9 @@ before saving. Refreshing the picker does not interrupt running turns.
 
 Display names are centralized in `crates/haarness-protocol/src/model-names.json`,
 shared by the Rust protocol helper and Desktop. Provider-supplied names take
-precedence; unfamiliar IDs are preserved without guessing a label. IDs remain the
+precedence; unfamiliar IDs are preserved without guessing a label. A Bedrock Claude
+ID is read by the bare ID it names, whatever its region prefix and version tag
+(`apac.anthropic.claude-sonnet-5-5-v1:0` is Claude Sonnet 5.5). IDs remain the
 stable API/storage values and remain searchable in the pickers.
 
 The TUI and CLI display routed Cloud models as `haarness-cloud/provider/model`.
