@@ -89,6 +89,17 @@ test("shortcut matching requires every modifier to agree", () => {
   assert.equal(matchesShortcut(key("k", { ctrlKey: true }), "Mod+K", "win32"), true);
   assert.equal(matchesShortcut(key("."), "", "darwin"), false);
 
+  // Ctrl is Control on every platform: Ctrl+Tab steps tabs on macOS and
+  // elsewhere, and Command+Tab never matches it.
+  for (const platform of ["darwin", "win32", "linux"]) {
+    assert.equal(matchesShortcut(key("Tab", { ctrlKey: true }), "Ctrl+Tab", platform), true);
+    assert.equal(matchesShortcut(key("Tab", { ctrlKey: true, shiftKey: true }), "Ctrl+Shift+Tab", platform), true);
+    assert.equal(matchesShortcut(key("Tab", { ctrlKey: true, shiftKey: true }), "Ctrl+Tab", platform), false);
+    assert.equal(matchesShortcut(key("Tab"), "Ctrl+Tab", platform), false);
+  }
+  assert.equal(matchesShortcut(key("Tab", { metaKey: true }), "Ctrl+Tab", "darwin"), false);
+  assert.equal(matchesShortcut(key("Tab", { ctrlKey: true, metaKey: true }), "Ctrl+Tab", "darwin"), false);
+
   // Recorded chords name the physical key: ⌥⌘Z arrives as "Ω" on macOS.
   const optionZ = { ...key("Ω", { metaKey: true, altKey: true }), code: "KeyZ" };
   assert.equal(matchesShortcut(optionZ, "Mod+Alt+Z", "darwin"), true);

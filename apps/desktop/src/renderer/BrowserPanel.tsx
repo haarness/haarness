@@ -13,6 +13,7 @@ import { Icon } from "./ui";
 import { useApp } from "./state";
 import type { BrowserState } from "../shared";
 import { setNativeArea } from "./native-area";
+import { registerCyclePanel } from "./tab-cycle";
 import { CHROME_CAPABILITY, chromeThreadTabs, type ChromeHosts } from "../chrome";
 import "./browser.css";
 const empty = (): BrowserState => ({ tabs: [], focusedTabID: null });
@@ -235,6 +236,16 @@ export function BrowserPanel(props: {
         updateLayout();
       });
   }
+  // Ctrl+Tab in the panel's tab strip or address bar steps its pages; a
+  // page that has the keyboard keeps its keys.
+  onCleanup(
+    registerCyclePanel({
+      id: "browser",
+      tabs: () => (props.visible ? browser().tabs.map((item) => item.id) : []),
+      active: () => browser().focusedTabID ?? undefined,
+      select: (tabID) => void command({ type: "tabs.focus", tabID }),
+    }),
+  );
   async function command(action: unknown) {
     const { connection, thread } = owner();
     try {
@@ -304,6 +315,7 @@ export function BrowserPanel(props: {
   return (
     <section
       class="browser-panel"
+      data-cycle-panel="browser"
       style={{ display: props.visible ? "flex" : "none" }}
       aria-label={t("Web browser")}
     >
@@ -317,6 +329,7 @@ export function BrowserPanel(props: {
               <button
                 class="browser-tab-title"
                 role="tab"
+                data-cycle-tab={item.id}
                 aria-selected={item.id === browser().focusedTabID}
                 title={
                   item.title && item.url

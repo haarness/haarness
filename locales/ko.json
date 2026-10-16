@@ -2428,5 +2428,8 @@
   "Open “{folder}” from a link?": "링크에서 “{folder}” 폴더를 열까요?",
   "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "프로젝트 구성이 꺼진 상태로 열립니다. 이 폴더의 MCP 서버, 훅, 확장 기능은 실행되지 않습니다. 켜려면 프로젝트 열기로 폴더를 여세요.",
   "Open folder": "폴더 열기",
-  "Earlier terminal output is no longer available": "이전 터미널 출력은 더 이상 사용할 수 없습니다"
+  "Earlier terminal output is no longer available": "이전 터미널 출력은 더 이상 사용할 수 없습니다",
+  "Next tab": "다음 탭",
+  "Previous tab": "이전 탭",
+  "In the chats, terminal, files, browser or side panel that has the keyboard": "키보드 포커스가 있는 채팅, 터미널, 파일, 브라우저 또는 사이드 패널에서"
 }
