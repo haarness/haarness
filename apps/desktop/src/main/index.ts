@@ -961,9 +961,11 @@ function installHandlers() {
     "terminal",
     async (win, id: string, action: string, pty: string, input: unknown) => {
       const key = win.id + ":" + id + ":" + pty;
+      // A socket the view let go of ends without a "closed" event.
+      const previous = terminals.get(key);
       if (action === "detach") {
-        terminals.get(key)?.socket.close();
         terminals.delete(key);
+        previous?.socket.close();
         return;
       }
       if (action === "write") {
@@ -975,12 +977,14 @@ function installHandlers() {
         return;
       }
       if (action !== "connect") throw new Error("Unknown terminal action");
-      terminals.get(key)?.socket.close();
+      terminals.delete(key);
+      previous?.socket.close();
       const socket = await connection(id).client.connectPty(pty, {
         cursor: typeof input === "number" ? input : 0,
       });
       terminals.set(key, { owner: win.id, socket });
       void (async () => {
+        let failure: string | undefined;
         try {
           for await (const message of socket)
             send(win, {
@@ -993,14 +997,20 @@ function installHandlers() {
                   : message,
             });
         } catch (error) {
-          send(win, {
-            kind: "pty",
-            connection: id,
-            id: pty,
-            data: { error: String(error) },
-          });
+          failure = String(error);
         } finally {
-          if (terminals.get(key)?.socket === socket) terminals.delete(key);
+          // The server ends a socket whose reader fell behind, and a network
+          // or server outage ends it too. Unless the view detached or
+          // connected again, tell it, so it reconnects from its cursor.
+          if (terminals.get(key)?.socket === socket) {
+            terminals.delete(key);
+            send(win, {
+              kind: "pty",
+              connection: id,
+              id: pty,
+              data: { type: "closed", ...(failure ? { error: failure } : {}) },
+            });
+          }
         }
       })();
     },

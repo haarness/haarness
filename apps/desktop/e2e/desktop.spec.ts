@@ -2756,6 +2756,80 @@ test("a terminal text size change gives the shell its new size", async () => {
   expect(errors).toEqual([]);
 });
 
+test("a terminal shown again does not answer the queries in its replayed output", async () => {
+  const hide = page.getByRole("button", { name: "Hide terminal", exact: true });
+  const toggle = page.getByRole("button", { name: "Toggle terminal", exact: true });
+  if (await hide.count()) await hide.click();
+  for (const terminal of await client.listPtys())
+    await client.deletePty(terminal.id);
+  await toggle.click();
+  const input = page.locator(".xterm-helper-textarea");
+  await expect(input).toBeFocused();
+  // Outside the project, so later tests' changed-file lists stay as they were.
+  const live = join(temporary, "replay-live.txt");
+  const typed = join(temporary, "replay-typed.txt");
+  // Ask for the device attributes: xterm answers, and `read` takes the live
+  // answer. Then `cat` records everything the shell receives from here on.
+  await input.fill(
+    `printf '\\033[c'; read -rs -t 3 -d c reply; printf '%s' "\${#reply}" > ${live}; cat -v > ${typed}`,
+  );
+  await input.press("Enter");
+  await expect
+    .poll(() => readFile(live, "utf8").catch(() => ""))
+    .toMatch(/^[1-9]\d*$/);
+  // Shown again, the terminal replays its output, the `ESC[c` included.
+  await hide.click();
+  await toggle.click();
+  await expect(input).toBeFocused();
+  await expect(page.locator(".terminal-view .xterm-rows")).toContainText("replay-typed.txt");
+  await page.waitForTimeout(300);
+  await input.pressSequentially("done");
+  await input.press("Enter");
+  await input.press("Control+d");
+  // Only the typed line reached `cat`: no `^[[?1;2c` answer to the replay.
+  await expect.poll(() => readFile(typed, "utf8").catch(() => "")).toBe("done\n");
+  await hide.click();
+  for (const terminal of await client.listPtys())
+    await client.deletePty(terminal.id);
+  expect(errors).toEqual([]);
+});
+
+test("a terminal still reaches its shell after a long burst of output", async () => {
+  test.setTimeout(300_000);
+  const hide = page.getByRole("button", { name: "Hide terminal", exact: true });
+  if (await hide.count()) await hide.click();
+  for (const terminal of await client.listPtys())
+    await client.deletePty(terminal.id);
+  await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  const input = page.locator(".xterm-helper-textarea");
+  await expect(input).toBeFocused();
+  const done = join(temporary, "burst-done.txt");
+  const after = join(temporary, "burst-after.txt");
+  // Far more output than the server buffers for a reader that falls behind.
+  await input.fill(
+    `yes haarness-burst | head -n 1000000; printf done > ${done}; echo burst-$((6*7))-end`,
+  );
+  await input.press("Enter");
+  await expect
+    .poll(() => readFile(done, "utf8").catch(() => ""), { timeout: 120_000 })
+    .toBe("done");
+  // The view catches up with the end of the burst (the echo prints a text
+  // the command line does not hold).
+  await expect(page.locator(".terminal-view .xterm-rows")).toContainText(
+    "burst-42-end",
+    { timeout: 120_000 },
+  );
+  await input.fill(`printf alive > ${after}`);
+  await input.press("Enter");
+  await expect
+    .poll(() => readFile(after, "utf8").catch(() => ""), { timeout: 30_000 })
+    .toBe("alive");
+  await hide.click();
+  for (const terminal of await client.listPtys())
+    await client.deletePty(terminal.id);
+  expect(errors).toEqual([]);
+});
+
 test("conversation tab order survives reopening and uses horizontal keyboard controls", async () => {
   await expandPrimaryProject();
   const first = await client.createThread({

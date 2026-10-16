@@ -2427,5 +2427,6 @@
   "The folder in this link was not found.": "لم يُعثر على المجلد الوارد في هذا الرابط.",
   "Open “{folder}” from a link?": "هل تريد فتح «{folder}» من رابط؟",
   "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "يُفتح المجلد مع إيقاف إعداد المشروع: لا تعمل خوادم MCP والخطافات والامتدادات الموجودة فيه. لتشغيلها، افتح المجلد عبر «فتح مشروع».",
-  "Open folder": "فتح المجلد"
+  "Open folder": "فتح المجلد",
+  "Earlier terminal output is no longer available": "لم يعد الناتج السابق للمحطة الطرفية متاحًا"
 }

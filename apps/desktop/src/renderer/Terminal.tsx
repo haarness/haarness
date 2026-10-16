@@ -9,7 +9,8 @@ import {
 } from "solid-js";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { pendingSize, type TerminalSize } from "./terminal-size";
+import { sizePusher } from "./terminal-size";
+import { reconnectDelay, replayGate, writeChunks } from "./terminal-stream";
 import "@xterm/xterm/css/xterm.css";
 import type { PtyInfo } from "@haarness/sdk";
 import { useApp } from "./state";
@@ -298,38 +299,23 @@ function TerminalView(props: { id: string }) {
       fit.fit();
     });
     fit.fit();
-    const input = terminal.onData(
-      (data) =>
+    // Answers xterm gives to queries in replayed output stay out of the shell.
+    const gate = replayGate((done) => terminal.write("", done));
+    const input = terminal.onData((data) => {
+      if (!gate.open()) return;
+      // A long paste goes in several writes; IPC keeps them in order.
+      for (const chunk of writeChunks(new TextEncoder().encode(data)))
         void window.haarness
-          .terminal(
-            connection,
-            "write",
-            props.id,
-            Array.from(new TextEncoder().encode(data)),
-          )
-          .catch((error) => app.set("error", String(error))),
-    );
+          .terminal(connection, "write", props.id, Array.from(chunk))
+          .catch((error) => app.set("error", String(error)));
+    });
     // The PTY learns every size xterm takes: a panel resize, and a font size
     // change, which refits without the panel changing size. A push waits for
     // the size to settle and is skipped when the PTY already has that size.
-    let pushed: TerminalSize | undefined;
-    let pending: TerminalSize | undefined;
-    let push: ReturnType<typeof setTimeout> | undefined;
-    const schedule = (size: TerminalSize) => {
-      pending = pendingSize(pushed, size);
-      clearTimeout(push);
-      if (!pending) return;
-      push = setTimeout(() => {
-        const size = pending;
-        pending = undefined;
-        if (!size || disposed) return;
-        pushed = size;
-        void app.api("updatePty", props.id, size).catch(() => {});
-      }, 100);
-    };
-    const sized = terminal.onResize(({ cols, rows }) => schedule({ cols, rows }));
+    const sizes = sizePusher((size) => app.api("updatePty", props.id, size));
+    const sized = terminal.onResize(({ cols, rows }) => sizes.schedule({ cols, rows }));
     // A new or reattached PTY may have any size; give it this view's.
-    schedule({ cols: terminal.cols, rows: terminal.rows });
+    sizes.schedule({ cols: terminal.cols, rows: terminal.rows });
     let timer: ReturnType<typeof setTimeout>;
     resize = new ResizeObserver(() => {
       clearTimeout(timer);
@@ -346,30 +332,66 @@ function TerminalView(props: { id: string }) {
       const data = event.data as {
         bytes?: number[];
         type?: string;
+        end?: number;
         truncated?: boolean;
-        error?: string;
       };
+      if (data.type === "replay") gate.replay();
       if (data.bytes) terminal.write(new Uint8Array(data.bytes));
+      if (data.type === "cursor") {
+        gate.cursor();
+        if (typeof data.end === "number") cursor = data.end;
+        attempt = 0;
+      }
       if (data.truncated && data.type === "replay")
         terminal.writeln(
-          "\r\n[Earlier terminal output is no longer available]\r\n",
+          "\r\n[" + t("Earlier terminal output is no longer available") + "]\r\n",
         );
-      if (data.error) terminal.writeln("\r\n" + data.error);
+      if (data.type === "closed") reconnect();
     });
-    void window.haarness
-      .terminal(connection, "connect", props.id, 0)
-      .then(() => {
-        if (disposed) {
-          void window.haarness.terminal(connection, "detach", props.id);
-          return;
-        }
-        terminal.focus();
-      })
-      .catch((error) => app.set("error", String(error)));
+    // The output this view has, as the server counts it. When the socket
+    // ends (the server drops a reader that fell behind, or the network or
+    // server went away), the view connects again from there, so the shell
+    // keeps its keys and the missed output is replayed once.
+    let cursor = 0;
+    let attempt = 0;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let focused = false;
+    const connect = () =>
+      void window.haarness
+        .terminal(connection, "connect", props.id, cursor)
+        .then(() => {
+          if (disposed) {
+            void window.haarness.terminal(connection, "detach", props.id);
+            return;
+          }
+          if (!focused) terminal.focus();
+          focused = true;
+          sizes.schedule({ cols: terminal.cols, rows: terminal.rows });
+        })
+        .catch((error) => {
+          if (!focused) app.set("error", String(error));
+          reconnect();
+        });
+    function reconnect() {
+      if (disposed) return;
+      clearTimeout(retry);
+      retry = setTimeout(async () => {
+        // A shell that exited, or a terminal closed elsewhere, sends nothing
+        // more; while the server cannot say, keep trying.
+        const tabs = await window.haarness
+          .api<PtyInfo[]>(connection, "listPtys", [])
+          .catch(() => undefined);
+        if (disposed) return;
+        if (!tabs) return reconnect();
+        if (tabs.find((tab) => tab.id === props.id)?.status === "running") connect();
+      }, reconnectDelay(attempt++));
+    }
+    connect();
     onCleanup(() => {
       disposed = true;
+      clearTimeout(retry);
       clearTimeout(timer);
-      clearTimeout(push);
+      sizes.dispose();
       sized.dispose();
       input.dispose();
       resize.disconnect();

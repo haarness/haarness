@@ -2427,5 +2427,6 @@
   "The folder in this link was not found.": "找不到此链接中的文件夹。",
   "Open “{folder}” from a link?": "要从链接打开“{folder}”吗？",
   "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "它会在项目配置关闭的状态下打开：此文件夹中的 MCP 服务器、钩子和扩展不会运行。若要启用它们，请通过“打开项目”打开该文件夹。",
-  "Open folder": "打开文件夹"
+  "Open folder": "打开文件夹",
+  "Earlier terminal output is no longer available": "较早的终端输出已不可用"
 }

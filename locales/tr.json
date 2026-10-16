@@ -2427,5 +2427,6 @@
   "The folder in this link was not found.": "Bu bağlantıdaki klasör bulunamadı.",
   "Open “{folder}” from a link?": "“{folder}” bir bağlantıdan açılsın mı?",
   "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "Klasör proje yapılandırması kapalı olarak açılır: içindeki MCP sunucuları, kancalar ve uzantılar çalışmaz. Bunları açmak için klasörü Proje aç ile açın.",
-  "Open folder": "Klasörü aç"
+  "Open folder": "Klasörü aç",
+  "Earlier terminal output is no longer available": "Önceki terminal çıktısı artık kullanılamıyor"
 }

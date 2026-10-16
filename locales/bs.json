@@ -2427,5 +2427,6 @@
   "The folder in this link was not found.": "Mapa iz ovog linka nije pronađena.",
   "Open “{folder}” from a link?": "Otvoriti „{folder}” iz linka?",
   "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "Mapa se otvara s isključenom konfiguracijom projekta: MCP serveri, hookovi i proširenja u njoj se ne pokreću. Da ih uključite, otvorite mapu pomoću opcije Otvori projekat.",
-  "Open folder": "Otvori mapu"
+  "Open folder": "Otvori mapu",
+  "Earlier terminal output is no longer available": "Raniji izlaz terminala više nije dostupan"
 }

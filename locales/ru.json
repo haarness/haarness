@@ -2427,5 +2427,6 @@
   "The folder in this link was not found.": "Папка из этой ссылки не найдена.",
   "Open “{folder}” from a link?": "Открыть «{folder}» по ссылке?",
   "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "Папка откроется с отключённой конфигурацией проекта: MCP-серверы, хуки и расширения из неё не запускаются. Чтобы включить их, откройте папку через «Открыть проект».",
-  "Open folder": "Открыть папку"
+  "Open folder": "Открыть папку",
+  "Earlier terminal output is no longer available": "Предыдущий вывод терминала больше недоступен"
 }

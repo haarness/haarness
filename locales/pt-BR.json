@@ -2427,5 +2427,6 @@
   "The folder in this link was not found.": "A pasta deste link não foi encontrada.",
   "Open “{folder}” from a link?": "Abrir “{folder}” a partir de um link?",
   "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "A pasta abre com a configuração do projeto desativada: servidores MCP, hooks e extensões dela não são executados. Para ativá-los, abra a pasta com Abrir projeto.",
-  "Open folder": "Abrir pasta"
+  "Open folder": "Abrir pasta",
+  "Earlier terminal output is no longer available": "A saída anterior do terminal não está mais disponível"
 }
