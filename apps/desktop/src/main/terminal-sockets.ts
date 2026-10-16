@@ -54,6 +54,8 @@ export function terminalSockets<Socket extends { close(): void }>() {
       for (const key of views.keys())
         if (key.startsWith(owner + ":")) views.delete(key);
     },
+    /** Every socket held now. */
+    all: () => [...sockets.values()].map((item) => item.socket),
     /** The app quits. */
     closeAll() {
       for (const item of sockets.values()) item.socket.close();
