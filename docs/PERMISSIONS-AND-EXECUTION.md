@@ -84,7 +84,7 @@ The built-in `read` rules (`PermissionEngine::build_defaults`, `crates/haarness-
 
 `webfetch` rules (`webfetch:<address>`) meet the address as written and, when it is written differently, the address the fetch really reads: scheme and host in lower case, without a user name or password, a trailing dot on the host, the default port or `.`/`..` path segments. So a rule for `https://example.com/*` also applies to `HTTPS://user@Example.com.:443/a/../b`; another port is another address.
 
-A fetch follows redirects only while they stay on the host it asked for (the same host and port, or the same host moving from http to https). A redirect to another host is not followed: the result names the new address, and fetching it is the model's next call, checked against the rules like any other. A redirect within the host is followed without a new check, so a rule for one path of a host does not stop a redirect to it from another path of the same host.
+A fetch follows redirects only while they stay on the host it asked for (the same host and port, or the same host moving from http to https). Any other redirect (to another host, another port, or from https to plain http) is not followed: the result names the new address and why, and fetching it is the model's next call, checked against the rules like any other. Image and video generation follow their configured backend's redirects as before. A redirect within the host is followed without a new check, so a rule for one path of a host does not stop a redirect to it from another path of the same host.
 
 ## Skills and plan mode
 

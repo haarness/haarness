@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real server, echo provider: webfetch reads pages as text, meets rules for every spelling of an address,
-reports cross-host redirects, stops oversized and stalled pages, and honours Stop.
+reports redirects off the address by reason, stops oversized and stalled pages, and honours Stop;
+media generation still follows its backend's redirects.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-webfetch.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -31,6 +32,17 @@ class Web(http.server.BaseHTTPRequestHandler):
         self.send_response(200); self.send_header('Content-Type', content_type)
         self.send_header('Transfer-Encoding', 'chunked'); self.send_header('Connection', 'close'); self.end_headers()
     def chunk(self, data): self.wfile.write(b'%x\r\n%s\r\n' % (len(data), data)); self.wfile.flush()
+    def do_POST(self):
+        requests.append('POST ' + self.headers.get('Host', '') + self.path)
+        self.rfile.read(int(self.headers.get('Content-Length', '0')))
+        if self.path == '/moved':
+            # A media backend that moved to another host name: generation follows it, as it always did.
+            self.send_response(307); self.send_header('Location', f'http://localhost:{self.server.server_port}/generate')
+            self.send_header('Content-Length', '0'); self.end_headers()
+        else:
+            body = json.dumps({'data': [{'b64_json': 'iVBORw0KGgo='}], 'mime_type': 'image/png'}).encode()
+            self.send_response(200); self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
     def do_GET(self):
         requests.append(self.headers.get('Host', '') + self.path)
         if self.path == '/endless':
@@ -41,9 +53,10 @@ class Web(http.server.BaseHTTPRequestHandler):
                     self.chunk(block); sent['endless'] += len(block)
                 self.wfile.write(b'0\r\n\r\n')
             except (BrokenPipeError, ConnectionResetError): pass
-        elif self.path in ('/hop', '/away'):
-            # /hop stays on this host; /away leads to another host name for the same server.
-            target = '/landing' if self.path == '/hop' else f'http://localhost:{self.server.server_port}/landing'
+        elif self.path in ('/hop', '/away', '/port'):
+            # /hop stays on this host; /away leads to another host name for the same server; /port to another port.
+            target = {'/hop': '/landing', '/away': f'http://localhost:{self.server.server_port}/landing',
+                      '/port': 'http://127.0.0.1:1/landing'}[self.path]
             self.send_response(302); self.send_header('Location', target)
             self.send_header('Content-Length', '0'); self.end_headers()
         elif self.path == '/stall':
@@ -58,10 +71,12 @@ web = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Web)
 threading.Thread(target=web.serve_forever, daemon=True).start()
 port = web.server_port
 (state/'config/config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\n'
-    f'webfetch = {{ "*" = "allow", "http://127.0.0.1:{port}/private*" = "deny", "http://localhost:{port}/*" = "deny" }}\n')
+    f'webfetch = {{ "*" = "allow", "http://127.0.0.1:{port}/private*" = "deny", "http://localhost:{port}/*" = "deny" }}\n'
+    'media_generate = "allow"\n')
 env = {k: v for k, v in os.environ.items() if not k.startswith('HAARNESS_')}
 env.update(HAARNESS_DATA_DIR=str(state), HAARNESS_HOME=str(root/'home'), HAARNESS_TEST_PROVIDER='1',
-           HAARNESS_DEFAULT_PROVIDER='echo', HAARNESS_DEFAULT_MODEL='echo-1')
+           HAARNESS_DEFAULT_PROVIDER='echo', HAARNESS_DEFAULT_MODEL='echo-1',
+           HAARNESS_IMAGE_GENERATE_URL=f'http://127.0.0.1:{port}/moved')
 url = None; token = None; checks = []
 
 def run(args, **kwargs): return subprocess.run(args, check=True, text=True, capture_output=True, timeout=60, **kwargs).stdout
@@ -133,6 +148,19 @@ try:
     result = finish(thread, before)
     assert result['is_error'] and 'denied by permission rule' in result['output'], result
     check('a same-host redirect is followed; one to another host is reported, and fetching it meets the deny')
+
+    _, before = fetch(thread, {'url': f'http://127.0.0.1:{port}/port'})
+    result = finish(thread, before)
+    assert 'which is another port of the same host' in result['output'], result
+    check('a redirect to another port of the same host says so')
+
+    before = len(results(thread))
+    api(f'/threads/{thread}/turns', {'requestId': str(uuid.uuid4()), 'text': '!tool image_generate {"prompt":"Quiet red fox"}'})
+    result = until(lambda: (values[before] if len(values := results(thread)) > before else None), 'image result missing')
+    until(lambda: not api('/turns/active'), 'turn still active')
+    assert not result['is_error'] and result['metadata'].get('path'), result
+    assert f'POST localhost:{port}/generate' in requests, requests
+    check('image generation still follows its backend to another host')
 
     rss_before = rss_kb(pid) if pid else 0
     _, before = fetch(thread, {'url': f'http://127.0.0.1:{port}/endless'})

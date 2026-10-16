@@ -1307,17 +1307,33 @@ impl Tool for ManagementTool {
     }
 }
 
+fn http_client() -> reqwest::ClientBuilder {
+    // Wikimedia and other responsible public sites reject anonymous HTTP
+    // library defaults. Identify Haarness with a stable product URL while
+    // sending no user or machine-specific data.
+    reqwest::Client::builder().user_agent(concat!(
+        "haarness/",
+        env!("CARGO_PKG_VERSION"),
+        " (+https://github.com/haarness/haarness)"
+    ))
+}
+
+/// Media backends are followed wherever they redirect (a regional endpoint,
+/// a CDN), as they always were: the user configured them, and the
+/// permission rules judge the generation, not an address. Only webfetch
+/// keeps redirects on the address it was allowed to read.
+fn media_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        http_client()
+            .build()
+            .expect("the static media HTTP client configuration is valid")
+    })
+}
+
 fn web_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        // Wikimedia and other responsible public sites reject anonymous HTTP
-        // library defaults. Identify Haarness with a stable product URL while
-        // sending no user or machine-specific data.
-        .user_agent(concat!(
-            "haarness/",
-            env!("CARGO_PKG_VERSION"),
-            " (+https://github.com/haarness/haarness)"
-        ))
-        // A redirect to another host is not followed: the fetch returns its
+    http_client()
+        // A redirect off the address asked for is not followed: the fetch returns its
         // address, and fetching that is the model's next call, checked
         // against the permission rules, so an allowed address cannot lead
         // past a denied one. The first URL in `previous` is the one asked for.
@@ -1327,7 +1343,7 @@ fn web_client() -> reqwest::Client {
             } else if attempt
                 .previous()
                 .first()
-                .is_some_and(|first| same_host_redirect(first, attempt.url()))
+                .is_some_and(|first| redirect_leaves(first, attempt.url()).is_none())
             {
                 attempt.follow()
             } else {
@@ -1338,22 +1354,25 @@ fn web_client() -> reqwest::Client {
         .expect("the static WebFetch HTTP client configuration is valid")
 }
 
-/// Whether a redirect stays on the host a fetch asked for: the same host and
-/// port, or the same host moving from http to https on the default ports.
-fn same_host_redirect(from: &url::Url, to: &url::Url) -> bool {
+/// How a redirect leaves the address a fetch asked for, or `None` when it
+/// stays on it: the same host and port, or the same host moving from http
+/// to https on the default ports.
+fn redirect_leaves(from: &url::Url, to: &url::Url) -> Option<&'static str> {
     let host = |url: &url::Url| {
         url.host_str()
             .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
     };
     if host(from).is_none() || host(from) != host(to) {
-        return false;
+        return Some("which is on another host");
     }
     match (from.scheme(), to.scheme()) {
-        (from_scheme, to_scheme) if from_scheme == to_scheme => {
-            from.port_or_known_default() == to.port_or_known_default()
-        }
-        ("http", "https") => from.port().is_none() && to.port().is_none(),
-        _ => false,
+        (from_scheme, to_scheme) if from_scheme == to_scheme => (from.port_or_known_default()
+            != to.port_or_known_default())
+        .then_some("which is another port of the same host"),
+        ("http", "https") if from.port().is_none() && to.port().is_none() => None,
+        ("http", "https") => Some("which is another port of the same host"),
+        ("https", "http") => Some("which leaves https for unencrypted http"),
+        _ => Some("which uses another scheme"),
     }
 }
 
@@ -1383,8 +1402,8 @@ async fn webfetch(
 /// Reads `url` for webfetch; `webfetch` bounds it in time and by Stop.
 async fn fetch_page(client: &reqwest::Client, url: url::Url, raw: bool) -> CoreResult<ToolOutput> {
     let response = client.get(url.clone()).send().await.map_err(tool_error)?;
-    // `web_client` follows redirects on the same host only, so a redirect
-    // that arrives here leads to another host.
+    // `web_client` follows redirects on the address asked for only, so a
+    // redirect that arrives here leads off it.
     if response.status().is_redirection()
         && let Some(target) = response
             .headers()
@@ -1394,11 +1413,12 @@ async fn fetch_page(client: &reqwest::Client, url: url::Url, raw: bool) -> CoreR
     {
         return Ok(ToolOutput {
             text: format!(
-                "{} redirects (HTTP {}) to {target}, which is on another host, so the redirect \
-                 was not followed. Call webfetch with {target} to read it; that fetch is \
-                 checked against the permission rules like any other.",
+                "{} redirects (HTTP {}) to {target}, {}, so the redirect was not followed. \
+                 Call webfetch with {target} to read it; that fetch is checked against the \
+                 permission rules like any other.",
                 response.url(),
                 response.status().as_u16(),
+                redirect_leaves(&url, &target).unwrap_or("which leaves the address asked for"),
             ),
             metadata: json!({"redirect": target.as_str()}),
         });
@@ -2758,7 +2778,7 @@ impl Tool for BuiltinTool {
                     GeneratedMediaKind::Image,
                     &args,
                     &self.workspace,
-                    &self.client,
+                    media_client(),
                     &context.cancel,
                 )
                 .await
@@ -2768,7 +2788,7 @@ impl Tool for BuiltinTool {
                     GeneratedMediaKind::Video,
                     &args,
                     &self.workspace,
-                    &self.client,
+                    media_client(),
                     &context.cancel,
                 )
                 .await
@@ -5849,25 +5869,112 @@ mod webfetch_tests {
     }
 
     #[test]
-    fn redirects_are_followed_only_on_the_host_asked_for() {
+    fn redirects_are_followed_only_on_the_address_asked_for() {
         let url = |value: &str| url::Url::parse(value).unwrap();
-        for (from, to, followed) in [
-            ("http://a.example/x", "http://a.example/y", true),
-            ("http://a.example/", "https://a.example/", true),
-            ("https://a.example/", "https://A.EXAMPLE./login", true),
-            ("http://a.example:8080/", "http://a.example:8080/y", true),
-            ("https://a.example/", "http://a.example/", false),
-            ("http://a.example:8080/", "https://a.example/", false),
-            ("https://a.example/", "https://a.example:8443/", false),
-            ("https://a.example/", "https://b.example/", false),
-            ("https://a.example/", "https://sub.a.example/", false),
+        let host = Some("which is on another host");
+        let port = Some("which is another port of the same host");
+        for (from, to, leaves) in [
+            ("http://a.example/x", "http://a.example/y", None),
+            ("http://a.example/", "https://a.example/", None),
+            ("https://a.example/", "https://A.EXAMPLE./login", None),
+            ("http://a.example:8080/", "http://a.example:8080/y", None),
+            (
+                "https://a.example/",
+                "http://a.example/",
+                Some("which leaves https for unencrypted http"),
+            ),
+            ("http://a.example:8080/", "https://a.example/", port),
+            ("https://a.example/", "https://a.example:8443/", port),
+            ("https://a.example/", "https://b.example/", host),
+            ("https://a.example/", "https://sub.a.example/", host),
         ] {
             assert_eq!(
-                same_host_redirect(&url(from), &url(to)),
-                followed,
+                redirect_leaves(&url(from), &url(to)),
+                leaves,
                 "{from} -> {to}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_another_port_says_so() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let elsewhere = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = format!("http://{}/page", elsewhere.local_addr().unwrap());
+        let location = target.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = accept_request(&listener).await;
+            let head = format!(
+                "HTTP/1.1 301 Moved Permanently\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(head.as_bytes()).await.unwrap();
+        });
+        let tool = webfetch_tool();
+        let output = tool
+            .execute(
+                json!({"url": format!("http://{address}/start")}),
+                composite_context(&tool.workspace),
+            )
+            .await
+            .unwrap();
+        assert!(
+            output.text.contains(&format!(
+                "to {target}, which is another port of the same host"
+            )),
+            "{}",
+            output.text
+        );
+        server.await.unwrap();
+        // The other port was never asked.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), elsewhere.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn media_backends_are_still_followed_to_another_host() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, request) = accept_request(&listener).await;
+            assert!(request.starts_with("POST /moved "), "{request}");
+            let head = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://localhost:{}/generate\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                address.port()
+            );
+            stream.write_all(head.as_bytes()).await.unwrap();
+            drop(stream);
+            let (mut stream, request) = accept_request(&listener).await;
+            assert!(request.starts_with("POST /generate "), "{request}");
+            let body = r#"{"data":[{"b64_json":"iVBORw0KGgo="}],"mime_type":"image/png"}"#;
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(reply.as_bytes()).await.unwrap();
+        });
+        let root =
+            std::env::temp_dir().join(format!("haarness-media-redirect-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let output = generate_media_from_endpoint(
+            GeneratedMediaKind::Image,
+            &json!({"prompt":"Quiet red fox"}),
+            &root,
+            media_client(),
+            &CancellationToken::new(),
+            MediaEndpoint {
+                url: format!("http://{address}/moved"),
+                api_key: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(output.metadata["path"].is_string(), "{}", output.metadata);
+        server.await.unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
