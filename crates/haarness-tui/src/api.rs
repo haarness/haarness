@@ -2082,6 +2082,127 @@ mod tests {
         client.disconnect_all_ptys();
     }
 
+    /// The server closes a terminal socket whose reader fell behind; the
+    /// terminal must come back from the last output it showed, neither losing
+    /// nor repeating any.
+    #[tokio::test]
+    #[allow(clippy::result_large_err)]
+    async fn a_terminal_socket_the_server_closes_reconnects_from_its_last_cursor() {
+        use futures::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let id = haarness_protocol::PtyId(uuid::Uuid::now_v7());
+        let info = serde_json::to_string(&haarness_protocol::PtyInfo {
+            id,
+            title: "shell".into(),
+            command: "sh".into(),
+            args: vec![],
+            cwd: "/".into(),
+            status: haarness_protocol::PtyStatus::Running,
+            pid: None,
+            cols: 80,
+            rows: 24,
+        })
+        .unwrap();
+        let (queries, mut asked) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let _server = tokio::spawn(async move {
+            let control = |value: serde_json::Value| Message::Text(value.to_string().into());
+            let mut sockets = 0;
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut head = [0_u8; 2048];
+                let read = stream.peek(&mut head).await.unwrap();
+                let head = String::from_utf8_lossy(&head[..read]).to_ascii_lowercase();
+                if !head.contains("upgrade: websocket") {
+                    // The status check after a close: still running.
+                    let mut request = Vec::new();
+                    let mut chunk = [0_u8; 1024];
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        let read = stream.read(&mut chunk).await.unwrap();
+                        if read == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&chunk[..read]);
+                    }
+                    stream
+                        .write_all(response("application/json", &info).as_bytes())
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                let queries = queries.clone();
+                let mut socket = tokio_tungstenite::accept_hdr_async(
+                    stream,
+                    move |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                          response| {
+                        let _ = queries.send(request.uri().query().unwrap_or_default().into());
+                        Ok(response)
+                    },
+                )
+                .await
+                .unwrap();
+                sockets += 1;
+                if sockets > 1 {
+                    socket
+                        .send(control(serde_json::json!({"type":"replay","start":0,"end":6,"truncated":false})))
+                        .await
+                        .unwrap();
+                    socket
+                        .send(control(serde_json::json!({"type":"cursor","start":0,"end":6,"truncated":false})))
+                        .await
+                        .unwrap();
+                    while socket.next().await.is_some() {}
+                    return;
+                }
+                socket
+                    .send(control(
+                        serde_json::json!({"type":"replay","start":0,"end":0,"truncated":false}),
+                    ))
+                    .await
+                    .unwrap();
+                for (bytes, end) in [("abc", 3), ("def", 6)] {
+                    socket
+                        .send(Message::Binary(bytes.as_bytes().to_vec().into()))
+                        .await
+                        .unwrap();
+                    socket
+                        .send(control(serde_json::json!({"type":"cursor","start":0,"end":end,"truncated":false})))
+                        .await
+                        .unwrap();
+                }
+                // The reader fell behind: the server lets go.
+                socket.send(Message::Close(None)).await.unwrap();
+            }
+        });
+        let client = ApiClient::new(&format!("http://{address}"), "token").unwrap();
+        let mut events = client.subscribe_ptys();
+        client.connect_pty(id, 0);
+        for expected in ["cursor=0", "cursor=6"] {
+            let query = tokio::time::timeout(Duration::from_secs(10), asked.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(query, expected);
+        }
+        let mut shown = Vec::new();
+        let mut connected = 0;
+        while connected < 2 {
+            match tokio::time::timeout(Duration::from_secs(10), events.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                super::PtyClientEvent::Output { bytes, .. } => shown.extend(bytes),
+                super::PtyClientEvent::Connected(_) => connected += 1,
+                super::PtyClientEvent::Exited(_) => panic!("the terminal is still running"),
+                _ => {}
+            }
+        }
+        assert_eq!(shown, b"abcdef");
+        client.disconnect_all_ptys();
+    }
+
     fn fixture_server_info(
         server_instance_id: uuid::Uuid,
         workspace: &str,
