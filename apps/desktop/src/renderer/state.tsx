@@ -1204,14 +1204,16 @@ function createApp() {
    * Marks a switch to another project or checkout from its first step: the
    * message box waits until it is done. Text typed meanwhile would land in
    * the draft of the chat being left, and the box would then show the new
-   * chat's saved draft, which Enter sends.
+   * chat's saved draft, which Enter sends. Only the latest switch counts: a
+   * project still starting slowly in the background does not hold the box
+   * of the one chosen after it.
    */
-  let switches = 0;
+  let switchRequest = 0;
   function switching<T>(work: Promise<T>) {
-    switches++;
+    const request = ++switchRequest;
     set("switching", true);
     return work.finally(() => {
-      if (--switches === 0) set("switching", false);
+      if (request === switchRequest) set("switching", false);
     });
   }
   async function startChat(location?: string) {
