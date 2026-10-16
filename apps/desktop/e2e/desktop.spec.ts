@@ -2191,6 +2191,40 @@ test("file drops attach across the chat area and preserve text drop behavior", a
   await invalid.dispose();
 });
 
+test("a dropped file that is not media goes into the message as its path at the caret, and undo takes it out", async () => {
+  await newSession();
+  const chat = page.getByRole("region", { name: "Chat", exact: true });
+  const input = page.getByRole("textbox", { name: "Message", exact: true });
+  const before = "Hello\n\nsee this path: ";
+  const after = "\n\nAlso!";
+  await input.fill(before + after);
+  // The caret sits in the middle line, then the focus leaves the message box.
+  await input.evaluate((element: HTMLTextAreaElement, at) => {
+    element.setSelectionRange(at, at);
+    element.blur();
+  }, before.length);
+  const spec = join(workspace, "docs", "drop spec.md");
+  const transfer = await page.evaluateHandle((path) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(["# spec"], "drop spec.md", { type: "text/markdown" }));
+    // A file the page makes has no path of its own; a real drop's file URL
+    // names it, as Electron's own path would.
+    transfer.setData("text/uri-list", "file://" + encodeURI(path));
+    return transfer;
+  }, spec);
+  for (const type of ["dragenter", "dragover", "drop"])
+    await page.locator(".conversation-empty h2").dispatchEvent(type, { dataTransfer: transfer });
+  await expect(input).toHaveValue(before + '"docs/drop spec.md"' + after);
+  await expect(input).toBeFocused();
+  await expect(page.locator(".composer-attachments")).toHaveCount(0);
+  await expect(chat).not.toHaveClass(/file-drop-active/);
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+z" : "Control+z");
+  await expect(input).toHaveValue(before + after);
+  await transfer.dispose();
+  await input.fill("");
+  expect(errors).toEqual([]);
+});
+
 /** A Cmd+V as the focused element receives it: synthetic, so nothing is
  * inserted natively and only the app's own handling shows. */
 async function pasteFocused(data: { file?: string; text?: string }) {

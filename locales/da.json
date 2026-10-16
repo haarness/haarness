@@ -2431,5 +2431,6 @@
   "Earlier terminal output is no longer available": "Tidligere terminaloutput er ikke længere tilgængeligt",
   "Next tab": "Næste fane",
   "Previous tab": "Forrige fane",
-  "In the chats, terminal, files, browser or side panel that has the keyboard": "I chats, terminal, filer, browser eller sidepanel, der har tastaturet"
+  "In the chats, terminal, files, browser or side panel that has the keyboard": "I chats, terminal, filer, browser eller sidepanel, der har tastaturet",
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Vedhæft et billede, en PDF eller en lyd- eller videofil. Brug kildekodens sti i arbejdsområdet for at henvise til den."
 }

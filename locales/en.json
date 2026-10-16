@@ -2431,5 +2431,6 @@
   "Earlier terminal output is no longer available": "Earlier terminal output is no longer available",
   "Next tab": "Next tab",
   "Previous tab": "Previous tab",
-  "In the chats, terminal, files, browser or side panel that has the keyboard": "In the chats, terminal, files, browser or side panel that has the keyboard"
+  "In the chats, terminal, files, browser or side panel that has the keyboard": "In the chats, terminal, files, browser or side panel that has the keyboard",
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path."
 }

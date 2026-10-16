@@ -2431,5 +2431,6 @@
   "Earlier terminal output is no longer available": "Предыдущий вывод терминала больше недоступен",
   "Next tab": "Следующая вкладка",
   "Previous tab": "Предыдущая вкладка",
-  "In the chats, terminal, files, browser or side panel that has the keyboard": "В чатах, терминале, файлах, браузере или боковой панели, где находится клавиатура"
+  "In the chats, terminal, files, browser or side panel that has the keyboard": "В чатах, терминале, файлах, браузере или боковой панели, где находится клавиатура",
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Прикрепите изображение, PDF, аудио- или видеофайл. Чтобы сослаться на исходный код, укажите его путь в рабочей области."
 }

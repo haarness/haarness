@@ -2431,5 +2431,6 @@
   "Earlier terminal output is no longer available": "เอาต์พุตก่อนหน้าของเทอร์มินัลไม่มีให้ใช้แล้ว",
   "Next tab": "แท็บถัดไป",
   "Previous tab": "แท็บก่อนหน้า",
-  "In the chats, terminal, files, browser or side panel that has the keyboard": "ในแชท เทอร์มินัล ไฟล์ เบราว์เซอร์ หรือแผงด้านข้างที่แป้นพิมพ์อยู่"
+  "In the chats, terminal, files, browser or side panel that has the keyboard": "ในแชท เทอร์มินัล ไฟล์ เบราว์เซอร์ หรือแผงด้านข้างที่แป้นพิมพ์อยู่",
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "แนบรูปภาพ PDF ไฟล์เสียง หรือไฟล์วิดีโอ หากต้องการอ้างอิงซอร์สโค้ด ให้ใช้พาธในพื้นที่ทำงาน"
 }

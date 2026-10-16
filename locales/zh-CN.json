@@ -2431,5 +2431,6 @@
   "Earlier terminal output is no longer available": "较早的终端输出已不可用",
   "Next tab": "下一个标签页",
   "Previous tab": "上一个标签页",
-  "In the chats, terminal, files, browser or side panel that has the keyboard": "在键盘所在的对话、终端、文件、浏览器或侧面板中"
+  "In the chats, terminal, files, browser or side panel that has the keyboard": "在键盘所在的对话、终端、文件、浏览器或侧面板中",
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "请附加图片、PDF、音频或视频文件。要引用源代码，请使用它在工作区中的路径。"
 }

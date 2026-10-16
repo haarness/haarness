@@ -63,8 +63,8 @@ import { createVirtualizer } from "@tanstack/solid-virtual";
 import type * as T from "@haarness/sdk";
 import { useApp } from "./state";
 import { Button, Icon, stringify, time, type IconName } from "./ui";
-import { attachmentName, relabelAttachments, type Attachment } from "./media";
-import { createFileDrop } from "./file-drop";
+import { attachable, attachmentName, relabelAttachments, type Attachment } from "./media";
+import { createFileDrop, droppedPath, pathText } from "./file-drop";
 import { isTextEntry, typingElsewhere } from "./text-entry";
 import { Markdown } from "./Markdown";
 import { ConversationOutline } from "./ConversationOutline";
@@ -216,9 +216,41 @@ export function Session() {
   const setAttachments = (value: Attachment[] | ((items: Attachment[]) => Attachment[])) =>
     app.setAttachmentDraft(app.draftKey(), value);
   const fileDrop = createFileDrop(
-    (files) => { void app.run(() => app.attachFiles(app.draftKey(), files)); },
+    (files, transfer) => {
+      const uris = transfer.getData("text/uri-list");
+      void app.run(() => receiveFiles(files, uris));
+    },
     () => !!project() && editable(),
   );
+  /**
+   * Dropped or pasted files: media attaches to the draft, and any other file
+   * of this computer (source code, a folder) is referred to by its path,
+   * written at the message box's caret. A remote project's server cannot
+   * read this computer's files, so there they are refused as before.
+   */
+  async function receiveFiles(files: File[], uris = "") {
+    const key = app.draftKey();
+    const media: File[] = [],
+      paths: string[] = [];
+    for (const file of files) {
+      const path =
+        !state.connection?.remote && !(await attachable(file))
+          ? droppedPath(file, uris, window.haarness.pathForFile(file))
+          : "";
+      if (path) paths.push(path);
+      else media.push(file);
+    }
+    if (paths.length && app.draftKey() === key && composer?.isConnected && !composer.disabled)
+      insertText(
+        pathText(
+          paths,
+          state.connection?.workspace ?? "",
+          composer.value.slice(0, composer.selectionStart),
+          composer.value.slice(composer.selectionEnd),
+        ),
+      );
+    if (media.length) await app.attachFiles(key, media);
+  }
   const [choices, setChoices] = createSignal<
     Record<string, { provider?: string; model?: string; agent?: string }>
   >({});
@@ -799,21 +831,15 @@ export function Session() {
       if (files.length) {
         if (!project() || !editable()) return;
         event.preventDefault();
-        void app.run(() => app.attachFiles(app.draftKey(), files));
+        const uris = data.getData("text/uri-list");
+        void app.run(() => receiveFiles(files, uris));
         return;
       }
       const text = data.getData("text/plain");
       if (!text || !editable() || !composer?.isConnected || composer.disabled)
         return;
       event.preventDefault();
-      composer.focus({ preventScroll: true });
-      composer.setRangeText(
-        text,
-        composer.selectionStart,
-        composer.selectionEnd,
-        "end",
-      );
-      change(composer.value);
+      insertText(text);
     };
     document.addEventListener("paste", paste);
     onCleanup(() => document.removeEventListener("paste", paste));
@@ -1166,6 +1192,15 @@ export function Session() {
     virtual.getTotalSize();
     followLatest();
   });
+  /** Text at the message box's caret, as typing it would: Cmd+Z takes it
+   * out again. */
+  function insertText(text: string) {
+    composer.focus({ preventScroll: true });
+    if (!document.execCommand("insertText", false, text)) {
+      composer.setRangeText(text, composer.selectionStart, composer.selectionEnd, "end");
+      change(composer.value);
+    }
+  }
   function change(text: string, spoken = false) {
     resetRecall();
     if (!spoken) voice.cancel();
@@ -1839,7 +1874,8 @@ export function Session() {
                 const files = Array.from(event.clipboardData?.files ?? []);
                 if (!files.length) return;
                 event.preventDefault();
-                void app.run(() => app.attachFiles(app.draftKey(), files));
+                const uris = event.clipboardData?.getData("text/uri-list");
+                void app.run(() => receiveFiles(files, uris));
               }}
             >
               <Show when={attachments().length}>

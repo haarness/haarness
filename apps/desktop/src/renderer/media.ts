@@ -2,6 +2,25 @@ import { attachmentMimeTypes, checkAttachments, imageType, type Attachment } fro
 import { t } from "./i18n";
 export { checkAttachments, type Attachment } from "../attachments";
 
+/**
+ * Whether a dropped or pasted file goes to the draft as an attachment, by
+ * the rule `fileAttachments` applies: an image by its bytes, else a media
+ * type the server takes. A file named as an image that holds none counts,
+ * so it is refused with its own notice. Anything else (source code, a
+ * folder) is referred to by its path instead.
+ */
+export async function attachable(file: File) {
+  if (file.type.startsWith("image/")) return true;
+  if (attachmentMimeTypes.has(file.type)) return true;
+  if (file.type) return false;
+  // No type: an image by its bytes. A folder cannot be read.
+  try {
+    return !!imageType(new Uint8Array(await file.slice(0, 16).arrayBuffer()));
+  } catch {
+    return false;
+  }
+}
+
 export async function fileAttachments(files: File[]) {
   const values: Attachment[] = [];
   if (files.reduce((total, file) => total + file.size, 0) > 20 * 1024 * 1024)
@@ -19,7 +38,7 @@ export async function fileAttachments(files: File[]) {
     const type = image ?? file.type;
     if (!attachmentMimeTypes.has(type))
       throw new Error(
-        "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.",
+        t("Attach an image, PDF, audio, or video file. To reference source code, use its workspace path."),
       );
     const raw = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();

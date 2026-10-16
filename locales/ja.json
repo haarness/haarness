@@ -2431,5 +2431,6 @@
   "Earlier terminal output is no longer available": "以前のターミナル出力はもう利用できません",
   "Next tab": "次のタブ",
   "Previous tab": "前のタブ",
-  "In the chats, terminal, files, browser or side panel that has the keyboard": "キーボード操作中のチャット、ターミナル、ファイル、ブラウザ、またはサイドパネルで"
+  "In the chats, terminal, files, browser or side panel that has the keyboard": "キーボード操作中のチャット、ターミナル、ファイル、ブラウザ、またはサイドパネルで",
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "画像、PDF、音声、または動画ファイルを添付してください。ソースコードを参照するには、ワークスペース内のパスを使用してください。"
 }

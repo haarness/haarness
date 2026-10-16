@@ -2431,5 +2431,6 @@
   "Earlier terminal output is no longer available": "لم يعد الناتج السابق للمحطة الطرفية متاحًا",
   "Next tab": "علامة التبويب التالية",
   "Previous tab": "علامة التبويب السابقة",
-  "In the chats, terminal, files, browser or side panel that has the keyboard": "في المحادثات أو المحطة الطرفية أو الملفات أو المتصفح أو اللوحة الجانبية التي تتلقى إدخال لوحة المفاتيح"
+  "In the chats, terminal, files, browser or side panel that has the keyboard": "في المحادثات أو المحطة الطرفية أو الملفات أو المتصفح أو اللوحة الجانبية التي تتلقى إدخال لوحة المفاتيح",
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "أرفق صورة أو ملف PDF أو ملفًا صوتيًا أو مرئيًا. للإشارة إلى شيفرة مصدرية، استخدم مسارها في مساحة العمل."
 }

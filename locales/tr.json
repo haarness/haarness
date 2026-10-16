@@ -2431,5 +2431,6 @@
   "Earlier terminal output is no longer available": "Önceki terminal çıktısı artık kullanılamıyor",
   "Next tab": "Sonraki sekme",
   "Previous tab": "Önceki sekme",
-  "In the chats, terminal, files, browser or side panel that has the keyboard": "Klavyenin bulunduğu sohbetlerde, terminalde, dosyalarda, tarayıcıda veya yan panelde"
+  "In the chats, terminal, files, browser or side panel that has the keyboard": "Klavyenin bulunduğu sohbetlerde, terminalde, dosyalarda, tarayıcıda veya yan panelde",
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Bir görsel, PDF, ses veya video dosyası ekleyin. Kaynak koda başvurmak için çalışma alanındaki yolunu kullanın."
 }
