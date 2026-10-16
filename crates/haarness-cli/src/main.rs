@@ -4830,7 +4830,9 @@ impl RunWatch {
         }
     }
 
-    /// A scheduled run: nobody watches, and its approvals wait for the apps.
+    /// A scheduled run: nobody watches. Its turn approves its own requests
+    /// and the server refuses those that need a person, so nothing waits;
+    /// anything else is left to the apps.
     fn scheduled() -> Self {
         Self {
             approver: Approver::OtherClients,
