@@ -1636,32 +1636,76 @@ async fn tunnel_request(
     let host = broker.host(thread, Some(lease))?;
     host_tunnel(host, action, input).await
 }
-/// One tunnel attempt per address. Desktop's built-in browser reaches every
-/// site through these tunnels, so on a network that answers AAAA but drops
-/// IPv6, an IPv6 address tried first with no limit of its own would use the
-/// whole connect timeout and IPv4 would never be tried.
+/// How long opening one tunnel may take, the name lookup included.
+const TUNNEL_BUDGET: Duration = Duration::from_secs(10);
+/// One attempt per address before the next is tried. Desktop's built-in
+/// browser reaches every site through these tunnels, so on a network that
+/// answers AAAA but drops IPv6 (or drops some IPv4 addresses), an address
+/// with no limit of its own would use the whole budget and the next one
+/// would never be tried. The last address gets whatever budget is left.
 const TUNNEL_ATTEMPT: Duration = Duration::from_secs(3);
 
-/// Connects to `host`, IPv4 addresses first, each for at most
-/// `TUNNEL_ATTEMPT`.
+/// Connects to `host` within `TUNNEL_BUDGET`, trying its addresses in
+/// `dial_order`.
 async fn dial(host: &str, port: u16) -> std::io::Result<TcpStream> {
-    let addresses = tokio::net::lookup_host((host, port)).await?.collect();
-    dial_each(ipv4_first(addresses), TUNNEL_ATTEMPT).await
+    let deadline = tokio::time::Instant::now() + TUNNEL_BUDGET;
+    let addresses = tokio::time::timeout_at(deadline, tokio::net::lookup_host((host, port)))
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("{host} did not resolve"),
+            )
+        })??
+        .collect();
+    dial_each(dial_order(addresses), TUNNEL_ATTEMPT, deadline).await
 }
 
-/// IPv4 before IPv6, each family in the resolver's order.
-fn ipv4_first(mut addresses: Vec<std::net::SocketAddr>) -> Vec<std::net::SocketAddr> {
-    addresses.sort_by_key(std::net::SocketAddr::is_ipv6);
-    addresses
+/// An IPv4 address first, then the families alternate (IPv6, IPv4, …), each
+/// in the resolver's order: a dropped IPv6 path costs one attempt, and
+/// silently dropped IPv4 addresses cannot keep IPv6 from being tried.
+fn dial_order(addresses: Vec<std::net::SocketAddr>) -> Vec<std::net::SocketAddr> {
+    let (mut v4, mut v6): (std::collections::VecDeque<_>, std::collections::VecDeque<_>) =
+        addresses
+            .into_iter()
+            .partition(std::net::SocketAddr::is_ipv4);
+    let mut ordered = Vec::with_capacity(v4.len() + v6.len());
+    let mut take_v4 = true;
+    while let Some(address) = if take_v4 {
+        v4.pop_front().or_else(|| v6.pop_front())
+    } else {
+        v6.pop_front().or_else(|| v4.pop_front())
+    } {
+        ordered.push(address);
+        take_v4 = !take_v4;
+    }
+    ordered
+}
+
+/// How long one attempt may take: `attempt`, or for the last address all
+/// that is left before the deadline.
+fn attempt_limit(last: bool, attempt: Duration, remaining: Duration) -> Duration {
+    if last {
+        remaining
+    } else {
+        attempt.min(remaining)
+    }
 }
 
 async fn dial_each(
     addresses: Vec<std::net::SocketAddr>,
     attempt: Duration,
+    deadline: tokio::time::Instant,
 ) -> std::io::Result<TcpStream> {
     let mut last = None;
-    for address in addresses {
-        match tokio::time::timeout(attempt, TcpStream::connect(address)).await {
+    let count = addresses.len();
+    for (index, address) in addresses.into_iter().enumerate() {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let limit = attempt_limit(index + 1 == count, attempt, remaining);
+        match tokio::time::timeout(limit, TcpStream::connect(address)).await {
             Ok(Ok(socket)) => return Ok(socket),
             Ok(Err(error)) => last = Some(error),
             Err(_) => {
@@ -1696,7 +1740,7 @@ async fn host_tunnel(host: Arc<Host>, action: &str, input: Value) -> CoreResult<
             .and_then(|port| u16::try_from(port).ok())
             .filter(|port| *port > 0)
             .ok_or_else(|| error("Invalid tunnel port"))?;
-        let socket = tokio::select! {()=host.closed.cancelled()=>return Err(error(RECOVERY)),value=tokio::time::timeout(Duration::from_secs(10),dial(hostname,port))=>value.map_err(error)?.map_err(error)?};
+        let socket = tokio::select! {()=host.closed.cancelled()=>return Err(error(RECOVERY)),value=dial(hostname,port)=>value.map_err(error)?};
         socket.set_nodelay(true).map_err(error)?;
         let (read, write) = socket.into_split();
         let id = uuid::Uuid::now_v7().to_string();
@@ -2072,27 +2116,40 @@ mod tests {
         (host, rx)
     }
     #[test]
-    fn tunnels_try_ipv4_addresses_first() {
+    fn tunnels_try_an_ipv4_address_first_then_alternate_families() {
         let address = |value: &str| value.parse::<std::net::SocketAddr>().unwrap();
         let resolved = [
             "[2001:db8::1]:443",
             "192.0.2.1:443",
             "[2001:db8::2]:443",
             "192.0.2.2:443",
+            "192.0.2.3:443",
         ]
         .map(address)
         .to_vec();
         assert_eq!(
-            ipv4_first(resolved),
+            dial_order(resolved),
             [
                 "192.0.2.1:443",
-                "192.0.2.2:443",
                 "[2001:db8::1]:443",
-                "[2001:db8::2]:443"
+                "192.0.2.2:443",
+                "[2001:db8::2]:443",
+                "192.0.2.3:443",
             ]
             .map(address)
             .to_vec()
         );
+        let only_v6 = ["[2001:db8::1]:443", "[2001:db8::2]:443"]
+            .map(address)
+            .to_vec();
+        assert_eq!(dial_order(only_v6.clone()), only_v6);
+    }
+    #[test]
+    fn the_last_address_gets_the_rest_of_the_budget() {
+        let second = Duration::from_secs(1);
+        assert_eq!(attempt_limit(false, 3 * second, 10 * second), 3 * second);
+        assert_eq!(attempt_limit(false, 3 * second, 2 * second), 2 * second);
+        assert_eq!(attempt_limit(true, 3 * second, 7 * second), 7 * second);
     }
     #[tokio::test]
     async fn a_tunnel_moves_past_an_address_that_never_answers() {
@@ -2102,15 +2159,43 @@ mod tests {
         // refused at once where the machine has no IPv6 route.
         let dropped = format!("[100::1]:{}", live.port()).parse().unwrap();
         let started = std::time::Instant::now();
-        let socket = dial_each(vec![dropped, live], Duration::from_millis(300))
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let socket = dial_each(vec![dropped, live], Duration::from_millis(300), deadline)
             .await
             .unwrap();
         assert_eq!(socket.peer_addr().unwrap(), live);
         assert!(started.elapsed() < Duration::from_secs(3));
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(600);
         assert!(
-            dial_each(vec![dropped], Duration::from_millis(300))
+            dial_each(vec![dropped], Duration::from_millis(100), deadline)
                 .await
                 .is_err()
+        );
+    }
+    #[tokio::test]
+    async fn ipv6_is_reached_behind_ipv4_addresses_that_never_answer() {
+        // Without IPv6 loopback there is nothing to reach.
+        let Ok(listener) = tokio::net::TcpListener::bind("[::1]:0").await else {
+            return;
+        };
+        let live = listener.local_addr().unwrap();
+        // TEST-NET addresses: dropped on the way, or refused at once.
+        let dropped =
+            ["192.0.2.1", "192.0.2.2", "192.0.2.3"].map(|ip| format!("{ip}:{}", live.port()));
+        let mut resolved: Vec<std::net::SocketAddr> =
+            dropped.iter().map(|value| value.parse().unwrap()).collect();
+        resolved.push(live);
+        let started = std::time::Instant::now();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let socket = dial_each(dial_order(resolved), Duration::from_millis(500), deadline)
+            .await
+            .unwrap();
+        assert_eq!(socket.peer_addr().unwrap(), live);
+        // One dropped IPv4 attempt, then IPv6.
+        assert!(
+            started.elapsed() < Duration::from_millis(1500),
+            "{:?}",
+            started.elapsed()
         );
     }
     #[tokio::test]
