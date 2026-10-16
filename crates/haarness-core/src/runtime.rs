@@ -11006,6 +11006,14 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
     // open, after links and `..`: a link `notes.txt -> .env` still asks, and
     // `node_modules/x/../../.env` is not a file inside node_modules.
     let mut patterns = vec![target.clone()];
+    // A fetch also meets the rules for the address it really reads, so case,
+    // a user name, a trailing dot, the default port or `..` cannot step
+    // around a rule written for the plain address.
+    if name == "webfetch"
+        && let Some(pattern) = webfetch_pattern(&target)
+    {
+        patterns.push(pattern);
+    }
     let mut resolved = Vec::new();
     if matches!(name, "read" | "write" | "edit" | "multiedit")
         && let Some(pattern) = resolved_file_pattern(workspace, &target)
@@ -11032,6 +11040,38 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         resolved,
     });
     plans
+}
+
+/// The address a fetch of `target` reads, written the way rules name it:
+/// scheme and host in lower case, without a user name or password, a
+/// trailing dot on the host, the default port or `.`/`..` path segments.
+/// `None` when `target` is already written that way or is not an http(s)
+/// URL.
+fn webfetch_pattern(target: &str) -> Option<String> {
+    let mut url = url::Url::parse(target.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    url.set_username("").ok()?;
+    url.set_password(None).ok()?;
+    if let Some(host) = url
+        .host_str()
+        .and_then(|host| host.strip_suffix('.'))
+        .map(str::to_owned)
+    {
+        url.set_host(Some(&host)).ok()?;
+    }
+    let mut pattern = url.to_string();
+    // The parser writes `https://example.com` as `https://example.com/`; the
+    // same page either way, so a rule for the form written still settles it.
+    if url.path() == "/"
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && !target.trim().ends_with('/')
+    {
+        pattern.pop();
+    }
+    (pattern != target).then_some(pattern)
 }
 
 /// The path a file tool opens for `target`, when links or `..` make it a
@@ -13176,6 +13216,57 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn webfetch_permissions_also_meet_the_rules_for_the_address_really_read() {
+        let engine = crate::PermissionEngine::new(vec![crate::PermissionRule {
+            pattern: "webfetch:https://denied.example/*".into(),
+            decision: crate::PermissionDecision::Deny,
+        }]);
+        let plan = |url: &str| {
+            let plan = super::ask_plans(
+                "webfetch",
+                &json!({"url": url}),
+                std::path::Path::new("/workspace"),
+            )
+            .remove(0);
+            assert_eq!(plan.permission, "webfetch");
+            assert_eq!(plan.always, vec!["*"]);
+            let denied = plan.patterns.iter().any(|pattern| {
+                engine.evaluate(&plan.operation(pattern)) == crate::PermissionDecision::Deny
+            });
+            (plan.patterns, denied)
+        };
+        // An address written plainly is checked once, as written.
+        for url in [
+            "https://docs.example/guide",
+            "https://docs.example",
+            "https://docs.example/",
+        ] {
+            assert_eq!(plan(url), (vec![url.to_owned()], false), "{url}");
+        }
+        assert_eq!(
+            plan("https://denied.example/secret"),
+            (vec!["https://denied.example/secret".to_owned()], true)
+        );
+        // Other spellings of the same address meet the rule too.
+        for url in [
+            "HTTPS://DENIED.EXAMPLE/secret",
+            "https://someone:password@denied.example/secret",
+            "https://denied.example./secret",
+            "https://denied.example:443/secret",
+            "https://denied.example/public/../secret",
+        ] {
+            let (patterns, denied) = plan(url);
+            assert!(denied, "{url}");
+            assert_eq!(
+                patterns,
+                vec![url.to_owned(), "https://denied.example/secret".to_owned()]
+            );
+        }
+        // Another port is another address.
+        assert!(!plan("https://denied.example:8443/secret").1);
     }
 
     #[test]

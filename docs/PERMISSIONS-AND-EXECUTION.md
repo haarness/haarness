@@ -77,6 +77,12 @@ The built-in `read` rules (`PermissionEngine::build_defaults`, `crates/haarness-
 - **Dynamic parts.** A value such as `/tmp/$name` or `~/$(date)` is judged by the folder its literal start names; one with no literal folder, such as `$HOME/x`, is not checked.
 - **Not covered.** Other programs' arguments are not read (`tee /tmp/x`, `sed -i … /etc/x`, `python -c …`), nor paths relative to a `cd` earlier in the command. This guards against slips; it is not a sandbox.
 
+## Web fetches
+
+`webfetch` rules (`webfetch:<address>`) meet the address as written and, when it is written differently, the address the fetch really reads: scheme and host in lower case, without a user name or password, a trailing dot on the host, the default port or `.`/`..` path segments. So a rule for `https://example.com/*` also applies to `HTTPS://user@Example.com.:443/a/../b`; another port is another address.
+
+A fetch follows redirects only while they stay on the host it asked for (the same host and port, or the same host moving from http to https). A redirect to another host is not followed: the result names the new address, and fetching it is the model's next call, checked against the rules like any other. A redirect within the host is followed without a new check, so a rule for one path of a host does not stop a redirect to it from another path of the same host.
+
 ## Skills and plan mode
 
 Dynamic `!` shell context in a skill or command now raises the ordinary permission prompt when it needs approval. A deny still prevents execution, and a nonzero context command still fails the invocation. Installed skill and enabled plugin helper directories receive read-only external-directory exemptions. Secret-file rules and canonical symlink checks still apply; these exemptions do not authorize writes or arbitrary home-directory access.

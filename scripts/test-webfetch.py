@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Real server, echo provider: webfetch reads pages as text, stops oversized and stalled ones, honours Stop.
+"""Real server, echo provider: webfetch reads pages as text, meets rules for every spelling of an address,
+reports cross-host redirects, stops oversized and stalled pages, and honours Stop.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-webfetch.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -18,6 +19,8 @@ PAGES = {
               b'<body><h1>visible-content-proof</h1><script>hiddenBodyScriptProof()</script>'
               b'<p>after-script-proof</p></body></html>'),
     '/bare': ('text/html; charset=utf-8', b'bare-nonce-314159\n'),
+    '/landing': ('text/plain', b'same-host-landing-proof'),
+    '/private': ('text/plain', b'private-page-proof'),
 }
 
 class Web(http.server.BaseHTTPRequestHandler):
@@ -37,6 +40,11 @@ class Web(http.server.BaseHTTPRequestHandler):
                     self.chunk(block); sent['endless'] += len(block)
                 self.wfile.write(b'0\r\n\r\n')
             except (BrokenPipeError, ConnectionResetError): pass
+        elif self.path in ('/hop', '/away'):
+            # /hop stays on this host; /away leads to another host name for the same server.
+            target = '/landing' if self.path == '/hop' else f'http://localhost:{self.server.server_port}/landing'
+            self.send_response(302); self.send_header('Location', target)
+            self.send_header('Content-Length', '0'); self.end_headers()
         elif self.path == '/stall':
             self.chunked(); self.chunk(b'first part of a page that never ends')
             release.wait(120)
@@ -48,7 +56,8 @@ class Web(http.server.BaseHTTPRequestHandler):
 web = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Web)
 threading.Thread(target=web.serve_forever, daemon=True).start()
 port = web.server_port
-(state/'config/config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\n')
+(state/'config/config.toml').write_text('[defaults]\nprovider="echo"\nmodel="echo-1"\n[permissions]\n'
+    f'webfetch = {{ "*" = "allow", "http://127.0.0.1:{port}/private*" = "deny", "http://localhost:{port}/*" = "deny" }}\n')
 env = {k: v for k, v in os.environ.items() if not k.startswith('HAARNESS_')}
 env.update(HAARNESS_DATA_DIR=str(state), HAARNESS_HOME=str(root/'home'), HAARNESS_TEST_PROVIDER='1',
            HAARNESS_DEFAULT_PROVIDER='echo', HAARNESS_DEFAULT_MODEL='echo-1')
@@ -102,6 +111,27 @@ try:
     _, before = fetch(thread, {'url': f'http://127.0.0.1:{port}/bare'})
     assert finish(thread, before)['output'].strip() == 'bare-nonce-314159'
     check('HTML reads as its text, without inline scripts and styles, and bare text is kept')
+
+    for address in [f'HTTP://127.0.0.1:{port}/private', f'http://someone@127.0.0.1:{port}/private',
+                    f'http://127.0.0.1:{port}/public/../private', f'http://LOCALHOST.:{port}/landing']:
+        _, before = fetch(thread, {'url': address})
+        result = finish(thread, before)
+        assert result['is_error'] and 'denied by permission rule' in result['output'], (address, result)
+    assert not any(path.endswith('/private') or path.startswith('localhost') for path in requests), requests
+    check('a deny rule also meets other spellings of the address (case, user name, .., trailing dot)')
+
+    _, before = fetch(thread, {'url': f'http://127.0.0.1:{port}/hop'})
+    result = finish(thread, before)
+    assert not result['is_error'] and 'same-host-landing-proof' in result['output'], result
+    _, before = fetch(thread, {'url': f'http://127.0.0.1:{port}/away'})
+    result = finish(thread, before)
+    target = f'http://localhost:{port}/landing'
+    assert not result['is_error'] and 'another host' in result['output'] and target in result['output'], result
+    assert not any(path.startswith('localhost') for path in requests), requests
+    _, before = fetch(thread, {'url': target})
+    result = finish(thread, before)
+    assert result['is_error'] and 'denied by permission rule' in result['output'], result
+    check('a same-host redirect is followed; one to another host is reported, and fetching it meets the deny')
 
     rss_before = rss_kb(pid) if pid else 0
     _, before = fetch(thread, {'url': f'http://127.0.0.1:{port}/endless'})
