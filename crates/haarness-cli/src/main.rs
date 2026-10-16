@@ -1687,6 +1687,11 @@ fn normalize_natural_language_args(args: impl IntoIterator<Item = OsString>) -> 
 /// `haarness sessions list | head` closes stdout before the list ends. End
 /// quietly then, as other command-line tools do, rather than with the panic
 /// `println!` raises on a broken pipe.
+///
+/// Any other panic is also written to the log (once logging is set up) with
+/// where it happened: tokio catches a panic in a spawned task and only the
+/// default hook prints it, to stderr, which a background server sends
+/// nowhere.
 fn quiet_closed_stdout() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -1699,6 +1704,13 @@ fn quiet_closed_stdout() {
         if message.starts_with("failed printing to stdout") && message.contains("Broken pipe") {
             std::process::exit(0);
         }
+        let location = info.location().map(ToString::to_string);
+        tracing::error!(
+            location = location.as_deref(),
+            thread = std::thread::current().name(),
+            "panic: {}",
+            message.chars().take(500).collect::<String>()
+        );
         default_hook(info);
     }));
 }
