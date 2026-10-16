@@ -2830,6 +2830,80 @@ test("a terminal still reaches its shell after a long burst of output", async ()
   expect(errors).toEqual([]);
 });
 
+test("a chat read again after a compaction keeps a reply that arrived during the read", async () => {
+  await showChat();
+  await newSession();
+  await send("history-landing-proof");
+  const transcript = page.locator(".transcript");
+  await expect(transcript).toContainText("Echo: history-landing-proof");
+  let thread = "";
+  let sequence = 0;
+  for (const item of await client.listThreads()) {
+    const items = await client.listItems(item.id);
+    if (items.some((value) => value.data.type === "user_message" && value.data.text === "history-landing-proof")) {
+      thread = item.id;
+      sequence = Math.max(...items.map((value) => value.sequence));
+    }
+  }
+  expect(thread).not.toBe("");
+  const info = await client.info();
+  const connection = "local:" + workspace;
+  // A compaction mid-turn, then the turn's next reply, which the server
+  // writes after it answered the history read the compaction asks for.
+  await app.evaluate(
+    ({ BrowserWindow }, input) => {
+      const contents = BrowserWindow.getAllWindows()[0].webContents;
+      const event = (eventId: number, type: string, payload: unknown) => ({
+        kind: "server",
+        connection: input.connection,
+        data: {
+          eventId,
+          type,
+          payload,
+          threadId: input.thread,
+          serverInstanceId: input.instance,
+          schemaVersion: "1",
+          createdAt: new Date().toISOString(),
+        },
+      });
+      contents.send("haarness:event", event(input.eventId, "thread.compacted", {}));
+      contents.send(
+        "haarness:event",
+        event(input.eventId + 1, "item.created", {
+          id: "history-landing-reply",
+          threadId: input.thread,
+          sequence: input.sequence + 1,
+          createdAt: new Date().toISOString(),
+          data: { type: "assistant_message", text: "Arrived during the history read" },
+        }),
+      );
+    },
+    {
+      connection,
+      thread,
+      instance: info.serverInstanceId,
+      eventId: (info.eventCursor ?? 0) + 1_000_000,
+      sequence,
+    },
+  );
+  await expect(transcript).toContainText("Arrived during the history read");
+  // The read lands within moments; the reply is still there after it.
+  await page.waitForTimeout(3000);
+  await expect(transcript).toContainText("Arrived during the history read");
+  await expect(transcript).toContainText("Echo: history-landing-proof");
+  // Follow the real event stream again (the fixture's event ids ran ahead).
+  await app.evaluate(({ BrowserWindow }, connection) => {
+    BrowserWindow.getAllWindows()[0].webContents.send("haarness:event", {
+      kind: "server",
+      connection,
+      data: { type: "resync_required" },
+    });
+  }, connection);
+  await expect(transcript).not.toContainText("Arrived during the history read");
+  await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
+  expect(errors).toEqual([]);
+});
+
 test("conversation tab order survives reopening and uses horizontal keyboard controls", async () => {
   await expandPrimaryProject();
   const first = await client.createThread({

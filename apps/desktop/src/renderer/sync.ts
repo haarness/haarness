@@ -27,6 +27,22 @@ function merge<V extends { id: string }>(items: V[], value: V) {
     ? items.map((item) => (item.id === value.id ? value : item))
     : [...items, value];
 }
+/**
+ * A chat's history as a read returned it, plus the items `events` (what
+ * arrived while the read was in flight) created in `thread` after it. The
+ * read is the server's copy of everything it holds; an item created after
+ * the server answered is not in it, and setting the read alone would drop
+ * that item, and with it a reply whose streamed text it had replaced.
+ */
+export function landItems(read: T.Item[], events: T.EventEnvelope[], thread: string) {
+  const items = new Map(read.map((item) => [item.id, item]));
+  for (const event of events) {
+    const item = event.payload as T.Item;
+    if (event.type === "item.created" && item?.id && item.threadId === thread && !items.has(item.id))
+      items.set(item.id, item);
+  }
+  return [...items.values()].sort((a, b) => a.sequence - b.sequence);
+}
 export function reduceEvent<S extends Live>(
   state: S,
   set: SetStoreFunction<S>,
