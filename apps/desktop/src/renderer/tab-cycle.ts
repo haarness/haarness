@@ -48,7 +48,9 @@ type Marked = {
 };
 
 export function createCycle(
-  schedule: (run: () => void) => void = (run) => void requestAnimationFrame(run),
+  // After the panel drew the new tab. Not a frame: a window in the
+  // background draws none, and the keyboard would land late on a stale spot.
+  schedule: (run: () => void) => void = (run) => void setTimeout(run),
 ) {
   const panels = new Map<string, CyclePanel>();
   /** The panel a step goes to from `element`, the one with the keyboard,
@@ -86,7 +88,7 @@ export function createCycle(
       if (tab !== panel.active()) panel.select(tab);
       // The keyboard stays in the panel: where it was (a terminal, the
       // message box, an editor), or, when that is gone or was a tab, on the
-      // new tab. The new tab may draw a frame later.
+      // new tab.
       schedule(() => {
         if (panel.keep) return panel.keep(tab, from);
         const stays =

@@ -8,6 +8,9 @@ import { randomUUID } from "node:crypto";
 import {
   defaults,
   migrateAgentKeys,
+  migrateTabKeys,
+  optionalShortcuts,
+  shortcutsClash,
   type Preferences,
   type Recent,
   type SavedServer,
@@ -35,8 +38,10 @@ let state: Data = {
 let chain = Promise.resolve();
 const path = () => join(app.getPath("userData"), "desktop.json");
 export async function load() {
+  let saved: Record<string, string> | undefined;
   try {
     const raw = JSON.parse(await readFile(path(), "utf8"));
+    saved = raw.preferences?.shortcuts;
     state = {
       ...state,
       ...raw,
@@ -50,9 +55,13 @@ export async function load() {
   }
   const recent = migrateProjectlessLocations(state.recent);
   const servers = migrateServers(recent, state.servers);
-  const shortcuts = state.agentKeysMigrated
-    ? state.preferences.shortcuts
-    : migrateAgentKeys(state.preferences.shortcuts);
+  const shortcuts = migrateTabKeys(
+    saved,
+    state.agentKeysMigrated
+      ? state.preferences.shortcuts
+      : migrateAgentKeys(state.preferences.shortcuts),
+    process.platform,
+  );
   state.agentKeysMigrated = true;
   if (
     recent !== state.recent ||
@@ -188,13 +197,13 @@ export async function preferences(input: Partial<Preferences>) {
     `^(${MODIFIER})(\\+(${MODIFIER}))*\\+(${KEY})$`, "i");
   const composer = new RegExp(`^((${MODIFIER})\\+)*(${NAMED})$`, "i");
   const composerKeys = new Set(["agentNext", "agentPrev", "tabNext", "tabPrev"]);
-  const shortcuts = Object.values(candidate.shortcuts);
   if (
-    Object.entries(candidate.shortcuts).some(([name, value]) =>
-      !(composerKeys.has(name) ? composer : accelerator).test(value),
+    Object.entries(candidate.shortcuts).some(
+      ([name, value]) =>
+        !(value === "" && optionalShortcuts.has(name)) &&
+        !(composerKeys.has(name) ? composer : accelerator).test(value),
     ) ||
-    new Set(shortcuts.map((value) => value.toLowerCase())).size !==
-      shortcuts.length
+    shortcutsClash(candidate.shortcuts, process.platform)
   )
     // Shown as is in Settings, so it speaks the language Settings is in.
     throw new Error(

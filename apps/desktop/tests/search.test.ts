@@ -8,7 +8,7 @@ import {
   shortcutText,
   type SearchEntry,
 } from "../src/renderer/search";
-import { defaults, migrateAgentKeys } from "../src/shared";
+import { defaults, migrateAgentKeys, migrateTabKeys, shortcutKeys, shortcutsClash } from "../src/shared";
 const entry = (
   key: string,
   name: string,
@@ -129,4 +129,36 @@ test("agent keys default to chords so Tab keeps moving focus", () => {
   const taken = { ...old, palette: "Mod+." };
   assert.deepEqual(migrateAgentKeys(taken), { ...taken, agentPrev: "Mod+Shift+." });
   assert.equal(migrateAgentKeys(defaults.shortcuts), defaults.shortcuts);
+});
+
+test("the tab step defaults give way to keys people already chose", () => {
+  // Off macOS Mod is Control: an agent key saved as Mod+Tab is Ctrl+Tab.
+  assert.equal(shortcutKeys("Mod+Tab", "win32"), shortcutKeys("Ctrl+Tab", "win32"));
+  assert.notEqual(shortcutKeys("Mod+Tab", "darwin"), shortcutKeys("Ctrl+Tab", "darwin"));
+  assert.equal(shortcutKeys("Shift+Ctrl+Tab", "linux"), shortcutKeys("ctrl+shift+tab", "linux"));
+  const saved = { ...defaults.shortcuts, agentNext: "Mod+Tab", agentPrev: "Mod+Shift+Tab" };
+  const withoutTabs = (value: Record<string, string>) =>
+    Object.fromEntries(Object.entries(value).filter(([name]) => !name.startsWith("tab")));
+  const before = withoutTabs(saved);
+  // Saved before the tab steps existed: the defaults that clash are unset,
+  // so the agent keys keep working and saving Settings is not refused.
+  const migrated = migrateTabKeys(before, saved, "win32");
+  assert.equal(migrated.tabNext, "");
+  assert.equal(migrated.tabPrev, "");
+  assert.equal(shortcutsClash(saved, "win32"), true);
+  assert.equal(shortcutsClash(migrated, "win32"), false);
+  // On macOS those agent keys are Command+Tab: no clash, nothing changes.
+  assert.equal(migrateTabKeys(before, saved, "darwin"), saved);
+  // A custom Ctrl+Tab for another action, on any platform.
+  const custom = { ...defaults.shortcuts, agentNext: "Ctrl+Tab" };
+  const chosen = withoutTabs(custom);
+  assert.equal(migrateTabKeys(chosen, custom, "darwin").tabNext, "");
+  assert.equal(migrateTabKeys(chosen, custom, "darwin").tabPrev, "Ctrl+Shift+Tab");
+  // A tab key saved on purpose stays, and the defaults never clash.
+  assert.equal(migrateTabKeys(custom, custom, "darwin"), custom);
+  assert.equal(migrateTabKeys(undefined, defaults.shortcuts, "win32"), defaults.shortcuts);
+  for (const platform of ["darwin", "win32", "linux"])
+    assert.equal(shortcutsClash(defaults.shortcuts, platform), false);
+  // Unset keys are no clash.
+  assert.equal(shortcutsClash({ a: "", b: "" }, "darwin"), false);
 });
