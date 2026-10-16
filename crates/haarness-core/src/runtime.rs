@@ -169,12 +169,42 @@ pub struct ContextUsage {
     pub compact_at: u64,
 }
 
+/// How the turn that started some work answers approvals, kept by that work
+/// (a workflow's thread and agents) after the turn ends. Only work the turn
+/// started carries it: a person's own turn or `!` command in such a chat
+/// never does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RunStance {
+    /// The turn approved its own requests once (a schedule, `run --yolo`,
+    /// ACP, a `--yolo` terminal UI).
+    auto_approve: bool,
+    /// Nobody can answer the turn: a schedule's run. A request that needs a
+    /// person fails at once instead of waiting.
+    unattended: bool,
+}
+
+/// Chats a schedule created whose run has not started yet, and the stance
+/// each workflow thread took from the turn that started it.
+#[derive(Default)]
+struct RunStances {
+    scheduled: DashMap<ThreadId, ()>,
+    started: DashMap<ThreadId, RunStance>,
+}
+
+impl RunStances {
+    fn of(&self, thread: ThreadId) -> Option<RunStance> {
+        self.started.get(&thread).map(|stance| *stance)
+    }
+}
+
 struct ActiveTurn {
     id: TurnId,
     request_id: RequestId,
     /// Propagated to workflow-owned turns so a headless scheduled run cannot
     /// stall as soon as it delegates work to an agent node.
     auto_approve: bool,
+    /// A schedule's run, or work it started: nobody can answer it.
+    unattended: bool,
     cancel: CancellationToken,
     /// Queue callers wait for this during both launch setup and terminal
     /// closure rather than mistaking either transient state for a conflict.
@@ -266,6 +296,7 @@ struct BackgroundTask {
     ready: Notify,
     delivery_started: AtomicBool,
     delivery_auto_approve: bool,
+    delivery_unattended: bool,
     delivery_tools: Option<HashMap<String, bool>>,
     suppress_delivery: AtomicBool,
     delivered: AtomicBool,
@@ -1188,6 +1219,7 @@ pub struct AgentRuntime {
     /// Concurrent child agents' first requests for one prompt prefix: the
     /// first goes alone so the others can read the cache it writes.
     prefix_warmup: crate::prefix_warmup::PrefixWarmup,
+    run_stances: Arc<RunStances>,
 }
 
 #[derive(Clone)]
@@ -1321,6 +1353,7 @@ impl AgentRuntime {
             queue_pauses: Arc::new(DashMap::new()),
             approval_modes,
             prefix_warmup: crate::prefix_warmup::PrefixWarmup::default(),
+            run_stances: Arc::new(RunStances::default()),
         }
     }
 
@@ -1676,7 +1709,7 @@ impl AgentRuntime {
         let tools = request
             .preview
             .map(|preview| HashMap::from([("preview".into(), preview)]));
-        self.queue_input_with_options(thread_id, request, false, tools)
+        self.queue_input_with_options(thread_id, request, false, false, tools)
             .await
     }
 
@@ -1817,6 +1850,7 @@ impl AgentRuntime {
                     Vec::new(),
                     None,
                     Some(queue.revision),
+                    false,
                 )
                 .await;
             return match turn {
@@ -1896,6 +1930,7 @@ impl AgentRuntime {
         thread_id: ThreadId,
         mut request: QueueInputRequest,
         auto_approve: bool,
+        unattended: bool,
         tools: Option<HashMap<String, bool>>,
     ) -> CoreResult<QueueInputResponse> {
         if request.text.trim().is_empty() && request.attachments.is_empty() {
@@ -1936,7 +1971,7 @@ impl AgentRuntime {
                 continue;
             }
             match self
-                .start_turn(
+                .start_turn_with_ceilings(
                     thread_id,
                     StartTurnRequest {
                         request_id: request.request_id,
@@ -1956,6 +1991,10 @@ impl AgentRuntime {
                         tools: tools.clone(),
                         command: None,
                     },
+                    Vec::new(),
+                    None,
+                    None,
+                    unattended,
                 )
                 .await
             {
@@ -2084,7 +2123,32 @@ impl AgentRuntime {
             (result, _) => result?,
         };
         self.publish_created_thread(&thread).await;
-        if let Some(hooks) = &components.hooks {
+        if thread.schedule.is_some() {
+            self.run_stances.scheduled.insert(thread.id, ());
+        }
+        // A workflow's thread keeps how the turn that started it answers
+        // approvals, and its agents' threads keep the workflow's.
+        if let Some(parent) = thread.parent_id {
+            let stance = self
+                .active
+                .get(&parent)
+                .map(|active| RunStance {
+                    auto_approve: active.auto_approve,
+                    unattended: active.unattended,
+                })
+                .or_else(|| self.run_stances.of(parent))
+                .unwrap_or_default();
+            if stance != RunStance::default() {
+                self.run_stances.started.insert(thread.id, stance);
+            }
+        }
+        // A chat started inside another (a workflow's thread or one of its
+        // agents) is not a session start, as for task subagents and Claude
+        // Code's subagents: a slow SessionStart hook would hold up each
+        // workflow agent's first prompt.
+        if thread.parent_id.is_none()
+            && let Some(hooks) = &components.hooks
+        {
             hooks.session_start(thread.id, &thread.agent).await;
         }
         Ok(thread)
@@ -3344,8 +3408,37 @@ impl AgentRuntime {
         &self,
         thread_id: ThreadId,
         name: &str,
+        arguments: serde_json::Value,
+        cancel: CancellationToken,
+    ) -> CoreResult<DirectToolResult> {
+        self.run_direct_tool_as(thread_id, name, arguments, cancel, RunStance::default())
+            .await
+    }
+
+    /// [`run_direct_tool`](Self::run_direct_tool) for a workflow's own
+    /// `ctx.tool()` and `ctx.shell()` calls: they follow the turn that
+    /// started the workflow. A schedule's or `run --yolo` turn approves them
+    /// once, and a schedule's refuses at once what needs a person, also after
+    /// that turn ends. A person's call in the same chat is asked as usual.
+    pub async fn run_workflow_tool(
+        &self,
+        thread_id: ThreadId,
+        name: &str,
+        arguments: serde_json::Value,
+        cancel: CancellationToken,
+    ) -> CoreResult<DirectToolResult> {
+        let stance = self.run_stances.of(thread_id).unwrap_or_default();
+        self.run_direct_tool_as(thread_id, name, arguments, cancel, stance)
+            .await
+    }
+
+    async fn run_direct_tool_as(
+        &self,
+        thread_id: ThreadId,
+        name: &str,
         mut arguments: serde_json::Value,
         cancel: CancellationToken,
+        stance: RunStance,
     ) -> CoreResult<DirectToolResult> {
         if cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
@@ -3379,6 +3472,7 @@ impl AgentRuntime {
             *self.repository_rules.lock() = store.load()?;
         }
         let mut engine = components.config.permission_defaults(&thread.agent, name);
+        engine.set_workspace(&self.workspace);
         for rule in self.repository_rules.lock().iter().cloned() {
             engine.add_repository_grant(rule);
         }
@@ -3405,9 +3499,7 @@ impl AgentRuntime {
             }
         }
         if let Some(parent_id) = thread.parent_id {
-            for rule in self.permission_boundary_for_lineage(parent_id).await? {
-                engine.add_ceiling(rule);
-            }
+            engine.add_inherited_ceiling(self.permission_boundary_for_lineage(parent_id).await?);
         }
         let tool = components.tools.get(name).ok_or_else(|| {
             unknown_tool(
@@ -3426,6 +3518,13 @@ impl AgentRuntime {
                     .map(|tool| tool.name),
             )
         })?;
+        if !engine.hides_tool(name)
+            && let Some(rule) = engine.inherited_tool_denial(name)
+        {
+            return Err(CoreError::PermissionDenied(inherited_tool_refusal(
+                name, rule,
+            )));
+        }
         if engine.disables_tool(name) {
             return Err(CoreError::PermissionDenied(format!(
                 "tool {name} is disabled by permission policy. Do not retry this action."
@@ -3585,17 +3684,28 @@ impl AgentRuntime {
                 .filter(|operation| tool.explicit_approval(&arguments, operation))
                 .collect();
             let explicit = !explicit_operations.is_empty();
-            // Same rule as model calls: a scheduled run's workflow or tool
-            // call cannot get a person's answer, so it fails now.
-            if explicit && scheduled_lineage(self.repository.as_ref(), thread_id).await {
-                allowed = Err(cannot_ask(&explicit_operations));
-                break;
-            }
             let operation = if asked.len() == 1 {
                 format!("{}:{}", plan.permission, asked[0])
             } else {
                 format!("{}: {}", plan.permission, asked.join("  "))
             };
+            // Same rule as model calls: a scheduled run's workflow cannot
+            // get a person's answer, so it fails now.
+            if (explicit || forced) && stance.unattended {
+                allowed = Err(if explicit {
+                    cannot_ask(&explicit_operations)
+                } else {
+                    cannot_ask_forced(&operation)
+                });
+                break;
+            }
+            // A workflow's own tool calls follow the turn that started it: a
+            // schedule, `run --yolo`, ACP or a `--yolo` terminal UI approves
+            // them once, as it does its agents' requests.
+            if !forced && !explicit && stance.auto_approve {
+                tracing::info!(thread = %thread_id, operation, "approved once (unattended run)");
+                continue;
+            }
             let always_rules = plan.always_rules();
             // Same rule as model calls: a chat in Auto approves eligible
             // requests once, ordered with mode changes by the gate.
@@ -4384,7 +4494,7 @@ impl AgentRuntime {
         thread_id: ThreadId,
         request: StartTurnRequest,
     ) -> CoreResult<Turn> {
-        self.start_turn_with_ceilings(thread_id, request, Vec::new(), None, None)
+        self.start_turn_with_ceilings(thread_id, request, Vec::new(), None, None, false)
             .await
     }
 
@@ -4399,11 +4509,18 @@ impl AgentRuntime {
         mut request: StartTurnRequest,
         output_schema: Option<serde_json::Value>,
     ) -> CoreResult<Turn> {
-        if self
+        // The agent follows the turn that started the workflow, while it runs
+        // and, through the stance the workflow's threads keep, after it ends.
+        let stance = self
             .active
             .get(&authority_thread_id)
-            .is_some_and(|active| active.auto_approve)
-        {
+            .map(|active| RunStance {
+                auto_approve: active.auto_approve,
+                unattended: active.unattended,
+            })
+            .unwrap_or_default();
+        let kept = self.run_stances.of(thread_id).unwrap_or_default();
+        if stance.auto_approve || kept.auto_approve {
             request.auto_approve = true;
             request
                 .tools
@@ -4413,17 +4530,25 @@ impl AgentRuntime {
         let inherited_ceilings = self
             .permission_boundary_for_lineage(authority_thread_id)
             .await?;
-        self.start_turn_with_ceilings(thread_id, request, inherited_ceilings, output_schema, None)
-            .await
+        self.start_turn_with_ceilings(
+            thread_id,
+            request,
+            inherited_ceilings,
+            output_schema,
+            None,
+            stance.unattended || kept.unattended,
+        )
+        .await
     }
 
     async fn start_turn_with_ceilings(
         &self,
         thread_id: ThreadId,
         mut request: StartTurnRequest,
-        inherited_ceilings: Vec<PermissionRule>,
+        inherited_ceilings: Vec<Vec<PermissionRule>>,
         output_schema: Option<serde_json::Value>,
         queue_revision: Option<u64>,
+        unattended: bool,
     ) -> CoreResult<Turn> {
         let _reload = self.reload_gate.read().await;
         request.attachments = crate::attachments::admit_off_executor(
@@ -4563,6 +4688,10 @@ impl AgentRuntime {
         if !created {
             return Ok(turn);
         }
+        // The first turn in a chat a schedule created is the schedule's run,
+        // started with its own approvals. Later turns there are a person's.
+        let first_of_schedule = self.run_stances.scheduled.remove(&thread_id).is_some();
+        let unattended = unattended || (first_of_schedule && request.auto_approve);
         // Install a non-accepting launch reservation immediately after the
         // durable Running turn exists. Every remaining setup operation is
         // fallible; without this reservation, concurrent input can enter the
@@ -4573,6 +4702,7 @@ impl AgentRuntime {
             id: turn.id,
             request_id: turn.request_id,
             auto_approve: request.auto_approve,
+            unattended,
             cancel: cancel.clone(),
             changed: Notify::new(),
             accepting: AsyncMutex::new(false),
@@ -4767,6 +4897,8 @@ impl AgentRuntime {
             approval_modes: self.approval_modes.clone(),
             answer_steer: AtomicBool::new(false),
             prefix_warmup: self.prefix_warmup.clone(),
+            run_stances: self.run_stances.clone(),
+            unattended,
         });
         // A real message, or Send on a queued one, resumes a paused queue.
         if !task.request.synthetic {
@@ -4814,7 +4946,13 @@ impl AgentRuntime {
                 synthetic: true,
             };
             if let Err(error) = self
-                .queue_input_with_options(thread_id, request, false, task.request.tools.clone())
+                .queue_input_with_options(
+                    thread_id,
+                    request,
+                    false,
+                    false,
+                    task.request.tools.clone(),
+                )
                 .await
             {
                 tracing::warn!(%error, thread = %thread_id, "could not answer steering after stop");
@@ -4882,7 +5020,7 @@ impl AgentRuntime {
         );
     }
 
-    fn permission_boundary(&self, agent: &AgentSnapshot) -> Vec<PermissionRule> {
+    fn permission_boundary(&self, agent: &AgentSnapshot) -> Vec<Vec<PermissionRule>> {
         let components = self.components();
         let mut engine = components.config.permission_defaults(&agent.id, "");
         for rule in self.repository_rules.lock().iter().cloned() {
@@ -4911,7 +5049,7 @@ impl AgentRuntime {
     async fn permission_boundary_for_lineage(
         &self,
         authority_thread_id: ThreadId,
-    ) -> CoreResult<Vec<PermissionRule>> {
+    ) -> CoreResult<Vec<Vec<PermissionRule>>> {
         // Walk the authority lineage, not only the immediate launch thread.
         // A build-profile workflow started by a plan-bounded child must not
         // discard the original plan ceiling for either agents or direct tools.
@@ -5133,7 +5271,7 @@ struct RunnerTask {
     parent: Option<ParentLink>,
     /// Ceiling rules a child agent inherits from its parent — evaluated
     /// independently, so a child can never escalate past its parent.
-    inherited_ceilings: Vec<PermissionRule>,
+    inherited_ceilings: Vec<Vec<PermissionRule>>,
     /// Schema-constrained final output requested by a workflow-owned turn.
     /// Normal user and nested task turns always leave this unset.
     output_schema: Option<serde_json::Value>,
@@ -5172,6 +5310,12 @@ struct RunnerTask {
     /// Set when a stop leaves unread steering for a continuation to answer.
     answer_steer: AtomicBool,
     prefix_warmup: crate::prefix_warmup::PrefixWarmup,
+    run_stances: Arc<RunStances>,
+    /// A turn nobody can answer: a schedule's run and the subagents and
+    /// results it starts. A `--yolo` client (the terminal UI, `haarness
+    /// run`, ACP) still has a person to ask, and so does anyone who later
+    /// types in that chat or a fork of it.
+    unattended: bool,
 }
 
 struct TurnToolInvoker {
@@ -5669,8 +5813,21 @@ impl RunnerTask {
             haarness.agent.depth = i64::from(self.depth),
         )
     )]
+    /// Run the turn with a panic counted as its failure, so the cleanup
+    /// below still ends it and frees the chat. Uncaught, the panic ended
+    /// only this task: the chat stayed busy until the server restarted, and
+    /// a background server's stderr, where the panic was printed, goes
+    /// nowhere.
+    async fn run_contained(self: Arc<Self>) -> CoreResult<()> {
+        use futures::FutureExt as _;
+        std::panic::AssertUnwindSafe(self.run_inner())
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|panic| Err(turn_panicked(panic.as_ref())))
+    }
+
     async fn run_with_cleanup(self: Arc<Self>) -> CoreResult<()> {
-        let mut result = Arc::clone(&self).run_inner().await;
+        let mut result = Arc::clone(&self).run_contained().await;
         if result.is_err() {
             // Stop new queue writes immediately, but keep the matching active
             // reservation installed until goal state and the durable turn are
@@ -5691,7 +5848,7 @@ impl RunnerTask {
                 ) && !is_provider_usage_limit(error_value)
             });
             if retryable && self.has_unconsumed_queued().await {
-                result = Arc::clone(&self).run_inner().await;
+                result = Arc::clone(&self).run_contained().await;
             }
 
             // A cancellation, usage limit, or failed retry can still leave an
@@ -6637,7 +6794,11 @@ impl RunnerTask {
                 // denied tool only invites guaranteed failures. Default child
                 // agents also cannot recursively spawn tasks, so hide `task`
                 // rather than letting the model discover that ceiling by
-                // repeatedly calling it.
+                // repeatedly calling it. A boundary inherited from the chat
+                // that started this one never hides a tool: it differs
+                // between sessions of one agent, and the tools lead the
+                // cached prompt prefix those sessions share. Such a tool is
+                // refused when called, naming the parent's rule.
                 let permission_engine = self.permission_engine(agent);
                 let catalog = self.tools.list();
                 let eligible_tools = catalog
@@ -6647,7 +6808,7 @@ impl RunnerTask {
                         self.tool_enabled(&tool.name)
                             && !(self.depth >= self.config.execution.subagent_depth
                                 && tool.name == "task")
-                            && !permission_engine.disables_tool(&tool.name)
+                            && !permission_engine.hides_tool(&tool.name)
                             && (goal_for_request.is_some() || !is_goal_tool(&tool.name))
                     })
                     .collect::<Vec<_>>();
@@ -6663,7 +6824,7 @@ impl RunnerTask {
                 // Deferring an allowed tool is only useful when its loader is
                 // callable under this turn's permissions and explicit mask.
                 if !self.tool_enabled(LOAD_TOOL_NAME)
-                    || permission_engine.disables_tool(LOAD_TOOL_NAME)
+                    || permission_engine.hides_tool(LOAD_TOOL_NAME)
                 {
                     lazy_settings.mode = haarness_protocol::LazyToolMode::Off;
                 }
@@ -7606,6 +7767,14 @@ impl RunnerTask {
                 .collect::<Vec<_>>();
             return Err(unknown_tool(name, available));
         }
+        if self.tool_enabled(name)
+            && !engine.hides_tool(name)
+            && let Some(rule) = engine.inherited_tool_denial(name)
+        {
+            return Err(CoreError::PermissionDenied(inherited_tool_refusal(
+                name, rule,
+            )));
+        }
         if !self.tool_enabled(name)
             || engine.disables_tool(name)
             || (self.depth >= self.config.execution.subagent_depth && name == "task")
@@ -8223,8 +8392,7 @@ impl RunnerTask {
         for plan in plans {
             let mut asked = Vec::new();
             for pattern in &plan.patterns {
-                if PermissionEngine::new(self.skill_rules.lock().clone())
-                    .evaluate(&plan.operation(pattern))
+                if self.skill_engine().evaluate(&plan.operation(pattern))
                     == PermissionDecision::Deny
                 {
                     return Err(CoreError::PermissionDenied(
@@ -8268,8 +8436,7 @@ impl RunnerTask {
                             && ((hook_permission == Some(PermissionDecision::Allow)
                                 && !plan.is_resolved(pattern))
                                 || (evaluation.matched.is_none()
-                                    && PermissionEngine::new(self.skill_rules.lock().clone())
-                                        .evaluate(&plan.operation(pattern))
+                                    && self.skill_engine().evaluate(&plan.operation(pattern))
                                         == PermissionDecision::Allow)) => {}
                     PermissionDecision::Ask => asked.push(pattern.clone()),
                     PermissionDecision::Allow => {}
@@ -8401,19 +8568,20 @@ impl RunnerTask {
         Ok(output)
     }
 
-    /// A turn nobody can answer: part of a scheduled run. A `--yolo` client
-    /// (the terminal UI, `haarness run`, ACP) and the agents and workflows it
-    /// starts still have a person to ask, however their tools are masked.
-    async fn unattended(&self) -> bool {
-        scheduled_lineage(self.repository.as_ref(), self.thread.id).await
-    }
-
     /// The effective permission engine for this turn: agent defaults →
     /// configured rules → session approvals, bounded by ceilings (the plan
     /// agent's write boundary, and for child agents the parent's ruleset).
     fn permission_engine(&self, agent: &str) -> PermissionEngine {
         let session_rules = self.session_rules.lock();
         self.permission_engine_with_session_rules(agent, &session_rules)
+    }
+
+    /// The active skill's rules, matching path rules by either spelling of a
+    /// project file like the turn's own rules.
+    fn skill_engine(&self) -> PermissionEngine {
+        let mut engine = PermissionEngine::new(self.skill_rules.lock().clone());
+        engine.set_workspace(&self.workspace);
+        engine
     }
 
     fn permission_engine_for_tool(&self, agent: &str, tool: &str) -> PermissionEngine {
@@ -8435,6 +8603,7 @@ impl RunnerTask {
         session_rules: &[PermissionRule],
     ) -> PermissionEngine {
         let mut engine = self.config.permission_defaults(agent, tool);
+        engine.set_workspace(&self.workspace);
         for rule in self.repository_rules.lock().iter().cloned() {
             engine.add_repository_grant(rule);
         }
@@ -8455,9 +8624,7 @@ impl RunnerTask {
                 engine.add_rule(rule);
             }
         }
-        for rule in self.inherited_ceilings.iter().cloned() {
-            engine.add_ceiling(rule);
-        }
+        engine.add_inherited_ceiling(self.inherited_ceilings.iter().cloned());
         engine
     }
 
@@ -8477,11 +8644,14 @@ impl RunnerTask {
         let always_rules = plan.always_rules();
         let explicit = !explicit_operations.is_empty();
         // A run nobody watches (a schedule) cannot get a person's answer:
-        // fail now instead of waiting forever.
-        if explicit && self.unattended().await {
-            return Err(CoreError::PermissionDenied(cannot_ask(
-                &explicit_operations,
-            )));
+        // fail now instead of waiting forever. That includes the requests
+        // that ask every time, such as Cloud actions that spend money.
+        if (explicit || forced) && self.unattended {
+            return Err(CoreError::PermissionDenied(if explicit {
+                cannot_ask(&explicit_operations)
+            } else {
+                cannot_ask_forced(&operation)
+            }));
         }
         let automatic = self.config.auto_approve || self.request.auto_approve;
         if automatic && !forced && !explicit {
@@ -9125,10 +9295,12 @@ impl RunnerTask {
         // the admission lock, so `turn.started` must never describe a runner
         // whose cancellation token is not reachable yet.
         let cancel = self.cancel.child_token();
+        let unattended = self.unattended;
         let active = Arc::new(ActiveTurn {
             id: turn.id,
             request_id: turn.request_id,
             auto_approve: request.auto_approve,
+            unattended,
             cancel: cancel.clone(),
             changed: Notify::new(),
             accepting: AsyncMutex::new(false),
@@ -9223,6 +9395,8 @@ impl RunnerTask {
             approval_modes: self.approval_modes.clone(),
             answer_steer: AtomicBool::new(false),
             prefix_warmup: self.prefix_warmup.clone(),
+            run_stances: self.run_stances.clone(),
+            unattended: self.unattended,
         });
         child_task.publish_task_update("running");
         let task = Arc::new(BackgroundTask {
@@ -9247,6 +9421,7 @@ impl RunnerTask {
             ready: Notify::new(),
             delivery_started: AtomicBool::new(false),
             delivery_auto_approve: self.request.auto_approve,
+            delivery_unattended: self.unattended,
             // Preserve detached/headless restrictions (notably a disabled
             // question tool) without pinning an interactive session to an old
             // agent's transient tool mask after the user switches agents.
@@ -9410,6 +9585,7 @@ impl RunnerTask {
                         synthetic: true,
                     },
                     task.delivery_auto_approve,
+                    task.delivery_unattended,
                     task.delivery_tools.clone(),
                 )
                 .await;
@@ -9461,6 +9637,7 @@ impl RunnerTask {
             queue_pauses: self.queue_pauses.clone(),
             approval_modes: self.approval_modes.clone(),
             prefix_warmup: self.prefix_warmup.clone(),
+            run_stances: self.run_stances.clone(),
         }
     }
 }
@@ -10671,11 +10848,41 @@ fn with_target_path(arguments: &serde_json::Value, path: &str) -> serde_json::Va
     arguments
 }
 
+/// Why a tool listed for this agent is refused: the chat that started it
+/// denies the whole tool.
+fn inherited_tool_refusal(tool: &str, rule: &str) -> String {
+    format!(
+        "tool {tool} is denied by the rule '{rule}' of the chat or agent that started this one, which no rule here can lift. Do not retry it; do this part another way or report it to that agent."
+    )
+}
+
 /// Why a scheduled run's Chrome site gate failed instead of waiting.
 fn cannot_ask(operations: &[String]) -> String {
     format!(
         "Chrome needs the user's approval for {} and this run cannot ask. Ask the user to allow it in an interactive chat, then retry.",
         explicit_origins(operations)
+    )
+}
+
+/// The error a turn ends with when its code panicked. The panic itself, with
+/// where it happened, is in the log (see the CLI's panic hook).
+fn turn_panicked(panic: &(dyn std::any::Any + Send)) -> CoreError {
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or("no message");
+    let message: String = message.chars().take(200).collect();
+    tracing::error!(error = %message, "a turn stopped on a panic");
+    CoreError::Tool(format!(
+        "Haarness stopped this turn after an internal error ({message}). The details are in the Haarness log; send a message to continue."
+    ))
+}
+
+/// Why a scheduled run's request that always asks failed instead of waiting.
+fn cannot_ask_forced(operation: &str) -> String {
+    format!(
+        "'{operation}' needs the user's approval every time, and this scheduled run cannot ask. Do not retry it here; ask the user to do it in an interactive chat."
     )
 }
 
@@ -10967,15 +11174,36 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         // per-path rules apply; one prompt covers them all.
         if let Some(input) = arguments.get("input").and_then(serde_json::Value::as_str) {
             if let Ok(parsed) = crate::patch::parse_patch(input) {
+                // A moved file's destination is edited too, and each path
+                // also meets the rules for the file it really opens.
+                let mut patterns: Vec<String> = Vec::new();
+                let mut resolved = Vec::new();
+                for operation in &parsed {
+                    let destination = match operation {
+                        crate::patch::FileOp::Update {
+                            move_to: Some(target),
+                            ..
+                        } => Some(target.as_str()),
+                        _ => None,
+                    };
+                    for path in std::iter::once(operation.path()).chain(destination) {
+                        if !patterns.iter().any(|known| known == path) {
+                            patterns.push(path.to_owned());
+                        }
+                        if let Some(pattern) = resolved_file_pattern(workspace, path)
+                            && !patterns.contains(&pattern)
+                        {
+                            resolved.push((pattern.clone(), pattern.clone()));
+                            patterns.push(pattern);
+                        }
+                    }
+                }
                 plans.push(AskPlan {
                     permission: "edit".into(),
-                    patterns: parsed
-                        .iter()
-                        .map(|operation| operation.path().to_owned())
-                        .collect(),
+                    patterns,
                     always: vec!["*".into()],
                     external_paths: Vec::new(),
-                    resolved: Vec::new(),
+                    resolved,
                 });
                 return plans;
             }
@@ -11006,6 +11234,14 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
     // open, after links and `..`: a link `notes.txt -> .env` still asks, and
     // `node_modules/x/../../.env` is not a file inside node_modules.
     let mut patterns = vec![target.clone()];
+    // A fetch also meets the rules for the address it really reads, so case,
+    // a user name, a trailing dot, the default port or `..` cannot step
+    // around a rule written for the plain address.
+    if name == "webfetch"
+        && let Some(pattern) = webfetch_pattern(&target)
+    {
+        patterns.push(pattern);
+    }
     let mut resolved = Vec::new();
     if matches!(name, "read" | "write" | "edit" | "multiedit")
         && let Some(pattern) = resolved_file_pattern(workspace, &target)
@@ -11032,6 +11268,38 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         resolved,
     });
     plans
+}
+
+/// The address a fetch of `target` reads, written the way rules name it:
+/// scheme and host in lower case, without a user name or password, a
+/// trailing dot on the host, the default port or `.`/`..` path segments.
+/// `None` when `target` is already written that way or is not an http(s)
+/// URL.
+fn webfetch_pattern(target: &str) -> Option<String> {
+    let mut url = url::Url::parse(target.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    url.set_username("").ok()?;
+    url.set_password(None).ok()?;
+    if let Some(host) = url
+        .host_str()
+        .and_then(|host| host.strip_suffix('.'))
+        .map(str::to_owned)
+    {
+        url.set_host(Some(&host)).ok()?;
+    }
+    let mut pattern = url.to_string();
+    // The parser writes `https://example.com` as `https://example.com/`; the
+    // same page either way, so a rule for the form written still settles it.
+    if url.path() == "/"
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && !target.trim().ends_with('/')
+    {
+        pattern.pop();
+    }
+    (pattern != target).then_some(pattern)
 }
 
 /// The path a file tool opens for `target`, when links or `..` make it a
@@ -13176,6 +13444,105 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn a_patch_meets_the_rules_for_every_file_it_touches_and_moves_to() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-patch-paths-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::create_dir_all(workspace.join("vendor")).unwrap();
+        std::fs::write(workspace.join("src/old.rs"), "a\n").unwrap();
+        let patch = "*** Begin Patch\n\
+            *** Update File: src/old.rs\n\
+            *** Move to: vendor/lib.rs\n\
+            @@\n-a\n+b\n\
+            *** Add File: src/../vendor/new.rs\n+c\n\
+            *** End Patch";
+        let plan = super::ask_plans("apply_patch", &json!({"input": patch}), &workspace).remove(0);
+        assert_eq!(plan.permission, "edit");
+        assert_eq!(
+            plan.patterns,
+            vec![
+                "src/old.rs",
+                "vendor/lib.rs",
+                "src/../vendor/new.rs",
+                "vendor/new.rs"
+            ]
+        );
+        assert_eq!(
+            plan.resolved,
+            vec![("vendor/new.rs".to_owned(), "vendor/new.rs".to_owned())]
+        );
+        let mut engine = crate::PermissionEngine::build_defaults();
+        engine.set_workspace(&workspace);
+        engine.add_rule(crate::PermissionRule {
+            pattern: "edit:vendor/*".into(),
+            decision: crate::PermissionDecision::Deny,
+        });
+        let denied: Vec<_> = plan
+            .patterns
+            .iter()
+            .filter(|pattern| {
+                engine.evaluate(&plan.operation(pattern)) == crate::PermissionDecision::Deny
+            })
+            .collect();
+        assert_eq!(
+            denied,
+            vec!["vendor/lib.rs", "src/../vendor/new.rs", "vendor/new.rs"]
+        );
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn webfetch_permissions_also_meet_the_rules_for_the_address_really_read() {
+        let engine = crate::PermissionEngine::new(vec![crate::PermissionRule {
+            pattern: "webfetch:https://denied.example/*".into(),
+            decision: crate::PermissionDecision::Deny,
+        }]);
+        let plan = |url: &str| {
+            let plan = super::ask_plans(
+                "webfetch",
+                &json!({"url": url}),
+                std::path::Path::new("/workspace"),
+            )
+            .remove(0);
+            assert_eq!(plan.permission, "webfetch");
+            assert_eq!(plan.always, vec!["*"]);
+            let denied = plan.patterns.iter().any(|pattern| {
+                engine.evaluate(&plan.operation(pattern)) == crate::PermissionDecision::Deny
+            });
+            (plan.patterns, denied)
+        };
+        // An address written plainly is checked once, as written.
+        for url in [
+            "https://docs.example/guide",
+            "https://docs.example",
+            "https://docs.example/",
+        ] {
+            assert_eq!(plan(url), (vec![url.to_owned()], false), "{url}");
+        }
+        assert_eq!(
+            plan("https://denied.example/secret"),
+            (vec!["https://denied.example/secret".to_owned()], true)
+        );
+        // Other spellings of the same address meet the rule too.
+        for url in [
+            "HTTPS://DENIED.EXAMPLE/secret",
+            "https://someone:password@denied.example/secret",
+            "https://denied.example./secret",
+            "https://denied.example:443/secret",
+            "https://denied.example/public/../secret",
+        ] {
+            let (patterns, denied) = plan(url);
+            assert!(denied, "{url}");
+            assert_eq!(
+                patterns,
+                vec![url.to_owned(), "https://denied.example/secret".to_owned()]
+            );
+        }
+        // Another port is another address.
+        assert!(!plan("https://denied.example:8443/secret").1);
     }
 
     #[test]

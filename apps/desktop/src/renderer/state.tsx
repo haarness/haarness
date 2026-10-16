@@ -42,7 +42,7 @@ import {
   type NotificationTarget,
 } from "../shared";
 import { cloudServers, localServer, serverKey, serverProjects } from "../servers";
-import { freshChat, reduceEvent, type Live } from "./sync";
+import { freshChat, landItems, reduceEvent, type Live } from "./sync";
 import { themeColors } from "../themes";
 import {
   cleanProjectMeta,
@@ -131,6 +131,9 @@ interface State extends Live {
   terminal: boolean;
   ready: boolean;
   openingProject: string;
+  /** A switch to another project or checkout is under way, from the click
+   * on, before `openingProject` names it. */
+  switching: boolean;
   openingChat: number;
   loadingChat: number;
   projectFailure: {
@@ -193,6 +196,7 @@ function createApp() {
     terminal: false,
     ready: false,
     openingProject: "",
+    switching: false,
     openingChat: 0,
     loadingChat: 0,
     projectFailure: null,
@@ -215,6 +219,9 @@ function createApp() {
     reconnectAttempt = 0,
     stopped = false;
   const journals = new Set<T.EventEnvelope[]>();
+  // The latest history read of the open chat after a revert or compaction;
+  // an older one landing later is dropped.
+  let historyReads = 0;
   let tabHistory: string[] = [];
   let lastCursor = 0,
     lastInstance = "",
@@ -1181,13 +1188,33 @@ function createApp() {
     if (!group) return false;
     const location = primaryLocation(group);
     if (newChat) return connect({ recent: location.id }, true);
-    const remembered = await window.haarness.storage("project-location:" + id);
-    return activateProject(
-      group.locations.find((item) => item.id === remembered)?.id ?? location.id,
+    return switching(
+      (async () => {
+        const remembered = await window.haarness.storage("project-location:" + id);
+        return activateProject(
+          group.locations.find((item) => item.id === remembered)?.id ?? location.id,
+        );
+      })(),
     );
   }
   async function refreshProjects() {
     applyRecent(await window.haarness.projects());
+  }
+  /**
+   * Marks a switch to another project or checkout from its first step: the
+   * message box waits until it is done. Text typed meanwhile would land in
+   * the draft of the chat being left, and the box would then show the new
+   * chat's saved draft, which Enter sends. Only the latest switch counts: a
+   * project still starting slowly in the background does not hold the box
+   * of the one chosen after it.
+   */
+  let switchRequest = 0;
+  function switching<T>(work: Promise<T>) {
+    const request = ++switchRequest;
+    set("switching", true);
+    return work.finally(() => {
+      if (request === switchRequest) set("switching", false);
+    });
   }
   async function startChat(location?: string) {
     batch(() => {
@@ -1197,10 +1224,14 @@ function createApp() {
     if (location) {
       const target = state.recent.find((item) => item.id === location);
       if (!target || target.checkout?.exists === false) return false;
-      await expandProject(projectKey(target), true);
-      await expandLocation(location, true);
-      if (activation?.id === location) newChatAttempt = connectAttempt;
-      return connect({ recent: location }, true);
+      return switching(
+        (async () => {
+          await expandProject(projectKey(target), true);
+          await expandLocation(location, true);
+          if (activation?.id === location) newChatAttempt = connectAttempt;
+          return connect({ recent: location }, true);
+        })(),
+      );
     }
     if (!project() && !state.openingProject) {
       await openProject(true);
@@ -1231,7 +1262,7 @@ function createApp() {
   ) {
     if (input.recent && activation?.id === input.recent)
       return activation.promise;
-    const promise = loadWorkspace(input, newChat, inlineError).finally(() => {
+    const promise = switching(loadWorkspace(input, newChat, inlineError)).finally(() => {
       if (activation?.promise === promise) activation = undefined;
     });
     activation = { id: input.recent, promise };
@@ -1814,13 +1845,19 @@ function createApp() {
     ) {
       const connection = state.connection?.id;
       const selected = state.selected;
+      const read = ++historyReads;
+      // A compaction happens mid-turn, and the turn goes on: what it writes
+      // while this read is in flight arrives as events, not in the read.
+      const journal: T.EventEnvelope[] = [];
+      journals.add(journal);
       void api<T.Item[]>("listItems", selected)
         .then((items) => {
           if (
             state.connection?.id === connection &&
-            state.selected === selected
+            state.selected === selected &&
+            read === historyReads
           )
-            set("items", items);
+            set("items", landItems(items, journal, selected));
         })
         .catch((error) => {
           if (
@@ -1828,7 +1865,8 @@ function createApp() {
             state.selected === selected
           )
             set("error", String(error));
-        });
+        })
+        .finally(() => journals.delete(journal));
     }
   });
   const systemTheme = matchMedia("(prefers-color-scheme: dark)");

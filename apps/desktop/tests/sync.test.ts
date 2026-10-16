@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createStore } from "solid-js/store";
-import { freshChat, reduceEvent, type Live } from "../src/renderer/sync";
-import type { EventEnvelope } from "@haarness/sdk";
+import { freshChat, landItems, reduceEvent, type Live } from "../src/renderer/sync";
+import type { EventEnvelope, Item } from "@haarness/sdk";
 test("replayed durable items replace streamed text without duplicating the conversation", () => {
   const [state, set] = createStore<Live>({
     selected: "thread",
@@ -68,4 +68,71 @@ test("a chat created moments ago opens without a history request, unless late or
   assert.equal(freshChat(created, 13_000, 4), false);
   // The event stream reconnected in between and may have missed its first events.
   assert.equal(freshChat(created, 10_500, 5), false);
+});
+
+test("a history read keeps what the running turn wrote while it was in flight", () => {
+  const item = (id: string, sequence: number, thread = "thread"): Item => ({
+    id,
+    threadId: thread,
+    turnId: "turn",
+    sequence,
+    createdAt: "2026-10-16T00:00:00Z",
+    data: { type: "assistant_message", text: id },
+  });
+  const event = (type: string, payload: unknown) =>
+    ({ eventId: 1, type, payload, serverInstanceId: "instance" }) as EventEnvelope;
+  // The read the compaction asked for, and what arrived before it landed:
+  // the compaction item it already holds, the turn's next reply, another
+  // chat's item and an unrelated event.
+  const read = [item("before", 1), item("compaction", 2)];
+  const landed = landItems(
+    read,
+    [
+      event("item.created", item("compaction", 2)),
+      event("turn.text_delta", { delta: "x" }),
+      event("item.created", item("reply", 3)),
+      event("item.created", item("elsewhere", 4, "other")),
+    ],
+    "thread",
+  );
+  assert.deepEqual(
+    landed.map((value) => value.id),
+    ["before", "compaction", "reply"],
+  );
+  // Nothing arrived meanwhile: the read is the history.
+  assert.deepEqual(landItems(read, [], "thread"), read);
+});
+
+test("a slash command's message shows what the command expanded to, live and after a read", () => {
+  const [state, set] = createStore<Live>({
+    selected: "thread",
+    threads: [],
+    items: [],
+    turns: [],
+    streams: {},
+    permissions: [],
+    questions: [],
+  });
+  const message = (text: string): Item => ({
+    id: "message",
+    threadId: "thread",
+    turnId: "turn",
+    sequence: 1,
+    createdAt: "2026-10-16T00:00:00Z",
+    data: { type: "user_message", text },
+  });
+  const event = (type: string, payload: unknown) =>
+    ({ eventId: 1, type, payload, serverInstanceId: "instance" }) as EventEnvelope;
+  reduceEvent(state, set, event("item.created", message("/review src")));
+  reduceEvent(state, set, event("item.updated", message("Review src carefully.")));
+  assert.deepEqual(
+    state.items.map((item) => item.data.type === "user_message" && item.data.text),
+    ["Review src carefully."],
+  );
+  // Another chat's rewrite leaves this one alone.
+  reduceEvent(state, set, event("item.updated", { ...message("elsewhere"), threadId: "other" }));
+  assert.equal(state.items.length, 1);
+  // A read sent before the rewrite still lands with it.
+  const landed = landItems([message("/review src")], [event("item.updated", message("Review src carefully."))], "thread");
+  assert.equal(landed[0].data.type === "user_message" && landed[0].data.text, "Review src carefully.");
 });

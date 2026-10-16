@@ -378,6 +378,8 @@ pub(crate) fn retry_pacing() -> Pacing {
     Pacing {
         retry: Duration::from_millis(250),
         retry_max: Duration::from_secs(5),
+        recover_for: Duration::ZERO,
+        recover_max: Duration::from_secs(5),
         stable: Duration::from_secs(30),
         drops: u32::MAX,
         cooldown: Duration::from_secs(5),

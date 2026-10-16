@@ -2427,5 +2427,17 @@
   "The folder in this link was not found.": "找不到此链接中的文件夹。",
   "Open “{folder}” from a link?": "要从链接打开“{folder}”吗？",
   "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "它会在项目配置关闭的状态下打开：此文件夹中的 MCP 服务器、钩子和扩展不会运行。若要启用它们，请通过“打开项目”打开该文件夹。",
-  "Open folder": "打开文件夹"
+  "Open folder": "打开文件夹",
+  "Earlier terminal output is no longer available": "较早的终端输出已不可用",
+  "Next tab": "下一个标签页",
+  "Previous tab": "上一个标签页",
+  "In the chats, terminal, files, browser or side panel that has the keyboard": "在键盘所在的对话、终端、文件、浏览器或侧面板中",
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "请附加图片、PDF、音频或视频文件。要引用源代码，请使用它在工作区中的路径。",
+  "Show and hide Haarness from any app": "在任意应用中显示和隐藏 Haarness",
+  "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.": "在任意应用中将 Haarness 调到前台，在前台时再次隐藏它。开启期间，其他应用将不再收到该组合键。",
+  "Global shortcut": "全局快捷键",
+  "Click and press the keys, including a modifier key.": "点击后按下按键，需包含一个修饰键。",
+  "Use a modifier key and one more key, such as {keys}.": "请使用一个修饰键加另一个键，例如 {keys}。",
+  "{keys} belongs to the system. Choose another shortcut.": "{keys} 已被系统占用。请选择其他快捷键。",
+  "Another app or the system already uses {keys}. Choose another shortcut.": "其他应用或系统已在使用 {keys}。请选择其他快捷键。"
 }

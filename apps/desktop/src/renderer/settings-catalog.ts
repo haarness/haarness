@@ -79,6 +79,8 @@ export const settingsControls = [
   ["schedules", "Create schedule", "new automation cron interval prompt model timezone"],
   ["extensions", "Extension scope", "global project local"],
   ["extensions", "Install extension", "add source npm package path"],
+  ["shortcuts", "Show and hide Haarness from any app", "global hotkey system wide bring to front hide option space"],
+  ["shortcuts", "Global shortcut", "system wide hotkey combination record keys"],
   ["general", "Language", "locale translation english japanese french display language"],
   ["general", "Appearance", "dark light auto system mode"],
   ["general", "Theme", "color colours palette"],
@@ -108,9 +110,13 @@ export const shortcutTitles: Record<string, string> = {
   browser: "Open browser",
   agentNext: "Next agent",
   agentPrev: "Previous agent",
+  tabNext: "Next tab",
+  tabPrev: "Previous tab",
 };
 /** Composer keys work only in the message box; Tab elsewhere moves focus. */
 export const shortcutDescriptions: Record<string, string> = {
   agentNext: "While the message box has focus",
   agentPrev: "While the message box has focus",
+  tabNext: "In the chats, terminal, files, browser or side panel that has the keyboard",
+  tabPrev: "In the chats, terminal, files, browser or side panel that has the keyboard",
 };

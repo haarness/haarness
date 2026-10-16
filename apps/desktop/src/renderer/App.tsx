@@ -37,7 +37,8 @@ import { createOrdering, createOrderDropTarget } from "./Sortable";
 import { MenuButton } from "./MenuButton";
 import { UniversalSearch } from "./UniversalSearch";
 import { Wordmark } from "./brand";
-import { shortcutLabel, type SearchEntry } from "./search";
+import { matchesShortcut, shortcutLabel, type SearchEntry } from "./search";
+import { registerCyclePanel, stepFocusedPanel, tabButton } from "./tab-cycle";
 import { createWorktree, resetWorktree, removeWorktree } from "./worktrees";
 import { parseDeepLink } from "../deep-link";
 type Dock = "files" | "diff" | "context" | "browser";
@@ -266,6 +267,61 @@ export function App() {
     () => "list:panel-tabs",
     () => dockTabs(),
   );
+  // Ctrl+Tab in the conversation steps the chat tabs, and elsewhere in the
+  // side panel its tabs (Files, Review, Browser…), unless a panel inside it
+  // has tabs of its own (see tab-cycle.ts).
+  onCleanup(
+    registerCyclePanel({
+      id: "chats",
+      tabs: () =>
+        state.panel === "chat" && state.selected ? sessionTabs.ordered() : [],
+      active: () => state.selected,
+      select: (id) => void app.run(() => app.choose(id)),
+      // The chat loads (its message box and tabs hidden meanwhile, which
+      // drops the focus) before the keyboard goes back: to the message box
+      // when the step started there, else to the chat's tab.
+      keep: (id, from) => {
+        const composer = !!from?.matches("[data-composer-input]");
+        let frames = 300;
+        const land = () => {
+          if (state.selected !== id) return;
+          if (loading() && frames-- > 0) return void setTimeout(land, 16);
+          if (composer)
+            document.querySelector<HTMLElement>("[data-composer-input]")?.focus();
+          else if (!from?.isConnected || from.closest("[data-cycle-tab]") || document.activeElement !== from)
+            tabButton(document.querySelector(".session-bar"), id)?.focus();
+        };
+        land();
+      },
+    }),
+  );
+  onCleanup(
+    registerCyclePanel({
+      id: "dock",
+      tabs: () => (dockVisible() ? panelTabs.ordered() : []),
+      active: () => dock() ?? undefined,
+      select: (tab) => openDock(tab as Dock),
+    }),
+  );
+  onMount(() => {
+    const step = (event: KeyboardEvent) => {
+      const { tabNext, tabPrev } = state.preferences.shortcuts;
+      const offset = matchesShortcut(event, tabNext, state.platform)
+        ? 1
+        : matchesShortcut(event, tabPrev, state.platform)
+          ? -1
+          : 0;
+      if (!offset || event.defaultPrevented) return;
+      // Before the terminal, the editor or a tab list hears it, so the shell
+      // gets nothing and the step runs once.
+      if (stepFocusedPanel(document.activeElement, offset)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+    window.addEventListener("keydown", step, true);
+    onCleanup(() => window.removeEventListener("keydown", step, true));
+  });
   const selected = () => state.threads.find((t) => t.id === state.selected);
   const running = (id: string) =>
     state.turns.some((turn) => turn.threadId === id);
@@ -893,7 +949,7 @@ export function App() {
               "dock-expanded": dockVisible() && dockExpanded(),
             }}
           >
-            <div class="chat-pane">
+            <div class="chat-pane" data-cycle-panel="chats">
               <Show when={state.panel === "chat" && !!state.selected && !loading()}>
                 <div class="session-bar">
                   <Show when={selected()?.isSubagent && selected()?.parentId}>
@@ -954,6 +1010,7 @@ export function App() {
                           >
                             <button
                               role="tab"
+                              data-cycle-tab={id}
                               aria-selected={id === state.selected}
                               title={chatTitle(
                                 state.threads.find((thread) => thread.id === id)
@@ -1038,6 +1095,7 @@ export function App() {
             </Show>
             <aside
               class="side-panel"
+              data-cycle-panel="dock"
               aria-label={t("Project side panel")}
               style={{ display: dockVisible() ? "flex" : "none" }}
             >
@@ -1054,6 +1112,8 @@ export function App() {
                       classList={{ active: tab === dock() }}
                     >
                       <button
+                        data-cycle-tab={tab}
+                        aria-current={tab === dock() ? "true" : undefined}
                         aria-label={t("Show {name} panel", { name: tab })}
                         aria-description={
                           tab === "browser" && browserMoved()

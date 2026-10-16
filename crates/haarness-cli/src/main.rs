@@ -657,15 +657,17 @@ enum McpCommand {
         #[arg(long, visible_alias = "local")]
         project: bool,
     },
-    /// Show one MCP configuration. Environment and header values are redacted
-    /// unless --show-secrets is explicitly supplied.
+    /// Show one MCP configuration. Environment and header values, and
+    /// credentials in the URL or arguments, are redacted unless
+    /// --show-secrets is explicitly supplied.
     Get {
         /// MCP server name.
         name: String,
         /// Use this project's configuration instead of the global one.
         #[arg(long, visible_alias = "local")]
         project: bool,
-        /// Show environment and header values instead of hiding them.
+        /// Show environment and header values and URL and argument
+        /// credentials instead of hiding them.
         #[arg(long)]
         show_secrets: bool,
     },
@@ -1685,6 +1687,11 @@ fn normalize_natural_language_args(args: impl IntoIterator<Item = OsString>) -> 
 /// `haarness sessions list | head` closes stdout before the list ends. End
 /// quietly then, as other command-line tools do, rather than with the panic
 /// `println!` raises on a broken pipe.
+///
+/// Any other panic is also written to the log (once logging is set up) with
+/// where it happened: tokio catches a panic in a spawned task and only the
+/// default hook prints it, to stderr, which a background server sends
+/// nowhere.
 fn quiet_closed_stdout() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -1697,6 +1704,13 @@ fn quiet_closed_stdout() {
         if message.starts_with("failed printing to stdout") && message.contains("Broken pipe") {
             std::process::exit(0);
         }
+        let location = info.location().map(ToString::to_string);
+        tracing::error!(
+            location = location.as_deref(),
+            thread = std::thread::current().name(),
+            "panic: {}",
+            message.chars().take(500).collect::<String>()
+        );
         default_hook(info);
     }));
 }
@@ -4828,7 +4842,9 @@ impl RunWatch {
         }
     }
 
-    /// A scheduled run: nobody watches, and its approvals wait for the apps.
+    /// A scheduled run: nobody watches. Its turn approves its own requests
+    /// and the server refuses those that need a person, so nothing waits;
+    /// anything else is left to the apps.
     fn scheduled() -> Self {
         Self {
             approver: Approver::OtherClients,
@@ -4915,8 +4931,16 @@ impl RunWatch {
                         reply(PermissionReplyDecision::Reject),
                     )
                     .await;
+                let rule = allow_rule_example(&pending).map_or_else(
+                    || "with a permission rule".to_owned(),
+                    |rule| {
+                        format!(
+                            "by adding {rule} to haarness.json in the project or ~/.config/haarness/haarness.json"
+                        )
+                    },
+                );
                 anyhow::bail!(
-                    "Stopped: the agent asked to {request}, and nobody can approve that in this run. Allow it with a permission rule, or run again with --yolo to approve every request."
+                    "Stopped: the agent asked to {request}, and nobody can approve that in this run. Allow it {rule}, or run again with --yolo to approve every request."
                 );
             }
             let decision = if pending.explicit {
@@ -5190,6 +5214,36 @@ fn describe_permission(pending: &haarness_protocol::PendingPermissionInfo) -> St
         Some(subject) => format!("{kind} ({subject})"),
         None => kind,
     }
+}
+
+/// The configuration that would let a run without a person do what this
+/// request asks, such as `{"permission":{"bash":{"git push *":"allow"}}}`,
+/// built from the rules an **Always** answer would add. `None` for requests
+/// no rule should settle: an agent switch names one chat, and allowing the
+/// loop guard would turn it off.
+fn allow_rule_example(pending: &haarness_protocol::PendingPermissionInfo) -> Option<String> {
+    let rules: Vec<String> = if pending.always_patterns.is_empty() {
+        pending
+            .patterns
+            .iter()
+            .map(|pattern| format!("{}:{pattern}", pending.permission))
+            .collect()
+    } else {
+        pending.always_patterns.clone()
+    };
+    let mut permission = serde_json::Map::new();
+    for rule in &rules {
+        let (kind, pattern) = rule.split_once(':')?;
+        if matches!(kind, "agent_switch" | "doom_loop" | "browser_site" | "") {
+            return None;
+        }
+        permission
+            .entry(kind)
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()?
+            .insert(pattern.to_owned(), serde_json::json!("allow"));
+    }
+    (!permission.is_empty()).then(|| serde_json::json!({"permission": permission}).to_string())
 }
 
 /// "Working · 12s · Ctrl-C to stop" on stderr while a run waits, so a slow
@@ -7565,6 +7619,7 @@ fn mcp_config_for_display(
     entry: &McpConfigureRequest,
     show_secrets: bool,
 ) -> Result<serde_json::Value> {
+    use haarness_core::redact;
     let mut value = serde_json::to_value(entry)?;
     if !show_secrets {
         for field in ["env", "headers"] {
@@ -7573,12 +7628,21 @@ fn mcp_config_for_display(
                 .and_then(serde_json::Value::as_object_mut)
             {
                 for value in values.values_mut() {
-                    *value = serde_json::Value::String("<redacted>".into());
+                    *value = serde_json::Value::String(redact::REDACTED.into());
                 }
             }
         }
         if value.get("headersHelper").is_some() {
-            value["headersHelper"] = serde_json::Value::String("<redacted>".into());
+            value["headersHelper"] = serde_json::Value::String(redact::REDACTED.into());
+        }
+        // A server URL may carry a key in its user name or query, and a
+        // local server's arguments a `--api-key` value; the rest of each
+        // stays readable.
+        if let Some(url) = &entry.url {
+            value["url"] = serde_json::Value::String(redact::url(url).into_owned());
+        }
+        if !entry.args.is_empty() {
+            value["args"] = serde_json::json!(redact::args(&entry.args));
         }
     }
     Ok(value)
@@ -10314,9 +10378,9 @@ mod tests {
         write_runtime,
     };
     use super::{
-        Approver, NO_MODEL_CONNECTED, RunWatch, TurnStatus, default_run_model_client,
-        describe_permission, discard_refused_chat, requested_run_model, run_attachments,
-        wait_for_turn_client,
+        Approver, NO_MODEL_CONNECTED, RunWatch, TurnStatus, allow_rule_example,
+        default_run_model_client, describe_permission, discard_refused_chat, requested_run_model,
+        run_attachments, wait_for_turn_client,
     };
     use super::{
         HashMap, merge_file_config, provider_instances, stream_limits,
@@ -10789,10 +10853,66 @@ mod tests {
 
         let redacted = mcp_config_for_display(&entry, false).unwrap();
         assert_eq!(redacted["headers"]["Authorization"], "<redacted>");
+        assert_eq!(redacted["url"], "https://example.test/mcp");
         let explicit = mcp_config_for_display(&entry, true).unwrap();
         assert_eq!(explicit["headers"]["Authorization"], "Bearer ${TOKEN}");
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mcp_display_hides_credentials_in_urls_and_arguments() {
+        let remote = McpConfigureRequest {
+            transport: "streamable_http".into(),
+            command: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: None,
+            url: Some("https://user:hunter2@mcp.example.test/mcp?api_key=sk-1&region=eu".into()),
+            headers: BTreeMap::new(),
+            headers_helper: None,
+            timeout_ms: None,
+            oauth: None,
+            oauth_client_id: None,
+            oauth_scopes: Vec::new(),
+            enabled: true,
+        };
+        let shown = mcp_config_for_display(&remote, false).unwrap();
+        assert_eq!(
+            shown["url"],
+            "https://<redacted>@mcp.example.test/mcp?api_key=<redacted>&region=eu"
+        );
+        assert_eq!(
+            mcp_config_for_display(&remote, true).unwrap()["url"],
+            remote.url.as_deref().unwrap()
+        );
+        let local = McpConfigureRequest {
+            transport: "stdio".into(),
+            command: Some("npx".into()),
+            args: [
+                "-y",
+                "@acme/mcp",
+                "--api-key",
+                "sk-live-1",
+                "--region",
+                "eu",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            url: None,
+            ..remote
+        };
+        assert_eq!(
+            mcp_config_for_display(&local, false).unwrap()["args"],
+            serde_json::json!([
+                "-y",
+                "@acme/mcp",
+                "--api-key",
+                "<redacted>",
+                "--region",
+                "eu"
+            ])
+        );
     }
 
     #[test]
@@ -12382,6 +12502,15 @@ request_timeout = 0
             "{error}"
         );
         assert!(error.contains("--yolo"), "{error}");
+        // It names the rule that would allow it, and where it goes.
+        let folder = root.canonicalize().unwrap();
+        assert!(
+            error.contains(&format!(
+                r#"by adding {{"permission":{{"external_directory":{{"{}/*":"allow"}}}}}} to haarness.json in the project or ~/.config/haarness/haarness.json"#,
+                folder.display()
+            )),
+            "{error}"
+        );
         assert!(!outside.exists());
         assert!(client.pending_permissions().await.unwrap().is_empty());
         let stopped = tokio::time::timeout(Duration::from_secs(5), async {
@@ -12882,6 +13011,51 @@ request_timeout = 0
             describe_permission(&pending),
             "generate an image or video (image:generate)"
         );
+    }
+
+    #[test]
+    fn a_refused_run_names_the_rule_that_would_allow_it() {
+        let mut pending: haarness_protocol::PendingPermissionInfo =
+            serde_json::from_value(serde_json::json!({
+                "permissionId": "p",
+                "operation": "bash:git push origin main",
+                "permission": "bash",
+                "patterns": ["git push origin main"],
+                "alwaysPatterns": ["bash:git push *"],
+                "detail": {"command": "git push origin main"},
+                "threadId": uuid::Uuid::now_v7(),
+                "createdAt": "2026-10-16T00:00:00Z",
+            }))
+            .unwrap();
+        assert_eq!(
+            allow_rule_example(&pending).as_deref(),
+            Some(r#"{"permission":{"bash":{"git push *":"allow"}}}"#)
+        );
+        // Several rules, and quotes, come out as valid configuration.
+        pending.always_patterns = vec![
+            "external_directory:/data/\"x\"/*".into(),
+            "read:/data/\"x\"/a.txt".into(),
+        ];
+        let rule: serde_json::Value =
+            serde_json::from_str(&allow_rule_example(&pending).unwrap()).unwrap();
+        assert_eq!(
+            rule,
+            serde_json::json!({"permission": {
+                "external_directory": {"/data/\"x\"/*": "allow"},
+                "read": {"/data/\"x\"/a.txt": "allow"},
+            }})
+        );
+        // Without remembered rules, the asked patterns stand in.
+        pending.always_patterns.clear();
+        assert_eq!(
+            allow_rule_example(&pending).as_deref(),
+            Some(r#"{"permission":{"bash":{"git push origin main":"allow"}}}"#)
+        );
+        // An agent switch and the loop guard are not settled by a rule.
+        for kind in ["agent_switch", "doom_loop"] {
+            pending.always_patterns = vec![format!("{kind}:x")];
+            assert_eq!(allow_rule_example(&pending), None, "{kind}");
+        }
     }
 
     #[tokio::test]

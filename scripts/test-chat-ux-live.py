@@ -15,6 +15,8 @@ import tempfile
 import time
 import urllib.request
 
+import e2e_scratch
+
 
 repo = Path(__file__).resolve().parents[1]
 binary = str(Path(os.environ.get("HAARNESS_BIN", repo / "target/debug/haarness")).resolve())
@@ -183,3 +185,4 @@ finally:
     subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True)
     if connection:
         subprocess.run(args + ["serve", "--stop"], env=env, capture_output=True, timeout=30)
+    e2e_scratch.settle(root)

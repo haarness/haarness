@@ -6,11 +6,14 @@
 //! workspace's activity lease to be free.
 
 use std::{
+    collections::{HashMap, HashSet},
     fmt::Write as _,
     fs::{self, File, OpenOptions},
-    io::Write as _,
+    io::{Read as _, Write as _},
     path::{Path, PathBuf},
     process::{Command, Output},
+    sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, mpsc},
+    time::{Duration, Instant},
 };
 
 use chrono::Utc;
@@ -107,9 +110,29 @@ impl WorkspaceManager {
 
     /// Register an existing directory as a local workspace. Re-registering is
     /// idempotent and refreshes its branch and last-opened timestamp.
+    ///
+    /// Git and the folder are consulted before the registry lock is taken, so
+    /// a folder whose git stalls holds up only this call, never every other
+    /// registry read. A managed checkout's identity is checked against the
+    /// registry as it was read; the update refuses if that entry changed
+    /// meanwhile.
     pub fn register_local(&self, path: &Path) -> Result<WorkspaceInfo> {
         let path = canonical_directory(path)?;
         let identity = project_identity(&path)?;
+        let branch = git_branch(&path);
+        let snapshot = self.read_registry_locked()?;
+        let verified = match snapshot
+            .workspaces
+            .iter()
+            .find(|workspace| same_path(Path::new(&workspace.path), &path))
+        {
+            Some(workspace) if workspace.managed => {
+                let project = project_for(&snapshot, workspace)?;
+                verify_workspace_identity(workspace, project)?;
+                Some(managed_identity(workspace, project))
+            }
+            _ => None,
+        };
         self.with_registry_mut(|registry| {
             let now = Utc::now();
             let project_id = if let Some(project) = registry
@@ -138,12 +161,14 @@ impl WorkspaceManager {
                 if registry.workspaces[index].managed {
                     let workspace = &registry.workspaces[index];
                     let project = project_for(registry, workspace)?;
-                    verify_workspace_identity(workspace, project)?;
+                    if verified.as_ref() != Some(&managed_identity(workspace, project)) {
+                        return Err(registry_changed());
+                    }
                 }
                 let workspace = &mut registry.workspaces[index];
                 workspace.last_opened_at = now;
                 workspace.exists = true;
-                workspace.branch = git_branch(&path);
+                workspace.branch.clone_from(&branch);
                 if !workspace.managed {
                     workspace.project_id = project_id;
                     workspace.kind = if identity.linked {
@@ -166,7 +191,7 @@ impl WorkspaceManager {
                     WorkspaceKind::Local
                 },
                 managed: false,
-                branch: git_branch(&path),
+                branch,
                 from_ref: None,
                 base_commit: None,
                 created_at: now,
@@ -176,6 +201,21 @@ impl WorkspaceManager {
             registry.workspaces.push(workspace.clone());
             Ok(workspace)
         })
+    }
+
+    /// Register every directory that exists, as `register_local` does, all at
+    /// once and waiting at most a second. Desktop sends every folder of its
+    /// sidebar with each project-list request; one that has not answered by
+    /// then (a slow network volume, one that went away, a privacy prompt
+    /// nobody is there to answer) is left as registered before and returned
+    /// as pending, for the caller to finish without holding its answer.
+    pub fn register_existing(&self, directories: &[PathBuf]) -> Result<Registered> {
+        let manager = self.clone();
+        register_folders(
+            directories,
+            Arc::new(move |path: &Path| path.is_dir().then(|| manager.register_local(path))),
+            PROBE_PATIENCE,
+        )
     }
 
     /// Registry metadata only: startup must not probe unrelated directories.
@@ -198,6 +238,11 @@ impl WorkspaceManager {
         project_for(&registry, workspace).cloned()
     }
 
+    /// Every project and workspace, each folder looked at for whether it
+    /// still exists and its branch. The registry lock is released first, and
+    /// a folder that does not answer within a second shows as last recorded
+    /// (see `refresh_folders`), so a slow folder never holds up the list or
+    /// another process's registry access.
     pub fn list(&self, current_workspace_id: Option<&str>) -> Result<WorkspaceListResponse> {
         let mut registry = self.read_registry_locked()?;
         refresh_existence(&mut registry);
@@ -265,22 +310,41 @@ impl WorkspaceManager {
     /// Resolve and mark a workspace as most recently opened. Starting or
     /// attaching its workspace-scoped server is a client responsibility.
     pub fn open_workspace(&self, reference: &str) -> Result<WorkspaceInfo> {
+        // As in `register_local`, the folder and git are consulted outside
+        // the registry lock, against the registry as it was read.
+        let snapshot = self.read_registry_locked()?;
+        let workspace = resolve_workspace(&snapshot, reference)?.clone();
+        if !Path::new(&workspace.path).is_dir() {
+            return Err(WorkspaceError::Conflict(format!(
+                "workspace directory is missing: {}",
+                workspace.path
+            )));
+        }
+        let verified = if workspace.managed {
+            let project = project_for(&snapshot, &workspace)?;
+            verify_workspace_identity(&workspace, project)?;
+            Some(managed_identity(&workspace, project))
+        } else {
+            None
+        };
+        let branch = git_branch(Path::new(&workspace.path));
         self.with_registry_mut(|registry| {
-            let workspace = resolve_workspace(registry, reference)?.clone();
-            if !Path::new(&workspace.path).is_dir() {
-                return Err(WorkspaceError::Conflict(format!(
-                    "workspace directory is missing: {}",
-                    workspace.path
-                )));
-            }
-            if workspace.managed {
-                let project = project_for(registry, &workspace)?;
-                verify_workspace_identity(&workspace, project)?;
+            let current = resolve_workspace(registry, &workspace.id)?;
+            let unchanged = current.path == workspace.path
+                && current.managed == workspace.managed
+                && match &verified {
+                    Some(verified) => {
+                        *verified == managed_identity(current, project_for(registry, current)?)
+                    }
+                    None => true,
+                };
+            if !unchanged {
+                return Err(registry_changed());
             }
             let workspace = resolve_workspace_mut(registry, &workspace.id)?;
             workspace.exists = true;
             workspace.last_opened_at = Utc::now();
-            workspace.branch = git_branch(Path::new(&workspace.path));
+            workspace.branch = branch;
             Ok(workspace.clone())
         })
     }
@@ -912,6 +976,21 @@ fn write_workspace_identity(path: &Path, workspace_id: &str) -> Result<()> {
     file.sync_all().map_err(io_error)
 }
 
+/// What `verify_workspace_identity` checked a managed checkout against, so an
+/// update made after checking it outside the registry lock can tell whether
+/// the entry changed meanwhile.
+fn managed_identity(workspace: &WorkspaceInfo, project: &ProjectInfo) -> (String, String, String) {
+    (
+        workspace.id.clone(),
+        workspace.path.clone(),
+        project.root.clone(),
+    )
+}
+
+fn registry_changed() -> WorkspaceError {
+    WorkspaceError::Conflict("the workspace changed while it was being checked; try again".into())
+}
+
 fn verify_workspace_identity(workspace: &WorkspaceInfo, project: &ProjectInfo) -> Result<()> {
     let path = Path::new(&workspace.path);
     if !path.is_dir() {
@@ -1190,17 +1269,269 @@ fn workspace_index(registry: &Registry, reference: &str) -> Result<usize> {
     }
 }
 
-fn refresh_existence(registry: &mut Registry) {
-    for workspace in &mut registry.workspaces {
-        refresh_workspace(workspace);
+/// How long a listing waits for its folders before it shows the ones that
+/// have not answered as last recorded. A folder on a network volume that went
+/// away, or behind a privacy prompt nobody is there to answer, can hold one
+/// file-system call for minutes; the remote connector lists every few
+/// seconds, and the TUI and Desktop project lists wait on it.
+const PROBE_PATIENCE: Duration = Duration::from_secs(1);
+
+/// What looking at a registered folder found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Folder {
+    exists: bool,
+    branch: Option<String>,
+}
+
+impl Folder {
+    fn probe(path: &Path) -> Self {
+        let exists = path.is_dir();
+        Self {
+            exists,
+            branch: exists.then(|| head_branch(path)).flatten(),
+        }
+    }
+
+    fn apply(&self, workspace: &mut WorkspaceInfo) {
+        workspace.exists = self.exists;
+        if self.exists {
+            workspace.branch.clone_from(&self.branch);
+        }
     }
 }
 
+/// Folders being looked at (listed or registered) that have not answered yet,
+/// and what a listing's probe found once it answered after the listing
+/// stopped waiting. A folder that hangs holds one thread, never one per call,
+/// and a slow one still shows what it last answered.
+#[derive(Default)]
+struct Probes {
+    running: HashSet<PathBuf>,
+    late: HashMap<PathBuf, Folder>,
+}
+
+static PROBES: LazyLock<Mutex<Probes>> = LazyLock::new(Mutex::default);
+
+fn probes() -> MutexGuard<'static, Probes> {
+    PROBES.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn refresh_existence(registry: &mut Registry) {
+    refresh_folders(&mut registry.workspaces, Folder::probe, PROBE_PATIENCE);
+}
+
 fn refresh_workspace(workspace: &mut WorkspaceInfo) {
-    workspace.exists = Path::new(&workspace.path).is_dir();
-    if workspace.exists {
-        workspace.branch = git_branch(Path::new(&workspace.path));
+    refresh_folders(
+        std::slice::from_mut(workspace),
+        Folder::probe,
+        PROBE_PATIENCE,
+    );
+}
+
+/// Look at every folder at once, each on its own thread, and wait at most
+/// `patience` for them. A folder that has not answered keeps its recorded
+/// `exists` and `branch`, or what its last late probe found.
+fn refresh_folders(
+    workspaces: &mut [WorkspaceInfo],
+    probe: fn(&Path) -> Folder,
+    patience: Duration,
+) {
+    let paths: Vec<PathBuf> = workspaces
+        .iter()
+        .map(|workspace| PathBuf::from(&workspace.path))
+        .collect();
+    // The listing stopped waiting: keep the answer for the next one.
+    let found = look_at_once(&paths, Arc::new(probe), patience, |path, folder| {
+        probes().late.insert(path, folder);
+    });
+    let mut probes = probes();
+    for ((workspace, path), folder) in workspaces.iter_mut().zip(&paths).zip(found) {
+        if let Some(folder) = folder {
+            probes.late.remove(path);
+            folder.apply(workspace);
+        } else if let Some(folder) = probes.late.get(path) {
+            folder.apply(workspace);
+        }
     }
+}
+
+/// Run `look` on every path at once, each on its own thread, and wait at most
+/// `patience` for them all. A path whose earlier look has not returned is not
+/// looked at again, so a folder that hangs holds one thread, never one per
+/// call. A path's answer is `None` when it did not come in time or an earlier
+/// look is still out; `late` gets each answer that came after the wait ended.
+fn look_at_once<T: Send + 'static>(
+    paths: &[PathBuf],
+    look: Arc<dyn Fn(&Path) -> T + Send + Sync>,
+    patience: Duration,
+    late: fn(PathBuf, T),
+) -> Vec<Option<T>> {
+    let (sender, answers) = mpsc::channel();
+    let mut asked = 0;
+    for (index, path) in paths.iter().enumerate() {
+        if !probes().running.insert(path.clone()) {
+            continue;
+        }
+        let sender = sender.clone();
+        let look = Arc::clone(&look);
+        let spawned = std::thread::Builder::new()
+            .name("haarness-folder-probe".into())
+            .spawn({
+                let path = path.clone();
+                move || {
+                    let answer = look(&path);
+                    if let Err(mpsc::SendError((_, answer))) = sender.send((index, answer)) {
+                        late(path.clone(), answer);
+                    }
+                    probes().running.remove(&path);
+                }
+            });
+        if spawned.is_ok() {
+            asked += 1;
+        } else {
+            probes().running.remove(path);
+        }
+    }
+    drop(sender);
+    let deadline = Instant::now() + patience;
+    let mut found: Vec<Option<T>> = std::iter::repeat_with(|| None).take(paths.len()).collect();
+    while asked > 0 {
+        let Ok((index, answer)) =
+            answers.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        else {
+            break;
+        };
+        asked -= 1;
+        found[index] = Some(answer);
+    }
+    found
+}
+
+/// What registering a directory found: `None` when it is not a directory.
+type Registration = Option<Result<WorkspaceInfo>>;
+
+/// What `WorkspaceManager::register_existing` did.
+#[derive(Debug, Default)]
+pub struct Registered {
+    /// The directories registered in time.
+    pub workspaces: Vec<WorkspaceInfo>,
+    /// The directories that had not answered by then, or whose earlier look
+    /// in this process is still out. Their look registers them when it
+    /// returns, if the process still runs.
+    pub pending: Vec<PathBuf>,
+}
+
+/// Register `directories` through `register`, all at once, waiting at most
+/// `patience`; see `WorkspaceManager::register_existing`.
+fn register_folders(
+    directories: &[PathBuf],
+    register: Arc<dyn Fn(&Path) -> Registration + Send + Sync>,
+    patience: Duration,
+) -> Result<Registered> {
+    let mut registered = Registered::default();
+    let found = look_at_once(directories, register, patience, |_, _| {});
+    for (directory, answer) in directories.iter().zip(found) {
+        match answer {
+            None => registered.pending.push(directory.clone()),
+            Some(None) => {}
+            Some(Some(workspace)) => registered.workspaces.push(workspace?),
+        }
+    }
+    Ok(registered)
+}
+
+/// The branch checked out in `path`, as `git symbolic-ref HEAD` names it, read
+/// from the repository's HEAD file instead of starting git once per folder
+/// and listing. A HEAD this cannot read plainly (another ref storage, an
+/// unusual layout) is asked of git. For display only: removal asks git
+/// itself (`git_branch`).
+fn head_branch(path: &Path) -> Option<String> {
+    match read_head(path) {
+        Some(Head::Branch(name)) => Some(name),
+        Some(Head::Other) => None,
+        None => git_branch(path),
+    }
+}
+
+enum Head {
+    /// `ref: refs/heads/<name>`.
+    Branch(String),
+    /// Detached, another kind of ref, or no repository at all.
+    Other,
+}
+
+/// The most read from a `.git` pointer or a HEAD file: either holds one line.
+const SMALL_FILE: u64 = 4096;
+
+/// The text of `path` when `metadata` (read before opening it) says it is a
+/// regular file of at most `SMALL_FILE` bytes; `None` for a device, a FIFO,
+/// a folder or a larger file, so a hostile `.git` or HEAD can neither block a
+/// listing nor fill its memory.
+fn small_file(metadata: &fs::Metadata, path: &Path) -> Option<String> {
+    if !metadata.is_file() || metadata.len() > SMALL_FILE {
+        return None;
+    }
+    let mut text = String::new();
+    File::open(path)
+        .ok()?
+        .take(SMALL_FILE)
+        .read_to_string(&mut text)
+        .ok()?;
+    Some(text)
+}
+
+/// `None` when only git can tell.
+fn read_head(path: &Path) -> Option<Head> {
+    let Some(marker) = path
+        .ancestors()
+        .map(|folder| folder.join(".git"))
+        .find(|marker| fs::symlink_metadata(marker).is_ok())
+    else {
+        return Some(Head::Other);
+    };
+    let git_dir = if marker.is_dir() {
+        marker
+    } else {
+        // A linked worktree or submodule: `gitdir: <path>`, relative to its
+        // folder. Anything else (a device, a FIFO, a huge file) is no
+        // repository this or git could read, and is not handed to git.
+        let Some(pointer) = small_file(&fs::metadata(&marker).ok()?, &marker) else {
+            return Some(Head::Other);
+        };
+        let target = pointer.strip_prefix("gitdir:")?.trim();
+        marker.parent()?.join(target)
+    };
+    let head = git_dir.join("HEAD");
+    let metadata = fs::symlink_metadata(&head).ok()?;
+    // Older Git links HEAD to the branch's ref. The link is read, never
+    // followed: git itself would read whatever it points at to its end.
+    if metadata.file_type().is_symlink() {
+        let target = fs::read_link(&head).ok()?;
+        return Some(
+            match target
+                .to_str()
+                .and_then(|target| target.strip_prefix("refs/heads/"))
+            {
+                Some(name) if !name.is_empty() => Head::Branch(name.to_owned()),
+                _ => Head::Other,
+            },
+        );
+    }
+    let Some(content) = small_file(&metadata, &head) else {
+        return Some(Head::Other);
+    };
+    let content = content.trim_end();
+    if let Some(reference) = content.strip_prefix("ref: ") {
+        return match reference.strip_prefix("refs/heads/") {
+            // The reftable format keeps HEAD in its tables and this placeholder in the file.
+            Some(".invalid") => None,
+            Some(name) if !name.is_empty() => Some(Head::Branch(name.to_owned())),
+            _ => Some(Head::Other),
+        };
+    }
+    let detached =
+        matches!(content.len(), 40 | 64) && content.bytes().all(|byte| byte.is_ascii_hexdigit());
+    detached.then_some(Head::Other)
 }
 
 fn unique_name(registry: &Registry, requested: &str) -> String {
@@ -1370,6 +1701,248 @@ mod tests {
                 .find(|item| item.id == after.project_id)
                 .unwrap()
                 .git
+        );
+    }
+
+    #[test]
+    fn listing_reads_the_branch_from_head_as_git_names_it() {
+        let fixture = Fixture::new();
+        let linked = fixture.create("parallel");
+        let subdirectory = fixture.repository.join("src");
+        fs::create_dir(&subdirectory).unwrap();
+        let plain = fixture.root.join("plain");
+        fs::create_dir(&plain).unwrap();
+        let detached = fixture.root.join("detached");
+        command(
+            &fixture.repository,
+            ["worktree", "add", "--detach", detached.to_str().unwrap()],
+        );
+        command(&fixture.repository, ["checkout", "-b", "feature/head"]);
+        for path in [
+            fixture.repository.as_path(),
+            Path::new(&linked.path),
+            &subdirectory,
+            &plain,
+            &detached,
+        ] {
+            assert!(read_head(path).is_some(), "{path:?} needed git");
+            assert_eq!(head_branch(path), git_branch(path), "{path:?}");
+        }
+        assert_eq!(head_branch(&subdirectory).as_deref(), Some("feature/head"));
+        assert_eq!(head_branch(&detached), None);
+        // The reftable format's placeholder HEAD is left to git.
+        let reftable = fixture.root.join("reftable");
+        fs::create_dir_all(reftable.join(".git")).unwrap();
+        fs::write(reftable.join(".git/HEAD"), "ref: refs/heads/.invalid\n").unwrap();
+        assert!(read_head(&reftable).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hostile_git_file_or_head_neither_blocks_a_listing_nor_fills_its_memory() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("haarness-hostile-head-{}", Uuid::now_v7()));
+        let folder = |name: &str| {
+            let folder = root.join(name);
+            fs::create_dir_all(folder.join("inner")).unwrap();
+            folder
+        };
+        let fifo = |path: &Path| {
+            let made = Command::new("mkfifo").arg(path).status().unwrap();
+            assert!(made.success());
+        };
+        let zero_marker = folder("zero-marker");
+        symlink("/dev/zero", zero_marker.join(".git")).unwrap();
+        let fifo_marker = folder("fifo-marker");
+        fifo(&fifo_marker.join(".git"));
+        let fifo_head = folder("fifo-head");
+        fs::create_dir(fifo_head.join(".git")).unwrap();
+        fifo(&fifo_head.join(".git/HEAD"));
+        let zero_head = folder("zero-head");
+        fs::create_dir(zero_head.join(".git")).unwrap();
+        symlink("/dev/zero", zero_head.join(".git/HEAD")).unwrap();
+        let huge_head = folder("huge-head");
+        fs::create_dir(huge_head.join(".git")).unwrap();
+        fs::write(
+            huge_head.join(".git/HEAD"),
+            format!("ref: refs/heads/{}", "x".repeat(8192)),
+        )
+        .unwrap();
+        // A HEAD that older Git links to the branch's ref still names it.
+        let linked_head = folder("linked-head");
+        fs::create_dir(linked_head.join(".git")).unwrap();
+        symlink("refs/heads/main", linked_head.join(".git/HEAD")).unwrap();
+        let cases = [
+            (zero_marker, None),
+            (fifo_marker, None),
+            (fifo_head, None),
+            (zero_head, None),
+            (huge_head, None),
+            (linked_head, Some("main")),
+        ];
+        let (sender, answers) = mpsc::channel();
+        let paths: Vec<_> = cases.iter().map(|(path, _)| path.join("inner")).collect();
+        std::thread::spawn(move || {
+            for path in paths {
+                // Each is answered from the files alone, never handed to git.
+                let read = read_head(&path).is_some();
+                let _ = sender.send((path.clone(), read, head_branch(&path)));
+            }
+        });
+        for (_, expected) in cases {
+            let (path, read, branch) = answers
+                .recv_timeout(Duration::from_secs(30))
+                .expect("a hostile .git or HEAD blocked the read");
+            assert!(read, "{path:?} was handed to git");
+            assert_eq!(branch.as_deref(), expected, "{path:?}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    static SLOW_STARTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static SLOW_RELEASED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// A folder named `slow` hangs until the test releases its probe (as a
+    /// network volume that went away does); any other folder is looked at.
+    fn gated_probe(path: &Path) -> Folder {
+        use std::sync::atomic::Ordering::SeqCst;
+        if path.file_name().is_none_or(|name| name != "slow") {
+            return Folder::probe(path);
+        }
+        let probe = SLOW_STARTED.fetch_add(1, SeqCst) + 1;
+        while SLOW_RELEASED.load(SeqCst) < probe {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Folder {
+            exists: true,
+            branch: Some(format!("late-{probe}")),
+        }
+    }
+
+    #[test]
+    fn a_folder_that_does_not_answer_shows_as_recorded_and_is_probed_once() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let root = std::env::temp_dir().join(format!("haarness-slow-folder-{}", Uuid::now_v7()));
+        let fast = root.join("fast");
+        fs::create_dir_all(&fast).unwrap();
+        let slow = root.join("slow");
+        let entry = |path: &Path, exists: bool, branch: &str| WorkspaceInfo {
+            id: Uuid::now_v7().to_string(),
+            project_id: "project".into(),
+            name: path_name(path),
+            path: path.display().to_string(),
+            kind: WorkspaceKind::Local,
+            managed: false,
+            branch: Some(branch.into()),
+            from_ref: None,
+            base_commit: None,
+            created_at: Utc::now(),
+            last_opened_at: Utc::now(),
+            exists,
+        };
+        let mut workspaces = vec![entry(&fast, false, "old"), entry(&slow, true, "recorded")];
+        let patience = Duration::from_secs(2);
+
+        // The hanging folder keeps what was recorded; the other is looked at.
+        let started = Instant::now();
+        refresh_folders(&mut workspaces, gated_probe, patience);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(workspaces[0].exists);
+        assert_eq!(workspaces[0].branch, None);
+        assert_eq!(workspaces[1].branch.as_deref(), Some("recorded"));
+        assert_eq!(SLOW_STARTED.load(SeqCst), 1);
+
+        // While its probe is out, the next listing does not start another.
+        refresh_folders(&mut workspaces, gated_probe, patience);
+        assert_eq!(SLOW_STARTED.load(SeqCst), 1);
+        assert_eq!(workspaces[1].branch.as_deref(), Some("recorded"));
+
+        // It answers late; a listing that again waits in vain shows that answer.
+        SLOW_RELEASED.store(1, SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while probes().running.contains(&slow) {
+            assert!(Instant::now() < deadline, "the late probe never finished");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        refresh_folders(&mut workspaces, gated_probe, patience);
+        assert_eq!(SLOW_STARTED.load(SeqCst), 2);
+        assert_eq!(workspaces[1].branch.as_deref(), Some("late-1"));
+        SLOW_RELEASED.store(2, SeqCst);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    static REGISTER_STARTED: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    static REGISTER_RELEASED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    #[test]
+    fn registering_sidebar_folders_does_not_wait_on_one_that_hangs() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let fixture = Fixture::new();
+        let fast = fixture.root.join("fast");
+        let slow = fixture.root.join("slow");
+        fs::create_dir_all(&fast).unwrap();
+        fs::create_dir_all(&slow).unwrap();
+        let missing = fixture.root.join("missing");
+        let manager = fixture.manager.clone();
+        // `slow` hangs until the test lets it go, as a network volume that
+        // went away does; then it registers as usual.
+        let register: Arc<dyn Fn(&Path) -> Registration + Send + Sync> =
+            Arc::new(move |path: &Path| {
+                if path.file_name().is_some_and(|name| name == "slow") {
+                    REGISTER_STARTED.fetch_add(1, SeqCst);
+                    while !REGISTER_RELEASED.load(SeqCst) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+                path.is_dir().then(|| manager.register_local(path))
+            });
+
+        let registered = register_folders(
+            &[fast.clone(), slow.clone(), missing],
+            Arc::clone(&register),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(registered.pending, std::slice::from_ref(&slow));
+        let names: Vec<_> = registered
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.name.as_str())
+            .collect();
+        assert_eq!(names, ["fast"]);
+        assert_eq!(REGISTER_STARTED.load(SeqCst), 1);
+
+        // The next request does not look at it again while it hangs.
+        let again = register_folders(
+            std::slice::from_ref(&slow),
+            Arc::clone(&register),
+            Duration::from_millis(200),
+        )
+        .unwrap();
+        assert!(again.workspaces.is_empty());
+        assert_eq!(again.pending, std::slice::from_ref(&slow));
+        assert_eq!(REGISTER_STARTED.load(SeqCst), 1);
+
+        // Once it answers, its late registration counts.
+        REGISTER_RELEASED.store(true, SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while probes().running.contains(&slow) {
+            assert!(
+                Instant::now() < deadline,
+                "the late registration never finished"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let slow = fs::canonicalize(&slow).unwrap();
+        assert!(
+            fixture
+                .manager
+                .registered()
+                .unwrap()
+                .iter()
+                .any(|workspace| Path::new(&workspace.path) == slow)
         );
     }
 

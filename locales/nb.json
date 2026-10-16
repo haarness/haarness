@@ -2427,5 +2427,17 @@
   "The folder in this link was not found.": "Fant ikke mappen i denne lenken.",
   "Open “{folder}” from a link?": "Vil du åpne «{folder}» fra en lenke?",
   "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "Mappen åpnes med prosjektkonfigurasjonen slått av: MCP-servere, hooks og utvidelser i den kjører ikke. Åpne mappen med Åpne prosjekt for å slå dem på.",
-  "Open folder": "Åpne mappe"
+  "Open folder": "Åpne mappe",
+  "Earlier terminal output is no longer available": "Tidligere terminalutdata er ikke lenger tilgjengelig",
+  "Next tab": "Neste fane",
+  "Previous tab": "Forrige fane",
+  "In the chats, terminal, files, browser or side panel that has the keyboard": "I chattene, terminalen, filene, nettleseren eller sidepanelet som har tastaturet",
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Legg ved et bilde, en PDF eller en lyd- eller videofil. Bruk stien i arbeidsområdet for å vise til kildekode.",
+  "Show and hide Haarness from any app": "Vis og skjul Haarness fra hvilken som helst app",
+  "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.": "Henter Haarness frem fra hvilken som helst app, og skjuler den igjen når den ligger foran. Mens det er på, mottar andre apper ikke lenger kombinasjonen.",
+  "Global shortcut": "Global snarvei",
+  "Click and press the keys, including a modifier key.": "Klikk og trykk tastene, inkludert en modifikatortast.",
+  "Use a modifier key and one more key, such as {keys}.": "Bruk en modifikatortast og én tast til, for eksempel {keys}.",
+  "{keys} belongs to the system. Choose another shortcut.": "{keys} tilhører systemet. Velg en annen snarvei.",
+  "Another app or the system already uses {keys}. Choose another shortcut.": "En annen app eller systemet bruker allerede {keys}. Velg en annen snarvei."
 }

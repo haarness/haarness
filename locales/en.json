@@ -2427,5 +2427,17 @@
   "The folder in this link was not found.": "The folder in this link was not found.",
   "Open “{folder}” from a link?": "Open “{folder}” from a link?",
   "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.",
-  "Open folder": "Open folder"
+  "Open folder": "Open folder",
+  "Earlier terminal output is no longer available": "Earlier terminal output is no longer available",
+  "Next tab": "Next tab",
+  "Previous tab": "Previous tab",
+  "In the chats, terminal, files, browser or side panel that has the keyboard": "In the chats, terminal, files, browser or side panel that has the keyboard",
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.",
+  "Show and hide Haarness from any app": "Show and hide Haarness from any app",
+  "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.": "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.",
+  "Global shortcut": "Global shortcut",
+  "Click and press the keys, including a modifier key.": "Click and press the keys, including a modifier key.",
+  "Use a modifier key and one more key, such as {keys}.": "Use a modifier key and one more key, such as {keys}.",
+  "{keys} belongs to the system. Choose another shortcut.": "{keys} belongs to the system. Choose another shortcut.",
+  "Another app or the system already uses {keys}. Choose another shortcut.": "Another app or the system already uses {keys}. Choose another shortcut."
 }

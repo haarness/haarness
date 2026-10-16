@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real attached TUI coverage for repository consent, dynamic context, and nested tasks."""
 import json,os,pathlib,shlex,subprocess,tempfile,time,urllib.request,uuid
+import e2e_scratch
 root=pathlib.Path(tempfile.mkdtemp(prefix='haarness-parity-tmux-')).resolve()
 workspace=root/'primary';linked=root/'linked';workspace.mkdir()
 config=workspace/'.haarness';(config/'commands').mkdir(parents=True)
@@ -52,10 +53,10 @@ try:
  child='!tool task '+json.dumps({'agent':'general','prompt':leaf})
  t=turn('!tool task '+json.dumps({'agent':'general','prompt':child}));approval();check('grandchild approval appears in the root TUI with one execution slot');keys('y');finish(t);assert (workspace/'nested.txt').read_text()=='TMUX_NESTED_PROOF';check('nested tasks finish without capacity deadlock')
  (root/'items.json').write_text(json.dumps(api(c,'/threads/'+thread['id']+'/items'),indent=2));(root/'results.json').write_text(json.dumps(checks,indent=2))
- print('PASS',len(checks),'new TUI scenarios. Evidence:',root,flush=True)
+ print('PASS',len(checks),'new TUI scenarios.',flush=True)
 finally:
  subprocess.run(['tmux','kill-session','-t',name],capture_output=True)
  for ws,_ in connections:
   try:cli(ws,'serve','--stop')
   except Exception:pass
- print('Evidence retained:',root,flush=True)
+ e2e_scratch.settle(root)

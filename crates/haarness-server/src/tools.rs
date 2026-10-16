@@ -79,6 +79,13 @@ const APPLY_PATCH_DESCRIPTION: &str = "Apply a V4A patch envelope across one or 
 const BASH_DESCRIPTION: &str = "Run a terminal command through the workspace shell. Use bash for builds, tests, git, package managers, process inspection, and other terminal operations. Do not use it for ordinary file reading, listing, searching, writing, or editing when read, list, glob, grep, write, edit, or apply_patch can express the operation more clearly. Ripgrep (rg) is bundled and available on PATH for searches requiring flags or pipelines beyond the grep/glob tools; no installation is needed. Use workdir instead of 'cd <dir> && ...'. Quote paths containing spaces. timeout is milliseconds, defaults to the configured deadline (normally 120000), and has no fixed upper limit; set 0 for no deadline. Output includes the exit code and combined stdout/stderr. Do not create commits or push unless the user explicitly asks, and do not use destructive git or filesystem operations without clear authorization.";
 
 const WEBFETCH_DESCRIPTION: &str = "Fetch a fully formed HTTP or HTTPS URL as a read-only operation. HTML is converted to markdown by default; use format='raw' only when the original response body is required. Prefer a more targeted connected tool when one exists for the requested service or data. Large results may be truncated with a path to the full output.";
+/// A body larger than this is refused while it is read: a server that sends
+/// no Content-Length, or a wrong one, cannot fill memory.
+const WEBFETCH_MAX_BYTES: usize = 6 * 1024 * 1024;
+/// One fetch, redirects and body included. The tool has no timeout argument
+/// (its schema is part of every cached prompt), and a page that never
+/// finishes must still end the call.
+const WEBFETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 const QUESTION_DESCRIPTION: &str = "Ask the user one blocking question when a material requirement or decision cannot be resolved from the request, repository, or other available context. Keep the prompt concise and provide mutually exclusive choices when useful. Free-form answers are enabled by default, so do not add an Other or catch-all choice. Set multiple=true only when more than one choice may be selected. If recommending an option, put it first and suffix its label with '(Recommended)'. Do not ask for clarification when a safe, scoped assumption or local inspection can resolve it.";
 
@@ -1300,18 +1307,188 @@ impl Tool for ManagementTool {
     }
 }
 
+fn http_client() -> reqwest::ClientBuilder {
+    // Wikimedia and other responsible public sites reject anonymous HTTP
+    // library defaults. Identify Haarness with a stable product URL while
+    // sending no user or machine-specific data.
+    reqwest::Client::builder().user_agent(concat!(
+        "haarness/",
+        env!("CARGO_PKG_VERSION"),
+        " (+https://github.com/haarness/haarness)"
+    ))
+}
+
+/// Media backends are followed wherever they redirect (a regional endpoint,
+/// a CDN), as they always were: the user configured them, and the
+/// permission rules judge the generation, not an address. Only webfetch
+/// keeps redirects on the address it was allowed to read.
+fn media_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        http_client()
+            .build()
+            .expect("the static media HTTP client configuration is valid")
+    })
+}
+
 fn web_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        // Wikimedia and other responsible public sites reject anonymous HTTP
-        // library defaults. Identify Haarness with a stable product URL while
-        // sending no user or machine-specific data.
-        .user_agent(concat!(
-            "haarness/",
-            env!("CARGO_PKG_VERSION"),
-            " (+https://github.com/haarness/haarness)"
-        ))
+    http_client()
+        // A redirect off the address asked for is not followed: the fetch returns its
+        // address, and fetching that is the model's next call, checked
+        // against the permission rules, so an allowed address cannot lead
+        // past a denied one. The first URL in `previous` is the one asked for.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() > 10 {
+                attempt.error("too many redirects")
+            } else if attempt
+                .previous()
+                .first()
+                .is_some_and(|first| redirect_leaves(first, attempt.url()).is_none())
+            {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
         .build()
         .expect("the static WebFetch HTTP client configuration is valid")
+}
+
+/// How a redirect leaves the address a fetch asked for, or `None` when it
+/// stays on it: the same host and port, or the same host moving from http
+/// to https on the default ports.
+fn redirect_leaves(from: &url::Url, to: &url::Url) -> Option<&'static str> {
+    let host = |url: &url::Url| {
+        url.host_str()
+            .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
+    };
+    if host(from).is_none() || host(from) != host(to) {
+        return Some("which is on another host");
+    }
+    match (from.scheme(), to.scheme()) {
+        (from_scheme, to_scheme) if from_scheme == to_scheme => (from.port_or_known_default()
+            != to.port_or_known_default())
+        .then_some("which is another port of the same host"),
+        ("http", "https") if from.port().is_none() && to.port().is_none() => None,
+        ("http", "https") => Some("which is another port of the same host"),
+        ("https", "http") => Some("which leaves https for unencrypted http"),
+        _ => Some("which uses another scheme"),
+    }
+}
+
+/// A server can hold the connection open or never finish the body, so a
+/// fetch has a deadline and Stop abandons it.
+async fn webfetch(
+    client: &reqwest::Client,
+    url: url::Url,
+    raw: bool,
+    cancel: &tokio_util::sync::CancellationToken,
+    deadline: Duration,
+) -> CoreResult<ToolOutput> {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(CoreError::Cancelled),
+        result = tokio::time::timeout(deadline, fetch_page(client, url, raw)) => {
+            result.unwrap_or_else(|_| {
+                Err(CoreError::Tool(format!(
+                    "The page did not finish loading within {} seconds",
+                    deadline.as_secs()
+                )))
+            })
+        }
+    }
+}
+
+/// Reads `url` for webfetch; `webfetch` bounds it in time and by Stop.
+async fn fetch_page(client: &reqwest::Client, url: url::Url, raw: bool) -> CoreResult<ToolOutput> {
+    let response = client.get(url.clone()).send().await.map_err(tool_error)?;
+    // `web_client` follows redirects on the address asked for only, so a
+    // redirect that arrives here leads off it.
+    if response.status().is_redirection()
+        && let Some(target) = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|location| response.url().join(location).ok())
+    {
+        return Ok(ToolOutput {
+            text: format!(
+                "{} redirects (HTTP {}) to {target}, {}, so the redirect was not followed. \
+                 Call webfetch with {target} to read it; that fetch is checked against the \
+                 permission rules like any other.",
+                response.url(),
+                response.status().as_u16(),
+                redirect_leaves(&url, &target).unwrap_or("which leaves the address asked for"),
+            ),
+            metadata: json!({"redirect": target.as_str()}),
+        });
+    }
+    let response = response.error_for_status().map_err(tool_error)?;
+    let html_content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("text/html"));
+    let Some(body) = read_limited(response, WEBFETCH_MAX_BYTES).await? else {
+        tracing::info!(
+            host = url.host_str().unwrap_or_default(),
+            limit = WEBFETCH_MAX_BYTES,
+            "webfetch response too large"
+        );
+        return Err(CoreError::Tool(
+            "Response too large (over the 6 MiB webfetch limit)".into(),
+        ));
+    };
+    let mut text = String::from_utf8_lossy(&body).into_owned();
+    // HTML pages become markdown so the model reads content, not markup
+    // soup; sniff the body when the header is absent.
+    let looks_like_html = html_content_type
+        || text.trim_start().get(..15).is_some_and(|head| {
+            head.to_ascii_lowercase().starts_with("<!doctype html")
+                || head.to_ascii_lowercase().starts_with("<html")
+        });
+    if !raw && looks_like_html {
+        if let Some(markdown) = html_to_markdown(&text) {
+            text = markdown;
+        }
+    }
+    truncate_output(text).await
+}
+
+/// htmd writes the text of `script` and `style` like any other block, so a
+/// page's inline JavaScript and CSS would read as its content.
+fn html_to_markdown(html: &str) -> Option<String> {
+    htmd::HtmlToMarkdown::builder()
+        .skip_tags(vec![
+            "script", "style", "noscript", "template", "iframe", "object", "embed",
+        ])
+        .build()
+        .convert(html)
+        .ok()
+}
+
+/// A response body, or `None` when it is larger than `limit` bytes. The
+/// declared length is checked first, and a body sent without one (or with a
+/// wrong one) is read only up to the limit; dropping the response closes
+/// the connection.
+async fn read_limited(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> CoreResult<Option<Vec<u8>>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Ok(None);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(tool_error)? {
+        if body.len() + chunk.len() > limit {
+            return Ok(None);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(Some(body))
 }
 
 struct ScheduleTool {
@@ -1631,7 +1808,7 @@ impl Tool for WorkflowTool {
                 "Do not start a workflow for ordinary conversation, a focused edit, or a short sequential task. At most one top-level workflow should normally be active for a request. Child agents and workflow agents cannot create nested workflows unless their author explicitly grants tools.workflow=true.",
                 "Reusable files live under .haarness/workflows/<name>.ts; compatible legacy workflow roots are also discovered.",
                 "For a one-off inline workflow, prefer the restricted portable form: export const meta = { name: 'audit', phases: ['scan'] }; phase('scan'); const results = await parallel([() => agent('inspect A'), () => agent('inspect B')], { concurrencyLimit: 2 }); return results. Portable bodies expose args, phase, status, log, agent, tool, shell, workflow, parallel, and pipeline without direct filesystem/process/network globals.",
-                "Use read to list workflows or return one source; start with exactly one of name, source, or path; wait/inspect/cancel/pause/resume/delete operate on a runID.",
+                "Use read to list workflows or return one source; start with exactly one of name, source, or path; wait/inspect/cancel/pause/resume/delete operate on a runID. name is the invocation read lists: a plugin's workflow is plugin:name.",
                 "When source or path is supplied for start, it is authoritative and name is ignored. Do not include name expecting an additional lookup.",
                 "start may set workflow-wide agent, model, and variant defaults; an individual agent call and phase model/variant metadata take precedence.",
                 "Use create only when the user explicitly asks to persist the inline source. Creation never overwrites an existing file.",
@@ -1644,9 +1821,9 @@ impl Tool for WorkflowTool {
                     "action": {
                         "type": "string",
                         "enum": ["read", "start", "wait", "inspect", "create", "cancel", "pause", "resume", "delete"],
-                        "description":"read lists workflows or reads one by name; start requires exactly one of name, path, or source; wait, inspect, cancel, pause, resume, and delete require runID; create persists source."
+                        "description":"read lists workflows or reads one by its invocation (name); start requires exactly one of name, path, or source; wait, inspect, cancel, pause, resume, and delete require runID; create persists source."
                     },
-                    "name": {"type": "string", "description":"Existing workflow name for read or start-by-name; required with source for create. Omit for start when path or source is supplied."},
+                    "name": {"type": "string", "description":"An existing workflow's invocation, exactly as read lists it, for read or start-by-name: a plugin's workflow is plugin:name (such as shipping:audit), never its bare name. Required with source for create. Omit for start when path or source is supplied."},
                     "args": {"description":"JSON value passed to the workflow. Native workflow arguments must match its declaration."},
                     "runID": {"type": "string", "description":"Exact workflow run UUID returned by start. Required for wait, inspect, cancel, pause, resume, and delete."},
                     "source": {"type": "string", "description":"Inline workflow source for a one-off start or explicit create. For start, use source without name."},
@@ -2601,7 +2778,7 @@ impl Tool for BuiltinTool {
                     GeneratedMediaKind::Image,
                     &args,
                     &self.workspace,
-                    &self.client,
+                    media_client(),
                     &context.cancel,
                 )
                 .await
@@ -2611,7 +2788,7 @@ impl Tool for BuiltinTool {
                     GeneratedMediaKind::Video,
                     &args,
                     &self.workspace,
-                    &self.client,
+                    media_client(),
                     &context.cancel,
                 )
                 .await
@@ -2993,34 +3170,8 @@ impl Tool for BuiltinTool {
                 if url.host_str().is_none() {
                     return Err(CoreError::Invalid("webfetch URL has no hostname".into()));
                 }
-                let response = self
-                    .client
-                    .get(url)
-                    .send()
-                    .await
-                    .map_err(tool_error)?
-                    .error_for_status()
-                    .map_err(tool_error)?;
-                let html_content_type = response
-                    .headers()
-                    .get("content-type")
-                    .and_then(|value| value.to_str().ok())
-                    .is_some_and(|value| value.contains("text/html"));
-                let mut text = response.text().await.map_err(tool_error)?;
                 let raw = args.get("format").and_then(serde_json::Value::as_str) == Some("raw");
-                // HTML pages become markdown so the model reads content, not
-                // markup soup; sniff the body when the header is absent.
-                let looks_like_html = html_content_type
-                    || text.trim_start().get(..15).is_some_and(|head| {
-                        head.to_ascii_lowercase().starts_with("<!doctype html")
-                            || head.to_ascii_lowercase().starts_with("<html")
-                    });
-                if !raw && looks_like_html {
-                    if let Ok(markdown) = htmd::convert(&text) {
-                        text = markdown;
-                    }
-                }
-                truncate_output(text).await
+                webfetch(&self.client, url, raw, &context.cancel, WEBFETCH_TIMEOUT).await
             }
             Kind::Todo | Kind::TodoWrite | Kind::TodoRead => Err(CoreError::Tool(
                 "todo state is managed by the runtime task coordinator".into(),
@@ -3464,23 +3615,15 @@ async fn generate_media_from_endpoint(
         response = request.send() => response.map_err(tool_error)?,
     };
     let status = response.status();
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_GENERATION_RESPONSE_BYTES as u64)
-    {
-        return Err(CoreError::Tool(
-            "media generation response exceeds the 72 MiB transport limit".into(),
-        ));
-    }
     let bytes = tokio::select! {
         () = cancel.cancelled() => return Err(CoreError::Cancelled),
-        bytes = response.bytes() => bytes.map_err(tool_error)?,
+        bytes = read_limited(response, MAX_GENERATION_RESPONSE_BYTES) => bytes?,
     };
-    if bytes.len() > MAX_GENERATION_RESPONSE_BYTES {
+    let Some(bytes) = bytes else {
         return Err(CoreError::Tool(
             "media generation response exceeds the 72 MiB transport limit".into(),
         ));
-    }
+    };
     if !status.is_success() {
         let detail = String::from_utf8_lossy(&bytes);
         return Err(CoreError::Tool(format!(
@@ -5601,15 +5744,36 @@ mod webfetch_tests {
 
     #[test]
     fn html_converts_to_readable_markdown() {
-        let html = "<!doctype html><html><body><h1>Title</h1>\
+        let html = "<!doctype html><html><head><title>Page</title>\
+                    <style>body { color: red }</style><script>headScript()</script></head>\
+                    <body><h1>Title</h1>\
                     <p>Hello <strong>world</strong></p>\
                     <ul><li>one</li><li>two</li></ul>\
-                    <script>ignore me</script></body></html>";
-        let markdown = htmd::convert(html).unwrap();
+                    <script>ignore me</script><noscript>enable scripts</noscript>\
+                    <p>after the script</p></body></html>";
+        let markdown = html_to_markdown(html).unwrap();
         assert!(markdown.contains("# Title"), "{markdown}");
         assert!(markdown.contains("**world**"), "{markdown}");
         assert!(markdown.contains("one"), "{markdown}");
-        assert!(!markdown.contains("script"), "{markdown}");
+        assert!(markdown.contains("after the script"), "{markdown}");
+        for hidden in ["ignore me", "headScript", "color: red", "enable scripts"] {
+            assert!(!markdown.contains(hidden), "{hidden}: {markdown}");
+        }
+    }
+
+    #[test]
+    fn html_keeps_text_outside_any_element() {
+        assert_eq!(
+            html_to_markdown("bare-nonce-314159\n").as_deref(),
+            Some("bare-nonce-314159")
+        );
+        let markdown =
+            html_to_markdown("<p>kept</p><script>dropped()</script><style>p{}</style> tail")
+                .unwrap();
+        assert!(markdown.contains("kept"), "{markdown}");
+        assert!(markdown.contains("tail"), "{markdown}");
+        assert!(!markdown.contains("dropped"), "{markdown}");
+        assert!(!markdown.contains("p{}"), "{markdown}");
     }
 
     #[tokio::test]
@@ -5676,6 +5840,346 @@ mod webfetch_tests {
                 "{request}"
             );
         }
+    }
+
+    /// Accepts one connection and reads its request head.
+    async fn accept_request(listener: &tokio::net::TcpListener) -> (tokio::net::TcpStream, String) {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let count = stream.read(&mut buffer).await.unwrap();
+            if count == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..count]);
+        }
+        (stream, String::from_utf8_lossy(&request).into_owned())
+    }
+
+    fn webfetch_tool() -> BuiltinTool {
+        BuiltinTool {
+            kind: Kind::WebFetch,
+            workspace: std::env::current_dir().unwrap(),
+            client: web_client(),
+            skills: None,
+            skill_catalog: Arc::from(""),
+            instructions: Arc::new(InstructionDiscovery::default()),
+        }
+    }
+
+    #[test]
+    fn redirects_are_followed_only_on_the_address_asked_for() {
+        let url = |value: &str| url::Url::parse(value).unwrap();
+        let host = Some("which is on another host");
+        let port = Some("which is another port of the same host");
+        for (from, to, leaves) in [
+            ("http://a.example/x", "http://a.example/y", None),
+            ("http://a.example/", "https://a.example/", None),
+            ("https://a.example/", "https://A.EXAMPLE./login", None),
+            ("http://a.example:8080/", "http://a.example:8080/y", None),
+            (
+                "https://a.example/",
+                "http://a.example/",
+                Some("which leaves https for unencrypted http"),
+            ),
+            ("http://a.example:8080/", "https://a.example/", port),
+            ("https://a.example/", "https://a.example:8443/", port),
+            ("https://a.example/", "https://b.example/", host),
+            ("https://a.example/", "https://sub.a.example/", host),
+        ] {
+            assert_eq!(
+                redirect_leaves(&url(from), &url(to)),
+                leaves,
+                "{from} -> {to}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_another_port_says_so() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let elsewhere = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = format!("http://{}/page", elsewhere.local_addr().unwrap());
+        let location = target.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = accept_request(&listener).await;
+            let head = format!(
+                "HTTP/1.1 301 Moved Permanently\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(head.as_bytes()).await.unwrap();
+        });
+        let tool = webfetch_tool();
+        let output = tool
+            .execute(
+                json!({"url": format!("http://{address}/start")}),
+                composite_context(&tool.workspace),
+            )
+            .await
+            .unwrap();
+        assert!(
+            output.text.contains(&format!(
+                "to {target}, which is another port of the same host"
+            )),
+            "{}",
+            output.text
+        );
+        server.await.unwrap();
+        // The other port was never asked.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), elsewhere.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn media_backends_are_still_followed_to_another_host() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, request) = accept_request(&listener).await;
+            assert!(request.starts_with("POST /moved "), "{request}");
+            let head = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://localhost:{}/generate\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                address.port()
+            );
+            stream.write_all(head.as_bytes()).await.unwrap();
+            drop(stream);
+            let (mut stream, request) = accept_request(&listener).await;
+            assert!(request.starts_with("POST /generate "), "{request}");
+            let body = r#"{"data":[{"b64_json":"iVBORw0KGgo="}],"mime_type":"image/png"}"#;
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(reply.as_bytes()).await.unwrap();
+        });
+        let root =
+            std::env::temp_dir().join(format!("haarness-media-redirect-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let output = generate_media_from_endpoint(
+            GeneratedMediaKind::Image,
+            &json!({"prompt":"Quiet red fox"}),
+            &root,
+            media_client(),
+            &CancellationToken::new(),
+            MediaEndpoint {
+                url: format!("http://{address}/moved"),
+                api_key: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(output.metadata["path"].is_string(), "{}", output.metadata);
+        server.await.unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_another_host_is_reported_and_not_followed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let target = format!("http://localhost:{}/elsewhere", address.port());
+        let location = target.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = accept_request(&listener).await;
+            let head = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(head.as_bytes()).await.unwrap();
+            drop(stream);
+            // A followed redirect would arrive here as a second connection.
+            tokio::time::timeout(Duration::from_secs(2), listener.accept())
+                .await
+                .is_ok()
+        });
+        let tool = webfetch_tool();
+        let output = tool
+            .execute(
+                json!({"url": format!("http://{address}/start")}),
+                composite_context(&tool.workspace),
+            )
+            .await
+            .unwrap();
+        assert!(output.text.contains("another host"), "{}", output.text);
+        assert!(
+            output
+                .text
+                .contains(&format!("Call webfetch with {target}")),
+            "{}",
+            output.text
+        );
+        assert_eq!(output.metadata["redirect"], target);
+        assert!(!server.await.unwrap(), "the redirect was followed");
+    }
+
+    const CHUNKED_HEAD: &[u8] =
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+
+    fn chunk(size: usize) -> Vec<u8> {
+        format!("{size:x}\r\n{}\r\n", "a".repeat(size)).into_bytes()
+    }
+
+    #[tokio::test]
+    async fn stops_reading_a_body_without_length_once_it_passes_the_limit() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = accept_request(&listener).await;
+            stream.write_all(CHUNKED_HEAD).await.unwrap();
+            let chunk = chunk(64 * 1024);
+            let mut sent = 0_usize;
+            // Endless: only the client closing the connection ends it.
+            while stream.write_all(&chunk).await.is_ok() {
+                sent += 64 * 1024;
+            }
+            sent
+        });
+        let tool = webfetch_tool();
+        let error = tool
+            .execute(
+                json!({"url": format!("http://{address}/endless")}),
+                composite_context(&tool.workspace),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Response too large"), "{error}");
+        let sent = tokio::time::timeout(Duration::from_secs(20), server)
+            .await
+            .expect("the fetch closed the connection")
+            .unwrap();
+        // Socket buffers hold some of what was sent past the limit.
+        assert!(sent < WEBFETCH_MAX_BYTES + 16 * 1024 * 1024, "{sent}");
+    }
+
+    #[tokio::test]
+    async fn refuses_a_declared_length_over_the_limit_without_reading_it() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = accept_request(&listener).await;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n",
+                WEBFETCH_MAX_BYTES + 1
+            );
+            stream.write_all(head.as_bytes()).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        let tool = webfetch_tool();
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            tool.execute(
+                json!({"url": format!("http://{address}/large")}),
+                composite_context(&tool.workspace),
+            ),
+        )
+        .await
+        .expect("refused before any body arrived")
+        .unwrap_err();
+        assert!(error.to_string().contains("Response too large"), "{error}");
+        server.abort();
+    }
+
+    /// A server that sends its head and one chunk, then holds the
+    /// connection open without finishing the body.
+    async fn stalled_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = accept_request(&listener).await;
+            stream.write_all(CHUNKED_HEAD).await.unwrap();
+            stream.write_all(&chunk(16)).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(120)).await;
+        });
+        (address, server)
+    }
+
+    #[tokio::test]
+    async fn stop_abandons_a_fetch_whose_body_never_finishes() {
+        let (address, server) = stalled_server().await;
+        let tool = webfetch_tool();
+        let context = composite_context(&tool.workspace);
+        let cancel = context.cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            cancel.cancel();
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            tool.execute(json!({"url": format!("http://{address}/stall")}), context),
+        )
+        .await
+        .expect("Stop ended the fetch");
+        assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_fetch_whose_body_never_finishes_ends_at_its_deadline() {
+        let (address, server) = stalled_server().await;
+        let url = url::Url::parse(&format!("http://{address}/stall")).unwrap();
+        let error = webfetch(
+            &web_client(),
+            url,
+            false,
+            &CancellationToken::new(),
+            Duration::from_millis(300),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("did not finish loading"),
+            "{error}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_limited_read_stops_at_its_limit() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, request) = accept_request(&listener).await;
+                stream.write_all(CHUNKED_HEAD).await.unwrap();
+                let chunks = if request.contains("/small") {
+                    1
+                } else {
+                    usize::MAX
+                };
+                for _ in 0..chunks {
+                    if stream.write_all(&chunk(1024)).await.is_err() {
+                        break;
+                    }
+                }
+                let _ = stream.write_all(b"0\r\n\r\n").await;
+            }
+        });
+        let client = reqwest::Client::new();
+        let small = client
+            .get(format!("http://{address}/small"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            read_limited(small, 4096)
+                .await
+                .unwrap()
+                .map(|body| body.len()),
+            Some(1024)
+        );
+        let endless = client
+            .get(format!("http://{address}/endless"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(read_limited(endless, 4096).await.unwrap(), None);
+        tokio::time::timeout(Duration::from_secs(20), server)
+            .await
+            .expect("the read closed the connection")
+            .unwrap();
     }
 
     struct EchoInvoker;

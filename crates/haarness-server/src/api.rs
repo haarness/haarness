@@ -15,7 +15,7 @@ use axum::{
     },
     routing::{get, post},
 };
-use futures::{Stream, StreamExt};
+use futures::{FutureExt, Stream, StreamExt};
 use haarness_core::{AgentRuntime, CoreError, McpRegistry, SkillRegistry};
 use haarness_language::{FormatterStatus, LanguageService, LanguageStatus};
 use haarness_protocol::{
@@ -631,6 +631,24 @@ async fn pty_socket(
 
     loop {
         tokio::select! {
+            // Keys first: under a flood of output the reader falls behind at
+            // once, and a Ctrl+C sent meanwhile must still reach the shell.
+            biased;
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Binary(bytes))) => {
+                    if ptys.write(id, &bytes).is_err() {
+                        let _ = socket.send(Message::Close(None)).await;
+                        break;
+                    }
+                }
+                Some(Ok(Message::Ping(bytes))) => {
+                    if socket.send(Message::Pong(bytes)).await.is_err() {
+                        break;
+                    }
+                }
+                Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                Some(Ok(Message::Text(_) | Message::Pong(_))) => {}
+            },
             output = subscription.receiver.recv() => match output {
                 Ok(bytes) if bytes.is_empty() => {
                     let _ = socket.send(Message::Close(None)).await;
@@ -647,25 +665,18 @@ async fn pty_socket(
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     // The client reconnects with its last acknowledged cursor;
                     // the bounded session buffer fills the exact missing range.
+                    // Keys it already sent go to the shell before the close.
+                    while let Some(Some(Ok(message))) = socket.recv().now_or_never() {
+                        if let Message::Binary(bytes) = message
+                            && ptys.write(id, &bytes).is_err()
+                        {
+                            break;
+                        }
+                    }
                     let _ = socket.send(Message::Close(None)).await;
                     break;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            },
-            incoming = socket.recv() => match incoming {
-                Some(Ok(Message::Binary(bytes))) => {
-                    if ptys.write(id, &bytes).is_err() {
-                        let _ = socket.send(Message::Close(None)).await;
-                        break;
-                    }
-                }
-                Some(Ok(Message::Ping(bytes))) => {
-                    if socket.send(Message::Pong(bytes)).await.is_err() {
-                        break;
-                    }
-                }
-                Some(Ok(Message::Close(_)) | Err(_)) | None => break,
-                Some(Ok(Message::Text(_) | Message::Pong(_))) => {}
             },
         }
     }

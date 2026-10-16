@@ -8,6 +8,9 @@ import { randomUUID } from "node:crypto";
 import {
   defaults,
   migrateAgentKeys,
+  migrateTabKeys,
+  optionalShortcuts,
+  shortcutsClash,
   type Preferences,
   type Recent,
   type SavedServer,
@@ -15,6 +18,7 @@ import {
 import { migrateProjectlessLocations } from "../projects";
 import { migrateServers } from "../servers";
 import { themeIds } from "../themes";
+import { globalShortcutError } from "../global-shortcut";
 interface Data {
   preferences: Preferences;
   recent: Recent[];
@@ -34,12 +38,14 @@ let state: Data = {
 let chain = Promise.resolve();
 const path = () => join(app.getPath("userData"), "desktop.json");
 export async function load() {
+  let saved: Record<string, string> | undefined;
   try {
     const raw = JSON.parse(await readFile(path(), "utf8"));
+    saved = raw.preferences?.shortcuts;
     state = {
       ...state,
       ...raw,
-      preferences: { ...defaults, ...raw.preferences, shortcuts: { ...defaults.shortcuts, ...raw.preferences?.shortcuts }, language: displayLanguage(raw.preferences?.language) },
+      preferences: { ...defaults, ...raw.preferences, shortcuts: { ...defaults.shortcuts, ...raw.preferences?.shortcuts }, globalShortcut: { ...defaults.globalShortcut, ...raw.preferences?.globalShortcut }, language: displayLanguage(raw.preferences?.language) },
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT")
@@ -49,9 +55,13 @@ export async function load() {
   }
   const recent = migrateProjectlessLocations(state.recent);
   const servers = migrateServers(recent, state.servers);
-  const shortcuts = state.agentKeysMigrated
-    ? state.preferences.shortcuts
-    : migrateAgentKeys(state.preferences.shortcuts);
+  const shortcuts = migrateTabKeys(
+    saved,
+    state.agentKeysMigrated
+      ? state.preferences.shortcuts
+      : migrateAgentKeys(state.preferences.shortcuts),
+    process.platform,
+  );
   state.agentKeysMigrated = true;
   if (
     recent !== state.recent ||
@@ -160,6 +170,12 @@ export async function preferences(input: Partial<Preferences>) {
         browser: z.string(),
         agentNext: z.string(),
         agentPrev: z.string(),
+        tabNext: z.string(),
+        tabPrev: z.string(),
+      }),
+      globalShortcut: z.object({
+        enabled: z.boolean(),
+        keys: z.string().max(100),
       }),
     })
     .parse({ ...state.preferences, ...input });
@@ -172,22 +188,22 @@ export async function preferences(input: Partial<Preferences>) {
   )
     throw new Error("Invalid appearance setting");
   // Menu shortcuts become native accelerators, so they need a modifier and a
-  // single character. Composer shortcuts are matched in the message box and
-  // may also be a bare named key, such as Tab for people who want the TUI's.
+  // single character. Composer and tab shortcuts are matched in the page and
+  // may also use a named key, such as Tab for people who want the TUI's.
   const KEY = "[a-z0-9,.;/\\[\\]\\\\\\-=`]|F(?:[1-9]|1[0-9]|2[0-4])";
   const NAMED = `${KEY}|Tab|Enter|Space|Escape|Backspace|Up|Down|Left|Right`;
   const MODIFIER = "Mod|Ctrl|Alt|Shift|Meta";
   const accelerator = new RegExp(
     `^(${MODIFIER})(\\+(${MODIFIER}))*\\+(${KEY})$`, "i");
   const composer = new RegExp(`^((${MODIFIER})\\+)*(${NAMED})$`, "i");
-  const composerKeys = new Set(["agentNext", "agentPrev"]);
-  const shortcuts = Object.values(candidate.shortcuts);
+  const composerKeys = new Set(["agentNext", "agentPrev", "tabNext", "tabPrev"]);
   if (
-    Object.entries(candidate.shortcuts).some(([name, value]) =>
-      !(composerKeys.has(name) ? composer : accelerator).test(value),
+    Object.entries(candidate.shortcuts).some(
+      ([name, value]) =>
+        !(value === "" && optionalShortcuts.has(name)) &&
+        !(composerKeys.has(name) ? composer : accelerator).test(value),
     ) ||
-    new Set(shortcuts.map((value) => value.toLowerCase())).size !==
-      shortcuts.length
+    shortcutsClash(candidate.shortcuts, process.platform)
   )
     // Shown as is in Settings, so it speaks the language Settings is in.
     throw new Error(
@@ -196,6 +212,12 @@ export async function preferences(input: Partial<Preferences>) {
         "Use unique shortcuts such as Mod+Shift+E.",
       ),
     );
+  const problem = globalShortcutError(
+    candidate.globalShortcut.keys,
+    process.platform,
+    (key) => translate(state.preferences.language, key),
+  );
+  if (problem) throw new Error(problem);
   state.preferences = candidate;
   await persist();
   return candidate;

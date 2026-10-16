@@ -5,7 +5,10 @@ import { browserData, removeBrowserData, saveBrowserDownload } from "./browser-d
 import { createBrowserHost } from "./browser-host";
 import { chromeSetup, revealChromeExtension, setupChromeOnLaunch } from "./chrome-setup";
 import { createAttachmentDraftStorage } from "./attachment-drafts";
+import { terminalSockets } from "./terminal-sockets";
 import { translate } from "../localization";
+import { globalAccelerator, globalShortcutError, type GlobalShortcut } from "../global-shortcut";
+import { shortcutLabel } from "../renderer/search";
 /** Native dialogs speak the language chosen in Settings, like the menus do. */
 const say = (key: string) => translate(data().preferences.language, key);
 import { authorizationHeaders, type ServerAuth } from "@haarness/sdk";
@@ -22,6 +25,7 @@ import {
   powerMonitor,
   nativeTheme,
   nativeImage,
+  globalShortcut,
 } from "electron";
 import { readFile, writeFile, realpath, stat } from "node:fs/promises";
 import { join, resolve, basename, sep, isAbsolute } from "node:path";
@@ -114,7 +118,16 @@ const subscriptions = new Map<string, { owner: number; client: Haarness }>();
 if (process.env.HAARNESS_DESKTOP_TEST === "1" && process.env.HAARNESS_TELEMETRY === undefined)
   process.env.HAARNESS_TELEMETRY = "0";
 const commandOwners = new Map<string, number>();
-const terminals = new Map<string, { owner: number; socket: PtyConnection }>();
+const terminals = terminalSockets<PtyConnection>();
+// End-to-end tests end terminal sockets as a server or network outage does.
+if (process.env.HAARNESS_DESKTOP_TEST === "1")
+  Object.assign(globalThis, { haarnessTerminalSockets: terminals });
+/** Whether a terminal socket still takes input. The SDK keeps its WebSocket
+ * to itself; while that cannot be read, the socket counts as open. */
+function socketOpen(socket: PtyConnection) {
+  const state = (socket as unknown as { socket?: { readyState?: number } }).socket?.readyState;
+  return state === undefined || state === 1;
+}
 const projectTransaction = createProjectQueue();
 const worktreeOperations = new Set<string>();
 const voice = createVoiceInput((locale) =>
@@ -520,10 +533,34 @@ function installHandlers() {
     updateConfigured: !!process.env.HAARNESS_UPDATE_URL,
   }));
   handle("preferences", async (_, input) => {
-    const value = await preferences(input);
+    // A shortcut another app holds is refused before it is saved, and the
+    // one saved before stays registered.
+    const shortcut = (input as { globalShortcut?: GlobalShortcut } | undefined)?.globalShortcut;
+    const problem = shortcut && globalShortcutError(shortcut.keys, process.platform, say);
+    if (problem) throw new Error(problem);
+    if (shortcut && !registerShortcut(shortcut)) {
+      registerShortcut();
+      throw new Error(
+        say("Another app or the system already uses {keys}. Choose another shortcut.").replace(
+          "{keys}",
+          shortcutLabel(shortcut.keys, process.platform),
+        ),
+      );
+    }
+    const value = await preferences(input).catch((error) => {
+      if (shortcut) registerShortcut();
+      throw error;
+    });
     menu();
     broadcast({ kind: "menu", data: { action: "preferences", value } });
     return value;
+  });
+  // While Settings records a new global shortcut, the current one must not
+  // hide the window.
+  handle("globalShortcut", (win, action: unknown) => {
+    if (action !== "suspend") return resumeShortcut(win.id);
+    shortcutSuspendedBy = win.id;
+    registerShortcut();
   });
   const attachmentDraftStorage = createAttachmentDraftStorage(join(app.getPath("userData"), "attachment-drafts"));
   handle("attachmentDraft", (_, key: string, value: unknown) => attachmentDraftStorage(key, value));
@@ -962,8 +999,9 @@ function installHandlers() {
     async (win, id: string, action: string, pty: string, input: unknown) => {
       const key = win.id + ":" + id + ":" + pty;
       if (action === "detach") {
-        terminals.get(key)?.socket.close();
-        terminals.delete(key);
+        // Only the view's own socket: a newer view of the terminal keeps its.
+        // A socket the view let go of ends without a "closed" event.
+        terminals.detach(key, z.string().max(100).parse(input));
         return;
       }
       if (action === "write") {
@@ -971,16 +1009,28 @@ function installHandlers() {
           .array(z.number().int().min(0).max(255))
           .max(65536)
           .parse(input);
-        await terminals.get(key)?.socket.send(new Uint8Array(value));
-        return;
+        // False while there is no open socket, so the view keeps the input
+        // for the reconnect instead of losing it. A socket the server closed
+        // (it drops a reader that fell behind) stays listed until its last
+        // output is forwarded, and what is sent on it meanwhile is lost.
+        const current = terminals.get(key);
+        if (!current || !socketOpen(current.socket)) return false;
+        current.socket.send(new Uint8Array(value));
+        return true;
       }
       if (action !== "connect") throw new Error("Unknown terminal action");
-      terminals.get(key)?.socket.close();
+      const request = z
+        .object({ cursor: z.number().int().min(0), view: z.string().min(1).max(100) })
+        .parse(input);
+      terminals.begin(key, request.view);
       const socket = await connection(id).client.connectPty(pty, {
-        cursor: typeof input === "number" ? input : 0,
+        cursor: request.cursor,
       });
-      terminals.set(key, { owner: win.id, socket });
+      if (!terminals.accept(key, request.view, win.id, socket))
+        throw new Error("Terminal connection replaced");
+      const view = request.view;
       void (async () => {
+        let failure: string | undefined;
         try {
           for await (const message of socket)
             send(win, {
@@ -989,18 +1039,23 @@ function installHandlers() {
               id: pty,
               data:
                 message instanceof Uint8Array
-                  ? { bytes: Array.from(message) }
-                  : message,
+                  ? { bytes: Array.from(message), view }
+                  : { ...message, view },
             });
         } catch (error) {
-          send(win, {
-            kind: "pty",
-            connection: id,
-            id: pty,
-            data: { error: String(error) },
-          });
+          failure = String(error);
         } finally {
-          if (terminals.get(key)?.socket === socket) terminals.delete(key);
+          // The server ends a socket whose reader fell behind, and a network
+          // or server outage ends it too. Unless the view detached or
+          // connected again, tell it, so it reconnects from its cursor.
+          if (terminals.ended(key, socket)) {
+            send(win, {
+              kind: "pty",
+              connection: id,
+              id: pty,
+              data: { type: "closed", view, ...(failure ? { error: failure } : {}) },
+            });
+          }
         }
       })();
     },
@@ -1197,6 +1252,52 @@ function installHandlers() {
     return { available: updateAvailable, info: result?.updateInfo };
   });
 }
+/**
+ * The system-wide shortcut (Settings → Keyboard shortcuts, off by default):
+ * from another app it brings Haarness's last window to the front, and with
+ * Haarness in front it hides it again (minimizes it outside macOS).
+ */
+let registeredShortcut = "";
+/** The window whose Settings is recording a new global shortcut. */
+let shortcutSuspendedBy: number | undefined;
+/** Recording ends with the window that started it (closed, reloaded or
+ * crashed), so the shortcut never stays off. */
+function resumeShortcut(win: number) {
+  if (shortcutSuspendedBy !== win) return;
+  shortcutSuspendedBy = undefined;
+  registerShortcut();
+}
+function toggleFromShortcut() {
+  const focused = BrowserWindow.getFocusedWindow();
+  if (focused && windows.has(focused)) {
+    if (process.platform === "darwin") app.hide();
+    else focused.minimize();
+    return;
+  }
+  const win = [...windows].at(-1);
+  if (!win) return void createWindow();
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+  if (process.platform === "darwin") app.focus({ steal: true });
+}
+/** Registers `value` (the saved one by default) in place of the current one;
+ * false when another app or the system holds it, with nothing registered. */
+function registerShortcut(value: GlobalShortcut = data().preferences.globalShortcut) {
+  if (registeredShortcut) globalShortcut.unregister(registeredShortcut);
+  registeredShortcut = "";
+  const accelerator = value.enabled ? globalAccelerator(value.keys) : undefined;
+  if (!accelerator) return true;
+  try {
+    if (!globalShortcut.register(accelerator, toggleFromShortcut)) return false;
+  } catch {
+    return false;
+  }
+  // While Settings records a new one, a free combination is only tried.
+  if (shortcutSuspendedBy !== undefined) globalShortcut.unregister(accelerator);
+  else registeredShortcut = accelerator;
+  return true;
+}
 function createWindow() {
   if (!initialized || quitting) return;
   const state = data().values.window as
@@ -1258,6 +1359,7 @@ function createWindow() {
     },
   );
   win.webContents.on("render-process-gone", () => {
+    resumeShortcut(win.id);
     voice.stop(win.id);
     if (!quitting && !win.isDestroyed())
       void dialog
@@ -1278,8 +1380,12 @@ function createWindow() {
     data().values.window = { width, height };
     void persist();
   });
-  win.webContents.on("did-start-navigation", () => browserHost.hide(win));
+  win.webContents.on("did-start-navigation", () => {
+    browserHost.hide(win);
+    resumeShortcut(win.id);
+  });
   win.on("closed", () => {
+    resumeShortcut(win.id);
     voice.stop(win.id);
     windows.delete(win);
     notificationReady.delete(win.id);
@@ -1289,11 +1395,7 @@ function createWindow() {
         subscriptions.delete(id);
         item.client.close();
       }
-    for (const [id, item] of terminals)
-      if (item.owner === win.id) {
-        item.socket.close();
-        terminals.delete(id);
-      }
+    terminals.close(win.id);
   });
   if (process.env.ELECTRON_RENDERER_URL)
     void win.loadURL(process.env.ELECTRON_RENDERER_URL);
@@ -1478,6 +1580,7 @@ else {
       installHandlers();
       startBillingWatch(state => broadcast({ kind: "menu", data: { action: "account-billing", state } }));
       menu();
+      registerShortcut();
       initialized = true;
       createWindow();
       void refreshProjects().catch(() => {});
@@ -1501,7 +1604,10 @@ else {
   app.on("window-all-closed", () => {
     if (process.platform !== "darwin") app.quit();
   });
-  app.on("will-quit", () => uiSession?.dispose());
+  app.on("will-quit", () => {
+    globalShortcut.unregisterAll();
+    uiSession?.dispose();
+  });
   app.on("before-quit", () => {
     stopBillingWatch();
     browserHost.dispose();
@@ -1509,7 +1615,7 @@ else {
     for (const watch of notificationWatches.values()) watch.stop();
     voice.stop();
     for (const item of subscriptions.values()) item.client.close();
-    for (const item of terminals.values()) item.socket.close();
+    terminals.closeAll();
     for (const child of commands.values()) stopCommand(child);
   });
 }

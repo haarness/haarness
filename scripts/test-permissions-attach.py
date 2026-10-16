@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real server and attached TUI: ordinary tools, manual approvals and retired policy migration."""
 import http.server, json, os, pathlib, shlex, subprocess, tempfile, threading, time, urllib.request, urllib.error
+import e2e_scratch
 
 binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).resolve()
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-permissions-attach-')).resolve()
@@ -91,8 +92,8 @@ try:
     try: api('/manage/sandbox',{'action':'save','profile':'offline'}); raise AssertionError('retired API accepted')
     except urllib.error.HTTPError as error: assert error.code in (400,404,422),error.code
     (root/'items.json').write_text(json.dumps(items(),indent=2)); (root/'result.json').write_text(json.dumps({'passed':True,'checks':checks},indent=2))
-    print('PASS '+str(len(checks))+' attached TUI scenarios. Evidence: '+str(root),flush=True)
+    print('PASS '+str(len(checks))+' attached TUI scenarios.',flush=True)
 finally:
     subprocess.run(['tmux','kill-session','-t',name],capture_output=True)
     if url: subprocess.run([str(binary),'--workspace',str(workspace),'serve','--stop'],env=env,capture_output=True,timeout=35)
-    web.shutdown(); web.server_close(); print('Artifacts: '+str(root),flush=True)
+    web.shutdown(); web.server_close(); e2e_scratch.settle(root)

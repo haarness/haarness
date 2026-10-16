@@ -355,15 +355,30 @@ impl WorkflowCatalog {
     }
 
     pub fn read_source(&self, invocation: &str) -> Result<WorkflowSourceResponse, CatalogError> {
-        let definition = self
-            .list()
-            .workflows
-            .into_iter()
-            .find(|definition| {
-                definition.invocation == invocation
-                    || (definition.plugin_name.is_none() && definition.name == invocation)
-            })
-            .ok_or_else(|| CatalogError::NotFound(invocation.to_owned()))?;
+        let workflows = self.list().workflows;
+        let Some(definition) = workflows.iter().find(|definition| {
+            definition.invocation == invocation
+                || (definition.plugin_name.is_none() && definition.name == invocation)
+        }) else {
+            // A plugin's workflow is only found by its namespaced invocation;
+            // a model that passed the bare name learns the one to use.
+            let plugin: Vec<&str> = workflows
+                .iter()
+                .filter(|definition| {
+                    definition.plugin_name.is_some() && definition.name == invocation
+                })
+                .map(|definition| definition.invocation.as_str())
+                .collect();
+            return Err(CatalogError::NotFound(if plugin.is_empty() {
+                invocation.to_owned()
+            } else {
+                format!(
+                    "{invocation} (a plugin's workflow is invoked as plugin:name: {})",
+                    plugin.join(", ")
+                )
+            }));
+        };
+        let definition = definition.clone();
         let source = fs::read_to_string(&definition.path).map_err(|error| CatalogError::Read {
             path: definition.path.clone(),
             message: error.to_string(),
@@ -1536,6 +1551,27 @@ return client.fetch(labels.fetch + prose)
                 .plugin_name
                 .as_deref(),
             Some("shipping tools")
+        );
+    }
+
+    #[test]
+    fn a_plugin_workflow_asked_for_by_its_bare_name_names_its_invocation() {
+        let temp = TempDir::new("plugin-bare");
+        fs::write(
+            temp.0.join("audit.ts"),
+            "export default workflow({ name: 'audit', run() {} })",
+        )
+        .unwrap();
+        let catalog = WorkflowCatalog::new(Vec::new()).with_plugin_root(&temp.0, "shipping");
+        let error = catalog.read_source("audit").unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "workflow not found: audit (a plugin's workflow is invoked as plugin:name: shipping:audit)"
+        );
+        assert!(catalog.read_source("shipping:audit").is_ok());
+        assert_eq!(
+            catalog.read_source("other").unwrap_err().to_string(),
+            "workflow not found: other"
         );
     }
 

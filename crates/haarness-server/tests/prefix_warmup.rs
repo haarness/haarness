@@ -169,21 +169,31 @@ impl ModelProvider for Fanout {
     }
 }
 
-fn runtime(provider: &Arc<Fanout>) -> Arc<AgentRuntime> {
+/// The runtime's workspace folder, removed when the test ends, also when it fails.
+struct Workspace(std::path::PathBuf);
+
+impl Drop for Workspace {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn runtime(provider: &Arc<Fanout>) -> (Arc<AgentRuntime>, Workspace) {
     let workspace =
         std::env::temp_dir().join(format!("haarness-prefix-warmup-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&workspace).unwrap();
-    Arc::new(AgentRuntime::with_config(
+    let runtime = Arc::new(AgentRuntime::with_config(
         Arc::new(SqliteStore::in_memory().unwrap()),
         Arc::new(StaticProviderRegistry::new([
             Arc::clone(provider) as Arc<dyn ModelProvider>
         ])),
         Arc::new(NativeToolRegistry::new(workspace.clone())),
         EventBus::new(1024),
-        workspace,
+        workspace.clone(),
         String::new(),
         RuntimeConfig::default(),
-    ))
+    ));
+    (runtime, Workspace(workspace))
 }
 
 async fn root_thread(runtime: &AgentRuntime) -> ThreadId {
@@ -249,7 +259,7 @@ fn assert_one_leader(log: &[String]) {
 #[tokio::test]
 async fn a_task_batch_sends_one_child_first_and_the_rest_once_its_response_begins() {
     let provider = Fanout::new(true);
-    let runtime = runtime(&provider);
+    let (runtime, _workspace) = runtime(&provider);
     let thread = root_thread(&runtime).await;
     let turn = start(&runtime, thread, &format!("!tasks {CHILDREN}")).await;
     provider.wait_for_sends(1).await;
@@ -263,7 +273,7 @@ async fn a_task_batch_sends_one_child_first_and_the_rest_once_its_response_begin
 #[tokio::test]
 async fn a_workflow_fan_out_sends_one_agent_first_and_the_rest_once_its_response_begins() {
     let provider = Fanout::new(true);
-    let runtime = runtime(&provider);
+    let (runtime, _workspace) = runtime(&provider);
     let root = root_thread(&runtime).await;
     let host = WorkflowRuntimeAdapter::new();
     host.attach(&runtime);
@@ -308,7 +318,7 @@ async fn a_workflow_fan_out_sends_one_agent_first_and_the_rest_once_its_response
 #[tokio::test]
 async fn children_of_a_provider_without_explicit_caching_all_go_at_once() {
     let provider = Fanout::new(false);
-    let runtime = runtime(&provider);
+    let (runtime, _workspace) = runtime(&provider);
     let thread = root_thread(&runtime).await;
     let turn = start(&runtime, thread, &format!("!tasks {CHILDREN}")).await;
     // The first child's response is still held, and nobody waits on it.
@@ -320,7 +330,7 @@ async fn children_of_a_provider_without_explicit_caching_all_go_at_once() {
 #[tokio::test]
 async fn separate_conversations_never_wait_on_each_other() {
     let provider = Fanout::new(true);
-    let runtime = runtime(&provider);
+    let (runtime, _workspace) = runtime(&provider);
     let (first, second) = (root_thread(&runtime).await, root_thread(&runtime).await);
     let first = start(&runtime, first, "child a").await;
     provider.wait_for_sends(1).await;

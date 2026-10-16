@@ -83,6 +83,12 @@ definition's `whenToUse` helps choose a workflow after this gate opens and
 never opens the gate by itself. Direct `/workflow`, discovered slash-command,
 and `haarness run --workflow` execution bypass this model-facing gate.
 
+The tool's `name` is a workflow's invocation as `read` lists it, so a plugin's
+workflow is `plugin-name:workflow-name`. Asked for by its bare name, it is not
+found, and the error names the invocation to use: "workflow audit (a plugin's
+workflow is invoked as plugin:name: shipping:audit)". The HTTP API and `ctx`
+nested workflows report the same.
+
 ## Native workflows
 
 Native workflows support the workflow plugin shape and ordinary imports:

@@ -43,10 +43,24 @@ pub struct PermissionEngine {
     repository_grants: Vec<PermissionRule>,
     session_rules: Vec<PermissionRule>,
     /// Evaluated independently of the rules: a ceiling `deny` wins even when
-    /// a later rule or session approval allows. Used for the plan agent and
-    /// for child agents inheriting their parent's boundary.
+    /// a later rule or session approval allows. The agent's own (the plan
+    /// agent's write boundary).
     ceilings: Vec<PermissionRule>,
+    /// The boundaries a child agent inherits from the chats above it, each
+    /// one ruleset evaluated on its own, so one that ends with a broad allow
+    /// never reopens another's deny. Unlike the agent's own ceiling, they
+    /// differ between sessions of one agent, so they refuse calls but never
+    /// take a tool out of the list the model sees.
+    inherited: Vec<Vec<PermissionRule>>,
+    /// The project folder, when known: `read`, `edit` and `list` rules then
+    /// name a project file however the call spelled its path.
+    workspace: Option<PathBuf>,
 }
+
+/// Permissions whose patterns are file paths. A rule for one of them written
+/// relative to the project also names the file's absolute path, and an
+/// absolute rule its project-relative one.
+const PATH_PERMISSIONS: [&str; 3] = ["read", "edit", "list"];
 
 /// The built-in `read` rules for environment secrets, in order (last match
 /// wins). Packages ship `.env` files, often as test fixtures, so a file
@@ -84,7 +98,16 @@ impl PermissionEngine {
             session_rules: Vec::new(),
             repository_grants: Vec::new(),
             ceilings: Vec::new(),
+            inherited: Vec::new(),
+            workspace: None,
         }
+    }
+
+    /// Let path rules name a file in `workspace` by either spelling: a model
+    /// may read `/project/secrets/key` while the rule says `secrets/*`, or
+    /// the other way round. Rules starting with `*` match as written.
+    pub fn set_workspace(&mut self, workspace: &Path) {
+        self.workspace = Some(workspace.to_path_buf());
     }
 
     /// Ordinary tools run by default. External paths and environment secrets
@@ -144,6 +167,18 @@ impl PermissionEngine {
     pub fn add_ceiling(&mut self, rule: PermissionRule) {
         self.ceilings.push(normalize_rule_aliases(rule));
     }
+    /// Bound this engine by a parent's [`boundary`](Self::boundary): each of
+    /// its rulesets refuses what it denies, whatever the others allow.
+    pub fn add_inherited_ceiling(
+        &mut self,
+        boundary: impl IntoIterator<Item = Vec<PermissionRule>>,
+    ) {
+        self.inherited.extend(
+            boundary
+                .into_iter()
+                .map(|rules| rules.into_iter().map(normalize_rule_aliases).collect()),
+        );
+    }
     /// The effective ruleset (rules + session approvals), e.g. to snapshot a
     /// parent's boundary as a child agent's ceiling.
     #[must_use]
@@ -157,14 +192,18 @@ impl PermissionEngine {
             .collect()
     }
 
-    /// Everything that bounds this engine — effective rules plus its own
-    /// ceilings. A child agent inherits this as its ceiling so it can never
-    /// escalate past its parent.
+    /// Everything that bounds this engine, as rulesets to evaluate one by
+    /// one: its effective rules, its own ceiling and those it inherited. A
+    /// child agent inherits this as its ceiling so it can never escalate
+    /// past its parent.
     #[must_use]
-    pub fn boundary(&self) -> Vec<PermissionRule> {
-        let mut rules = self.flattened_rules();
-        rules.extend(self.ceilings.iter().cloned());
-        rules
+    pub fn boundary(&self) -> Vec<Vec<PermissionRule>> {
+        let mut boundary = vec![self.flattened_rules()];
+        if !self.ceilings.is_empty() {
+            boundary.push(self.ceilings.clone());
+        }
+        boundary.extend(self.inherited.iter().cloned());
+        boundary
     }
 
     #[must_use]
@@ -175,31 +214,22 @@ impl PermissionEngine {
     #[must_use]
     pub fn evaluate_detailed(&self, operation: &str) -> Evaluation {
         let operation = normalize_operation_alias(operation);
+        let spellings = self.path_spellings(&operation);
+        let names = |rule: &&PermissionRule| rule_names(rule, &operation, &spellings);
         // Ceilings first and independently: their deny is final.
-        if let Some(ceiling) = self
-            .ceilings
-            .iter()
-            .rfind(|rule| wildcard_match(&rule.pattern, operation.as_ref()))
-        {
-            if ceiling.decision == PermissionDecision::Deny {
+        for ceiling in std::iter::once(&self.ceilings).chain(&self.inherited) {
+            if let Some(ceiling) = ceiling.iter().rfind(names)
+                && ceiling.decision == PermissionDecision::Deny
+            {
                 return Evaluation {
                     decision: PermissionDecision::Deny,
                     matched: Some(ceiling.pattern.clone()),
                 };
             }
         }
-        let configured = self
-            .rules
-            .iter()
-            .rfind(|rule| wildcard_match(&rule.pattern, operation.as_ref()));
-        let grant = self
-            .session_rules
-            .iter()
-            .rfind(|rule| wildcard_match(&rule.pattern, operation.as_ref()));
-        let repository = self
-            .repository_grants
-            .iter()
-            .rfind(|rule| wildcard_match(&rule.pattern, operation.as_ref()));
+        let configured = self.rules.iter().rfind(names);
+        let grant = self.session_rules.iter().rfind(names);
+        let repository = self.repository_grants.iter().rfind(names);
         // An "always" answer or sharing consent never reopens a configured
         // deny: `always` on `git push origin` must not allow a denied
         // `git push --force`.
@@ -214,29 +244,140 @@ impl PermissionEngine {
         }
     }
 
-    /// Whether a tool is categorically unavailable and should therefore be
-    /// omitted from the model-facing tool schema.
-    /// Local/session rules are one ordered ruleset,
-    /// inherited ceilings are checked independently, and only a final `*`
-    /// deny hides the complete tool. Scoped denies remain visible because a
-    /// valid argument can still be allowed at execution time.
+    /// The other ways to write a path operation's file, each with whether it
+    /// is absolute: the project-relative path of an absolute one inside the
+    /// project (also through a link such as macOS's `/tmp` for
+    /// `/private/tmp`), or the absolute paths of a relative one and its
+    /// plain relative form (`./secrets/key`, `src/../vendor/lib.rs` and
+    /// `build/` are `secrets/key`, `vendor/lib.rs` and `build`).
+    fn path_spellings(&self, operation: &str) -> Vec<(String, bool)> {
+        let Some(workspace) = &self.workspace else {
+            return Vec::new();
+        };
+        let Some((permission, target)) = operation.split_once(':') else {
+            return Vec::new();
+        };
+        if !PATH_PERMISSIONS.contains(&permission)
+            || target.is_empty()
+            || target == "*"
+            || target.starts_with('~')
+        {
+            return Vec::new();
+        }
+        let configured = normalize_absolute(workspace);
+        let root = workspace
+            .canonicalize()
+            .unwrap_or_else(|_| configured.clone());
+        let given = Path::new(target);
+        let mut spellings = Vec::new();
+        if given.is_absolute() {
+            let named = normalize_absolute(given);
+            let relative = named
+                .strip_prefix(&configured)
+                .or_else(|_| named.strip_prefix(&root))
+                .map(Path::to_path_buf)
+                .or_else(|_| {
+                    resolve_permission_path(workspace, target)
+                        .strip_prefix(&root)
+                        .map(Path::to_path_buf)
+                });
+            if let Ok(relative) = relative {
+                let relative = relative.to_string_lossy();
+                let relative = if relative.is_empty() { "." } else { &relative };
+                spellings.push((format!("{permission}:{relative}"), false));
+            }
+        } else {
+            if let Some(plain) = plain_relative(given) {
+                let plain = plain.to_string_lossy();
+                let plain = if plain.is_empty() { "." } else { &plain };
+                if plain != target {
+                    spellings.push((format!("{permission}:{plain}"), false));
+                }
+            }
+            for base in [&configured, &root] {
+                let absolute = format!(
+                    "{permission}:{}",
+                    normalize_absolute(&base.join(given)).to_string_lossy()
+                );
+                if !spellings.iter().any(|(known, _)| known == &absolute) {
+                    spellings.push((absolute, true));
+                }
+            }
+        }
+        spellings
+    }
+
+    /// Whether a tool is categorically unavailable to this agent and should
+    /// therefore be omitted from the model-facing tool schema. Local/session
+    /// rules are one ordered ruleset, the agent's own ceiling is checked
+    /// independently, and only a final `*` deny hides the complete tool.
+    /// Scoped denies remain visible because a valid argument can still be
+    /// allowed at execution time. Inherited boundaries never hide a tool:
+    /// sessions of one agent started from different chats then send one
+    /// tool list, which keeps the cached prompt prefix they share.
+    #[must_use]
+    pub fn hides_tool(&self, tool: &str) -> bool {
+        tool_denial(self.rules.iter().chain(&self.session_rules), tool).is_some()
+            || tool_denial(self.ceilings.iter(), tool).is_some()
+    }
+
+    /// The rule of an inherited boundary (a chat above this agent) that
+    /// denies the whole tool, for a refusal that says why.
+    #[must_use]
+    pub fn inherited_tool_denial(&self, tool: &str) -> Option<&str> {
+        self.inherited
+            .iter()
+            .find_map(|rules| tool_denial(rules.iter(), tool))
+            .map(|rule| rule.pattern.as_str())
+    }
+
+    /// Whether every call of a tool is refused: [`hides_tool`](Self::hides_tool)
+    /// or an inherited boundary's whole-tool deny.
     #[must_use]
     pub fn disables_tool(&self, tool: &str) -> bool {
-        if let Some(method) = tool.strip_prefix("browser_") {
-            return ruleset_disables_browser(self.rules.iter().chain(&self.session_rules), method)
-                || ruleset_disables_browser(self.ceilings.iter(), method);
-        }
-        ruleset_disables_tool(
-            self.rules.iter().chain(&self.session_rules),
-            canonical_tool_permission(tool),
-        ) || ruleset_disables_tool(self.ceilings.iter(), canonical_tool_permission(tool))
+        self.hides_tool(tool) || self.inherited_tool_denial(tool).is_some()
     }
+}
+
+/// The rule that denies every call of `tool` in one ordered ruleset: the
+/// last rule naming the tool, when it is a `*` deny.
+fn tool_denial<'a>(
+    rules: impl DoubleEndedIterator<Item = &'a PermissionRule>,
+    tool: &str,
+) -> Option<&'a PermissionRule> {
+    if let Some(method) = tool.strip_prefix("browser_") {
+        return ruleset_disables_browser(rules, method);
+    }
+    ruleset_disables_tool(rules, canonical_tool_permission(tool))
+}
+
+/// Whether `rule` covers `operation`, as written or, for a path rule, by the
+/// file's other spelling: a relative rule meets the project-relative path and
+/// an absolute rule the absolute one. A rule starting with `*` (the built-in
+/// secret rules) or `~` matches as written, so it means what it always did.
+fn rule_names(rule: &PermissionRule, operation: &str, spellings: &[(String, bool)]) -> bool {
+    if wildcard_match(&rule.pattern, operation) {
+        return true;
+    }
+    if spellings.is_empty() {
+        return false;
+    }
+    let Some((_, target)) = rule.pattern.split_once(':') else {
+        return false;
+    };
+    if target.is_empty() || target.starts_with(['*', '~']) {
+        return false;
+    }
+    let absolute = Path::new(target).is_absolute();
+    spellings.iter().any(|(spelled, spelled_absolute)| {
+        *spelled_absolute == absolute && wildcard_match(&rule.pattern, spelled)
+    })
 }
 
 fn ruleset_disables_browser<'a>(
     rules: impl DoubleEndedIterator<Item = &'a PermissionRule>,
     method: &str,
-) -> bool {
+) -> Option<&'a PermissionRule> {
     rules
         .rev()
         .find_map(|rule| {
@@ -245,26 +386,37 @@ fn ruleset_disables_browser<'a>(
                 return None;
             }
             if target == "*" {
-                return Some(rule.decision == PermissionDecision::Deny);
+                return Some((rule, rule.decision == PermissionDecision::Deny));
             }
             let (operation, resource) = target.split_once(':').unwrap_or((target, "*"));
-            wildcard_match(operation, method)
-                .then_some(resource == "*" && rule.decision == PermissionDecision::Deny)
+            wildcard_match(operation, method).then_some((
+                rule,
+                resource == "*" && rule.decision == PermissionDecision::Deny,
+            ))
         })
-        .unwrap_or(false)
+        .and_then(|(rule, denies)| denies.then_some(rule))
 }
 
 fn ruleset_disables_tool<'a>(
     rules: impl DoubleEndedIterator<Item = &'a PermissionRule>,
     tool: &str,
-) -> bool {
+) -> Option<&'a PermissionRule> {
     rules
         .rev()
-        .find_map(|rule| {
-            let (permission, target) = rule.pattern.split_once(':').unwrap_or((&rule.pattern, "*"));
-            wildcard_match(permission, tool).then_some((target, rule.decision))
+        .find(|rule| {
+            let permission = rule
+                .pattern
+                .split_once(':')
+                .map_or(rule.pattern.as_str(), |(p, _)| p);
+            wildcard_match(permission, tool)
         })
-        .is_some_and(|(target, decision)| target == "*" && decision == PermissionDecision::Deny)
+        .filter(|rule| {
+            let target = rule
+                .pattern
+                .split_once(':')
+                .map_or("*", |(_, target)| target);
+            target == "*" && rule.decision == PermissionDecision::Deny
+        })
 }
 
 fn canonical_tool_permission(tool: &str) -> &str {
@@ -421,6 +573,25 @@ pub(crate) fn names_inside(workspace: &Path, value: &str) -> bool {
     } else {
         normalize_absolute(&root.join(given)).starts_with(&root)
     }
+}
+
+/// A relative path with `.`, `..` and trailing separators taken lexically,
+/// or `None` when it climbs out of the folder it is relative to.
+fn plain_relative(path: &Path) -> Option<PathBuf> {
+    let mut plain = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !plain.pop() {
+                    return None;
+                }
+            }
+            Component::Normal(value) => plain.push(value),
+            Component::Prefix(_) | Component::RootDir => return None,
+        }
+    }
+    Some(plain)
 }
 
 fn normalize_absolute(path: &Path) -> PathBuf {
@@ -790,6 +961,54 @@ mod tests {
     }
 
     #[test]
+    fn a_ceiling_holds_whatever_boundary_comes_after_it() {
+        // The plan agent running below a build chat: the parent's boundary
+        // ends with its `*` allow, which must not reopen the plan ceiling.
+        let mut child = PermissionEngine::plan_defaults();
+        child.add_inherited_ceiling(PermissionEngine::build_defaults().boundary());
+        assert_eq!(child.evaluate("edit:src/main.rs"), PermissionDecision::Deny);
+        assert!(child.disables_tool("media_generate"));
+        // A workflow under it inherits both boundaries, nearest first.
+        let mut workflow = PermissionEngine::build_defaults();
+        workflow.add_inherited_ceiling(child.boundary());
+        workflow.add_inherited_ceiling(PermissionEngine::build_defaults().boundary());
+        assert_eq!(
+            workflow.evaluate("write:src/main.rs"),
+            PermissionDecision::Deny
+        );
+        assert_eq!(
+            workflow.evaluate("write:.haarness/plans/next.md"),
+            PermissionDecision::Allow
+        );
+        assert_eq!(workflow.evaluate("bash:ls"), PermissionDecision::Allow);
+    }
+
+    #[test]
+    fn an_inherited_whole_tool_deny_refuses_the_tool_but_keeps_it_listed() {
+        let mut parent = PermissionEngine::build_defaults();
+        parent.add_rule(rule("webfetch:*", PermissionDecision::Deny));
+        parent.add_rule(rule("browser:*", PermissionDecision::Deny));
+        let mut child = PermissionEngine::build_defaults();
+        child.add_inherited_ceiling(parent.boundary());
+        for tool in ["webfetch", "browser_navigate"] {
+            assert!(!child.hides_tool(tool), "{tool}");
+            assert!(child.disables_tool(tool), "{tool}");
+        }
+        assert_eq!(child.inherited_tool_denial("webfetch"), Some("webfetch:*"));
+        assert_eq!(
+            child.inherited_tool_denial("browser_navigate"),
+            Some("browser:*")
+        );
+        assert_eq!(child.inherited_tool_denial("read"), None);
+        // The agent's own ceiling and rules still take a tool out.
+        let mut plan = PermissionEngine::plan_defaults();
+        plan.add_rule(rule("task:*", PermissionDecision::Deny));
+        assert!(plan.hides_tool("media_generate"));
+        assert!(plan.hides_tool("task"));
+        assert_eq!(plan.inherited_tool_denial("media_generate"), None);
+    }
+
+    #[test]
     fn only_categorical_denies_hide_tools_from_the_model() {
         let mut engine = PermissionEngine::build_defaults();
         engine.add_rule(rule("task:*", PermissionDecision::Deny));
@@ -933,9 +1152,7 @@ mod tests {
         );
         // A child agent's boundary keeps the deny too.
         let mut child = PermissionEngine::new(vec![rule("bash:*", PermissionDecision::Allow)]);
-        for ceiling in engine.boundary() {
-            child.add_ceiling(ceiling);
-        }
+        child.add_inherited_ceiling(engine.boundary());
         assert_eq!(
             child.evaluate("bash:git push --force origin main"),
             PermissionDecision::Deny
@@ -956,5 +1173,128 @@ mod tests {
             PermissionDecision::Allow
         );
         assert_eq!(engine.evaluate("bash:cargo run"), PermissionDecision::Ask);
+    }
+
+    #[test]
+    fn path_rules_name_a_project_file_by_either_spelling() {
+        let project = Path::new("/work/project");
+        let mut engine = PermissionEngine::build_defaults();
+        engine.add_rule(rule("read:secrets/*", PermissionDecision::Deny));
+        engine.add_rule(rule(
+            "edit:/work/project/vendor/*",
+            PermissionDecision::Deny,
+        ));
+        engine.add_rule(rule("list:build", PermissionDecision::Ask));
+        // Without the project folder, rules match the path as written.
+        assert_eq!(
+            engine.evaluate("read:/work/project/secrets/key"),
+            PermissionDecision::Allow
+        );
+        engine.set_workspace(project);
+        for operation in [
+            "read:secrets/key",
+            "read:/work/project/secrets/key",
+            "read:/work/project/./src/../secrets/key",
+            "edit:vendor/lib.rs",
+            "write:vendor/lib.rs",
+            "edit:/work/project/vendor/lib.rs",
+        ] {
+            assert_eq!(
+                engine.evaluate(operation),
+                PermissionDecision::Deny,
+                "{operation}"
+            );
+        }
+        assert_eq!(
+            engine.evaluate("list:/work/project/build"),
+            PermissionDecision::Ask
+        );
+        // `./`, `..` inside the project and a trailing separator are the
+        // same file or folder.
+        for operation in [
+            "read:./secrets/key",
+            "read:src/../secrets/key",
+            "edit:./vendor/lib.rs",
+            "write:src/../vendor/lib.rs",
+        ] {
+            assert_eq!(
+                engine.evaluate(operation),
+                PermissionDecision::Deny,
+                "{operation}"
+            );
+        }
+        assert_eq!(engine.evaluate("list:build/"), PermissionDecision::Ask);
+        assert_eq!(engine.evaluate("list:./build"), PermissionDecision::Ask);
+        // The deny names the rule as written.
+        assert_eq!(
+            engine
+                .evaluate_detailed("read:/work/project/secrets/key")
+                .matched
+                .as_deref(),
+            Some("read:secrets/*")
+        );
+        // Outside the project, or another permission, nothing changes.
+        for operation in [
+            "read:/elsewhere/secrets/key",
+            "read:../secrets/key",
+            "bash:cat /work/project/secrets/key",
+            "read:/work/project-other/secrets/key",
+        ] {
+            assert_eq!(
+                engine.evaluate(operation),
+                PermissionDecision::Allow,
+                "{operation}"
+            );
+        }
+    }
+
+    #[test]
+    fn rules_starting_with_a_star_still_match_only_as_written() {
+        // A project inside a node_modules folder: a relative `.env` read asks
+        // as before, although its absolute path is inside node_modules.
+        let mut engine = PermissionEngine::build_defaults();
+        engine.set_workspace(Path::new("/work/node_modules/project"));
+        assert_eq!(engine.evaluate("read:.env"), PermissionDecision::Ask);
+        assert_eq!(
+            engine.evaluate("read:/work/node_modules/project/.env"),
+            PermissionDecision::Allow
+        );
+        // Ceilings and grants follow the same matching as configured rules.
+        let mut child = PermissionEngine::build_defaults();
+        child.set_workspace(Path::new("/work/project"));
+        child.add_ceiling(rule("edit:generated/*", PermissionDecision::Deny));
+        child.approve_always("read:/work/project/notes/.env");
+        assert_eq!(
+            child.evaluate("edit:/work/project/generated/a.rs"),
+            PermissionDecision::Deny
+        );
+        assert_eq!(child.evaluate("read:notes/.env"), PermissionDecision::Allow);
+    }
+
+    #[test]
+    fn a_project_path_through_a_folder_link_is_still_a_project_path() {
+        // macOS keeps temporary folders under /private/var, also reachable
+        // as /var: a rule for the project meets a path through either.
+        let project = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("haarness-path-rules-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(project.join("secrets")).unwrap();
+        let mut engine = PermissionEngine::build_defaults();
+        engine.add_rule(rule("read:secrets/*", PermissionDecision::Deny));
+        engine.set_workspace(&project);
+        let canonical = project.join("secrets/key").to_string_lossy().into_owned();
+        assert_eq!(
+            engine.evaluate(&format!("read:{canonical}")),
+            PermissionDecision::Deny
+        );
+        if let Some(alias) = canonical.strip_prefix("/private") {
+            assert_eq!(
+                engine.evaluate(&format!("read:{alias}")),
+                PermissionDecision::Deny,
+                "{alias}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&project);
     }
 }

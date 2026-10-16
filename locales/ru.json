@@ -2427,5 +2427,17 @@
   "The folder in this link was not found.": "Папка из этой ссылки не найдена.",
   "Open “{folder}” from a link?": "Открыть «{folder}» по ссылке?",
   "It opens with its project configuration off: MCP servers, hooks and extensions in this folder do not run. To turn them on, open the folder with Open project.": "Папка откроется с отключённой конфигурацией проекта: MCP-серверы, хуки и расширения из неё не запускаются. Чтобы включить их, откройте папку через «Открыть проект».",
-  "Open folder": "Открыть папку"
+  "Open folder": "Открыть папку",
+  "Earlier terminal output is no longer available": "Предыдущий вывод терминала больше недоступен",
+  "Next tab": "Следующая вкладка",
+  "Previous tab": "Предыдущая вкладка",
+  "In the chats, terminal, files, browser or side panel that has the keyboard": "В чатах, терминале, файлах, браузере или боковой панели, где находится клавиатура",
+  "Attach an image, PDF, audio, or video file. To reference source code, use its workspace path.": "Прикрепите изображение, PDF, аудио- или видеофайл. Чтобы сослаться на исходный код, укажите его путь в рабочей области.",
+  "Show and hide Haarness from any app": "Показывать и скрывать Haarness из любого приложения",
+  "Brings Haarness to the front from any app, and hides it again when it is in front. While it is on, other apps no longer receive the combination.": "Выводит Haarness на передний план из любого приложения и снова скрывает его, когда он впереди. Пока это включено, другие приложения не получают это сочетание.",
+  "Global shortcut": "Глобальное сочетание клавиш",
+  "Click and press the keys, including a modifier key.": "Щёлкните и нажмите клавиши, включая клавишу-модификатор.",
+  "Use a modifier key and one more key, such as {keys}.": "Используйте клавишу-модификатор и ещё одну клавишу, например {keys}.",
+  "{keys} belongs to the system. Choose another shortcut.": "{keys} занято системой. Выберите другое сочетание.",
+  "Another app or the system already uses {keys}. Choose another shortcut.": "{keys} уже использует другое приложение или система. Выберите другое сочетание."
 }

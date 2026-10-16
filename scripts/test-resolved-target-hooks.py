@@ -12,6 +12,7 @@
 Every daemon runs on isolated data under one temporary root and is stopped at the end.
 """
 import json, os, pathlib, shlex, subprocess, tempfile, time, urllib.error, urllib.request, uuid
+import e2e_scratch
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-resolved-targets-')).resolve()
@@ -210,7 +211,7 @@ export default () => ({
           and "'edit:out.txt' is denied" in items, result)
     again = agent_chat.turn('hello', agent='reviewer')
     check('a new turn sees the deletion', 'Unknown agent' in json.dumps(again), again)
-    print('PASS', len(checks), 'checks. Evidence:', root, flush=True)
+    print('PASS', len(checks), 'checks.', flush=True)
 finally:
     subprocess.run(['tmux', 'kill-session', '-t', name], capture_output=True)
     for ws in connections:
@@ -218,4 +219,4 @@ finally:
             cli(ws, 'serve', '--stop')
         except Exception as error:
             print('stop failed', ws, error, flush=True)
-    print('Evidence retained:', root, flush=True)
+    e2e_scratch.settle(root)
