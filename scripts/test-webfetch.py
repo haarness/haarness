@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real server, echo provider: webfetch stops oversized and stalled pages and honours Stop.
+"""Real server, echo provider: webfetch reads pages as text, stops oversized and stalled ones, honours Stop.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-webfetch.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -12,6 +12,13 @@ workspace = root/'project'; workspace.mkdir()
 state = root/'state'; (state/'config').mkdir(parents=True); (state/'data').mkdir()
 ENDLESS_CAP = 64 * 1024 * 1024
 sent = {}; requests = []; release = threading.Event()
+PAGES = {
+    '/page': ('text/html; charset=utf-8', b'<!doctype html><html><head><title>Fixture</title>'
+              b'<style>.hidden-style-proof { color: red }</style><script>hiddenHeadScriptProof()</script></head>'
+              b'<body><h1>visible-content-proof</h1><script>hiddenBodyScriptProof()</script>'
+              b'<p>after-script-proof</p></body></html>'),
+    '/bare': ('text/html; charset=utf-8', b'bare-nonce-314159\n'),
+}
 
 class Web(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
@@ -34,8 +41,8 @@ class Web(http.server.BaseHTTPRequestHandler):
             self.chunked(); self.chunk(b'first part of a page that never ends')
             release.wait(120)
         else:
-            body = b'ordinary-page-proof'
-            self.send_response(200); self.send_header('Content-Type', 'text/plain')
+            content_type, body = PAGES.get(self.path, ('text/plain', b'ordinary-page-proof'))
+            self.send_response(200); self.send_header('Content-Type', content_type)
             self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
 
 web = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Web)
@@ -86,6 +93,15 @@ try:
     result = finish(thread, before)
     assert not result['is_error'] and 'ordinary-page-proof' in result['output'], result
     check('an ordinary page is fetched')
+
+    _, before = fetch(thread, {'url': f'http://127.0.0.1:{port}/page'})
+    output = finish(thread, before)['output']
+    assert 'visible-content-proof' in output and 'after-script-proof' in output, output
+    for hidden in ['hiddenHeadScriptProof', 'hiddenBodyScriptProof', 'hidden-style-proof']:
+        assert hidden not in output, (hidden, output)
+    _, before = fetch(thread, {'url': f'http://127.0.0.1:{port}/bare'})
+    assert finish(thread, before)['output'].strip() == 'bare-nonce-314159'
+    check('HTML reads as its text, without inline scripts and styles, and bare text is kept')
 
     rss_before = rss_kb(pid) if pid else 0
     _, before = fetch(thread, {'url': f'http://127.0.0.1:{port}/endless'})
