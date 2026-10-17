@@ -3132,6 +3132,114 @@ fn edit_results_are_collapsed_then_expand_to_a_diff_block() {
 }
 
 #[test]
+fn edit_rows_count_changed_lines_like_git_not_the_replaced_region() {
+    // One edit adds an import, changes a signature, inserts a limiter block
+    // and replaces a route. `git diff --numstat` and Desktop say +10 −2; a
+    // host that counted the whole replaced region recorded +16 −8, because
+    // the unchanged lines between the changes counted as removed and added.
+    let before = r#"const express = require("express");
+const { listUsers } = require("./users");
+
+const app = express();
+
+function createServer(port) {
+  app.use(express.json());
+  app.get("/health", (req, res) => res.send("ok"));
+  app.get("/users", (req, res) => res.json(listUsers()));
+  return app.listen(port);
+}
+
+module.exports = { createServer };
+"#;
+    let after = r#"const express = require("express");
+const rateLimit = require("express-rate-limit");
+const { listUsers } = require("./users");
+
+const app = express();
+
+function createServer(port, { limit = 100 } = {}) {
+  app.use(express.json());
+  const limiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: limit,
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+  app.use("/users", limiter);
+  app.get("/health", (req, res) => res.send("ok"));
+  app.get("/users", limiter, (req, res) => res.json(listUsers(req.query)));
+  return app.listen(port);
+}
+
+module.exports = { createServer };
+"#;
+    let thread = fixture_thread();
+    let edit = |sequence, call_id: &str, path: &str, diff: serde_json::Value| {
+        [
+            message_item(
+                sequence,
+                &thread,
+                ItemData::ToolCall {
+                    call_id: call_id.into(),
+                    name: "edit".into(),
+                    arguments: serde_json::json!({"path": path, "old": "…", "new": "…"}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            message_item(
+                sequence + 1,
+                &thread,
+                ItemData::ToolResult {
+                    call_id: call_id.into(),
+                    name: "edit".into(),
+                    output: format!("updated {path}"),
+                    is_error: false,
+                    metadata: serde_json::json!({ "diffs": [diff] }),
+                },
+            ),
+        ]
+    };
+    let mut items = Vec::new();
+    items.extend(edit(
+        1,
+        "c1",
+        "src/app.js",
+        serde_json::json!({
+            "file": "src/app.js",
+            "status": "modified",
+            "additions": 16,
+            "deletions": 8,
+            "before": before,
+            "after": after
+        }),
+    ));
+    // Bodies cut at the host's budget cannot be recounted; its numbers stand.
+    items.extend(edit(
+        3,
+        "c2",
+        "big.js",
+        serde_json::json!({
+            "file": "big.js",
+            "status": "modified",
+            "additions": 3,
+            "deletions": 1,
+            "before": "partial\n",
+            "after": "partial\n",
+            "truncated": true
+        }),
+    ));
+    let app = App::new(thread.clone(), vec![thread], items, vec![], vec![]);
+    let text = app
+        .lines((90, 30))
+        .iter()
+        .map(Line::text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("edit src/app.js  ·  +10 −2"), "{text}");
+    assert!(text.contains("edit big.js  ·  +3 −1"), "{text}");
+}
+
+#[test]
 fn home_is_a_launch_masthead_settled_onto_the_composer() {
     let thread = fixture_thread();
     let other = Thread {

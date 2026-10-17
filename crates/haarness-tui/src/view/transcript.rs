@@ -253,21 +253,25 @@ fn empty_result_label(output: &str) -> Option<&'static str> {
 }
 
 fn file_diff_count(metadata: &serde_json::Value) -> usize {
-    file_diff_stat(metadata).0
+    file_diffs(metadata).len()
 }
 
-/// Files touched, and lines added and removed across them.
-fn file_diff_stat(metadata: &serde_json::Value) -> (usize, u64, u64) {
+fn file_diffs(metadata: &serde_json::Value) -> Vec<FileDiff> {
     metadata
         .get("diffs")
         .cloned()
         .and_then(|value| serde_json::from_value::<Vec<FileDiff>>(value).ok())
-        .map_or((0, 0, 0), |diffs| {
-            diffs
-                .iter()
-                .fold((0, 0, 0), |(files, added, removed), diff| {
-                    (files + 1, added + diff.additions, removed + diff.deletions)
-                })
+        .unwrap_or_default()
+}
+
+/// Files touched, and lines added and removed across them, counted from the
+/// changed lines rather than the region an edit replaced.
+fn file_diff_stat(metadata: &serde_json::Value) -> (usize, u64, u64) {
+    file_diffs(metadata)
+        .iter()
+        .fold((0, 0, 0), |(files, added, removed), diff| {
+            let (additions, deletions) = crate::diffview::line_stat(diff);
+            (files + 1, added + additions, removed + deletions)
         })
 }
 
@@ -1304,7 +1308,8 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         return String::new();
                     }
                     let output = displayed_output(name, output, metadata);
-                    let (files, added, removed) = file_diff_stat(metadata);
+                    let (files, added, removed) =
+                        app.cached_diff_stat(item.id, || file_diff_stat(metadata));
                     if files > 0 && compact_result.is_some() {
                         // The row already names the file; the line counts
                         // are what a reader cannot infer from it.
