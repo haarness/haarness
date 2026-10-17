@@ -4667,7 +4667,7 @@
               },
               {
                 "$ref": "#/components/schemas/Turn",
-                "description": "The turn running in this chat, if any."
+                "description": "The turn running in this chat, if any. Always sent, null when none."
               }
             ]
           },
@@ -4676,10 +4676,23 @@
             "format": "int32",
             "minimum": 0,
             "type": "integer"
+          },
+          "lastTurn": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Turn",
+                "description": "The chat's newest turn by creation, whatever its status; null for a\nchat without turns. Read after the other two, so a turn that started\nand ended since an earlier read shows here. Always sent; servers\nbefore 2026-10-17 leave it out."
+              }
+            ]
           }
         },
         "required": [
-          "background"
+          "activeTurn",
+          "background",
+          "lastTurn"
         ],
         "type": "object"
       },

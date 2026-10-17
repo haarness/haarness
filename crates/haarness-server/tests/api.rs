@@ -6588,6 +6588,21 @@ async fn settled_activity(base: &str, thread: haarness_protocol::ThreadId) -> Va
     .expect("the finished turn leaves the chat")
 }
 
+/// A quiet chat's activity: no turn runs, `background` results are owed, and
+/// `last` is its newest turn (none for a chat without turns).
+fn assert_activity(activity: &Value, background: u64, last: Option<haarness_protocol::TurnId>) {
+    assert!(activity["activeTurn"].is_null(), "{activity}");
+    assert_eq!(activity["background"], background, "{activity}");
+    let named = activity
+        .get("lastTurn")
+        .unwrap_or_else(|| panic!("lastTurn is always sent: {activity}"));
+    assert_eq!(
+        named["id"].as_str(),
+        last.map(|turn| turn.to_string()).as_deref(),
+        "{activity}"
+    );
+}
+
 /// The next `turn.finished` of `thread`.
 async fn next_finished(
     events: &mut tokio::sync::broadcast::Receiver<haarness_protocol::EventEnvelope>,
@@ -6637,9 +6652,10 @@ async fn a_chat_owed_a_background_task_result_is_not_quiet_until_it_is_delivered
     assert_eq!(launched.turn_id, Some(launch.id));
     assert_eq!(launched.payload["status"], "completed");
     assert_eq!(launched.payload["background"], 1, "{}", launched.payload);
-    assert_eq!(
-        settled_activity(&base, thread.id).await,
-        serde_json::json!({"activeTurn": null, "background": 1})
+    assert_activity(
+        &settled_activity(&base, thread.id).await,
+        1,
+        Some(launch.id),
     );
     let stored = runtime.turn(launch.id).await.unwrap();
     assert!(
@@ -6659,9 +6675,10 @@ async fn a_chat_owed_a_background_task_result_is_not_quiet_until_it_is_delivered
         "{}",
         delivered.payload
     );
-    assert_eq!(
-        settled_activity(&base, thread.id).await,
-        serde_json::json!({"activeTurn": null, "background": 0})
+    assert_activity(
+        &settled_activity(&base, thread.id).await,
+        0,
+        delivered.turn_id,
     );
     assert_eq!(runtime.background_results_owed(thread.id), 0);
 
@@ -6748,10 +6765,7 @@ export default workflow({
         .await
         .unwrap();
     assert_eq!(run.status, WorkflowRunStatus::Running);
-    assert_eq!(
-        settled_activity(&base, thread.id).await,
-        serde_json::json!({"activeTurn": null, "background": 1})
-    );
+    assert_activity(&settled_activity(&base, thread.id).await, 1, None);
 
     // A turn that finishes while the run works is not the chat's end.
     let turn = runtime
@@ -6771,9 +6785,10 @@ export default workflow({
         "{}",
         delivered.payload
     );
-    assert_eq!(
-        settled_activity(&base, thread.id).await,
-        serde_json::json!({"activeTurn": null, "background": 0})
+    assert_activity(
+        &settled_activity(&base, thread.id).await,
+        0,
+        delivered.turn_id,
     );
     handle.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(workspace);
@@ -6833,9 +6848,10 @@ async fn a_stop_owns_the_background_children_so_its_turn_owes_nothing() {
         "the stop cancelled the child: {}",
         finished.payload
     );
-    assert_eq!(
-        settled_activity(&base, thread.id).await,
-        serde_json::json!({"activeTurn": null, "background": 0})
+    assert_activity(
+        &settled_activity(&base, thread.id).await,
+        0,
+        Some(working.id),
     );
     handle.shutdown().await.unwrap();
 }

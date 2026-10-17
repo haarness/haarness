@@ -2663,9 +2663,13 @@ impl AgentRuntime {
             Some(turn) => Some(self.repository.get_turn(turn).await?),
             None => None,
         };
+        // Last: a turn that started and ended between two reads of a chat
+        // that looks quiet is the newest here.
+        let last_turn = self.repository.last_turn(id).await?;
         Ok(ThreadActivity {
             active_turn,
             background,
+            last_turn,
         })
     }
 
