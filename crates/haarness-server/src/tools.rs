@@ -3796,6 +3796,7 @@ fn output(text: String) -> ToolOutput {
 /// in snapshots; this payload exists only to render an immediate review.
 const TOOL_DIFF_MAX_FILES: usize = 64;
 const TOOL_DIFF_BODY_MAX_BYTES: usize = 32 * 1_024;
+const TOOL_DIFF_LINE_BUDGET: Duration = Duration::from_millis(500);
 
 enum ExistingDiffBody {
     Missing,
@@ -3898,10 +3899,12 @@ fn bounded_diff_body(body: &str) -> (String, bool) {
     (body[..end].to_owned(), true)
 }
 
-/// Count the changed middle after excluding the common leading and trailing
-/// lines. Native `edit` is one contiguous replacement; for arbitrary writes
-/// this remains a conservative whole-region count without an unbounded diff
-/// algorithm in the tool host.
+/// Lines added and removed by a line diff, the same count `git diff` and the
+/// Review panel give. Unchanged lines inside an edited region are not
+/// changes: a replacement that keeps four of its lines adds and removes the
+/// lines around them, not those four. The deadline keeps a pathological
+/// rewrite from holding the tool host; past it the diff is still correct,
+/// only possibly not minimal.
 fn line_changes(status: FileDiffStatus, before: Option<&str>, after: Option<&str>) -> (u64, u64) {
     let before = before.unwrap_or_default();
     let after = after.unwrap_or_default();
@@ -3912,31 +3915,20 @@ fn line_changes(status: FileDiffStatus, before: Option<&str>, after: Option<&str
             if before == after {
                 return (0, 0);
             }
-            let before_count = before.lines().count();
-            let after_count = after.lines().count();
-            let prefix = before
-                .lines()
-                .zip(after.lines())
-                .take_while(|(left, right)| left == right)
-                .count();
-            let suffix = before
-                .lines()
-                .rev()
-                .zip(after.lines().rev())
-                .take(before_count.min(after_count).saturating_sub(prefix))
-                .take_while(|(left, right)| left == right)
-                .count();
-            let deletions = before_count.saturating_sub(prefix + suffix);
-            let additions = after_count.saturating_sub(prefix + suffix);
-            if additions == 0 && deletions == 0 {
-                // `str::lines` intentionally omits line terminators, but a
-                // changed final newline is still a real one-line mutation.
-                return (1, 1);
-            }
-            (
-                u64::try_from(additions).unwrap_or(u64::MAX),
-                u64::try_from(deletions).unwrap_or(u64::MAX),
-            )
+            // Lines keep their terminators here, so a changed final newline
+            // still counts as the one-line mutation it is.
+            let diff = similar::TextDiff::configure()
+                .timeout(TOOL_DIFF_LINE_BUDGET)
+                .diff_lines(before, after);
+            diff.ops()
+                .iter()
+                .fold((0, 0), |(additions, deletions), op| match op.tag() {
+                    similar::DiffTag::Equal => (additions, deletions),
+                    _ => (
+                        additions + u64::try_from(op.new_range().len()).unwrap_or(u64::MAX),
+                        deletions + u64::try_from(op.old_range().len()).unwrap_or(u64::MAX),
+                    ),
+                })
         }
     }
 }
@@ -5342,6 +5334,65 @@ export default workflow({
         assert!(matches!(escaped, Err(CoreError::PermissionDenied(_))));
 
         tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    #[test]
+    fn mutation_diff_counts_changed_lines_not_the_edited_region() {
+        // One edit adds an import, changes a signature, inserts a limiter
+        // block and replaces a route; the lines between them stay as they
+        // were. `git diff --numstat` says 10 added, 2 removed.
+        let before = "const express = require(\"express\");\n\
+            const { listUsers } = require(\"./users\");\n\
+            \n\
+            const app = express();\n\
+            \n\
+            function createServer(port) {\n\
+            \x20 app.use(express.json());\n\
+            \x20 app.get(\"/health\", (req, res) => res.send(\"ok\"));\n\
+            \x20 app.get(\"/users\", (req, res) => res.json(listUsers()));\n\
+            \x20 return app.listen(port);\n\
+            }\n\
+            \n\
+            module.exports = { createServer };\n";
+        let after = "const express = require(\"express\");\n\
+            const rateLimit = require(\"express-rate-limit\");\n\
+            const { listUsers } = require(\"./users\");\n\
+            \n\
+            const app = express();\n\
+            \n\
+            function createServer(port, { limit = 100 } = {}) {\n\
+            \x20 app.use(express.json());\n\
+            \x20 const limiter = rateLimit({\n\
+            \x20   windowMs: 60 * 1000,\n\
+            \x20   max: limit,\n\
+            \x20   standardHeaders: true,\n\
+            \x20   legacyHeaders: false,\n\
+            \x20 });\n\
+            \x20 app.use(\"/users\", limiter);\n\
+            \x20 app.get(\"/health\", (req, res) => res.send(\"ok\"));\n\
+            \x20 app.get(\"/users\", limiter, (req, res) => res.json(listUsers(req.query)));\n\
+            \x20 return app.listen(port);\n\
+            }\n\
+            \n\
+            module.exports = { createServer };\n";
+        let diff = text_file_diff(
+            "src/app.js",
+            FileDiffStatus::Modified,
+            Some(before),
+            Some(after),
+        );
+        assert_eq!((diff.additions, diff.deletions), (10, 2));
+
+        // Only the final newline changed: still a one-line mutation.
+        let diff = text_file_diff(
+            "a.txt",
+            FileDiffStatus::Modified,
+            Some("a\nb"),
+            Some("a\nb\n"),
+        );
+        assert_eq!((diff.additions, diff.deletions), (1, 1));
+        let diff = text_file_diff("a.txt", FileDiffStatus::Modified, Some("a\n"), Some("a\n"));
+        assert_eq!((diff.additions, diff.deletions), (0, 0));
     }
 
     #[test]

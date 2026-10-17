@@ -873,6 +873,9 @@ pub struct App {
     /// Rendered-lines cache for expensive items (markdown, diffs); entries
     /// are keyed by item and invalidated by width or generation changes.
     pub render_cache: std::cell::RefCell<std::collections::HashMap<ItemId, CachedRender>>,
+    /// Files and lines an edit result changed, keyed by the result item.
+    /// Counting means diffing its bodies, too slow to repeat every frame.
+    pub diff_stats: std::cell::RefCell<std::collections::HashMap<ItemId, (usize, u64, u64)>>,
     /// Bumped when rendering inputs beyond width change (theme switches).
     pub render_generation: u64,
 }
@@ -1071,6 +1074,7 @@ impl App {
             selection_range: None,
             last_frame: std::cell::RefCell::new(Vec::new()),
             render_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            diff_stats: std::cell::RefCell::new(std::collections::HashMap::new()),
             render_generation: 0,
         }
     }
@@ -1810,6 +1814,14 @@ impl App {
             },
         );
         lines
+    }
+    /// An item's diff stat, counted once: results never change after they land.
+    pub fn cached_diff_stat(
+        &self,
+        id: ItemId,
+        count: impl FnOnce() -> (usize, u64, u64),
+    ) -> (usize, u64, u64) {
+        *self.diff_stats.borrow_mut().entry(id).or_insert_with(count)
     }
     /// Scroll the transcript; positive steps move toward older content. The
     /// view clamps against the actual transcript height.
