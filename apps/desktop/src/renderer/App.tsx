@@ -323,6 +323,12 @@ export function App() {
     onCleanup(() => window.removeEventListener("keydown", step, true));
   });
   const selected = () => state.threads.find((t) => t.id === state.selected);
+  /** A chat tab's name, read where it is shown so a generated title or a
+   * rename reaches an open tab. */
+  const tabTitle = (id: string) => {
+    const thread = state.threads.find((item) => item.id === id);
+    return thread ? chatTitle(thread.title) : t("Chat");
+  };
   const running = (id: string) =>
     state.turns.some((turn) => turn.threadId === id);
   async function newChat() {
@@ -1012,21 +1018,13 @@ export function App() {
                               role="tab"
                               data-cycle-tab={id}
                               aria-selected={id === state.selected}
-                              title={chatTitle(
-                                state.threads.find((thread) => thread.id === id)
-                                  ?.title,
-                              )}
+                              title={tabTitle(id)}
                               onClick={() => app.run(() => app.choose(id))}
                             >
                               <Show when={running(id)}>
                                 <span class="session-status running" />
                               </Show>
-                              <Show
-                                when={state.threads.find((thread) => thread.id === id)}
-                                fallback={t("Chat")}
-                              >
-                                {(thread) => chatTitle(thread().title)}
-                              </Show>
+                              {tabTitle(id)}
                             </button>
                             <Button
                               icon="close"
