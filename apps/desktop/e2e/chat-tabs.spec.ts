@@ -15,6 +15,8 @@ let workspace: string;
 let env: Record<string, string>;
 let client: Haarness;
 let errors: string[] = [];
+/** Projects opened after the first, whose daemons the file stops. */
+const others: { directory: string; client: Haarness }[] = [];
 
 const sidebar = () => page.getByRole("region", { name: "Project workspace", exact: true });
 const tabs = () => page.locator(".workspace-tabs [role=tab]");
@@ -54,6 +56,7 @@ test.afterAll(async () => {
   // bounded time so neither Electron nor the project daemon outlives the file.
   test.setTimeout(180000);
   client?.close();
+  for (const other of others) other.client.close();
   if (app) {
     const child = app.process();
     const exited = new Promise<void>(resolve => {
@@ -73,7 +76,8 @@ test.afterAll(async () => {
     await within(5000);
     if (child.exitCode === null) child.kill("SIGKILL");
   }
-  try { execFileSync(binary, ["--workspace", workspace, "--trust-project", "serve", "--stop"], { env, stdio: "ignore", timeout: 60000 }); } catch {}
+  for (const directory of [workspace, ...others.map(other => other.directory)])
+    try { execFileSync(binary, ["--workspace", directory, "--trust-project", "serve", "--stop"], { env, stdio: "ignore", timeout: 60000 }); } catch {}
   if (temporary) await rm(temporary, { recursive: true, force: true, maxRetries: 10 }).catch(() => {});
 });
 
@@ -186,5 +190,43 @@ test("archiving a chat closes its background tab, while the chat on screen stays
   await reload();
   await expect(tabs()).toHaveText(open);
   await expect(tab("Archive kept")).toHaveAttribute("aria-selected", "true");
+  expect(errors).toEqual([]);
+});
+
+test("each project keeps its own tabs across a switch to another project and back", async () => {
+  const first = await tabs().allTextContents();
+  expect(first.length).toBeGreaterThan(1);
+  const directory = join(temporary, "second");
+  await mkdir(join(directory, ".haarness"), { recursive: true });
+  await writeFile(join(directory, ".haarness", "config.toml"), '[defaults]\nprovider="echo"\nmodel="echo-1"\n');
+  await app.evaluate(({ dialog }, directory) => {
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory] });
+  }, directory);
+  await page.getByRole("button", { name: "Open another project", exact: true }).click();
+  const second = page.getByRole("region", { name: "Project second", exact: true });
+  await expect(second).toHaveClass(/current/);
+  await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true", { timeout: 60000 });
+  const connection = JSON.parse(execFileSync(binary, ["--workspace", directory, "--trust-project", "desktop"], {
+    env, input: JSON.stringify({ action: "connect" }), encoding: "utf8", timeout: 60000,
+  }));
+  const other = new Haarness({ baseUrl: connection.url, token: connection.token });
+  others.push({ directory, client: other });
+  // A project opened for the first time has no tabs of its own yet.
+  await expect(tabs()).toHaveCount(0);
+  for (const title of ["Second one", "Second two"]) {
+    await other.createThread({ title, provider: "echo", model: "echo-1" });
+    await second.getByRole("button", { name: title, exact: true }).click();
+  }
+  await expect(tabs()).toHaveText(["Second one", "Second two"]);
+  // Back in the first project, through one of its chats: all of its tabs return.
+  await sidebar().getByRole("button", { name: "Reload two", exact: true }).click();
+  await expect(sidebar()).toHaveClass(/current/);
+  await expect(tabs()).toHaveText(first);
+  await expect(page.getByRole("tab", { name: "Reload two", exact: true })).toHaveAttribute("aria-selected", "true");
+  // And the second project's tabs return with it.
+  await second.getByRole("button", { name: "Second one", exact: true }).click();
+  await expect(second).toHaveClass(/current/);
+  await expect(tabs()).toHaveText(["Second one", "Second two"]);
+  await expect(page.getByRole("tab", { name: "Second one", exact: true })).toHaveAttribute("aria-selected", "true");
   expect(errors).toEqual([]);
 });

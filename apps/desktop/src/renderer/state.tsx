@@ -1347,6 +1347,11 @@ function createApp() {
         set("permissions", []);
         set("questions", []);
       });
+      // Read the project's tabs before its chats are listed: opening one
+      // rewrites the record, and the chats can be chosen while catalogs load.
+      const rememberedTabs = window.haarness
+        .storage(tabsKey(view.id))
+        .catch(() => null);
       const boot = await window.haarness.boot();
       if (!valid()) return false;
       set("servers", boot.servers);
@@ -1370,10 +1375,7 @@ function createApp() {
       // and load chat state and model choices together on remote connections.
       await Promise.all([hydrate(view.info), catalogs(false, view.info)]);
       if (!valid()) return false;
-      const reopened = savedTabs(
-        await window.haarness.storage(tabsKey(view.id)),
-        state.threads,
-      );
+      const reopened = savedTabs(await rememberedTabs, state.threads);
       if (!valid()) return false;
       if (reopened.length) {
         set("tabs", (tabs) => [...new Set([...reopened, ...tabs])]);
