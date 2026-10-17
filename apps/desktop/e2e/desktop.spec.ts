@@ -3153,10 +3153,11 @@ test("conversation tab order survives reopening and uses horizontal keyboard con
     "Tab Two",
   );
   // The open tabs come back with the window, in their saved order. A chat an
-  // earlier scenario archived while it was on screen stays closed.
+  // earlier scenario archived while it was on screen stays closed (an agent's
+  // own chat, which the server archives when its work ends, does not).
   const archived = new Set(
     (await client.listThreads({ archived: true }))
-      .filter((thread) => thread.archived)
+      .filter((thread) => thread.archived && !thread.isSubagent)
       .map((thread) => thread.id),
   );
   const tabs = page.locator(".workspace-tabs [role=tab]");

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { newlyArchived, savedTabs, tabsKey, unarchivedChats } from "../src/renderer/chat-tabs";
+import { archivedByReader, newlyArchived, sameTabs, savedTabs, tabsKey, unarchivedChats } from "../src/renderer/chat-tabs";
 
 const threads = [
   { id: "one", archived: false },
@@ -46,4 +46,21 @@ test("a chat archived since the last listing is newly archived", () => {
 test("a project's first listing, or a chat first seen archived, archives nothing", () => {
   assert.deepEqual(newlyArchived(new Set(), threads), []);
   assert.deepEqual(newlyArchived(new Set(["one"]), [{ id: "new", archived: true }]), []);
+});
+
+test("an agent's own chat, archived when its work ends, keeps its tab", () => {
+  const agent = { id: "agent", archived: true, isSubagent: true };
+  assert.equal(archivedByReader(agent), false);
+  assert.equal(archivedByReader({ id: "chat", archived: true }), true);
+  assert.deepEqual(savedTabs(["agent", "one"], [...threads, agent]), ["agent", "one"]);
+  const before = unarchivedChats([{ ...agent, archived: false }]);
+  assert.deepEqual(newlyArchived(before, [agent]), []);
+});
+
+test("a record is rewritten only when it differs from the open tabs", () => {
+  assert.equal(sameTabs(["one", "two"], ["one", "two"]), true);
+  assert.equal(sameTabs(null, []), true);
+  assert.equal(sameTabs(["one", "two"], ["two", "one"]), false);
+  assert.equal(sameTabs(["one", "gone"], ["one"]), false);
+  assert.equal(sameTabs("one", ["one"]), false);
 });
