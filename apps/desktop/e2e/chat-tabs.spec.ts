@@ -1,6 +1,6 @@
 import { Haarness } from "@haarness/sdk";
 import { test, expect, _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
-import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -51,20 +51,30 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   // A loaded machine can take minutes to close Electron; stop waiting after a
-  // bounded time so the project daemon is still stopped.
+  // bounded time so neither Electron nor the project daemon outlives the file.
   test.setTimeout(180000);
   client?.close();
   if (app) {
     const child = app.process();
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    const exited = new Promise<void>(resolve => {
+      if (child.exitCode !== null) resolve();
+      else child.once("exit", () => resolve());
+    });
+    const within = (ms: number) => Promise.race([exited, new Promise<void>(resolve => setTimeout(resolve, ms))]);
+    // Destroying the windows skips the close and quit handling a user's
+    // close goes through, as desktop.spec.ts and sidebar.spec.ts do.
     await Promise.race([
-      app.close().catch(() => {}),
-      new Promise<void>(resolve => { timer = setTimeout(resolve, 15000); }),
+      app.evaluate(({ BrowserWindow }) => { for (const window of BrowserWindow.getAllWindows()) window.destroy(); }).catch(() => {}),
+      within(10000),
     ]);
-    clearTimeout(timer);
+    void app.close().catch(() => {});
+    await within(15000);
     if (child.exitCode === null) child.kill("SIGTERM");
+    await within(5000);
+    if (child.exitCode === null) child.kill("SIGKILL");
   }
-  try { execFileSync(binary, ["--workspace", workspace, "serve", "--stop"], { env, stdio: "ignore", timeout: 60000 }); } catch {}
+  try { execFileSync(binary, ["--workspace", workspace, "--trust-project", "serve", "--stop"], { env, stdio: "ignore", timeout: 60000 }); } catch {}
+  if (temporary) await rm(temporary, { recursive: true, force: true, maxRetries: 10 }).catch(() => {});
 });
 
 test.beforeEach(() => { errors = []; });
