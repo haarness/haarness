@@ -93,6 +93,10 @@ pub(crate) enum Frame {
         revision: u64,
         items: Vec<remote_attention::Item>,
         finished: Vec<remote_attention::Finished>,
+        /// The chats still working, only for a relay announcing
+        /// `attention.working`: one without it drops a frame with this.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working: Option<Vec<Uuid>>,
     },
     Open {
         id: Uuid,
@@ -678,8 +682,8 @@ const RELAY_SEND: Duration = Duration::from_secs(10);
 const RELAY_READY: Duration = Duration::from_secs(10);
 const RELAY_VERSION: u64 = 1;
 /// The upgrade header that names the relay features this connector
-/// understands. Cloud lists features in `ready` only when asked, because
-/// connectors built before features parse `ready` strictly.
+/// understands, comma-separated. Cloud lists features in `ready` only when
+/// asked, because connectors built before features parse `ready` strictly.
 const RELAY_FEATURES_HEADER: &str = "x-haarness-relay-features";
 /// The relay's WebSocket upgrade: the bearer, and the features to offer.
 fn relay_handshake(
@@ -689,7 +693,15 @@ fn relay_handshake(
     let mut handshake = url.as_str().into_client_request()?;
     let headers = handshake.headers_mut();
     headers.insert("authorization", format!("Bearer {bearer}").parse()?);
-    headers.insert(RELAY_FEATURES_HEADER, remote_attention::FEATURE.parse()?);
+    headers.insert(
+        RELAY_FEATURES_HEADER,
+        format!(
+            "{}, {}",
+            remote_attention::FEATURE,
+            remote_attention::WORKING_FEATURE
+        )
+        .parse()?,
+    );
     Ok(handshake)
 }
 /// The version and optional features a relay's first frame announces, when
@@ -860,7 +872,11 @@ async fn connected(
         None => anyhow::bail!("Relay did not announce its protocol"),
     };
     let (send, mut outgoing) = mpsc::channel::<Frame>(128);
-    // An older relay drops the socket on a frame it does not know.
+    // An older relay drops the socket on a frame it does not know, and one
+    // before `attention.working` drops a frame that lists working chats.
+    let working = features
+        .iter()
+        .any(|feature| feature == remote_attention::WORKING_FEATURE);
     let _attention = features
         .iter()
         .any(|feature| feature == remote_attention::FEATURE)
@@ -878,6 +894,7 @@ async fn connected(
                 attention,
                 scope,
                 send.clone(),
+                working,
             )))
         });
     let runtime_lost = tokio_util::sync::CancellationToken::new();
@@ -1967,7 +1984,7 @@ mod tests {
         assert_eq!(handshake.headers()["authorization"], "Bearer token");
         assert_eq!(
             handshake.headers()["x-haarness-relay-features"],
-            "attention.v1"
+            "attention.v1, attention.working"
         );
     }
     #[test]
@@ -2480,6 +2497,11 @@ mod tests {
         active_failures: usize,
         /// The event stream ends as soon as it opens.
         close_events: bool,
+        /// Whether `/threads/{id}/activity` exists; a server from before it
+        /// answers 404 there.
+        activity: bool,
+        /// The background results `/threads/{id}/activity` reports, by chat.
+        background: HashMap<Uuid, u32>,
     }
     /// A Haarness server as the attention watcher sees it: a scope-aware
     /// `/v1/permissions`, `/v1/questions`, chats and an event stream.
@@ -2568,6 +2590,23 @@ mod tests {
                                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                             }
                             Json(state.active.get(&id).cloned().unwrap_or(Value::Null)).into_response()
+                        },
+                    ),
+                )
+                .route(
+                    "/v1/threads/{id}/activity",
+                    get(
+                        |State(daemon): State<FakeDaemon>, Route(id): Route<Uuid>, uri: Uri, headers: HeaderMap| async move {
+                            daemon.visible(&uri, &headers);
+                            let state = daemon.state.lock().unwrap();
+                            if !state.activity {
+                                return StatusCode::NOT_FOUND.into_response();
+                            }
+                            Json(json!({
+                                "activeTurn": state.active.get(&id).cloned().unwrap_or(Value::Null),
+                                "background": state.background.get(&id).copied().unwrap_or(0),
+                            }))
+                            .into_response()
                         },
                     ),
                 )
@@ -3590,6 +3629,169 @@ mod tests {
             .expect("what waits is reported while the registry is held");
         assert_eq!(frame["items"][0]["id"], "perm-1", "{frame}");
         drop(lock);
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    /// A `turn.finished` payload that says background work still owes the
+    /// chat `background` results.
+    fn owing_turn(id: Uuid, thread: Uuid, status: &str, background: u32) -> Value {
+        let mut turn = finished_turn(id, thread, status);
+        turn["background"] = json!(background);
+        turn
+    }
+    /// The next attention frame for which `wanted` holds.
+    async fn attention_where(
+        frames: &mut mpsc::UnboundedReceiver<Value>,
+        wanted: impl Fn(&Value) -> bool,
+    ) -> Value {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let frame = next_attention(frames).await;
+                if wanted(&frame) {
+                    return frame;
+                }
+            }
+        })
+        .await
+        .expect("the attention frame arrives")
+    }
+    #[tokio::test]
+    async fn a_chat_with_background_work_is_reported_once_its_last_result_is_in() {
+        let work = Uuid::now_v7();
+        let (computer, home) = watched_home(&[(work, "Work")]).await;
+        home.state.lock().unwrap().activity = true;
+        let (relay, mut frames) =
+            fake_relay(vec![Relay::Record(&["attention.v1", "attention.working"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        let first = next_attention(&mut frames).await;
+        assert_eq!(first["working"], json!([]), "{first}");
+
+        // The turn launches a child agent in the background and ends.
+        let (launch, delivered) = (Uuid::now_v7(), Uuid::now_v7());
+        home.emit(
+            "turn.started",
+            work,
+            work,
+            finished_turn(launch, work, "running"),
+        );
+        let started = attention_where(&mut frames, |frame| frame["working"] == json!([work])).await;
+        assert_eq!(started["finished"], json!([]));
+        home.state.lock().unwrap().background.insert(work, 1);
+        home.emit(
+            "turn.finished",
+            work,
+            work,
+            owing_turn(launch, work, "completed", 1),
+        );
+        // Not the end: nothing is reported however long it settles, and the
+        // chat is still working.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        while let Ok(frame) = frames.try_recv() {
+            assert_eq!(frame["finished"], json!([]), "{frame}");
+            assert_eq!(frame["working"], json!([work]), "{frame}");
+        }
+
+        // The child's result arrives as a new turn, which is the end.
+        home.state.lock().unwrap().background.remove(&work);
+        home.emit(
+            "turn.started",
+            work,
+            work,
+            finished_turn(delivered, work, "running"),
+        );
+        home.emit(
+            "turn.finished",
+            work,
+            work,
+            finished_turn(delivered, work, "completed"),
+        );
+        let done = attention_where(&mut frames, |frame| !finished_turns(frame).is_empty()).await;
+        assert_eq!(finished_turns(&done), [json!(delivered)], "{done}");
+        assert_eq!(done["finished"][0]["status"], "completed");
+        assert_eq!(done["working"], json!([]), "{done}");
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        while let Ok(frame) = frames.try_recv() {
+            assert_ne!(frame["type"], "attention", "reported once: {frame}");
+        }
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_stopped_chat_is_reported_stopped_unless_it_went_straight_on() {
+        let (stopped, continued) = (Uuid::now_v7(), Uuid::now_v7());
+        let (computer, home) =
+            watched_home(&[(stopped, "Stopped"), (continued, "Continued")]).await;
+        home.state.lock().unwrap().activity = true;
+        let (relay, mut frames) = fake_relay(vec![Relay::Record(&["attention.v1"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        next_attention(&mut frames).await;
+        // A stop owns what the chat launched: even a count of background
+        // work that is still being cancelled does not hold the report back.
+        let (stop, answered) = (Uuid::now_v7(), Uuid::now_v7());
+        home.state.lock().unwrap().background.insert(stopped, 1);
+        home.emit(
+            "turn.finished",
+            stopped,
+            stopped,
+            owing_turn(stop, stopped, "interrupted", 1),
+        );
+        // A stop that left steering unread goes on with its answer at once.
+        home.state.lock().unwrap().active.insert(
+            continued,
+            finished_turn(Uuid::now_v7(), continued, "running"),
+        );
+        home.emit(
+            "turn.finished",
+            continued,
+            continued,
+            finished_turn(answered, continued, "interrupted"),
+        );
+        let frame = attention_where(&mut frames, |frame| !finished_turns(frame).is_empty()).await;
+        assert_eq!(finished_turns(&frame), [json!(stop)], "{frame}");
+        assert_eq!(frame["finished"][0]["status"], "interrupted");
+        assert_eq!(frame["finished"][0]["chatTitle"], "Stopped");
+        assert!(frame.get("working").is_none(), "not asked for: {frame}");
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        while let Ok(frame) = frames.try_recv() {
+            assert_ne!(frame["type"], "attention", "{frame}");
+        }
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn working_chats_go_only_to_a_relay_that_asked_for_them() {
+        let work = Uuid::now_v7();
+        let (computer, home) = watched_home(&[(work, "Work")]).await;
+        home.state.lock().unwrap().activity = true;
+        let (relay, mut frames) = fake_relay(vec![Relay::Record(&["attention.v1"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        let first = next_attention(&mut frames).await;
+        let mut keys = first.as_object().unwrap().keys().collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(keys, ["finished", "items", "revision", "type"], "{first}");
+        let running = Uuid::now_v7();
+        home.emit(
+            "turn.started",
+            work,
+            work,
+            finished_turn(running, work, "running"),
+        );
+        home.state.lock().unwrap().background.insert(work, 2);
+        home.emit(
+            "turn.finished",
+            work,
+            work,
+            owing_turn(running, work, "completed", 2),
+        );
+        // A chat starting or owing work changes nothing a relay that did not
+        // ask for working chats is told.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        while let Ok(frame) = frames.try_recv() {
+            assert_ne!(frame["type"], "attention", "{frame}");
+        }
         connection.abort();
         std::fs::remove_dir_all(&computer.root).unwrap();
     }
