@@ -15,8 +15,8 @@ use std::{
 use async_trait::async_trait;
 use haarness_core::{AgentRuntime, CoreError};
 use haarness_protocol::{
-    CreateThreadRequest, ItemData, QueueInputRequest, RequestId, StartTurnRequest, ThreadId,
-    TurnId, TurnStatus, UpdateThreadRequest, WorkflowRun, WorkflowRunStatus,
+    CreateThreadRequest, ItemData, RequestId, StartTurnRequest, ThreadId, TurnId, TurnStatus,
+    UpdateThreadRequest, WorkflowRun, WorkflowRunStatus,
 };
 use haarness_workflows::{
     HostCall, HostError, HostRequestMethod, WorkflowAgentDefaults, WorkflowModelResolution,
@@ -708,15 +708,9 @@ impl WorkflowRuntimeHost for WorkflowRuntimeAdapter {
             return Ok(());
         };
         let runtime = self.runtime()?;
-        let request = QueueInputRequest {
-            preview: None,
-            reasoning_effort: None,
-            delivery: haarness_protocol::InputDelivery::Steer,
-            request_id: RequestId::new(),
-            text,
-            attachments: Vec::new(),
-            synthetic: true,
-        };
+        // Taken before the coordinator forgets the run, so the launching
+        // thread is owed this result without a gap until its input admits it.
+        let handoff = runtime.background_handoff(launch_thread_id);
         // A launcher wait can be aborted by the same turn that is currently
         // executing this tool. Deliver out of band so that turn can unwind;
         // queue_input asks us to retry during the narrow stopping window, then
@@ -724,7 +718,10 @@ impl WorkflowRuntimeHost for WorkflowRuntimeAdapter {
         tokio::spawn(async move {
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                match runtime.queue_input(launch_thread_id, request.clone()).await {
+                match runtime
+                    .queue_background_result(launch_thread_id, text.clone(), &handoff)
+                    .await
+                {
                     Ok(_) => return,
                     Err(CoreError::Conflict(_)) if Instant::now() < deadline => {
                         tokio::time::sleep(Duration::from_millis(10)).await;
