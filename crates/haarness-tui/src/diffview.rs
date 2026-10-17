@@ -229,6 +229,29 @@ pub fn rows_from_texts(before: &str, after: &str, context: Option<u32>) -> Vec<D
     rows
 }
 
+/// Lines added and removed in one file, as `git diff` counts them. Whole
+/// pre/post images are diffed line by line: hosts before 2026-10-17 counted
+/// an edit's entire region, so unchanged lines inside it showed as both
+/// removed and added. Without both bodies intact the host's numbers stand.
+pub fn line_stat(file: &FileDiff) -> (u64, u64) {
+    if file.binary || file.truncated || (file.before.is_none() && file.after.is_none()) {
+        return (file.additions, file.deletions);
+    }
+    let diff = TextDiff::from_lines(
+        file.before.as_deref().unwrap_or_default(),
+        file.after.as_deref().unwrap_or_default(),
+    );
+    diff.ops()
+        .iter()
+        .fold((0, 0), |(additions, deletions), op| match op.tag() {
+            similar::DiffTag::Equal => (additions, deletions),
+            _ => (
+                additions + u64::try_from(op.new_range().len()).unwrap_or(u64::MAX),
+                deletions + u64::try_from(op.old_range().len()).unwrap_or(u64::MAX),
+            ),
+        })
+}
+
 /// Move `value` by a signed `delta`, saturating at zero and `max`.
 fn shift(value: usize, delta: isize, max: usize) -> usize {
     let next = if delta >= 0 {
