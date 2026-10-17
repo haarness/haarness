@@ -171,6 +171,13 @@ export function UniversalSearch(props: { close: () => void }) {
     });
     return [...chats, ...[...groups.values()].flat()];
   });
+  // Rows follow their result's key rather than its object: the list is rebuilt
+  // whenever any chat, turn or setting changes, and a row rebuilt under the
+  // pointer would lose the click that was landing on it.
+  const keys = createMemo(() => entries().map((entry) => entry.key));
+  const byKey = createMemo(
+    () => new Map(entries().map((entry) => [entry.key, entry])),
+  );
   createEffect(() => {
     const size = entries().length;
     const selected = entries().findIndex(
@@ -272,48 +279,52 @@ export function UniversalSearch(props: { close: () => void }) {
           id="universal-search-results"
           aria-label={t("Search results")}
         >
-          <For each={entries()}>
-            {(entry, position) => (
-              <>
-                <Show
-                  when={
-                    position() === 0 ||
-                    entries()[position() - 1].group !== entry.group
-                  }
-                >
-                  <span class="palette-group">{t(entry.group)}</span>
-                </Show>
-                <button
-                  id={"palette-option-" + position()}
-                  role="option"
-                  aria-label={entry.name}
-                  aria-description={entry.detail}
-                  aria-selected={index() === position()}
-                  aria-disabled={!!entry.disabled}
-                  tabIndex={-1}
-                  onPointerMove={() => {
-                    setIndex(position());
-                    setSelection(entry.key);
-                  }}
-                  onClick={() => run(entry)}
-                >
-                  <Show
-                    when={entry.provider}
-                    fallback={<Icon name={entry.icon} size="sm" />}
-                  >
-                    <ProviderIcon provider={entry.provider} size="sm" />
-                  </Show>
-                  <span class="palette-label">
-                    <span>{entry.name}</span>
-                    <Show when={entry.detail}>
-                      <small>{entry.detail}</small>
+          <For each={keys()}>
+            {(key, position) => (
+              <Show when={byKey().get(key)}>
+                {(entry) => (
+                  <>
+                    <Show
+                      when={
+                        position() === 0 ||
+                        entries()[position() - 1]?.group !== entry().group
+                      }
+                    >
+                      <span class="palette-group">{t(entry().group)}</span>
                     </Show>
-                  </span>
-                  <Show when={entry.hint}>
-                    <kbd dir="ltr">{entry.hint}</kbd>
-                  </Show>
-                </button>
-              </>
+                    <button
+                      id={"palette-option-" + position()}
+                      role="option"
+                      aria-label={entry().name}
+                      aria-description={entry().detail}
+                      aria-selected={index() === position()}
+                      aria-disabled={!!entry().disabled}
+                      tabIndex={-1}
+                      onPointerMove={() => {
+                        setIndex(position());
+                        setSelection(key);
+                      }}
+                      onClick={() => run(entry())}
+                    >
+                      <Show
+                        when={entry().provider}
+                        fallback={<Icon name={entry().icon} size="sm" />}
+                      >
+                        <ProviderIcon provider={entry().provider} size="sm" />
+                      </Show>
+                      <span class="palette-label">
+                        <span>{entry().name}</span>
+                        <Show when={entry().detail}>
+                          <small>{entry().detail}</small>
+                        </Show>
+                      </span>
+                      <Show when={entry().hint}>
+                        <kbd dir="ltr">{entry().hint}</kbd>
+                      </Show>
+                    </button>
+                  </>
+                )}
+              </Show>
             )}
           </For>
           <Show when={!entries().length}>
