@@ -43,6 +43,7 @@ import {
 } from "../shared";
 import { cloudServers, localServer, serverKey, serverProjects } from "../servers";
 import { freshChat, landItems, reduceEvent, type Live } from "./sync";
+import { savedTabs, tabsKey } from "./chat-tabs";
 import { themeColors } from "../themes";
 import {
   cleanProjectMeta,
@@ -521,6 +522,7 @@ function createApp() {
     }
     const current = ++selection;
     const connection = state.connection!.id;
+    const opened = !state.tabs.includes(id);
     tabHistory = [...tabHistory.filter((tab) => tab !== id), id];
     batch(() => {
       // A chat created just now (see `freshChat`) has no history to load, so
@@ -529,8 +531,9 @@ function createApp() {
       set("selected", id);
       set("items", []);
       set("panel", panel);
-      if (!state.tabs.includes(id)) set("tabs", (tabs) => [...tabs, id]);
+      if (opened) set("tabs", (tabs) => [...tabs, id]);
     });
+    if (opened) rememberTabs(connection);
     try {
       if (!options.fresh) {
         const items = await api<T.Item[]>("listItems", id);
@@ -550,9 +553,14 @@ function createApp() {
     }
   }
 
+  /** Open chat tabs outlast a reload or relaunch, as the selected chat does. */
+  function rememberTabs(connection: string) {
+    void window.haarness.storage(tabsKey(connection), [...state.tabs]);
+  }
   async function closeTab(id: string) {
     set("openingChat", 0);
     set("tabs", (tabs) => tabs.filter((tab) => tab !== id));
+    if (state.connection) rememberTabs(state.connection.id);
     tabHistory = tabHistory.filter((tab) => state.tabs.includes(tab));
     if (state.selected !== id) return;
     const next = tabHistory.at(-1) ?? state.tabs.at(-1);
@@ -1344,6 +1352,15 @@ function createApp() {
       // and load chat state and model choices together on remote connections.
       await Promise.all([hydrate(view.info), catalogs(false, view.info)]);
       if (!valid()) return false;
+      const reopened = savedTabs(
+        await window.haarness.storage(tabsKey(view.id)),
+        state.threads,
+      );
+      if (!valid()) return false;
+      if (reopened.length) {
+        set("tabs", (tabs) => [...new Set([...reopened, ...tabs])]);
+        tabHistory = [...new Set([...reopened, ...tabHistory])];
+      }
       if (newChat || newChatAttempt === attempt)
         await window.haarness.storage("session:" + view.id, "");
       const saved = await window.haarness.storage("session:" + view.id);
