@@ -1055,6 +1055,21 @@ pub struct BackgroundTaskInfo {
     pub started_at: DateTime<Utc>,
 }
 
+/// What a chat is doing now (`GET /v1/threads/{id}/activity`). Work the chat
+/// started in the background (child agents launched or moved there, workflow
+/// runs started without waiting) delivers its result into the chat when it
+/// ends, starting a new turn when the chat is idle. A chat is quiet only when
+/// no turn runs in it and `background` is 0. `turn.finished` events carry the
+/// same count, as of the moment the turn finished, under the same name.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadActivity {
+    /// The turn running in this chat, if any.
+    pub active_turn: Option<Turn>,
+    /// Background results this chat is still owed.
+    pub background: u32,
+}
+
 /// User input against a thread that may already have a running turn. When a
 /// turn is active the text is persisted immediately and steered into that
 /// turn's next provider round; otherwise a normal turn starts.
@@ -1150,6 +1165,7 @@ pub struct ApiError {
         PendingPermissionInfo,
         PendingQuestionInfo,
         BackgroundTaskInfo,
+        ThreadActivity,
         InputDelivery,
         PendingInput,
         InputQueue,

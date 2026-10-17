@@ -399,6 +399,20 @@ impl WorkflowCoordinator {
         }
     }
 
+    /// Background runs launched by `thread` that will still deliver their
+    /// terminal result into it, including one being handed to it now. The
+    /// runtime reads this through the probe the server installs, so a chat
+    /// that launched them is not called done while they run.
+    #[must_use]
+    pub fn pending_deliveries(&self, thread: ThreadId) -> u32 {
+        let pending = self
+            .delivery_watches
+            .iter()
+            .filter(|watch| watch.launch_thread_id == thread)
+            .count();
+        u32::try_from(pending).unwrap_or(u32::MAX)
+    }
+
     /// Optimistically claim terminal delivery for a model-facing wait issued
     /// by the thread that launched this background run. Other sessions may
     /// inspect or wait without suppressing the launcher's notification.
@@ -436,11 +450,13 @@ impl WorkflowCoordinator {
                 remove = true;
             }
         }
-        if remove {
-            self.delivery_watches.remove(&id);
-        }
+        // A delivered run is forgotten only once its result was handed to the
+        // launching thread, so `pending_deliveries` counts it until then.
         if let Some((launch_thread_id, run)) = deliver {
             self.deliver_terminal(launch_thread_id, run).await;
+        }
+        if remove {
+            self.delivery_watches.remove(&id);
         }
     }
 
@@ -914,11 +930,12 @@ impl WorkflowCoordinator {
                 remove = true;
             }
         }
-        if remove {
-            self.delivery_watches.remove(&id);
-        }
+        // As in `end_launch_wait`: forgotten once handed over.
         if let Some((launch_thread_id, run)) = deliver {
             self.deliver_terminal(launch_thread_id, run).await;
+        }
+        if remove {
+            self.delivery_watches.remove(&id);
         }
     }
 

@@ -68,6 +68,10 @@ struct CoordinatorHost {
     calls: Mutex<Vec<(HostRequestMethod, Value)>>,
     disposed_threads: Mutex<Vec<ThreadId>>,
     notifications: Mutex<Vec<(ThreadId, WorkflowRun)>>,
+    /// When set, each notification also records what the coordinator
+    /// reported as pending for the launch thread while it was delivered.
+    coordinator: std::sync::OnceLock<std::sync::Weak<WorkflowCoordinator>>,
+    pending_while_notified: Mutex<Vec<u32>>,
 }
 
 impl CoordinatorHost {
@@ -80,6 +84,8 @@ impl CoordinatorHost {
             calls: Mutex::new(Vec::new()),
             disposed_threads: Mutex::new(Vec::new()),
             notifications: Mutex::new(Vec::new()),
+            coordinator: std::sync::OnceLock::new(),
+            pending_while_notified: Mutex::new(Vec::new()),
         }
     }
 
@@ -203,6 +209,12 @@ impl WorkflowRuntimeHost for CoordinatorHost {
         launch_thread_id: ThreadId,
         run: WorkflowRun,
     ) -> Result<(), HostError> {
+        if let Some(coordinator) = self.coordinator.get().and_then(std::sync::Weak::upgrade) {
+            self.pending_while_notified
+                .lock()
+                .expect("pending lock")
+                .push(coordinator.pending_deliveries(launch_thread_id));
+        }
         self.notifications
             .lock()
             .expect("notifications lock")
@@ -1201,6 +1213,61 @@ async fn background_completion_and_failure_notify_only_the_launch_thread() {
         2,
         "a synchronous start already consumed its terminal result"
     );
+}
+
+#[tokio::test]
+async fn a_background_run_is_pending_for_its_launcher_until_its_result_is_handed_over() {
+    let Some(bun) = bun_path() else {
+        eprintln!("skipping coordinator fixture: Bun is unavailable");
+        return;
+    };
+    let workspace = tempfile::tempdir().expect("workspace fixture");
+    let store = Arc::new(SqliteStore::in_memory().expect("workflow store"));
+    let launch = store
+        .create_thread(CreateThreadRequest::default())
+        .await
+        .expect("launch thread");
+    let other = store
+        .create_thread(CreateThreadRequest::default())
+        .await
+        .expect("other thread");
+    let host = Arc::new(CoordinatorHost::new(Arc::clone(&store), usize::MAX));
+    let coordinator =
+        portable_coordinator(bun, store, host.clone(), workspace.path().to_path_buf());
+    host.coordinator
+        .set(Arc::downgrade(&coordinator))
+        .expect("set once");
+
+    let mut background = portable_start(BLOCKING_PORTABLE_WORKFLOW);
+    background.thread_id = Some(launch.id);
+    let run = coordinator
+        .start(background)
+        .await
+        .expect("background workflow starts");
+    host.wait_for_request().await;
+    // A run without a launching thread delivers nowhere.
+    let detached = coordinator
+        .start(portable_start(BLOCKING_PORTABLE_WORKFLOW))
+        .await
+        .expect("detached workflow starts");
+    host.wait_for_request().await;
+    assert_eq!(coordinator.pending_deliveries(launch.id), 1);
+    assert_eq!(coordinator.pending_deliveries(other.id), 0);
+
+    coordinator.cancel(run.id).await.expect("workflow cancels");
+    let notifications = host.wait_for_notifications(1).await;
+    assert_eq!(notifications[0].0, launch.id);
+    assert_eq!(
+        *host.pending_while_notified.lock().expect("pending lock"),
+        [1],
+        "still pending while its result is handed over"
+    );
+    assert_eq!(coordinator.pending_deliveries(launch.id), 0);
+
+    coordinator
+        .cancel(detached.id)
+        .await
+        .expect("fixture cleanup");
 }
 
 #[tokio::test]
