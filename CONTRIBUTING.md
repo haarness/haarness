@@ -57,7 +57,8 @@ Also, depending on the change:
 - Keep each pull request to one logical change, with tests for new behaviour and for the bug
   being fixed.
 - Write commit messages in the imperative (“Add …”, “Fix …”) and explain *why* in the body.
-- Update the documentation when behaviour changes: `README.md` and the pages in `docs/`
+- Update the documentation when behaviour changes: `README.md` (the short tour),
+  [docs/REFERENCE.md](docs/REFERENCE.md) (the long form) and the pages in `docs/`
   (indexed in [docs/README.md](docs/README.md)). Write what is true of the shipped build.
   The user guides at <https://haarness.ai/docs> are published from the Haarness Cloud
   repository; say in the pull request when one of them needs to change too.
