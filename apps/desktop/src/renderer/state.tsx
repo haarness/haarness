@@ -28,6 +28,7 @@ import {
   createMemo,
   createRoot,
   createSignal,
+  untrack,
   type ParentProps,
 } from "solid-js";
 import { createStore, reconcile, unwrap } from "solid-js/store";
@@ -43,7 +44,14 @@ import {
 } from "../shared";
 import { cloudServers, localServer, serverKey, serverProjects } from "../servers";
 import { freshChat, landItems, reduceEvent, type Live } from "./sync";
-import { savedTabs, tabsKey } from "./chat-tabs";
+import {
+  archivedByReader,
+  newlyArchived,
+  sameTabs,
+  savedTabs,
+  tabsKey,
+  unarchivedChats,
+} from "./chat-tabs";
 import { themeColors } from "../themes";
 import {
   cleanProjectMeta,
@@ -557,6 +565,23 @@ function createApp() {
   function rememberTabs(connection: string) {
     void window.haarness.storage(tabsKey(connection), [...state.tabs]);
   }
+  // A chat archived while its tab waits behind another (from the sidebar,
+  // Archive chats or another window) leaves the tab strip with its sidebar
+  // row. The chat on screen stays open, with its archived notice and Restore.
+  let unarchived = new Set<string>();
+  createEffect(() => {
+    const archived = newlyArchived(unarchived, state.threads);
+    unarchived = unarchivedChats(state.threads);
+    untrack(() => {
+      const closing = archived.filter(
+        (id) => id !== state.selected && state.tabs.includes(id),
+      );
+      if (!closing.length || !state.connection) return;
+      set("tabs", (tabs) => tabs.filter((tab) => !closing.includes(tab)));
+      tabHistory = tabHistory.filter((tab) => !closing.includes(tab));
+      rememberTabs(state.connection.id);
+    });
+  });
   async function closeTab(id: string) {
     set("openingChat", 0);
     set("tabs", (tabs) => tabs.filter((tab) => tab !== id));
@@ -1329,6 +1354,11 @@ function createApp() {
         set("permissions", []);
         set("questions", []);
       });
+      // Read the project's tabs before its chats are listed: opening one
+      // rewrites the record, and the chats can be chosen while catalogs load.
+      const rememberedTabs = window.haarness
+        .storage(tabsKey(view.id))
+        .catch(() => null);
       const boot = await window.haarness.boot();
       if (!valid()) return false;
       set("servers", boot.servers);
@@ -1352,15 +1382,16 @@ function createApp() {
       // and load chat state and model choices together on remote connections.
       await Promise.all([hydrate(view.info), catalogs(false, view.info)]);
       if (!valid()) return false;
-      const reopened = savedTabs(
-        await window.haarness.storage(tabsKey(view.id)),
-        state.threads,
-      );
+      const remembered = await rememberedTabs;
       if (!valid()) return false;
+      const reopened = savedTabs(remembered, state.threads);
       if (reopened.length) {
         set("tabs", (tabs) => [...new Set([...reopened, ...tabs])]);
         tabHistory = [...new Set([...reopened, ...tabHistory])];
       }
+      // Keep the record to what is open now: without the chats archived or
+      // gone meanwhile, and with any chat chosen while the project loaded.
+      if (!sameTabs(remembered, state.tabs)) rememberTabs(view.id);
       if (newChat || newChatAttempt === attempt)
         await window.haarness.storage("session:" + view.id, "");
       const saved = await window.haarness.storage("session:" + view.id);
@@ -1369,7 +1400,9 @@ function createApp() {
         !newChat &&
         newChatAttempt !== attempt &&
         typeof saved === "string" &&
-        state.threads.some((item) => item.id === saved && !item.archived)
+        state.threads.some(
+          (item) => item.id === saved && !archivedByReader(item),
+        )
       )
         await choose(saved);
       else if (!newChat && newChatAttempt !== attempt && saved == null) {
