@@ -6229,6 +6229,20 @@ impl RunnerTask {
         }
     }
 
+    /// The result of task call `call_id` is durable in this turn: a child it
+    /// launched or moved to the background may now deliver its own result,
+    /// which must come after it.
+    fn release_task_delivery(&self, call_id: &str) {
+        if let Some(task) = self.background_tasks.iter().find_map(|entry| {
+            let info = entry.value().info();
+            (info.parent_thread_id == self.thread.id && info.call_id == call_id)
+                .then(|| Arc::clone(entry.value()))
+        }) {
+            task.parent_ready.store(true, Ordering::SeqCst);
+            task.ready.notify_waiters();
+        }
+    }
+
     /// The background results this turn's thread is still owed as the turn
     /// finishes; the result the turn itself carried in is not among them.
     fn background_results_owed(&self) -> u32 {
@@ -6643,13 +6657,15 @@ impl RunnerTask {
                         .execute_call_inner(agent, &call_id, "task", arguments, false, false)
                         .await?;
                     self.publish_item(ItemData::ToolResult {
-                        call_id,
+                        call_id: call_id.clone(),
                         name: "task".into(),
                         output: output.text.clone(),
                         is_error: false,
                         metadata: output.metadata,
                     })
                     .await?;
+                    // A child moved to the background delivers after this.
+                    self.release_task_delivery(&call_id);
                     self.publish_item(ItemData::AssistantMessage { text: output.text })
                         .await?;
                     let active = self
@@ -7792,15 +7808,8 @@ impl RunnerTask {
                             .await?;
                         }
                     }
-                    if name == "task"
-                        && let Some(task) = self.background_tasks.iter().find_map(|entry| {
-                            let info = entry.value().info();
-                            (info.parent_thread_id == self.thread.id && info.call_id == call_id)
-                                .then(|| Arc::clone(entry.value()))
-                        })
-                    {
-                        task.parent_ready.store(true, Ordering::SeqCst);
-                        task.ready.notify_waiters();
+                    if name == "task" {
+                        self.release_task_delivery(&call_id);
                     }
                 }
             }

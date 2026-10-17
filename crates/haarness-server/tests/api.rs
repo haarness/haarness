@@ -6993,6 +6993,94 @@ export default workflow({
 }
 
 #[tokio::test]
+async fn a_forked_command_moved_to_the_background_delivers_its_result() {
+    let workspace = std::env::temp_dir();
+    let mut config = haarness_core::RuntimeConfig::default();
+    config.commands.push(haarness_protocol::CommandInfo {
+        execution: haarness_protocol::DefinitionExecution {
+            fork: true,
+            ..Default::default()
+        },
+        name: "slowcheck".into(),
+        description: "a slow forked check".into(),
+        source: None,
+        agent: None,
+        model: None,
+        argument_hint: None,
+        template: r#"!tool bash {"command":"sleep 2"}"#.into(),
+        plugin: None,
+    });
+    let runtime = Arc::new(AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Capturing::default()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(haarness_server::NativeToolRegistry::new(
+            workspace.to_path_buf(),
+        )),
+        EventBus::new(2048),
+        workspace.to_path_buf(),
+        String::new(),
+        config,
+    ));
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let mut events = runtime.events().subscribe(None).receiver;
+    let mut request = turn_request("");
+    request.command = Some("slowcheck".into());
+    let turn = runtime.start_turn(thread.id, request).await.unwrap();
+    // The forked child runs in the foreground until it is moved.
+    let child = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(task) = runtime.background_tasks(thread.id).await.unwrap().pop() {
+                return task;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the forked child starts");
+    assert!(!child.background);
+    let promoted = runtime.promote_subagents(thread.id, None).await.unwrap();
+    assert_eq!(promoted.len(), 1);
+
+    let launched = next_finished(&mut events, thread.id).await;
+    assert_eq!(launched.turn_id, Some(turn.id));
+    assert_eq!(launched.payload["background"], 1, "{}", launched.payload);
+    // Its result arrives as the chat's next turn, which owes nothing.
+    let delivered = next_finished(&mut events, thread.id).await;
+    assert_ne!(delivered.turn_id, Some(turn.id));
+    assert!(
+        delivered.payload.get("background").is_none(),
+        "{}",
+        delivered.payload
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while runtime.background_results_owed(thread.id) > 0
+            || !runtime
+                .background_tasks(thread.id)
+                .await
+                .unwrap()
+                .is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the moved child's result was delivered");
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(items.iter().any(|item| matches!(&item.data,
+        haarness_protocol::ItemData::UserMessage { text, synthetic: true, .. }
+            if text.contains(&child.child_thread_id.to_string()) && text.contains("state=\"completed\""))));
+}
+
+#[tokio::test]
 async fn a_running_turn_shows_in_activity_and_a_published_chat_may_read_it() {
     let workspace = std::env::temp_dir();
     let (runtime, _) = p0_runtime(&workspace, true);
