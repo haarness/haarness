@@ -73,9 +73,14 @@ export function createNotifications(input: {
     if (event.type === "turn.started" || event.type === "turn.finished") {
       // A delegated agent's turn neither ends nor resumes the conversation.
       if (root !== event.threadId) return;
-      if (event.type === "turn.finished" && payload.status === "completed")
+      // Work the turn started in the background (a child agent, a workflow
+      // run) still owes the conversation a result; the turn that receives
+      // the last one is where it ends, so this one is neither finished nor
+      // failed yet, and a completion it holds is not true either.
+      const owed = typeof payload.background === "number" && payload.background > 0;
+      if (event.type === "turn.finished" && !owed && payload.status === "completed")
         title = "Task finished";
-      else if (event.type === "turn.finished" && payload.status === "failed")
+      else if (event.type === "turn.finished" && !owed && payload.status === "failed")
         title = "Task failed";
     } else if (event.type === "permission.requested") title = "Approval needed";
     else if (event.type === "question.requested") title = "Answer needed";
@@ -91,9 +96,10 @@ export function createNotifications(input: {
     const completed = title === "Task finished";
     const conversationKey = JSON.stringify([connection, root]);
     // The conversation picked up again (the next queued prompt, a stop's
-    // follow-up), stopped or failed: a completion it is holding is not true.
+    // follow-up), stopped, failed or is waiting on background work: a
+    // completion it is holding is not true.
     if (event.type.startsWith("turn.") && !completed) drop(conversationKey);
-    if (!title) return; // A start, or a stop, which is not a completion.
+    if (!title) return; // A start, a stop or a turn background work outlives.
     const permitted = () => {
       if (!input.enabled()) return false;
       const policy = input.policy?.();
