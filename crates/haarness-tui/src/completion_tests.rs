@@ -1,7 +1,7 @@
 //! Turn-end banners: a completion waits out its grace, a queued prompt
 //! starting inside it drops the banner, stops say nothing and failures say so.
 use super::*;
-use crate::state::{COMPLETION_GRACE, ToastVariant};
+use crate::state::{COMPLETION_GRACE, ToastVariant, TurnEnd};
 use std::time::{Duration, Instant};
 
 fn finished(thread: ThreadId, status: &str) -> haarness_protocol::EventEnvelope {
@@ -116,6 +116,125 @@ async fn a_failure_or_stop_inside_the_grace_drops_the_held_completion() {
         app.release_completions(Instant::now() + COMPLETION_GRACE);
         assert_eq!(app.pending_notification, None, "{end}");
     }
+}
+
+fn owing(thread: ThreadId, status: &str, background: u32) -> haarness_protocol::EventEnvelope {
+    fixture_event(
+        "turn.finished",
+        thread,
+        thread,
+        serde_json::json!({ "status": status, "background": background }),
+    )
+}
+
+#[tokio::test]
+async fn a_turn_background_work_outlives_is_no_end_and_the_turn_its_result_starts_is() {
+    let thread = fixture_thread();
+    let mut app = away(&thread);
+    let client = offline_client();
+
+    // A completion still in its grace is dropped by a later turn that
+    // leaves background work running, completed or failed.
+    app.reduce(finished(thread.id, "completed"), &client)
+        .await
+        .unwrap();
+    for status in ["completed", "failed"] {
+        app.reduce(started(thread.id), &client).await.unwrap();
+        app.reduce(owing(thread.id, status, 1), &client)
+            .await
+            .unwrap();
+        assert!(!app.completions.holds(thread.id), "{status}");
+        app.release_completions(Instant::now() + COMPLETION_GRACE);
+        assert_eq!(app.pending_notification, None, "{status}: still at work");
+        assert_eq!(toast(&app), None);
+    }
+
+    // The child's result starts a quick turn; the run it ends took a minute.
+    app.reduce(started(thread.id), &client).await.unwrap();
+    app.turn_started = Some(Instant::now());
+    app.reduce(finished(thread.id, "completed"), &client)
+        .await
+        .unwrap();
+    app.release_completions(Instant::now() + COMPLETION_GRACE);
+    let message = format!("Haarness finished: {}", thread.title);
+    assert_eq!(app.pending_notification.take().as_deref(), Some(&*message));
+    assert_eq!(toast(&app), Some(&*message));
+    assert_eq!(
+        TurnEnd::from_payload(&serde_json::json!({"status": "completed", "background": 0})),
+        TurnEnd::Completed
+    );
+    assert_eq!(
+        TurnEnd::from_payload(&serde_json::json!({"status": "interrupted", "background": 2})),
+        TurnEnd::Stopped
+    );
+}
+
+/// The prompt a turn of `thread` starts with: a person's, or a background
+/// result the runtime delivered (`synthetic`).
+fn prompt(thread: ThreadId, synthetic: bool) -> haarness_protocol::EventEnvelope {
+    let item = haarness_protocol::Item {
+        id: haarness_protocol::ItemId::new(),
+        thread_id: thread,
+        turn_id: None,
+        sequence: 1,
+        data: haarness_protocol::ItemData::UserMessage {
+            text: "next".into(),
+            attachments: Vec::new(),
+            queued: false,
+            synthetic,
+        },
+        created_at: chrono::Utc::now(),
+    };
+    fixture_event(
+        "item.created",
+        thread,
+        thread,
+        serde_json::to_value(item).unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn a_run_left_waiting_on_stopped_work_does_not_make_the_next_quick_turn_long() {
+    let thread = fixture_thread();
+    let mut app = away(&thread);
+    let client = offline_client();
+    app.reduce(owing(thread.id, "completed", 1), &client)
+        .await
+        .unwrap();
+    assert!(app.completions.owes(thread.id));
+
+    // The work was stopped while the chat was idle; the person's next prompt
+    // starts a quick turn of its own.
+    app.reduce(prompt(thread.id, false), &client).await.unwrap();
+    assert!(!app.completions.owes(thread.id), "the run ends with it");
+    app.reduce(started(thread.id), &client).await.unwrap();
+    app.reduce(finished(thread.id, "completed"), &client)
+        .await
+        .unwrap();
+    app.release_completions(Instant::now() + COMPLETION_GRACE);
+    assert_eq!(app.pending_notification, None, "a quick turn stays quiet");
+    assert_eq!(toast(&app), None);
+}
+
+#[tokio::test]
+async fn a_delivered_result_carries_the_waiting_run_on() {
+    let thread = fixture_thread();
+    let mut app = away(&thread);
+    let client = offline_client();
+    app.reduce(owing(thread.id, "completed", 1), &client)
+        .await
+        .unwrap();
+    // The result arrives as a runtime message starting the next turn.
+    app.reduce(prompt(thread.id, true), &client).await.unwrap();
+    assert!(app.completions.owes(thread.id), "the run carries on");
+    app.reduce(started(thread.id), &client).await.unwrap();
+    app.reduce(finished(thread.id, "completed"), &client)
+        .await
+        .unwrap();
+    assert!(!app.completions.owes(thread.id));
+    app.release_completions(Instant::now() + COMPLETION_GRACE);
+    let message = format!("Haarness finished: {}", thread.title);
+    assert_eq!(app.pending_notification.take().as_deref(), Some(&*message));
 }
 
 #[tokio::test]

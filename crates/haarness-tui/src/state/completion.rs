@@ -7,7 +7,11 @@
 //! turn that starts in the same conversation inside the grace drops the held
 //! banner and carries the run's start forward, so the last turn of a queue is
 //! judged by how long the whole queue took and announced once. A failure is
-//! never taken back and goes out at once; a stop says nothing.
+//! never taken back and goes out at once; a stop says nothing. A turn that
+//! ends while work it started in the background (a child agent, a workflow
+//! run) still owes the conversation a result is no end at all: it drops a
+//! held banner and carries the run on, and the turn that receives the last
+//! result is announced.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -24,18 +28,29 @@ pub const COMPLETION_GRACE: Duration = Duration::from_millis(500);
 /// because the reader is still looking at them.
 const NOTIFY_AFTER: Duration = Duration::from_secs(20);
 
-/// How a turn ended, read from the `turn.finished` payload's `status`.
+/// How long a run waiting on background work is remembered: past this its
+/// work ended without a result long ago, or the conversation was left.
+const OWED_RUN_LIMIT: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How a turn ended, read from its `turn.finished` payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnEnd {
     Completed,
     Failed,
+    /// Completed or failed while background work it started still owes the
+    /// conversation a result (the payload's `background` count).
+    Owed,
     /// Interrupted (a stop), or anything else that is not a completion.
     Stopped,
 }
 
 impl TurnEnd {
-    pub fn from_status(status: &serde_json::Value) -> Self {
-        match status.as_str() {
+    pub fn from_payload(payload: &serde_json::Value) -> Self {
+        let owed = payload["background"]
+            .as_u64()
+            .is_some_and(|count| count > 0);
+        match payload["status"].as_str() {
+            Some("completed" | "failed") if owed => Self::Owed,
             Some("completed") => Self::Completed,
             Some("failed") => Self::Failed,
             _ => Self::Stopped,
@@ -48,8 +63,17 @@ impl TurnEnd {
 pub struct HeldCompletions {
     held: Vec<Held>,
     /// When the current run of back-to-back turns began, per conversation.
-    /// Set when a new turn drops a held completion; read by the next end.
-    runs: HashMap<ThreadId, Instant>,
+    /// Set when a new turn drops a held completion, or when a turn ends with
+    /// background work still owed; read by the next end.
+    runs: HashMap<ThreadId, Run>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Run {
+    started: Instant,
+    /// The run waits on background work: only the turn that work's result
+    /// starts carries it on.
+    owed: bool,
 }
 
 #[derive(Debug)]
@@ -71,15 +95,50 @@ impl HeldCompletions {
         if let Some(index) = self.held.iter().position(|held| held.thread == thread) {
             let held = self.held.remove(index);
             if let Some(started) = held.started {
-                self.runs.insert(thread, started);
+                self.runs.insert(
+                    thread,
+                    Run {
+                        started,
+                        owed: false,
+                    },
+                );
             }
         }
+    }
+
+    /// A person's own prompt reached `thread` and starts its next turn. A
+    /// run waiting on background work does not carry on into it: that work
+    /// was stopped without a result, or the person moved on, and only a
+    /// delivered result (a runtime message) continues the run.
+    pub fn prompted(&mut self, thread: ThreadId) {
+        if self.runs.get(&thread).is_some_and(|run| run.owed) {
+            self.runs.remove(&thread);
+        }
+    }
+
+    /// Remember that `thread`'s run from `started` waits on background work.
+    fn owe(&mut self, thread: ThreadId, started: Instant) {
+        self.runs
+            .retain(|_, run| !run.owed || run.started.elapsed() < OWED_RUN_LIMIT);
+        self.runs.insert(
+            thread,
+            Run {
+                started,
+                owed: true,
+            },
+        );
     }
 
     /// Forget anything `thread` was holding: a newer end is the true one.
     fn settle(&mut self, thread: ThreadId) -> Option<Instant> {
         self.held.retain(|held| held.thread != thread);
-        self.runs.remove(&thread)
+        self.runs.remove(&thread).map(|run| run.started)
+    }
+
+    /// Whether `thread`'s run waits on background work.
+    #[cfg(test)]
+    pub fn owes(&self, thread: ThreadId) -> bool {
+        self.runs.get(&thread).is_some_and(|run| run.owed)
     }
 
     /// Whether `thread` has a completion waiting out its grace.
@@ -117,6 +176,13 @@ impl App {
                 // reader watching this conversation.
                 if elsewhere || !self.terminal_focused {
                     self.show_toast(None, message, ToastVariant::Error, Duration::from_secs(8));
+                }
+            }
+            // Still at work: the turn that receives the last result is the
+            // end, judged from when this run began.
+            TurnEnd::Owed => {
+                if let Some(started) = run.into_iter().chain(started).min() {
+                    self.completions.owe(thread, started);
                 }
             }
             // The reader (or another client) asked for the stop.

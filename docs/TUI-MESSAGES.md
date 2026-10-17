@@ -78,7 +78,13 @@ the conversation starts another turn inside that grace, nothing is announced,
 and the last turn of a queue is judged by how long the whole queue took (work
 of 20 seconds or more in the open conversation earns one). A failed turn says
 **Haarness failed: …** at once (a card only while unfocused, or for another
-session), and a stopped turn says nothing.
+session), and a stopped turn says nothing. A turn that completes or fails while
+work it started in the background (a child agent, a workflow run) still owes
+the conversation a result says nothing either and drops a held card: that work
+delivers its result as a new turn, which is announced, judged by how long the
+whole run took. Only that delivered result carries the waiting run on: any
+prompt from the person in the meantime, whether the work was stopped or still
+runs, starts a run of its own.
 
 A custom status-line command that keeps failing logs one WARN per distinct
 error, DEBUG while the same error repeats, and INFO when it recovers.

@@ -266,6 +266,10 @@ export class Api extends Transport {
   activeTurn(id: string, options: RequestOptions = {}): Promise<(T.Turn | null)> {
     return this.request("GET", `/v1/threads/${this.segment(id)}/active`, { binaryBody: false, binaryResponse: false, ...options });
   }
+  /** GET /v1/threads/{id}/activity */
+  threadActivity(id: string, options: RequestOptions = {}): Promise<T.ThreadActivity> {
+    return this.request("GET", `/v1/threads/${this.segment(id)}/activity`, { binaryBody: false, binaryResponse: false, ...options });
+  }
   /** POST /v1/threads/{id}/interrupt */
   interruptThreadTree(id: string, query: T.InterruptQuery = {}, options: RequestOptions = {}): Promise<T.InterruptResponse> {
     return this.request("POST", `/v1/threads/${this.segment(id)}/interrupt`, { query, binaryBody: false, binaryResponse: false, ...options });

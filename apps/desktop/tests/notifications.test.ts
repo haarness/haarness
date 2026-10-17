@@ -293,6 +293,28 @@ test("a stop or failure inside the grace drops the held completion; failure show
   await tick();
   assert.equal(f.shown.length, 1, "a stop is never announced as finished");
 });
+test("a turn that background work outlives is neither finished nor failed; the turn its last result starts is", async () => {
+  const f = fixture();
+  // A completion still in its grace is not true once a later turn says
+  // background work goes on.
+  const held = f.deliver(event({ eventId: 1 }));
+  await f.receive(event({ eventId: 2, payload: { status: "completed", background: 1 } }));
+  await f.receive(event({ eventId: 3, payload: { status: "failed", background: 2 } }));
+  await held;
+  await tick();
+  assert.equal(f.shown.length, 0, "the conversation is still at work");
+  // The child's result starts a turn; when it ends, the conversation is done.
+  await f.deliver(event({ eventId: 4, type: "turn.started", payload: { status: "running" } }));
+  await f.receive(event({ eventId: 5, payload: { status: "completed" } }));
+  assert.deepEqual(
+    f.shown.map((notification) => notification.title),
+    ["Haarness — Task finished"],
+  );
+  // A count of zero, as an older server never sends, is no different.
+  await f.receive(event({ eventId: 6, payload: { status: "failed", background: 0 } }));
+  assert.equal(f.shown.length, 2);
+  assert.match(f.shown[1].title, /Task failed/);
+});
 test("other conversations and delegated agents starting do not drop a held completion", async () => {
   const f = fixture();
   const pending = f.deliver();

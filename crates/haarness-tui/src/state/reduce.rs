@@ -606,6 +606,16 @@ impl App {
             }
             "item.created" => {
                 if let Ok(item) = serde_json::from_value::<Item>(event.payload.clone()) {
+                    // The prompt a turn starts with: a person's own, not a
+                    // background result the runtime delivered.
+                    if let ItemData::UserMessage {
+                        queued: false,
+                        synthetic: false,
+                        ..
+                    } = &item.data
+                    {
+                        self.completions.prompted(item.thread_id);
+                    }
                     if let Some(thread_id) = event.thread_id {
                         let live = self.live_threads.entry(thread_id).or_default();
                         match &item.data {
@@ -993,7 +1003,7 @@ impl App {
                     self.pending_permissions.clear();
                     self.permission_focus = false;
                 }
-                let end = TurnEnd::from_status(&event.payload["status"]);
+                let end = TurnEnd::from_payload(&event.payload);
                 if on_current {
                     let goal_continues = self
                         .goal

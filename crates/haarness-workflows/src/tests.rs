@@ -68,6 +68,10 @@ struct CoordinatorHost {
     calls: Mutex<Vec<(HostRequestMethod, Value)>>,
     disposed_threads: Mutex<Vec<ThreadId>>,
     notifications: Mutex<Vec<(ThreadId, WorkflowRun)>>,
+    /// When set, each notification also records what the coordinator
+    /// reported as pending for the launch thread while it was delivered.
+    coordinator: std::sync::OnceLock<std::sync::Weak<WorkflowCoordinator>>,
+    pending_while_notified: Mutex<Vec<u32>>,
 }
 
 impl CoordinatorHost {
@@ -80,6 +84,8 @@ impl CoordinatorHost {
             calls: Mutex::new(Vec::new()),
             disposed_threads: Mutex::new(Vec::new()),
             notifications: Mutex::new(Vec::new()),
+            coordinator: std::sync::OnceLock::new(),
+            pending_while_notified: Mutex::new(Vec::new()),
         }
     }
 
@@ -203,6 +209,12 @@ impl WorkflowRuntimeHost for CoordinatorHost {
         launch_thread_id: ThreadId,
         run: WorkflowRun,
     ) -> Result<(), HostError> {
+        if let Some(coordinator) = self.coordinator.get().and_then(std::sync::Weak::upgrade) {
+            self.pending_while_notified
+                .lock()
+                .expect("pending lock")
+                .push(coordinator.pending_deliveries(launch_thread_id));
+        }
         self.notifications
             .lock()
             .expect("notifications lock")
@@ -1201,6 +1213,194 @@ async fn background_completion_and_failure_notify_only_the_launch_thread() {
         2,
         "a synchronous start already consumed its terminal result"
     );
+}
+
+#[tokio::test]
+async fn a_background_run_is_pending_for_its_launcher_until_its_result_is_handed_over() {
+    let Some(bun) = bun_path() else {
+        eprintln!("skipping coordinator fixture: Bun is unavailable");
+        return;
+    };
+    let workspace = tempfile::tempdir().expect("workspace fixture");
+    let store = Arc::new(SqliteStore::in_memory().expect("workflow store"));
+    let launch = store
+        .create_thread(CreateThreadRequest::default())
+        .await
+        .expect("launch thread");
+    let other = store
+        .create_thread(CreateThreadRequest::default())
+        .await
+        .expect("other thread");
+    let host = Arc::new(CoordinatorHost::new(Arc::clone(&store), usize::MAX));
+    let coordinator =
+        portable_coordinator(bun, store, host.clone(), workspace.path().to_path_buf());
+    host.coordinator
+        .set(Arc::downgrade(&coordinator))
+        .expect("set once");
+
+    let mut background = portable_start(BLOCKING_PORTABLE_WORKFLOW);
+    background.thread_id = Some(launch.id);
+    let run = coordinator
+        .start(background)
+        .await
+        .expect("background workflow starts");
+    host.wait_for_request().await;
+    // A run without a launching thread delivers nowhere.
+    let detached = coordinator
+        .start(portable_start(BLOCKING_PORTABLE_WORKFLOW))
+        .await
+        .expect("detached workflow starts");
+    host.wait_for_request().await;
+    assert_eq!(coordinator.pending_deliveries(launch.id), 1);
+    assert_eq!(coordinator.pending_deliveries(other.id), 0);
+
+    coordinator.cancel(run.id).await.expect("workflow cancels");
+    let notifications = host.wait_for_notifications(1).await;
+    assert_eq!(notifications[0].0, launch.id);
+    assert_eq!(
+        *host.pending_while_notified.lock().expect("pending lock"),
+        [1],
+        "still pending while its result is handed over"
+    );
+    assert_eq!(coordinator.pending_deliveries(launch.id), 0);
+
+    // A run cancelled with its session never reports back, so it is owed
+    // nothing from the moment it is cancelled.
+    let mut stopped = portable_start(BLOCKING_PORTABLE_WORKFLOW);
+    stopped.thread_id = Some(launch.id);
+    coordinator
+        .start(stopped)
+        .await
+        .expect("background workflow starts");
+    host.wait_for_request().await;
+    assert_eq!(coordinator.pending_deliveries(launch.id), 1);
+    coordinator
+        .cancel_for_launch_threads(&HashSet::from([launch.id]))
+        .await
+        .expect("session workflows cancel");
+    assert_eq!(coordinator.pending_deliveries(launch.id), 0);
+    tokio::task::yield_now().await;
+    assert_eq!(host.notifications().len(), 1, "no delivery after the stop");
+
+    coordinator
+        .cancel(detached.id)
+        .await
+        .expect("fixture cleanup");
+}
+
+/// The store, except that writing a log line fails while `fail_logs` is set.
+struct FailingLogs {
+    store: Arc<SqliteStore>,
+    fail_logs: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl WorkflowRepository for FailingLogs {
+    async fn create_workflow_run(
+        &self,
+        run: WorkflowRun,
+    ) -> haarness_core::CoreResult<WorkflowRun> {
+        self.store.create_workflow_run(run).await
+    }
+    async fn workflow_run(&self, id: WorkflowId) -> haarness_core::CoreResult<WorkflowRun> {
+        self.store.workflow_run(id).await
+    }
+    async fn list_workflow_runs(
+        &self,
+        directory: Option<&str>,
+        thread_id: Option<ThreadId>,
+        limit: usize,
+    ) -> haarness_core::CoreResult<Vec<WorkflowRun>> {
+        self.store
+            .list_workflow_runs(directory, thread_id, limit)
+            .await
+    }
+    async fn save_workflow_run(&self, run: &WorkflowRun) -> haarness_core::CoreResult<WorkflowRun> {
+        self.store.save_workflow_run(run).await
+    }
+    async fn append_workflow_log(
+        &self,
+        id: WorkflowId,
+        entry: haarness_core::WorkflowLogDraft,
+    ) -> haarness_core::CoreResult<haarness_protocol::WorkflowLog> {
+        if self.fail_logs.load(Ordering::SeqCst) {
+            return Err(CoreError::Storage("injected log failure".into()));
+        }
+        self.store.append_workflow_log(id, entry).await
+    }
+    async fn delete_workflow_run(&self, id: WorkflowId) -> haarness_core::CoreResult<bool> {
+        self.store.delete_workflow_run(id).await
+    }
+    async fn running_workflow_ids(
+        &self,
+        directory: &str,
+    ) -> haarness_core::CoreResult<Vec<WorkflowId>> {
+        self.store.running_workflow_ids(directory).await
+    }
+    async fn recover_interrupted_workflows(
+        &self,
+        directory: &str,
+        ids: &[WorkflowId],
+    ) -> haarness_core::CoreResult<u64> {
+        self.store
+            .recover_interrupted_workflows(directory, ids)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn a_cancel_whose_log_fails_still_releases_its_launcher() {
+    let Some(bun) = bun_path() else {
+        eprintln!("skipping coordinator fixture: Bun is unavailable");
+        return;
+    };
+    let workspace = tempfile::tempdir().expect("workspace fixture");
+    let store = Arc::new(SqliteStore::in_memory().expect("workflow store"));
+    let launch = store
+        .create_thread(CreateThreadRequest::default())
+        .await
+        .expect("launch thread");
+    let host = Arc::new(CoordinatorHost::new(Arc::clone(&store), usize::MAX));
+    let repository = Arc::new(FailingLogs {
+        store: Arc::clone(&store),
+        fail_logs: std::sync::atomic::AtomicBool::new(false),
+    });
+    let coordinator = Arc::new(WorkflowCoordinator::new(
+        repository.clone(),
+        Arc::new(haarness_workflow_catalog::WorkflowCatalog::new(Vec::new())),
+        WorkflowExecutor::new(ExecutorConfig {
+            bun_path: Some(bun),
+            execution_timeout: Some(Duration::from_secs(10)),
+            ..ExecutorConfig::default()
+        }),
+        host.clone(),
+        EventBus::new(128),
+        workspace.path().to_path_buf(),
+        false,
+    ));
+    let mut background = portable_start(BLOCKING_PORTABLE_WORKFLOW);
+    background.thread_id = Some(launch.id);
+    let run = coordinator
+        .start(background)
+        .await
+        .expect("background workflow starts");
+    host.wait_for_request().await;
+    assert_eq!(coordinator.pending_deliveries(launch.id), 1);
+
+    repository.fail_logs.store(true, Ordering::SeqCst);
+    let error = coordinator.cancel(run.id).await.unwrap_err();
+    assert!(
+        error.to_string().contains("injected log failure"),
+        "{error}"
+    );
+    // Cancelled all the same: its notice was delivered and nothing is owed.
+    assert_eq!(
+        coordinator.get(run.id, None).await.unwrap().status,
+        WorkflowRunStatus::Cancelled
+    );
+    let notifications = host.wait_for_notifications(1).await;
+    assert_eq!(notifications[0].1.id, run.id);
+    assert_eq!(coordinator.pending_deliveries(launch.id), 0);
 }
 
 #[tokio::test]
