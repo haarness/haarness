@@ -173,6 +173,9 @@ struct DeliveryWatch {
     waits: usize,
     consumed: bool,
     pending_terminal: Option<WorkflowRun>,
+    /// Paused: it is not working and owes its launcher nothing until it is
+    /// resumed.
+    paused: bool,
 }
 
 /// Durable state machine around the isolated executor.
@@ -325,6 +328,7 @@ impl WorkflowCoordinator {
                     waits: 0,
                     consumed: false,
                     pending_terminal: None,
+                    paused: false,
                 },
             );
         }
@@ -402,13 +406,14 @@ impl WorkflowCoordinator {
     /// Background runs launched by `thread` that will still deliver their
     /// terminal result into it, including one being handed to it now. The
     /// runtime reads this through the probe the server installs, so a chat
-    /// that launched them is not called done while they run.
+    /// that launched them is not called done while they run. A paused run
+    /// counts again once it is resumed.
     #[must_use]
     pub fn pending_deliveries(&self, thread: ThreadId) -> u32 {
         let pending = self
             .delivery_watches
             .iter()
-            .filter(|watch| watch.launch_thread_id == thread)
+            .filter(|watch| watch.launch_thread_id == thread && !watch.paused)
             .count();
         u32::try_from(pending).unwrap_or(u32::MAX)
     }
@@ -629,6 +634,9 @@ impl WorkflowCoordinator {
         run.time.updated = Utc::now();
         run.time.completed = None;
         let run = self.repository.save_workflow_run(&run).await?;
+        if let Some(mut watch) = self.delivery_watches.get_mut(&id) {
+            watch.paused = false;
+        }
         drop(guard);
         self.append_log(
             id,
@@ -900,6 +908,10 @@ impl WorkflowCoordinator {
         run.time.completed = (status == WorkflowRunStatus::Cancelled).then_some(run.time.updated);
         run.error = (status == WorkflowRunStatus::Cancelled).then(|| message.to_owned());
         let saved = self.repository.save_workflow_run(&run).await?;
+        // Paused, the run owes nothing; cancelled, it owes its notice.
+        if let Some(mut watch) = self.delivery_watches.get_mut(&id) {
+            watch.paused = status == WorkflowRunStatus::Paused;
+        }
         if let Some(active) = self.active.get(&id) {
             active.cancellation.cancel();
         }
