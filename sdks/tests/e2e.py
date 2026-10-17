@@ -233,6 +233,7 @@ def scenario(mode):
                 == "completed"
             )
             assert c("active_turn", tid) is None
+            assert c("thread_activity", tid) == {"activeTurn": None, "background": 0}
             items = c("list_items", tid)
             assert any(x["data"].get("text") == "Echo: Hello SDK" for x in items)
             assert c("list_items", tid, {"after": items[-1]["sequence"]}) == []
