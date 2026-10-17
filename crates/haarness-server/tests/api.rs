@@ -7015,11 +7015,9 @@ async fn a_forked_command_moved_to_the_background_delivers_its_result() {
         Arc::new(StaticProviderRegistry::new(vec![
             Arc::new(Capturing::default()) as Arc<dyn ModelProvider>,
         ])),
-        Arc::new(haarness_server::NativeToolRegistry::new(
-            workspace.to_path_buf(),
-        )),
+        Arc::new(haarness_server::NativeToolRegistry::new(workspace.clone())),
         EventBus::new(2048),
-        workspace.to_path_buf(),
+        workspace.clone(),
         String::new(),
         config,
     ));
