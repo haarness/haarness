@@ -9627,6 +9627,31 @@ test("universal search opens settings controls, shortcuts, files and commands di
   expect(errors).toEqual([]);
 });
 
+test("universal search keeps each result's row while other chats change, so a click on it lands", async () => {
+  const target = await client.createThread({ title: "Steadyrow result", provider: "echo", model: "echo-1" });
+  const busy = await client.createThread({ title: "Steadyrow neighbour", provider: "echo", model: "echo-1" });
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("Steadyrow");
+  const option = page.getByRole("option", { name: "Steadyrow result", exact: true });
+  await expect(option).toBeVisible();
+  const row = (await option.elementHandle())!;
+  // Activity in another chat rebuilds the results: a rename, then a whole turn.
+  await client.updateThread(busy.id, { title: "Steadyrow neighbour renamed" });
+  await expect(page.getByRole("option", { name: "Steadyrow neighbour renamed", exact: true })).toBeVisible();
+  await client.startTurn(busy.id, { text: "keep the results busy", requestId: crypto.randomUUID() });
+  await expect.poll(() => client.activeTurns().then((turns) => turns.length)).toBe(0);
+  expect(await row.evaluate((element) => element.isConnected)).toBe(true);
+  // A change to the result's own chat shows in the same row.
+  await client.updateThread(target.id, { title: "Steadyrow result renamed" });
+  await expect(page.getByRole("option", { name: "Steadyrow result renamed", exact: true })).toBeVisible();
+  expect(await row.evaluate((element) => element.isConnected && element.getAttribute("aria-label"))).toBe("Steadyrow result renamed");
+  await row.click();
+  await expect(page.getByRole("dialog", { name: "Universal search" })).toHaveCount(0);
+  await expect(page.locator(".session-bar-name, .workspace-tab.active")).toContainText("Steadyrow result renamed");
+  await client.updateThread(busy.id, { archived: true });
+  expect(errors).toEqual([]);
+});
+
 test("universal search includes all conversations and navigates collapsed projects and worktrees", async () => {
   test.setTimeout(180000);
   const retained = [];
