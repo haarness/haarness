@@ -3974,4 +3974,95 @@ mod tests {
         connection.abort();
         std::fs::remove_dir_all(&computer.root).unwrap();
     }
+    #[tokio::test]
+    async fn a_stop_followed_unseen_by_a_turn_that_left_work_running_is_not_an_end() {
+        let work = Uuid::now_v7();
+        let (computer, home) = watched_home(&[(work, "Work")]).await;
+        home.state.lock().unwrap().activity = true;
+        let (relay, mut frames) =
+            fake_relay(vec![Relay::Record(&["attention.v1", "attention.working"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        next_attention(&mut frames).await;
+        // A stop, then a follow-up turn whose events are not read yet: it
+        // launched a helper and ended while that helper works.
+        let (stop, follow_up) = (Uuid::now_v7(), Uuid::now_v7());
+        home.emit(
+            "turn.finished",
+            work,
+            work,
+            finished_turn(stop, work, "interrupted"),
+        );
+        {
+            let mut state = home.state.lock().unwrap();
+            state.background.insert(work, 1);
+            state.last_turns = Some(HashMap::from([(
+                work,
+                finished_turn(follow_up, work, "completed"),
+            )]));
+        }
+        // Held on the follow-up: working, and nothing reported.
+        let held = attention_where(&mut frames, |frame| frame["working"] == json!([work])).await;
+        assert_eq!(held["finished"], json!([]), "{held}");
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        while let Ok(frame) = frames.try_recv() {
+            assert_eq!(frame["finished"], json!([]), "{frame}");
+        }
+        // That helper is stopped while the chat is idle: the follow-up is
+        // where it stopped.
+        home.state.lock().unwrap().background.remove(&work);
+        home.emit("task.updated", work, work, task_update("cancelled"));
+        let stopped = attention_where(&mut frames, |frame| !finished_turns(frame).is_empty()).await;
+        assert_eq!(finished_turns(&stopped), [json!(follow_up)], "{stopped}");
+        assert_eq!(stopped["finished"][0]["status"], "interrupted");
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_paused_workflow_lets_its_chat_stop_and_a_resumed_one_makes_it_work_again() {
+        let (computer, home, mut frames, connection, work, launch) =
+            chat_held_for_background_work(true).await;
+        let run_thread = Uuid::now_v7();
+        let workflow = |status: &str| json!({"info": {"status": status, "threadId": run_thread}});
+        // The only work the chat waits on is paused: it is quiet, stopped.
+        home.state.lock().unwrap().background.remove(&work);
+        home.emit("workflow.updated", run_thread, work, workflow("paused"));
+        let stopped = attention_where(&mut frames, |frame| !finished_turns(frame).is_empty()).await;
+        assert_eq!(finished_turns(&stopped), [json!(launch)], "{stopped}");
+        assert_eq!(stopped["finished"][0]["status"], "interrupted");
+        assert_eq!(stopped["working"], json!([]));
+        // Resumed, the chat works again before any result arrives.
+        home.state.lock().unwrap().background.insert(work, 1);
+        home.emit("workflow.updated", run_thread, work, workflow("running"));
+        attention_where(&mut frames, |frame| frame["working"] == json!([work])).await;
+        // Its result is the chat's last turn.
+        home.state.lock().unwrap().background.remove(&work);
+        let delivered = Uuid::now_v7();
+        home.state
+            .lock()
+            .unwrap()
+            .last_turns
+            .as_mut()
+            .unwrap()
+            .insert(work, finished_turn(delivered, work, "completed"));
+        home.emit(
+            "turn.started",
+            work,
+            work,
+            finished_turn(delivered, work, "running"),
+        );
+        home.emit(
+            "turn.finished",
+            work,
+            work,
+            finished_turn(delivered, work, "completed"),
+        );
+        let done = attention_where(&mut frames, |frame| {
+            finished_turns(frame).contains(&json!(delivered))
+        })
+        .await;
+        assert_eq!(done["working"], json!([]), "{done}");
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
 }
