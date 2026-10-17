@@ -150,3 +150,41 @@ test("reloading the window keeps every open chat tab and the active one", async 
   await expect(page.getByRole("tab", { name: "Reload two", exact: true })).toHaveAttribute("aria-selected", "true");
   expect(errors).toEqual([]);
 });
+
+test("archiving a chat closes its background tab, while the chat on screen stays open to restore", async () => {
+  const names = ["Archive kept", "Archive from sidebar", "Archive elsewhere"];
+  const ids: Record<string, string> = {};
+  for (const title of names) {
+    ids[title] = (await client.createThread({ title, provider: "echo", model: "echo-1" })).id;
+    await sidebar().getByRole("button", { name: title, exact: true }).click();
+  }
+  await page.getByRole("tab", { name: "Archive kept", exact: true }).click();
+  const tab = (name: string) => page.getByRole("tab", { name, exact: true });
+  // From the sidebar row's own archive button: the row and the tab both go.
+  await sidebar().getByRole("button", { name: "Archive chat Archive from sidebar", exact: true }).click();
+  await expect(sidebar().getByRole("button", { name: "Archive from sidebar", exact: true })).toHaveCount(0);
+  await expect(tab("Archive from sidebar")).toHaveCount(0);
+  // From another client: the open window follows.
+  await client.updateThread(ids["Archive elsewhere"], { archived: true });
+  await expect(tab("Archive elsewhere")).toHaveCount(0);
+  await expect(tab("Archive kept")).toHaveAttribute("aria-selected", "true");
+  // The chat on screen stays, says it is archived, and restores.
+  await page.getByRole("button", { name: "Chat actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Archive", exact: true }).click();
+  const notice = page.locator(".archived-notice");
+  await expect(notice).toContainText("This chat is archived.");
+  await expect(tab("Archive kept")).toHaveAttribute("aria-selected", "true");
+  await page.screenshot({ path: test.info().outputPath("archived-on-screen.png") });
+  await notice.getByRole("button", { name: "Restore", exact: true }).click();
+  await expect(notice).toHaveCount(0);
+  await expect(sidebar().getByRole("button", { name: "Archive kept", exact: true })).toBeVisible();
+  // Closed tabs stay closed after a reload; restoring a chat does not reopen one.
+  const open = await tabs().allTextContents();
+  await client.updateThread(ids["Archive from sidebar"], { archived: false });
+  await expect(sidebar().getByRole("button", { name: "Archive from sidebar", exact: true })).toBeVisible();
+  await expect(tabs()).toHaveText(open);
+  await reload();
+  await expect(tabs()).toHaveText(open);
+  await expect(tab("Archive kept")).toHaveAttribute("aria-selected", "true");
+  expect(errors).toEqual([]);
+});
