@@ -1064,10 +1064,18 @@ pub struct BackgroundTaskInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadActivity {
-    /// The turn running in this chat, if any.
+    /// The turn running in this chat, if any. Always sent, null when none.
+    #[schema(required = true)]
     pub active_turn: Option<Turn>,
     /// Background results this chat is still owed.
     pub background: u32,
+    /// The chat's newest turn by creation, whatever its status; null for a
+    /// chat without turns. Read after the other two, so a turn that started
+    /// and ended since an earlier read shows here. Always sent; servers
+    /// before 2026-10-17 leave it out.
+    #[serde(default)]
+    #[schema(required = true)]
+    pub last_turn: Option<Turn>,
 }
 
 /// User input against a thread that may already have a running turn. When a
