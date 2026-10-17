@@ -917,14 +917,25 @@ impl WorkflowCoordinator {
         }
         self.publish_updated(&saved);
         drop(guard);
-        self.append_log(id, message.to_owned(), WorkflowLogSource::Platform)
-            .await?;
-        self.wait_until_inactive(id).await?;
-        let run = self.get(id, None).await?;
+        let logged = self
+            .append_log(id, message.to_owned(), WorkflowLogSource::Platform)
+            .await;
+        let stopped = self.wait_until_inactive(id).await;
+        let run = self.get(id, None).await;
         if status == WorkflowRunStatus::Cancelled {
-            self.terminal_ready(run.clone()).await;
+            // The run is cancelled even when its log or its stop did not
+            // complete: its launcher gets the result, or at least stops
+            // waiting for one, so it is never owed it forever.
+            match &run {
+                Ok(run) => self.terminal_ready(run.clone()).await,
+                Err(_) => {
+                    self.delivery_watches.remove(&id);
+                }
+            }
         }
-        Ok(run)
+        logged?;
+        stopped?;
+        run
     }
 
     async fn terminal_ready(&self, run: WorkflowRun) {
