@@ -127,6 +127,14 @@ async function send(text: string) {
     .getByRole("button", { name: /Send message|Send guidance/ })
     .click();
 }
+/** Waits until no turn runs, so the next message starts a turn of its own
+ * instead of joining the running one as guidance (which a loaded machine
+ * makes likely when one tool message follows another). */
+async function settled() {
+  await expect
+    .poll(() => client.activeTurns().then((turns) => turns.length))
+    .toBe(0);
+}
 const errors: string[] = [];
 const extraWorkspaces: string[] = [];
 
@@ -3144,20 +3152,26 @@ test("conversation tab order survives reopening and uses horizontal keyboard con
   await expect(page.locator(".workspace-tabs [role=tab]").nth(1)).toHaveText(
     "Tab Two",
   );
-  const expected = await page
-    .locator(".workspace-tabs [role=tab]")
-    .allTextContents();
+  // The open tabs come back with the window, in their saved order. A chat an
+  // earlier scenario archived while it was on screen stays closed (an agent's
+  // own chat, which the server archives when its work ends, does not).
+  const archived = new Set(
+    (await client.listThreads({ archived: true }))
+      .filter((thread) => thread.archived && !thread.isSubagent)
+      .map((thread) => thread.id),
+  );
+  const tabs = page.locator(".workspace-tabs [role=tab]");
+  const expected: string[] = [];
+  for (const tab of await tabs.all())
+    if (!archived.has((await tab.getAttribute("data-cycle-tab")) ?? ""))
+      expected.push((await tab.textContent()) ?? "");
+  expect(expected).toContain("Tab Two");
   await page.reload();
   await expect(page.locator(".application")).toHaveAttribute("data-project-ready", "true");
+  await expect(tabs).toHaveText(expected);
   const disclosure = page.getByRole("button", { name: /^(Expand|Collapse) project workspace$/ });
   if ((await disclosure.getAttribute("aria-expanded")) !== "true") await disclosure.click();
   await expect(disclosure).toHaveAttribute("aria-expanded", "true");
-  for (const title of expected)
-    await page
-      .locator(".sessions")
-      .getByRole("button", { name: title, exact: true })
-      .click();
-  await expect(page.locator(".workspace-tabs [role=tab]")).toHaveText(expected);
 });
 
 test("closing a session tab returns to the previous active conversation", async () => {
@@ -12502,6 +12516,7 @@ test("canvas preview runs isolated scripts, refreshes versions, compares and res
   const second = first.replace('Canvas first', 'Canvas second');
   await send('!tool write ' + JSON.stringify({ path: 'canvas.html', content: first }));
   await expect.poll(() => readFile(join(workspace, 'canvas.html'), 'utf8').catch(() => '')).toBe(first);
+  await settled();
   await send('!tool preview {"filePath":"canvas.html","title":"Canvas demo"}');
   const banner = page.locator('.preview-banner').last();
   await expect(banner).toContainText('Canvas demo');
@@ -12519,8 +12534,10 @@ test("canvas preview runs isolated scripts, refreshes versions, compares and res
   await page.locator('.file-actions').getByRole('button', { name: 'Preview', exact: true }).click();
   await banner.getByRole('button', { name: 'Preview', exact: true }).click();
   await expect(banner.locator('.preview-inline .html-preview')).toBeVisible();
+  await settled();
   await send('!tool edit ' + JSON.stringify({ path: 'canvas.html', old: 'Canvas first', new: 'Canvas second' }));
   await expect.poll(() => readFile(join(workspace, 'canvas.html'), 'utf8')).toBe(second);
+  await settled();
   await send('!tool preview {"filePath":"canvas.html","title":"Canvas updated"}');
   await expect(page.locator('.preview-banner')).toHaveCount(2);
   await expect(content().getByRole('heading', { name: 'Canvas second' })).toBeVisible();
@@ -12559,7 +12576,12 @@ test("canvas preview blocks network and navigation without affecting chat or nor
   if (!address || typeof address === 'string') throw Error('Missing receiver');
   const url = `http://127.0.0.1:${address.port}`;
   try {
-    const html = `<!doctype html><h1>Contained preview</h1><a href="${url}/link">Leave</a><img src="${url}/image"><script>fetch('${url}/fetch').catch(()=>{});setTimeout(()=>{location.href='${url}/navigation'},500);</script><meta http-equiv="refresh" content="1;url=${url}/refresh">`;
+    // The page's own navigations (a script and a meta refresh) start when the
+    // link is clicked, not at load: a blocked navigation can replace the page,
+    // and on a loaded machine one started at load could do that before the
+    // heading and link are checked.
+    const navigate = `setTimeout(()=>{location.href='${url}/navigation'},300);var m=document.createElement('meta');m.httpEquiv='refresh';m.content='1;url=${url}/refresh';document.head.appendChild(m)`;
+    const html = `<!doctype html><h1>Contained preview</h1><a href="${url}/link" onclick="${navigate}">Leave</a><img src="${url}/image"><script>fetch('${url}/fetch').catch(()=>{});</script>`;
     await writeFile(join(workspace, 'contained.html'), html);
     await send('!tool preview {"filePath":"contained.html"}');
     await expect(page.locator('.preview-banner')).toBeVisible();
@@ -12585,6 +12607,7 @@ test("canvas preview preserves unsaved code, renders markdown on request and nev
   await page.locator('.file-actions').getByRole('button', { name: 'Code', exact: true }).click();
   const editor = page.locator('.file-preview .cm-content');
   await editor.fill('<h1>Unsaved canvas</h1>');
+  await settled();
   await send('!tool preview {"filePath":"draft-preview.html"}');
   await expect(page.locator('.preview-banner')).toHaveCount(2);
   await expect(editor).toContainText('Unsaved canvas');
@@ -12593,6 +12616,7 @@ test("canvas preview preserves unsaved code, renders markdown on request and nev
   await expect.poll(() => readFile(join(workspace, 'draft-preview.html'), 'utf8')).toContain('Unsaved canvas');
   await expect(editor).toBeVisible();
   await writeFile(join(workspace, 'report-preview.md'), '# Rendered report\n\nPreview markdown content.');
+  await settled();
   await send('!tool preview {"filePath":"report-preview.md"}');
   await expect(page.locator('.file-preview .document-preview')).toContainText('Rendered report');
   await expect(page.locator('.preview-banner')).toHaveCount(3);
