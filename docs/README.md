@@ -5,7 +5,7 @@ configuration reference, architecture, and dated engineering records. To learn t
 start with the user guides at **<https://haarness.ai/docs>**; where a page here covers the same
 ground, it links to the user guide at the top.
 
-New to the code? Read the [README](../README.md) quick start, then [CONTRIBUTING.md](../CONTRIBUTING.md)
+New to the code? Read the [README](../README.md) quick start and the [reference](REFERENCE.md), then [CONTRIBUTING.md](../CONTRIBUTING.md)
 and the [build and run skill](../.skills/haarness-build-run/SKILL.md).
 
 ## Guides
@@ -31,6 +31,7 @@ and the [build and run skill](../.skills/haarness-build-run/SKILL.md).
 
 ## Reference
 
+- [Haarness reference](REFERENCE.md): the long-form tour — command examples, servers and clients, worktrees, the terminal UI, agents and workflows, schedules, plugins, providers and the full configuration.
 - [Server API v1](API.md): authentication, every resource group, events and capabilities.
 - [Configuration and resource scopes](CONFIGURATION-SCOPES.md): where configuration, credentials and data live, precedence, instruction files, hooks.
 - [Model catalogs](MODELS.md): live discovery, fallback catalogs, per-model metadata and update history.
