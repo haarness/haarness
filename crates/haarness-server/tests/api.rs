@@ -6856,6 +6856,142 @@ async fn a_stop_owns_the_background_children_so_its_turn_owes_nothing() {
     handle.shutdown().await.unwrap();
 }
 
+/// A trusted workspace served with a real workflow coordinator and the echo
+/// provider; None when Bun is unavailable.
+async fn workflow_activity_server() -> Option<(
+    haarness_server::ServerHandle,
+    Arc<AgentRuntime>,
+    String,
+    std::path::PathBuf,
+)> {
+    let workspace = std::env::temp_dir().join(format!(
+        "haarness-workflow-activity-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let executor = WorkflowExecutor::new(ExecutorConfig::default());
+    if !executor.capability().executable {
+        eprintln!("skipping background workflow activity fixture: Bun is unavailable");
+        let _ = std::fs::remove_dir_all(workspace);
+        return None;
+    }
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let events = EventBus::new(256);
+    let runtime = Arc::new(AgentRuntime::with_workspace(
+        store.clone(),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Echo) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        events.clone(),
+        workspace.clone(),
+    ));
+    let host = WorkflowRuntimeAdapter::new();
+    host.attach(&runtime);
+    let workflows = Arc::new(WorkflowCoordinator::new(
+        store,
+        Arc::new(WorkflowCatalog::for_workspace(&workspace)),
+        executor,
+        host,
+        events,
+        workspace.clone(),
+        true,
+    ));
+    let handle = activity_server(runtime.clone(), Some(workflows), &workspace).await;
+    let base = format!("http://{}", handle.address);
+    Some((handle, runtime, base, workspace))
+}
+
+#[tokio::test]
+async fn a_paused_background_workflow_owes_nothing_until_it_is_resumed() {
+    let Some((handle, runtime, base, workspace)) = workflow_activity_server().await else {
+        return;
+    };
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let mut subscription = runtime.events().subscribe(None).receiver;
+    let client = reqwest::Client::new();
+    let run: WorkflowRun = client
+        .post(format!("{base}/v1/workflows/run"))
+        .bearer_auth("activity-token")
+        .json(&serde_json::json!({
+            "source": r#"
+export default workflow({
+  name: "paused-activity",
+  async run() {
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    return { ok: true }
+  },
+})
+"#,
+            "threadId": thread.id,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_activity(&settled_activity(&base, thread.id).await, 1, None);
+    let control = |action: &'static str| {
+        let request = client
+            .post(format!("{base}/v1/workflows/runs/{}/{action}", run.id))
+            .bearer_auth("activity-token");
+        async move {
+            request
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json::<WorkflowRun>()
+                .await
+                .unwrap()
+        }
+    };
+
+    // Paused, the run is not working and owes the chat nothing.
+    assert_eq!(control("pause").await.status, WorkflowRunStatus::Paused);
+    assert_activity(&settled_activity(&base, thread.id).await, 0, None);
+    let turn = runtime
+        .start_turn(thread.id, turn_request("while paused"))
+        .await
+        .unwrap();
+    let finished = next_finished(&mut subscription, thread.id).await;
+    assert_eq!(finished.turn_id, Some(turn.id));
+    assert!(
+        finished.payload.get("background").is_none(),
+        "{}",
+        finished.payload
+    );
+
+    // Resumed, it is owed again, and its result starts the chat's last turn.
+    assert_eq!(control("resume").await.status, WorkflowRunStatus::Running);
+    assert_activity(&settled_activity(&base, thread.id).await, 1, Some(turn.id));
+    let delivered = next_finished(&mut subscription, thread.id).await;
+    assert_ne!(delivered.turn_id, Some(turn.id));
+    assert!(
+        delivered.payload.get("background").is_none(),
+        "{}",
+        delivered.payload
+    );
+    assert_activity(
+        &settled_activity(&base, thread.id).await,
+        0,
+        delivered.turn_id,
+    );
+    handle.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
 #[tokio::test]
 async fn a_running_turn_shows_in_activity_and_a_published_chat_may_read_it() {
     let workspace = std::env::temp_dir();
