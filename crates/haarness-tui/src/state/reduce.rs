@@ -993,7 +993,7 @@ impl App {
                     self.pending_permissions.clear();
                     self.permission_focus = false;
                 }
-                let end = TurnEnd::from_status(&event.payload["status"]);
+                let end = TurnEnd::from_payload(&event.payload);
                 if on_current {
                     let goal_continues = self
                         .goal

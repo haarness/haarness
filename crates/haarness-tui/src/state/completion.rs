@@ -7,7 +7,11 @@
 //! turn that starts in the same conversation inside the grace drops the held
 //! banner and carries the run's start forward, so the last turn of a queue is
 //! judged by how long the whole queue took and announced once. A failure is
-//! never taken back and goes out at once; a stop says nothing.
+//! never taken back and goes out at once; a stop says nothing. A turn that
+//! ends while work it started in the background (a child agent, a workflow
+//! run) still owes the conversation a result is no end at all: it drops a
+//! held banner and carries the run on, and the turn that receives the last
+//! result is announced.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -24,18 +28,25 @@ pub const COMPLETION_GRACE: Duration = Duration::from_millis(500);
 /// because the reader is still looking at them.
 const NOTIFY_AFTER: Duration = Duration::from_secs(20);
 
-/// How a turn ended, read from the `turn.finished` payload's `status`.
+/// How a turn ended, read from its `turn.finished` payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnEnd {
     Completed,
     Failed,
+    /// Completed or failed while background work it started still owes the
+    /// conversation a result (the payload's `background` count).
+    Owed,
     /// Interrupted (a stop), or anything else that is not a completion.
     Stopped,
 }
 
 impl TurnEnd {
-    pub fn from_status(status: &serde_json::Value) -> Self {
-        match status.as_str() {
+    pub fn from_payload(payload: &serde_json::Value) -> Self {
+        let owed = payload["background"]
+            .as_u64()
+            .is_some_and(|count| count > 0);
+        match payload["status"].as_str() {
+            Some("completed" | "failed") if owed => Self::Owed,
             Some("completed") => Self::Completed,
             Some("failed") => Self::Failed,
             _ => Self::Stopped,
@@ -117,6 +128,13 @@ impl App {
                 // reader watching this conversation.
                 if elsewhere || !self.terminal_focused {
                     self.show_toast(None, message, ToastVariant::Error, Duration::from_secs(8));
+                }
+            }
+            // Still at work: the turn that receives the last result is the
+            // end, judged from when this run began.
+            TurnEnd::Owed => {
+                if let Some(started) = run.into_iter().chain(started).min() {
+                    self.completions.runs.insert(thread, started);
                 }
             }
             // The reader (or another client) asked for the stop.
