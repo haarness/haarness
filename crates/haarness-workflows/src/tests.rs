@@ -1264,6 +1264,24 @@ async fn a_background_run_is_pending_for_its_launcher_until_its_result_is_handed
     );
     assert_eq!(coordinator.pending_deliveries(launch.id), 0);
 
+    // A run cancelled with its session never reports back, so it is owed
+    // nothing from the moment it is cancelled.
+    let mut stopped = portable_start(BLOCKING_PORTABLE_WORKFLOW);
+    stopped.thread_id = Some(launch.id);
+    coordinator
+        .start(stopped)
+        .await
+        .expect("background workflow starts");
+    host.wait_for_request().await;
+    assert_eq!(coordinator.pending_deliveries(launch.id), 1);
+    coordinator
+        .cancel_for_launch_threads(&HashSet::from([launch.id]))
+        .await
+        .expect("session workflows cancel");
+    assert_eq!(coordinator.pending_deliveries(launch.id), 0);
+    tokio::task::yield_now().await;
+    assert_eq!(host.notifications().len(), 1, "no delivery after the stop");
+
     coordinator
         .cancel(detached.id)
         .await
