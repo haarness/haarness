@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 
 // Real Electron, IPC, disk preferences and a project daemon on the echo
 // provider. Only the native folder picker is given a deterministic answer.
@@ -228,5 +229,35 @@ test("each project keeps its own tabs across a switch to another project and bac
   await expect(second).toHaveClass(/current/);
   await expect(tabs()).toHaveText(["Second one", "Second two"]);
   await expect(page.getByRole("tab", { name: "Second one", exact: true })).toHaveAttribute("aria-selected", "true");
+  expect(errors).toEqual([]);
+});
+
+test("an agent's own chat keeps its tab when the server archives it as the agent's work ends", async () => {
+  await sidebar().getByRole("button", { name: "Reload two", exact: true }).click();
+  await expect(sidebar()).toHaveClass(/current/);
+  const parent = await client.createThread({ title: "Agent parent", provider: "echo", model: "echo-1" });
+  const witness = await client.createThread({ title: "Agent witness", provider: "echo", model: "echo-1" });
+  for (const title of ["Agent witness", "Agent parent"])
+    await sidebar().getByRole("button", { name: title, exact: true }).click();
+  await client.startTurn(parent.id, {
+    requestId: randomUUID(),
+    text: "!tool task " + JSON.stringify({ description: "Tab child", agent: "general", prompt: "child says hello" }),
+  });
+  await expect.poll(() => client.activeTurns().then(turns => turns.length)).toBe(0);
+  await page.getByRole("button", { name: "Open agent task: Tab child", exact: true }).click();
+  const child = await page.locator(".workspace-tabs [role=tab][aria-selected=true]").getAttribute("data-cycle-tab");
+  expect(child).toBeTruthy();
+  expect(child).not.toBe(parent.id);
+  const childTab = page.locator(`.workspace-tabs [data-cycle-tab="${child}"]`);
+  await page.getByRole("tab", { name: "Agent parent", exact: true }).click();
+  // The server archives an agent's chat itself when the agent's work ends.
+  await client.updateThread(child!, { archived: true });
+  // Archived after it, the witness's tab closing shows the window has seen both.
+  await client.updateThread(witness.id, { archived: true });
+  await expect(page.getByRole("tab", { name: "Agent witness", exact: true })).toHaveCount(0);
+  await expect(childTab).toHaveCount(1);
+  await reload();
+  await expect(childTab).toHaveCount(1);
+  await expect(page.getByRole("tab", { name: "Agent parent", exact: true })).toHaveAttribute("aria-selected", "true");
   expect(errors).toEqual([]);
 });

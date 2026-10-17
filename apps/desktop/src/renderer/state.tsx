@@ -44,7 +44,14 @@ import {
 } from "../shared";
 import { cloudServers, localServer, serverKey, serverProjects } from "../servers";
 import { freshChat, landItems, reduceEvent, type Live } from "./sync";
-import { newlyArchived, savedTabs, tabsKey, unarchivedChats } from "./chat-tabs";
+import {
+  archivedByReader,
+  newlyArchived,
+  sameTabs,
+  savedTabs,
+  tabsKey,
+  unarchivedChats,
+} from "./chat-tabs";
 import { themeColors } from "../themes";
 import {
   cleanProjectMeta,
@@ -1375,12 +1382,16 @@ function createApp() {
       // and load chat state and model choices together on remote connections.
       await Promise.all([hydrate(view.info), catalogs(false, view.info)]);
       if (!valid()) return false;
-      const reopened = savedTabs(await rememberedTabs, state.threads);
+      const remembered = await rememberedTabs;
       if (!valid()) return false;
+      const reopened = savedTabs(remembered, state.threads);
       if (reopened.length) {
         set("tabs", (tabs) => [...new Set([...reopened, ...tabs])]);
         tabHistory = [...new Set([...reopened, ...tabHistory])];
       }
+      // Keep the record to what is open now: without the chats archived or
+      // gone meanwhile, and with any chat chosen while the project loaded.
+      if (!sameTabs(remembered, state.tabs)) rememberTabs(view.id);
       if (newChat || newChatAttempt === attempt)
         await window.haarness.storage("session:" + view.id, "");
       const saved = await window.haarness.storage("session:" + view.id);
@@ -1389,7 +1400,9 @@ function createApp() {
         !newChat &&
         newChatAttempt !== attempt &&
         typeof saved === "string" &&
-        state.threads.some((item) => item.id === saved && !item.archived)
+        state.threads.some(
+          (item) => item.id === saved && !archivedByReader(item),
+        )
       )
         await choose(saved);
       else if (!newChat && newChatAttempt !== attempt && saved == null) {
