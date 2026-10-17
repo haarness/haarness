@@ -1,0 +1,27 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { savedTabs, tabsKey } from "../src/renderer/chat-tabs";
+
+const threads = [
+  { id: "one", archived: false },
+  { id: "two", archived: false },
+  { id: "old", archived: true },
+];
+
+test("saved chat tabs reopen in their saved order", () => {
+  assert.deepEqual(savedTabs(["two", "one"], threads), ["two", "one"]);
+});
+
+test("tabs of archived, missing or repeated chats are not reopened", () => {
+  assert.deepEqual(savedTabs(["one", "old", "gone", "one", "two"], threads), ["one", "two"]);
+});
+
+test("a damaged or absent record reopens no tabs", () => {
+  for (const saved of [null, undefined, "one", { one: true }, [1, null, { id: "one" }]])
+    assert.deepEqual(savedTabs(saved, threads), [], JSON.stringify(saved));
+});
+
+test("each project remembers its own tabs", () => {
+  assert.notEqual(tabsKey("project-a"), tabsKey("project-b"));
+  assert.match(tabsKey("project-a"), /^chat-tabs:v1:/);
+});
