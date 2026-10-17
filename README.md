@@ -126,22 +126,28 @@ Provider variables such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` work as well
 
 **2. Ask for something.** Type your request at **Ask anything…** and press Enter. `/` lists commands,
 `@` attaches files or hands work to an agent, and `!` runs a shell command. Quitting leaves running
-work on the server; `haarness -c` continues the last chat. In Desktop, choose **Open project**, pick a
-folder, and the **Welcome to Haarness** dialog connects a provider. Full guide:
+work on the server; `haarness -c` continues the last chat. Full guide:
 [Your first chat](https://haarness.ai/docs/start/first-session).
+
+In Desktop, choose **Open project** and pick a folder. The **Welcome to Haarness** dialog connects
+Haarness Cloud or a provider; then type in the message box and press Enter. See the
+[Desktop first run](docs/DESKTOP.md#first-run) and the full guide,
+[Install and first run](https://haarness.ai/docs/desktop/install).
 
 **3. Script it.**
 
 ```sh
 haarness run "Summarize what this project does"
 git diff | haarness run "Review this change"
-haarness run --file ./brief.pdf "Check the code against this brief"
+haarness run -m anthropic/claude-sonnet-5-5 --file ./brief.pdf "Check the code against this brief"
 haarness run --format json "List the open TODOs"   # newline-delimited JSON records
 ```
 
-With no terminal to ask at (a script, CI), a permission request is refused and the run stops, naming
-what was asked: allow it with a permission rule, or pass `--yolo` where the damage is bounded. Ctrl-C
-stops the run's work on the server and exits with status 130. See
+`haarness run` uses your default model, else a connected provider's. With no terminal to ask at (a
+script, CI), a permission request is refused and the run stops, naming what was asked: allow it with a
+permission rule, or pass `--yolo` where the damage is bounded. `--auto` instead puts the chat in Auto,
+where it stays for every app until switched back. Ctrl-C stops the run's work on the server and exits
+with status 130. See
 [Run a prompt from a script or CI](https://haarness.ai/docs/cli/headless-runs).
 
 ## Everywhere you work
@@ -155,7 +161,7 @@ stops the run's work on the server and exits with status 130. See
 | **Your Chrome** | Haarness for Chrome lets agents use your own signed-in Chrome; every site asks in each chat. [Use your Chrome](https://haarness.ai/docs/desktop/use-your-chrome) |
 | **Your product** | A versioned `/v1` server API with generated TypeScript and Python SDKs. [API](docs/API.md) · [SDKs](sdks/README.md) |
 | **Haarness Cloud** | Sessions that keep running, schedules, remote control of your own computers, one account for every model. [haarness.ai](https://haarness.ai) |
-| **iPhone** | Follow every chat, approve and answer from the lock screen. [Haarness for iPhone](https://github.com/haarness/haarness-ios) |
+| **iPhone** | Follow every chat, approve and answer from the Lock Screen. [Haarness for iPhone](https://github.com/haarness/haarness-ios) |
 
 <p align="center">
   <img alt="The Haarness terminal UI after a finished chat" src=".github/assets/tui.png" width="100%">
@@ -168,22 +174,31 @@ stops the run's work on the server and exits with status 130. See
 > approval prompts before allowing tools to operate.
 
 Each chat is in **Review** (the default) or **Auto**, stored on the server and shared by every client:
-**Ctrl+Y** in the TUI or the shield pill in Desktop's composer switches it. In Review, edits and
-commands inside the project run without asking; Haarness asks before touching files outside the
-project, reading secrets such as `.env`, switching agents or generating paid media, plus anything your
-own rules set to ask. Auto answers those itself — except Haarness Cloud actions that spend money or
-delete something, and a website in your own Chrome, which only a person can allow.
+**Ctrl+Y** in the TUI or the shield pill in Desktop's composer changes the open chat, and the choice
+survives quitting. In Review, edits and commands inside the project run without asking; Haarness asks
+before using files outside the project, reading secrets such as `.env`, switching agents or generating
+paid media, plus anything your own rules set to ask. Desktop's browser asks about a site only when
+**Settings → Browser** sets it to **Requires approval**. Auto answers those requests itself, except
+Haarness Cloud actions that spend money or delete something, which always ask, a site set to
+**Requires approval**, which asks unless **Remember site approvals** is on, and a website in your own
+Chrome, which only a person can allow.
 
 | Key | Answer |
 | --- | --- |
 | `y` / `n` | **Allow once** / **Reject** |
-| `a` | **Always** — every chat on this server, until it stops |
-| `w` / `r` | **This folder** / **Repository** — saved, so they survive a restart |
+| `a` | **Always** — every chat on this server, until the server stops |
+| `w` / `r` | **This folder** / **Repository** — saved, so they still apply after a restart |
 | `u` | **Once + Auto** — allow this one and switch the chat to Auto |
 
-`a`, `w`, `r` and `u` first show what they grant. An "always" answer saves the rule shown on the card,
-which is a pattern: approving `rm -rf build` allows every `rm` command. See
-[Permissions and approvals](https://haarness.ai/docs/security/permissions).
+`a`, `w`, `r` and `u` first show what they grant; Enter or the same key again confirms. An "always"
+answer saves the rule shown on the card, which is a pattern: approving `rm -rf build` allows every `rm`
+command. See [Permissions and approvals](https://haarness.ai/docs/security/permissions).
+
+**Use your Chrome.** Agents can also work in your own Google Chrome, signed in as you, through the
+Haarness for Chrome extension: set it up with `/chrome` in the TUI, **Settings → Browser → Chrome** in
+Desktop, or `haarness browser setup`. Each new site asks in each chat (**Allow in Chrome**: `a` allows it
+in this chat), and Auto, `--yolo`, hooks and permission rules never answer for you. See
+[Use your Chrome](https://haarness.ai/docs/desktop/use-your-chrome).
 
 ## Usage statistics
 
