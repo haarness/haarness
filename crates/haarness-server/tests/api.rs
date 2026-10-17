@@ -6534,6 +6534,601 @@ async fn background_subagent_returns_immediately_then_delivers_into_the_parent()
             if text == "include this follow-up context in the same child")));
 }
 
+/// A server for `runtime` with the routes under test and nothing else.
+async fn activity_server(
+    runtime: Arc<AgentRuntime>,
+    workflows: Option<Arc<WorkflowCoordinator>>,
+    workspace: &std::path::Path,
+) -> haarness_server::ServerHandle {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    serve(
+        listener,
+        "activity-token",
+        ServerState {
+            browser: None,
+            management: None,
+            runtime,
+            mcp: Arc::new(NoMcp),
+            skills: Arc::new(NoSkills),
+            plugins: None,
+            workflows,
+            workspaces: None,
+            workspace_id: None,
+            workspace: workspace.to_path_buf(),
+            project_trusted: true,
+            language: None,
+        },
+    )
+    .await
+    .unwrap()
+}
+
+/// `GET /v1/threads/{id}/activity` once the chat's turn has let go of it.
+async fn settled_activity(base: &str, thread: haarness_protocol::ThreadId) -> Value {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let activity: Value = reqwest::Client::new()
+                .get(format!("{base}/v1/threads/{thread}/activity"))
+                .bearer_auth("activity-token")
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if activity["activeTurn"].is_null() {
+                return activity;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the finished turn leaves the chat")
+}
+
+/// A quiet chat's activity: no turn runs, `background` results are owed, and
+/// `last` is its newest turn (none for a chat without turns).
+fn assert_activity(activity: &Value, background: u64, last: Option<haarness_protocol::TurnId>) {
+    assert!(activity["activeTurn"].is_null(), "{activity}");
+    assert_eq!(activity["background"], background, "{activity}");
+    let named = activity
+        .get("lastTurn")
+        .unwrap_or_else(|| panic!("lastTurn is always sent: {activity}"));
+    assert_eq!(
+        named["id"].as_str(),
+        last.map(|turn| turn.to_string()).as_deref(),
+        "{activity}"
+    );
+}
+
+/// The next `turn.finished` of `thread`.
+async fn next_finished(
+    events: &mut tokio::sync::broadcast::Receiver<haarness_protocol::EventEnvelope>,
+    thread: haarness_protocol::ThreadId,
+) -> haarness_protocol::EventEnvelope {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event.event_type == "turn.finished" && event.thread_id == Some(thread) {
+                return event;
+            }
+        }
+    })
+    .await
+    .expect("a turn of the chat finishes")
+}
+
+#[tokio::test]
+async fn a_chat_owed_a_background_task_result_is_not_quiet_until_it_is_delivered() {
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    let runtime = Arc::new(runtime);
+    let handle = activity_server(runtime.clone(), None, &workspace).await;
+    let base = format!("http://{}", handle.address);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let mut events = runtime.events().subscribe(None).receiver;
+    let prompt = serde_json::json!({
+        "prompt": "!tool bash {\"command\":\"sleep 2\"}",
+        "agent": "general",
+        "description": "slow independent check",
+        "background": true,
+    });
+    let launch = runtime
+        .start_turn(thread.id, turn_request(&format!("!tool task {prompt}")))
+        .await
+        .unwrap();
+
+    // The launching turn completes while its child works: not the end.
+    let launched = next_finished(&mut events, thread.id).await;
+    assert_eq!(launched.turn_id, Some(launch.id));
+    assert_eq!(launched.payload["status"], "completed");
+    assert_eq!(launched.payload["background"], 1, "{}", launched.payload);
+    assert_activity(
+        &settled_activity(&base, thread.id).await,
+        1,
+        Some(launch.id),
+    );
+    let stored = runtime.turn(launch.id).await.unwrap();
+    assert!(
+        serde_json::to_value(stored)
+            .unwrap()
+            .get("background")
+            .is_none(),
+        "the count is not stored with the turn"
+    );
+
+    // The child's result starts the turn that ends the chat.
+    let delivered = next_finished(&mut events, thread.id).await;
+    assert_ne!(delivered.turn_id, Some(launch.id));
+    assert_eq!(delivered.payload["status"], "completed");
+    assert!(
+        delivered.payload.get("background").is_none(),
+        "{}",
+        delivered.payload
+    );
+    assert_activity(
+        &settled_activity(&base, thread.id).await,
+        0,
+        delivered.turn_id,
+    );
+    assert_eq!(runtime.background_results_owed(thread.id), 0);
+
+    let missing = reqwest::Client::new()
+        .get(format!(
+            "{base}/v1/threads/{}/activity",
+            haarness_protocol::ThreadId::new()
+        ))
+        .bearer_auth("activity-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+    handle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_chat_owed_a_background_workflow_result_is_not_quiet_until_it_is_delivered() {
+    let workspace = std::env::temp_dir().join(format!(
+        "haarness-workflow-activity-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let events = EventBus::new(256);
+    let runtime = Arc::new(AgentRuntime::with_workspace(
+        store.clone(),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Echo) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        events.clone(),
+        workspace.clone(),
+    ));
+    let host = WorkflowRuntimeAdapter::new();
+    host.attach(&runtime);
+    let executor = WorkflowExecutor::new(ExecutorConfig::default());
+    if !executor.capability().executable {
+        eprintln!("skipping background workflow activity fixture: Bun is unavailable");
+        let _ = std::fs::remove_dir_all(workspace);
+        return;
+    }
+    let workflows = Arc::new(WorkflowCoordinator::new(
+        store,
+        Arc::new(WorkflowCatalog::for_workspace(&workspace)),
+        executor,
+        host,
+        events,
+        workspace.clone(),
+        true,
+    ));
+    let handle = activity_server(runtime.clone(), Some(workflows), &workspace).await;
+    let base = format!("http://{}", handle.address);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let mut subscription = runtime.events().subscribe(None).receiver;
+    let run: WorkflowRun = reqwest::Client::new()
+        .post(format!("{base}/v1/workflows/run"))
+        .bearer_auth("activity-token")
+        .json(&serde_json::json!({
+            "source": r#"
+export default workflow({
+  name: "background-activity",
+  async run() {
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    return { ok: true }
+  },
+})
+"#,
+            "threadId": thread.id,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(run.status, WorkflowRunStatus::Running);
+    assert_activity(&settled_activity(&base, thread.id).await, 1, None);
+
+    // A turn that finishes while the run works is not the chat's end.
+    let turn = runtime
+        .start_turn(thread.id, turn_request("meanwhile"))
+        .await
+        .unwrap();
+    let finished = next_finished(&mut subscription, thread.id).await;
+    assert_eq!(finished.turn_id, Some(turn.id));
+    assert_eq!(finished.payload["background"], 1, "{}", finished.payload);
+
+    // The run's result starts the turn that ends the chat.
+    let delivered = next_finished(&mut subscription, thread.id).await;
+    assert_ne!(delivered.turn_id, Some(turn.id));
+    assert_eq!(delivered.payload["status"], "completed");
+    assert!(
+        delivered.payload.get("background").is_none(),
+        "{}",
+        delivered.payload
+    );
+    assert_activity(
+        &settled_activity(&base, thread.id).await,
+        0,
+        delivered.turn_id,
+    );
+    handle.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[tokio::test]
+async fn a_stop_owns_the_background_children_so_its_turn_owes_nothing() {
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    let runtime = Arc::new(runtime);
+    let handle = activity_server(runtime.clone(), None, &workspace).await;
+    let base = format!("http://{}", handle.address);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let mut events = runtime.events().subscribe(None).receiver;
+    let prompt = serde_json::json!({
+        "prompt": "!tool bash {\"command\":\"sleep 5\"}",
+        "agent": "general",
+        "description": "stopped with its parent",
+        "background": true,
+    });
+    let launch = runtime
+        .start_turn(thread.id, turn_request(&format!("!tool task {prompt}")))
+        .await
+        .unwrap();
+    assert_eq!(
+        next_finished(&mut events, thread.id).await.payload["background"],
+        1
+    );
+    let working = runtime
+        .start_turn(
+            thread.id,
+            turn_request("!tool bash {\"command\":\"sleep 3\"}"),
+        )
+        .await
+        .unwrap();
+    assert_ne!(working.id, launch.id);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let stopped = reqwest::Client::new()
+        .post(format!("{base}/v1/turns/{}/interrupt", working.id))
+        .bearer_auth("activity-token")
+        .send()
+        .await
+        .unwrap();
+    assert!(stopped.status().is_success(), "{}", stopped.status());
+    let finished = next_finished(&mut events, thread.id).await;
+    assert_eq!(finished.turn_id, Some(working.id));
+    assert_eq!(finished.payload["status"], "interrupted");
+    assert!(
+        finished.payload.get("background").is_none(),
+        "the stop cancelled the child: {}",
+        finished.payload
+    );
+    assert_activity(
+        &settled_activity(&base, thread.id).await,
+        0,
+        Some(working.id),
+    );
+    handle.shutdown().await.unwrap();
+}
+
+/// A trusted workspace served with a real workflow coordinator and the echo
+/// provider; None when Bun is unavailable.
+async fn workflow_activity_server() -> Option<(
+    haarness_server::ServerHandle,
+    Arc<AgentRuntime>,
+    String,
+    std::path::PathBuf,
+)> {
+    let workspace = std::env::temp_dir().join(format!(
+        "haarness-workflow-activity-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let executor = WorkflowExecutor::new(ExecutorConfig::default());
+    if !executor.capability().executable {
+        eprintln!("skipping background workflow activity fixture: Bun is unavailable");
+        let _ = std::fs::remove_dir_all(workspace);
+        return None;
+    }
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let events = EventBus::new(256);
+    let runtime = Arc::new(AgentRuntime::with_workspace(
+        store.clone(),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Echo) as Arc<dyn ModelProvider>
+        ])),
+        Arc::new(EmptyToolRegistry),
+        events.clone(),
+        workspace.clone(),
+    ));
+    let host = WorkflowRuntimeAdapter::new();
+    host.attach(&runtime);
+    let workflows = Arc::new(WorkflowCoordinator::new(
+        store,
+        Arc::new(WorkflowCatalog::for_workspace(&workspace)),
+        executor,
+        host,
+        events,
+        workspace.clone(),
+        true,
+    ));
+    let handle = activity_server(runtime.clone(), Some(workflows), &workspace).await;
+    let base = format!("http://{}", handle.address);
+    Some((handle, runtime, base, workspace))
+}
+
+#[tokio::test]
+async fn a_paused_background_workflow_owes_nothing_until_it_is_resumed() {
+    let Some((handle, runtime, base, workspace)) = workflow_activity_server().await else {
+        return;
+    };
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let mut subscription = runtime.events().subscribe(None).receiver;
+    let client = reqwest::Client::new();
+    let run: WorkflowRun = client
+        .post(format!("{base}/v1/workflows/run"))
+        .bearer_auth("activity-token")
+        .json(&serde_json::json!({
+            "source": r#"
+export default workflow({
+  name: "paused-activity",
+  async run() {
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    return { ok: true }
+  },
+})
+"#,
+            "threadId": thread.id,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_activity(&settled_activity(&base, thread.id).await, 1, None);
+    let control = |action: &'static str| {
+        let request = client
+            .post(format!("{base}/v1/workflows/runs/{}/{action}", run.id))
+            .bearer_auth("activity-token");
+        async move {
+            request
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json::<WorkflowRun>()
+                .await
+                .unwrap()
+        }
+    };
+
+    // Paused, the run is not working and owes the chat nothing.
+    assert_eq!(control("pause").await.status, WorkflowRunStatus::Paused);
+    assert_activity(&settled_activity(&base, thread.id).await, 0, None);
+    let turn = runtime
+        .start_turn(thread.id, turn_request("while paused"))
+        .await
+        .unwrap();
+    let finished = next_finished(&mut subscription, thread.id).await;
+    assert_eq!(finished.turn_id, Some(turn.id));
+    assert!(
+        finished.payload.get("background").is_none(),
+        "{}",
+        finished.payload
+    );
+
+    // Resumed, it is owed again, and its result starts the chat's last turn.
+    assert_eq!(control("resume").await.status, WorkflowRunStatus::Running);
+    assert_activity(&settled_activity(&base, thread.id).await, 1, Some(turn.id));
+    let delivered = next_finished(&mut subscription, thread.id).await;
+    assert_ne!(delivered.turn_id, Some(turn.id));
+    assert!(
+        delivered.payload.get("background").is_none(),
+        "{}",
+        delivered.payload
+    );
+    assert_activity(
+        &settled_activity(&base, thread.id).await,
+        0,
+        delivered.turn_id,
+    );
+    handle.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[tokio::test]
+async fn a_forked_command_moved_to_the_background_delivers_its_result() {
+    let workspace = std::env::temp_dir();
+    let mut config = haarness_core::RuntimeConfig::default();
+    config.commands.push(haarness_protocol::CommandInfo {
+        execution: haarness_protocol::DefinitionExecution {
+            fork: true,
+            ..Default::default()
+        },
+        name: "slowcheck".into(),
+        description: "a slow forked check".into(),
+        source: None,
+        agent: None,
+        model: None,
+        argument_hint: None,
+        template: r#"!tool bash {"command":"sleep 2"}"#.into(),
+        plugin: None,
+    });
+    let runtime = Arc::new(AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Capturing::default()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(haarness_server::NativeToolRegistry::new(workspace.clone())),
+        EventBus::new(2048),
+        workspace.clone(),
+        String::new(),
+        config,
+    ));
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let mut events = runtime.events().subscribe(None).receiver;
+    let mut request = turn_request("");
+    request.command = Some("slowcheck".into());
+    let turn = runtime.start_turn(thread.id, request).await.unwrap();
+    // The forked child runs in the foreground until it is moved.
+    let child = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(task) = runtime.background_tasks(thread.id).await.unwrap().pop() {
+                return task;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the forked child starts");
+    assert!(!child.background);
+    let promoted = runtime.promote_subagents(thread.id, None).await.unwrap();
+    assert_eq!(promoted.len(), 1);
+
+    let launched = next_finished(&mut events, thread.id).await;
+    assert_eq!(launched.turn_id, Some(turn.id));
+    assert_eq!(launched.payload["background"], 1, "{}", launched.payload);
+    // Its result arrives as the chat's next turn, which owes nothing.
+    let delivered = next_finished(&mut events, thread.id).await;
+    assert_ne!(delivered.turn_id, Some(turn.id));
+    assert!(
+        delivered.payload.get("background").is_none(),
+        "{}",
+        delivered.payload
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while runtime.background_results_owed(thread.id) > 0
+            || !runtime
+                .background_tasks(thread.id)
+                .await
+                .unwrap()
+                .is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the moved child's result was delivered");
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(items.iter().any(|item| matches!(&item.data,
+        haarness_protocol::ItemData::UserMessage { text, synthetic: true, .. }
+            if text.contains(&child.child_thread_id.to_string()) && text.contains("state=\"completed\""))));
+}
+
+#[tokio::test]
+async fn a_running_turn_shows_in_activity_and_a_published_chat_may_read_it() {
+    let workspace = std::env::temp_dir();
+    let (runtime, _) = p0_runtime(&workspace, true);
+    let runtime = Arc::new(runtime);
+    let handle = activity_server(runtime.clone(), None, &workspace).await;
+    let base = format!("http://{}", handle.address);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let other = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request("!tool bash {\"command\":\"sleep 1\"}"),
+        )
+        .await
+        .unwrap();
+    let scoped = |chat: haarness_protocol::ThreadId, asked: haarness_protocol::ThreadId| {
+        reqwest::Client::new()
+            .get(format!("{base}/v1/threads/{asked}/activity"))
+            .bearer_auth("activity-token")
+            .header("x-haarness-remote-thread", chat.to_string())
+            .send()
+    };
+    let running = scoped(thread.id, thread.id).await.unwrap();
+    assert_eq!(running.status(), reqwest::StatusCode::OK);
+    let running: Value = running.json().await.unwrap();
+    assert_eq!(running["activeTurn"]["id"], serde_json::json!(turn.id));
+    assert_eq!(running["background"], 0);
+    // Another chat is outside what a published chat may read.
+    assert_eq!(
+        scoped(thread.id, other.id).await.unwrap().status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
+    wait_done(&runtime, &turn).await;
+    handle.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn interrupting_the_parent_stops_background_children_without_reinjecting() {
     let workspace = std::env::temp_dir();

@@ -93,6 +93,10 @@ pub(crate) enum Frame {
         revision: u64,
         items: Vec<remote_attention::Item>,
         finished: Vec<remote_attention::Finished>,
+        /// The chats still working, only for a relay announcing
+        /// `attention.working`: one without it drops a frame with this.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working: Option<Vec<Uuid>>,
     },
     Open {
         id: Uuid,
@@ -678,8 +682,8 @@ const RELAY_SEND: Duration = Duration::from_secs(10);
 const RELAY_READY: Duration = Duration::from_secs(10);
 const RELAY_VERSION: u64 = 1;
 /// The upgrade header that names the relay features this connector
-/// understands. Cloud lists features in `ready` only when asked, because
-/// connectors built before features parse `ready` strictly.
+/// understands, comma-separated. Cloud lists features in `ready` only when
+/// asked, because connectors built before features parse `ready` strictly.
 const RELAY_FEATURES_HEADER: &str = "x-haarness-relay-features";
 /// The relay's WebSocket upgrade: the bearer, and the features to offer.
 fn relay_handshake(
@@ -689,7 +693,15 @@ fn relay_handshake(
     let mut handshake = url.as_str().into_client_request()?;
     let headers = handshake.headers_mut();
     headers.insert("authorization", format!("Bearer {bearer}").parse()?);
-    headers.insert(RELAY_FEATURES_HEADER, remote_attention::FEATURE.parse()?);
+    headers.insert(
+        RELAY_FEATURES_HEADER,
+        format!(
+            "{}, {}",
+            remote_attention::FEATURE,
+            remote_attention::WORKING_FEATURE
+        )
+        .parse()?,
+    );
     Ok(handshake)
 }
 /// The version and optional features a relay's first frame announces, when
@@ -860,7 +872,11 @@ async fn connected(
         None => anyhow::bail!("Relay did not announce its protocol"),
     };
     let (send, mut outgoing) = mpsc::channel::<Frame>(128);
-    // An older relay drops the socket on a frame it does not know.
+    // An older relay drops the socket on a frame it does not know, and one
+    // before `attention.working` drops a frame that lists working chats.
+    let working = features
+        .iter()
+        .any(|feature| feature == remote_attention::WORKING_FEATURE);
     let _attention = features
         .iter()
         .any(|feature| feature == remote_attention::FEATURE)
@@ -878,6 +894,7 @@ async fn connected(
                 attention,
                 scope,
                 send.clone(),
+                working,
             )))
         });
     let runtime_lost = tokio_util::sync::CancellationToken::new();
@@ -1967,7 +1984,7 @@ mod tests {
         assert_eq!(handshake.headers()["authorization"], "Bearer token");
         assert_eq!(
             handshake.headers()["x-haarness-relay-features"],
-            "attention.v1"
+            "attention.v1, attention.working"
         );
     }
     #[test]
@@ -2480,6 +2497,14 @@ mod tests {
         active_failures: usize,
         /// The event stream ends as soon as it opens.
         close_events: bool,
+        /// Whether `/threads/{id}/activity` exists; a server from before it
+        /// answers 404 there.
+        activity: bool,
+        /// The background results `/threads/{id}/activity` reports, by chat.
+        background: HashMap<Uuid, u32>,
+        /// The newest turn `/threads/{id}/activity` names, by chat; None for
+        /// a server from before `lastTurn`, which leaves it out.
+        last_turns: Option<HashMap<Uuid, Value>>,
     }
     /// A Haarness server as the attention watcher sees it: a scope-aware
     /// `/v1/permissions`, `/v1/questions`, chats and an event stream.
@@ -2568,6 +2593,26 @@ mod tests {
                                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                             }
                             Json(state.active.get(&id).cloned().unwrap_or(Value::Null)).into_response()
+                        },
+                    ),
+                )
+                .route(
+                    "/v1/threads/{id}/activity",
+                    get(
+                        |State(daemon): State<FakeDaemon>, Route(id): Route<Uuid>, uri: Uri, headers: HeaderMap| async move {
+                            daemon.visible(&uri, &headers);
+                            let state = daemon.state.lock().unwrap();
+                            if !state.activity {
+                                return StatusCode::NOT_FOUND.into_response();
+                            }
+                            let mut activity = json!({
+                                "activeTurn": state.active.get(&id).cloned().unwrap_or(Value::Null),
+                                "background": state.background.get(&id).copied().unwrap_or(0),
+                            });
+                            if let Some(last) = &state.last_turns {
+                                activity["lastTurn"] = last.get(&id).cloned().unwrap_or(Value::Null);
+                            }
+                            Json(activity).into_response()
                         },
                     ),
                 )
@@ -3590,6 +3635,596 @@ mod tests {
             .expect("what waits is reported while the registry is held");
         assert_eq!(frame["items"][0]["id"], "perm-1", "{frame}");
         drop(lock);
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    /// A `turn.finished` payload that says background work still owes the
+    /// chat `background` results.
+    fn owing_turn(id: Uuid, thread: Uuid, status: &str, background: u32) -> Value {
+        let mut turn = finished_turn(id, thread, status);
+        turn["background"] = json!(background);
+        turn
+    }
+    /// The next attention frame for which `wanted` holds.
+    async fn attention_where(
+        frames: &mut mpsc::UnboundedReceiver<Value>,
+        wanted: impl Fn(&Value) -> bool,
+    ) -> Value {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let frame = next_attention(frames).await;
+                if wanted(&frame) {
+                    return frame;
+                }
+            }
+        })
+        .await
+        .expect("the attention frame arrives")
+    }
+    #[tokio::test]
+    async fn a_chat_with_background_work_is_reported_once_its_last_result_is_in() {
+        let work = Uuid::now_v7();
+        let (computer, home) = watched_home(&[(work, "Work")]).await;
+        home.state.lock().unwrap().activity = true;
+        let (relay, mut frames) =
+            fake_relay(vec![Relay::Record(&["attention.v1", "attention.working"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        let first = next_attention(&mut frames).await;
+        assert_eq!(first["working"], json!([]), "{first}");
+
+        // The turn launches a child agent in the background and ends.
+        let (launch, delivered) = (Uuid::now_v7(), Uuid::now_v7());
+        home.emit(
+            "turn.started",
+            work,
+            work,
+            finished_turn(launch, work, "running"),
+        );
+        let started = attention_where(&mut frames, |frame| frame["working"] == json!([work])).await;
+        assert_eq!(started["finished"], json!([]));
+        home.state.lock().unwrap().background.insert(work, 1);
+        home.emit(
+            "turn.finished",
+            work,
+            work,
+            owing_turn(launch, work, "completed", 1),
+        );
+        // Not the end: nothing is reported however long it settles, and the
+        // chat is still working.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        while let Ok(frame) = frames.try_recv() {
+            assert_eq!(frame["finished"], json!([]), "{frame}");
+            assert_eq!(frame["working"], json!([work]), "{frame}");
+        }
+
+        // The child's result arrives as a new turn, which is the end.
+        home.state.lock().unwrap().background.remove(&work);
+        home.emit(
+            "turn.started",
+            work,
+            work,
+            finished_turn(delivered, work, "running"),
+        );
+        home.emit(
+            "turn.finished",
+            work,
+            work,
+            finished_turn(delivered, work, "completed"),
+        );
+        let done = attention_where(&mut frames, |frame| !finished_turns(frame).is_empty()).await;
+        assert_eq!(finished_turns(&done), [json!(delivered)], "{done}");
+        assert_eq!(done["finished"][0]["status"], "completed");
+        assert_eq!(done["working"], json!([]), "{done}");
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        while let Ok(frame) = frames.try_recv() {
+            assert_ne!(frame["type"], "attention", "reported once: {frame}");
+        }
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_stopped_chat_is_reported_stopped_unless_it_went_straight_on() {
+        let (stopped, continued) = (Uuid::now_v7(), Uuid::now_v7());
+        let (computer, home) =
+            watched_home(&[(stopped, "Stopped"), (continued, "Continued")]).await;
+        home.state.lock().unwrap().activity = true;
+        let (relay, mut frames) =
+            fake_relay(vec![Relay::Record(&["attention.v1", "attention.working"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        next_attention(&mut frames).await;
+        // A stop owns what the chat launched: even a count of background
+        // work that is still being cancelled does not hold the report back.
+        let (stop, answered) = (Uuid::now_v7(), Uuid::now_v7());
+        home.state.lock().unwrap().background.insert(stopped, 1);
+        home.emit(
+            "turn.finished",
+            stopped,
+            stopped,
+            owing_turn(stop, stopped, "interrupted", 1),
+        );
+        // A stop that left steering unread goes on with its answer at once.
+        home.state.lock().unwrap().active.insert(
+            continued,
+            finished_turn(Uuid::now_v7(), continued, "running"),
+        );
+        home.emit(
+            "turn.finished",
+            continued,
+            continued,
+            finished_turn(answered, continued, "interrupted"),
+        );
+        let frame = attention_where(&mut frames, |frame| !finished_turns(frame).is_empty()).await;
+        assert_eq!(finished_turns(&frame), [json!(stop)], "{frame}");
+        assert_eq!(frame["finished"][0]["status"], "interrupted");
+        assert_eq!(frame["finished"][0]["chatTitle"], "Stopped");
+        // Its work still owes it a result: it is working all the same.
+        assert_eq!(frame["working"], json!([stopped]), "{frame}");
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        while let Ok(frame) = frames.try_recv() {
+            assert_ne!(frame["type"], "attention", "{frame}");
+        }
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn working_chats_go_only_to_a_relay_that_asked_for_them() {
+        let work = Uuid::now_v7();
+        let (computer, home) = watched_home(&[(work, "Work")]).await;
+        home.state.lock().unwrap().activity = true;
+        let (relay, mut frames) = fake_relay(vec![Relay::Record(&["attention.v1"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        let first = next_attention(&mut frames).await;
+        let mut keys = first.as_object().unwrap().keys().collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(keys, ["finished", "items", "revision", "type"], "{first}");
+        let running = Uuid::now_v7();
+        home.emit(
+            "turn.started",
+            work,
+            work,
+            finished_turn(running, work, "running"),
+        );
+        home.state.lock().unwrap().background.insert(work, 2);
+        home.emit(
+            "turn.finished",
+            work,
+            work,
+            owing_turn(running, work, "completed", 2),
+        );
+        // A chat starting or owing work changes nothing a relay that did not
+        // ask for working chats is told.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        while let Ok(frame) = frames.try_recv() {
+            assert_ne!(frame["type"], "attention", "{frame}");
+        }
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    /// A helper agent's `task.updated` in `state`.
+    fn task_update(state: &str) -> Value {
+        json!({"callId":"call-1","childThreadId":Uuid::now_v7(),"childTurnId":Uuid::now_v7(),
+            "state":state,"toolCalls":1,"lastTool":"bash","startedAt":chrono::Utc::now()})
+    }
+    /// A watched chat whose turn just ended while one helper still works for
+    /// it, on a relay that asked for working chats; `names_last`: the server
+    /// names each chat's newest turn.
+    async fn chat_held_for_background_work(
+        names_last: bool,
+    ) -> (
+        Computer,
+        FakeDaemon,
+        mpsc::UnboundedReceiver<Value>,
+        tokio::task::JoinHandle<Result<Link>>,
+        Uuid,
+        Uuid,
+    ) {
+        let work = Uuid::now_v7();
+        let (computer, home) = watched_home(&[(work, "Work")]).await;
+        home.state.lock().unwrap().activity = true;
+        let (relay, mut frames) =
+            fake_relay(vec![Relay::Record(&["attention.v1", "attention.working"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        next_attention(&mut frames).await;
+        let launch = Uuid::now_v7();
+        if names_last {
+            home.state.lock().unwrap().last_turns = Some(HashMap::from([(
+                work,
+                finished_turn(launch, work, "completed"),
+            )]));
+        }
+        home.emit(
+            "turn.started",
+            work,
+            work,
+            finished_turn(launch, work, "running"),
+        );
+        home.state.lock().unwrap().background.insert(work, 1);
+        home.emit(
+            "turn.finished",
+            work,
+            work,
+            owing_turn(launch, work, "completed", 1),
+        );
+        attention_where(&mut frames, |frame| frame["working"] == json!([work])).await;
+        (computer, home, frames, connection, work, launch)
+    }
+    #[tokio::test]
+    async fn a_chat_whose_background_work_is_stopped_while_it_is_idle_is_reported_stopped_once() {
+        let (computer, home, mut frames, connection, work, launch) =
+            chat_held_for_background_work(false).await;
+        // Stopped while idle: the helper is cancelled and no turn follows.
+        home.state.lock().unwrap().background.remove(&work);
+        home.emit("task.updated", work, work, task_update("cancelled"));
+        let stopped = attention_where(&mut frames, |frame| !finished_turns(frame).is_empty()).await;
+        assert_eq!(finished_turns(&stopped), [json!(launch)], "{stopped}");
+        assert_eq!(stopped["finished"][0]["status"], "interrupted");
+        assert_eq!(stopped["finished"][0]["chatTitle"], "Work");
+        assert_eq!(stopped["working"], json!([]), "{stopped}");
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        while let Ok(frame) = frames.try_recv() {
+            assert_ne!(frame["type"], "attention", "reported once: {frame}");
+        }
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_chat_whose_background_result_arrives_is_reported_completed_and_never_stopped() {
+        let (computer, home, mut frames, connection, work, launch) =
+            chat_held_for_background_work(false).await;
+        // The helper is done; its result is on its way into the chat.
+        home.emit("task.updated", work, work, task_update("done"));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        home.state.lock().unwrap().background.remove(&work);
+        let delivered = Uuid::now_v7();
+        home.emit(
+            "turn.started",
+            work,
+            work,
+            finished_turn(delivered, work, "running"),
+        );
+        home.emit(
+            "turn.finished",
+            work,
+            work,
+            finished_turn(delivered, work, "completed"),
+        );
+        let done = attention_where(&mut frames, |frame| !finished_turns(frame).is_empty()).await;
+        assert_eq!(finished_turns(&done), [json!(delivered)], "{done}");
+        assert_eq!(done["finished"][0]["status"], "completed");
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        while let Ok(frame) = frames.try_recv() {
+            if frame["type"] == "attention" {
+                assert_eq!(finished_turns(&frame), [json!(delivered)], "{frame}");
+                assert!(!frame.to_string().contains(&launch.to_string()), "{frame}");
+            }
+        }
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    /// Lose the server's events: the stream is cut and the server keeps
+    /// none of what happened since, as when its buffer moved on.
+    fn miss_events(home: &FakeDaemon) {
+        {
+            let mut state = home.state.lock().unwrap();
+            state.event_id += 3000;
+            state.kept_from = state.event_id;
+        }
+        home.cut();
+    }
+    #[tokio::test]
+    async fn a_held_chat_whose_result_arrived_unseen_reports_the_turn_the_server_names() {
+        let (computer, home, mut frames, connection, work, launch) =
+            chat_held_for_background_work(true).await;
+        // The result arrives and its turn ends while the events are lost.
+        let delivered = Uuid::now_v7();
+        {
+            let mut state = home.state.lock().unwrap();
+            state.background.remove(&work);
+            state
+                .last_turns
+                .as_mut()
+                .unwrap()
+                .insert(work, finished_turn(delivered, work, "completed"));
+        }
+        miss_events(&home);
+        let done = attention_where(&mut frames, |frame| !finished_turns(frame).is_empty()).await;
+        assert_eq!(finished_turns(&done), [json!(delivered)], "{done}");
+        assert_eq!(done["finished"][0]["status"], "completed");
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        while let Ok(frame) = frames.try_recv() {
+            assert!(!frame.to_string().contains(&launch.to_string()), "{frame}");
+        }
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_held_chat_stopped_while_its_events_were_missed_is_reported_stopped() {
+        let (computer, home, mut frames, connection, work, launch) =
+            chat_held_for_background_work(true).await;
+        // Stopped while idle, unseen: no turn followed the held one.
+        home.state.lock().unwrap().background.remove(&work);
+        miss_events(&home);
+        let stopped = attention_where(&mut frames, |frame| !finished_turns(frame).is_empty()).await;
+        assert_eq!(finished_turns(&stopped), [json!(launch)], "{stopped}");
+        assert_eq!(stopped["finished"][0]["status"], "interrupted");
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn an_older_server_that_cannot_name_the_newest_turn_reports_nothing_after_missed_events()
+    {
+        let (computer, home, mut frames, connection, work, _) =
+            chat_held_for_background_work(false).await;
+        home.state.lock().unwrap().background.remove(&work);
+        miss_events(&home);
+        // The chat stops working, but which turn it stopped at is unknown.
+        let quiet = attention_where(&mut frames, |frame| frame["working"] == json!([])).await;
+        assert_eq!(quiet["finished"], json!([]), "{quiet}");
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        while let Ok(frame) = frames.try_recv() {
+            assert_eq!(frame["finished"], json!([]), "{frame}");
+        }
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_stop_followed_unseen_by_a_turn_that_left_work_running_is_not_an_end() {
+        let work = Uuid::now_v7();
+        let (computer, home) = watched_home(&[(work, "Work")]).await;
+        home.state.lock().unwrap().activity = true;
+        let (relay, mut frames) =
+            fake_relay(vec![Relay::Record(&["attention.v1", "attention.working"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        next_attention(&mut frames).await;
+        // A stop, then a follow-up turn whose events are not read yet: it
+        // launched a helper and ended while that helper works.
+        let (stop, follow_up) = (Uuid::now_v7(), Uuid::now_v7());
+        home.emit(
+            "turn.finished",
+            work,
+            work,
+            finished_turn(stop, work, "interrupted"),
+        );
+        {
+            let mut state = home.state.lock().unwrap();
+            state.background.insert(work, 1);
+            state.last_turns = Some(HashMap::from([(
+                work,
+                finished_turn(follow_up, work, "completed"),
+            )]));
+        }
+        // Held on the follow-up: working, and nothing reported.
+        let held = attention_where(&mut frames, |frame| frame["working"] == json!([work])).await;
+        assert_eq!(held["finished"], json!([]), "{held}");
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        while let Ok(frame) = frames.try_recv() {
+            assert_eq!(frame["finished"], json!([]), "{frame}");
+        }
+        // That helper is stopped while the chat is idle: the follow-up is
+        // where it stopped.
+        home.state.lock().unwrap().background.remove(&work);
+        home.emit("task.updated", work, work, task_update("cancelled"));
+        let stopped = attention_where(&mut frames, |frame| !finished_turns(frame).is_empty()).await;
+        assert_eq!(finished_turns(&stopped), [json!(follow_up)], "{stopped}");
+        assert_eq!(stopped["finished"][0]["status"], "interrupted");
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_paused_workflow_lets_its_chat_stop_and_a_resumed_one_makes_it_work_again() {
+        let (computer, home, mut frames, connection, work, launch) =
+            chat_held_for_background_work(true).await;
+        let run_thread = Uuid::now_v7();
+        let run = Uuid::now_v7();
+        let workflow =
+            |status: &str| json!({"info": {"id": run, "status": status, "threadId": run_thread}});
+        // The only work the chat waits on is paused: it is quiet, stopped.
+        home.state.lock().unwrap().background.remove(&work);
+        home.emit("workflow.updated", run_thread, work, workflow("paused"));
+        let stopped = attention_where(&mut frames, |frame| !finished_turns(frame).is_empty()).await;
+        assert_eq!(finished_turns(&stopped), [json!(launch)], "{stopped}");
+        assert_eq!(stopped["finished"][0]["status"], "interrupted");
+        assert_eq!(stopped["working"], json!([]));
+        // Resumed, the chat works again before any result arrives.
+        home.state.lock().unwrap().background.insert(work, 1);
+        home.emit("workflow.updated", run_thread, work, workflow("running"));
+        attention_where(&mut frames, |frame| frame["working"] == json!([work])).await;
+        // Its result is the chat's last turn.
+        home.state.lock().unwrap().background.remove(&work);
+        let delivered = Uuid::now_v7();
+        home.state
+            .lock()
+            .unwrap()
+            .last_turns
+            .as_mut()
+            .unwrap()
+            .insert(work, finished_turn(delivered, work, "completed"));
+        home.emit(
+            "turn.started",
+            work,
+            work,
+            finished_turn(delivered, work, "running"),
+        );
+        home.emit(
+            "turn.finished",
+            work,
+            work,
+            finished_turn(delivered, work, "completed"),
+        );
+        let done = attention_where(&mut frames, |frame| {
+            finished_turns(frame).contains(&json!(delivered))
+        })
+        .await;
+        assert_eq!(done["working"], json!([]), "{done}");
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    /// A `workflow.updated` for run `run`, launched by `launcher`.
+    fn workflow_update(run: Uuid, status: &str) -> Value {
+        json!({"info": {"id": run, "status": status}})
+    }
+    #[tokio::test]
+    async fn a_busy_workflow_run_costs_its_chat_a_bounded_number_of_reads() {
+        let work = Uuid::now_v7();
+        let (computer, home) = watched_home(&[(work, "Work")]).await;
+        let earlier = Uuid::now_v7();
+        {
+            let mut state = home.state.lock().unwrap();
+            state.activity = true;
+            state.background.insert(work, 1);
+            state.last_turns = Some(HashMap::from([(
+                work,
+                finished_turn(earlier, work, "completed"),
+            )]));
+        }
+        let (relay, mut frames) =
+            fake_relay(vec![Relay::Record(&["attention.v1", "attention.working"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        next_attention(&mut frames).await;
+        let path = format!("/v1/threads/{work}/activity");
+        // A run started for the chat from outside a turn, publishing on
+        // every log line: only its start says anything.
+        let (run, run_thread) = (Uuid::now_v7(), Uuid::now_v7());
+        for _ in 0..30 {
+            home.emit(
+                "workflow.updated",
+                run_thread,
+                work,
+                workflow_update(run, "running"),
+            );
+        }
+        attention_where(&mut frames, |frame| frame["working"] == json!([work])).await;
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert_eq!(home.requested(&path), 1, "one read for thirty updates");
+        // Its helpers report in a burst: one check is asked at a time.
+        for _ in 0..10 {
+            home.emit("task.updated", work, work, task_update("done"));
+        }
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        assert_eq!(home.requested(&path), 2, "one more read for ten updates");
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_chat_with_no_turn_yet_works_while_its_run_does_and_its_first_turn_ends_it() {
+        let fresh = Uuid::now_v7();
+        let (computer, home) = watched_home(&[(fresh, "Fresh")]).await;
+        {
+            let mut state = home.state.lock().unwrap();
+            state.activity = true;
+            state.last_turns = Some(HashMap::new());
+        }
+        let (relay, mut frames) =
+            fake_relay(vec![Relay::Record(&["attention.v1", "attention.working"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        next_attention(&mut frames).await;
+        // A workflow run started for a chat that ran no turn yet.
+        let (run, run_thread) = (Uuid::now_v7(), Uuid::now_v7());
+        home.state.lock().unwrap().background.insert(fresh, 1);
+        home.emit(
+            "workflow.updated",
+            run_thread,
+            fresh,
+            workflow_update(run, "running"),
+        );
+        let working =
+            attention_where(&mut frames, |frame| frame["working"] == json!([fresh])).await;
+        assert_eq!(working["finished"], json!([]), "{working}");
+        // Its result is the chat's first turn, which ends it.
+        let first = Uuid::now_v7();
+        {
+            let mut state = home.state.lock().unwrap();
+            state.background.remove(&fresh);
+            state
+                .last_turns
+                .as_mut()
+                .unwrap()
+                .insert(fresh, finished_turn(first, fresh, "completed"));
+        }
+        home.emit(
+            "workflow.updated",
+            run_thread,
+            fresh,
+            workflow_update(run, "completed"),
+        );
+        home.emit(
+            "turn.started",
+            fresh,
+            fresh,
+            finished_turn(first, fresh, "running"),
+        );
+        home.emit(
+            "turn.finished",
+            fresh,
+            fresh,
+            finished_turn(first, fresh, "completed"),
+        );
+        let done = attention_where(&mut frames, |frame| !finished_turns(frame).is_empty()).await;
+        assert_eq!(finished_turns(&done), [json!(first)], "{done}");
+        assert_eq!(done["finished"][0]["status"], "completed");
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        while let Ok(frame) = frames.try_recv() {
+            if frame["type"] == "attention" {
+                assert_eq!(
+                    finished_turns(&frame),
+                    [json!(first)],
+                    "reported once: {frame}"
+                );
+                assert_eq!(frame["working"], json!([]), "{frame}");
+            }
+        }
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_run_a_helper_launched_never_lists_the_helper() {
+        let (main, helper) = (Uuid::now_v7(), Uuid::now_v7());
+        let (computer, home) = watched_home(&[(main, "Main"), (helper, "Helper")]).await;
+        {
+            let mut state = home.state.lock().unwrap();
+            state.threads.get_mut(&helper).unwrap()["parentId"] = json!(main);
+            state.activity = true;
+            state.background.insert(helper, 1);
+            state.last_turns = Some(HashMap::from([(
+                helper,
+                finished_turn(Uuid::now_v7(), helper, "completed"),
+            )]));
+        }
+        let (relay, mut frames) =
+            fake_relay(vec![Relay::Record(&["attention.v1", "attention.working"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        next_attention(&mut frames).await;
+        // The helper's run starts, pauses and resumes.
+        let (run, run_thread) = (Uuid::now_v7(), Uuid::now_v7());
+        for status in ["running", "paused", "running"] {
+            home.emit(
+                "workflow.updated",
+                run_thread,
+                helper,
+                workflow_update(run, status),
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            home.requested(&format!("/v1/threads/{helper}/activity")),
+            1,
+            "asked once, then known as a helper"
+        );
+        while let Ok(frame) = frames.try_recv() {
+            if frame["type"] == "attention" {
+                assert_eq!(frame["working"], json!([]), "{frame}");
+                assert_eq!(frame["finished"], json!([]), "{frame}");
+            }
+        }
         connection.abort();
         std::fs::remove_dir_all(&computer.root).unwrap();
     }

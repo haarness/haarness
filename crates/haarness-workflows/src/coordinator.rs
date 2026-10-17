@@ -173,6 +173,9 @@ struct DeliveryWatch {
     waits: usize,
     consumed: bool,
     pending_terminal: Option<WorkflowRun>,
+    /// Paused: it is not working and owes its launcher nothing until it is
+    /// resumed.
+    paused: bool,
 }
 
 /// Durable state machine around the isolated executor.
@@ -325,6 +328,7 @@ impl WorkflowCoordinator {
                     waits: 0,
                     consumed: false,
                     pending_terminal: None,
+                    paused: false,
                 },
             );
         }
@@ -399,6 +403,21 @@ impl WorkflowCoordinator {
         }
     }
 
+    /// Background runs launched by `thread` that will still deliver their
+    /// terminal result into it, including one being handed to it now. The
+    /// runtime reads this through the probe the server installs, so a chat
+    /// that launched them is not called done while they run. A paused run
+    /// counts again once it is resumed.
+    #[must_use]
+    pub fn pending_deliveries(&self, thread: ThreadId) -> u32 {
+        let pending = self
+            .delivery_watches
+            .iter()
+            .filter(|watch| watch.launch_thread_id == thread && !watch.paused)
+            .count();
+        u32::try_from(pending).unwrap_or(u32::MAX)
+    }
+
     /// Optimistically claim terminal delivery for a model-facing wait issued
     /// by the thread that launched this background run. Other sessions may
     /// inspect or wait without suppressing the launcher's notification.
@@ -436,11 +455,13 @@ impl WorkflowCoordinator {
                 remove = true;
             }
         }
-        if remove {
-            self.delivery_watches.remove(&id);
-        }
+        // A delivered run is forgotten only once its result was handed to the
+        // launching thread, so `pending_deliveries` counts it until then.
         if let Some((launch_thread_id, run)) = deliver {
             self.deliver_terminal(launch_thread_id, run).await;
+        }
+        if remove {
+            self.delivery_watches.remove(&id);
         }
     }
 
@@ -613,6 +634,9 @@ impl WorkflowCoordinator {
         run.time.updated = Utc::now();
         run.time.completed = None;
         let run = self.repository.save_workflow_run(&run).await?;
+        if let Some(mut watch) = self.delivery_watches.get_mut(&id) {
+            watch.paused = false;
+        }
         drop(guard);
         self.append_log(
             id,
@@ -884,19 +908,34 @@ impl WorkflowCoordinator {
         run.time.completed = (status == WorkflowRunStatus::Cancelled).then_some(run.time.updated);
         run.error = (status == WorkflowRunStatus::Cancelled).then(|| message.to_owned());
         let saved = self.repository.save_workflow_run(&run).await?;
+        // Paused, the run owes nothing; cancelled, it owes its notice.
+        if let Some(mut watch) = self.delivery_watches.get_mut(&id) {
+            watch.paused = status == WorkflowRunStatus::Paused;
+        }
         if let Some(active) = self.active.get(&id) {
             active.cancellation.cancel();
         }
         self.publish_updated(&saved);
         drop(guard);
-        self.append_log(id, message.to_owned(), WorkflowLogSource::Platform)
-            .await?;
-        self.wait_until_inactive(id).await?;
-        let run = self.get(id, None).await?;
+        let logged = self
+            .append_log(id, message.to_owned(), WorkflowLogSource::Platform)
+            .await;
+        let stopped = self.wait_until_inactive(id).await;
+        let run = self.get(id, None).await;
         if status == WorkflowRunStatus::Cancelled {
-            self.terminal_ready(run.clone()).await;
+            // The run is cancelled even when its log or its stop did not
+            // complete: its launcher gets the result, or at least stops
+            // waiting for one, so it is never owed it forever.
+            match &run {
+                Ok(run) => self.terminal_ready(run.clone()).await,
+                Err(_) => {
+                    self.delivery_watches.remove(&id);
+                }
+            }
         }
-        Ok(run)
+        logged?;
+        stopped?;
+        run
     }
 
     async fn terminal_ready(&self, run: WorkflowRun) {
@@ -914,11 +953,12 @@ impl WorkflowCoordinator {
                 remove = true;
             }
         }
-        if remove {
-            self.delivery_watches.remove(&id);
-        }
+        // As in `end_launch_wait`: forgotten once handed over.
         if let Some((launch_thread_id, run)) = deliver {
             self.deliver_terminal(launch_thread_id, run).await;
+        }
+        if remove {
+            self.delivery_watches.remove(&id);
         }
     }
 

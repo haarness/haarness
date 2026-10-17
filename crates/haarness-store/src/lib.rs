@@ -762,6 +762,22 @@ impl ThreadRepository for SqliteStore {
         decode_turn(raw)
     }
 
+    async fn last_turn(&self, id: ThreadId) -> CoreResult<Option<Turn>> {
+        // `idx_turns_thread` orders a thread's turns by creation.
+        let raw = self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT id,thread_id,request_id,status,agent,provider,model,error,created_at,updated_at,ultracode
+                 FROM turns WHERE thread_id=?1 ORDER BY created_at DESC, id DESC LIMIT 1",
+                [id.to_string()],
+                raw_turn,
+            )
+            .optional()
+            .map_err(storage)?;
+        raw.map(decode_turn).transpose()
+    }
+
     async fn prepare_command_input(
         &self,
         thread: ThreadId,

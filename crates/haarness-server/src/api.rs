@@ -28,12 +28,12 @@ use haarness_protocol::{
     PtyInfo, PtyUpdateRequest, QuestionReply, QueueInputRequest, QueueInputResponse, ReviewFile,
     SCHEMA_VERSION, SESSION_ARCHIVE_CAPABILITY, ServerInfo, SessionArchive,
     SessionArchiveImportRequest, SessionArchiveImportResult, SkillInfo, StartTurnRequest, Thread,
-    ThreadId, ToolCatalogResponse, ToolSettingsUpdate, Turn, TurnId, UpdateThreadRequest,
-    WORKSPACE_CLEANUP_CAPABILITY, WORKSPACE_HISTORY_CAPABILITY, WorkflowId, WorkflowRun,
-    WorkflowRunStatus, WorkflowStartRequest, WorkspaceCleanupRequest, WorkspaceCreateRequest,
-    WorkspaceInfo, WorkspaceListResponse, WorkspaceOperationResponse, WorkspaceRefsResponse,
-    WorkspaceRemoveRequest, WorkspaceResetRequest, WorkspaceResolveRefRequest,
-    WorkspaceResolveRefResponse,
+    ThreadActivity, ThreadId, ToolCatalogResponse, ToolSettingsUpdate, Turn, TurnId,
+    UpdateThreadRequest, WORKSPACE_CLEANUP_CAPABILITY, WORKSPACE_HISTORY_CAPABILITY, WorkflowId,
+    WorkflowRun, WorkflowRunStatus, WorkflowStartRequest, WorkspaceCleanupRequest,
+    WorkspaceCreateRequest, WorkspaceInfo, WorkspaceListResponse, WorkspaceOperationResponse,
+    WorkspaceRefsResponse, WorkspaceRemoveRequest, WorkspaceResetRequest,
+    WorkspaceResolveRefRequest, WorkspaceResolveRefResponse,
 };
 use haarness_pty::{PtyManager, PtySubscription};
 use haarness_workflow_catalog::{CatalogError, WorkflowCatalog};
@@ -156,6 +156,16 @@ pub async fn serve_with_access(
 ) -> anyhow::Result<ServerHandle> {
     let address = listener.local_addr()?;
     let workflow_coordinator = state.workflows.clone();
+    // A background workflow run is owed to the chat that launched it until
+    // its result is delivered there; the runtime counts it through this.
+    if let Some(workflows) = &workflow_coordinator {
+        let workflows = Arc::downgrade(workflows);
+        state.runtime.set_background_probe(Arc::new(move |thread| {
+            workflows
+                .upgrade()
+                .map_or(0, |workflows| workflows.pending_deliveries(thread))
+        }));
+    }
     let language = state.language.clone();
     let ptys = Arc::new(PtyManager::new(
         state.workspace.clone(),
@@ -235,6 +245,7 @@ pub async fn serve_with_access(
         .route("/threads/{id}/items", get(list_items))
         .route("/threads/{id}/todos", get(list_todos))
         .route("/threads/{id}/active", get(active_turn))
+        .route("/threads/{id}/activity", get(thread_activity))
         .route("/threads/{id}/interrupt", post(interrupt_thread_tree))
         .route(
             "/threads/{id}/background",
@@ -1426,6 +1437,12 @@ async fn active_turn(
     Path(id): Path<ThreadId>,
 ) -> ApiResult<Json<Option<Turn>>> {
     Ok(Json(state.runtime.active_turn(id).await?))
+}
+async fn thread_activity(
+    State(state): State<ServerState>,
+    Path(id): Path<ThreadId>,
+) -> ApiResult<Json<ThreadActivity>> {
+    Ok(Json(state.runtime.thread_activity(id).await?))
 }
 async fn pending_question(
     State(state): State<ServerState>,

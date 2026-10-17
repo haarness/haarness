@@ -4657,6 +4657,45 @@
         ],
         "type": "object"
       },
+      "ThreadActivity": {
+        "description": "What a chat is doing now (`GET /v1/threads/{id}/activity`). Work the chat\nstarted in the background (child agents launched or moved there, workflow\nruns started without waiting) delivers its result into the chat when it\nends, starting a new turn when the chat is idle. A chat is quiet only when\nno turn runs in it and `background` is 0. `turn.finished` events carry the\nsame count, as of the moment the turn finished, under the same name.",
+        "properties": {
+          "activeTurn": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Turn",
+                "description": "The turn running in this chat, if any. Always sent, null when none."
+              }
+            ]
+          },
+          "background": {
+            "description": "Background results this chat is still owed.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "lastTurn": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Turn",
+                "description": "The chat's newest turn by creation, whatever its status; null for a\nchat without turns. Read after the other two, so a turn that started\nand ended since an earlier read shows here. Always sent; servers\nbefore 2026-10-17 leave it out."
+              }
+            ]
+          }
+        },
+        "required": [
+          "activeTurn",
+          "background",
+          "lastTurn"
+        ],
+        "type": "object"
+      },
       "ThreadId": {
         "format": "uuid",
         "type": "string"

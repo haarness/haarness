@@ -267,6 +267,10 @@ class Api(Transport):
         """GET /v1/threads/{id}/active."""
         return cast("Union[T.Turn, None]", self.request('GET', f'/v1/threads/{self.segment(id)}/active', binary_body=False, binary_response=False, options=options))
 
+    def thread_activity(self, id: str, *, options: RequestOptions | None = None) -> T.ThreadActivity:
+        """GET /v1/threads/{id}/activity."""
+        return cast("T.ThreadActivity", self.request('GET', f'/v1/threads/{self.segment(id)}/activity', binary_body=False, binary_response=False, options=options))
+
     def interrupt_thread_tree(self, id: str, query: T.InterruptQuery | None = None, *, options: RequestOptions | None = None) -> T.InterruptResponse:
         """POST /v1/threads/{id}/interrupt."""
         return cast("T.InterruptResponse", self.request('POST', f'/v1/threads/{self.segment(id)}/interrupt', query=query, binary_body=False, binary_response=False, options=options))
@@ -767,6 +771,10 @@ class AsyncApi(AsyncTransport):
     async def active_turn(self, id: str, *, options: RequestOptions | None = None) -> Union[T.Turn, None]:
         """GET /v1/threads/{id}/active."""
         return cast("Union[T.Turn, None]", await self.request('GET', f'/v1/threads/{self.segment(id)}/active', binary_body=False, binary_response=False, options=options))
+
+    async def thread_activity(self, id: str, *, options: RequestOptions | None = None) -> T.ThreadActivity:
+        """GET /v1/threads/{id}/activity."""
+        return cast("T.ThreadActivity", await self.request('GET', f'/v1/threads/{self.segment(id)}/activity', binary_body=False, binary_response=False, options=options))
 
     async def interrupt_thread_tree(self, id: str, query: T.InterruptQuery | None = None, *, options: RequestOptions | None = None) -> T.InterruptResponse:
         """POST /v1/threads/{id}/interrupt."""

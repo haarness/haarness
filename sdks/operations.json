@@ -818,6 +818,17 @@
     }
   },
   {
+    "name": "thread_activity",
+    "method": "GET",
+    "path": "/v1/threads/{id}/activity",
+    "pathParams": [
+      "id"
+    ],
+    "response": {
+      "$ref": "#/components/schemas/ThreadActivity"
+    }
+  },
+  {
     "name": "interrupt_thread_tree",
     "method": "POST",
     "path": "/v1/threads/{id}/interrupt",

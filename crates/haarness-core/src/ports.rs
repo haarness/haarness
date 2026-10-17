@@ -159,6 +159,11 @@ pub trait ThreadRepository: Send + Sync {
         Err(CoreError::Invalid("Deferred input is unavailable".into()))
     }
     async fn get_turn(&self, id: TurnId) -> CoreResult<Turn>;
+    /// The thread's newest turn by creation, whatever its status. Stores that
+    /// cannot say report none.
+    async fn last_turn(&self, _id: ThreadId) -> CoreResult<Option<Turn>> {
+        Ok(None)
+    }
     async fn prepare_command_input(
         &self,
         _thread: ThreadId,

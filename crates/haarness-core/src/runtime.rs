@@ -17,8 +17,8 @@ use haarness_protocol::{
     GoalLogicalTurnPhase, GoalState, GoalStatus, GoalUpdateRequest, GoalUpdatedEvent, GoalVerdict,
     Item, ItemData, ItemId, PendingPermissionInfo, PendingQuestionInfo, PermissionReply,
     PermissionReplyDecision, QuestionReply, QueueInputRequest, QueueInputResponse, RequestId,
-    SessionArchive, SessionArchiveImportResult, StartTurnRequest, Thread, ThreadId, TodoCheckpoint,
-    TodoEntry, ToolCatalogResponse, Turn, TurnId, TurnStatus, UpdateThreadRequest,
+    SessionArchive, SessionArchiveImportResult, StartTurnRequest, Thread, ThreadActivity, ThreadId,
+    TodoCheckpoint, TodoEntry, ToolCatalogResponse, Turn, TurnId, TurnStatus, UpdateThreadRequest,
 };
 use parking_lot::{Mutex, RwLock};
 use serde_json::json;
@@ -27,6 +27,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, error, info, instrument, warn};
 
 use crate::agents::custom_system_prompt_with_context;
+use crate::background::{BackgroundHandoff, BackgroundLedger, BackgroundProbe};
 use crate::tool_catalog::{
     LOAD_TOOL_NAME, MAX_PROMOTED_TOOLS, is_essential_tool, load_tool_result, search_deferred_tools,
     select_tools,
@@ -299,6 +300,9 @@ struct BackgroundTask {
     delivery_unattended: bool,
     delivery_tools: Option<HashMap<String, bool>>,
     suppress_delivery: AtomicBool,
+    /// The result went to the parent's input; from then on the ledger's
+    /// handoff counts it until the parent admits it.
+    handed_off: AtomicBool,
     delivered: AtomicBool,
     delivery_done: Notify,
 }
@@ -313,6 +317,16 @@ impl BackgroundTask {
     }
     fn info(&self) -> BackgroundTaskInfo {
         self.info.lock().clone()
+    }
+
+    /// Whether this child still owes `thread` its result: it works in the
+    /// background (launched there or moved), was not stopped with its
+    /// parent, and has not handed its result over yet.
+    fn owes(&self, thread: ThreadId) -> bool {
+        self.promoted.load(Ordering::SeqCst)
+            && !self.suppress_delivery.load(Ordering::SeqCst)
+            && !self.handed_off.load(Ordering::SeqCst)
+            && self.info.lock().parent_thread_id == thread
     }
 
     fn promote(&self) -> bool {
@@ -384,6 +398,45 @@ fn turn_admission_lock(locks: &TurnAdmissionLocks, thread_id: ThreadId) -> Arc<A
             .or_insert_with(|| Arc::new(AsyncMutex::new(())))
             .value(),
     )
+}
+
+/// The background results `thread` is still owed: child tasks it launched
+/// in the background (or moved there) that have not handed their result
+/// over, results handed over and not yet admitted, and background workflow
+/// runs it launched. `finishing` is the request of a turn finishing now,
+/// whose own result is not owed any more. This is the one count:
+/// `turn.finished` carries it and `/v1/threads/{id}/activity` reports it.
+fn background_owed(
+    tasks: &BackgroundTasks,
+    ledger: &BackgroundLedger,
+    thread: ThreadId,
+    finishing: Option<RequestId>,
+) -> u32 {
+    // Workflow runs first: the server hands a run's result over before the
+    // coordinator forgets the run, so reading the coordinator first may
+    // count that result twice for an instant, but never misses it.
+    let workflows = ledger.probed(thread);
+    let owed = ledger.with_handoffs(thread, finishing, |handed| {
+        handed
+            + tasks
+                .iter()
+                .filter(|entry| entry.value().owes(thread))
+                .count()
+    });
+    u32::try_from(owed)
+        .unwrap_or(u32::MAX)
+        .saturating_add(workflows)
+}
+
+/// A `turn.finished` payload: the turn, and the background results its
+/// thread was still owed when it finished, left out when there are none.
+/// The count belongs to that moment and is not stored with the turn.
+fn finished_payload(turn: &Turn, background: u32) -> serde_json::Value {
+    let mut payload = json!(turn);
+    if background > 0 {
+        payload["background"] = json!(background);
+    }
+    payload
 }
 
 /// Result of a direct host-side tool call. Workflows use this path so shell,
@@ -1190,6 +1243,7 @@ pub struct AgentRuntime {
     repository_rules: Arc<Mutex<Vec<PermissionRule>>>,
     subagents: Arc<Mutex<HashMap<(u8, usize), Arc<Semaphore>>>>,
     background_tasks: Arc<BackgroundTasks>,
+    background_ledger: Arc<BackgroundLedger>,
     memory_context: Arc<RwLock<String>>,
     live_commands: Arc<RwLock<Vec<haarness_protocol::CommandInfo>>>,
     live_agents: Arc<RwLock<Vec<crate::CustomAgent>>>,
@@ -1340,6 +1394,7 @@ impl AgentRuntime {
             repository_rules: Arc::new(Mutex::new(Vec::new())),
             subagents: Arc::new(Mutex::new(HashMap::new())),
             background_tasks: Arc::new(DashMap::new()),
+            background_ledger: Arc::new(BackgroundLedger::default()),
             memory_context: Arc::new(RwLock::new(String::new())),
             live_commands: Arc::new(RwLock::new(commands)),
             live_agents: Arc::new(RwLock::new(agents)),
@@ -1709,7 +1764,7 @@ impl AgentRuntime {
         let tools = request
             .preview
             .map(|preview| HashMap::from([("preview".into(), preview)]));
-        self.queue_input_with_options(thread_id, request, false, false, tools)
+        self.queue_input_with_options(thread_id, request, false, false, tools, None)
             .await
     }
 
@@ -1925,6 +1980,9 @@ impl AgentRuntime {
     /// Queue runtime-owned input while preserving the headless/tool contract
     /// of the turn which launched it. Interactive API callers use the public
     /// wrapper above and therefore never gain automatic approval implicitly.
+    /// A background result's `handoff` is released the moment its input is
+    /// admitted: appended while the running turn still accepts input (that
+    /// turn reads it before it can finish), or as the turn it starts.
     async fn queue_input_with_options(
         &self,
         thread_id: ThreadId,
@@ -1932,6 +1990,7 @@ impl AgentRuntime {
         auto_approve: bool,
         unattended: bool,
         tools: Option<HashMap<String, bool>>,
+        handoff: Option<&BackgroundHandoff>,
     ) -> CoreResult<QueueInputResponse> {
         if request.text.trim().is_empty() && request.attachments.is_empty() {
             return Err(CoreError::Invalid(
@@ -1953,7 +2012,13 @@ impl AgentRuntime {
                 let changed = active.changed.notified();
                 let accepting = active.accepting.lock().await;
                 if *accepting {
-                    return self.append_queued_input(&thread, active.id, &request).await;
+                    let queued = self.append_queued_input(&thread, active.id, &request).await;
+                    // Still under the gate the turn closes before it finishes.
+                    if let Some(handoff) = handoff {
+                        handoff.release();
+                    }
+                    drop(accepting);
+                    return queued;
                 }
                 drop(accepting);
                 // `false` means either launch setup has not opened acceptance
@@ -1999,6 +2064,11 @@ impl AgentRuntime {
                 .await
             {
                 Ok(turn) => {
+                    // The turn may already be finishing; it does not count
+                    // the result it carries (see `background_owed`).
+                    if let Some(handoff) = handoff {
+                        handoff.release();
+                    }
                     return Ok(QueueInputResponse {
                         queued: false,
                         item: None,
@@ -2565,6 +2635,84 @@ impl AgentRuntime {
             })
         });
         Ok(tasks)
+    }
+
+    /// The background results `thread` is still owed: each one, when it
+    /// ends, is delivered into it. A thread is done only when it has no
+    /// running turn and this is 0.
+    #[must_use]
+    pub fn background_results_owed(&self, thread: ThreadId) -> u32 {
+        background_owed(
+            &self.background_tasks,
+            &self.background_ledger,
+            thread,
+            None,
+        )
+    }
+
+    /// What a chat is doing now: its running turn, and the background
+    /// results it is still owed. A chat with neither is quiet.
+    pub async fn thread_activity(&self, id: ThreadId) -> CoreResult<ThreadActivity> {
+        self.repository.get_thread(id).await?;
+        // The count first: a result is admitted (its turn is running) before
+        // it stops being owed, so this order never finds a chat quiet while
+        // a result moves from one to the other.
+        let background = self.background_results_owed(id);
+        let active = self.active.get(&id).map(|entry| entry.value().id);
+        let active_turn = match active {
+            Some(turn) => Some(self.repository.get_turn(turn).await?),
+            None => None,
+        };
+        // Last: a turn that started and ended between two reads of a chat
+        // that looks quiet is the newest here.
+        let last_turn = self.repository.last_turn(id).await?;
+        Ok(ThreadActivity {
+            active_turn,
+            background,
+            last_turn,
+        })
+    }
+
+    /// Let the background count read the workflow runs a thread launched
+    /// that will deliver into it. The server installs this once.
+    pub fn set_background_probe(&self, probe: BackgroundProbe) {
+        self.background_ledger.set_probe(probe);
+    }
+
+    /// Start handing a background result to `thread`. It stays owed until
+    /// [`Self::queue_background_result`] admits it or the handoff is dropped.
+    #[must_use]
+    pub fn background_handoff(&self, thread: ThreadId) -> BackgroundHandoff {
+        self.background_ledger
+            .hand_off(thread, RequestId::new(), || {})
+    }
+
+    /// Deliver a background result to `thread` as steering, or as a new
+    /// turn when it is idle, releasing `handoff` at the moment the input is
+    /// admitted.
+    pub async fn queue_background_result(
+        &self,
+        thread: ThreadId,
+        text: String,
+        handoff: &BackgroundHandoff,
+    ) -> CoreResult<QueueInputResponse> {
+        self.queue_input_with_options(
+            thread,
+            QueueInputRequest {
+                preview: None,
+                reasoning_effort: None,
+                delivery: haarness_protocol::InputDelivery::Steer,
+                request_id: handoff.request_id(),
+                text,
+                attachments: Vec::new(),
+                synthetic: true,
+            },
+            false,
+            false,
+            None,
+            Some(handoff),
+        )
+        .await
     }
 
     /// Stop exactly one child task owned by `parent`. The selected child may
@@ -4801,13 +4949,19 @@ impl AgentRuntime {
                 .set_turn_status(turn.id, TurnStatus::Failed, Some(message))
                 .await
             {
+                let background = background_owed(
+                    &self.background_tasks,
+                    &self.background_ledger,
+                    thread_id,
+                    Some(failed.request_id),
+                );
                 self.events.publish_scoped(
                     "turn.finished",
                     Some(thread_id),
                     Some(root),
                     Some(turn.id),
                     None,
-                    json!(failed),
+                    finished_payload(&failed, background),
                 );
             }
             self.active
@@ -4867,6 +5021,7 @@ impl AgentRuntime {
             repository_rules: self.repository_rules.clone(),
             subagents: self.subagents.clone(),
             background_tasks: self.background_tasks.clone(),
+            background_ledger: self.background_ledger.clone(),
             depth: 0,
             root_thread_id: root,
             parent: None,
@@ -4952,6 +5107,7 @@ impl AgentRuntime {
                     false,
                     false,
                     task.request.tools.clone(),
+                    None,
                 )
                 .await
             {
@@ -5216,12 +5372,18 @@ impl AgentRuntime {
                 .set_turn_status(active_turn.id, TurnStatus::Interrupted, Some(message))
                 .await
             {
+                let background = background_owed(
+                    &self.background_tasks,
+                    &self.background_ledger,
+                    *thread_id,
+                    Some(turn.request_id),
+                );
                 self.events.publish(
                     "turn.finished",
                     Some(*thread_id),
                     Some(active_turn.id),
                     None,
-                    json!(turn),
+                    finished_payload(&turn, background),
                 );
             }
             self.active
@@ -5263,6 +5425,7 @@ struct RunnerTask {
     repository_rules: Arc<Mutex<Vec<PermissionRule>>>,
     subagents: Arc<Mutex<HashMap<(u8, usize), Arc<Semaphore>>>>,
     background_tasks: Arc<BackgroundTasks>,
+    background_ledger: Arc<BackgroundLedger>,
     depth: u8,
     /// Root of this turn's conversation; equals `thread.id` unless this is a
     /// child-agent turn.
@@ -5979,7 +6142,7 @@ impl RunnerTask {
                     Some(self.root_thread_id),
                     Some(self.turn.id),
                     None,
-                    json!(turn),
+                    finished_payload(&turn, self.background_results_owed()),
                 );
             }
         }
@@ -6064,6 +6227,31 @@ impl RunnerTask {
         if let Some(active) = active {
             *active.accepting.lock().await = false;
         }
+    }
+
+    /// The result of task call `call_id` is durable in this turn: a child it
+    /// launched or moved to the background may now deliver its own result,
+    /// which must come after it.
+    fn release_task_delivery(&self, call_id: &str) {
+        if let Some(task) = self.background_tasks.iter().find_map(|entry| {
+            let info = entry.value().info();
+            (info.parent_thread_id == self.thread.id && info.call_id == call_id)
+                .then(|| Arc::clone(entry.value()))
+        }) {
+            task.parent_ready.store(true, Ordering::SeqCst);
+            task.ready.notify_waiters();
+        }
+    }
+
+    /// The background results this turn's thread is still owed as the turn
+    /// finishes; the result the turn itself carried in is not among them.
+    fn background_results_owed(&self) -> u32 {
+        background_owed(
+            &self.background_tasks,
+            &self.background_ledger,
+            self.thread.id,
+            Some(self.turn.request_id),
+        )
     }
 
     async fn close_acceptance(&self) {
@@ -6469,13 +6657,15 @@ impl RunnerTask {
                         .execute_call_inner(agent, &call_id, "task", arguments, false, false)
                         .await?;
                     self.publish_item(ItemData::ToolResult {
-                        call_id,
+                        call_id: call_id.clone(),
                         name: "task".into(),
                         output: output.text.clone(),
                         is_error: false,
                         metadata: output.metadata,
                     })
                     .await?;
+                    // A child moved to the background delivers after this.
+                    self.release_task_delivery(&call_id);
                     self.publish_item(ItemData::AssistantMessage { text: output.text })
                         .await?;
                     let active = self
@@ -6498,7 +6688,7 @@ impl RunnerTask {
                             Some(self.root_thread_id),
                             Some(turn.id),
                             None,
-                            json!(turn),
+                            finished_payload(&turn, self.background_results_owed()),
                         );
                         return Ok(());
                     }
@@ -7497,7 +7687,7 @@ impl RunnerTask {
                         Some(self.root_thread_id),
                         Some(self.turn.id),
                         None,
-                        json!(turn),
+                        finished_payload(&turn, self.background_results_owed()),
                     );
                     self.active
                         .remove_if(&self.thread.id, |_, current| current.id == self.turn.id);
@@ -7618,15 +7808,8 @@ impl RunnerTask {
                             .await?;
                         }
                     }
-                    if name == "task"
-                        && let Some(task) = self.background_tasks.iter().find_map(|entry| {
-                            let info = entry.value().info();
-                            (info.parent_thread_id == self.thread.id && info.call_id == call_id)
-                                .then(|| Arc::clone(entry.value()))
-                        })
-                    {
-                        task.parent_ready.store(true, Ordering::SeqCst);
-                        task.ready.notify_waiters();
+                    if name == "task" {
+                        self.release_task_delivery(&call_id);
                     }
                 }
             }
@@ -9361,6 +9544,7 @@ impl RunnerTask {
             repository_rules: self.repository_rules.clone(),
             subagents: self.subagents.clone(),
             background_tasks: self.background_tasks.clone(),
+            background_ledger: self.background_ledger.clone(),
             depth: self.depth + 1,
             root_thread_id: self.root_thread_id,
             parent: Some(ParentLink {
@@ -9431,6 +9615,7 @@ impl RunnerTask {
                 None
             },
             suppress_delivery: AtomicBool::new(false),
+            handed_off: AtomicBool::new(false),
             delivered: AtomicBool::new(false),
             delivery_done: Notify::new(),
         });
@@ -9553,6 +9738,7 @@ impl RunnerTask {
         }
         let runtime = self.runtime_handle();
         let tasks = self.background_tasks.clone();
+        let ledger = self.background_ledger.clone();
         tokio::spawn(async move {
             let result = task.wait_result().await;
             task.wait_parent_ready().await;
@@ -9572,6 +9758,10 @@ impl RunnerTask {
                 Err(error) => ("error", user_facing_error(&error)),
             };
             let info = task.info();
+            // The parent stays owed this result until its input admits it.
+            let handoff = ledger.hand_off(info.parent_thread_id, RequestId::new(), || {
+                task.handed_off.store(true, Ordering::SeqCst);
+            });
             let delivered = runtime
                 .queue_input_with_options(
                     info.parent_thread_id,
@@ -9579,7 +9769,7 @@ impl RunnerTask {
                         preview: None,
                         reasoning_effort: None,
                         delivery: haarness_protocol::InputDelivery::Steer,
-                        request_id: RequestId::new(),
+                        request_id: handoff.request_id(),
                         text: task.envelope(&info, state, &text),
                         attachments: Vec::new(),
                         synthetic: true,
@@ -9587,8 +9777,10 @@ impl RunnerTask {
                     task.delivery_auto_approve,
                     task.delivery_unattended,
                     task.delivery_tools.clone(),
+                    Some(&handoff),
                 )
                 .await;
+            drop(handoff);
             if let Err(error) = delivered {
                 tracing::error!(%error, child = %info.child_thread_id, "failed to deliver background task result");
             }
@@ -9624,6 +9816,7 @@ impl RunnerTask {
             repository_rules: self.repository_rules.clone(),
             subagents: self.subagents.clone(),
             background_tasks: self.background_tasks.clone(),
+            background_ledger: self.background_ledger.clone(),
             memory_context: self.memory_context.clone(),
             live_commands: self.live_commands.clone(),
             live_agents: self.live_agents.clone(),
