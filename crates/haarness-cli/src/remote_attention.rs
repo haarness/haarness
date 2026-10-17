@@ -11,6 +11,9 @@
 //! such work runs is not where the chat stopped; the turn that receives the
 //! last result is. A root turn that was stopped is reported as stopped, after
 //! the same settle, so a stop that goes straight on is not reported at all.
+//! A chat held for background work that goes quiet without another turn (it
+//! was stopped while idle, its last helper was stopped, the server stopped, a
+//! delivery failed) reports the turn it was held on as stopped.
 //! With a Cloud that asks for it (`attention.working`), each frame also lists
 //! the chats that are still working.
 //!
@@ -182,12 +185,18 @@ struct Remembered {
     finished: Vec<Done>,
     /// Root turns that ran when it was last read, with their chats.
     running: HashMap<TurnId, ThreadId>,
-    /// Root chats owed background results when it was last read.
-    background: HashSet<ThreadId>,
+    /// Root chats owed background results when it was last read, with the
+    /// turn each is held on.
+    background: Held,
 }
 
 /// By server instance.
 type Memory = Arc<Mutex<HashMap<String, Remembered>>>;
+
+/// Root chats that background work still owes a result, each with the root
+/// turn that ended while it was owed, when that turn is known to be the
+/// chat's newest; None when events were missed since.
+type Held = HashMap<ThreadId, Option<Turn>>;
 
 /// This build's executable fingerprint as it is now.
 pub(crate) type Fingerprint = Arc<dyn Fn() -> Option<String> + Send + Sync>;
@@ -1295,16 +1304,48 @@ async fn settle(daemon: Daemon, turn: Turn, delay: Duration, attempt: u32) -> Se
     }
 }
 
-/// A chat owed background results while no turn runs in it, asked again.
+/// A chat held for background work while no turn runs in it, asked again.
 struct Recheck {
     chat: ThreadId,
-    checked: Result<ThreadActivity>,
+    /// A second check, a settle after the first found the chat quiet.
+    confirm: bool,
+    /// The chat when it is quiet: no turn runs in it and nothing is owed.
+    checked: Result<Option<Thread>>,
 }
 
-async fn recheck(daemon: Daemon, chat: ThreadId) -> Recheck {
+async fn recheck(daemon: Daemon, chat: ThreadId, delay: Duration, confirm: bool) -> Recheck {
+    tokio::time::sleep(delay).await;
+    let checked = async {
+        let now = activity(&daemon, chat).await?;
+        if now.active_turn.is_some() || now.background > 0 {
+            return Ok(None);
+        }
+        Ok(Some(
+            daemon.get::<Thread>(&format!("threads/{chat}")).await?,
+        ))
+    }
+    .await;
     Recheck {
         chat,
-        checked: activity(&daemon, chat).await,
+        confirm,
+        checked,
+    }
+}
+
+/// A `task.updated` or `workflow.updated` that says background work ended:
+/// a helper agent finished, failed or was stopped, or a workflow run reached
+/// its end.
+fn background_ended(event: &EventEnvelope) -> bool {
+    match event.event_type.as_str() {
+        "task.updated" => matches!(
+            event.payload["state"].as_str(),
+            Some("done" | "failed" | "cancelled")
+        ),
+        "workflow.updated" => matches!(
+            event.payload["info"]["status"].as_str(),
+            Some("completed" | "failed" | "cancelled" | "interrupted")
+        ),
+        _ => false,
     }
 }
 
@@ -1315,6 +1356,9 @@ enum Step {
     Refresh,
     /// The view changed.
     Changed,
+    /// Background work of this chat, held for it, ended: ask whether the
+    /// chat went quiet.
+    Recheck(ThreadId),
 }
 
 struct Follower {
@@ -1334,8 +1378,8 @@ struct Follower {
     /// about: their end may be among what was missed.
     running: HashMap<TurnId, ThreadId>,
     /// Root chats that background work still owes a result, as their last
-    /// finished turn or check said.
-    background: HashSet<ThreadId>,
+    /// finished turn or check said, with the turn each is held on.
+    background: Held,
     /// Events may have been missed (the server's buffer moved past the
     /// cursor, or this server is followed afresh): ask which turns run.
     missed: bool,
@@ -1421,10 +1465,25 @@ impl Follower {
     ) -> Step {
         let step = match event.kind.as_str() {
             "resync_required" => {
-                // What was missed may hold a root turn's end.
+                // What was missed may hold a root turn's end, and a held
+                // chat's turn may no longer be its newest.
                 self.missed = true;
+                for held in self.background.values_mut() {
+                    *held = None;
+                }
                 Step::Refresh
             }
+            "task.updated" | "workflow.updated" => event
+                .envelope()
+                .filter(background_ended)
+                .and_then(|envelope| {
+                    let thread = envelope.thread_id?;
+                    let chat = root_of(self.daemon.scope, thread, envelope.root_thread_id);
+                    self.background
+                        .contains_key(&chat)
+                        .then_some(Step::Recheck(chat))
+                })
+                .unwrap_or(Step::Nothing),
             "permission.requested"
             | "permission.resolved"
             | "question.requested"
@@ -1467,18 +1526,20 @@ impl Follower {
                     && let Some(turn) = root_turn(&envelope, self.daemon.scope)
                 {
                     self.running.remove(&turn.id);
-                    let owed = owed(&envelope.payload);
-                    if owed > 0 {
-                        self.background.insert(turn.thread_id);
-                    } else {
-                        self.background.remove(&turn.thread_id);
-                    }
-                    if owed > 0 && turn.status != TurnStatus::Interrupted {
+                    // A stop owns what the chat launched: it is where the chat
+                    // stopped, whatever is still counted, and leaves the chat
+                    // working only if a turn takes over.
+                    let stopped = turn.status == TurnStatus::Interrupted;
+                    if owed(&envelope.payload) > 0 && !stopped {
                         // What the turn started still works: the turn that
                         // receives its last result is where the chat stops.
+                        self.background.insert(turn.thread_id, Some(turn.clone()));
                         self.settling.remove(&turn.thread_id);
-                    } else if finished(&turn) {
-                        self.check(turn, settle_for, settling);
+                    } else {
+                        self.background.remove(&turn.thread_id);
+                        if finished(&turn) {
+                            self.check(turn, settle_for, settling);
+                        }
                     }
                     self.note_working();
                     self.remember();
@@ -1544,8 +1605,8 @@ impl Follower {
         };
         self.settling.remove(&turn.thread_id);
         if let Some(check) = &check {
-            if check.background > 0 {
-                self.background.insert(turn.thread_id);
+            if check.background > 0 && turn.status != TurnStatus::Interrupted {
+                self.background.insert(turn.thread_id, Some(turn.clone()));
             } else {
                 self.background.remove(&turn.thread_id);
             }
@@ -1556,16 +1617,23 @@ impl Follower {
             self.remember();
             return working;
         };
-        self.view.chats.insert(thread.id, Chat::of(&thread));
+        let status = match turn.status {
+            TurnStatus::Failed => Outcome::Failed,
+            TurnStatus::Interrupted => Outcome::Interrupted,
+            _ => Outcome::Completed,
+        };
+        self.report(&thread, &turn, status, turn.updated_at);
+        true
+    }
+
+    /// Count `turn` of `thread` as where the chat stopped.
+    fn report(&mut self, thread: &Thread, turn: &Turn, status: Outcome, at: DateTime<Utc>) {
+        self.view.chats.insert(thread.id, Chat::of(thread));
         self.view.finished.push(Done {
             turn: turn.id,
             thread: turn.thread_id,
-            status: match turn.status {
-                TurnStatus::Failed => Outcome::Failed,
-                TurnStatus::Interrupted => Outcome::Interrupted,
-                _ => Outcome::Completed,
-            },
-            at: turn.updated_at,
+            status,
+            at,
         });
         let now = Utc::now();
         self.view
@@ -1575,28 +1643,55 @@ impl Follower {
             .finished
             .sort_by(|left, right| right.at.cmp(&left.at));
         self.view.finished.truncate(MAX_FINISHED);
+        self.note_working();
         self.remember();
-        true
     }
 
-    /// A chat owed background results asked again: one owed nothing any
-    /// more (its background work was stopped) stops working. True when the
-    /// view changed.
-    fn rechecked(&mut self, recheck: Recheck) -> bool {
-        if let Ok(activity) = recheck.checked
-            && activity.background == 0
-            && self.background.remove(&recheck.chat)
-        {
-            self.remember();
+    /// A held chat asked again. One that stayed quiet for a settle without
+    /// another turn was stopped while idle (or its work was stopped, or its
+    /// result could not be delivered): the turn it was held on is reported
+    /// as stopped. True when the view changed.
+    fn rechecked(
+        &mut self,
+        asked: Recheck,
+        settle_for: Duration,
+        rechecks: &mut JoinSet<Recheck>,
+    ) -> bool {
+        let Recheck {
+            chat,
+            confirm,
+            checked,
+        } = asked;
+        // Still at work, or the server did not answer: the next check asks.
+        let Ok(Some(thread)) = checked else {
+            return false;
+        };
+        let Some(held) = self.background.get(&chat) else {
+            // A turn took over and ended meanwhile.
+            return false;
+        };
+        if held.is_some() && !confirm {
+            // A turn the last result started may be on its way in the
+            // events: only a chat still quiet a settle later stopped here.
+            rechecks.spawn(recheck(self.daemon.clone(), chat, settle_for, true));
+            return false;
         }
-        self.note_working()
+        let held = self.background.remove(&chat).flatten();
+        self.remember();
+        match held {
+            Some(turn) if !self.view.finished.iter().any(|done| done.turn == turn.id) => {
+                self.report(&thread, &turn, Outcome::Interrupted, Utc::now());
+                true
+            }
+            _ => self.note_working(),
+        }
     }
 
     /// The chats owed background results that no turn runs in: nothing
     /// else would say when they stop being owed.
     fn idle_background(&self) -> Vec<ThreadId> {
         self.background
-            .iter()
+            .keys()
             .filter(|chat| !self.running.values().any(|running| running == *chat))
             .copied()
             .collect()
@@ -1607,7 +1702,7 @@ impl Follower {
         let working: HashSet<ThreadId> = self
             .running
             .values()
-            .chain(&self.background)
+            .chain(self.background.keys())
             .copied()
             .collect();
         if working == self.view.working {
@@ -1726,6 +1821,10 @@ async fn follow(
                                 return;
                             }
                         }
+                        Step::Recheck(chat) => {
+                            // After a settle, as a finished turn is checked.
+                            rechecks.spawn(recheck(follower.daemon.clone(), chat, settle_for, false));
+                        }
                     }
                 }
                 Some(settled) = settling.join_next(), if !settling.is_empty() => {
@@ -1739,12 +1838,12 @@ async fn follow(
                 () = tokio::time::sleep_until(recheck_at.unwrap_or_else(Instant::now)), if recheck_at.is_some() => {
                     recheck_at = None;
                     for chat in follower.idle_background() {
-                        rechecks.spawn(recheck(follower.daemon.clone(), chat));
+                        rechecks.spawn(recheck(follower.daemon.clone(), chat, Duration::ZERO, false));
                     }
                 }
                 Some(rechecked) = rechecks.join_next(), if !rechecks.is_empty() => {
                     if let Ok(rechecked) = rechecked
-                        && follower.rechecked(rechecked)
+                        && follower.rechecked(rechecked, settle_for, &mut rechecks)
                         && !report(&follower).await
                     {
                         return;
@@ -2098,7 +2197,7 @@ mod tests {
             cursor: None,
             settling: HashMap::new(),
             running: HashMap::new(),
-            background: HashSet::new(),
+            background: HashMap::new(),
             missed: false,
         }
     }
@@ -2171,6 +2270,10 @@ mod tests {
             &mut settling,
         );
         assert_eq!(settles(&follower), Some(Uuid::from_u128(63)));
+        assert!(
+            follower.view.working.is_empty(),
+            "a stopped chat is not working"
+        );
         settling.abort_all();
     }
 
@@ -2213,8 +2316,9 @@ mod tests {
             Settled {
                 turn: stop,
                 attempt: 1,
+                // A stop is where the chat stopped, whatever is still counted.
                 checked: Ok(Check {
-                    background: 0,
+                    background: 1,
                     quiet: Some(thread),
                 }),
             },

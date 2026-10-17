@@ -3723,7 +3723,8 @@ mod tests {
         let (computer, home) =
             watched_home(&[(stopped, "Stopped"), (continued, "Continued")]).await;
         home.state.lock().unwrap().activity = true;
-        let (relay, mut frames) = fake_relay(vec![Relay::Record(&["attention.v1"])]).await;
+        let (relay, mut frames) =
+            fake_relay(vec![Relay::Record(&["attention.v1", "attention.working"])]).await;
         let attention = attention(&computer.paths);
         let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
         next_attention(&mut frames).await;
@@ -3752,7 +3753,11 @@ mod tests {
         assert_eq!(finished_turns(&frame), [json!(stop)], "{frame}");
         assert_eq!(frame["finished"][0]["status"], "interrupted");
         assert_eq!(frame["finished"][0]["chatTitle"], "Stopped");
-        assert!(frame.get("working").is_none(), "not asked for: {frame}");
+        assert_eq!(
+            frame["working"],
+            json!([]),
+            "a stopped chat is not working: {frame}"
+        );
         tokio::time::sleep(Duration::from_millis(800)).await;
         while let Ok(frame) = frames.try_recv() {
             assert_ne!(frame["type"], "attention", "{frame}");
@@ -3791,6 +3796,99 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(800)).await;
         while let Ok(frame) = frames.try_recv() {
             assert_ne!(frame["type"], "attention", "{frame}");
+        }
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    /// A helper agent's `task.updated` in `state`.
+    fn task_update(state: &str) -> Value {
+        json!({"callId":"call-1","childThreadId":Uuid::now_v7(),"childTurnId":Uuid::now_v7(),
+            "state":state,"toolCalls":1,"lastTool":"bash","startedAt":chrono::Utc::now()})
+    }
+    /// A watched chat whose turn just ended while one helper still works for
+    /// it, on a relay that asked for working chats.
+    async fn chat_held_for_background_work() -> (
+        Computer,
+        FakeDaemon,
+        mpsc::UnboundedReceiver<Value>,
+        tokio::task::JoinHandle<Result<Link>>,
+        Uuid,
+        Uuid,
+    ) {
+        let work = Uuid::now_v7();
+        let (computer, home) = watched_home(&[(work, "Work")]).await;
+        home.state.lock().unwrap().activity = true;
+        let (relay, mut frames) =
+            fake_relay(vec![Relay::Record(&["attention.v1", "attention.working"])]).await;
+        let attention = attention(&computer.paths);
+        let connection = link(&relay, &home.target(&computer.home.id, None), &attention);
+        next_attention(&mut frames).await;
+        let launch = Uuid::now_v7();
+        home.emit(
+            "turn.started",
+            work,
+            work,
+            finished_turn(launch, work, "running"),
+        );
+        home.state.lock().unwrap().background.insert(work, 1);
+        home.emit(
+            "turn.finished",
+            work,
+            work,
+            owing_turn(launch, work, "completed", 1),
+        );
+        attention_where(&mut frames, |frame| frame["working"] == json!([work])).await;
+        (computer, home, frames, connection, work, launch)
+    }
+    #[tokio::test]
+    async fn a_chat_whose_background_work_is_stopped_while_it_is_idle_is_reported_stopped_once() {
+        let (computer, home, mut frames, connection, work, launch) =
+            chat_held_for_background_work().await;
+        // Stopped while idle: the helper is cancelled and no turn follows.
+        home.state.lock().unwrap().background.remove(&work);
+        home.emit("task.updated", work, work, task_update("cancelled"));
+        let stopped = attention_where(&mut frames, |frame| !finished_turns(frame).is_empty()).await;
+        assert_eq!(finished_turns(&stopped), [json!(launch)], "{stopped}");
+        assert_eq!(stopped["finished"][0]["status"], "interrupted");
+        assert_eq!(stopped["finished"][0]["chatTitle"], "Work");
+        assert_eq!(stopped["working"], json!([]), "{stopped}");
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        while let Ok(frame) = frames.try_recv() {
+            assert_ne!(frame["type"], "attention", "reported once: {frame}");
+        }
+        connection.abort();
+        std::fs::remove_dir_all(&computer.root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_chat_whose_background_result_arrives_is_reported_completed_and_never_stopped() {
+        let (computer, home, mut frames, connection, work, launch) =
+            chat_held_for_background_work().await;
+        // The helper is done; its result is on its way into the chat.
+        home.emit("task.updated", work, work, task_update("done"));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        home.state.lock().unwrap().background.remove(&work);
+        let delivered = Uuid::now_v7();
+        home.emit(
+            "turn.started",
+            work,
+            work,
+            finished_turn(delivered, work, "running"),
+        );
+        home.emit(
+            "turn.finished",
+            work,
+            work,
+            finished_turn(delivered, work, "completed"),
+        );
+        let done = attention_where(&mut frames, |frame| !finished_turns(frame).is_empty()).await;
+        assert_eq!(finished_turns(&done), [json!(delivered)], "{done}");
+        assert_eq!(done["finished"][0]["status"], "completed");
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        while let Ok(frame) = frames.try_recv() {
+            if frame["type"] == "attention" {
+                assert_eq!(finished_turns(&frame), [json!(delivered)], "{frame}");
+                assert!(!frame.to_string().contains(&launch.to_string()), "{frame}");
+            }
         }
         connection.abort();
         std::fs::remove_dir_all(&computer.root).unwrap();
