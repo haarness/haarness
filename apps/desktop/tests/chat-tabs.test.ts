@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { savedTabs, tabsKey } from "../src/renderer/chat-tabs";
+import { newlyArchived, savedTabs, tabsKey, unarchivedChats } from "../src/renderer/chat-tabs";
 
 const threads = [
   { id: "one", archived: false },
@@ -24,4 +24,26 @@ test("a damaged or absent record reopens no tabs", () => {
 test("each project remembers its own tabs", () => {
   assert.notEqual(tabsKey("project-a"), tabsKey("project-b"));
   assert.match(tabsKey("project-a"), /^chat-tabs:v1:/);
+});
+
+test("a chat archived since the last listing is newly archived", () => {
+  const before = unarchivedChats([
+    { id: "one", archived: false },
+    { id: "two", archived: false },
+    { id: "old", archived: true },
+  ]);
+  assert.deepEqual([...before], ["one", "two"]);
+  assert.deepEqual(
+    newlyArchived(before, [
+      { id: "one", archived: true },
+      { id: "two", archived: false },
+      { id: "old", archived: true },
+    ]),
+    ["one"],
+  );
+});
+
+test("a project's first listing, or a chat first seen archived, archives nothing", () => {
+  assert.deepEqual(newlyArchived(new Set(), threads), []);
+  assert.deepEqual(newlyArchived(new Set(["one"]), [{ id: "new", archived: true }]), []);
 });

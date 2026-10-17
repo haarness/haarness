@@ -28,6 +28,7 @@ import {
   createMemo,
   createRoot,
   createSignal,
+  untrack,
   type ParentProps,
 } from "solid-js";
 import { createStore, reconcile, unwrap } from "solid-js/store";
@@ -43,7 +44,7 @@ import {
 } from "../shared";
 import { cloudServers, localServer, serverKey, serverProjects } from "../servers";
 import { freshChat, landItems, reduceEvent, type Live } from "./sync";
-import { savedTabs, tabsKey } from "./chat-tabs";
+import { newlyArchived, savedTabs, tabsKey, unarchivedChats } from "./chat-tabs";
 import { themeColors } from "../themes";
 import {
   cleanProjectMeta,
@@ -557,6 +558,23 @@ function createApp() {
   function rememberTabs(connection: string) {
     void window.haarness.storage(tabsKey(connection), [...state.tabs]);
   }
+  // A chat archived while its tab waits behind another (from the sidebar,
+  // Archive chats or another window) leaves the tab strip with its sidebar
+  // row. The chat on screen stays open, with its archived notice and Restore.
+  let unarchived = new Set<string>();
+  createEffect(() => {
+    const archived = newlyArchived(unarchived, state.threads);
+    unarchived = unarchivedChats(state.threads);
+    untrack(() => {
+      const closing = archived.filter(
+        (id) => id !== state.selected && state.tabs.includes(id),
+      );
+      if (!closing.length || !state.connection) return;
+      set("tabs", (tabs) => tabs.filter((tab) => !closing.includes(tab)));
+      tabHistory = tabHistory.filter((tab) => !closing.includes(tab));
+      rememberTabs(state.connection.id);
+    });
+  });
   async function closeTab(id: string) {
     set("openingChat", 0);
     set("tabs", (tabs) => tabs.filter((tab) => tab !== id));
