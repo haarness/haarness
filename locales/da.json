@@ -2450,5 +2450,8 @@
   "This result is too large to show in the app.": "Dette resultat er for stort til at blive vist i appen.",
   "Link from the app": "Link fra appen",
   "This app wants to open a link.": "Denne app vil åbne et link.",
-  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "Dette værktøj har en app; åbn chatten i Haarness Desktop for at bruge den."
+  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "Dette værktøj har en app; åbn chatten i Haarness Desktop for at bruge den.",
+  "Message from the app": "Besked fra appen",
+  "This app wants to write a message for you.": "Denne app vil skrive en besked for dig.",
+  "Insert app message": "Indsæt appens besked"
 }

@@ -172,6 +172,32 @@ test("a message from the page goes into the message box and is never sent by its
   await box.fill("");
 });
 
+test("a message the page writes by itself waits for the person and leaves the draft and focus alone", async () => {
+  const box = page.getByRole("textbox", { name: "Message" });
+  await box.fill("Keep this draft");
+  await box.focus();
+  const view = await show('{"city":"Evora","automessage":true}');
+  const request = view.getByRole("group", { name: "Message from the app" });
+  await expect(request).toContainText("This app wants to write a message for you.");
+  await expect(request).toContainText("Automatic message from the page.");
+  await page.waitForTimeout(300);
+  await expect(box).toHaveValue("Keep this draft");
+  await expect(box).toBeFocused();
+  await request.getByRole("button", { name: "Insert app message", exact: true }).click();
+  await expect(content(view).locator("#status")).toHaveText("automessage {}");
+  await expect(box).toHaveValue("Keep this draft\n\nAutomatic message from the page.");
+  await expect(request).toHaveCount(0);
+  expect((await client.activeTurns()).length).toBe(0);
+
+  // Dismiss refuses it and changes nothing.
+  await box.fill("");
+  const again = await show('{"city":"Beja","automessage":true}');
+  await again.getByRole("group", { name: "Message from the app" }).getByRole("button", { name: "Dismiss", exact: true }).click();
+  await expect(content(again).locator("#status")).toHaveText('automessage {"isError":true}');
+  await expect(box).toHaveValue("");
+  expect(errors).toEqual([]);
+});
+
 test("the page cannot call tools, read other resources, reach undeclared hosts or leave its frame", async () => {
   const view = page.locator(".mcp-app").last();
   const frame = content(view);
@@ -197,7 +223,7 @@ test("the page cannot call tools, read other resources, reach undeclared hosts o
   await expect(view.locator(".mcp-app-notice")).toContainText("This app tried to leave its page, so Haarness closed it.");
   await view.getByRole("button", { name: "Try again", exact: true }).click();
   await expect(view).toHaveAttribute("data-state", "ready", { timeout: 30000 });
-  await expect(content(view).locator("#input")).toHaveText('input {"city":"Faro","autolink":true}');
+  await expect(content(view).locator("#input")).toHaveText('input {"city":"Beja","automessage":true}');
   // Only the two links the person allowed ever reached the system.
   expect((await calls()).shell).toHaveLength(2);
   expect(errors).toEqual([]);
