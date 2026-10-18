@@ -74,6 +74,7 @@ async fn turn(
                 estimated: false,
                 first_token_ms: None,
                 stream_ms: None,
+                stream_tokens: None,
             },
         )
         .await

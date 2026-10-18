@@ -101,19 +101,20 @@ export const tokenNumber = (value: number | null | undefined) =>
   value == null ? "Not available" : value.toLocaleString("en-US");
 
 /** A request's pace from its usage record: the wait for its first streamed
- * content, and output tokens per second while it streamed. Speed is left out
- * under half a second of streaming, where one burst reads as an absurd rate,
- * and for a request that produced nothing. Records of stopped or failed
- * requests, and those made before requests were timed, carry no timing. */
+ * content, and the tokens that streamed per second while they streamed (not
+ * the provider's output count, which also holds reasoning it never streamed).
+ * Speed is left out under half a second of streaming, where one burst reads
+ * as an absurd rate, and for a request that streamed nothing. Records of
+ * stopped or failed requests, and those made before requests were timed,
+ * carry no timing. */
 export function requestPace(data: ItemData | undefined) {
   if (data?.type !== "usage" || data.first_token_ms == null) return undefined;
   const stream = data.stream_ms ?? 0;
+  const streamed = data.stream_tokens ?? data.output_tokens;
   return {
     firstTokenMs: data.first_token_ms,
     tokensPerSecond:
-      stream >= 500 && data.output_tokens > 0
-        ? data.output_tokens / (stream / 1000)
-        : undefined,
+      stream >= 500 && streamed > 0 ? streamed / (stream / 1000) : undefined,
   };
 }
 

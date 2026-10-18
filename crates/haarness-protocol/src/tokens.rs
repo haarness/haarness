@@ -706,6 +706,7 @@ mod tests {
             estimated: false,
             first_token_ms: None,
             stream_ms: None,
+            stream_tokens: None,
         }
     }
 
@@ -919,6 +920,7 @@ mod tests {
             estimated: true,
             first_token_ms: None,
             stream_ms: None,
+            stream_tokens: None,
         };
         let items = vec![
             item(1, user("hello")),

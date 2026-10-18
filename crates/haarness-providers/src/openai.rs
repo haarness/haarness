@@ -702,6 +702,10 @@ impl ModelProvider for OpenAiProvider {
                     // Responses stream does not include its call_id (and currently omits the
                     // documented name too). The completed output item is the authoritative
                     // function-call record and contains every field needed for continuation.
+                    // A function call's arguments are held until its item is done.
+                    "response.output_item.added" if event["item"]["type"] == "function_call" => {
+                        yield ProviderEvent::ContentStarted;
+                    }
                     "response.output_item.done" if event["item"]["type"] == "reasoning" => {
                         // Opaque reasoning is required for stateless tool continuation.
                         if event["item"]["encrypted_content"].is_string() {
@@ -1655,9 +1659,18 @@ mod tests {
             .await
             .unwrap();
         let events: Vec<_> = stream.by_ref().collect().await;
+        let events: Vec<_> = events.into_iter().map(Result::unwrap).collect();
+        // The call starts when its item is added, before its arguments.
+        assert!(matches!(
+            events.iter().find(|event| matches!(
+                event,
+                ProviderEvent::ContentStarted | ProviderEvent::ToolCall { .. }
+            )),
+            Some(ProviderEvent::ContentStarted)
+        ));
         let calls: Vec<_> = events
             .into_iter()
-            .filter_map(|event| match event.unwrap() {
+            .filter_map(|event| match event {
                 ProviderEvent::ToolCall {
                     call_id,
                     name,

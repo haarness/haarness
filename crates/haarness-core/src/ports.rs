@@ -406,6 +406,11 @@ pub enum ProviderEvent {
         provider_metadata: Value,
     },
     StructuredOutput(Value),
+    /// The response began content the adapter holds back until it is whole:
+    /// a tool call's arguments, or structured output. Only the request's
+    /// first-token clock reads it; nothing is stored or shown, and it does
+    /// not count as an answer for the retry rules.
+    ContentStarted,
     /// One request's token counts. `input_tokens` is the whole prompt, cache reads and writes included (`OpenAI`'s
     /// convention; Anthropic and Bedrock adapters add their separate cache counters in), so it measures the context
     /// for compaction and the context meter. `cache_read_tokens` and `cache_write_tokens` say how much of it was

@@ -2632,7 +2632,7 @@ impl AgentRuntime {
             while let Some(event) = stream.next().await {
                 match event? {
                     ProviderEvent::TextDelta(delta) => answer.push_str(&delta),
-                    ProviderEvent::ReasoningDelta(_) => {}
+                    ProviderEvent::ReasoningDelta(_) | ProviderEvent::ContentStarted => {}
                     ProviderEvent::Finished { reason } => {
                         finished = true;
                         if let Some(error) = ProviderEvent::finish_error(&reason) {
@@ -7408,17 +7408,24 @@ impl RunnerTask {
                             break;
                         }
                     };
-                    saw_provider_event = true;
                     let content = match &event {
                         ProviderEvent::TextDelta(delta) | ProviderEvent::ReasoningDelta(delta) => {
                             !delta.is_empty()
                         }
-                        ProviderEvent::ToolCall { .. } | ProviderEvent::StructuredOutput(_) => true,
+                        ProviderEvent::ToolCall { .. }
+                        | ProviderEvent::StructuredOutput(_)
+                        | ProviderEvent::ContentStarted => true,
                         ProviderEvent::Usage { .. } | ProviderEvent::Finished { .. } => false,
                     };
                     if content {
                         clock.content(tokio::time::Instant::now().into_std());
                     }
+                    // Only the clock reads it: nothing reached the person yet,
+                    // so a failure right after it can still be retried.
+                    if matches!(event, ProviderEvent::ContentStarted) {
+                        continue;
+                    }
+                    saw_provider_event = true;
                     match event {
                         ProviderEvent::TextDelta(delta) => {
                             if delta.is_empty() {
@@ -7533,7 +7540,7 @@ impl RunnerTask {
                                 cache_write_tokens,
                             ));
                         }
-                        ProviderEvent::Usage { .. } => {}
+                        ProviderEvent::Usage { .. } | ProviderEvent::ContentStarted => {}
                         ProviderEvent::Finished { reason } => {
                             finished = true;
                             provider_span.record("gen_ai.response.finish_reasons", reason.as_str());
@@ -8052,6 +8059,10 @@ impl RunnerTask {
             estimated,
             first_token_ms: timing.map(|timing| timing.first_token_ms),
             stream_ms: timing.map(|timing| timing.stream_ms),
+            // What streamed, counted here: a provider's output count also
+            // holds reasoning it never streamed (hidden or summarised), made
+            // before the first token, which would inflate the output speed.
+            stream_tokens: timing.map(|_| Tokenizer::for_model(model).text(streamed)),
         })
         .await?;
         Ok(usage)
@@ -13676,6 +13687,7 @@ mod tests {
                     estimated: false,
                     first_token_ms: None,
                     stream_ms: None,
+                    stream_tokens: None,
                 },
             ),
             item(

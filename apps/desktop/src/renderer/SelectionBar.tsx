@@ -1,4 +1,4 @@
-import { createSignal, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { t } from "./i18n";
 import { useApp } from "./state";
 import { confirm } from "./ui";
@@ -34,17 +34,43 @@ function reason(error: unknown) {
 export function SelectionBar() {
   const app = useApp();
   const [busy, setBusy] = createSignal(false);
-  const rows = () => {
+  /** The list's chat rows that still exist, not archived: what the mode can
+   * act on. */
+  const live = () => {
     const current = selection();
     if (!current) return [];
-    const list = app.conversations(current.scope === "all" ? undefined : current.scope);
-    return current.chats.flatMap((key) => list.find((row) => row.key === key) ?? []);
+    return app
+      .conversations(current.scope === "all" ? undefined : current.scope)
+      .filter(({ thread }) => !thread.archived && !thread.isSubagent);
+  };
+  const rows = () => {
+    const list = live();
+    return (selection()?.chats ?? []).flatMap((key) => list.find((row) => row.key === key) ?? []);
   };
   const project = () => app.projects().find((item) => item.id === selection()?.scope);
   const trees = () =>
     project()?.locations.filter((location) => selection()?.trees.includes(location.id)) ?? [];
-  const count = () => (selection()?.chats.length ?? 0) + (selection()?.trees.length ?? 0);
+  // Picks that no longer exist count for nothing.
+  const count = () => rows().length + trees().length;
   const stop = () => setSelection(null);
+  /** Leaves the picks an action handled, and any that no longer exist. */
+  const settleAfter = (done: { chats?: string[]; trees?: string[] }) =>
+    setSelection(
+      (current) =>
+        current &&
+        settle(current, done, {
+          chats: live().map((row) => row.key),
+          trees: project()?.locations.map((location) => location.id) ?? [],
+        }),
+    );
+  // The mode belongs to one list: it ends when that list goes away, as when
+  // its project leaves the sidebar or the sidebar changes how it is organized.
+  createEffect(() => {
+    const current = selection();
+    if (!current) return;
+    const flat = app.state.sidebarLayout === "flat";
+    if (current.scope === "all" ? !flat : flat || !project()) stop();
+  });
   /** The result of one action: what it did, then anything it could not do. */
   function report(done: string, failed: string[]) {
     app.notify(
@@ -92,7 +118,7 @@ export function SelectionBar() {
     } finally {
       setBusy(false);
     }
-    setSelection((current) => current && settle(current, { chats: picked.map((row) => row.key) }));
+    settleAfter({ chats: picked.map((row) => row.key) });
     report(done === 1 ? t("Archived 1 chat") : t("Archived {count} chats", { count: done }), failed);
   }
   async function remove() {
@@ -130,7 +156,7 @@ export function SelectionBar() {
     } finally {
       setBusy(false);
     }
-    setSelection((current) => current && settle(current, { trees: picked.map((item) => item.id) }));
+    settleAfter({ trees: picked.map((item) => item.id) });
     report(done === 1 ? t("Removed 1 worktree") : t("Removed {count} worktrees", { count: done }), failed);
   }
   onMount(() => {
@@ -162,12 +188,12 @@ export function SelectionBar() {
           <div class="selection-bar-row">
             <button
               class="primary"
-              disabled={busy() || !current().chats.length}
+              disabled={busy() || !rows().length}
               onClick={() => void app.run(archive)}
             >
               {t("Archive")}
             </button>
-            <Show when={current().trees.length}>
+            <Show when={trees().length}>
               <button class="danger" disabled={busy()} onClick={() => void app.run(remove)}>
                 {t("Remove worktrees")}
               </button>
