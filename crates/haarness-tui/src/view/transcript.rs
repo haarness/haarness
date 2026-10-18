@@ -32,11 +32,63 @@ const USER_BLOCK_ROWS: usize = 12;
 const USER_PREVIEW_ROWS: usize = 8;
 const TOOL_BLOCK_ROWS: usize = 12;
 /// The argument worth showing beside an ordinary tool name (path, command, …).
-fn primary_argument(arguments: &serde_json::Value) -> Option<String> {
-    ["path", "command", "pattern", "url", "name", "prompt"]
-        .iter()
-        .find_map(|key| arguments.get(key).and_then(serde_json::Value::as_str))
-        .map(str::to_owned)
+/// A search names what it looks for and where, as Desktop's rows do: two
+/// greps in `src` must not both read `grep src`.
+fn primary_argument(
+    language: crate::locale::Language,
+    name: &str,
+    arguments: &serde_json::Value,
+) -> Option<String> {
+    let text = |key: &str| {
+        arguments
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+    };
+    if matches!(name, "grep" | "glob")
+        && let Some(pattern) = text("pattern")
+    {
+        return Some(text("path").map_or_else(
+            || pattern.to_owned(),
+            |path| {
+                language.format(
+                    "{pattern} in {path}",
+                    &[("pattern", pattern), ("path", path)],
+                )
+            },
+        ));
+    }
+    [
+        "path",
+        "file_path",
+        "filePath",
+        "command",
+        "pattern",
+        "query",
+        "url",
+        "name",
+        "prompt",
+    ]
+    .iter()
+    .find_map(|key| text(key))
+    .map(str::to_owned)
+}
+
+/// What a tool row names after the tool: [`primary_argument`], or the files
+/// of a patch, or a workflow's action and run.
+fn tool_target(
+    language: crate::locale::Language,
+    name: &str,
+    arguments: &serde_json::Value,
+) -> Option<String> {
+    if name == "workflow" {
+        return Some(workflow_argument(arguments));
+    }
+    primary_argument(language, name, arguments).or_else(|| {
+        (name == "apply_patch")
+            .then(|| patch_argument(arguments))
+            .flatten()
+    })
 }
 
 /// Workflow calls otherwise collapse to the unhelpful word `workflow`. Keep
@@ -1376,12 +1428,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 let argument = if name == "workflow" {
                     format!(" {}", workflow_argument(arguments))
                 } else {
-                    primary_argument(arguments)
-                        .or_else(|| {
-                            (name == "apply_patch")
-                                .then(|| patch_argument(arguments))
-                                .flatten()
-                        })
+                    tool_target(app.language, name, arguments)
                         .map(|value| format!(" {}", single_line(&value, argument_budget)))
                         .unwrap_or_default()
                 };
