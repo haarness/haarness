@@ -868,7 +868,7 @@ function Providers() {
     const count = provider.models.length;
     return [
       t("Connected"),
-      count === 1 ? t("1 model") : count ? t("{count} models").replace("{count}", String(count)) : "",
+      count === 1 ? t("1 model") : count ? t("{count} models", { count }) : "",
     ]
       .filter(Boolean)
       .join(" · ");

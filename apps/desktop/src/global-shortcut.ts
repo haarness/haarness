@@ -84,11 +84,11 @@ export function globalShortcutError(
   if (!globalAccelerator(keys))
     return say("Use a modifier key and one more key, such as {keys}.").replace(
       "{keys}",
-      shortcutLabel(defaultGlobalShortcut.keys, platform),
+      () => shortcutLabel(defaultGlobalShortcut.keys, platform),
     );
   if (reservedGlobalShortcut(keys, platform))
     return say("{keys} belongs to the system. Choose another shortcut.").replace(
       "{keys}",
-      shortcutLabel(keys, platform),
+      () => shortcutLabel(keys, platform),
     );
 }
