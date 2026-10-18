@@ -180,8 +180,15 @@ prompt starts reach the client on the session itself, while that prompt runs:
 their titles start with the subagent's name (`Write the proof · Edit notes.md`,
 from the `task` call's `description`, otherwise its chat title) and `_meta`
 carries `{"haarness": {"childSessionId", "childTitle"}}`. A subagent's own
-messages and plan stay in its chat. A background subagent that asks after the
-prompt has ended is answered from another Haarness app.
+messages and plan stay in its chat. The client is asked one request at a
+time; the others wait. A request the server settles first (answered in
+another Haarness app, or covered by a sibling's Reject, which rejects every
+request in the conversation, or Always) is never shown, or is withdrawn with
+`$/cancel_request` when it already is, and an answer that arrives too late is
+ignored. A background subagent that asks while no prompt runs is asked when
+the next prompt starts, or can be answered from another Haarness app. "Allow
+while Haarness is running" is offered only where the request allows more
+than once.
 
 `haarness attach <url>` is the first-class interactive client for an existing
 server; `tui --connect` remains an alias-shaped compatibility entrypoint, and
