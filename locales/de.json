@@ -2439,5 +2439,16 @@
   "Click and press the keys, including a modifier key.": "Klicke und drücke die Tasten, einschließlich einer Sondertaste.",
   "Use a modifier key and one more key, such as {keys}.": "Verwende eine Sondertaste und eine weitere Taste, zum Beispiel {keys}.",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} gehört dem System. Wähle ein anderes Tastenkürzel.",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "Eine andere App oder das System verwendet {keys} bereits. Wähle ein anderes Tastenkürzel."
+  "Another app or the system already uses {keys}. Choose another shortcut.": "Eine andere App oder das System verwendet {keys} bereits. Wähle ein anderes Tastenkürzel.",
+  "The server sent no page for this app.": "Der Server hat keine Seite für diese App gesendet.",
+  "The app's message is in the message box. Send it when you are ready.": "Die Nachricht der App steht im Nachrichtenfeld. Sende sie, wenn du so weit bist.",
+  "This chat cannot take a message from the app.": "Dieser Chat kann keine Nachricht von der App übernehmen.",
+  "{name} app": "App „{name}“",
+  "Loading the app…": "App wird geladen…",
+  "This app tried to leave its page, so Haarness closed it.": "Diese App wollte ihre Seite verlassen, daher hat Haarness sie geschlossen.",
+  "This app's page could not be loaded.": "Die Seite dieser App konnte nicht geladen werden.",
+  "This result is too large to show in the app.": "Dieses Ergebnis ist zu groß, um es in der App zu zeigen.",
+  "Link from the app": "Link aus der App",
+  "This app wants to open a link.": "Diese App möchte einen Link öffnen.",
+  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "Zu diesem Werkzeug gehört eine App; öffne den Chat in Haarness Desktop, um sie zu nutzen."
 }

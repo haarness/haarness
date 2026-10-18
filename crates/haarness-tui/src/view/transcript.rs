@@ -343,6 +343,22 @@ fn displayed_output<'a>(name: &str, output: &'a str, metadata: &serde_json::Valu
     }
 }
 
+/// A successful result that carries an MCP App page (`metadata.mcp_app`, a
+/// `ui://` page on the tool's server), which only Desktop renders.
+fn has_mcp_app(result: &ItemData) -> bool {
+    let ItemData::ToolResult {
+        is_error, metadata, ..
+    } = result
+    else {
+        return false;
+    };
+    !is_error
+        && metadata
+            .pointer("/mcp_app/uri")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|uri| uri.starts_with("ui://"))
+}
+
 /// Every successful paired tool result is a compact activity row by default,
 /// regardless of tool name or output length. This prevents arbitrary provider
 /// formatting from changing the transcript hierarchy. Errors (including a
@@ -1401,6 +1417,20 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     block.push_tagged(row, HitTarget::ToolToggle(result.id));
                 } else {
                     block.push(row);
+                }
+                // An MCP tool whose server pairs it with a page: the page
+                // renders in Desktop, so the row says where to find it.
+                if result.is_some_and(|item| has_mcp_app(&item.data)) {
+                    let notice = app.language.text(
+                        "This tool comes with an app; open the chat in Haarness Desktop to use it.",
+                    );
+                    block.extend(wrap_spans(
+                        &[Span::new(notice, theme.muted)],
+                        width,
+                        "    ↳ ",
+                        "      ",
+                        theme.muted,
+                    ));
                 }
                 for (index, child_call_id, task) in &batch_children {
                     let (glyph, tone) = task_state_style(&task.state, app.tick, theme);

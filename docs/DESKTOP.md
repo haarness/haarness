@@ -191,6 +191,19 @@ Icons come from Lucide through one shared component in `renderer/icons.tsx`. Cal
 
 On macOS, the composer microphone button (or Command+Shift+M) starts dictation using Apple Speech and AVFoundation. macOS 26 and later use SpeechAnalyzer with SpeechTranscriber, falling back to DictationTranscriber for other supported languages. These engines run on-device without requiring Siri or keyboard dictation to be enabled. The first use may download the selected language's speech model and asks for microphone access; the composer shows model preparation until capture starts. Older macOS versions use SFSpeechRecognizer and require speech recognition access and enabled system dictation; recognition stays on-device where supported, otherwise macOS may use Apple's speech service. Transcription replaces the selected text or inserts at the cursor, revises partial results, and never sends automatically. Typing, navigating to another conversation, opening settings, reloading or closing the window stops capture. Audio is not written to an app recording file or sent to the Haarness model runtime. See Apple's [SpeechAnalyzer overview](https://developer.apple.com/videos/play/wwdc2025/277/). Windows/Linux dictation is not implemented in this revision.
 
+### MCP App pages
+
+An MCP server may pair a tool with an interactive page ([MCP Apps](https://modelcontextprotocol.io/extensions/apps)). When the agent calls such a tool, the page appears under the tool's row once the call finishes, in the current theme, palette and language, and grows with its content up to 640 px. There is nothing to turn on; servers learn that Haarness renders pages when it connects to them (see [MCP results](REFERENCE.md)). A failed call shows its error and no page.
+
+What a page can do:
+
+- **Show the tool's input and result** in its own layout. A result too large to keep for the page (over 512 KB without its media) shows a notice instead.
+- **Open a link** (http, https or mailto only) through the same check as any other link. Right after a click or key press inside the page it opens at once; otherwise the page's request waits under it with **Open** and **Dismiss**.
+- **Write a message for you**: the text goes into the message box after anything already there, and is never sent on its own.
+- **Read its own `ui://` resources** from its own server.
+
+What a page cannot do: call tools (it is told to ask in the chat instead), change what the model reads, download files, go full screen, or open nested frames. Each page runs in a sandboxed frame that allows scripts and forms only, with an opaque origin, so it cannot reach the window, the project, the server or other pages. A separate host page (`mcp-app.html`) holds the frame and refuses any navigation of it; the page's own Content Security Policy allows only the network and resource hosts its server declares in `_meta.ui.csp` (host sources only, no network when none are declared, no form submissions), and only clipboard writing among the permissions a page may ask for. A page that tries to leave is closed, with **Try again**. Scrolling over a page scrolls the conversation.
+
 ## Verification
 
 ```sh

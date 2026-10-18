@@ -2439,5 +2439,16 @@
   "Click and press the keys, including a modifier key.": "انقر ثم اضغط المفاتيح، بما فيها مفتاح تعديل.",
   "Use a modifier key and one more key, such as {keys}.": "استخدم مفتاح تعديل ومفتاحًا آخر، مثل {keys}.",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} محجوز للنظام. اختر اختصارًا آخر.",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "يستخدم تطبيق آخر أو النظام {keys} بالفعل. اختر اختصارًا آخر."
+  "Another app or the system already uses {keys}. Choose another shortcut.": "يستخدم تطبيق آخر أو النظام {keys} بالفعل. اختر اختصارًا آخر.",
+  "The server sent no page for this app.": "لم يرسل الخادم أي صفحة لهذا التطبيق.",
+  "The app's message is in the message box. Send it when you are ready.": "رسالة التطبيق موجودة في مربع الرسالة. أرسلها عندما تكون جاهزًا.",
+  "This chat cannot take a message from the app.": "لا يمكن لهذه الدردشة تلقي رسالة من التطبيق.",
+  "{name} app": "تطبيق {name}",
+  "Loading the app…": "جارٍ تحميل التطبيق…",
+  "This app tried to leave its page, so Haarness closed it.": "حاول هذا التطبيق مغادرة صفحته، لذا أغلقه Haarness.",
+  "This app's page could not be loaded.": "تعذّر تحميل صفحة هذا التطبيق.",
+  "This result is too large to show in the app.": "هذه النتيجة أكبر من أن تُعرض في التطبيق.",
+  "Link from the app": "رابط من التطبيق",
+  "This app wants to open a link.": "يريد هذا التطبيق فتح رابط.",
+  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "لهذه الأداة تطبيق؛ افتح الدردشة في Haarness Desktop لاستخدامه."
 }

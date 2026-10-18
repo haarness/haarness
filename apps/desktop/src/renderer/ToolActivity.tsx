@@ -1,4 +1,6 @@
 import { PreviewBanner } from "./PreviewBanner";
+import { McpAppView } from "./McpAppView";
+import { payload as mcpAppPayload, type Payload as McpAppPayload } from "./mcp-app";
 import { previewInfo } from "./preview-actions";
 import { t } from "./i18n";
 import {
@@ -37,6 +39,8 @@ export function ToolActivity(props: {
   name: string;
   args: unknown;
   result?: ToolResult;
+  /** The call's own item id, which identifies an MCP App page across remounts. */
+  id?: string;
   expanded?: boolean;
   nested?: boolean;
   settled?: boolean;
@@ -101,7 +105,17 @@ export function ToolActivity(props: {
   const output = createMemo(
     () => props.result && toolOutput(props.name, props.result.output),
   );
+  // An MCP tool whose server pairs it with a page: the page shows under the row.
+  const app = createMemo<McpAppPayload | undefined>(
+    () => (props.nested || props.result?.is_error ? undefined : mcpAppPayload(props.result?.metadata)),
+    undefined,
+    {
+      equals: (a, b) =>
+        a === b || (!!a && !!b && a.server === b.server && a.uri === b.uri && a.result === b.result),
+    },
+  );
   return (
+    <>
     <Show when={toolName(props.name) === "preview" && props.result && !props.result.is_error && previewInfo(props.result.metadata)} fallback={<details
       class="tool-call"
       classList={{
@@ -248,6 +262,10 @@ export function ToolActivity(props: {
         </div>
       </Show>
     </details>}><PreviewBanner metadata={props.result?.metadata} /></Show>
+    <Show when={app()} keyed>
+      {(value) => <McpAppView payload={value} arguments={props.args} callKey={props.id ?? value.uri} />}
+    </Show>
+    </>
   );
 }
 export function ChangePreview(props: { change: Change; showPath?: boolean }) {

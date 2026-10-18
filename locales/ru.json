@@ -2439,5 +2439,16 @@
   "Click and press the keys, including a modifier key.": "Щёлкните и нажмите клавиши, включая клавишу-модификатор.",
   "Use a modifier key and one more key, such as {keys}.": "Используйте клавишу-модификатор и ещё одну клавишу, например {keys}.",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} занято системой. Выберите другое сочетание.",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "{keys} уже использует другое приложение или система. Выберите другое сочетание."
+  "Another app or the system already uses {keys}. Choose another shortcut.": "{keys} уже использует другое приложение или система. Выберите другое сочетание.",
+  "The server sent no page for this app.": "Сервер не прислал страницу этого приложения.",
+  "The app's message is in the message box. Send it when you are ready.": "Сообщение приложения добавлено в поле сообщения. Отправьте его, когда будете готовы.",
+  "This chat cannot take a message from the app.": "Этот чат не может принять сообщение от приложения.",
+  "{name} app": "Приложение «{name}»",
+  "Loading the app…": "Загрузка приложения…",
+  "This app tried to leave its page, so Haarness closed it.": "Это приложение попыталось покинуть свою страницу, поэтому Haarness закрыл его.",
+  "This app's page could not be loaded.": "Не удалось загрузить страницу этого приложения.",
+  "This result is too large to show in the app.": "Этот результат слишком велик, чтобы показать его в приложении.",
+  "Link from the app": "Ссылка из приложения",
+  "This app wants to open a link.": "Это приложение хочет открыть ссылку.",
+  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "У этого инструмента есть приложение; откройте чат в Haarness Desktop, чтобы им воспользоваться."
 }
