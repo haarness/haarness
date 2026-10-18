@@ -847,7 +847,7 @@ fn apply_json_config(layers: &mut JsonLayers, path: &Path, trusted: bool) {
     if trusted {
         if let Some(mcp) = value.get("mcp").and_then(Value::as_object) {
             for (name, entry) in mcp {
-                if let Some(request) = mcp_entry(entry) {
+                if let Some(request) = loaded_mcp_entry(entry, None) {
                     layers.mcp.insert(name.clone(), request);
                 }
             }
@@ -1045,9 +1045,38 @@ fn agent_permissions(value: Option<&Value>) -> Vec<PermissionRule> {
 }
 
 /// Haarness MCP entry: `{type: "local"|"remote", command: [..], url, enabled,
-/// environment}` — or the Claude-style `{command, args}` shape.
+/// environment}` — or the Claude-style `{command, args}` shape — as written:
+/// `${VAR}` references stay text, so what is shown, edited and written back
+/// keeps them instead of the values they hold.
 pub(super) fn mcp_entry(entry: &Value) -> Option<McpConfigureRequest> {
     mcp_entry_with_root(entry, None)
+}
+
+/// The entry a configuration load registers: plugin-root placeholders are
+/// filled, then [`resolve_mcp_entry`] resolves references once.
+fn loaded_mcp_entry(entry: &Value, plugin_root: Option<&Path>) -> Option<McpConfigureRequest> {
+    mcp_entry_with_root(entry, plugin_root).map(resolve_mcp_entry)
+}
+
+/// Resolves `${VAR}` references in the strings the MCP client uses as given
+/// (command, arguments, folder, URL, headers helper, OAuth client and scopes).
+/// Environment values and headers keep theirs: the client resolves them once
+/// when it connects, so a variable whose value holds `${OTHER}` is not read
+/// again, and the server receives that text as it is.
+pub(super) fn resolve_mcp_entry(mut entry: McpConfigureRequest) -> McpConfigureRequest {
+    for value in entry
+        .command
+        .iter_mut()
+        .chain(&mut entry.args)
+        .chain(&mut entry.cwd)
+        .chain(&mut entry.url)
+        .chain(&mut entry.headers_helper)
+        .chain(&mut entry.oauth_client_id)
+        .chain(&mut entry.oauth_scopes)
+    {
+        *value = expand_env(value);
+    }
+    entry
 }
 
 fn mcp_entry_with_root(entry: &Value, plugin_root: Option<&Path>) -> Option<McpConfigureRequest> {
@@ -1061,7 +1090,7 @@ fn mcp_entry_with_root(entry: &Value, plugin_root: Option<&Path>) -> Option<McpC
                 .map(|disabled| !disabled)
         })
         .unwrap_or(true);
-    let expand = |value: &str| expand_mcp_value(value, plugin_root);
+    let expand = |value: &str| plugin_placeholders(value, plugin_root);
     let timeout_ms = entry
         .get("timeout")
         .and_then(Value::as_u64)
@@ -1199,8 +1228,8 @@ fn plugin_mcp_env(
     env
 }
 
-fn expand_mcp_value(value: &str, plugin_root: Option<&Path>) -> String {
-    let value = plugin_root.map_or_else(
+fn plugin_placeholders(value: &str, plugin_root: Option<&Path>) -> String {
+    plugin_root.map_or_else(
         || value.to_owned(),
         |root| {
             let root = root.display().to_string();
@@ -1209,8 +1238,7 @@ fn expand_mcp_value(value: &str, plugin_root: Option<&Path>) -> String {
                 .replace("${OPENCODE_PLUGIN_ROOT}", &root)
                 .replace("${CLAUDE_PLUGIN_ROOT}", &root)
         },
-    );
-    expand_env(&value)
+    )
 }
 
 /// `${VAR}` / `${VAR:-default}` expansion (the Claude `.mcp.json` idiom).
@@ -1289,7 +1317,7 @@ fn apply_plugin_mcp_servers(
     root: &Path,
 ) {
     for (name, entry) in servers {
-        if let Some(request) = mcp_entry_with_root(entry, Some(root)) {
+        if let Some(request) = loaded_mcp_entry(entry, Some(root)) {
             layers.mcp.entry(name.clone()).or_insert(request);
         }
     }
@@ -3095,6 +3123,43 @@ mod tests {
         assert_eq!(expand_env("${MISSING_VAR_HAARNESS:-fallback}"), "fallback");
         assert_eq!(expand_env("${MISSING_VAR_HAARNESS}"), "");
         assert_eq!(expand_env("plain"), "plain");
+    }
+
+    /// A load resolves what the MCP client uses as given and leaves
+    /// environment and header references to the client, which resolves them
+    /// once when it connects: resolved here too, a variable whose value holds
+    /// `${OTHER}` would have that read as well and sent.
+    #[test]
+    fn loaded_mcp_entries_leave_environment_and_header_references_to_the_connection() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let local = serde_json::json!({
+            "command": "${HOME}/bin/server",
+            "args": ["--root", "${HOME}"],
+            "env": {"TOKEN": "${HAARNESS_FIXTURE_UNSET_TOKEN}", "MIXED": "a-${HOME}"}
+        });
+        let loaded = loaded_mcp_entry(&local, None).unwrap();
+        assert_eq!(loaded.command, Some(format!("{home}/bin/server")));
+        assert_eq!(loaded.args, ["--root", home.as_str()]);
+        assert_eq!(loaded.env["TOKEN"], "${HAARNESS_FIXTURE_UNSET_TOKEN}");
+        assert_eq!(loaded.env["MIXED"], "a-${HOME}");
+        let remote = loaded_mcp_entry(
+            &serde_json::json!({
+                "url": "https://example.test/${HAARNESS_FIXTURE_UNSET_REGION:-eu}/mcp",
+                "headers": {"Authorization": "Bearer ${HAARNESS_FIXTURE_UNSET_TOKEN}"}
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(remote.url.as_deref(), Some("https://example.test/eu/mcp"));
+        assert_eq!(
+            remote.headers["Authorization"],
+            "Bearer ${HAARNESS_FIXTURE_UNSET_TOKEN}"
+        );
+        // As written, for showing, editing and writing back.
+        let written = mcp_entry(&local).unwrap();
+        assert_eq!(written.command.as_deref(), Some("${HOME}/bin/server"));
+        assert_eq!(written.args, ["--root", "${HOME}"]);
+        assert_eq!(written.env["TOKEN"], "${HAARNESS_FIXTURE_UNSET_TOKEN}");
     }
 
     #[test]
