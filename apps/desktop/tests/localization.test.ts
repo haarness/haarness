@@ -87,6 +87,21 @@ test("every renderer t() key is in the shared catalog", async () => {
   assert.deepEqual([...missing], []);
 });
 
+// `t(key).replace("{name}", value)` reads `$&`, `$'` and `$$` in the value as
+// replacement patterns, so a provider named "A $& B" would show the key's
+// text; `t(key, { name })` inserts values as they are.
+test("translated sentences take their values through t(), not a string replace", async () => {
+  const directory = new URL("../src/renderer/", import.meta.url);
+  const names = (await readdir(directory)).filter((name) => /\.tsx?$/.test(name));
+  const found: string[] = [];
+  for (const name of names) {
+    const source = await readFile(new URL(name, directory), "utf8");
+    for (const [call] of source.matchAll(/\bt\(\s*"(?:[^"\\]|\\.)*"\s*\)\s*\.replace(?:All)?\(\s*"\{\w+\}"\s*,\s*(?!\()[^)]*/g))
+      found.push(`${name}: ${call}`);
+  }
+  assert.deepEqual(found, []);
+});
+
 // Keys the renderer reaches through a variable, which the scan above cannot
 // see: search-result groups, the panel launcher, the starter cards, and the
 // labels that shared modules hand back for the renderer to translate.
