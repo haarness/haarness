@@ -2524,5 +2524,6 @@
   "+{count} more": "{count} أخرى",
   "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "حاول هذا التطبيق فتح رابط لا يفتحه Haarness. يمكن للتطبيقات فتح روابط http وhttps وmailto فقط.",
   "Load image from {host}": "تحميل الصورة من {host}",
-  "The image from {host} could not be loaded.": "تعذّر تحميل الصورة من {host}."
+  "The image from {host} could not be loaded.": "تعذّر تحميل الصورة من {host}.",
+  "This app tried to open a {scheme} link. Apps may open only http, https and mailto links.": "حاول هذا التطبيق فتح رابط {scheme}. يمكن للتطبيقات فتح روابط http وhttps وmailto فقط."
 }

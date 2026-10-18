@@ -2524,5 +2524,6 @@
   "+{count} more": "還有 {count} 項",
   "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "此應用程式嘗試開啟 Haarness 不會開啟的連結。應用程式只能開啟 http、https 和 mailto 連結。",
   "Load image from {host}": "從 {host} 載入圖片",
-  "The image from {host} could not be loaded.": "無法載入來自 {host} 的圖片。"
+  "The image from {host} could not be loaded.": "無法載入來自 {host} 的圖片。",
+  "This app tried to open a {scheme} link. Apps may open only http, https and mailto links.": "此應用程式嘗試開啟一個 {scheme} 連結。應用程式只能開啟 http、https 和 mailto 連結。"
 }
