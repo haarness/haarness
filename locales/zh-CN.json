@@ -2439,5 +2439,15 @@
   "Click and press the keys, including a modifier key.": "点击后按下按键，需包含一个修饰键。",
   "Use a modifier key and one more key, such as {keys}.": "请使用一个修饰键加另一个键，例如 {keys}。",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} 已被系统占用。请选择其他快捷键。",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "其他应用或系统已在使用 {keys}。请选择其他快捷键。"
+  "Another app or the system already uses {keys}. Choose another shortcut.": "其他应用或系统已在使用 {keys}。请选择其他快捷键。",
+  "The server sent no page for this app.": "服务器没有发送此应用的页面。",
+  "The app's message is in the message box. Send it when you are ready.": "应用的消息已放入消息框。准备好后再发送。",
+  "This chat cannot take a message from the app.": "此对话无法接收来自应用的消息。",
+  "{name} app": "{name} 应用",
+  "Loading the app…": "正在加载应用…",
+  "This app tried to leave its page, so Haarness closed it.": "此应用试图离开其页面，因此 Haarness 已将其关闭。",
+  "This app's page could not be loaded.": "无法加载此应用的页面。",
+  "This result is too large to show in the app.": "此结果太大，无法在应用中显示。",
+  "Link from the app": "来自应用的链接",
+  "This app wants to open a link.": "此应用想要打开一个链接。"
 }

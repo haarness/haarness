@@ -2439,5 +2439,15 @@
   "Click and press the keys, including a modifier key.": "Tıklayın ve bir değiştirici tuş dahil tuşlara basın.",
   "Use a modifier key and one more key, such as {keys}.": "Bir değiştirici tuş ve bir tuş daha kullanın, örneğin {keys}.",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} sisteme ait. Başka bir kısayol seçin.",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "{keys} başka bir uygulama veya sistem tarafından kullanılıyor. Başka bir kısayol seçin."
+  "Another app or the system already uses {keys}. Choose another shortcut.": "{keys} başka bir uygulama veya sistem tarafından kullanılıyor. Başka bir kısayol seçin.",
+  "The server sent no page for this app.": "Sunucu bu uygulama için bir sayfa göndermedi.",
+  "The app's message is in the message box. Send it when you are ready.": "Uygulamanın mesajı mesaj kutusunda. Hazır olduğunuzda gönderin.",
+  "This chat cannot take a message from the app.": "Bu sohbet uygulamadan mesaj alamaz.",
+  "{name} app": "{name} uygulaması",
+  "Loading the app…": "Uygulama yükleniyor…",
+  "This app tried to leave its page, so Haarness closed it.": "Bu uygulama sayfasından ayrılmaya çalıştı, bu yüzden Haarness onu kapattı.",
+  "This app's page could not be loaded.": "Bu uygulamanın sayfası yüklenemedi.",
+  "This result is too large to show in the app.": "Bu sonuç uygulamada gösterilemeyecek kadar büyük.",
+  "Link from the app": "Uygulamadan gelen bağlantı",
+  "This app wants to open a link.": "Bu uygulama bir bağlantı açmak istiyor."
 }

@@ -2439,5 +2439,15 @@
   "Click and press the keys, including a modifier key.": "Cliquez puis appuyez sur les touches, dont une touche de modification.",
   "Use a modifier key and one more key, such as {keys}.": "Utilisez une touche de modification et une autre touche, par exemple {keys}.",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} est réservé au système. Choisissez un autre raccourci.",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "Une autre app ou le système utilise déjà {keys}. Choisissez un autre raccourci."
+  "Another app or the system already uses {keys}. Choose another shortcut.": "Une autre app ou le système utilise déjà {keys}. Choisissez un autre raccourci.",
+  "The server sent no page for this app.": "Le serveur n’a envoyé aucune page pour cette app.",
+  "The app's message is in the message box. Send it when you are ready.": "Le message de l’app est dans la zone de message. Envoyez-le quand vous êtes prêt.",
+  "This chat cannot take a message from the app.": "Cette conversation ne peut pas recevoir de message de l’app.",
+  "{name} app": "App {name}",
+  "Loading the app…": "Chargement de l’app…",
+  "This app tried to leave its page, so Haarness closed it.": "Cette app a tenté de quitter sa page, Haarness l’a donc fermée.",
+  "This app's page could not be loaded.": "Impossible de charger la page de cette app.",
+  "This result is too large to show in the app.": "Ce résultat est trop volumineux pour être affiché dans l’app.",
+  "Link from the app": "Lien de l’app",
+  "This app wants to open a link.": "Cette app veut ouvrir un lien."
 }

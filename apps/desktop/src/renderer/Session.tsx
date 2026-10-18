@@ -1192,6 +1192,21 @@ export function Session() {
     virtual.getTotalSize();
     followLatest();
   });
+  // A message an MCP App page asks to send goes into the message box, after
+  // what is already there; the person sends it, or not.
+  onMount(() => {
+    const appMessage = (event: Event) => {
+      const detail = (event as CustomEvent<{ text: string; accepted: boolean }>).detail;
+      if (!project() || !editable() || !composer?.isConnected || composer.disabled) return;
+      const current = draft();
+      change(current.trim() ? current.trimEnd() + "\n\n" + detail.text : detail.text);
+      composer.focus({ preventScroll: true });
+      composer.setSelectionRange(composer.value.length, composer.value.length);
+      detail.accepted = true;
+    };
+    scrolling.addEventListener("mcp-app-message", appMessage);
+    onCleanup(() => scrolling.removeEventListener("mcp-app-message", appMessage));
+  });
   /** Text at the message box's caret, as typing it would: Cmd+Z takes it
    * out again. */
   function insertText(text: string) {
@@ -2368,6 +2383,7 @@ function Message(props: {
                   name={tool().name}
                   args={tool().arguments}
                   result={result()}
+                  id={props.item.id}
                   expanded={!app.state.preferences.compactTools}
                   waiting={app.state.permissions.some(
                     (permission) =>

@@ -2439,5 +2439,15 @@
   "Click and press the keys, including a modifier key.": "클릭한 다음 보조 키를 포함한 키를 누르세요.",
   "Use a modifier key and one more key, such as {keys}.": "보조 키와 다른 키 하나를 함께 사용하세요(예: {keys}).",
   "{keys} belongs to the system. Choose another shortcut.": "{keys}은(는) 시스템에서 사용합니다. 다른 단축키를 선택하세요.",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "다른 앱이나 시스템에서 이미 {keys}을(를) 사용하고 있습니다. 다른 단축키를 선택하세요."
+  "Another app or the system already uses {keys}. Choose another shortcut.": "다른 앱이나 시스템에서 이미 {keys}을(를) 사용하고 있습니다. 다른 단축키를 선택하세요.",
+  "The server sent no page for this app.": "서버가 이 앱의 페이지를 보내지 않았습니다.",
+  "The app's message is in the message box. Send it when you are ready.": "앱의 메시지를 메시지 입력란에 넣었습니다. 준비되면 보내세요.",
+  "This chat cannot take a message from the app.": "이 채팅은 앱의 메시지를 받을 수 없습니다.",
+  "{name} app": "{name} 앱",
+  "Loading the app…": "앱을 불러오는 중…",
+  "This app tried to leave its page, so Haarness closed it.": "이 앱이 페이지를 벗어나려고 해서 Haarness가 닫았습니다.",
+  "This app's page could not be loaded.": "이 앱의 페이지를 불러올 수 없습니다.",
+  "This result is too large to show in the app.": "이 결과는 너무 커서 앱에 표시할 수 없습니다.",
+  "Link from the app": "앱에서 온 링크",
+  "This app wants to open a link.": "이 앱이 링크를 열려고 합니다."
 }
