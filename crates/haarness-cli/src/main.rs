@@ -7640,7 +7640,14 @@ async fn receive_oauth_callback(
                         connections.spawn(answer_mcp_oauth_callback(stream, state.clone()));
                     }
                 }
-                Some(Ok(Some(query))) = connections.join_next() => return Ok::<_, anyhow::Error>(query),
+                // Every finished connection is taken, so the callback is never left
+                // behind a connection that ended without one (a pattern that fails
+                // disables its branch for the rest of the `select!`).
+                Some(joined) = connections.join_next(), if !connections.is_empty() => {
+                    if let Ok(Some(query)) = joined {
+                        return Ok::<_, anyhow::Error>(query);
+                    }
+                }
             }
         }
     })
@@ -11603,6 +11610,64 @@ mod tests {
         })
         .await
         .expect("the callback is read while an idle connection waits");
+        assert_eq!(
+            callback.unwrap(),
+            format!("{redirect}?code=real&state=st-1")
+        );
+    }
+
+    /// Two connections that end without the callback, finishing together,
+    /// leave the callback to be taken at once rather than when some later
+    /// connection arrives.
+    #[tokio::test]
+    async fn the_mcp_callback_is_taken_after_connections_that_ended_without_one() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let redirect = format!("http://127.0.0.1:{port}/mcp/oauth/callback");
+        let client = async {
+            let mut probes = Vec::new();
+            for _ in 0..2 {
+                probes.push(
+                    tokio::net::TcpStream::connect(("127.0.0.1", port))
+                        .await
+                        .unwrap(),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            for probe in &mut probes {
+                probe
+                    .write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: x\r\n\r\n")
+                    .await
+                    .unwrap();
+            }
+            for probe in &mut probes {
+                let mut response = String::new();
+                probe.read_to_string(&mut response).await.unwrap();
+                assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+            }
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            stream
+                .write_all(
+                    b"GET /mcp/oauth/callback?code=real&state=st-1 HTTP/1.1\r\nHost: x\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        };
+        let (callback, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(
+                receive_oauth_callback(
+                    &listener,
+                    &redirect,
+                    "https://auth.example/authorize?state=st-1"
+                ),
+                client
+            )
+        })
+        .await
+        .expect("the callback is taken without waiting for another connection");
         assert_eq!(
             callback.unwrap(),
             format!("{redirect}?code=real&state=st-1")

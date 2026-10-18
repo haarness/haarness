@@ -1029,7 +1029,14 @@ async fn wait_for_callback(listeners: &[TcpListener], state: &str) -> AuthResult
                 })?;
                 connections.spawn(answer_callback(stream, state.to_owned()));
             }
-            Some(Ok(Some(outcome))) = connections.join_next() => return outcome,
+            // Every finished connection is taken, so one that ended the sign-in is
+            // never left behind one that did not (a pattern that fails disables its
+            // branch for the rest of the `select!`).
+            Some(joined) = connections.join_next(), if !connections.is_empty() => {
+                if let Ok(Some(outcome)) = joined {
+                    return outcome;
+                }
+            }
         }
     }
 }
@@ -1554,6 +1561,66 @@ mod tests {
         assert!(error.contains("access_denied"), "{error}");
         assert!(started.elapsed() < std::time::Duration::from_secs(3));
         drop(idle);
+    }
+
+    /// Two connections that end without the callback, finishing together,
+    /// leave the browser's return to be taken at once: in this flow nothing
+    /// else would arrive, since the browser waits for the token exchange.
+    #[tokio::test]
+    async fn the_return_is_taken_after_connections_that_ended_without_it() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let login = OpenAiOAuthClient::new(OpenAiOAuthConfig {
+            callback_port: port,
+            ..OpenAiOAuthConfig::default()
+        })
+        .start_browser_login()
+        .await
+        .unwrap();
+        let state = query(&login.url, "state").unwrap();
+        let waiting = tokio::spawn(login.finish());
+        let mut probes = Vec::new();
+        for _ in 0..2 {
+            probes.push(
+                tokio::net::TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .unwrap(),
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        for probe in &mut probes {
+            probe
+                .write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: x\r\n\r\n")
+                .await
+                .unwrap();
+        }
+        for probe in &mut probes {
+            let mut response = String::new();
+            probe.read_to_string(&mut response).await.unwrap();
+            assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+        }
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(
+                format!(
+                    "GET /auth/callback?state={state}&error=access_denied HTTP/1.1\r\nHost: x\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(3), waiting)
+            .await
+            .expect("the return is taken without waiting for another connection")
+            .unwrap()
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("access_denied"), "{error}");
     }
 
     #[tokio::test]
