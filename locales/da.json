@@ -2524,5 +2524,8 @@
   "+{count} more": "{count} mere",
   "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "Denne app forsøgte at åbne et link, som Haarness ikke åbner. Apps kan kun åbne http-, https- og mailto-links.",
   "Load image from {host}": "Indlæs billede fra {host}",
-  "The image from {host} could not be loaded.": "Billedet fra {host} kunne ikke indlæses."
+  "The image from {host} could not be loaded.": "Billedet fra {host} kunne ikke indlæses.",
+  "This app tried to open a {scheme} link. Apps may open only http, https and mailto links.": "Denne app forsøgte at åbne et {scheme}-link. Apps kan kun åbne http-, https- og mailto-links.",
+  "{first}, {second}": "{first}, {second}",
+  "{first}, {second} +{count}": "{first}, {second} og {count} mere"
 }

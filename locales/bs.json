@@ -2524,5 +2524,8 @@
   "+{count} more": "još {count}",
   "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "Ova aplikacija je pokušala otvoriti link koji Haarness ne otvara. Aplikacije mogu otvarati samo http, https i mailto linkove.",
   "Load image from {host}": "Učitaj sliku s {host}",
-  "The image from {host} could not be loaded.": "Slika s {host} nije se mogla učitati."
+  "The image from {host} could not be loaded.": "Slika s {host} nije se mogla učitati.",
+  "This app tried to open a {scheme} link. Apps may open only http, https and mailto links.": "Ova aplikacija je pokušala otvoriti {scheme} link. Aplikacije mogu otvarati samo http, https i mailto linkove.",
+  "{first}, {second}": "{first}, {second}",
+  "{first}, {second} +{count}": "{first}, {second} i još {count}"
 }

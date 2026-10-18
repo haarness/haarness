@@ -1,10 +1,18 @@
-import { t } from "./i18n";
+import { language, t } from "./i18n";
 import { useApp } from "./state";
-import { createEffect, onCleanup } from "solid-js";
+import { createEffect, on, onCleanup } from "solid-js";
 import { createMarkdownClient } from "./markdown-client";
 import { createMarkdownDOM } from "./markdown-dom";
 import { linkTarget } from "./link-target";
-import { loadedElement, loadedImage, rememberImage } from "./remote-images";
+import {
+  imageLoading,
+  loadableSources,
+  loadedElement,
+  loadedImage,
+  loadImage,
+  madeHere,
+  relabelImages,
+} from "./remote-images";
 
 /**
  * `document` renders a Markdown file, where a lone newline is not a line
@@ -48,35 +56,37 @@ export function Markdown(props: { text: string; live?: boolean; document?: boole
    * The person asked for the image this button names: it, and the reply's
    * other images from the same host, are fetched by the app and replace
    * their placeholders. Images from other hosts keep waiting for their own click.
+   * Only placeholders the app made count, and only addresses on that host.
    */
   async function loadImages(button: HTMLButtonElement) {
     const holder = button.closest<HTMLElement>(".remote-image");
     const from = holder?.dataset.remoteHost;
-    if (!holder || !from) return;
+    if (!holder || !from || !madeHere(holder) || !madeHere(button)) return;
     const focused = document.activeElement === button;
-    const sources = [
-      ...new Set(
-        Array.from(host.querySelectorAll<HTMLElement>(".remote-image"))
-          .filter((other) => other.dataset.remoteHost === from)
-          .map((other) => other.dataset.remoteSrc ?? ""),
-      ),
-    ].filter(Boolean);
+    const placeholders = () =>
+      Array.from(host.querySelectorAll<HTMLElement>(".remote-image")).filter((other) => madeHere(other));
+    const sources = loadableSources(
+      placeholders().map((other) => ({ host: other.dataset.remoteHost, src: other.dataset.remoteSrc })),
+      from,
+    );
     const chat = scope();
     const waiting = () =>
-      Array.from(host.querySelectorAll<HTMLButtonElement>(".remote-image-load")).filter(
-        (other) => other.closest<HTMLElement>(".remote-image")?.dataset.remoteHost === from,
-      );
+      Array.from(host.querySelectorAll<HTMLButtonElement>(".remote-image-load")).filter((other) => {
+        const owner = other.closest<HTMLElement>(".remote-image");
+        return madeHere(other) && madeHere(owner) && owner?.dataset.remoteHost === from;
+      });
     for (const other of waiting()) other.disabled = true;
     let failed = false;
     await Promise.all(
       sources.map(async (src) => {
         try {
-          const data = await window.haarness.remoteImage(src);
-          rememberImage(chat, src, data);
+          // Kept in state, not in the button: a reply drawn anew while this
+          // runs gets its button back off, and a second click joins this fetch.
+          const data = await loadImage(chat, src, (address) => window.haarness.remoteImage(address));
           if (disposed) return;
           // Placeholders are found again: the reply may have been drawn anew meanwhile.
-          for (const other of Array.from(host.querySelectorAll<HTMLElement>(".remote-image"))) {
-            if (other.dataset.remoteSrc !== src) continue;
+          for (const other of placeholders()) {
+            if (other.dataset.remoteSrc !== src || other.dataset.remoteHost !== from) continue;
             const image = loadedElement(document, src, other.dataset.remoteAlt ?? "", data);
             const keep = focused && other === holder;
             other.replaceWith(image);
@@ -92,9 +102,16 @@ export function Markdown(props: { text: string; live?: boolean; document?: boole
       }),
     );
     if (disposed) return;
-    for (const other of waiting()) other.disabled = false;
+    for (const other of waiting()) {
+      const src = other.closest<HTMLElement>(".remote-image")?.dataset.remoteSrc ?? "";
+      other.disabled = imageLoading(chat, src);
+    }
     if (failed) app.notify(t("The image from {host} could not be loaded.", { host: from }), "blocked");
   }
+  const imageLabels = () => ({
+    load: (from: string) => t("Load image from {host}", { host: from }),
+    unnamed: t("Image"),
+  });
   let host!: HTMLDivElement;
   let patch: ReturnType<typeof createMarkdownDOM> | undefined;
   let disposed = false;
@@ -103,10 +120,8 @@ export function Markdown(props: { text: string; live?: boolean; document?: boole
     if (disposed) return;
     (patch ??= createMarkdownDOM(host, {
       loaded: (src) => loadedImage(scope(), src),
-      labels: () => ({
-        load: (from) => t("Load image from {host}", { host: from }),
-        unnamed: t("Image"),
-      }),
+      loading: (src) => imageLoading(scope(), src),
+      labels: imageLabels,
     }))(update);
     for (const block of host.querySelectorAll("pre")) {
       const code = block.querySelector("code");
@@ -132,6 +147,8 @@ export function Markdown(props: { text: string; live?: boolean; document?: boole
     host.dataset.markdownReady = "false";
     client.update(props.text, !!props.live, !props.document);
   });
+  // Image placeholders already drawn follow a language change.
+  createEffect(on(language, () => relabelImages(host, imageLabels()), { defer: true }));
   onCleanup(() => {
     disposed = true;
     client.dispose();
@@ -144,7 +161,7 @@ export function Markdown(props: { text: string; live?: boolean; document?: boole
       onClick={(event) => {
         const target = event.target as HTMLElement;
         const load = target.closest<HTMLButtonElement>(".remote-image-load");
-        if (load && host.contains(load)) {
+        if (load && host.contains(load) && madeHere(load)) {
           // A link around the image must not take the click meant for its button.
           event.preventDefault();
           void loadImages(load);

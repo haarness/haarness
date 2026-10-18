@@ -49,10 +49,75 @@ export function rememberImage(scope: string, src: string, data: string, limit = 
   }
 }
 
+const pending = new Map<string, Promise<string>>();
+
+/**
+ * Loads an image for a chat once at a time: a second click, or another reply
+ * showing it, waits for the fetch already running. The loaded image is
+ * remembered for the chat.
+ */
+export function loadImage(scope: string, src: string, fetch: (src: string) => Promise<string>): Promise<string> {
+  const entry = key(scope, src);
+  let running = pending.get(entry);
+  if (!running) {
+    running = fetch(src)
+      .then((data) => {
+        rememberImage(scope, src, data);
+        return data;
+      })
+      .finally(() => pending.delete(entry));
+    pending.set(entry, running);
+  }
+  return running;
+}
+
+/** Whether this chat is fetching the image now. */
+export function imageLoading(scope: string, src: string) {
+  return pending.has(key(scope, src));
+}
+
 /** Forgets every loaded image, as quitting does. */
 export function forgetImages() {
   remembered.clear();
   rememberedBytes = 0;
+}
+
+/**
+ * Placeholders and their buttons made here. A reply's own markup is never
+ * one, whatever classes or attributes it copies, so only these load images.
+ */
+const made = new WeakSet<Node>();
+export function madeHere(node: Node | null | undefined): boolean {
+  return !!node && made.has(node);
+}
+
+/**
+ * What the sanitizer keeps of an attribute a reply wrote: never the
+ * `data-remote-*` attributes or `remote-image*` classes placeholders use, so
+ * markup cannot dress as one. Undefined drops the attribute.
+ */
+export function replyAttribute(name: string, value: string): string | undefined {
+  if (/^data-remote-/i.test(name)) return undefined;
+  if (name.toLowerCase() !== "class") return value;
+  const tokens = value.split(/\s+/).filter(Boolean);
+  const kept = tokens.filter((token) => !/^remote-image/i.test(token));
+  if (kept.length === tokens.length) return value;
+  return kept.length ? kept.join(" ") : undefined;
+}
+
+/**
+ * The addresses one click on `host`'s button loads: each placeholder of that
+ * host whose address really is on that host, so the host the button names is
+ * the only one asked.
+ */
+export function loadableSources(placeholders: { host?: string; src?: string }[], host: string): string[] {
+  return [
+    ...new Set(
+      placeholders
+        .filter((placeholder) => placeholder.host === host && remoteImageHost(placeholder.src) === host)
+        .map((placeholder) => placeholder.src!),
+    ),
+  ];
 }
 
 export interface RemoteImageLabels {
@@ -68,18 +133,39 @@ export interface RemoteImageLabels {
  * host. The button carries the host as its own text, so alt text that reads
  * like a host cannot pass for it.
  */
-export function holdRemoteImages(root: ParentNode, loaded: (src: string) => string | undefined, labels: RemoteImageLabels) {
+export function holdRemoteImages(
+  root: ParentNode,
+  loaded: (src: string) => string | undefined,
+  labels: RemoteImageLabels,
+  loading: (src: string) => boolean = () => false,
+) {
   for (const image of Array.from(root.querySelectorAll("img"))) {
     const src = image.getAttribute("src")?.trim();
     const host = remoteImageHost(src);
     if (!src || !host) continue;
     const alt = image.getAttribute("alt") ?? "";
     const data = loaded(src);
-    image.replaceWith(data ? loadedElement(image.ownerDocument, src, alt, data) : placeholder(image.ownerDocument, src, host, alt, labels));
+    image.replaceWith(
+      data ? loadedElement(image.ownerDocument, src, alt, data) : placeholder(image.ownerDocument, src, host, alt, labels, loading(src)),
+    );
   }
 }
 
-function placeholder(document: Document, src: string, host: string, alt: string, labels: RemoteImageLabels) {
+/**
+ * Words the placeholders under `root` in the interface language again: a
+ * reply already drawn is not drawn anew when the language changes.
+ */
+export function relabelImages(root: ParentNode, labels: RemoteImageLabels) {
+  for (const holder of Array.from(root.querySelectorAll<HTMLElement>(".remote-image"))) {
+    if (!madeHere(holder)) continue;
+    const text = holder.querySelector(".remote-image-alt");
+    const button = holder.querySelector(".remote-image-load");
+    if (text) text.textContent = holder.dataset.remoteAlt || labels.unnamed;
+    if (button && madeHere(button)) button.textContent = labels.load(holder.dataset.remoteHost ?? "");
+  }
+}
+
+function placeholder(document: Document, src: string, host: string, alt: string, labels: RemoteImageLabels, busy: boolean) {
   const holder = document.createElement("span");
   holder.className = "remote-image";
   holder.dataset.remoteSrc = src;
@@ -93,7 +179,11 @@ function placeholder(document: Document, src: string, host: string, alt: string,
   button.className = "remote-image-load";
   button.title = src;
   button.textContent = labels.load(host);
+  // A fetch already running keeps its button off, however often the reply is drawn.
+  button.disabled = busy;
   holder.append(text, button);
+  made.add(holder);
+  made.add(button);
   return holder;
 }
 

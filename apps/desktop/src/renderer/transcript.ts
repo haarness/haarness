@@ -122,9 +122,7 @@ export function describeTool(name: string, args: unknown): ToolShape {
       return {
         ...known,
         target:
-          files.length > 2
-            ? `${files[0]}, ${files[1]} +${files.length - 2}`
-            : files.join(", "),
+          targetList(files),
       };
   }
   if (known) return { ...known, target: toolTarget(args) };
@@ -441,12 +439,20 @@ export function batchLabel(steps: BatchStep[]) {
  * start collapsed, and "Read files" alone does not say which.
  */
 export function batchTarget(steps: BatchStep[]) {
-  const targets = [
+  return targetList([
     ...new Set(steps.map((step) => describeTool(step.name, step.args).target).filter(Boolean)),
-  ];
-  return targets.length > 2
-    ? `${targets[0]}, ${targets[1]} +${targets.length - 2}`
-    : targets.join(", ");
+  ]);
+}
+/**
+ * A row's targets as the interface language lists them: one, two, or the
+ * first two and how many more ("a.ts, b.ts +3").
+ */
+export function targetList(targets: string[]) {
+  if (targets.length < 2) return targets[0] ?? "";
+  const [first, second] = targets;
+  return targets.length === 2
+    ? t("{first}, {second}", { first, second })
+    : t("{first}, {second} +{count}", { first, second, count: String(targets.length - 2) });
 }
 /** The argument a tool row names, as the call wrote it. */
 function targetText(args: unknown): string {

@@ -599,6 +599,10 @@ pub trait ToolInvoker: Send + Sync {
         None
     }
     async fn invoke(&self, name: &str, arguments: Value) -> CoreResult<ToolOutput>;
+    /// A batch step refused before it starts still takes its number, so the
+    /// call ids of the steps after it (`<batch call id>:N`) stay their place
+    /// in the batch, which is how clients pair a delegation with its step.
+    fn skip_call(&self) {}
     async fn definition_shell(&self, command: String) -> CoreResult<ToolOutput> {
         self.invoke("bash", serde_json::json!({"command":command}))
             .await

@@ -413,6 +413,16 @@ export interface Host {
   log?(params: unknown): void;
 }
 
+/**
+ * The scheme of a link an app asked for ("file:"), or undefined when it has
+ * none worth naming. Only the scheme is ever shown: the rest is the page's
+ * own text, which must not speak in the app's voice.
+ */
+export function linkScheme(url: string): string | undefined {
+  const scheme = /^[\u0000-\u0020]*([a-z][a-z\d+.-]{0,31}):/i.exec(url)?.[1];
+  return scheme ? scheme.toLowerCase() + ":" : undefined;
+}
+
 export const REFUSED = {
   tools: "Haarness does not let apps call tools yet. Ask in the chat instead.",
   context: "Haarness does not take context updates from apps yet.",
