@@ -148,7 +148,15 @@ shell. Patch changes the title and/or resizes using both dimensions. A WebSocket
 client sends raw input as binary frames and receives raw output as binary
 frames. JSON text control frames mark replay boundaries and acknowledge the
 monotonic byte `cursor`; reconnecting with the last acknowledged cursor replays
-the missing range from a bounded two-megabyte buffer. Lifecycle changes also
+the missing range from a bounded two-megabyte buffer. A cursor older than the
+buffer gets `truncated: true` and a replay that starts at the first whole line
+still buffered (or, without a line break in its first 64 KiB, the first
+character outside an escape sequence), whose offset is `start`; `modes` then
+holds the escape sequences that restore the terminal modes the dropped output
+left on (alternate screen, application cursor keys and keypad, mouse tracking
+and encoding, focus reports, bracketed paste, a hidden cursor, autowrap off,
+insert mode). A client resets its terminal and applies `modes` before the
+replay; clients that predate the field ignore it. Lifecycle changes also
 publish `pty.created`, `pty.updated`, `pty.exited`, and `pty.deleted` SSE events.
 Disconnecting a socket never terminates its process. DELETE does, as does
 graceful server shutdown. A configuration hot reload (a provider connected,

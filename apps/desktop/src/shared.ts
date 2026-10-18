@@ -47,6 +47,9 @@ export interface Preferences {
   editorWrap: boolean;
   diffLayout: "split" | "unified";
   terminalFontSize: number;
+  /** Which Option keys send Meta (ESC and the key) in the terminal instead
+   * of the character the layout composes; macOS only, off by default. */
+  terminalOptionAsMeta: "off" | "left" | "both";
   shortcuts: Record<string, string>;
   /** Shows and hides Haarness from any app; off by default. */
   globalShortcut: GlobalShortcut;
@@ -73,6 +76,7 @@ export const defaults: Preferences = {
   editorWrap: false,
   diffLayout: "split",
   terminalFontSize: 13,
+  terminalOptionAsMeta: "off",
   shortcuts: {
     new: "Mod+N",
     settings: "Mod+,",

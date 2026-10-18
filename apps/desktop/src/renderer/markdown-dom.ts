@@ -4,6 +4,11 @@ import type { MarkdownPatch } from "./markdown-project";
 type Block = { html: string; start: Comment; end: Comment };
 
 const URL_ATTRIBUTES = new Set(["href", "xlink:href", "src", "srcset", "poster", "background"]);
+// Markdown has a sanitizer of its own: a hook or setting another part of the
+// app (or a library it loads, as Mermaid does) adds to the shared DOMPurify
+// never changes what a reply may contain, and the hook below, which keeps
+// `file:` and file-share links, stays out of theirs.
+const purifier = DOMPurify(window);
 // Every link click goes through Markdown.tsx, which decides where it may go
 // and says why a link does not open. So a link keeps a `file:` address, a
 // file share's address or a Windows drive path, none of which can run
@@ -12,7 +17,7 @@ const URL_ATTRIBUTES = new Set(["href", "xlink:href", "src", "srcset", "poster",
 // says it does not open. No other address may name a network path: an image
 // there would reach its host as soon as the reply is drawn, on Windows with
 // the user's sign-in.
-DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
+purifier.addHook("uponSanitizeAttribute", (node, data) => {
   if (!URL_ATTRIBUTES.has(data.attrName)) return;
   if (node.nodeName === "A" && data.attrName === "href") {
     const value = data.attrValue;
@@ -83,7 +88,7 @@ export function createMarkdownDOM(host: HTMLElement) {
         host.append(block.start, block.end);
       }
       if (block.html === html) return;
-      const fragment = DOMPurify.sanitize(html, {
+      const fragment = purifier.sanitize(html, {
         RETURN_DOM_FRAGMENT: true,
         FORBID_TAGS: ["style", "form", "input", "button", "iframe"],
         FORBID_ATTR: ["style"],

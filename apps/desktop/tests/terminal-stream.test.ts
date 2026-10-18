@@ -1,6 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { inputQueue, reconnectDelay, shownOutput, terminalStream, writeChunks, WRITE_LIMIT } from "../src/renderer/terminal-stream";
+import {
+  DISCONNECTED_AFTER,
+  RECONNECTING_AFTER,
+  inputQueue,
+  linkWatch,
+  reconnectDelay,
+  scrollPlaces,
+  shownOutput,
+  terminalStream,
+  writeChunks,
+  WRITE_LIMIT,
+  type Link,
+} from "../src/renderer/terminal-stream";
 
 /**
  * A stand-in for xterm: written bytes are parsed later, in order, and a
@@ -81,6 +93,16 @@ test("after a reconnect only the output missed while it was down is answered", (
   assert.deepEqual(other.answered, [10, 11]);
 });
 
+test("the view's own bytes before a truncated replay are never answered, and the replay's new output is", () => {
+  const view = fakeTerminal(new Map());
+  // A reset, the notice and the restored modes, then output never shown.
+  view.stream.replay(5);
+  view.stream.quiet(text("\u001bc?notice?\u001b[?1h"));
+  view.stream.bytes(text("x?"));
+  view.parse();
+  assert.deepEqual(view.answered, [16]);
+});
+
 test("input typed while the connection is down is kept in order, up to a limit", () => {
   const queue = inputQueue(4);
   queue.add(2, text("b"));
@@ -125,4 +147,75 @@ test("a terminal this window did not start counts its first replay as shown", ()
   assert.equal(shownOutput.get("c:old"), 500);
   shownOutput.keep("c:", ["new"]);
   assert.equal(shownOutput.get("c:old"), 0);
+});
+
+/** A clock the test moves: timers run when it passes their time. */
+function clock() {
+  let now = 0;
+  let timers: { at: number; run: () => void; id: number }[] = [];
+  let next = 0;
+  return {
+    schedule: (run: () => void, ms: number) => {
+      const id = ++next;
+      timers.push({ at: now + ms, run, id });
+      return id as unknown as ReturnType<typeof setTimeout>;
+    },
+    cancel: (timer: ReturnType<typeof setTimeout>) => {
+      timers = timers.filter((item) => item.id !== (timer as unknown as number));
+    },
+    advance(ms: number) {
+      now += ms;
+      for (const item of timers.filter((item) => item.at <= now).sort((a, b) => a.at - b.at)) {
+        timers = timers.filter((other) => other !== item);
+        item.run();
+      }
+    },
+  };
+}
+
+test("a dropped terminal says nothing for a quick reconnect, then that it reconnects, then that it cannot reach its shell", () => {
+  const time = clock();
+  const states: Link[] = [];
+  const watch = linkWatch({ onState: (link) => states.push(link), ...time });
+  // The server lets go of a view behind a burst and it connects at once.
+  watch.lost();
+  time.advance(RECONNECTING_AFTER - 1);
+  watch.connected();
+  time.advance(DISCONNECTED_AFTER);
+  assert.deepEqual(states, []);
+  // The server is gone: a second on, it reconnects; later, it gives up saying so.
+  watch.lost();
+  time.advance(RECONNECTING_AFTER);
+  watch.lost();
+  assert.deepEqual(states, ["reconnecting"]);
+  time.advance(DISCONNECTED_AFTER - RECONNECTING_AFTER);
+  assert.deepEqual(states, ["reconnecting", "disconnected"]);
+  // Retry says so at once and waits the whole time again.
+  watch.retry();
+  time.advance(DISCONNECTED_AFTER - 1);
+  assert.deepEqual(states, ["reconnecting", "disconnected", "reconnecting"]);
+  time.advance(1);
+  assert.deepEqual(states, ["reconnecting", "disconnected", "reconnecting", "disconnected"]);
+  // The background reconnect that succeeds clears it.
+  watch.connected();
+  assert.equal(states.at(-1), "connected");
+  watch.dispose();
+});
+
+test("a terminal shown again opens where it was scrolled to, unless its replay holds other lines", () => {
+  scrollPlaces.save("c:a", 0, 120);
+  assert.equal(scrollPlaces.take("c:a", 0), 120);
+  // Taken once: a reconnect's replay does not scroll the view back.
+  assert.equal(scrollPlaces.take("c:a", 0), undefined);
+  // At the bottom, nothing is kept.
+  scrollPlaces.save("c:a", 0, 120);
+  scrollPlaces.save("c:a", 0, undefined);
+  assert.equal(scrollPlaces.take("c:a", 0), undefined);
+  // Older output was dropped meanwhile: the replay starts later.
+  scrollPlaces.save("c:a", 0, 120);
+  assert.equal(scrollPlaces.take("c:a", 4096), undefined);
+  // A terminal that is gone is forgotten.
+  scrollPlaces.save("c:b", 0, 7);
+  shownOutput.keep("c:", ["a"]);
+  assert.equal(scrollPlaces.take("c:b", 0), undefined);
 });

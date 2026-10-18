@@ -126,12 +126,39 @@ impl TerminalWorkspace {
                 tab.exited = true;
                 tab.info.status = PtyStatus::Exited;
             }
+            // Older output is gone: start over, in the modes it left on.
             PtyClientEvent::Replay {
-                truncated: true, ..
-            } => tab.reset(),
+                truncated: true,
+                modes,
+                ..
+            } => {
+                tab.reset();
+                if let Some(modes) = modes {
+                    tab.parser.process(modes.as_bytes());
+                }
+            }
             PtyClientEvent::Replay { .. } => {}
             PtyClientEvent::Output { bytes, .. } => tab.parser.process(&bytes),
         }
+    }
+
+    /// The bytes `key` sends to the active terminal. A program that turned on
+    /// application cursor keys (vim, less, htop and other full-screen
+    /// programs do) reads the arrows, Home and End as `ESC O x`, which is what
+    /// the `xterm-256color` entry its `TERM` names says they send.
+    #[must_use]
+    pub fn input_bytes(&self, key: KeyEvent) -> Option<Vec<u8>> {
+        let mut bytes = key_bytes(key)?;
+        let application = self
+            .tabs
+            .get(self.active)
+            .is_some_and(|tab| tab.parser.screen().application_cursor());
+        if application
+            && let [0x1b, prefix @ b'[', b'A'..=b'D' | b'H' | b'F'] = bytes.as_mut_slice()
+        {
+            *prefix = b'O';
+        }
+        Some(bytes)
     }
 
     #[must_use]
@@ -510,6 +537,97 @@ mod tests {
         assert_eq!(
             wide[5].text(),
             " ctrl+] or f12 chat   alt+←/→ tab   shift+pgup scroll"
+        );
+    }
+
+    fn workspace() -> (TerminalWorkspace, PtyId) {
+        let terminal = TerminalWorkspace::new(vec![PtyInfo {
+            id: PtyId::new(),
+            title: "test".into(),
+            command: "sh".into(),
+            args: Vec::new(),
+            cwd: "/tmp".into(),
+            status: PtyStatus::Running,
+            pid: None,
+            cols: 20,
+            rows: 4,
+        }]);
+        let id = terminal.active_id().unwrap();
+        (terminal, id)
+    }
+
+    #[test]
+    fn arrows_follow_the_programs_cursor_key_mode() {
+        let (mut terminal, id) = workspace();
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        assert_eq!(
+            terminal.input_bytes(key(KeyCode::Up)),
+            Some(b"\x1b[A".to_vec())
+        );
+        terminal.apply(PtyClientEvent::Output {
+            id,
+            bytes: b"\x1b[?1h\x1b=".to_vec(),
+        });
+        for (code, sent) in [
+            (KeyCode::Up, b"\x1bOA"),
+            (KeyCode::Down, b"\x1bOB"),
+            (KeyCode::Right, b"\x1bOC"),
+            (KeyCode::Left, b"\x1bOD"),
+            (KeyCode::Home, b"\x1bOH"),
+            (KeyCode::End, b"\x1bOF"),
+        ] {
+            assert_eq!(
+                terminal.input_bytes(key(code)),
+                Some(sent.to_vec()),
+                "{code:?}"
+            );
+        }
+        // Other keys are as before.
+        assert_eq!(
+            terminal.input_bytes(key(KeyCode::PageUp)),
+            Some(b"\x1b[5~".to_vec())
+        );
+        assert_eq!(
+            terminal.input_bytes(key(KeyCode::Char('x'))),
+            Some(b"x".to_vec())
+        );
+        terminal.apply(PtyClientEvent::Output {
+            id,
+            bytes: b"\x1b[?1l".to_vec(),
+        });
+        assert_eq!(
+            terminal.input_bytes(key(KeyCode::Up)),
+            Some(b"\x1b[A".to_vec())
+        );
+    }
+
+    #[test]
+    fn a_truncated_replay_starts_over_in_the_modes_the_lost_output_left_on() {
+        let (mut terminal, id) = workspace();
+        terminal.apply(PtyClientEvent::Output {
+            id,
+            bytes: b"old screen".to_vec(),
+        });
+        terminal.apply(PtyClientEvent::Replay {
+            id,
+            truncated: true,
+            modes: Some("\x1b[?1049h\x1b[?1h\x1b[?2004h".into()),
+        });
+        terminal.apply(PtyClientEvent::Output {
+            id,
+            bytes: b"redrawn".to_vec(),
+        });
+        let rendered = frame(&terminal, Theme::editorial_dark(), Language::English, 20, 6);
+        assert!(
+            rendered[1].text().starts_with("redrawn"),
+            "{}",
+            rendered[1].text()
+        );
+        let screen = terminal.tabs[0].parser.screen();
+        assert!(screen.alternate_screen() && screen.application_cursor());
+        assert_eq!(
+            terminal.paste_bytes("p"),
+            Some(b"\x1b[200~p\x1b[201~".to_vec())
         );
     }
 }
