@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, rename, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { attachments } from "@haarness/sdk";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { listScreenshots, readListedScreenshots } from "../src/main/screenshot-files";
@@ -88,38 +89,42 @@ test("a pick names places in the window's last listing, and nothing else", () =>
 test("a screenshot swapped for a link or another file after it was listed is refused, not read", async () => {
   const folder = await mkdtemp(join(tmpdir(), "haarness-screenshots-"));
   try {
-    await writeFile(join(folder, "a.png"), "first");
-    await writeFile(join(folder, "b.png"), "second");
-    await writeFile(join(folder, "c.png"), "third");
-    await writeFile(join(folder, "private.png"), "another file");
+    for (const [name, text] of [["a.png", "first"], ["b.png", "second"], ["c.png", "third"], ["d.png", "fourth"], ["private.png", "another file"]])
+      await writeFile(join(folder, name), text);
     await symlink(join(folder, "private.png"), join(folder, "link.png"));
+    // Over what one message may attach (sparse, so it takes no room).
+    await writeFile(join(folder, "big.png"), "");
+    await truncate(join(folder, "big.png"), 20 * 1024 * 1024 + 1);
     const listed = await listScreenshots(folder);
     // A link is never listed.
-    assert.deepEqual(listed.map((entry) => entry.name).sort(), ["a.png", "b.png", "c.png", "private.png"]);
+    assert.deepEqual(
+      listed.map((entry) => entry.name).sort(),
+      ["a.png", "b.png", "big.png", "c.png", "d.png", "private.png"],
+    );
     const pick = (name: string) => listed.find((entry) => entry.name === name)!;
-    let reads = 0;
-    const read = (paths: string[]) => {
-      reads++;
-      return Promise.all(paths.map((path) => readFile(path, "utf8")));
-    };
-    assert.deepEqual(await readListedScreenshots([pick("b.png"), pick("a.png")], read), ["second", "first"]);
-    // Made a link to another file since the listing: refused before anything is read.
+    const text = (values: string[]) => values.map((value) => Buffer.from(value.split(",")[1], "base64").toString());
+    assert.deepEqual(text(await readListedScreenshots([pick("b.png"), pick("a.png")])), ["second", "first"]);
+    // The same attachments the SDK's reader makes from the paths.
+    assert.deepEqual(await readListedScreenshots([pick("b.png"), pick("a.png")]), await attachments([pick("b.png").path, pick("a.png").path]));
+    await assert.rejects(readListedScreenshots([pick("a.png"), pick("big.png")]), /20 MiB/);
+    // Made a link to another file since the listing.
     await rm(join(folder, "a.png"));
     await symlink(join(folder, "private.png"), join(folder, "a.png"));
-    reads = 0;
-    await assert.rejects(readListedScreenshots([pick("b.png"), pick("a.png")], read), /changed/);
-    assert.equal(reads, 0);
+    await assert.rejects(readListedScreenshots([pick("b.png"), pick("a.png")]), /changed/);
     // Rewritten since the listing.
     await writeFile(join(folder, "b.png"), "rewritten");
-    await assert.rejects(readListedScreenshots([pick("b.png")], read), /changed/);
-    assert.equal(reads, 0);
-    // Swapped for a link while it was being read.
+    await assert.rejects(readListedScreenshots([pick("b.png")]), /changed/);
+    // Swapped for a link after it was checked: what is read is still the listed file, never the link's target.
+    const swapped = await readListedScreenshots([pick("c.png")], {
+      checked: async (path) => {
+        await rename(path, path + ".moved");
+        await symlink(join(folder, "private.png"), path);
+      },
+    });
+    assert.deepEqual(text(swapped), ["third"]);
+    // Written to while it was read.
     await assert.rejects(
-      readListedScreenshots([pick("c.png")], async (paths) => {
-        await rm(paths[0]);
-        await symlink(join(folder, "private.png"), paths[0]);
-        return read(paths);
-      }),
+      readListedScreenshots([pick("d.png")], { checked: (path) => appendFile(path, " and more") }),
       /changed/,
     );
   } finally {
