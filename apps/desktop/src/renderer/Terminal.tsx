@@ -15,7 +15,7 @@ import { terminalTheme, type ThemeId } from "../themes";
 import {
   inputQueue,
   linkWatch,
-  reconnectDelay,
+  reconnects,
   scrollPlaces,
   shownOutput,
   terminalStream,
@@ -422,7 +422,7 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
       if (data.type === "cursor" && typeof data.end === "number") {
         stream.cursor(data.end);
         cursor = data.end;
-        attempt = 0;
+        loop.reset();
         // The replay is in: open where the view was scrolled to before.
         if (place !== undefined) {
           const line = place;
@@ -446,7 +446,7 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
       if (data.type === "closed") {
         live = false;
         watch.lost();
-        reconnect();
+        loop.after();
       }
     });
     // The output this view has, as the server counts it. When the socket
@@ -459,60 +459,55 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
     // it is in (see scrollPlaces).
     let replayStart: number | undefined;
     let place: number | undefined;
-    let attempt = 0;
-    let retry: ReturnType<typeof setTimeout> | undefined;
     let focused = false;
     // What the view says while the connection is down; reconnects go on
     // whatever it says.
     const watch = linkWatch({ onState: setLink });
-    const connect = () => {
-      requested = cursor;
-      void window.haarness
-        .terminal(connection, "connect", props.id, { cursor, view })
-        .then(() => {
-          if (disposed) return;
-          if (!focused) terminal.focus();
-          focused = true;
-          live = true;
-          watch.connected();
-          for (const bytes of waiting.take()) send(bytes);
-          sizes.schedule({ cols: terminal.cols, rows: terminal.rows });
-        })
-        .catch(() => {
-          if (disposed) return;
-          watch.lost();
-          reconnect();
-        });
-    };
-    function reconnect(delay = reconnectDelay(attempt++)) {
-      if (disposed) return;
-      clearTimeout(retry);
-      retry = setTimeout(async () => {
-        // While the server cannot say, keep trying. A shell that exited
-        // sends nothing more, and its tab says so; a terminal the server no
-        // longer has (it was replaced meanwhile) gives way to what it has.
-        const tabs = await window.haarness
-          .api<PtyInfo[]>(connection, "listPtys", [])
-          .catch(() => undefined);
-        if (disposed) return;
-        if (!tabs) return reconnect();
-        const tab = tabs.find((tab) => tab.id === props.id);
-        if (tab?.status === "running") return connect();
+    // One attempt at a time (see reconnects). The first connects at once;
+    // later ones ask the server first, which keeps them trying while it
+    // cannot say. A shell that exited sends nothing more, and its tab says
+    // so; a terminal the server no longer has (it was replaced meanwhile)
+    // gives way to what it has.
+    let first = true;
+    const loop = reconnects({
+      attempt: async () => {
+        if (!first) {
+          const tabs = await window.haarness.api<PtyInfo[]>(connection, "listPtys", []);
+          if (disposed) return true;
+          const tab = tabs.find((tab) => tab.id === props.id);
+          if (tab?.status !== "running") {
+            watch.connected();
+            if (!tab) props.onGone();
+            return true;
+          }
+        }
+        first = false;
+        requested = cursor;
+        try {
+          await window.haarness.terminal(connection, "connect", props.id, { cursor, view });
+        } catch {
+          if (!disposed) watch.lost();
+          return disposed;
+        }
+        if (disposed) return true;
+        if (!focused) terminal.focus();
+        focused = true;
+        live = true;
         watch.connected();
-        if (!tab) props.onGone();
-      }, delay);
-    }
-    // Retry tries at once, and backs off from the start again.
+        for (const bytes of waiting.take()) send(bytes);
+        sizes.schedule({ cols: terminal.cols, rows: terminal.rows });
+        return true;
+      },
+    });
     retryNow = () => {
-      attempt = 0;
       watch.retry();
-      reconnect(0);
+      loop.now();
     };
-    connect();
+    loop.now();
     onCleanup(() => {
       disposed = true;
       watch.dispose();
-      clearTimeout(retry);
+      loop.dispose();
       clearTimeout(timer);
       sizes.dispose();
       sized.dispose();

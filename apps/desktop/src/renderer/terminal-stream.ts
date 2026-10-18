@@ -227,3 +227,61 @@ export function linkWatch(input: {
     dispose: clear,
   };
 }
+
+/**
+ * When a terminal view tries to connect again after its connection ended:
+ * after a delay that grows from 250 ms to 5 s (`reconnectDelay`), and never
+ * while another attempt is under way, since each would connect the view and
+ * the output would arrive twice. Retry (`now`) tries at once, unless an
+ * attempt is under way; then that attempt goes on, and if it fails the next
+ * comes after the shortest delay.
+ */
+export function reconnects(input: {
+  /** One attempt: true when the view is connected, or has nothing left to
+   * connect to; false, or a failure, to try again later. */
+  attempt: () => Promise<boolean>;
+  schedule?: (run: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  cancel?: (timer: ReturnType<typeof setTimeout>) => void;
+}) {
+  const schedule = input.schedule ?? ((run, ms) => setTimeout(run, ms));
+  const cancel = input.cancel ?? ((timer) => clearTimeout(timer));
+  let attempts = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let running = false;
+  let stopped = false;
+  const run = () => {
+    timer = undefined;
+    running = true;
+    void input
+      .attempt()
+      .catch(() => false)
+      .then((done) => {
+        running = false;
+        if (!done) later(reconnectDelay(attempts++));
+      });
+  };
+  const later = (delay: number) => {
+    if (stopped || running) return;
+    if (timer !== undefined) cancel(timer);
+    timer = schedule(run, delay);
+  };
+  return {
+    /** The connection ended: try again after the next delay. */
+    after() {
+      if (!running) later(reconnectDelay(attempts++));
+    },
+    /** The first connect, or Retry: at once, with the delays from the start. */
+    now() {
+      attempts = 0;
+      later(0);
+    },
+    /** Output flows again: a later drop starts from the shortest delay. */
+    reset() {
+      attempts = 0;
+    },
+    dispose() {
+      stopped = true;
+      if (timer !== undefined) cancel(timer);
+    },
+  };
+}

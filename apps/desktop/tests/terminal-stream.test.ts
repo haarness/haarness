@@ -6,6 +6,7 @@ import {
   inputQueue,
   linkWatch,
   reconnectDelay,
+  reconnects,
   scrollPlaces,
   shownOutput,
   terminalStream,
@@ -218,4 +219,50 @@ test("a terminal shown again opens where it was scrolled to, unless its replay h
   scrollPlaces.save("c:b", 0, 7);
   shownOutput.keep("c:", ["a"]);
   assert.equal(scrollPlaces.take("c:b", 0), undefined);
+});
+
+test("a terminal never has two reconnect attempts under way, and Retry during one backs off from the start", async () => {
+  const time = clock();
+  const settled = () => new Promise((resolve) => setImmediate(resolve));
+  const attempts: ((done: boolean) => void)[] = [];
+  const loop = reconnects({
+    attempt: () => new Promise<boolean>((resolve) => attempts.push(resolve)),
+    ...time,
+  });
+  loop.now();
+  time.advance(0);
+  assert.equal(attempts.length, 1);
+  // Retry, and a drop reported meanwhile, while the attempt is out.
+  loop.now();
+  loop.after();
+  time.advance(10_000);
+  assert.equal(attempts.length, 1);
+  // It fails: the next comes after the shortest delay, then longer ones.
+  attempts[0](false);
+  await settled();
+  time.advance(249);
+  assert.equal(attempts.length, 1);
+  time.advance(1);
+  assert.equal(attempts.length, 2);
+  attempts[1](false);
+  await settled();
+  time.advance(499);
+  assert.equal(attempts.length, 2);
+  time.advance(1);
+  assert.equal(attempts.length, 3);
+  // Retry while waiting goes at once.
+  attempts[2](false);
+  await settled();
+  loop.now();
+  time.advance(0);
+  assert.equal(attempts.length, 4);
+  // Connected: nothing more until the connection ends again.
+  attempts[3](true);
+  await settled();
+  time.advance(10_000);
+  assert.equal(attempts.length, 4);
+  loop.after();
+  loop.dispose();
+  time.advance(10_000);
+  assert.equal(attempts.length, 4);
 });
