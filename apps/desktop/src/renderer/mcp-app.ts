@@ -401,11 +401,33 @@ export interface Host {
    * its request arrived.
    */
   openLink(url: string, gesture: boolean): Promise<boolean>;
+  /**
+   * A link the bridge refused (any scheme but http, https and mailto). The page is told
+   * why; this lets the host tell the person, who may have just clicked it.
+   */
+  refusedLink?(url: string, gesture: boolean): void;
   /** Puts text in the message box; false when the person declined or this chat cannot take it. */
   compose(text: string, gesture: boolean): boolean | Promise<boolean>;
   /** Reads a `ui://` resource of the page's own server. */
   readResource(uri: string): Promise<unknown>;
   log?(params: unknown): void;
+}
+
+/** Schemes a refused link may be named by: well known, and none of them words a page could choose. */
+const NAMED_SCHEMES = new Set([
+  "about", "afp", "blob", "chrome", "data", "facetime", "file", "ftp", "javascript", "nfs",
+  "rdp", "sftp", "smb", "sms", "ssh", "tel", "telnet", "vbscript", "vnc", "ws", "wss",
+]);
+
+/**
+ * The scheme of a refused link ("file:"), when it is one of a short list of
+ * well-known ones; otherwise undefined, and the notice says only that the
+ * link does not open. Any other scheme is the page's own text, which could
+ * read like a host or a sentence (`sign-in.at.example.com:`).
+ */
+export function linkScheme(url: string): string | undefined {
+  const scheme = /^[\u0000-\u0020]*([a-z][a-z\d+.-]*):/i.exec(url)?.[1]?.toLowerCase();
+  return scheme && NAMED_SCHEMES.has(scheme) ? scheme + ":" : undefined;
 }
 
 export const REFUSED = {
@@ -441,7 +463,10 @@ export function createBridge(host: Host, post: (message: Record<string, unknown>
         return {};
       case "ui/open-link": {
         const url = webLink(params.url);
-        if (!url) throw new RpcError(-32602, REFUSED.link);
+        if (!url) {
+          host.refusedLink?.(typeof params.url === "string" ? params.url : "", gesture);
+          throw new RpcError(-32602, REFUSED.link);
+        }
         return (await host.openLink(url, gesture)) ? {} : { isError: true };
       }
       case "ui/message": {

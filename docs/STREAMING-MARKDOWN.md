@@ -6,7 +6,7 @@ The parser retains two trailing top-level blocks because partial syntax can merg
 
 Each mounted message owns its worker projection. Requests coalesce while parsing; superseded replies update transport state without rendering obsolete text. Unmounting releases the projection and ignores late responses. The idle worker terminates after 30 seconds without clients. Worker startup, transport or timeout failure falls back to the same incremental parser locally. Parsing moves off the UI thread in normal operation; sanitization and DOM updates remain on it. Very large individual blocks and documents containing reference definitions can still require substantial parsing.
 
-Model HTML remains untrusted. Sanitization precedes every DOM update, including fallback. Model-authored scripts, event handlers, form controls and inline styles remain excluded. Code-copy buttons appear only after streaming finishes; links still use Desktop's external-link handler.
+Model HTML remains untrusted. Sanitization precedes every DOM update, including fallback. Model-authored scripts, event handlers, form controls and inline styles remain excluded. An image from another host becomes a click-to-load placeholder in the same pass (see [Desktop](DESKTOP.md)), so a later patch of the block reproduces the placeholder, or the image once it is loaded, rather than undoing the click. Code-copy buttons appear only after streaming finishes; links still use Desktop's external-link handler.
 
 ## Verification
 

@@ -143,7 +143,7 @@ fn chrome_failure(code: &str) -> Option<&'static str> {
             "This tab is no longer in the chat's Chrome tab group. Call browser_tabs_list."
         }
         "background-tab" => {
-            "Chrome cannot capture this tab while it is in the background of the window the user is using. Use browser_snapshot, or call browser_tabs_focus first."
+            "Chrome cannot capture this tab while it is in the background of the window the user is using. Use browser_snapshot to read it, or ask the user to show the tab; browser_tabs_focus does not bring a tab forward in the window the user is using."
         }
         _ => return None,
     })

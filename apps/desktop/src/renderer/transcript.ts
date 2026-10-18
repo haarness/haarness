@@ -122,9 +122,7 @@ export function describeTool(name: string, args: unknown): ToolShape {
       return {
         ...known,
         target:
-          files.length > 2
-            ? `${files[0]}, ${files[1]} +${files.length - 2}`
-            : files.join(", "),
+          targetList(files),
       };
   }
   if (known) return { ...known, target: toolTarget(args) };
@@ -434,6 +432,27 @@ const batchGroup = (tool: string) => {
 export function batchLabel(steps: BatchStep[]) {
   const actions = [...new Set(steps.map((step) => batchDone[batchGroup(step.name)]))];
   return phraseList(actions.map((action) => t(action)));
+}
+/**
+ * What a batch acted on, for its collapsed row: the steps' distinct targets,
+ * the first two and then "+N", as an apply_patch row lists its files. Rows
+ * start collapsed, and "Read files" alone does not say which.
+ */
+export function batchTarget(steps: BatchStep[]) {
+  return targetList([
+    ...new Set(steps.map((step) => describeTool(step.name, step.args).target).filter(Boolean)),
+  ]);
+}
+/**
+ * A row's targets as the interface language lists them: one, two, or the
+ * first two and how many more ("a.ts, b.ts +3").
+ */
+export function targetList(targets: string[]) {
+  if (targets.length < 2) return targets[0] ?? "";
+  const [first, second] = targets;
+  return targets.length === 2
+    ? t("{first}, {second}", { first, second })
+    : t("{first}, {second} +{count}", { first, second, count: String(targets.length - 2) });
 }
 /** The argument a tool row names, as the call wrote it. */
 function targetText(args: unknown): string {

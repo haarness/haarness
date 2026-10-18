@@ -400,9 +400,60 @@ impl PermissionEngine {
 
     #[must_use]
     pub fn evaluate_detailed(&self, operation: &str) -> Evaluation {
+        self.evaluate_passing_over(operation, &|_| false, PermissionDecision::Ask)
+    }
+
+    /// The verdict on a pattern read from inside a written shell command
+    /// (another spelling of it, or a command it runs). In every layer
+    /// (ceilings, configured rules, remembered answers) the rules `covers`
+    /// holds for are passed over: rules that also name the command as
+    /// written, such as a blanket `*`, `"bash": "ask"` or an allow for the
+    /// wrapper, judged that command already. What no other rule names is
+    /// allowed. So a ceiling's blanket deny with an allow for `timeout *`
+    /// leaves `cargo test` in `timeout 5 cargo test` alone, while a deny for
+    /// `tool-x *` in any layer refuses `timeout 5 tool-x a`.
+    #[must_use]
+    pub fn evaluate_reading(&self, operation: &str, covers: &dyn Fn(&str) -> bool) -> Evaluation {
+        self.evaluate_passing_over(operation, covers, PermissionDecision::Allow)
+    }
+
+    /// A bash rule that denies or asks without covering the command as
+    /// written (`covers`), with its decision: a deny when there is one, in
+    /// any layer, else an ask. A command whose readings a limit stopped is
+    /// refused or asked about when one exists.
+    #[must_use]
+    pub fn narrower_bash_rule(
+        &self,
+        covers: &dyn Fn(&str) -> bool,
+    ) -> Option<(String, PermissionDecision)> {
+        let narrower = |decision: PermissionDecision| {
+            std::iter::once(&self.ceilings)
+                .chain(&self.inherited)
+                .chain(std::iter::once(&self.rules))
+                .flatten()
+                .filter(|rule| rule.decision == decision)
+                .filter(|rule| {
+                    rule.pattern
+                        .split_once(':')
+                        .is_some_and(|(permission, _)| wildcard_match(permission, "bash"))
+                })
+                .find(|rule| !covers(&rule.pattern))
+                .map(|rule| (rule.pattern.clone(), decision))
+        };
+        narrower(PermissionDecision::Deny).or_else(|| narrower(PermissionDecision::Ask))
+    }
+
+    fn evaluate_passing_over(
+        &self,
+        operation: &str,
+        passed_over: &dyn Fn(&str) -> bool,
+        unmatched: PermissionDecision,
+    ) -> Evaluation {
         let operation = normalize_operation_alias(operation);
         let spellings = self.path_spellings(&operation);
-        let names = |rule: &&PermissionRule| rule_names(rule, &operation, &spellings);
+        let names = |rule: &&PermissionRule| {
+            rule_names(rule, &operation, &spellings) && !passed_over(&rule.pattern)
+        };
         // Ceilings first and independently: their deny is final.
         for ceiling in std::iter::once(&self.ceilings).chain(&self.inherited) {
             if let Some(ceiling) = ceiling.iter().rfind(names)
@@ -475,7 +526,7 @@ impl PermissionEngine {
             };
         }
         Evaluation {
-            decision: matched.map_or(PermissionDecision::Ask, |rule| rule.decision),
+            decision: matched.map_or(unmatched, |rule| rule.decision),
             matched: matched.map(|rule| rule.pattern.clone()),
             protected: false,
         }

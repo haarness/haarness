@@ -34,12 +34,49 @@ const refused = (reason: "network" | "outside" | "unsupported"): LinkTarget => (
 /** Two leading slashes or backslashes in any mix: `//host/share`, `\\host\share`. */
 const networkPath = (path: string) => /^[\\/]{2}/.test(path);
 
+/**
+ * An address as the URL parser reads it: without leading and trailing spaces
+ * and control characters, or any tab or newline.
+ */
+export function parsedAddress(href: string) {
+  return href.replace(/[\t\n\r]/g, "").replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, "");
+}
+
+/**
+ * Whether an address a page loads by itself (an image's `src` or `srcset`
+ * candidate, an SVG image's `href`, a video's `poster`) names a network path,
+ * `//host/…` or `\\host\…` in any mix of slashes, which this window would
+ * resolve to `file://host/…` and reach as soon as it is drawn: on Windows
+ * with the user's sign-in. Each comma-separated part is read, so a `srcset`
+ * candidate after the first is too.
+ */
+export function loadsNetworkPath(value: string) {
+  return value.split(",").some((part) => networkPath(parsedAddress(part)));
+}
+
+/**
+ * Whether a CSS value, as an SVG presentation attribute (`mask`, `filter`,
+ * `fill`, `marker-end`, …) holds one, points anywhere but into the reply
+ * itself. Only `url(#fragment)` stays: this window resolves any other target
+ * like an address, `url(//host/x.svg#a)` to a network share included, and so
+ * it would the strings of `image-set()` (Chromium may read `mask` as the CSS
+ * shorthand, whose images it takes). So a value also counts when, besides its
+ * fragment `url()`s, it has a quoted string or an image function
+ * (`image-set()`, `-webkit-image-set()`, `src()`, `image()`, `cross-fade()`,
+ * `element()`), or a CSS escape, which could spell any of them.
+ */
+export function cssReferencesOutside(value: string) {
+  if (value.includes("\\")) return true;
+  for (const match of value.matchAll(/url\(/gi)) {
+    const target = value.slice(match.index + 4).replace(/^[\s"']+/, "");
+    if (!target.startsWith("#")) return true;
+  }
+  const rest = value.replace(/url\(\s*(["']?)#[^"'()\s]*\1\s*\)/gi, "");
+  return /["']|image-set\(|\bsrc\(|\bimage\(|cross-fade\(|element\(/i.test(rest);
+}
+
 export function linkTarget(href: string, place: LinkPlace): LinkTarget {
-  // Read the link the way the URL parser does: it drops leading and trailing
-  // spaces and control characters, and any tab or newline.
-  const raw = href
-    .replace(/[\t\n\r]/g, "")
-    .replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, "");
+  const raw = parsedAddress(href);
   if (!raw || raw.startsWith("#")) return { kind: "none" };
   if (networkPath(raw)) return refused("network");
   const scheme = /^([a-z][a-z\d+.-]*):/i.exec(raw)?.[1]?.toLowerCase();

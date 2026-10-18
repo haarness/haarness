@@ -218,9 +218,19 @@ test("new tabs open in the background, in one group per chat named after it; a s
   await h.command({ action: { type: "tabs.list" } }, { title: "Plan the Lisbon trip" });
   assert.equal(h.fake.groupsById.get(live.groupId)!.title, "Plan the Lisbon trip");
 
+  // focus brings the tab forward while the user is not using Chrome…
+  h.fake.chromeFocused = false;
   const focused = await h.open("about:blank", { focus: true });
   assert.equal(focused.live.active, true);
   assert.equal(h.fake.focused, 1, "never raises a window");
+  // …but never over the user's tab in the window they are using.
+  h.fake.chromeFocused = true;
+  const mine = h.fake.createTab({ url: "https://mail.example/", windowId: 1, active: true });
+  const behind = await h.open("about:blank", { focus: true });
+  assert.equal(behind.live.active, false);
+  assert.equal(h.fake.tabsById.get(mine.id)!.active, true);
+  assert.match((behind.tab as { note?: string }).note ?? "", /opened in the background/);
+  assert.equal(h.states().at(-1)!.message.state.focusedTabID, behind.tab.id, "it is still the chat's focused tab");
 });
 
 test("state always reaches the server before the result, failures included", async () => {
@@ -404,6 +414,7 @@ function recordingPage(calls: string[]): CreatePage {
       return { value: { ok: true }, files: [] };
     },
     navigationStarted() {},
+    personActed() {},
     dispose() {},
   });
 }
@@ -472,6 +483,7 @@ function loggingPage(log: string[], delay: (type: string) => number = () => 0): 
         log.push("navigation");
         options.publish();
       },
+      personActed() {},
       dispose() {
         log.push("dispose");
       },
@@ -795,6 +807,7 @@ test("the shared page driver plugs in through createPage and runs inside the sit
       navigationStarted() {
         generation++;
       },
+      personActed() {},
       dispose() {
         calls.push("dispose");
       },
@@ -858,4 +871,61 @@ test("Show tabs is the one place Haarness brings a window forward, because the u
   assert.deepEqual(await h.host.request({ type: "show-tabs", key }), { ok: true });
   assert.equal(h.fake.focused, live.windowId);
   assert.equal(h.fake.tabsById.get(live.id)!.active, true);
+});
+
+test("tabs.focus brings a tab forward only where that takes nothing from the user", async () => {
+  const h = await boot();
+  h.start();
+  h.attach();
+  const first = await h.open("https://a.example/one");
+  const second = await h.open("https://a.example/two");
+  // The user is reading a tab of their own in the window they are using.
+  const own = h.fake.createTab({ url: "https://mail.example/", windowId: 1, active: true });
+  const focus = async (tabID: string) => {
+    const { outcome } = await h.command({ action: { type: "tabs.focus", tabID } });
+    assert.equal(outcome.type, "success", JSON.stringify(outcome));
+    return outcome.result.value as { id: string; note?: string };
+  };
+  const kept = await focus(first.tab.id);
+  assert.match(kept.note ?? "", /stays in the background.*will not bring it forward/);
+  assert.equal(h.fake.tabsById.get(own.id)!.active, true, "the user's tab stays in front");
+  assert.equal(h.fake.tabsById.get(first.live.id)!.active, false);
+  assert.equal(h.states().at(-1)!.message.state.focusedTabID, first.tab.id, "it is still the chat's focused tab");
+
+  // In a window the user is not using, the tab comes forward.
+  h.fake.windowIds.push(2);
+  h.fake.focused = 2;
+  const shown = await focus(second.tab.id);
+  assert.equal(shown.note, undefined);
+  assert.equal(h.fake.tabsById.get(second.live.id)!.active, true);
+
+  // That window is the user's again but they have not come back to it: the
+  // agent may replace the tab it brought forward there with another of its own.
+  h.fake.focused = 1;
+  assert.equal((await focus(first.tab.id)).note, undefined);
+  assert.equal(h.fake.tabsById.get(first.live.id)!.active, true);
+  // A tab already in front stays as it is.
+  assert.equal((await focus(first.tab.id)).note, undefined);
+  assert.equal(h.fake.focused, 1, "never raises a window");
+
+  // Once the user comes back to the window, its front tab is theirs to read.
+  h.fake.chrome.windows.onFocusChanged.emit(1);
+  assert.match((await focus(second.tab.id)).note ?? "", /stays in the background/);
+  assert.equal(h.fake.tabsById.get(first.live.id)!.active, true);
+});
+
+test("tabs.focus never brings a tab forward over a tab the user dragged into the chat", async () => {
+  const h = await boot();
+  h.start();
+  h.attach();
+  const agents = await h.open("https://a.example/one");
+  // The user drags a tab of theirs into the chat's group and keeps working in it.
+  const user = h.fake.createTab({ url: "https://b.example/", windowId: 1 });
+  await h.fake.chrome.tabs.group({ tabIds: user.id, groupId: agents.live.groupId });
+  await h.until((message) => message.type === "to-server" && message.message.state?.tabs.length === 2);
+  await h.fake.chrome.tabs.update(user.id, { active: true });
+  const { outcome } = await h.command({ action: { type: "tabs.focus", tabID: agents.tab.id } });
+  assert.equal(outcome.type, "success", JSON.stringify(outcome));
+  assert.match(outcome.result.value.note ?? "", /stays in the background/);
+  assert.equal(h.fake.tabsById.get(user.id)!.active, true);
 });

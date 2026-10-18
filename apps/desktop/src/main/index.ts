@@ -67,6 +67,7 @@ import {
   saveServerAuth,
 } from "./store";
 import { bounded, external, request } from "./validation";
+import { fetchRemoteImage } from "./remote-image";
 import { createVoiceInput, launchVoice } from "./voice";
 import { createProjectQueue } from "./project-queue";
 import { createUiSession } from "./ui-session";
@@ -1272,6 +1273,16 @@ function installHandlers() {
     chromeSetup(z.enum(["setup", "status"]).parse(action)),
   );
   handle("chromeReveal", () => revealChromeExtension());
+  // An image a reply links to on another host, once the person asks for it.
+  // End-to-end tests pin fixture host names with `haarnessImageHosts`.
+  handle("remoteImage", (_, raw: unknown) =>
+    fetchRemoteImage(raw, {
+      hosts:
+        process.env.HAARNESS_DESKTOP_TEST === "1"
+          ? ((globalThis as { haarnessImageHosts?: Record<string, string> }).haarnessImageHosts ?? {})
+          : {},
+    }),
+  );
   handle("openLink", async (win, id: string | undefined, thread: string | undefined, raw: string) => {
     const url = external(raw);
     if (id && browserLinkDestination(url, data().preferences) === "browser") {
