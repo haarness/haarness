@@ -80,6 +80,24 @@ test("an SVG attribute's url() may point only into the reply", async () => {
   for (const value of ["url(#clip)", "url( '#mask' )", 'url("#f") red', "red", "none", "#fff"])
     assert.equal(cssReferencesOutside(value), false, JSON.stringify(value));
 
+  // Chromium may read `mask` as the CSS shorthand, whose images include the
+  // strings of image-set() and the other image functions.
+  for (const value of [
+    "image-set('//evil.example/m.png' 1x)",
+    '-webkit-image-set("//evil.example/m.png" 1x)',
+    "IMAGE-SET(url(#a) 1x, '//evil.example/m.png' 2x)",
+    "src(//evil.example/m.svg)",
+    "image(//evil.example/m.png)",
+    "cross-fade(url(#a), url(#b))",
+    "element(#a)",
+    "url(#a) '//evil.example/m.png'",
+    'url("#a)',
+    "\\69 mage-set('//evil.example/m.png' 1x)",
+  ])
+    assert.equal(cssReferencesOutside(value), true, JSON.stringify(value));
+  for (const value of ['url("#grad")', "url('#m') red", "rgb(0, 0, 0)", "url(#a) none"])
+    assert.equal(cssReferencesOutside(value), false, JSON.stringify(value));
+
   const markdown = await readFile(new URL("../src/renderer/markdown-dom.ts", import.meta.url), "utf8");
   const attributes = /const CSS_URL_ATTRIBUTES = new Set\(\[([^\]]*)\]\)/.exec(markdown)?.[1] ?? "";
   for (const name of ["fill", "stroke", "filter", "mask", "clip-path", "marker", "marker-start", "marker-mid", "marker-end", "cursor"])

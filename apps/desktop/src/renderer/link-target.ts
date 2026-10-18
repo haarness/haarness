@@ -57,9 +57,13 @@ export function loadsNetworkPath(value: string) {
 /**
  * Whether a CSS value, as an SVG presentation attribute (`mask`, `filter`,
  * `fill`, `marker-end`, …) holds one, points anywhere but into the reply
- * itself: a `url()` whose target is not a `#fragment`. This window resolves
- * any other target like an address, `url(//host/x.svg#a)` to a network share
- * included. A CSS escape could spell `url(`, so a value with one counts too.
+ * itself. Only `url(#fragment)` stays: this window resolves any other target
+ * like an address, `url(//host/x.svg#a)` to a network share included, and so
+ * it would the strings of `image-set()` (Chromium may read `mask` as the CSS
+ * shorthand, whose images it takes). So a value also counts when, besides its
+ * fragment `url()`s, it has a quoted string or an image function
+ * (`image-set()`, `-webkit-image-set()`, `src()`, `image()`, `cross-fade()`,
+ * `element()`), or a CSS escape, which could spell any of them.
  */
 export function cssReferencesOutside(value: string) {
   if (value.includes("\\")) return true;
@@ -67,7 +71,8 @@ export function cssReferencesOutside(value: string) {
     const target = value.slice(match.index + 4).replace(/^[\s"']+/, "");
     if (!target.startsWith("#")) return true;
   }
-  return false;
+  const rest = value.replace(/url\(\s*(["']?)#[^"'()\s]*\1\s*\)/gi, "");
+  return /["']|image-set\(|\bsrc\(|\bimage\(|cross-fade\(|element\(/i.test(rest);
 }
 
 export function linkTarget(href: string, place: LinkPlace): LinkTarget {
