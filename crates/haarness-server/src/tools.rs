@@ -3048,6 +3048,26 @@ impl Tool for BuiltinTool {
             Kind::ApplyPatch => {
                 let operations = haarness_core::patch::parse_patch(string(&args, "input")?)
                     .map_err(CoreError::Tool)?;
+                // A move onto the file itself (the same path, a `./` spelling,
+                // another case on a case-insensitive disk) would write the
+                // file and then delete it. Refused before anything is written.
+                for operation in &operations {
+                    if let haarness_core::patch::FileOp::Update {
+                        path,
+                        move_to: Some(target),
+                        ..
+                    } = operation
+                        && let (Ok(source), Ok(destination)) = (
+                            self.resolve_existing(path, &context),
+                            self.resolve_new(target, &context),
+                        )
+                        && same_file(&source, &destination)
+                    {
+                        return Err(CoreError::Invalid(format!(
+                            "{path}: *** Move to: {target} names the same file; leave out the Move to line to update it in place"
+                        )));
+                    }
+                }
                 let mut report = Vec::new();
                 let mut diffs = Vec::new();
                 let mut diffs_truncated = false;
@@ -3084,6 +3104,12 @@ impl Tool for BuiltinTool {
                                 .map_err(|error| CoreError::Tool(format!("{path}: {error}")))?;
                             if let Some(target) = move_to {
                                 let destination = self.resolve_new(&target, &context)?;
+                                // A file the patch added earlier is checked here.
+                                if same_file(&resolved, &destination) {
+                                    return Err(CoreError::Invalid(format!(
+                                        "{path}: *** Move to: {target} names the same file; leave out the Move to line to update it in place"
+                                    )));
+                                }
                                 let destination_before = existing_diff_body(&destination).await;
                                 if let Some(parent) = destination.parent() {
                                     tokio::fs::create_dir_all(parent)
@@ -3412,6 +3438,26 @@ impl SecretFilter {
                 .filter(|target| target != path)
                 .and_then(|target| self.judge(&target))
         })
+    }
+}
+
+/// Whether two paths name one existing file: the same device and inode on
+/// Unix, the same canonical path elsewhere (Windows canonicalizes case too).
+fn same_file(left: &Path, right: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if let (Ok(left), Ok(right)) = (std::fs::metadata(left), std::fs::metadata(right)) {
+            return left.dev() == right.dev() && left.ino() == right.ino();
+        }
+        false
+    }
+    #[cfg(not(unix))]
+    {
+        matches!(
+            (left.canonicalize(), right.canonicalize()),
+            (Ok(left), Ok(right)) if left == right
+        )
     }
 }
 
@@ -5263,6 +5309,67 @@ export default workflow({
             .execute(json!({"name":"secret"}), context)
             .await;
         assert!(matches!(refused, Err(CoreError::PermissionDenied(_))));
+        tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_patch_refuses_a_move_onto_the_same_file() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-patch-self-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        tokio::fs::write(workspace.join("notes.txt"), "one\n")
+            .await
+            .unwrap();
+        tokio::fs::write(workspace.join("first.txt"), "first\n")
+            .await
+            .unwrap();
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let run = |input: String| {
+            let registry = &registry;
+            let context = tool_context(&workspace);
+            async move {
+                registry
+                    .get("apply_patch")
+                    .unwrap()
+                    .execute(json!({ "input": input }), context)
+                    .await
+            }
+        };
+        let mut targets = vec!["notes.txt".to_owned(), "./notes.txt".to_owned()];
+        // On a case-insensitive disk another case is the same file too.
+        if workspace.join("NOTES.TXT").exists() {
+            targets.push("NOTES.TXT".to_owned());
+        }
+        for target in targets {
+            let input = format!(
+                "*** Begin Patch\n*** Update File: first.txt\n@@\n-first\n+changed\n\
+                 *** Update File: notes.txt\n*** Move to: {target}\n@@\n-one\n+two\n*** End Patch\n"
+            );
+            let error = run(input).await.unwrap_err().to_string();
+            assert!(error.contains("names the same file"), "{target}: {error}");
+            assert_eq!(
+                std::fs::read_to_string(workspace.join("notes.txt")).unwrap(),
+                "one\n"
+            );
+            // Refused before anything was written.
+            assert_eq!(
+                std::fs::read_to_string(workspace.join("first.txt")).unwrap(),
+                "first\n"
+            );
+        }
+        // A file the same patch added, moved onto itself.
+        let error = run(
+            "*** Begin Patch\n*** Add File: added.txt\n+a\n*** Update File: added.txt\n*** Move to: ./added.txt\n@@\n-a\n+b\n*** End Patch\n"
+                .to_owned(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("names the same file"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("added.txt")).unwrap(),
+            "a\n"
+        );
         tokio::fs::remove_dir_all(workspace).await.unwrap();
     }
 
