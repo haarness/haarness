@@ -955,14 +955,83 @@ html[dir="rtl"] :is(.session-title, .session-bar-name) {
   width: 24px;
   height: 24px;
 }
+.terminal-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
 .terminal-view {
   flex: 1;
   min-height: 0;
   padding: var(--s2) var(--s3);
   background: var(--page);
+  transition: opacity var(--fast) var(--ease);
 }
 .terminal-view .xterm {
   height: 100%;
+}
+/* Cut off from its shell: what the terminal still shows is out of date. */
+.terminal-stage[data-link="disconnected"] .terminal-view {
+  opacity: 0.4;
+}
+.terminal-reconnecting {
+  position: absolute;
+  top: var(--s2);
+  inset-inline-end: var(--s3);
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  height: 24px;
+  padding: 0 var(--s2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-pill);
+  background: var(--raised);
+  box-shadow: var(--shadow-1);
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  pointer-events: none;
+}
+.terminal-disconnected {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--s4);
+}
+.terminal-disconnected > div {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s2);
+  max-width: 340px;
+  padding: var(--s4) var(--s5);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  background: var(--raised);
+  box-shadow: var(--shadow-1);
+  text-align: center;
+  font-size: var(--ui);
+}
+.terminal-disconnected .icon {
+  color: var(--danger);
+}
+.terminal-disconnected strong {
+  color: var(--text);
+  font-size: var(--ui-lg);
+}
+.terminal-disconnected p {
+  margin: 0;
+  color: var(--muted);
+}
+.terminal-disconnected > div > div {
+  display: flex;
+  gap: var(--s2);
+  padding-top: var(--s1);
 }
 .terminal-empty {
   flex: 1;

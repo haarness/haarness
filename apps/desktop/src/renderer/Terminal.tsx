@@ -10,11 +10,19 @@ import {
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { sizePusher } from "./terminal-size";
-import { inputQueue, reconnectDelay, shownOutput, terminalStream, writeChunks } from "./terminal-stream";
+import {
+  inputQueue,
+  linkWatch,
+  reconnectDelay,
+  shownOutput,
+  terminalStream,
+  writeChunks,
+  type Link,
+} from "./terminal-stream";
 import "@xterm/xterm/css/xterm.css";
 import type { PtyInfo } from "@haarness/sdk";
 import { useApp } from "./state";
-import { Button, ask } from "./ui";
+import { Button, Icon, ask } from "./ui";
 import { createOrdering } from "./Sortable";
 import { registerCyclePanel } from "./tab-cycle";
 
@@ -104,6 +112,18 @@ export function TerminalPanel() {
     setSelected("");
     setStarting(true);
     void app.run(() => refresh(true));
+  });
+  // A server that was replaced (restarted, or stopped and started again)
+  // has none of the old terminals and sends no event for them: list them
+  // again, which also opens a shell when none is left.
+  let instance = { connection: "", id: "" };
+  createEffect(() => {
+    const connection = app.state.connection?.id ?? "";
+    const id = app.state.connection?.info.serverInstanceId ?? "";
+    const previous = instance;
+    instance = { connection, id };
+    if (connection && previous.connection === connection && previous.id && id !== previous.id)
+      void app.run(() => refresh(true));
   });
   const off = window.haarness.onEvent((event) => {
     if (
@@ -255,13 +275,23 @@ export function TerminalPanel() {
           </div>
         }
       >
-        {(id) => <TerminalView id={id} />}
+        {(id) => (
+          <TerminalView
+            id={id}
+            // The server answered without this terminal (it was replaced
+            // while this view was cut off): show what it has instead.
+            onGone={() => void app.run(() => refresh(true))}
+            onNew={() => void app.run(create)}
+          />
+        )}
       </Show>
     </section>
   );
 }
-function TerminalView(props: { id: string }) {
+function TerminalView(props: { id: string; onGone: () => void; onNew: () => void }) {
   const app = useApp();
+  const [link, setLink] = createSignal<Link>("connected");
+  let retryNow = () => {};
   let host!: HTMLDivElement;
   let terminal: Terminal;
   let fit: FitAddon;
@@ -409,6 +439,7 @@ function TerminalView(props: { id: string }) {
         );
       if (data.type === "closed") {
         live = false;
+        watch.lost();
         reconnect();
       }
     });
@@ -421,6 +452,9 @@ function TerminalView(props: { id: string }) {
     let attempt = 0;
     let retry: ReturnType<typeof setTimeout> | undefined;
     let focused = false;
+    // What the view says while the connection is down; reconnects go on
+    // whatever it says.
+    const watch = linkWatch({ onState: setLink });
     const connect = () => {
       requested = cursor;
       void window.haarness
@@ -430,32 +464,44 @@ function TerminalView(props: { id: string }) {
           if (!focused) terminal.focus();
           focused = true;
           live = true;
+          watch.connected();
           for (const bytes of waiting.take()) send(bytes);
           sizes.schedule({ cols: terminal.cols, rows: terminal.rows });
         })
-        .catch((error) => {
+        .catch(() => {
           if (disposed) return;
-          if (!focused) app.set("error", String(error));
+          watch.lost();
           reconnect();
         });
     };
-    function reconnect() {
+    function reconnect(delay = reconnectDelay(attempt++)) {
       if (disposed) return;
       clearTimeout(retry);
       retry = setTimeout(async () => {
-        // A shell that exited, or a terminal closed elsewhere, sends nothing
-        // more; while the server cannot say, keep trying.
+        // While the server cannot say, keep trying. A shell that exited
+        // sends nothing more, and its tab says so; a terminal the server no
+        // longer has (it was replaced meanwhile) gives way to what it has.
         const tabs = await window.haarness
           .api<PtyInfo[]>(connection, "listPtys", [])
           .catch(() => undefined);
         if (disposed) return;
         if (!tabs) return reconnect();
-        if (tabs.find((tab) => tab.id === props.id)?.status === "running") connect();
-      }, reconnectDelay(attempt++));
+        const tab = tabs.find((tab) => tab.id === props.id);
+        if (tab?.status === "running") return connect();
+        watch.connected();
+        if (!tab) props.onGone();
+      }, delay);
     }
+    // Retry tries at once, and backs off from the start again.
+    retryNow = () => {
+      attempt = 0;
+      watch.retry();
+      reconnect(0);
+    };
     connect();
     onCleanup(() => {
       disposed = true;
+      watch.dispose();
       clearTimeout(retry);
       clearTimeout(timer);
       sizes.dispose();
@@ -467,7 +513,34 @@ function TerminalView(props: { id: string }) {
       terminal.dispose();
     });
   });
+  // xterm owns the view's children, so what the view says about its
+  // connection sits beside it.
   return (
-    <div class="terminal-view" aria-label={t("Workspace terminal")} ref={host} />
+    <div class="terminal-stage" data-link={link()}>
+      <div class="terminal-view" aria-label={t("Workspace terminal")} ref={host} />
+      <Show when={link() === "reconnecting"}>
+        <div class="terminal-reconnecting" role="status">
+          <span class="spinner" />
+          {t("Reconnecting…")}
+        </div>
+      </Show>
+      <Show when={link() === "disconnected"}>
+        <div class="terminal-disconnected">
+          <div role="alert">
+            <Icon name="alert" size="lg" />
+            <strong>{t("Terminal disconnected")}</strong>
+            <p>{t("Haarness can't reach this terminal. Its shell may still be running.")}</p>
+            <div>
+              <button type="button" onClick={() => props.onNew()}>
+                {t("New terminal")}
+              </button>
+              <button type="button" class="primary" onClick={() => retryNow()}>
+                {t("Retry")}
+              </button>
+            </div>
+          </div>
+        </div>
+      </Show>
+    </div>
   );
 }

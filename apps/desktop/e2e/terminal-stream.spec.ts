@@ -178,6 +178,60 @@ async function run(command: string, name: string) {
   await input().press("Enter");
   await expect.poll(() => exists(name)).toBe(true);
 }
+/** Ends or resumes the outage main simulates for terminal sockets. */
+async function outage(on: boolean) {
+  await app.evaluate((_, on) => {
+    const test = globalThis as unknown as {
+      haarnessTerminalOutage: boolean;
+      haarnessTerminalSockets: { all(): { close(): void }[] };
+    };
+    test.haarnessTerminalOutage = on;
+    if (on) for (const socket of test.haarnessTerminalSockets.all()) socket.close();
+  }, on);
+}
+
+test("a terminal cut off from its server says so, offers Retry and New terminal, and keeps its shell", async () => {
+  test.setTimeout(180_000);
+  if (!(await page.locator(".terminal-panel").count()))
+    await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  await run(`cat -v > ${join(temporary, "outage.txt")}`, "outage.txt");
+  const shells = (await client.listPtys()).map((item) => item.id);
+  const reconnecting = page.getByRole("status").filter({ hasText: "Reconnecting…" });
+  const alert = page.getByRole("alert").filter({ hasText: "Terminal disconnected" });
+  await outage(true);
+  await expect(reconnecting).toBeVisible();
+  await expect(alert).toContainText("Haarness can't reach this terminal. Its shell may still be running.", {
+    timeout: 30_000,
+  });
+  await expect(alert.getByRole("button", { name: "New terminal", exact: true })).toBeVisible();
+  // Typed while it is cut off, kept for the shell.
+  await input().pressSequentially("kept");
+  // Retry says it is reconnecting at once, while the outage lasts.
+  await alert.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect(reconnecting).toBeVisible();
+  await expect(alert).toHaveCount(0);
+  await outage(false);
+  await expect(reconnecting).toHaveCount(0);
+  await input().press("Enter");
+  await input().press("Control+d");
+  await expect.poll(() => read("outage.txt")).toBe("kept\n");
+  // The same shells: nothing was replaced.
+  expect((await client.listPtys()).map((item) => item.id)).toEqual(shells);
+
+  // New terminal from the notice opens another terminal and shows it.
+  await outage(true);
+  await expect(alert).toBeVisible({ timeout: 30_000 });
+  await outage(false);
+  await alert.getByRole("button", { name: "New terminal", exact: true }).click();
+  await expect.poll(() => client.listPtys().then((items) => items.length)).toBe(shells.length + 1);
+  const added = (await client.listPtys()).find((item) => !shells.includes(item.id))!;
+  await expect(page.locator(`[data-cycle-tab="${added.id}"]`)).toHaveAttribute("aria-current", "true");
+  await expect(alert).toHaveCount(0);
+  await prompt();
+  await client.deletePty(added.id);
+  await expect(page.locator(`[data-cycle-tab="${added.id}"]`)).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
 
 test("a terminal shown again past two megabytes of output keeps a program's cursor keys and bracketed paste", async () => {
   test.setTimeout(240_000);
@@ -200,5 +254,45 @@ test("a terminal shown again past two megabytes of output keeps a program's curs
   await input().press("Enter");
   await input().press("Control+d");
   await expect.poll(() => read("modes.txt")).toBe("^[OA^[[200~pasted^[[201~\n");
+  expect(errors).toEqual([]);
+});
+
+// Last: it replaces the server the other tests use.
+test("after the server is replaced, the terminal it no longer has gives way to a new shell", async () => {
+  test.setTimeout(240_000);
+  await prompt();
+  const old = (await client.listPtys()).map((item) => item.id);
+  const instance = (await client.info()).serverInstanceId;
+  await client.shutdownServer();
+  client.close();
+  const id = "local:" + workspace;
+  await expect
+    .poll(
+      () =>
+        page
+          .evaluate(async (id) => (await window.haarness.api<{ serverInstanceId: string }>(id, "info", [])).serverInstanceId, id)
+          .catch(() => instance),
+      { timeout: 90_000 },
+    )
+    .not.toBe(instance);
+  const connection = JSON.parse(
+    execFileSync(binary, ["--workspace", workspace, "--trust-project", "desktop"], {
+      env,
+      input: '{"action":"connect"}',
+      encoding: "utf8",
+      timeout: 120000,
+    }),
+  );
+  client = new Haarness({ baseUrl: connection.url, token: connection.token });
+  await expect.poll(() => client.listPtys().then((items) => items.length), { timeout: 60_000 }).toBe(1);
+  const [shell] = await client.listPtys();
+  expect(old).not.toContain(shell.id);
+  // Only the new terminal is listed, and it is the one shown and connected.
+  await expect(page.locator("[data-cycle-tab]")).toHaveCount(1);
+  await expect(page.locator(`[data-cycle-tab="${shell.id}"]`)).toHaveAttribute("aria-current", "true");
+  await prompt();
+  await input().fill(`printf replaced > ${join(temporary, "replaced.txt")}`);
+  await input().press("Enter");
+  await expect.poll(() => read("replaced.txt"), { timeout: 30_000 }).toBe("replaced");
   expect(errors).toEqual([]);
 });

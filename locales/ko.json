@@ -2439,5 +2439,8 @@
   "Click and press the keys, including a modifier key.": "클릭한 다음 보조 키를 포함한 키를 누르세요.",
   "Use a modifier key and one more key, such as {keys}.": "보조 키와 다른 키 하나를 함께 사용하세요(예: {keys}).",
   "{keys} belongs to the system. Choose another shortcut.": "{keys}은(는) 시스템에서 사용합니다. 다른 단축키를 선택하세요.",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "다른 앱이나 시스템에서 이미 {keys}을(를) 사용하고 있습니다. 다른 단축키를 선택하세요."
+  "Another app or the system already uses {keys}. Choose another shortcut.": "다른 앱이나 시스템에서 이미 {keys}을(를) 사용하고 있습니다. 다른 단축키를 선택하세요.",
+  "Reconnecting…": "다시 연결하는 중…",
+  "Terminal disconnected": "터미널 연결이 끊어짐",
+  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness가 이 터미널에 연결할 수 없습니다. 셸은 아직 실행 중일 수 있습니다."
 }

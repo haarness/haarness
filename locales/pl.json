@@ -2439,5 +2439,8 @@
   "Click and press the keys, including a modifier key.": "Kliknij i naciśnij klawisze, w tym klawisz modyfikujący.",
   "Use a modifier key and one more key, such as {keys}.": "Użyj klawisza modyfikującego i jeszcze jednego klawisza, np. {keys}.",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} należy do systemu. Wybierz inny skrót.",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "Inna aplikacja lub system już używa {keys}. Wybierz inny skrót."
+  "Another app or the system already uses {keys}. Choose another shortcut.": "Inna aplikacja lub system już używa {keys}. Wybierz inny skrót.",
+  "Reconnecting…": "Ponowne łączenie…",
+  "Terminal disconnected": "Terminal rozłączony",
+  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness nie może połączyć się z tym terminalem. Jego powłoka może nadal działać."
 }

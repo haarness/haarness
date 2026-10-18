@@ -2439,5 +2439,8 @@
   "Click and press the keys, including a modifier key.": "按一下後按下按鍵，需包含一個輔助鍵。",
   "Use a modifier key and one more key, such as {keys}.": "請使用一個輔助鍵加另一個鍵，例如 {keys}。",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} 已由系統使用。請選擇其他快捷鍵。",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "其他 App 或系統已在使用 {keys}。請選擇其他快捷鍵。"
+  "Another app or the system already uses {keys}. Choose another shortcut.": "其他 App 或系統已在使用 {keys}。請選擇其他快捷鍵。",
+  "Reconnecting…": "正在重新連線…",
+  "Terminal disconnected": "終端機已中斷連線",
+  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness 無法連線到此終端機。它的 shell 可能仍在執行。"
 }

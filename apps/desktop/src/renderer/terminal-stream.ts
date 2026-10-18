@@ -140,3 +140,65 @@ export function writeChunks(bytes: Uint8Array, limit = WRITE_LIMIT) {
 export function reconnectDelay(attempt: number) {
   return Math.min(5000, 250 * 2 ** Math.min(attempt, 5));
 }
+
+/** What a terminal view says about its connection. */
+export type Link = "connected" | "reconnecting" | "disconnected";
+/** A drop mended within this long (the server lets go of a view that fell
+ * behind a burst of output, and it connects again at once) shows nothing. */
+export const RECONNECTING_AFTER = 1000;
+/** After this long without its connection, a terminal says it cannot reach
+ * its shell, and offers to retry or to open another terminal. */
+export const DISCONNECTED_AFTER = 15_000;
+
+/**
+ * Follows a terminal's connection for what its view shows. While the server
+ * cannot be reached the shell's state is unknown, so the view keeps the
+ * terminal and keeps reconnecting in the background; it only says so.
+ */
+export function linkWatch(input: {
+  onState: (link: Link) => void;
+  schedule?: (run: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  cancel?: (timer: ReturnType<typeof setTimeout>) => void;
+}) {
+  const schedule = input.schedule ?? ((run, ms) => setTimeout(run, ms));
+  const cancel = input.cancel ?? ((timer) => clearTimeout(timer));
+  let link: Link = "connected";
+  let down = false;
+  let timers: ReturnType<typeof setTimeout>[] = [];
+  const set = (next: Link) => {
+    if (next === link) return;
+    link = next;
+    input.onState(next);
+  };
+  const clear = () => {
+    for (const timer of timers) cancel(timer);
+    timers = [];
+  };
+  return {
+    /** The connection ended, or connecting failed. */
+    lost() {
+      if (down) return;
+      down = true;
+      timers = [
+        schedule(() => set("reconnecting"), RECONNECTING_AFTER),
+        schedule(() => set("disconnected"), DISCONNECTED_AFTER),
+      ];
+    },
+    /** The person asked to try again: it says so at once, and gives up
+     * again only after the whole wait. */
+    retry() {
+      clear();
+      down = true;
+      set("reconnecting");
+      timers = [schedule(() => set("disconnected"), DISCONNECTED_AFTER)];
+    },
+    /** Connected again, or there is nothing left to connect to (the shell
+     * exited, the terminal is gone). */
+    connected() {
+      clear();
+      down = false;
+      set("connected");
+    },
+    dispose: clear,
+  };
+}
