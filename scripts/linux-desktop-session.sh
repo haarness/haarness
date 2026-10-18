@@ -12,4 +12,7 @@ gnome-keyring-daemon --start --components=secrets >/dev/null 2>&1
 # Chromium chooses its password store from the desktop: under a bare X server
 # it would keep secrets in plain text, which Desktop refuses.
 export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-GNOME}"
+# Playwright forces the plain-text store on the development Electron; Desktop
+# test runs (HAARNESS_DESKTOP_TEST=1) switch back to this session's keyring.
+export HAARNESS_DESKTOP_PASSWORD_STORE="${HAARNESS_DESKTOP_PASSWORD_STORE:-gnome-libsecret}"
 exec xvfb-run -a -s '-screen 0 1600x1000x24' "$@"
