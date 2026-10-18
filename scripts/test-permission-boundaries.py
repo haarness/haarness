@@ -267,7 +267,15 @@ def case_config_files():
     haarness(guarded, 'run', '!tool write ' + json.dumps({'path': '.haarness/agents/plain.md',
                                                          'content': '---\ndescription: Plain\n---\nRead.'}))
     assert (guarded / '.haarness' / 'agents' / 'plain.md').exists()
-    passed("plugin hooks, extension code, a trimmed name and an agent's new permissions ask; a plain agent does not")
+    passed("plugin hooks, extension code, a trimmed name, the global config.toml and an agent's new permissions ask; a plain agent does not")
+    # A patch that adds an agent and then gives it permissions, in two steps.
+    two_steps = ('*** Begin Patch\n*** Add File: .haarness/agents/later.md\n+---\n+description: Later\n+---\n+Go.\n'
+                 '*** Update File: .haarness/agents/later.md\n@@\n description: Later\n+permission:\n+  bash: allow\n'
+                 '*** End Patch')
+    result = haarness(guarded, 'run', '!tool apply_patch ' + json.dumps({'input': two_steps}), check=False)
+    assert result.returncode != 0 and 'which always needs an answer' in result.stderr, result.stderr
+    assert not (guarded / '.haarness' / 'agents' / 'later.md').exists()
+    passed('a patch that adds an agent and then opens its permissions asks')
     haarness(guarded, 'schedule', 'add', '--name', 'widen', '--every', '1d', '--prompt', f'!tool write {widen}')
     run = json.loads(haarness(guarded, 'schedule', 'run', 'widen', '--json', timeout=60).stdout)
     assert run['status'] == 'success', run

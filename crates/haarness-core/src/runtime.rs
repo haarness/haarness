@@ -3810,7 +3810,14 @@ impl AgentRuntime {
             .iter()
             .flat_map(|plan| plan.external_paths.iter().cloned())
             .collect();
-        let guarded = definition_grant_edits(name, &arguments, &self.workspace);
+        let guarded = definition_grant_edits(name, &arguments, &self.workspace, &|kind, id| {
+            restricted_definition(
+                &self.live_agents.read(),
+                &self.live_commands.read(),
+                kind,
+                id,
+            )
+        });
         let mut pending_plans = Vec::new();
         // Asks only a person answers (a configuration file edit).
         let mut protected = HashSet::new();
@@ -8683,7 +8690,14 @@ impl RunnerTask {
             .flat_map(|plan| plan.external_paths.iter().cloned())
             .collect();
         let engine = self.permission_engine_for_tool(agent, name);
-        let guarded = definition_grant_edits(name, &arguments, &self.workspace);
+        let guarded = definition_grant_edits(name, &arguments, &self.workspace, &|kind, id| {
+            restricted_definition(
+                &self.live_agents.read(),
+                &self.live_commands.read(),
+                kind,
+                id,
+            )
+        });
         let mut pending_plans = Vec::new();
         // Asks only a person answers (a configuration file edit).
         let mut protected = HashSet::new();
@@ -11785,69 +11799,116 @@ fn resolved_file_pattern(workspace: &Path, target: &str) -> Option<String> {
     (pattern != target).then_some(pattern)
 }
 
-/// The edit patterns of a call that change what an agent, command or skill
-/// may do when it runs (`definitions::grants_change`), each as written and
-/// where it really leads. They are asked like a configuration file edit; an
-/// edit of a definition's prompt or description is not.
-fn definition_grant_edits(
+/// One file a call writes, after replaying every operation in order: what it
+/// read before and what it will read after.
+struct FileChange {
+    /// Every spelling the call used for the file, as its edit patterns do.
+    spellings: Vec<String>,
+    before: Option<String>,
+    after: FileAfter,
+}
+
+enum FileAfter {
+    Text(String),
+    /// Deleted, or moved away.
+    Gone,
+    /// The replay could not tell (a patch hunk that does not apply).
+    Unknown,
+}
+
+/// The files a `write`, `edit`, `multiedit` or `apply_patch` call changes,
+/// keyed by where each really is. A patch is replayed operation by operation
+/// over the contents so far, as the tool applies it, so adding a file and
+/// then updating or moving it in the same patch is judged by the result.
+fn replay_file_changes(
     name: &str,
     arguments: &serde_json::Value,
     workspace: &Path,
-) -> HashSet<String> {
-    let mut guarded = HashSet::new();
-    let read = |target: &str| {
-        std::fs::read_to_string(crate::permissions::resolve_permission_path(
-            workspace, target,
-        ))
-        .ok()
-    };
-    let mut check = |target: &str, before: Option<String>, after: Option<String>| {
-        let resolved = crate::permissions::resolve_permission_path(workspace, target);
-        if !(crate::definitions::is_definition_path(Path::new(target))
-            || crate::definitions::is_definition_path(&resolved))
-        {
-            return;
+) -> Vec<FileChange> {
+    /// The index of `target`'s change, recording the spelling and, the first
+    /// time, what the file reads now.
+    fn entry(changes: &mut Vec<(PathBuf, FileChange)>, workspace: &Path, target: &str) -> usize {
+        let key = crate::permissions::resolve_permission_path(workspace, target);
+        let index = changes
+            .iter()
+            .position(|(known, _)| *known == key)
+            .unwrap_or_else(|| {
+                let before = std::fs::read_to_string(&key).ok();
+                let after = before.clone().map_or(FileAfter::Gone, FileAfter::Text);
+                changes.push((
+                    key,
+                    FileChange {
+                        spellings: Vec::new(),
+                        before,
+                        after,
+                    },
+                ));
+                changes.len() - 1
+            });
+        let spellings = &mut changes[index].1.spellings;
+        if !spellings.iter().any(|known| known == target) {
+            spellings.push(target.to_owned());
         }
-        if after.is_some_and(|after| crate::definitions::grants_change(before.as_deref(), &after)) {
-            guarded.insert(target.to_owned());
-            guarded.extend(resolved_file_pattern(workspace, target));
-        }
-    };
+        index
+    }
+    let mut changes: Vec<(PathBuf, FileChange)> = Vec::new();
     let text = |key: &str| arguments.get(key).and_then(serde_json::Value::as_str);
     match name {
         "write" => {
             if let (Some(path), Some(content)) = (text("path"), text("content")) {
-                check(path, read(path), Some(content.to_owned()));
+                let index = entry(&mut changes, workspace, path);
+                changes[index].1.after = FileAfter::Text(content.to_owned());
             }
         }
-        "edit" => {
-            if let (Some(path), Some(old), Some(new)) = (text("path"), text("old"), text("new")) {
-                let before = read(path);
-                let after = before
-                    .as_deref()
-                    .filter(|before| before.contains(old))
-                    .map(|before| before.replacen(old, new, 1));
-                check(path, before, after);
-            }
-        }
-        "multiedit" => {
-            if let Some(path) = text("path") {
-                let before = read(path);
-                let mut after = before.clone();
-                for edit in arguments["edits"].as_array().into_iter().flatten() {
-                    let (Some(old), Some(new)) = (edit["old"].as_str(), edit["new"].as_str())
-                    else {
-                        continue;
-                    };
-                    after = after.map(|text| {
-                        if edit["replaceAll"].as_bool() == Some(true) {
-                            text.replace(old, new)
-                        } else {
-                            text.replacen(old, new, 1)
-                        }
-                    });
+        "edit" | "multiedit" => {
+            let edits: Vec<(String, String, bool)> = if name == "edit" {
+                match (text("old"), text("new")) {
+                    (Some(old), Some(new)) => vec![(old.to_owned(), new.to_owned(), false)],
+                    _ => Vec::new(),
                 }
-                check(path, before, after);
+            } else {
+                arguments["edits"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|edit| {
+                        Some((
+                            edit["old"].as_str()?.to_owned(),
+                            edit["new"].as_str()?.to_owned(),
+                            edit["replaceAll"].as_bool() == Some(true),
+                        ))
+                    })
+                    .collect()
+            };
+            if let Some(path) = text("path") {
+                let index = entry(&mut changes, workspace, path);
+                let change = &mut changes[index].1;
+                // A replacement that does not match fails the whole call,
+                // which then writes nothing.
+                if let FileAfter::Text(mut current) =
+                    std::mem::replace(&mut change.after, FileAfter::Gone)
+                {
+                    let mut applied = true;
+                    for (old, new, all) in &edits {
+                        if old.is_empty() || !current.contains(old.as_str()) {
+                            applied = false;
+                            break;
+                        }
+                        current = if *all {
+                            current.replace(old.as_str(), new)
+                        } else {
+                            current.replacen(old.as_str(), new, 1)
+                        };
+                    }
+                    change.after = if applied {
+                        FileAfter::Text(current)
+                    } else {
+                        change
+                            .before
+                            .clone()
+                            .map_or(FileAfter::Gone, FileAfter::Text)
+                    };
+                }
             }
         }
         "apply_patch" => {
@@ -11857,29 +11918,118 @@ fn definition_grant_edits(
             for operation in operations {
                 match operation {
                     crate::patch::FileOp::Add { path, content } => {
-                        check(&path, read(&path), Some(content));
+                        let index = entry(&mut changes, workspace, &path);
+                        changes[index].1.after = FileAfter::Text(content);
+                    }
+                    crate::patch::FileOp::Delete { path } => {
+                        let index = entry(&mut changes, workspace, &path);
+                        changes[index].1.after = FileAfter::Gone;
                     }
                     crate::patch::FileOp::Update {
                         path,
                         move_to,
                         hunks,
                     } => {
-                        let before = read(&path);
-                        let after = before
-                            .as_deref()
-                            .and_then(|before| crate::patch::apply_hunks(before, &hunks).ok());
-                        check(&path, before, after.clone());
-                        if let Some(target) = move_to {
-                            check(&target, read(&target), after);
+                        let index = entry(&mut changes, workspace, &path);
+                        let updated = match &changes[index].1.after {
+                            FileAfter::Text(current) => crate::patch::apply_hunks(current, &hunks)
+                                .map_or(FileAfter::Unknown, FileAfter::Text),
+                            FileAfter::Gone | FileAfter::Unknown => FileAfter::Unknown,
+                        };
+                        match move_to {
+                            Some(target) => {
+                                changes[index].1.after = FileAfter::Gone;
+                                let target = entry(&mut changes, workspace, &target);
+                                changes[target].1.after = updated;
+                            }
+                            None => changes[index].1.after = updated,
                         }
                     }
-                    crate::patch::FileOp::Delete { .. } => {}
                 }
             }
         }
         _ => {}
     }
+    changes.into_iter().map(|(_, change)| change).collect()
+}
+
+/// The edit patterns of a call that may widen what an agent, command or skill
+/// can do, each as written and where it really leads. They are asked like a
+/// configuration file edit: a change to a definition's permission fields
+/// (`definitions::definition_change_widens`, which also counts deleting or
+/// moving away a definition that has them, and frontmatter that does not
+/// load), a change the replay cannot work out, and a definition that would
+/// load under the name of a restricted one from another layer (`restricted`
+/// says whether a loaded definition of that kind and name has permission
+/// fields). An edit of a definition's prompt or description is not.
+fn definition_grant_edits(
+    name: &str,
+    arguments: &serde_json::Value,
+    workspace: &Path,
+    restricted: &dyn Fn(crate::definitions::DefinitionKind, &str) -> bool,
+) -> HashSet<String> {
+    let mut guarded = HashSet::new();
+    for change in replay_file_changes(name, arguments, workspace) {
+        let Some(spelling) = change.spellings.first() else {
+            continue;
+        };
+        let real = crate::permissions::resolve_permission_path(workspace, spelling);
+        let path = if crate::definitions::is_definition_path(Path::new(spelling)) {
+            Path::new(spelling).to_path_buf()
+        } else if crate::definitions::is_definition_path(&real) {
+            real
+        } else {
+            continue;
+        };
+        let widens = match &change.after {
+            FileAfter::Unknown => true,
+            FileAfter::Gone => {
+                crate::definitions::definition_change_widens(change.before.as_deref(), None)
+            }
+            FileAfter::Text(after) => {
+                crate::definitions::definition_change_widens(change.before.as_deref(), Some(after))
+                    || crate::definitions::definition_id(&path, after).is_some_and(|id| {
+                        let kind = crate::definitions::definition_kind(&path)
+                            .expect("a definition path has a kind");
+                        let before = change
+                            .before
+                            .as_deref()
+                            .and_then(|before| crate::definitions::definition_id(&path, before));
+                        before.as_deref() != Some(id.as_str()) && restricted(kind, &id)
+                    })
+            }
+        };
+        if widens {
+            for spelling in &change.spellings {
+                guarded.insert(spelling.clone());
+                guarded.extend(resolved_file_pattern(workspace, spelling));
+            }
+        }
+    }
     guarded
+}
+
+/// Whether a loaded agent, command or skill named `id` has permission fields
+/// that a new definition under the same name would replace.
+fn restricted_definition(
+    agents: &[crate::CustomAgent],
+    commands: &[haarness_protocol::CommandInfo],
+    kind: crate::definitions::DefinitionKind,
+    id: &str,
+) -> bool {
+    match kind {
+        crate::definitions::DefinitionKind::Agent => agents.iter().any(|agent| {
+            agent.id == id && (!agent.permissions.is_empty() || !agent.tools.is_empty())
+        }),
+        crate::definitions::DefinitionKind::Command | crate::definitions::DefinitionKind::Skill => {
+            commands.iter().any(|command| {
+                command.name == id
+                    && (!command.execution.disallowed_tools.is_empty()
+                        || command.agent.is_some()
+                        || command.execution.agent.is_some())
+            })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -14118,13 +14268,24 @@ mod tests {
             "---\ndescription: Reviewer\npermission:\n  bash: deny\n---\nReview.\n",
         )
         .unwrap();
+        std::fs::write(
+            workspace.join(".haarness/agents/plain.md"),
+            "---\ndescription: Plain\n---\nRead.\n",
+        )
+        .unwrap();
+        // Another layer already loads a restricted agent named `strict`.
+        let restricted = |kind: crate::definitions::DefinitionKind, id: &str| {
+            kind == crate::definitions::DefinitionKind::Agent && id == "strict"
+        };
         let guarded = |name: &str, arguments: serde_json::Value| {
-            let mut found = super::definition_grant_edits(name, &arguments, &workspace)
-                .into_iter()
-                .collect::<Vec<_>>();
+            let mut found =
+                super::definition_grant_edits(name, &arguments, &workspace, &restricted)
+                    .into_iter()
+                    .collect::<Vec<_>>();
             found.sort();
             found
         };
+        let patch = |body: &str| json!({"input": format!("*** Begin Patch\n{body}*** End Patch")});
         let reviewer = ".haarness/agents/reviewer.md";
         // Opening the agent's bash, by edit, multiedit, write or patch.
         assert_eq!(
@@ -14148,12 +14309,99 @@ mod tests {
             ),
             vec![".haarness/agents/new.md"]
         );
-        let patch = "*** Begin Patch\n*** Update File: .haarness/agents/reviewer.md\n@@\n-  bash: deny\n+  bash: allow\n*** End Patch";
         assert_eq!(
-            guarded("apply_patch", json!({"input": patch})),
+            guarded(
+                "apply_patch",
+                patch(
+                    "*** Update File: .haarness/agents/reviewer.md\n@@\n-  bash: deny\n+  bash: allow\n"
+                )
+            ),
             vec![reviewer]
         );
-        // The prompt changing, a plain new agent, or another file.
+        // A patch is judged by its result, replayed in order: an added file
+        // updated later, a second update matching only the first's output,
+        // and a file moved into an agents folder.
+        assert_eq!(
+            guarded(
+                "apply_patch",
+                patch(
+                    "*** Add File: .haarness/agents/x.md\n+---\n+description: X\n+---\n+Go.\n\
+                     *** Update File: .haarness/agents/x.md\n@@\n description: X\n+permission:\n+  bash: allow\n"
+                )
+            ),
+            vec![".haarness/agents/x.md"]
+        );
+        assert_eq!(
+            guarded(
+                "apply_patch",
+                patch(
+                    "*** Update File: .haarness/agents/plain.md\n@@\n-description: Plain\n+description: Step\n\
+                     *** Update File: .haarness/agents/plain.md\n@@\n description: Step\n+tools: Bash\n"
+                )
+            ),
+            vec![".haarness/agents/plain.md"]
+        );
+        assert_eq!(
+            guarded(
+                "apply_patch",
+                patch(
+                    "*** Add File: tmp/x.md\n+---\n+permission:\n+  bash: allow\n+---\n+Go.\n\
+                     *** Update File: tmp/x.md\n*** Move to: .claude/agents/x.md\n@@\n Go.\n+More.\n"
+                )
+            ),
+            vec![".claude/agents/x.md"]
+        );
+        // Deleting or moving away a definition with permission fields, a
+        // hunk the replay cannot apply, and frontmatter broken on purpose.
+        assert_eq!(
+            guarded(
+                "apply_patch",
+                patch("*** Delete File: .haarness/agents/reviewer.md\n")
+            ),
+            vec![reviewer]
+        );
+        assert_eq!(
+            guarded(
+                "apply_patch",
+                patch(
+                    "*** Update File: .haarness/agents/reviewer.md\n*** Move to: notes/reviewer.md\n@@\n Review.\n"
+                )
+            ),
+            vec![reviewer]
+        );
+        assert_eq!(
+            guarded(
+                "apply_patch",
+                patch(
+                    "*** Update File: .haarness/agents/plain.md\n@@\n-no such line\n+tools: Bash\n"
+                )
+            ),
+            vec![".haarness/agents/plain.md"]
+        );
+        assert_eq!(
+            guarded(
+                "edit",
+                json!({"path": reviewer, "old": "---\nReview.", "new": "Review."})
+            ),
+            vec![reviewer]
+        );
+        // A plain new agent that would load under a restricted agent's name.
+        assert_eq!(
+            guarded(
+                "write",
+                json!({"path": ".haarness/agents/strict.md", "content": "---\ndescription: Loose\n---\nGo."})
+            ),
+            vec![".haarness/agents/strict.md"]
+        );
+        assert_eq!(
+            guarded(
+                "edit",
+                json!({"path": ".haarness/agents/plain.md", "old": "description: Plain", "new": "name: strict"})
+            ),
+            vec![".haarness/agents/plain.md"]
+        );
+        // The prompt changing, a plain new agent, deleting a plain one, or
+        // another file.
         assert!(
             guarded(
                 "edit",
@@ -14164,7 +14412,25 @@ mod tests {
         assert!(
             guarded(
                 "write",
-                json!({"path": ".haarness/agents/plain.md", "content": "---\ndescription: x\n---\nGo."})
+                json!({"path": ".haarness/agents/fresh.md", "content": "---\ndescription: x\n---\nGo."})
+            )
+            .is_empty()
+        );
+        assert!(
+            guarded(
+                "apply_patch",
+                patch("*** Delete File: .haarness/agents/plain.md\n")
+            )
+            .is_empty()
+        );
+        // Replayed, a plain agent added and then edited in one patch asks nothing.
+        assert!(
+            guarded(
+                "apply_patch",
+                patch(
+                    "*** Add File: .haarness/agents/y.md\n+---\n+description: Y\n+---\n+Go.\n\
+                     *** Update File: .haarness/agents/y.md\n@@\n-description: Y\n+description: Why\n"
+                )
             )
             .is_empty()
         );
@@ -14185,6 +14451,20 @@ mod tests {
             engine.evaluate(&format!("edit:{reviewer}")),
             crate::PermissionDecision::Allow
         );
+        // A patch that moves a scratch file onto haarness.json names it, so
+        // the configuration-file ask meets it.
+        let plans = super::ask_plans(
+            "apply_patch",
+            &patch(
+                "*** Add File: tmp/c.json\n+{}\n*** Update File: tmp/c.json\n*** Move to: haarness.json\n@@\n {}\n+\n",
+            ),
+            &workspace,
+        );
+        let edit = plans.iter().find(|plan| plan.permission == "edit").unwrap();
+        assert!(edit.patterns.iter().any(|pattern| {
+            let evaluation = engine.evaluate_detailed(&edit.operation(pattern));
+            pattern == "haarness.json" && evaluation.protected
+        }));
         std::fs::remove_dir_all(workspace).unwrap();
     }
 
