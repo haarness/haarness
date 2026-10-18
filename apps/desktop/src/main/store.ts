@@ -144,6 +144,7 @@ export async function preferences(input: Partial<Preferences>) {
       palette: z.enum(themeIds),
       fontSize: z.number().int().min(11).max(24),
       terminalFontSize: z.number().int().min(10).max(24),
+      terminalOptionAsMeta: z.enum(["off", "left", "both"]),
       notifications: z.boolean(),
       completionNotifications: z.enum(["background", "always", "never"]),
       permissionNotifications: z.boolean(),

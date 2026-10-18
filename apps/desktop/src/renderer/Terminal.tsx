@@ -10,6 +10,7 @@ import {
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { sizePusher } from "./terminal-size";
+import { optionKeys } from "./terminal-keys";
 import {
   inputQueue,
   linkWatch,
@@ -349,6 +350,17 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
       terminal.options.fontSize = app.state.preferences.terminalFontSize;
       fit.fit();
     });
+    // Option as Meta (Settings, macOS only): xterm reads its switch as it
+    // handles each key, so it is set for the Option key held just before.
+    const option = optionKeys();
+    const optionMode = () =>
+      app.state.platform === "darwin" ? app.state.preferences.terminalOptionAsMeta : "off";
+    terminal.attachCustomKeyEventHandler((event) => {
+      terminal.options.macOptionIsMeta = option.meta(event, optionMode());
+      return true;
+    });
+    window.addEventListener("blur", option.reset);
+    onCleanup(() => window.removeEventListener("blur", option.reset));
     fit.fit();
     // This view's own connection: main ignores a late connect or detach of
     // a view of the same terminal that was replaced.

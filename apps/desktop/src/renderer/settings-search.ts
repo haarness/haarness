@@ -4,6 +4,7 @@ import type { useApp } from "./state";
 import { t } from "./i18n";
 import { modelName } from "../model-names";
 import {
+  macOnlyControls,
   settingsControls,
   settingsTitles,
   settingsKeywords,
@@ -156,9 +157,9 @@ export function createSettingsSearch(
     ...Object.entries(settingsTitles).map(([section, title]) =>
       entry(section, title, undefined, settingsKeywords[section]),
     ),
-    ...settingsControls.map(([section, title, keywords]) =>
-      entry(section, title, title, keywords),
-    ),
+    ...settingsControls
+      .filter(([, title]) => app.state.platform === "darwin" || !macOnlyControls.has(title))
+      .map(([section, title, keywords]) => entry(section, title, title, keywords)),
     // "Shortcut: New chat" is one sentence in the catalog, so a language
     // can order the two words its own way. Search still matches the English.
     ...Object.entries(app.state.preferences.shortcuts).map(([name, value]) => ({

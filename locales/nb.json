@@ -2442,5 +2442,9 @@
   "Another app or the system already uses {keys}. Choose another shortcut.": "En annen app eller systemet bruker allerede {keys}. Velg en annen snarvei.",
   "Reconnecting…": "Kobler til på nytt…",
   "Terminal disconnected": "Terminalen er frakoblet",
-  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness når ikke denne terminalen. Skallet kan fortsatt kjøre."
+  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness når ikke denne terminalen. Skallet kan fortsatt kjøre.",
+  "Option as Meta key": "Option som Meta-tast",
+  "Make Option send Meta (Esc) shortcuts in the terminal instead of typing special characters.": "La Option sende Meta-snarveier (Esc) i terminalen i stedet for å skrive spesialtegn.",
+  "Left Option": "Venstre Option",
+  "Both Option keys": "Begge Option-tastene"
 }

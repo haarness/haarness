@@ -2442,5 +2442,9 @@
   "Another app or the system already uses {keys}. Choose another shortcut.": "其他应用或系统已在使用 {keys}。请选择其他快捷键。",
   "Reconnecting…": "正在重新连接…",
   "Terminal disconnected": "终端已断开",
-  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness 无法连接此终端。它的 shell 可能仍在运行。"
+  "Haarness can't reach this terminal. Its shell may still be running.": "Haarness 无法连接此终端。它的 shell 可能仍在运行。",
+  "Option as Meta key": "将 Option 用作 Meta 键",
+  "Make Option send Meta (Esc) shortcuts in the terminal instead of typing special characters.": "在终端中让 Option 键发送 Meta（Esc）快捷键，而不是输入特殊字符。",
+  "Left Option": "左 Option 键",
+  "Both Option keys": "两个 Option 键"
 }
