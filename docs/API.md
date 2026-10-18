@@ -203,17 +203,19 @@ result is durable. The registry itself is process-local: restart recovery
 interrupts orphaned work rather than replaying it.
 
 A background subagent the server stopped (a crash, `serve --stop`, an upgrade)
-is not resumed, but the chat that launched it is told on the next start, once:
-its result arrives as a delivered one would, as `<task id="…" state="error">`
-saying Haarness restarted before the task finished and that it can be
-continued with its `task_id` once what it changed has been checked. A
-subagent that finished but whose result had not been delivered yet is
-delivered then (`state="completed"`). An idle chat answers it in a new turn
-(unattended in a scheduled run's chat); a chat whose own last turn was stopped
-keeps it as a hidden message for when it goes on, and no turn starts by itself.
-A shutdown no longer records such a task as `cancelled`: its row reads
-`interrupted` after the restart. Foreground subagents stop with the turn that
-waits for them, which already says so.
+is not resumed, but the chat that launched it is told on the next start, once.
+Nothing starts by itself after a restart, in any chat, scheduled ones
+included: the result is recorded as a hidden user message the model reads
+with the next message the person sends, `<task id="…" state="error">` saying
+Haarness restarted before the task finished and that it can be continued with
+its `task_id` once what it changed has been checked (`state="completed"` with
+the result for a subagent that finished before its result was delivered).
+Beside it an `error` item tells the person, in every app: “Haarness restarted
+before the background task “…” finished. It was not resumed; your next
+message tells the agent, which can continue it.” A shutdown no longer records
+such a task as `cancelled`: its row reads `interrupted` after the restart.
+Foreground subagents stop with the turn that waits for them, which already
+says so.
 
 The server is the sole execution owner. Graceful server shutdown interrupts
 active turns/workflows into durable terminal states after a bounded drain.

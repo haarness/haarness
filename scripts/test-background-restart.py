@@ -6,11 +6,13 @@ launches a subagent in the background that keeps working for two minutes,
 then stops the daemon while it runs, starts it again and reads the launching
 chat:
 
-- crash: the daemon is killed. The idle chat gets the task's result as an
-  error naming the restart and the task_id, and answers it in a new turn.
+- crash: the daemon is killed. The chat gets the task's result, an error
+  naming the restart and the task_id, for the model to read with the next
+  message, and a notice the person sees; no turn starts by itself.
 - graceful: `serve --stop`. Same report; the task is not marked cancelled.
-- busy: the chat's own turn was running too. It gets the notice for when it
-  goes on, and no turn starts by itself.
+- busy: the chat's own turn was running too. Same report, no turn.
+
+The person's next message then runs as usual.
 
 Before this change none of the chats heard anything: the subagent stayed
 "interrupted" (or "cancelled") in the task list and the model never knew.
@@ -117,12 +119,22 @@ def replies(thread):
             if item["data"]["type"] == "assistant_message"]
 
 
+def shown(thread):
+    """The errors the chat shows the person."""
+    return [item["data"]["message"] for item in api(f"/threads/{thread}/items") if item["data"]["type"] == "error"]
+
+
 def reported(thread, child, description):
     texts = notices(thread)
     assert len(texts) == 1, texts
     text = texts[0]
     assert text.startswith(f'<task id="{child}" state="error">'), text
     assert f"{description}: failed" in text and "not resumed" in text and f'task_id "{child}"' in text, text
+    visible = [message for message in shown(thread) if message.startswith("Haarness restarted before the background task")]
+    assert len(visible) == 1 and f"\u201c{description}\u201d" in visible[0], shown(thread)
+    time.sleep(1)
+    assert api(f"/threads/{thread}/activity")["activeTurn"] is None, "a turn started by itself after the restart"
+    assert not any(text.startswith('Echo: <task id="') for text in replies(thread)), replies(thread)
 
 
 try:
@@ -138,10 +150,11 @@ try:
     connect()
     until(lambda: notices(crash), "the crashed task was never reported")
     reported(crash, crash_child, "Crash audit")
-    until(lambda: any(text.startswith('Echo: <task id="') for text in replies(crash)),
-          "the idle chat did not take the report as a delivered result")
     assert states(crash) == ["background", "interrupted"], states(crash)
-    print("PASS a subagent a crash stopped is reported to its idle chat, which answers it", flush=True)
+    asked = api(f"/threads/{crash}/turns", {"requestId": str(uuid.uuid4()), "text": "what happened?"})
+    until(lambda: api(f"/turns/{asked['id']}")["status"] == "completed", "the next message did not run")
+    assert replies(crash)[-1] == "Echo: what happened?", replies(crash)
+    print("PASS a subagent a crash stopped is reported to its chat without starting a turn", flush=True)
 
     # graceful
     graceful, graceful_turn, graceful_child = launch(task("Graceful audit"))
@@ -151,8 +164,6 @@ try:
     connect()
     until(lambda: notices(graceful), "the stopped task was never reported")
     reported(graceful, graceful_child, "Graceful audit")
-    until(lambda: any(text.startswith('Echo: <task id="') for text in replies(graceful)),
-          "the idle chat did not take the report as a delivered result")
     assert states(graceful) == ["background", "interrupted"], states(graceful)
     assert len(notices(crash)) == 1, "a task is reported once"
     print("PASS a subagent a graceful stop stopped is reported, not marked cancelled", flush=True)
@@ -167,10 +178,7 @@ try:
     until(lambda: notices(busy), "the busy chat's task was never reported")
     reported(busy, busy_child, "Busy audit")
     assert api(f"/turns/{busy_turn}")["status"] == "interrupted"
-    time.sleep(1)
-    assert api(f"/threads/{busy}/activity")["activeTurn"] is None, "no turn starts in a chat the restart stopped"
-    assert not any(text.startswith('Echo: <task id="') for text in replies(busy)), replies(busy)
-    print("PASS a chat the restart stopped keeps the notice without a turn of its own", flush=True)
+    print("PASS a chat the restart stopped gets the same report", flush=True)
 finally:
     if connection:
         subprocess.run(args + ["serve", "--stop"], env=env, capture_output=True, timeout=60)
