@@ -255,15 +255,21 @@ test("a terminal scrolled up opens where it was when shown again", async () => {
   // Let the scroll settle before reading where it is.
   await page.waitForTimeout(300);
   const place = await top();
+  const shown = page.locator('[data-cycle-tab][aria-current="true"]');
+  const id = await shown.getAttribute("data-cycle-tab");
   // The panel hidden and shown again.
   await page.getByRole("button", { name: "Hide terminal", exact: true }).click();
   await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
   await expect(input()).toBeFocused();
+  await expect(shown).toHaveAttribute("data-cycle-tab", id!);
   await expect.poll(top).toBe(place);
-  // Another tab and back.
+  // Another tab and back, from the keyboard the tab step leaves in the
+  // terminal it shows.
   await page.keyboard.press("Control+Tab");
+  await expect(shown).not.toHaveAttribute("data-cycle-tab", id!);
   await expect.poll(top).not.toBe(place);
   await page.keyboard.press("Control+Shift+Tab");
+  await expect(shown).toHaveAttribute("data-cycle-tab", id!);
   await expect.poll(top).toBe(place);
   // Typing goes to the shell and takes the view back to its prompt.
   await input().pressSequentially("x");

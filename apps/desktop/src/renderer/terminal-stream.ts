@@ -286,7 +286,11 @@ export function reconnects(input: {
   const later = (delay: number) => {
     if (stopped || running) return;
     if (timer !== undefined) cancel(timer);
-    timer = schedule(run, delay);
+    timer = undefined;
+    // At once means now: a view shown connects, and takes the keyboard, in
+    // the same moment.
+    if (delay === 0) run();
+    else timer = schedule(run, delay);
   };
   return {
     /** The connection ended: try again after the next delay. */
