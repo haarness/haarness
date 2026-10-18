@@ -7,7 +7,8 @@ Drives real, isolated workspace daemons with the echo provider:
   (before, the flag stayed in the client and the server logged at info).
 - `haarness logs level debug --for 5m` makes a server that is already running
   log at debug within a few seconds, `haarness logs level stop` brings it back,
-  and every line names the process that wrote it (pid and role).
+  and every line names the process that wrote it (pid and role). A raised
+  level never lowers a server started more verbose.
 - `haarness logs export` packs the logs with credentials removed.
 """
 import json
@@ -110,8 +111,17 @@ try:
     assert "--log-level debug" in command, command
     tool_turn()
     until(lambda: lines(pid, r"DEBUG .*tool starting"), "the server started with --log-level debug logs no debug")
-    stop()
     print("PASS --log-level reaches the workspace server it starts", flush=True)
+
+    # A raised level never lowers a process started more verbose.
+    run(args + ["logs", "level", "info", "--until-stopped"])
+    time.sleep(3)
+    before = len(lines(pid, r"DEBUG .*tool starting"))
+    tool_turn()
+    until(lambda: len(lines(pid, r"DEBUG .*tool starting")) > before, "logs level info lowered a server started at debug")
+    run(args + ["logs", "level", "stop"])
+    stop()
+    print("PASS logs level info leaves a server started at debug at debug", flush=True)
 
     # A running server follows `haarness logs level`.
     connect()

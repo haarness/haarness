@@ -222,10 +222,16 @@ its `task_id` once what it changed has been checked (`state="completed"` with
 the result for a subagent that finished before its result was delivered).
 Beside it an `error` item tells the person, in every app: “Haarness restarted
 before the background task “…” finished. It was not resumed; your next
-message tells the agent, which can continue it.” A shutdown no longer records
-such a task as `cancelled`: its row reads `interrupted` after the restart.
-Foreground subagents stop with the turn that waits for them, which already
-says so.
+message tells the agent, which can continue it.” Both are written in the
+same database step as the task's final checkpoint, so a crash or an error
+during recovery cannot record one without the other. A chat that already
+holds the result (its own checkpoint was lost, or a late one followed the
+delivery) is not told again, and an archived chat is not told. A shutdown no
+longer records such a task as `cancelled`: its row reads `interrupted` after
+the restart. A result that ended before the shutdown but was still waiting
+for its chat (the launching round had not finished) is recorded the same way
+on the next start. Foreground subagents stop with the turn that waits for
+them, which already says so.
 
 The server is the sole execution owner. Graceful server shutdown interrupts
 active turns/workflows into durable terminal states after a bounded drain.

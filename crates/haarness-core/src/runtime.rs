@@ -303,6 +303,8 @@ struct BackgroundTask {
     /// Stopped because the server is shutting down: its checkpoint is left
     /// in the background, so the next start tells the parent it stopped.
     shutdown: AtomicBool,
+    /// Its final checkpoint (done, failed, cancelled) is written.
+    ended: AtomicBool,
     /// The result went to the parent's input; from then on the ledger's
     /// handoff counts it until the parent admits it.
     handed_off: AtomicBool,
@@ -1655,7 +1657,28 @@ impl AgentRuntime {
                 .map_err(|error| CoreError::Storage(format!("invalid lazy tool mode: {error}")))?;
             *self.lazy_tool_mode.write() = Some(mode);
         }
-        let (recovered, stranded) = self.repository.recover_interrupted_tasks().await?;
+        // A background subagent the restart stopped is recorded in the chat
+        // that launched it with its final checkpoint, before anything else
+        // here can fail.
+        let (recovered, reported) = self
+            .repository
+            .recover_interrupted_tasks(&stranded_report)
+            .await?;
+        for item in reported {
+            let root = match self.repository.get_thread(item.thread_id).await {
+                Ok(thread) => self.resolve_root(&thread).await,
+                Err(_) => item.thread_id,
+            };
+            info!(chat = %item.thread_id, "recorded a background task the restart stopped");
+            self.events.publish_scoped(
+                "item.created",
+                Some(item.thread_id),
+                Some(root),
+                item.turn_id,
+                Some(item.id),
+                json!(item),
+            );
+        }
 
         // A process restart cannot retain the provider/tool program counter.
         // Never leave a durable goal claiming to be actively pursuing while
@@ -1688,123 +1711,7 @@ impl AgentRuntime {
             self.events
                 .publish("goal.updated", Some(thread.id), None, None, payload);
         }
-        for task in stranded {
-            let child = task.child_thread_id;
-            if let Err(error) = self.report_stranded_task(task).await {
-                warn!(%error, %child, "could not report a background task the restart stopped");
-            }
-        }
         Ok(recovered)
-    }
-
-    /// Tells a chat how a background subagent it launched ended when the
-    /// result could not reach it: the server stopped while the subagent ran
-    /// (it is not resumed: nothing it was doing is repeated), or between its
-    /// end and the delivery. Nothing starts by itself after a restart: the
-    /// result is recorded where the model reads it with the next message the
-    /// person sends, and a notice in the chat tells the person.
-    async fn report_stranded_task(&self, task: StrandedTask) -> CoreResult<()> {
-        let parent = self.repository.get_thread(task.parent_thread_id).await?;
-        if parent.archived {
-            return Ok(());
-        }
-        let child = task.child_thread_id;
-        let description = self
-            .repository
-            .list_items(parent.id, None)
-            .await?
-            .into_iter()
-            .find_map(|item| match item.data {
-                ItemData::ToolCall {
-                    call_id, arguments, ..
-                } if call_id == task.call_id => arguments["description"]
-                    .as_str()
-                    .map(str::trim)
-                    .filter(|description| !description.is_empty())
-                    .map(str::to_owned),
-                _ => None,
-            });
-        let description = match description {
-            Some(description) => description,
-            None => self.repository.get_thread(child).await?.title,
-        };
-        let (state, text) = match task.state.as_str() {
-            "done" => (
-                "completed",
-                self.repository
-                    .list_items(child, None)
-                    .await?
-                    .into_iter()
-                    .rev()
-                    .find_map(|item| match item.data {
-                        ItemData::AssistantMessage { text } if !text.trim().is_empty() => {
-                            Some(text)
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| "Subagent completed without a text response".into()),
-            ),
-            "failed" => (
-                "error",
-                format!(
-                    "{}\nHaarness restarted before this background task's result was delivered.",
-                    self.repository
-                        .get_turn(task.child_turn_id)
-                        .await?
-                        .error
-                        .unwrap_or_else(|| "The subagent failed.".into())
-                ),
-            ),
-            _ => (
-                "error",
-                format!(
-                    "Haarness restarted before this background task finished, and it was not \
-                     resumed, so nothing it was doing was repeated. Its conversation is saved: \
-                     if the work is still needed, check what it may already have changed, then \
-                     continue it with task_id \"{child}\"."
-                ),
-            ),
-        };
-        let text = task_envelope_for(child, &description, state, &text);
-        let notice = if task.state == "interrupted" {
-            format!(
-                "Haarness restarted before the background task \u{201c}{description}\u{201d} finished. \
-                 It was not resumed; your next message tells the agent, which can continue it."
-            )
-        } else {
-            format!(
-                "Haarness restarted before the result of the background task \u{201c}{description}\u{201d} \
-                 reached this chat; your next message passes it to the agent."
-            )
-        };
-        info!(parent = %parent.id, %child, state = task.state, "recorded a background task the restart stopped");
-        let root = self.resolve_root(&parent).await;
-        for data in [
-            ItemData::UserMessage {
-                text,
-                attachments: Vec::new(),
-                queued: false,
-                synthetic: true,
-            },
-            ItemData::Error {
-                message: notice,
-                retryable: false,
-            },
-        ] {
-            let item = self
-                .repository
-                .append_item(parent.id, task.parent_turn_id, data)
-                .await?;
-            self.events.publish_scoped(
-                "item.created",
-                Some(parent.id),
-                Some(root),
-                item.turn_id,
-                Some(item.id),
-                json!(item),
-            );
-        }
-        Ok(())
     }
 
     /// Whether a chat belongs to a scheduled run: the run's own chat or
@@ -9843,6 +9750,7 @@ impl RunnerTask {
             },
             suppress_delivery: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
+            ended: AtomicBool::new(false),
             handed_off: AtomicBool::new(false),
             delivered: AtomicBool::new(false),
             delivery_done: Notify::new(),
@@ -9889,24 +9797,29 @@ impl RunnerTask {
                 Err(CoreError::Cancelled) => "cancelled",
                 Err(_) => "failed",
             };
-            // The next start reports a background task the shutdown stopped
-            // (its chat is still owed the result); "cancelled" would say a
-            // person stopped it.
-            let stranded = state == "cancelled"
-                && worker.shutdown.load(Ordering::SeqCst)
+            // A background task that ends (stopped, done or failed) while the
+            // server shuts down keeps its background checkpoint: its chat is
+            // still owed the result, which the next start records from the
+            // child's turn. "cancelled" would say a person stopped it.
+            let stranded = worker.shutdown.load(Ordering::SeqCst)
                 && worker.promoted.load(Ordering::SeqCst);
             if stranded {
-                info!(child = %child.id, "background task stopped by the shutdown; reported on the next start");
-            } else if let Err(error) = persist_task_state(
-                repository.as_ref(),
-                &events,
-                root_thread_id,
-                &worker.info(),
-                state,
-            )
-            .await
-            {
-                tracing::error!(%error, child = %child.id, "failed to persist child task state");
+                info!(child = %child.id, "background task ended in the shutdown; recorded on the next start");
+            } else {
+                match persist_task_state(
+                    repository.as_ref(),
+                    &events,
+                    root_thread_id,
+                    &worker.info(),
+                    state,
+                )
+                .await
+                {
+                    Ok(_) => worker.ended.store(true, Ordering::SeqCst),
+                    Err(error) => {
+                        tracing::error!(%error, child = %child.id, "failed to persist child task state");
+                    }
+                }
             }
             *worker.result.lock().await = Some(result);
             worker.done.notify_waiters();
@@ -9975,11 +9888,28 @@ impl RunnerTask {
         let runtime = self.runtime_handle();
         let tasks = self.background_tasks.clone();
         let ledger = self.background_ledger.clone();
+        let root_thread_id = self.root_thread_id;
         tokio::spawn(async move {
             let result = task.wait_result().await;
             task.wait_parent_ready().await;
             if task.suppress_delivery.load(Ordering::SeqCst) {
                 let info = task.info();
+                // A result that ended before the shutdown and was waiting for
+                // its chat: its final checkpoint is already written, so mark
+                // it owed again for the next start to record.
+                if task.shutdown.load(Ordering::SeqCst)
+                    && task.ended.load(Ordering::SeqCst)
+                    && let Err(error) = persist_task_state(
+                        runtime.repository.as_ref(),
+                        &runtime.events,
+                        root_thread_id,
+                        &info,
+                        "background",
+                    )
+                    .await
+                {
+                    tracing::error!(%error, child = %info.child_thread_id, "failed to keep an undelivered result for the next start");
+                }
                 tasks.remove(&info.child_thread_id);
                 task.delivered.store(true, Ordering::SeqCst);
                 task.delivery_done.notify_waiters();
@@ -10103,6 +10033,64 @@ async fn persist_task_state(
 
 fn task_envelope(info: &BackgroundTaskInfo, state: &str, text: &str) -> String {
     task_envelope_for(info.child_thread_id, &info.description, state, text)
+}
+
+/// What a chat is told of a background subagent it launched whose result
+/// could not reach it: the server stopped while the subagent ran (it is not
+/// resumed: nothing it was doing is repeated), or between its end and the
+/// delivery. Nothing starts by itself after a restart: the result is a hidden
+/// message the model reads with the person's next one, and an error notice
+/// in the chat tells the person.
+fn stranded_report(task: &StrandedTask) -> Vec<ItemData> {
+    let child = task.child_thread_id;
+    let description = &task.description;
+    let (state, text) = match task.state.as_str() {
+        "done" => (
+            "completed",
+            task.reply
+                .clone()
+                .unwrap_or_else(|| "Subagent completed without a text response".into()),
+        ),
+        "failed" => (
+            "error",
+            format!(
+                "{}\nHaarness restarted before this background task's result was delivered.",
+                task.error.as_deref().unwrap_or("The subagent failed.")
+            ),
+        ),
+        _ => (
+            "error",
+            format!(
+                "Haarness restarted before this background task finished, and it was not \
+                 resumed, so nothing it was doing was repeated. Its conversation is saved: \
+                 if the work is still needed, check what it may already have changed, then \
+                 continue it with task_id \"{child}\"."
+            ),
+        ),
+    };
+    let notice = if task.state == "interrupted" {
+        format!(
+            "Haarness restarted before the background task \u{201c}{description}\u{201d} finished. \
+             It was not resumed; your next message tells the agent, which can continue it."
+        )
+    } else {
+        format!(
+            "Haarness restarted before the result of the background task \u{201c}{description}\u{201d} \
+             reached this chat; your next message passes it to the agent."
+        )
+    };
+    vec![
+        ItemData::UserMessage {
+            text: task_envelope_for(child, description, state, &text),
+            attachments: Vec::new(),
+            queued: false,
+            synthetic: true,
+        },
+        ItemData::Error {
+            message: notice,
+            retryable: false,
+        },
+    ]
 }
 
 fn task_envelope_for(child: ThreadId, description: &str, state: &str, text: &str) -> String {
