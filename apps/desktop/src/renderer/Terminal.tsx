@@ -14,6 +14,7 @@ import {
   inputQueue,
   linkWatch,
   reconnectDelay,
+  scrollPlaces,
   shownOutput,
   terminalStream,
   writeChunks,
@@ -419,12 +420,24 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
       if (data.type === "replay" && typeof data.start === "number" && typeof data.end === "number") {
         shownOutput.adopt(key, data.end);
         stream.replay(Math.min(Math.max(requested, data.start), data.end));
+        if (replayStart === undefined) {
+          replayStart = data.start;
+          place = scrollPlaces.take(key, data.start);
+        }
       }
       if (data.bytes) stream.bytes(new Uint8Array(data.bytes));
       if (data.type === "cursor" && typeof data.end === "number") {
         stream.cursor(data.end);
         cursor = data.end;
         attempt = 0;
+        // The replay is in: open where the view was scrolled to before.
+        if (place !== undefined) {
+          const line = place;
+          place = undefined;
+          terminal.write(new Uint8Array(), () => {
+            if (!disposed) terminal.scrollToLine(line);
+          });
+        }
       }
       // Older output is gone, so the replay does not continue what the view
       // shows: start over (ESC c), say so, and put the terminal in the modes
@@ -449,6 +462,10 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
     // keeps its keys and the missed output is replayed once.
     let cursor = 0;
     let requested = 0;
+    // Where this view's first replay started, and the line to open at once
+    // it is in (see scrollPlaces).
+    let replayStart: number | undefined;
+    let place: number | undefined;
     let attempt = 0;
     let retry: ReturnType<typeof setTimeout> | undefined;
     let focused = false;
@@ -510,6 +527,14 @@ function TerminalView(props: { id: string; onGone: () => void; onNew: () => void
       resize.disconnect();
       unsubscribe();
       void window.haarness.terminal(connection, "detach", props.id, view);
+      if (replayStart !== undefined) {
+        const buffer = terminal.buffer.active;
+        scrollPlaces.save(
+          key,
+          replayStart,
+          place ?? (buffer.viewportY < buffer.baseY ? buffer.viewportY : undefined),
+        );
+      }
       terminal.dispose();
     });
   });

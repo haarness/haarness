@@ -7,6 +7,8 @@
 const shown = new Map<string, number>();
 /** Terminals this window started, whose whole output is new to it. */
 const started = new Set<string>();
+/** Where views were scrolled up to when they went; see `scrollPlaces`. */
+const places = new Map<string, { start: number; line: number }>();
 export const shownOutput = {
   get: (key: string) => shown.get(key) ?? 0,
   set: (key: string, end: number) => shown.set(key, Math.max(end, shown.get(key) ?? 0)),
@@ -21,11 +23,34 @@ export const shownOutput = {
   },
   /** Forget terminals that are gone. */
   keep: (prefix: string, ids: readonly string[]) => {
-    for (const key of [...shown.keys(), ...started])
+    for (const key of [...shown.keys(), ...started, ...places.keys()])
       if (key.startsWith(prefix) && !ids.includes(key.slice(prefix.length))) {
         shown.delete(key);
         started.delete(key);
+        places.delete(key);
       }
+  },
+};
+
+/**
+ * The line each terminal's view was scrolled up to when it went (the panel
+ * hidden, another tab chosen), by `<connection>:<pty>`, so the view shown
+ * again opens there instead of at the bottom. A place belongs to the replay
+ * it was read in, named by where that replay started: one that starts
+ * elsewhere (older output was dropped meanwhile) holds other lines, and
+ * opens at the bottom.
+ */
+export const scrollPlaces = {
+  /** A view goes: scrolled up to `line`, or at the bottom (`undefined`). */
+  save(key: string, start: number, line: number | undefined) {
+    if (line === undefined) places.delete(key);
+    else places.set(key, { start, line });
+  },
+  /** A view's first replay starts at `start`: where it should open. */
+  take(key: string, start: number) {
+    const place = places.get(key);
+    places.delete(key);
+    return place?.start === start ? place.line : undefined;
   },
 };
 

@@ -6,6 +6,7 @@ import {
   inputQueue,
   linkWatch,
   reconnectDelay,
+  scrollPlaces,
   shownOutput,
   terminalStream,
   writeChunks,
@@ -199,4 +200,22 @@ test("a dropped terminal says nothing for a quick reconnect, then that it reconn
   watch.connected();
   assert.equal(states.at(-1), "connected");
   watch.dispose();
+});
+
+test("a terminal shown again opens where it was scrolled to, unless its replay holds other lines", () => {
+  scrollPlaces.save("c:a", 0, 120);
+  assert.equal(scrollPlaces.take("c:a", 0), 120);
+  // Taken once: a reconnect's replay does not scroll the view back.
+  assert.equal(scrollPlaces.take("c:a", 0), undefined);
+  // At the bottom, nothing is kept.
+  scrollPlaces.save("c:a", 0, 120);
+  scrollPlaces.save("c:a", 0, undefined);
+  assert.equal(scrollPlaces.take("c:a", 0), undefined);
+  // Older output was dropped meanwhile: the replay starts later.
+  scrollPlaces.save("c:a", 0, 120);
+  assert.equal(scrollPlaces.take("c:a", 4096), undefined);
+  // A terminal that is gone is forgotten.
+  scrollPlaces.save("c:b", 0, 7);
+  shownOutput.keep("c:", ["a"]);
+  assert.equal(scrollPlaces.take("c:b", 0), undefined);
 });
