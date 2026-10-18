@@ -1985,6 +1985,7 @@ impl ManagementService {
                 .await
                 .map_err(core_error)?;
             let url = session.authorization_url.clone();
+            let authorization = url.clone();
             let mcp = self.mcp.clone();
             let (sender, receiver) = tokio::sync::oneshot::channel::<String>();
             callback_sender = Some(sender);
@@ -1993,7 +1994,7 @@ impl ManagementService {
                 String::new(),
                 Box::pin(async move {
                     let callback = tokio::select! {
-                        value = receive_oauth_callback(&listener, &redirect) => value?,
+                        value = receive_oauth_callback(&listener, &redirect, &authorization) => value?,
                         value = receiver => value.context("Authorization cancelled")?,
                     };
                     session.complete(&callback).await.map_err(core_error)?;

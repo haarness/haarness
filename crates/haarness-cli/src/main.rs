@@ -7423,7 +7423,9 @@ async fn mcp_command(
             if !no_browser && let Err(error) = open_browser(&session.authorization_url) {
                 eprintln!("Could not open a browser automatically: {error}");
             }
-            let callback_url = receive_oauth_callback(&listener, &redirect_uri).await?;
+            let callback_url =
+                receive_oauth_callback(&listener, &redirect_uri, &session.authorization_url)
+                    .await?;
             session.complete(&callback_url).await?;
             let server = client.configure_mcp(&name, &entry).await?;
             println!("{}: {}", server.name, server.status);
@@ -7599,47 +7601,123 @@ fn mcp_arguments(arguments: &str) -> Result<serde_json::Value> {
     Ok(arguments)
 }
 
-async fn receive_oauth_callback(listener: &TcpListener, redirect_uri: &str) -> Result<String> {
+/// Waits for the browser's return from `authorization_url` (the page Haarness
+/// opened) to `redirect_uri`, and hands back the callback URL. Any web page
+/// can reach the port too: only a request to the callback path carrying the
+/// `state` of that authorization URL ends the wait, with a code or an error
+/// for the session to read. Anything else is answered and the wait goes on,
+/// for five minutes in all.
+async fn receive_oauth_callback(
+    listener: &TcpListener,
+    redirect_uri: &str,
+    authorization_url: &str,
+) -> Result<String> {
+    let state = reqwest::Url::parse(authorization_url)
+        .ok()
+        .and_then(|url| {
+            url.query_pairs()
+                .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+        })
+        .context("the MCP authorization URL carries no state")?;
+    tokio::time::timeout(Duration::from_secs(300), async {
+        loop {
+            let (mut stream, peer) = listener.accept().await?;
+            if !peer.ip().is_loopback() {
+                continue;
+            }
+            let Ok(Ok(target)) =
+                tokio::time::timeout(Duration::from_secs(10), read_request_target(&mut stream))
+                    .await
+            else {
+                continue;
+            };
+            let (status, body, query) = match mcp_oauth_callback(&target, &state) {
+                McpOAuthCallback::Elsewhere => ("404 Not Found", "Not found.\n", None),
+                McpOAuthCallback::Foreign => (
+                    "400 Bad Request",
+                    "This is not the authorization Haarness started.\n",
+                    None,
+                ),
+                McpOAuthCallback::Ours(query) => (
+                    "200 OK",
+                    "Authorization received. You may return to the Haarness CLI.\n",
+                    Some(query),
+                ),
+            };
+            let _ = stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
+            if let Some(query) = query {
+                return Ok(format!("{redirect_uri}{query}"));
+            }
+        }
+    })
+    .await
+    .context("timed out waiting for the MCP OAuth callback")?
+}
+
+/// The request target of one HTTP request head, read up to 32 KiB.
+async fn read_request_target(stream: &mut tokio::net::TcpStream) -> Result<String> {
     const MAX_REQUEST_BYTES: usize = 32 * 1024;
-    let (mut stream, peer) = tokio::time::timeout(Duration::from_secs(300), listener.accept())
-        .await
-        .context("timed out waiting for the MCP OAuth callback")??;
-    if !peer.ip().is_loopback() {
-        anyhow::bail!("rejected a non-loopback MCP OAuth callback");
-    }
     let mut request = Vec::new();
     let mut chunk = [0_u8; 2048];
     loop {
-        let count = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut chunk))
-            .await
-            .context("timed out reading the MCP OAuth callback")??;
-        if count == 0 {
-            anyhow::bail!("MCP OAuth callback closed before sending a request");
-        }
+        let count = stream.read(&mut chunk).await?;
+        anyhow::ensure!(count > 0, "the connection closed before sending a request");
         request.extend_from_slice(&chunk[..count]);
         if request.windows(4).any(|window| window == b"\r\n\r\n") {
             break;
         }
-        if request.len() > MAX_REQUEST_BYTES {
-            anyhow::bail!("MCP OAuth callback request exceeded 32 KiB");
-        }
+        anyhow::ensure!(
+            request.len() <= MAX_REQUEST_BYTES,
+            "the request exceeded 32 KiB"
+        );
     }
-    let request = std::str::from_utf8(&request).context("MCP OAuth callback was not UTF-8")?;
-    let target = request
+    String::from_utf8_lossy(&request)
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
-        .context("MCP OAuth callback request line was invalid")?;
-    if !target.starts_with("/mcp/oauth/callback?") {
-        anyhow::bail!("MCP OAuth callback used an unexpected path");
+        .map(str::to_owned)
+        .context("the request line was invalid")
+}
+
+/// What one request to the MCP OAuth callback port is.
+#[derive(Debug, PartialEq, Eq)]
+enum McpOAuthCallback {
+    /// Not the callback path.
+    Elsewhere,
+    /// The callback path without the authorization's state.
+    Foreign,
+    /// The callback for the authorization Haarness opened: its `?query`.
+    Ours(String),
+}
+
+fn mcp_oauth_callback(target: &str, state: &str) -> McpOAuthCallback {
+    let Ok(url) = reqwest::Url::parse(&format!("http://127.0.0.1{target}")) else {
+        return McpOAuthCallback::Elsewhere;
+    };
+    if url.path() != "/mcp/oauth/callback" {
+        return McpOAuthCallback::Elsewhere;
     }
-    let callback_url = format!("{redirect_uri}{}", &target["/mcp/oauth/callback".len()..]);
-    stream
-        .write_all(
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 60\r\nConnection: close\r\n\r\nAuthorization received. You may return to the Haarness CLI.\n",
-        )
-        .await?;
-    Ok(callback_url)
+    if !url
+        .query_pairs()
+        .any(|(name, value)| name == "state" && value == state)
+    {
+        return McpOAuthCallback::Foreign;
+    }
+    // The query as the browser sent it, for the session to read.
+    McpOAuthCallback::Ours(
+        target
+            .find('?')
+            .map_or("", |start| &target[start..])
+            .to_owned(),
+    )
 }
 
 fn validate_mcp_name(name: &str) -> Result<()> {
@@ -10871,15 +10949,16 @@ mod tests {
 
     use super::{
         AgentRuntime, AuthCommand, BTreeMap, Cli, Command, Credential, FileConfig,
-        LiveWorkspaceServer, McpCommand, McpConfigureRequest, Paths, ProviderSection, RunFormat,
-        RuntimeDiscovery, SessionCommand, assistant_messages_for_turn, configured_mcp,
-        current_executable_fingerprint, finish_goal_run, goal_idle_timeout_from, load_output_style,
-        loaded_mcp_entry, local_server_compatibility_error, mcp_config_for_display,
-        migrate_legacy_workspace_database, normalize_natural_language_args, parse_mcp_key_values,
-        prepare_start_log, read_mcp_entry, replace_incompatible_workspace_server,
-        resolved_credentials, select_run_thread_client, server_compatibility_error,
-        set_goal_for_run_client, start_failure, valid_provider_url, wait_for_goal_client,
-        write_mcp_entry, write_provider_entry, write_runtime,
+        LiveWorkspaceServer, McpCommand, McpConfigureRequest, McpOAuthCallback, Paths,
+        ProviderSection, RunFormat, RuntimeDiscovery, SessionCommand, assistant_messages_for_turn,
+        configured_mcp, current_executable_fingerprint, finish_goal_run, goal_idle_timeout_from,
+        load_output_style, loaded_mcp_entry, local_server_compatibility_error,
+        mcp_config_for_display, mcp_oauth_callback, migrate_legacy_workspace_database,
+        normalize_natural_language_args, parse_mcp_key_values, prepare_start_log, read_mcp_entry,
+        receive_oauth_callback, replace_incompatible_workspace_server, resolved_credentials,
+        select_run_thread_client, server_compatibility_error, set_goal_for_run_client,
+        start_failure, valid_provider_url, wait_for_goal_client, write_mcp_entry,
+        write_provider_entry, write_runtime,
     };
     use super::{
         Approver, NO_MODEL_CONNECTED, RunWatch, TurnStatus, allow_rule_example,
@@ -11324,6 +11403,93 @@ mod tests {
                 command: McpCommand::Remove { .. }
             })
         ));
+    }
+
+    #[test]
+    fn only_the_opened_authorizations_callback_ends_an_mcp_sign_in() {
+        for target in [
+            "/",
+            "/favicon.ico",
+            "/mcp/oauth/callbackx?state=st-1",
+            "bad target",
+        ] {
+            assert_eq!(
+                mcp_oauth_callback(target, "st-1"),
+                McpOAuthCallback::Elsewhere,
+                "{target}"
+            );
+        }
+        for target in [
+            "/mcp/oauth/callback?code=page-code",
+            "/mcp/oauth/callback?code=page-code&state=other",
+            "/mcp/oauth/callback?error=access_denied&error_description=PAGE_TEXT",
+        ] {
+            assert_eq!(
+                mcp_oauth_callback(target, "st-1"),
+                McpOAuthCallback::Foreign,
+                "{target}"
+            );
+        }
+        assert_eq!(
+            mcp_oauth_callback("/mcp/oauth/callback?code=c%2B1&state=st-1", "st-1"),
+            McpOAuthCallback::Ours("?code=c%2B1&state=st-1".into())
+        );
+        assert_eq!(
+            mcp_oauth_callback("/mcp/oauth/callback?error=access_denied&state=st-1", "st-1"),
+            McpOAuthCallback::Ours("?error=access_denied&state=st-1".into())
+        );
+    }
+
+    /// A request a web page sends to the port first is answered, and the
+    /// wait goes on to the real return.
+    #[tokio::test]
+    async fn the_mcp_callback_waits_past_requests_without_its_state() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let redirect = format!("http://127.0.0.1:{port}/mcp/oauth/callback");
+        let send = |target: &'static str| async move {
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            stream
+                .write_all(format!("GET {target} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            response
+        };
+        let client = async {
+            assert!(
+                send("/mcp/oauth/callback?code=page&state=nope")
+                    .await
+                    .starts_with("HTTP/1.1 400")
+            );
+            assert!(send("/").await.starts_with("HTTP/1.1 404"));
+            assert!(
+                send("/mcp/oauth/callback?code=real&state=st-1")
+                    .await
+                    .starts_with("HTTP/1.1 200")
+            );
+        };
+        let (callback, ()) = tokio::join!(
+            receive_oauth_callback(
+                &listener,
+                &redirect,
+                "https://auth.example/authorize?client_id=c&state=st-1"
+            ),
+            client
+        );
+        assert_eq!(
+            callback.unwrap(),
+            format!("{redirect}?code=real&state=st-1")
+        );
+        assert!(
+            receive_oauth_callback(&listener, &redirect, "https://auth.example/authorize")
+                .await
+                .is_err()
+        );
     }
 
     /// Launchers sharing the start log each quote only their own server's

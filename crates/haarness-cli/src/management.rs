@@ -878,7 +878,9 @@ impl ManagementService {
                     .await
                     .map_err(core_error)?;
                 open_browser(&session.authorization_url)?;
-                let callback_url = receive_oauth_callback(&listener, &redirect_uri).await?;
+                let callback_url =
+                    receive_oauth_callback(&listener, &redirect_uri, &session.authorization_url)
+                        .await?;
                 session.complete(&callback_url).await.map_err(core_error)?;
                 let live = self.mcp.reconnect(name).await.map_err(core_error)?;
                 Ok(

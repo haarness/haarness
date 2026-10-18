@@ -1010,6 +1010,11 @@ async fn bind_loopback(port: u16) -> std::io::Result<Vec<TcpListener>> {
     }
 }
 
+/// Waits for the browser's return. Port 1455 is fixed, so any web page can
+/// send a request to it: only one carrying this sign-in's `state` ends the
+/// wait, with a code or the provider's refusal. Anything else is answered and
+/// the wait goes on (until [`CALLBACK_TIMEOUT`]), and its text never becomes
+/// the error.
 async fn wait_for_callback(listeners: &[TcpListener], state: &str) -> AuthResult<BrowserCallback> {
     loop {
         let accepts = listeners.iter().map(|listener| Box::pin(listener.accept()));
@@ -1017,48 +1022,85 @@ async fn wait_for_callback(listeners: &[TcpListener], state: &str) -> AuthResult
         let (mut stream, _) = accepted
             .map_err(|error| AuthError::OpenAi(format!("callback listener failed: {error}")))?;
         let mut buffer = vec![0_u8; 16 * 1024];
-        let count = stream
-            .read(&mut buffer)
-            .await
-            .map_err(|error| AuthError::OpenAi(format!("callback read failed: {error}")))?;
+        // A connection that never sends a request does not hold the others up.
+        let Ok(Ok(count)) =
+            tokio::time::timeout(CALLBACK_READ_TIMEOUT, stream.read(&mut buffer)).await
+        else {
+            continue;
+        };
         let request = String::from_utf8_lossy(&buffer[..count]);
-        let Some(target) = request
+        let target = request
             .lines()
             .next()
             .and_then(|line| line.split_whitespace().nth(1))
-        else {
-            respond(stream, "400 Bad Request", "Invalid OAuth callback").await?;
-            continue;
+            .unwrap_or_default();
+        match read_callback(target, state) {
+            CallbackRequest::Elsewhere => {
+                let _ = respond(stream, "404 Not Found", "Not found").await;
+            }
+            CallbackRequest::Foreign => {
+                let _ = respond(
+                    stream,
+                    "400 Bad Request",
+                    &error_page("This is not the sign-in Haarness started."),
+                )
+                .await;
+            }
+            CallbackRequest::Code(code) => return Ok(BrowserCallback { code, stream }),
+            CallbackRequest::Refused(error) => {
+                let _ = respond(stream, "400 Bad Request", &error_page(&error)).await;
+                return Err(AuthError::OpenAi(error));
+            }
+        }
+    }
+}
+
+/// How long one connection to the callback port may take to send its request.
+const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What one request to the callback port means for the sign-in.
+#[derive(Debug, PartialEq, Eq)]
+enum CallbackRequest {
+    /// Not the callback path: answered 404.
+    Elsewhere,
+    /// The callback path without this sign-in's state: answered 400.
+    Foreign,
+    /// This sign-in's authorization code.
+    Code(String),
+    /// This sign-in failed: the provider's refusal, or no code.
+    Refused(String),
+}
+
+fn read_callback(target: &str, state: &str) -> CallbackRequest {
+    let Ok(url) = Url::parse(&format!("http://localhost{target}")) else {
+        return CallbackRequest::Elsewhere;
+    };
+    if url.path() != "/auth/callback" {
+        return CallbackRequest::Elsewhere;
+    }
+    if query(&url, "state").as_deref() != Some(state) {
+        return CallbackRequest::Foreign;
+    }
+    if let Some(error) = query(&url, "error") {
+        // With this sign-in's state it comes from the provider; still only
+        // printable text, and not much of it.
+        let printable = |text: &str| -> String {
+            text.chars()
+                .filter(|character| character.is_ascii_graphic() || *character == ' ')
+                .take(300)
+                .collect()
         };
-        let url = Url::parse(&format!("http://localhost{target}"))
-            .map_err(|error| AuthError::OpenAi(format!("invalid callback URL: {error}")))?;
-        if url.path() != "/auth/callback" {
-            respond(stream, "404 Not Found", "Not found").await?;
-            continue;
-        }
-        if let Some(error) = query(&url, "error_description").or_else(|| query(&url, "error")) {
-            respond(stream, "400 Bad Request", &error_page(&error)).await?;
-            return Err(AuthError::OpenAi(error));
-        }
-        if query(&url, "state").as_deref() != Some(state) {
-            respond(
-                stream,
-                "400 Bad Request",
-                &error_page("Invalid OAuth state"),
-            )
-            .await?;
-            return Err(AuthError::OpenAi("invalid OAuth state".into()));
-        }
-        let Some(code) = query(&url, "code") else {
-            respond(
-                stream,
-                "400 Bad Request",
-                &error_page("Missing authorization code"),
-            )
-            .await?;
-            return Err(AuthError::OpenAi("missing authorization code".into()));
-        };
-        return Ok(BrowserCallback { code, stream });
+        let description = query(&url, "error_description")
+            .map(|text| printable(&text))
+            .filter(|text| !text.trim().is_empty());
+        return CallbackRequest::Refused(match description {
+            Some(description) => format!("{description} ({})", printable(&error)),
+            None => printable(&error),
+        });
+    }
+    match query(&url, "code") {
+        Some(code) if !code.is_empty() => CallbackRequest::Code(code),
+        _ => CallbackRequest::Refused("missing authorization code".into()),
     }
 }
 
@@ -1317,8 +1359,8 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::{
-        CopilotOAuthClient, CopilotOAuthConfig, Credential, CredentialStore, OpenAiOAuthClient,
-        OpenAiOAuthConfig, openai_residency, query,
+        CallbackRequest, CopilotOAuthClient, CopilotOAuthConfig, Credential, CredentialStore,
+        OpenAiOAuthClient, OpenAiOAuthConfig, openai_residency, query, read_callback,
     };
 
     #[tokio::test]
@@ -1356,6 +1398,100 @@ mod tests {
             Some(redirect.as_str())
         );
         drop(login);
+    }
+
+    #[test]
+    fn only_a_callback_with_this_sign_ins_state_ends_it() {
+        for target in [
+            "/",
+            "/favicon.ico",
+            "/auth/callbackx?state=st-1",
+            "not a target",
+        ] {
+            assert_eq!(
+                read_callback(target, "st-1"),
+                CallbackRequest::Elsewhere,
+                "{target}"
+            );
+        }
+        for target in [
+            "/auth/callback?error=access_denied&error_description=Pwned%20by%20a%20page",
+            "/auth/callback?code=c&state=other",
+            "/auth/callback?code=c",
+        ] {
+            assert_eq!(
+                read_callback(target, "st-1"),
+                CallbackRequest::Foreign,
+                "{target}"
+            );
+        }
+        assert_eq!(
+            read_callback("/auth/callback?code=c-1&state=st-1", "st-1"),
+            CallbackRequest::Code("c-1".into())
+        );
+        assert_eq!(
+            read_callback(
+                "/auth/callback?state=st-1&error=access_denied&error_description=User%20said%20no%3Cb%3E%0A",
+                "st-1"
+            ),
+            CallbackRequest::Refused("User said no<b> (access_denied)".into())
+        );
+        assert_eq!(
+            read_callback("/auth/callback?state=st-1", "st-1"),
+            CallbackRequest::Refused("missing authorization code".into())
+        );
+    }
+
+    /// Port 1455 is fixed, so a web page can reach it: its requests are
+    /// answered and the sign-in keeps waiting for the real return.
+    #[tokio::test]
+    async fn a_web_page_cannot_end_a_browser_sign_in() {
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let login = OpenAiOAuthClient::new(OpenAiOAuthConfig {
+            callback_port: port,
+            ..OpenAiOAuthConfig::default()
+        })
+        .start_browser_login()
+        .await
+        .unwrap();
+        let state = query(&login.url, "state").unwrap();
+        let waiting = tokio::spawn(login.finish());
+        let client = reqwest::Client::new();
+        for forged in [
+            "auth/callback?error=access_denied&error_description=PAGE_TEXT".to_owned(),
+            "auth/callback?code=PAGE_CODE&state=PAGE_STATE".to_owned(),
+            "favicon.ico".to_owned(),
+        ] {
+            let response = client
+                .get(format!("http://127.0.0.1:{port}/{forged}"))
+                .send()
+                .await
+                .unwrap();
+            assert!(response.status().is_client_error(), "{forged}");
+            assert!(
+                !response.text().await.unwrap().contains("PAGE_"),
+                "{forged}"
+            );
+        }
+        // A connection that never sends a request holds nothing up.
+        let silent = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!waiting.is_finished(), "a forged request ended the sign-in");
+        drop(silent);
+        let response = client
+            .get(format!(
+                "http://127.0.0.1:{port}/auth/callback?state={state}&error=access_denied"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400);
+        let error = waiting.await.unwrap().err().unwrap().to_string();
+        assert!(error.contains("access_denied"), "{error}");
     }
 
     #[tokio::test]
