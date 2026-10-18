@@ -77,8 +77,8 @@ The built-in `read` rules (`PermissionEngine::build_defaults`, `crates/haarness-
 
 - **New paths.** A path that does not exist yet is judged where it would be created, so `touch /tmp/new`, `mkdir -p /tmp/a/b`, `cp notes.txt /tmp/new` and `echo x > /tmp/new` ask like an existing file there. `..` inside the part that does not exist is taken the way `mkdir -p` creates it.
 - **Links.** Links are followed, dangling ones too (writing through one creates its target), and `..` after a link goes up from where the link leads. A link chain the check cannot finish counts as outside (`/*`).
-- **Home.** An unquoted leading `~` is the home folder, and `~name` that user's home (taken next to yours); quoted, `~` is just a name in the project.
-- **Dynamic parts.** A value such as `/tmp/$name` or `~/$(date)` is judged by the folder its literal start names; one with no literal folder, such as `$HOME/x`, is not checked.
+- **Home.** An unquoted leading `~` is the home folder, and `~name` that user's home (taken next to yours); quoted, `~` is just a name in the project. A leading `$HOME` or `${HOME}`, bare or in double quotes, is the home folder too, and so are `$TMPDIR`, `$HAARNESS_HOME`, `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME` and `$XDG_STATE_HOME` when the server has them set to an absolute folder: `cp x.json $HOME/.config/haarness/haarness.json`, `echo x > "${HOME}/.profile"` and `cd $HOME` ask like their `~` spellings. In single quotes they are names.
+- **Dynamic parts.** A value such as `/tmp/$name` or `~/$(date)` is judged by the folder its literal start names; one that starts with another variable, an expansion with an operator (`${HOME:-/x}`) or a substitution, such as `$OUT/x`, is not checked.
 - **Not covered.** Other programs' arguments are not read (`tee /tmp/x`, `sed -i … /etc/x`, `python -c …`), nor paths relative to a `cd` earlier in the command. This guards against slips; it is not a sandbox.
 
 ## Web fetches
