@@ -8,7 +8,7 @@ export type FileIdentity = { dev: bigint; ino: bigint; size: bigint; mtimeNs: bi
 /** A screenshot as main keeps it in a listing; the renderer only sees its name and time. */
 export type ListedScreenshot = { name: string; modified: number; path: string; identity: FileIdentity };
 
-const identity = (info: BigIntStats): FileIdentity => ({
+export const fileIdentity = (info: BigIntStats): FileIdentity => ({
   dev: info.dev,
   ino: info.ino,
   size: info.size,
@@ -37,7 +37,7 @@ export async function listScreenshots(folder: string): Promise<ListedScreenshot[
         // Not followed: a name made a link since the folder was read is left out.
         const info = await lstat(path, { bigint: true }).catch(() => undefined);
         if (!info?.isFile()) return undefined;
-        return { name: entry.name, modified: Number(info.mtimeMs), file: true, path, identity: identity(info) };
+        return { name: entry.name, modified: Number(info.mtimeMs), file: true, path, identity: fileIdentity(info) };
       }),
   );
   return newestImages(entries.filter((entry) => !!entry)).map(({ name, modified, path, identity }) => ({
@@ -51,7 +51,7 @@ export async function listScreenshots(folder: string): Promise<ListedScreenshot[
 /** Whether `path` is still the file a listing saw: not a link, and not replaced or rewritten since. */
 export async function unchangedFile(path: string, before: FileIdentity) {
   const info = await lstat(path, { bigint: true }).catch(() => undefined);
-  return !!info && info.isFile() && sameFile(identity(info), before);
+  return !!info && info.isFile() && sameFile(fileIdentity(info), before);
 }
 
 /**
