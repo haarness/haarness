@@ -77,13 +77,22 @@ export const pickAll = (selection: Selection, drawn: readonly string[]): Selecti
   chats: [...new Set([...selection.chats, ...drawn])],
 });
 
-/** What is left once an action handled `done`: nothing left ends the mode. */
+/**
+ * What is left once an action handled `done`, keeping only picks that still
+ * exist (`live`): a chat archived elsewhere, or one inside a worktree the
+ * action removed, is gone. Nothing left ends the mode.
+ */
 export function settle(
   selection: Selection,
   done: { chats?: readonly string[]; trees?: readonly string[] },
+  live: { chats: readonly string[]; trees: readonly string[] },
 ): Selection | null {
-  const chats = selection.chats.filter((key) => !done.chats?.includes(key));
-  const trees = selection.trees.filter((id) => !done.trees?.includes(id));
+  const chats = selection.chats.filter(
+    (key) => !done.chats?.includes(key) && live.chats.includes(key),
+  );
+  const trees = selection.trees.filter(
+    (id) => !done.trees?.includes(id) && live.trees.includes(id),
+  );
   return chats.length || trees.length ? { ...selection, chats, trees } : null;
 }
 
