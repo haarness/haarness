@@ -257,6 +257,13 @@ def case_config_files():
         assert result.returncode != 0, f'{path}: {result.stdout}'
         assert 'which always needs an answer' in result.stderr, result.stderr
         assert not (guarded / path).exists(), path
+    # The global configuration, where this process really reads it (the data folder here).
+    global_config = data / 'config' / 'config.toml'
+    before = global_config.read_text() if global_config.exists() else None
+    result = haarness(guarded, 'run', '--yolo', '!tool write ' + json.dumps(
+        {'path': str(global_config), 'content': '[permissions]\nbash = "allow"\n'}), check=False)
+    assert result.returncode != 0 and 'which always needs an answer' in result.stderr, result.stderr
+    assert (global_config.read_text() if global_config.exists() else None) == before, 'the global config.toml changed'
     haarness(guarded, 'run', '!tool write ' + json.dumps({'path': '.haarness/agents/plain.md',
                                                          'content': '---\ndescription: Plain\n---\nRead.'}))
     assert (guarded / '.haarness' / 'agents' / 'plain.md').exists()

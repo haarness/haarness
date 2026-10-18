@@ -1352,6 +1352,9 @@ async fn main() -> Result<()> {
         cli.trust_project.then_some(true)
     };
     let base_paths = Paths::new(cli.data_dir.as_deref())?;
+    // An edit of the global configuration asks a person; tell the
+    // permission engine which folder that is in this process.
+    haarness_core::set_global_config_dir(base_paths.config_dir().to_path_buf());
     // Analytics must not register workspaces, migrate databases, start daemons or load credentials.
     match &cli.command {
         Some(Command::Login(args)) => return account::login(args).await,
