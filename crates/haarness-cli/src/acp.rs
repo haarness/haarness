@@ -227,12 +227,62 @@ impl Service {
             .insert(request.session_id.to_string(), turn.id);
 
         let mut calls = HashMap::<String, Value>::new();
+        // The chats this turn starts under the session (subagents, workflow
+        // agents): what each is called where the client is shown its work.
+        let mut children = HashMap::<ThreadId, Child>::new();
         let result = async {
             loop {
                 let Some(event) = events.recv().await else {
                     break Err(internal("Haarness event stream closed during an ACP turn"));
                 };
                 match event {
+                    // A request from the session's own chat, its subagents or
+                    // the workflows it runs, outside a turn included: the client
+                    // is the only one who can answer it. The stream starts with
+                    // the server's recent events, so earlier ones are skipped.
+                    SubscriptionEvent::Event(event)
+                        if event.event_type == "permission.requested"
+                            && event.created_at >= turn.created_at
+                            && (event.thread_id == Some(thread)
+                                || event.root_thread_id == Some(thread)) =>
+                    {
+                        let child = match event.thread_id {
+                            Some(id) if id != thread => Some(self.child(id, &mut children).await),
+                            _ => None,
+                        };
+                        self.permission(
+                            &request.session_id,
+                            &event.payload,
+                            connection,
+                            &calls,
+                            child.as_ref(),
+                        )
+                        .await?;
+                    }
+                    SubscriptionEvent::Event(event)
+                        if event.event_type == "task.updated"
+                            && event.root_thread_id == Some(thread) =>
+                    {
+                        name_child(&event.payload, &calls, &mut children);
+                    }
+                    SubscriptionEvent::Event(event)
+                        if event.event_type == "item.created"
+                            && event.created_at >= turn.created_at
+                            && event.root_thread_id == Some(thread)
+                            && event.thread_id.is_some_and(|id| id != thread) =>
+                    {
+                        let Some(id) = event.thread_id else { continue };
+                        let item = serde_json::from_value::<Item>(event.payload.clone())
+                            .map_err(internal)?;
+                        let child = self.child(id, &mut children).await;
+                        Self::child_item(
+                            &request.session_id,
+                            item,
+                            &child,
+                            connection,
+                            &mut calls,
+                        )?;
+                    }
                     SubscriptionEvent::Event(event)
                         if event.thread_id == Some(thread) && event.turn_id == Some(turn.id) =>
                     {
@@ -264,16 +314,6 @@ impl Service {
                             let item = serde_json::from_value::<Item>(event.payload.clone())
                                 .map_err(internal)?;
                             Self::live_item(&request.session_id, item, connection, &mut calls)?;
-                            continue;
-                        }
-                        if event.event_type == "permission.requested" {
-                            self.permission(
-                                &request.session_id,
-                                &event.payload,
-                                connection,
-                                &calls,
-                            )
-                            .await?;
                             continue;
                         }
                         if event.event_type == "turn.finished" {
@@ -373,6 +413,7 @@ impl Service {
         payload: &Value,
         connection: &ConnectionTo<Client>,
         calls: &HashMap<String, Value>,
+        child: Option<&Child>,
     ) -> AcpResult<()> {
         let id = payload["permissionId"]
             .as_str()
@@ -388,30 +429,41 @@ impl Service {
             .find(|(_, input)| **input == detail)
             .map_or_else(|| id.clone(), |(call, _)| call.clone());
         let response = connection
-            .send_request(RequestPermissionRequest::new(
-                session.clone(),
-                ToolCallUpdate::new(
-                    call,
-                    ToolCallUpdateFields::new()
-                        .title(operation)
-                        .status(ToolCallStatus::Pending)
-                        .raw_input(detail),
-                ),
-                vec![
-                    PermissionOption::new("once", "Allow once", PermissionOptionKind::AllowOnce),
-                    PermissionOption::new(
-                        "always",
-                        // A site in the user's Chrome is approved for this chat only.
-                        if payload["explicit"] == true {
-                            "Allow in this chat"
-                        } else {
-                            "Allow while Haarness is running"
-                        },
-                        PermissionOptionKind::AllowAlways,
-                    ),
-                    PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
-                ],
-            ))
+            .send_request(
+                RequestPermissionRequest::new(
+                    session.clone(),
+                    ToolCallUpdate::new(
+                        call,
+                        ToolCallUpdateFields::new()
+                            .title(child.map_or_else(
+                                || operation.clone(),
+                                |child| child.titled(&operation),
+                            ))
+                            .status(ToolCallStatus::Pending)
+                            .raw_input(detail),
+                    )
+                    .meta(child.map(Child::meta)),
+                    vec![
+                        PermissionOption::new(
+                            "once",
+                            "Allow once",
+                            PermissionOptionKind::AllowOnce,
+                        ),
+                        PermissionOption::new(
+                            "always",
+                            // A site in the user's Chrome is approved for this chat only.
+                            if payload["explicit"] == true {
+                                "Allow in this chat"
+                            } else {
+                                "Allow while Haarness is running"
+                            },
+                            PermissionOptionKind::AllowAlways,
+                        ),
+                        PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
+                    ],
+                )
+                .meta(child.map(Child::meta)),
+            )
             .block_task()
             .await?;
         let decision = match response.outcome {
@@ -432,6 +484,82 @@ impl Service {
             )
             .await
             .map_err(internal)
+    }
+
+    /// What a chat started under the session is called, looked up once.
+    async fn child(&self, id: ThreadId, children: &mut HashMap<ThreadId, Child>) -> Child {
+        if let Some(child) = children.get(&id) {
+            return child.clone();
+        }
+        let title = self
+            .client
+            .thread(id)
+            .await
+            .map(|thread| thread.title)
+            .unwrap_or_default();
+        let child = Child::new(id, &title);
+        children.insert(id, child.clone());
+        child
+    }
+
+    /// A child's tool calls and their results, on the session's own updates:
+    /// the editor sees the work done under its session and which child did it.
+    /// Its plan and messages stay its own.
+    fn child_item(
+        session: &SessionId,
+        item: Item,
+        child: &Child,
+        connection: &ConnectionTo<Client>,
+        calls: &mut HashMap<String, Value>,
+    ) -> AcpResult<()> {
+        match item.data {
+            ItemData::ToolCall {
+                call_id,
+                name,
+                arguments,
+                ..
+            } => {
+                let call_id = child.call(&call_id);
+                calls.insert(call_id.clone(), arguments.clone());
+                notify(
+                    connection,
+                    session,
+                    SessionUpdate::ToolCall(
+                        ToolCall::new(call_id, child.titled(&title(&name, &arguments)))
+                            .kind(tool_kind(&name))
+                            .status(ToolCallStatus::InProgress)
+                            .raw_input(arguments)
+                            .meta(child.meta()),
+                    ),
+                )
+            }
+            ItemData::ToolResult {
+                call_id,
+                output,
+                is_error,
+                ..
+            } => notify(
+                connection,
+                session,
+                SessionUpdate::ToolCallUpdate(
+                    ToolCallUpdate::new(
+                        child.call(&call_id),
+                        ToolCallUpdateFields::new()
+                            .status(if is_error {
+                                ToolCallStatus::Failed
+                            } else {
+                                ToolCallStatus::Completed
+                            })
+                            .content(vec![
+                                ContentBlock::Text(TextContent::new(output.clone())).into(),
+                            ])
+                            .raw_output(parse_output(&output)),
+                    )
+                    .meta(child.meta()),
+                ),
+            ),
+            _ => Ok(()),
+        }
     }
 
     fn live_item(
@@ -567,6 +695,80 @@ impl Service {
         }
         Ok(())
     }
+}
+
+/// A chat Haarness started under the client's session: a subagent or a
+/// workflow agent. Its requests and tool calls reach the client on the
+/// session, titled with its name and tagged with its id in `_meta`.
+#[derive(Clone)]
+struct Child {
+    id: ThreadId,
+    title: String,
+    label: String,
+}
+
+impl Child {
+    fn new(id: ThreadId, title: &str) -> Self {
+        let title = if title.trim().is_empty() {
+            "Subagent".to_owned()
+        } else {
+            title.trim().to_owned()
+        };
+        let label = if title.chars().count() > 40 {
+            let mut label = title.chars().take(39).collect::<String>();
+            label.push('…');
+            label
+        } else {
+            title.clone()
+        };
+        Self { id, title, label }
+    }
+
+    /// A child's tool call id as the client sees it: providers number calls
+    /// per chat, so a child's could repeat one of the session's own.
+    fn call(&self, call_id: &str) -> String {
+        format!("{call_id}@{}", self.id)
+    }
+
+    /// `label · title`, for clients that do not read `_meta`.
+    fn titled(&self, title: &str) -> String {
+        format!("{} · {title}", self.label)
+    }
+
+    fn meta(&self) -> serde_json::Map<String, Value> {
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "haarness".into(),
+            json!({"childSessionId": self.id.to_string(), "childTitle": self.title}),
+        );
+        meta
+    }
+}
+
+/// Names a subagent after the `description` of the `task` call that started
+/// it, which says what it is for better than the chat title cut from its
+/// prompt.
+fn name_child(
+    payload: &Value,
+    calls: &HashMap<String, Value>,
+    children: &mut HashMap<ThreadId, Child>,
+) {
+    let Some(id) = payload["childThreadId"]
+        .as_str()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .map(ThreadId)
+    else {
+        return;
+    };
+    let Some(description) = payload["callId"]
+        .as_str()
+        .and_then(|call| calls.get(call))
+        .and_then(|arguments| arguments["description"].as_str())
+        .filter(|description| !description.trim().is_empty())
+    else {
+        return;
+    };
+    children.insert(id, Child::new(id, description));
 }
 
 fn notify(
