@@ -7619,47 +7619,62 @@ async fn receive_oauth_callback(
                 .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
         })
         .context("the MCP authorization URL carries no state")?;
-    tokio::time::timeout(Duration::from_secs(300), async {
+    // Each connection is read in a task of its own while the listener keeps
+    // accepting, so idle ones (a browser's spare socket, a page's preconnect)
+    // never hold up the real return.
+    let mut connections = tokio::task::JoinSet::new();
+    let query = tokio::time::timeout(Duration::from_secs(300), async {
         loop {
-            let (mut stream, peer) = listener.accept().await?;
-            if !peer.ip().is_loopback() {
-                continue;
-            }
-            let Ok(Ok(target)) =
-                tokio::time::timeout(Duration::from_secs(10), read_request_target(&mut stream))
-                    .await
-            else {
-                continue;
-            };
-            let (status, body, query) = match mcp_oauth_callback(&target, &state) {
-                McpOAuthCallback::Elsewhere => ("404 Not Found", "Not found.\n", None),
-                McpOAuthCallback::Foreign => (
-                    "400 Bad Request",
-                    "This is not the authorization Haarness started.\n",
-                    None,
-                ),
-                McpOAuthCallback::Ours(query) => (
-                    "200 OK",
-                    "Authorization received. You may return to the Haarness CLI.\n",
-                    Some(query),
-                ),
-            };
-            let _ = stream
-                .write_all(
-                    format!(
-                        "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    )
-                    .as_bytes(),
-                )
-                .await;
-            if let Some(query) = query {
-                return Ok(format!("{redirect_uri}{query}"));
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, peer) = accepted?;
+                    if peer.ip().is_loopback() {
+                        connections.spawn(answer_mcp_oauth_callback(stream, state.clone()));
+                    }
+                }
+                Some(Ok(Some(query))) = connections.join_next() => return Ok::<_, anyhow::Error>(query),
             }
         }
     })
     .await
-    .context("timed out waiting for the MCP OAuth callback")?
+    .context("timed out waiting for the MCP OAuth callback")??;
+    Ok(format!("{redirect_uri}{query}"))
+}
+
+/// Reads one connection to the MCP OAuth callback port and answers it: the
+/// callback's `?query` when it is the authorization Haarness opened.
+async fn answer_mcp_oauth_callback(
+    mut stream: tokio::net::TcpStream,
+    state: String,
+) -> Option<String> {
+    let Ok(Ok(target)) =
+        tokio::time::timeout(Duration::from_secs(10), read_request_target(&mut stream)).await
+    else {
+        return None;
+    };
+    let (status, body, query) = match mcp_oauth_callback(&target, &state) {
+        McpOAuthCallback::Elsewhere => ("404 Not Found", "Not found.\n", None),
+        McpOAuthCallback::Foreign => (
+            "400 Bad Request",
+            "This is not the authorization Haarness started.\n",
+            None,
+        ),
+        McpOAuthCallback::Ours(query) => (
+            "200 OK",
+            "Authorization received. You may return to the Haarness CLI.\n",
+            Some(query),
+        ),
+    };
+    let _ = stream
+        .write_all(
+            format!(
+                "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await;
+    query
 }
 
 /// The request target of one HTTP request head, read up to 32 KiB.
@@ -11489,6 +11504,50 @@ mod tests {
             receive_oauth_callback(&listener, &redirect, "https://auth.example/authorize")
                 .await
                 .is_err()
+        );
+    }
+
+    /// An idle connection (a browser's spare socket, a page's preconnect)
+    /// does not hold up the real return for its read timeout.
+    #[tokio::test]
+    async fn idle_connections_do_not_delay_the_mcp_callback() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let redirect = format!("http://127.0.0.1:{port}/mcp/oauth/callback");
+        let client = async {
+            let _idle = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            stream
+                .write_all(
+                    b"GET /mcp/oauth/callback?code=real&state=st-1 HTTP/1.1\r\nHost: x\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        };
+        let (callback, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(
+                receive_oauth_callback(
+                    &listener,
+                    &redirect,
+                    "https://auth.example/authorize?state=st-1"
+                ),
+                client
+            )
+        })
+        .await
+        .expect("the callback is read while an idle connection waits");
+        assert_eq!(
+            callback.unwrap(),
+            format!("{redirect}?code=real&state=st-1")
         );
     }
 
