@@ -2525,5 +2525,7 @@
   "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "Diese App wollte einen Link öffnen, den Haarness nicht öffnet. Apps dürfen nur http-, https- und mailto-Links öffnen.",
   "Load image from {host}": "Bild von {host} laden",
   "The image from {host} could not be loaded.": "Das Bild von {host} konnte nicht geladen werden.",
-  "This app tried to open a {scheme} link. Apps may open only http, https and mailto links.": "Diese App wollte einen {scheme}-Link öffnen. Apps dürfen nur http-, https- und mailto-Links öffnen."
+  "This app tried to open a {scheme} link. Apps may open only http, https and mailto links.": "Diese App wollte einen {scheme}-Link öffnen. Apps dürfen nur http-, https- und mailto-Links öffnen.",
+  "{first}, {second}": "{first}, {second}",
+  "{first}, {second} +{count}": "{first}, {second} und {count} weitere"
 }
