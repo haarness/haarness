@@ -247,6 +247,12 @@ test("screenshots show a background tab only in a window the user is not using",
   expect(failed(await stack.tool(thread, "browser_screenshot", { tabID: tab.id }))).toContain(
     "Chrome cannot capture this tab while it is in the background of the window the user is using.",
   );
+  // Focusing the tab there leaves the user's own tab in front, and says so, so the model does not try again.
+  const kept = value<Tab & { note?: string }>(await stack.tool(thread, "browser_tabs_focus", { tabID: tab.id }));
+  expect(kept.note).toContain("stays in the background");
+  expect(await stack.worker.evaluate((windowId) => chrome.tabs.query({ windowId, active: true }).then(([entry]) => entry.id), agentWindow)).toBe(
+    activeBefore,
+  );
 
   // The user works in another window: the agent's tab is shown for the capture, then the user's tab comes back.
   await stack.worker.evaluate(() => chrome.windows.create({ url: "about:blank", focused: true }));
@@ -258,7 +264,7 @@ test("screenshots show a background tab only in a window the user is not using",
     .poll(() => stack.worker.evaluate((windowId) => chrome.tabs.query({ windowId, active: true }).then(([entry]) => entry.id), agentWindow))
     .toBe(activeBefore);
 
-  // Focusing the tab is the model's way out; it never raises the window.
+  // In a window the user is not using, focusing shows the tab; it never raises the window.
   value(await stack.tool(thread, "browser_tabs_focus", { tabID: tab.id }));
   expect(await focused()).not.toBe(agentWindow);
   expect((await stack.tool(thread, "browser_screenshot", { tabID: tab.id })).isError).toBe(false);

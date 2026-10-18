@@ -242,6 +242,36 @@ test("a dialog that opens during a click returns the click as dispatched", async
   });
 });
 
+test("a file chooser the page opens during an action is held back, and the action says how to upload instead", async () => {
+  const { page: tab, cdp } = page();
+  await tab.ready;
+  const snapshot = await tab.execute({ action: { type: "snapshot", tabID }, files: [] }, signal());
+  // Reading the page acts on nothing: the person's choosers are left alone.
+  assert.equal(cdp.methods().includes("Page.setInterceptFileChooserDialog"), false);
+  const ref = Browser.Ref.make(/@(e\d+) \[button\]/.exec((snapshot.value as { content: string }).content)![1]);
+  const holds = () => cdp.sent.filter((entry) => entry.method === "Page.setInterceptFileChooserDialog").map((entry) => entry.params);
+  cdp.handlers["Input.dispatchMouseEvent"] = (params) => {
+    if (params.type === "mouseReleased") {
+      // The page's click handler asked for a chooser while choosers were held.
+      assert.deepEqual(holds(), [{ enabled: true, cancel: true }]);
+      cdp.emit("Page.fileChooserOpened", { frameId: "main", mode: "selectSingle", backendNodeId: 10 });
+    }
+    return {};
+  };
+  const result = await tab.execute({ action: { type: "click", tabID, ref }, files: [] }, signal());
+  assert.match((result.value as { fileChooser?: string }).fileChooser ?? "", /kept from appearing.*browser\.files\.upload/);
+  assert.equal((result.value as { dispatched: boolean }).dispatched, true);
+  // A click that opens nothing says nothing, and holding continues across it without asking twice.
+  cdp.handlers["Input.dispatchMouseEvent"] = () => ({});
+  const plain = await tab.execute({ action: { type: "click", tabID, ref }, files: [] }, signal());
+  assert.equal("fileChooser" in (plain.value as object), false);
+  assert.deepEqual(holds(), [{ enabled: true, cancel: true }]);
+  // A moment after the agent's last action, the person's choosers open again.
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  assert.deepEqual(holds(), [{ enabled: true, cancel: true }, { enabled: false }]);
+  tab.dispose();
+});
+
 test("the host runs its own tools and their permission targets", async () => {
   const extension: PageExtension<Browser.File> = {
     methods: new Set<Browser.Method>(["cpu.start", "cpu.stop"]),

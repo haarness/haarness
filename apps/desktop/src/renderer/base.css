@@ -198,6 +198,21 @@ fieldset {
 .icon-button.active svg {
   color: var(--primary);
 }
+/* Something changed behind the control that the person has not seen yet,
+   drawn like the side panel tab's dot in the control's top end corner. */
+.icon-button:has(> .icon-button-dot) {
+  position: relative;
+}
+.icon-button-dot {
+  position: absolute;
+  top: 4px;
+  inset-inline-end: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary-soft);
+}
 .ghost {
   border-color: transparent;
 }

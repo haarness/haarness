@@ -859,3 +859,38 @@ test("Show tabs is the one place Haarness brings a window forward, because the u
   assert.equal(h.fake.focused, live.windowId);
   assert.equal(h.fake.tabsById.get(live.id)!.active, true);
 });
+
+test("tabs.focus brings a tab forward only where that takes nothing from the user", async () => {
+  const h = await boot();
+  h.start();
+  h.attach();
+  const first = await h.open("https://a.example/one");
+  const second = await h.open("https://a.example/two");
+  // The user is reading a tab of their own in the window they are using.
+  const own = h.fake.createTab({ url: "https://mail.example/", windowId: 1, active: true });
+  const focus = async (tabID: string) => {
+    const { outcome } = await h.command({ action: { type: "tabs.focus", tabID } });
+    assert.equal(outcome.type, "success", JSON.stringify(outcome));
+    return outcome.result.value as { id: string; note?: string };
+  };
+  const kept = await focus(first.tab.id);
+  assert.match(kept.note ?? "", /stays in the background.*will not bring it forward/);
+  assert.equal(h.fake.tabsById.get(own.id)!.active, true, "the user's tab stays in front");
+  assert.equal(h.fake.tabsById.get(first.live.id)!.active, false);
+  assert.equal(h.states().at(-1)!.message.state.focusedTabID, first.tab.id, "it is still the chat's focused tab");
+
+  // In a window the user is not using, the tab comes forward.
+  h.fake.windowIds.push(2);
+  h.fake.focused = 2;
+  const shown = await focus(second.tab.id);
+  assert.equal(shown.note, undefined);
+  assert.equal(h.fake.tabsById.get(second.live.id)!.active, true);
+
+  // Back in that window, one of the chat's tabs may replace another.
+  h.fake.focused = 1;
+  assert.equal((await focus(first.tab.id)).note, undefined);
+  assert.equal(h.fake.tabsById.get(first.live.id)!.active, true);
+  // A tab already in front stays as it is.
+  assert.equal((await focus(first.tab.id)).note, undefined);
+  assert.equal(h.fake.focused, 1, "never raises a window");
+});
