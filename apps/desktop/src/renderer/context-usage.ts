@@ -1,4 +1,4 @@
-import type { Item, Thread } from "@haarness/sdk";
+import type { Item, ItemData, Thread } from "@haarness/sdk";
 
 export const contextKinds = [
   "User messages",
@@ -99,3 +99,41 @@ export function contextUsage(items: Item[], thread: Thread) {
 
 export const tokenNumber = (value: number | null | undefined) =>
   value == null ? "Not available" : value.toLocaleString("en-US");
+
+/** A request's pace from its usage record: the wait for its first streamed
+ * content, and output tokens per second while it streamed. Speed is left out
+ * under half a second of streaming, where one burst reads as an absurd rate,
+ * and for a request that produced nothing. Records of stopped or failed
+ * requests, and those made before requests were timed, carry no timing. */
+export function requestPace(data: ItemData | undefined) {
+  if (data?.type !== "usage" || data.first_token_ms == null) return undefined;
+  const stream = data.stream_ms ?? 0;
+  return {
+    firstTokenMs: data.first_token_ms,
+    tokensPerSecond:
+      stream >= 500 && data.output_tokens > 0
+        ? data.output_tokens / (stream / 1000)
+        : undefined,
+  };
+}
+
+/** One decimal under ten, whole numbers from there, rounded to tenths first so
+ * 9.96 reads 10 rather than 10.0. */
+const paceDigits = (value: number) => (Math.round(value * 10) < 100 ? 1 : 0);
+
+/** A first-token time in seconds, in the reader's language ("1.2 s", "1,2 s"). */
+export const paceSeconds = (ms: number, locale: string) =>
+  new Intl.NumberFormat(locale, {
+    style: "unit",
+    unit: "second",
+    unitDisplay: "narrow",
+    minimumFractionDigits: paceDigits(ms / 1000),
+    maximumFractionDigits: paceDigits(ms / 1000),
+  }).format(ms / 1000);
+
+/** A tokens-per-second figure, for the "{count} tokens/s" label. */
+export const paceSpeed = (tokensPerSecond: number, locale: string) =>
+  new Intl.NumberFormat(locale, {
+    minimumFractionDigits: paceDigits(tokensPerSecond),
+    maximumFractionDigits: paceDigits(tokensPerSecond),
+  }).format(tokensPerSecond);

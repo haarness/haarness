@@ -18,6 +18,7 @@ mod prefix_warmup;
 pub mod redact;
 mod runtime;
 mod side_question;
+mod stream_clock;
 mod stream_limits;
 mod tool_catalog;
 mod tool_validation;

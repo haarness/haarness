@@ -2769,6 +2769,15 @@
                 "description": "The provider reported no usage for this request; the counts are\nthe local estimate of what was sent and streamed. Such a record\nnever anchors the context size.",
                 "type": "boolean"
               },
+              "first_token_ms": {
+                "description": "Milliseconds from sending the request to its first streamed\ncontent (text, reasoning or a tool call). Absent on a request\nthat streamed nothing, was stopped or failed, and on records made\nbefore requests were timed.",
+                "format": "int64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
               "input_tokens": {
                 "format": "int64",
                 "minimum": 0,
@@ -2787,6 +2796,15 @@
                   {
                     "$ref": "#/components/schemas/PromptUsage"
                   }
+                ]
+              },
+              "stream_ms": {
+                "description": "Milliseconds from that first content to the last, the span the\noutput streamed across; present exactly when `first_token_ms` is.",
+                "format": "int64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
                 ]
               },
               "type": {

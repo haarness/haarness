@@ -2023,6 +2023,44 @@ impl App {
             }
         })
     }
+    /// The newest timed request of this chat: how long it took to start
+    /// answering and, when its output streamed for at least half a second,
+    /// how fast that output came in tokens per second. A shorter stream is
+    /// mostly one burst, and dividing by it reads as an absurd rate.
+    pub fn request_pace(&self) -> Option<(u64, Option<f64>)> {
+        self.items.iter().rev().find_map(|item| match &item.data {
+            ItemData::Usage {
+                output_tokens,
+                first_token_ms: Some(first_token_ms),
+                stream_ms,
+                ..
+            } if item.thread_id == self.thread.id => {
+                #[allow(clippy::cast_precision_loss)] // display-only rate
+                let speed = stream_ms
+                    .filter(|stream_ms| *stream_ms >= 500 && *output_tokens > 0)
+                    .map(|stream_ms| *output_tokens as f64 / (stream_ms as f64 / 1000.0));
+                Some((*first_token_ms, speed))
+            }
+            _ => None,
+        })
+    }
+    /// The newest timed request as one line ("first token 1.2s · 85 tok/s"),
+    /// for the sidebar and `/usage`.
+    pub fn request_pace_label(&self) -> Option<String> {
+        let (first_token_ms, speed) = self.request_pace()?;
+        let language = self.language;
+        let mut parts = vec![language.format(
+            "first token {time}",
+            &[("time", &crate::view::span::seconds_label(first_token_ms))],
+        )];
+        if let Some(speed) = speed {
+            parts.push(language.format(
+                "{speed} tok/s",
+                &[("speed", &crate::view::span::speed_label(speed))],
+            ));
+        }
+        Some(parts.join(" · "))
+    }
     /// Total cost of this thread when the models carried pricing.
     pub fn usage_cost(&self) -> Option<f64> {
         let mut total = 0.0;

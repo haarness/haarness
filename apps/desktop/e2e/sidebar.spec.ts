@@ -14,6 +14,8 @@ let temporary: string;
 let env: Record<string, string>;
 let errors: string[];
 let directories: string[];
+/** Worktrees a test made; Desktop may have started their servers. */
+let checkouts: string[];
 const clients: Haarness[] = [];
 const project = (name: string) => page.getByRole("region", { name: `Project ${name}`, exact: true });
 const section = (name: string) => page.getByRole("region", { name: `Section ${name}`, exact: true });
@@ -52,11 +54,11 @@ async function close() {
     if (child.exitCode === null) child.kill("SIGTERM");
   }
 }
-async function open(name: string) {
+async function open(name: string, config = "") {
   const directory = join(temporary, "projects", name);
   if (!directories.includes(directory)) directories.push(directory);
   await mkdir(join(directory, ".haarness"), { recursive: true });
-  await writeFile(join(directory, ".haarness", "config.toml"), '[defaults]\nprovider="echo"\nmodel="echo-1"\n');
+  await writeFile(join(directory, ".haarness", "config.toml"), '[defaults]\nprovider="echo"\nmodel="echo-1"\n' + config);
   await app.evaluate(({ dialog }, directory) => {
     const original = dialog.showOpenDialog;
     dialog.showOpenDialog = async () => {
@@ -165,6 +167,7 @@ test.beforeEach(async () => {
   temporary = await realpath(await mkdtemp(join(tmpdir(), "haarness-sidebar-e2e-")));
   errors = [];
   directories = [];
+  checkouts = [];
   env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
   Object.assign(env, {
     HAARNESS_BIN: binary,
@@ -186,6 +189,12 @@ test.afterEach(async () => {
   await close();
   for (const directory of directories) {
     execFileSync(binary, ["--workspace", directory, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 });
+  }
+  // A removed worktree's folder is gone, which this tolerates.
+  for (const directory of checkouts) {
+    try {
+      execFileSync(binary, ["--workspace", directory, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 });
+    } catch {}
   }
   await rm(temporary, { recursive: true, force: true });
   expect(errors).toEqual([]);
@@ -428,7 +437,8 @@ test("sidebar session mouse reordering remains stable across repeated gestures a
   let expected = ["Five", "Four", "Three", "Two", "One"];
   await expect(labels).toHaveText(expected);
   await sessions.getByRole("button", { name: "Three", exact: true }).click();
-  const selected = project("alpha").locator('.session-row > button[aria-current="true"]');
+  // The selected row's title; the row also shows when the chat was last active.
+  const selected = project("alpha").locator('.session-row > button[aria-current="true"] .session-title');
   for (let round = 0; round < 12; round++) {
     const from = round % 2 ? 0 : expected.length - 1;
     const to = round % 2 ? expected.length - 1 : 0;
@@ -744,3 +754,206 @@ for (const gesture of ["keyboard", "drag"] as const) {
     await expect(page.locator("[data-drop-position]")).toHaveCount(0);
   });
 }
+
+test("sidebar Alt and an arrow step the chats the sidebar shows; on a focused row they still move it", async () => {
+  const alpha = await open("alpha");
+  for (const title of ["One", "Two", "Three"])
+    await alpha.createThread({ title, provider: "echo", model: "echo-1" });
+  const row = (title: string) => project("alpha").getByRole("button", { name: title, exact: true });
+  await expect(project("alpha").locator(".session-title")).toHaveText(["Three", "Two", "One"]);
+  await row("Two").click();
+  await expect(row("Two")).toHaveAttribute("aria-current", "true");
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
+  await composer.focus();
+  await composer.press("Alt+ArrowDown");
+  await expect(row("One")).toHaveAttribute("aria-current", "true");
+  await expect(composer).toBeFocused();
+  // A draft does not stop the step, and past the last row it wraps.
+  await composer.fill("draft stays");
+  await composer.press("Alt+ArrowDown");
+  await expect(row("Three")).toHaveAttribute("aria-current", "true");
+  await expect(composer).toBeFocused();
+  await composer.press("Alt+ArrowUp");
+  await expect(row("One")).toHaveAttribute("aria-current", "true");
+  await expect(composer).toHaveValue("draft stays");
+  // A sidebar row with the keyboard moves itself and leaves the open chat alone.
+  await row("One").press("Alt+ArrowUp");
+  await expect(project("alpha").locator(".session-title")).toHaveText(["Three", "One", "Two"]);
+  await expect(row("One")).toHaveAttribute("aria-current", "true");
+  // The palette offers the same steps.
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("Next chat");
+  await page.getByRole("option", { name: "Next chat", exact: true }).click();
+  await expect(row("Two")).toHaveAttribute("aria-current", "true");
+});
+
+test("sidebar Focus sidebar shows a hidden sidebar and puts the keyboard on the open chat", async () => {
+  const alpha = await open("alpha");
+  await alpha.createThread({ title: "Focus me", provider: "echo", model: "echo-1" });
+  await alpha.createThread({ title: "Other chat", provider: "echo", model: "echo-1" });
+  await project("alpha").getByRole("button", { name: "Focus me", exact: true }).click();
+  await collapse("alpha");
+  await page.getByRole("button", { name: "Hide sidebar", exact: true }).click();
+  await expect(page.locator(".sidebar")).toBeHidden();
+  await page.getByRole("textbox", { name: "Message", exact: true }).focus();
+  // Control+Shift+L on macOS; elsewhere that is the file editor's Add
+  // selection to context, so Focus sidebar is Alt+Shift+L there.
+  await page.keyboard.press(process.platform === "darwin" ? "Control+Shift+L" : "Alt+Shift+L");
+  await expect(page.locator(".sidebar")).toBeVisible();
+  const row = project("alpha").getByRole("button", { name: "Focus me", exact: true });
+  await expect(row).toBeFocused();
+  await expect(row).toHaveAttribute("aria-current", "true");
+});
+
+test("sidebar prompt keys move through the open chat's prompts and back to the newest output", async () => {
+  const alpha = await open("alpha");
+  const thread = await alpha.createThread({ title: "Long talk", provider: "echo", model: "echo-1" });
+  for (let index = 0; index < 3; index++)
+    await alpha.waitTurn((await alpha.startTurn(thread.id, { text: "::long 60", requestId: crypto.randomUUID() })).id);
+  await project("alpha").getByRole("button", { name: "Long talk", exact: true }).click();
+  await expect(page.locator(".transcript")).toContainText("60");
+  const reading = page.locator('.outline-dash[aria-current="location"]');
+  const latest = page.getByRole("button", { name: "Jump to latest", exact: true });
+  const mod = process.platform === "darwin" ? "Meta" : "Control";
+  const composer = page.getByRole("textbox", { name: "Message", exact: true });
+  await composer.focus();
+  await composer.press(`${mod}+Shift+ArrowUp`);
+  await expect(reading).toHaveAttribute("aria-label", "Jump to prompt 1");
+  await expect(latest).toBeVisible();
+  await composer.press(`${mod}+ArrowDown`);
+  await expect(reading).toHaveAttribute("aria-label", "Jump to prompt 2");
+  // In a draft the keys move the caret instead.
+  await composer.fill("x");
+  await composer.press(`${mod}+ArrowDown`);
+  await expect(reading).toHaveAttribute("aria-label", "Jump to prompt 2");
+  await composer.fill("");
+  await composer.press(`${mod}+Shift+ArrowDown`);
+  await expect(latest).toHaveCount(0);
+  // From the newest output, Previous goes back to the last prompt.
+  await composer.press(`${mod}+ArrowUp`);
+  await expect(reading).toHaveAttribute("aria-label", "Jump to prompt 3");
+  await expect(latest).toBeVisible();
+});
+
+test("sidebar rows show when a chat was last active, and a scheduled run's waiting label and Archive chats' count speak the reader's language", async () => {
+  const de: Record<string, string> = JSON.parse(await readFile(resolve("../../locales/de.json"), "utf8"));
+  const alpha = await open("alpha", '[permissions]\nbash="ask"\n');
+  await alpha.createThread({ title: "Quiet chat", provider: "echo", model: "echo-1" });
+  // The age sits in the row without joining its name.
+  const quiet = project("alpha").getByRole("button", { name: "Quiet chat", exact: true });
+  await expect(quiet.locator(".session-age")).toHaveText("now");
+  await expect(quiet.locator(".session-age")).toHaveAttribute("aria-hidden", "true");
+  const run = await alpha.createThread({
+    title: "Scheduled run", provider: "echo", model: "echo-1",
+    schedule: { id: crypto.randomUUID(), name: "Nightly" },
+  });
+  await alpha.startTurn(run.id, { requestId: crypto.randomUUID(), text: '!tool bash {"command":"printf waiting-proof"}' });
+  await expect.poll(async () => (await alpha.listPermissions()).length).toBe(1);
+  await page.evaluate(() => window.haarness.preferences({ language: "de" }));
+  const group = page.getByRole("region", { name: de["Project {name}"].replace("{name}", "alpha"), exact: true });
+  await expect(group.locator(".session-age")).toHaveText(de["now"]);
+  await group.locator(".scheduled-heading").click();
+  await group.locator(".schedule-group-heading").click();
+  await expect(group.locator(".schedule-runs .session-waiting")).toHaveText(de["Needs approval"]);
+  await group.getByRole("button", { name: de["Project options for {name}"].replace("{name}", "alpha"), exact: true }).click();
+  await page.getByRole("menuitem", { name: de["Archive chats"], exact: true }).click();
+  await page.getByRole("dialog", { name: de["Archive all chats in {name}?"].replace("{name}", "alpha"), exact: true })
+    .getByRole("button", { name: de["Archive chats"], exact: true }).click();
+  await expect(page.locator(".toast")).toHaveText(de["Archived {count} chats"].replace("{count}", "2"));
+  await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+});
+
+test("sidebar Select chats archives several chats at once, notes a chat still working, and Escape leaves it", async () => {
+  const alpha = await open("alpha", '[permissions]\nbash="ask"\n');
+  const threads: Awaited<ReturnType<Haarness["createThread"]>>[] = [];
+  for (const title of ["One", "Two", "Three", "Four"])
+    threads.push(await alpha.createThread({ title, provider: "echo", model: "echo-1" }));
+  // "Two" waits for an approval, so its turn is still running.
+  await alpha.startTurn(threads[1].id, { requestId: crypto.randomUUID(), text: '!tool bash {"command":"printf still-working"}' });
+  await expect.poll(async () => (await alpha.listPermissions()).length).toBe(1);
+  const row = (title: string) => project("alpha").getByRole("button", { name: title, exact: true });
+  const bar = page.getByRole("toolbar", { name: "Chat selection", exact: true });
+  await row("One").click();
+  await options("alpha");
+  await item("Select chats").click();
+  await expect(bar).toContainText("0 selected");
+  await expect(row("Four")).toHaveAttribute("aria-pressed", "false");
+  // A click picks without opening; Shift picks the rows since.
+  await row("Four").click();
+  await row("Two").click({ modifiers: ["Shift"] });
+  await expect(bar.getByRole("status")).toHaveText("3 selected");
+  for (const title of ["Four", "Three", "Two"]) await expect(row(title)).toHaveAttribute("aria-pressed", "true");
+  await expect(row("One")).toHaveAttribute("aria-current", "true");
+  await page.screenshot({ path: test.info().outputPath("select-chats-bar.png") });
+  await bar.getByRole("button", { name: "Select all shown", exact: true }).click();
+  await expect(bar.getByRole("status")).toHaveText("4 selected");
+  await row("One").click();
+  await expect(row("One")).toHaveAttribute("aria-pressed", "false");
+  await bar.getByRole("button", { name: "Archive", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Archive 3 chats?", exact: true });
+  await expect(dialog).toContainText("Archiving does not stop a chat that is still working.");
+  await expect(dialog.locator(".dialog-list li")).toHaveText(["Four", "Three", /^Two\s*Working$/]);
+  await page.screenshot({ path: test.info().outputPath("select-chats-confirm.png") });
+  await dialog.getByRole("button", { name: "Archive", exact: true }).click();
+  await expect(page.locator(".toast")).toHaveText("Archived 3 chats");
+  await expect(project("alpha").locator(".session-title")).toHaveText(["One"]);
+  await expect(bar).toHaveCount(0);
+  await expect.poll(async () => (await Promise.all(threads.map(thread => alpha.getThread(thread.id)))).map(thread => thread.archived))
+    .toEqual([false, true, true, true]);
+
+  // Command-click (Control-click off macOS) starts picking on that row; Escape ends it.
+  await alpha.createThread({ title: "Five", provider: "echo", model: "echo-1" });
+  await row("Five").click({ modifiers: [process.platform === "darwin" ? "Meta" : "Control"] });
+  await expect(bar.getByRole("status")).toHaveText("1 selected");
+  await expect(row("Five")).toHaveAttribute("aria-pressed", "true");
+  await expect(row("One")).toHaveAttribute("aria-current", "true");
+  await page.keyboard.press("Escape");
+  await expect(bar).toHaveCount(0);
+  await expect(row("Five")).not.toHaveAttribute("aria-pressed", /.*/);
+});
+
+test("sidebar Select chats removes picked worktrees and names the one it keeps for uncommitted changes", async () => {
+  const directory = join(temporary, "projects", "repo");
+  await mkdir(directory, { recursive: true });
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-c", "user.name=Haarness E2E", "-c", "user.email=e2e@example.com", ...args], { cwd: directory, stdio: "ignore" });
+  git("init", "-q", "-b", "main");
+  await writeFile(join(directory, "README.md"), "Select chats fixture\n");
+  git("add", "README.md");
+  git("commit", "-q", "-m", "Initial commit");
+  const repo = await open("repo");
+  const clean = (await repo.createWorkspace({ name: "clean" })).workspace;
+  const dirty = (await repo.createWorkspace({ name: "dirty" })).workspace;
+  checkouts.push(clean.path, dirty.path);
+  await writeFile(join(dirty.path, "unsaved.txt"), "work in progress\n");
+  await options("repo");
+  await item("Enable worktree view").click();
+  await options("repo");
+  await item("Refresh project").click();
+  const checkout = (name: string) => project("repo").getByRole("region", { name: `Checkout ${name}`, exact: true });
+  await expect(checkout("clean")).toBeVisible();
+  await expect(checkout("dirty")).toBeVisible();
+  await options("repo");
+  await item("Select chats").click();
+  const bar = page.getByRole("toolbar", { name: "Chat selection", exact: true });
+  // The project folder itself cannot be picked.
+  await expect(project("repo").getByRole("button", { name: /^Select worktree / })).toHaveCount(2);
+  await checkout("clean").getByRole("button", { name: "Select worktree clean", exact: true }).click();
+  await checkout("dirty").getByRole("button", { name: "Select worktree dirty", exact: true }).click();
+  await expect(bar.getByRole("status")).toHaveText("2 selected");
+  await expect(bar.getByRole("button", { name: "Archive", exact: true })).toBeDisabled();
+  await bar.getByRole("button", { name: "Remove worktrees", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Remove 2 worktrees?", exact: true });
+  // Listed in the order the sidebar draws them.
+  await expect(dialog.locator(".dialog-list li")).toHaveCount(2);
+  expect((await dialog.locator(".dialog-list li").allTextContents()).sort()).toEqual(["clean", "dirty"]);
+  await dialog.getByRole("button", { name: "Remove worktrees", exact: true }).click();
+  await expect(page.locator(".toast")).toHaveText("Removed 1 worktree 1 failed: dirty: uncommitted changes");
+  await expect(checkout("clean")).toHaveCount(0);
+  await expect(checkout("dirty")).toBeVisible();
+  await expect(bar).toHaveCount(0);
+  const left = (await repo.workspacesList()).workspaces.map(workspace => workspace.id);
+  expect(left).not.toContain(clean.id);
+  expect(left).toContain(dirty.id);
+  expect(await readFile(join(dirty.path, "unsaved.txt"), "utf8")).toBe("work in progress\n");
+});
