@@ -1,6 +1,6 @@
 import { test, expect, _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
 import { Haarness } from "@haarness/sdk";
-import { mkdtemp, mkdir, writeFile, realpath, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -41,6 +41,9 @@ test.beforeAll(async () => {
     join(workspace, "docs/guide.md"),
     "# Guide\n\nRead [the source](../src/a.ts#L120) or [elsewhere](../../outside.md).\n",
   );
+  // A link in the project to a file outside it, as a cloned repository can hold.
+  await writeFile(join(temporary, "outside.txt"), "OUTSIDE_SECRET\n");
+  await symlink(join(temporary, "outside.txt"), join(workspace, "outside-link"));
   binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
   env = {
     ...(process.env as Record<string, string>),
@@ -191,6 +194,14 @@ test("file links in a reply open project files in the Files panel; others say wh
   await page.locator(".file-tabs").getByRole("button", { name: "guide.md", exact: true }).click();
   await document.getByRole("link", { name: "elsewhere", exact: true }).click();
   await expect(toast()).toHaveText("Only files in this project open from a link.");
+
+  // A file in the tree that links out of the project says so, in words,
+  // and never shows what it points at.
+  await page.locator(".file-entry").filter({ hasText: "outside-link" }).click();
+  await expect(toast()).toHaveText("This file is a link to somewhere outside the project, so it does not open here.");
+  await expect(toast()).toHaveAttribute("data-tone", "blocked");
+  await expect(page.locator(".error-banner")).toHaveCount(0);
+  await expect(page.locator(".file-preview")).not.toContainText("OUTSIDE_SECRET");
 
   // Nothing but the mail link reached the system.
   expect((await calls()).shell).toEqual([["openExternal", "mailto:me@example.test?subject=Hi"]]);

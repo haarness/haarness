@@ -2421,6 +2421,7 @@
   "Open a project to open links to its files.": "เปิดโปรเจกต์ก่อนเพื่อเปิดลิงก์ไปยังไฟล์ในโปรเจกต์",
   "Links to network locations do not open.": "ลิงก์ไปยังตำแหน่งบนเครือข่ายจะไม่เปิด",
   "Only files in this project open from a link.": "เปิดจากลิงก์ได้เฉพาะไฟล์ในโปรเจกต์นี้เท่านั้น",
+  "This file is a link to somewhere outside the project, so it does not open here.": "ไฟล์นี้เป็นลิงก์ไปยังตำแหน่งนอกโปรเจกต์ จึงเปิดที่นี่ไม่ได้",
   "This kind of link does not open in Haarness.": "ลิงก์ประเภทนี้เปิดใน Haarness ไม่ได้",
   "{path} was not found in this project.": "ไม่พบ {path} ในโปรเจกต์นี้",
   "This Haarness link could not be opened.": "ไม่สามารถเปิดลิงก์ Haarness นี้ได้",

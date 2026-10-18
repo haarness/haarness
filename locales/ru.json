@@ -2421,6 +2421,7 @@
   "Open a project to open links to its files.": "Откройте проект, чтобы открывать ссылки на его файлы.",
   "Links to network locations do not open.": "Ссылки на сетевые расположения не открываются.",
   "Only files in this project open from a link.": "По ссылке открываются только файлы этого проекта.",
+  "This file is a link to somewhere outside the project, so it does not open here.": "Этот файл — ссылка на место вне проекта, поэтому здесь он не открывается.",
   "This kind of link does not open in Haarness.": "Ссылки такого типа не открываются в Haarness.",
   "{path} was not found in this project.": "{path} не найден в этом проекте.",
   "This Haarness link could not be opened.": "Не удалось открыть эту ссылку Haarness.",
