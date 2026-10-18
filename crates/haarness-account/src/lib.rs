@@ -184,15 +184,21 @@ fn default_config_dir(api_url: &Url, haarness_home: Option<&Path>) -> PathBuf {
         Some(home) => home.join("config").join("account"),
         None => std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
-            })
+            .unwrap_or_else(|| user_home().join(".config"))
             .join("haarness-cloud"),
     };
     if safe_url(PRODUCTION_API_URL).is_ok_and(|production| production == *api_url) {
         return base;
     }
     base.join("services").join(service_folder(api_url))
+}
+/// The user's home folder. Windows sets USERPROFILE, not HOME; with neither,
+/// an empty path would put sign-in files inside whatever folder the process
+/// started in (Desktop starts the CLI in the project).
+fn user_home() -> PathBuf {
+    haarness_protocol::home_dir()
+        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()))
+        .unwrap_or_else(std::env::temp_dir)
 }
 /// `127.0.0.1-18080`, `staging.haarness.ai`: the host and any explicit port,
 /// reduced to characters every file system accepts.

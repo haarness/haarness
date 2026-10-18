@@ -5,6 +5,7 @@ mod archive;
 mod btw;
 mod cloud;
 mod goal;
+mod home;
 mod input;
 mod management;
 mod model_names;
@@ -18,6 +19,7 @@ pub use archive::*;
 pub use btw::*;
 pub use cloud::*;
 pub use goal::*;
+pub use home::home_dir;
 pub use input::*;
 pub use management::*;
 pub use model_names::{

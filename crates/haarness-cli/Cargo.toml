@@ -12,6 +12,7 @@ name = "haarness"
 path = "src/main.rs"
 
 [dependencies]
+dunce.workspace = true
 base64.workspace = true
 futures.workspace = true
 tokio-tungstenite.workspace = true

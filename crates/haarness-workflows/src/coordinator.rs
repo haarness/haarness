@@ -118,6 +118,27 @@ struct WorkflowRunLease {
     file: File,
 }
 
+/// Where workflow leases live: a folder only this user writes. They were in
+/// one fixed folder under the system temporary directory, which on Linux is
+/// shared, so the first user to run a workflow owned it and every other
+/// user's workflows failed with "Permission denied". Resolved like the CLI's
+/// cache, so an isolated install keeps its leases inside its own folder.
+fn lease_directory() -> PathBuf {
+    let absolute = |key: &str| {
+        std::env::var_os(key)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    absolute("HAARNESS_DATA_DIR")
+        .or_else(|| absolute("HAARNESS_HOME"))
+        .map(|root| root.join("cache"))
+        .or_else(|| absolute("XDG_RUNTIME_DIR").map(|runtime| runtime.join("haarness")))
+        .or_else(|| absolute("XDG_CACHE_HOME").map(|cache| cache.join("haarness")))
+        .or_else(|| haarness_protocol::home_dir().map(|home| home.join(".cache").join("haarness")))
+        .unwrap_or_else(|| std::env::temp_dir().join("haarness"))
+        .join("workflow-leases")
+}
+
 impl WorkflowRunLease {
     fn acquire(id: WorkflowId) -> CoreResult<Self> {
         Self::try_acquire(id)?.ok_or_else(|| {
@@ -128,7 +149,7 @@ impl WorkflowRunLease {
     }
 
     fn try_acquire(id: WorkflowId) -> CoreResult<Option<Self>> {
-        let directory = std::env::temp_dir().join("haarness-workflow-leases");
+        let directory = lease_directory();
         fs::create_dir_all(&directory).map_err(|error| {
             CoreError::Storage(format!(
                 "cannot create workflow lease directory {}: {error}",
@@ -150,7 +171,13 @@ impl WorkflowRunLease {
             })?;
         match file.try_lock_exclusive() {
             Ok(()) => Ok(Some(Self { file })),
-            Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(None),
+            // fs2 reports a held lock on Windows as ERROR_LOCK_VIOLATION (33).
+            Err(error)
+                if error.kind() == ErrorKind::WouldBlock
+                    || (cfg!(windows) && error.raw_os_error() == Some(33)) =>
+            {
+                Ok(None)
+            }
             Err(error) => Err(CoreError::Storage(format!(
                 "cannot lock workflow lease {}: {error}",
                 path.display()

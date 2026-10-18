@@ -2095,7 +2095,8 @@ impl Tool for BrowserTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// A valid 1×1 PNG.
+    /// A valid 1×1 PNG (for the Unix-only capture test).
+    #[cfg(unix)]
     const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
     fn connected(
         broker: &Arc<BrowserBroker>,

@@ -25,7 +25,9 @@ pub fn run(args: UpgradeArgs) -> Result<()> {
     let status = std::process::Command::new("sh")
         .arg("-c")
         .arg(include_str!("../../../install.sh"))
-        .env("HAARNESS_INSTALL_DIR", directory)
+        .env("HAARNESS_INSTALL_DIR", dunce::simplified(directory))
+        // Upgrading in place: the folder is already where the user runs it from.
+        .env("HAARNESS_NO_MODIFY_PATH", "1")
         .env("HAARNESS_PRODUCT", "cli")
         .env("HAARNESS_CHANNEL", args.channel)
         .env("HAARNESS_VERSION", args.version)
@@ -39,7 +41,9 @@ pub fn run(args: UpgradeArgs) -> Result<()> {
             "-Command",
             include_str!("../../../install.ps1"),
         ])
-        .env("HAARNESS_INSTALL_DIR", directory)
+        .env("HAARNESS_INSTALL_DIR", dunce::simplified(directory))
+        // Upgrading in place: the folder is already where the user runs it from.
+        .env("HAARNESS_NO_MODIFY_PATH", "1")
         .env("HAARNESS_PRODUCT", "cli")
         .env("HAARNESS_CHANNEL", args.channel)
         .env("HAARNESS_VERSION", args.version)

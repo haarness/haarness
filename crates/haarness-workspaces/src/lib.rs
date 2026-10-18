@@ -776,6 +776,9 @@ impl WorkspaceManager {
             file.write_all(&bytes)?;
             file.sync_all()?;
             fs::rename(&temporary, &self.registry_path)?;
+            // Windows cannot open a directory as a file (access denied), so
+            // this failed every command there; NTFS journals the rename.
+            #[cfg(unix)]
             File::open(parent)?.sync_all()?;
             Ok(())
         })();
