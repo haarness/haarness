@@ -2524,5 +2524,6 @@
   "+{count} more": "jeszcze {count}",
   "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "Ta aplikacja próbowała otworzyć link, którego Haarness nie otwiera. Aplikacje mogą otwierać tylko linki http, https i mailto.",
   "Load image from {host}": "Wczytaj obraz z {host}",
-  "The image from {host} could not be loaded.": "Nie udało się wczytać obrazu z {host}."
+  "The image from {host} could not be loaded.": "Nie udało się wczytać obrazu z {host}.",
+  "This app tried to open a {scheme} link. Apps may open only http, https and mailto links.": "Ta aplikacja próbowała otworzyć link {scheme}. Aplikacje mogą otwierać tylko linki http, https i mailto."
 }

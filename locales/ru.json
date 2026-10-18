@@ -2524,5 +2524,6 @@
   "+{count} more": "ещё {count}",
   "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "Это приложение попыталось открыть ссылку, которую Haarness не открывает. Приложения могут открывать только ссылки http, https и mailto.",
   "Load image from {host}": "Загрузить изображение с {host}",
-  "The image from {host} could not be loaded.": "Не удалось загрузить изображение с {host}."
+  "The image from {host} could not be loaded.": "Не удалось загрузить изображение с {host}.",
+  "This app tried to open a {scheme} link. Apps may open only http, https and mailto links.": "Это приложение попыталось открыть ссылку {scheme}. Приложения могут открывать только ссылки http, https и mailto."
 }

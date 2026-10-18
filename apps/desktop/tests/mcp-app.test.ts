@@ -11,6 +11,7 @@ import {
   createBridge,
   document,
   granted,
+  linkScheme,
   messageText,
   payload,
   payloadFor,
@@ -339,6 +340,18 @@ test("a refused link reaches the host too, so the person who clicked it can be t
     { jsonrpc: "2.0", id: 1, error: { code: -32602, message: REFUSED.link } },
     { jsonrpc: "2.0", id: 2, error: { code: -32602, message: REFUSED.link } },
   ]);
+});
+
+test("a refused link is named only by its scheme, never by the page's own text", () => {
+  assert.equal(linkScheme("file:///etc/hosts"), "file:");
+  assert.equal(linkScheme(" JavaScript:alert(1)"), "javascript:");
+  assert.equal(linkScheme("vscode://open?x=1"), "vscode:");
+  // Only the scheme of a worded address is repeated; text that is not one, never.
+  assert.equal(linkScheme("Haarness: sign in at https://evil.example"), "haarness:");
+  assert.equal(linkScheme("Sign in at https://evil.example"), undefined);
+  assert.equal(linkScheme("relative/path"), undefined);
+  assert.equal(linkScheme(""), undefined);
+  assert.equal(linkScheme("a".repeat(40) + ":x"), undefined);
 });
 
 test("a message waits for the host's answer: inserted, or declined", async () => {

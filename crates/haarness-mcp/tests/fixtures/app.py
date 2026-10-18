@@ -62,6 +62,8 @@ addEventListener("message", (event) => {
     out("input", "input " + JSON.stringify(params.arguments || {}));
     if (params.arguments && params.arguments.autolink)
       request("ui/open-link", { url: "https://example.com/auto" }).then((reply) => out("status", "autolink " + answer(reply)));
+    if (params.arguments && params.arguments.autofile)
+      request("ui/open-link", { url: "file:///etc/passwd" }).then((reply) => out("status", "autofile " + answer(reply)));
     if (params.arguments && params.arguments.automessage)
       request("ui/message", { role: "user", content: [{ type: "text", text: "Automatic message from the page." }] })
         .then((reply) => out("status", "automessage " + answer(reply)));
