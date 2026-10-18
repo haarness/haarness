@@ -480,9 +480,11 @@ async function composite(path: string) {
   await mkdir(join(path, ".."), { recursive: true });
   await writeFile(path, Buffer.from(data.split(",")[1], "base64"));
 }
-test("the Browser comes back when the agent takes the shown tab to another page, not for a reload or a background tab", async () => {
+test("an agent's page opens a closed side panel on the Browser, but never brings back a Browser the person put away or takes another panel", async () => {
   const browser = page.getByRole("region", { name: "Web browser" });
   const sidePanel = page.locator(".side-panel");
+  const toggle = page.getByRole("button", { name: /^(Show|Hide) side panel$/ });
+  const browserTab = page.getByRole("button", { name: "Show browser panel", exact: true });
   const hide = async () => {
     await page.getByRole("button", { name: "Hide side panel", exact: true }).click();
     await expect(sidePanel).toBeHidden();
@@ -494,42 +496,75 @@ test("the Browser comes back when the agent takes the shown tab to another page,
   };
   await tool("tabs_focus", { tabID });
   await expect(browser).toBeVisible();
-  // The user closed the side panel; the agent takes the shown tab elsewhere.
+  // The person hides the side panel while the Browser shows: it stays away
+  // while the agent works, and the side panel's button gets a dot.
   await hide();
   await tool("navigate", { tabID, url: siteURL + "/frame" });
+  await stays(() => expect(sidePanel).toBeHidden());
+  await expect(toggle.locator(".icon-button-dot")).toBeVisible();
+  await expect(toggle).toHaveAttribute("aria-description", "The agent opened another page");
+  await tool("tabs_focus", { tabID });
+  const other = (await tool("tabs_open", { url: siteURL + "/popup" })).value.id;
+  await stays(() => expect(sidePanel).toBeHidden());
+  await composite("test-results/browser-away.png");
+  // Showing the side panel shows the Browser, and the dot goes.
+  await toggle.click();
   await expect(browser).toBeVisible();
-  await composite("test-results/browser-reopened.png");
-  // The user closed the Browser tab itself, leaving the panel launcher.
+  await expect(toggle.locator(".icon-button-dot")).toHaveCount(0);
+  await expect(toggle).not.toHaveAttribute("aria-description", /./);
+  await tool("tabs_close", { tabID: other });
+  await tool("tabs_focus", { tabID });
+  // Closing the Browser's own tab puts it away too: the agent's page brings
+  // the tab back with a dot, and the panel launcher stays.
   await page.getByRole("button", { name: "Close browser panel", exact: true }).click();
   await expect(browser).toBeHidden();
   await tool("navigate", { tabID, url: siteURL + "/popup" });
+  await expect(browserTab.locator(".dock-tab-dot")).toBeVisible();
+  await expect(browser).toBeHidden();
+  await expect(page.getByRole("region", { name: "Open a project panel" })).toBeVisible();
+  await browserTab.click();
   await expect(browser).toBeVisible();
-  // A reload is the same page again.
+  await expect(browserTab.locator(".dock-tab-dot")).toHaveCount(0);
+  // A reload is the same page again: no dot.
   await hide();
   await tool("reload", { tabID });
   await stays(() => expect(sidePanel).toBeHidden());
-  // Back and Forward are other pages.
+  await expect(toggle.locator(".icon-button-dot")).toHaveCount(0);
+  // A side panel hidden while another panel showed was not hiding the
+  // Browser: the agent's next page opens it on the Browser, Back and Forward
+  // included.
+  await toggle.click();
+  await expect(browser).toBeVisible();
+  await page.getByRole("button", { name: "Open panel", exact: true }).click();
+  await page.getByRole("button", { name: "Open Context", exact: true }).click();
+  await expect(page.locator(".dock-tab.active")).toContainText("Context");
+  await hide();
   await tool("back", { tabID });
   await expect(browser).toBeVisible();
-  await hide();
-  await tool("forward", { tabID });
-  await expect(browser).toBeVisible();
+  await expect(toggle.locator(".icon-button-dot")).toHaveCount(0);
   // A tab the agent keeps in the background loads pages where it is.
   const background = (await tool("tabs_open", { url: siteURL + "/popup", focus: false })).value.id;
+  await page.getByRole("button", { name: "Show context panel", exact: true }).click();
   await hide();
   await tool("navigate", { tabID: background, url: siteURL + "/frame" });
   await stays(() => expect(sidePanel).toBeHidden());
-  // Another panel on screen keeps the side panel; the Browser tab gets a dot.
-  await page.getByRole("button", { name: "Show side panel", exact: true }).click();
-  await page.getByRole("button", { name: "Open panel", exact: true }).click();
-  await page.getByRole("button", { name: "Open Context", exact: true }).click();
-  const browserTab = page.getByRole("button", { name: "Show browser panel", exact: true });
+  await expect(toggle.locator(".icon-button-dot")).toHaveCount(0);
+  // Another panel on screen keeps the side panel; the Browser tab gets a dot,
+  // whether the agent takes the shown tab elsewhere, focuses a tab or opens one.
+  await toggle.click();
   await expect(page.locator(".dock-tab.active")).toContainText("Context");
-  await tool("navigate", { tabID, url: siteURL });
-  await expect(browserTab.locator(".dock-tab-dot")).toBeVisible();
-  await expect(browserTab).toHaveAttribute("aria-description", "The agent opened another page");
-  await expect(page.locator(".dock-tab.active")).toContainText("Context");
-  await expect(browser).toBeHidden();
+  for (const step of [
+    () => tool("navigate", { tabID, url: siteURL }),
+    () => tool("tabs_focus", { tabID: background }),
+    () => tool("tabs_open", { url: siteURL + "/popup" }),
+  ]) {
+    const opened = (await step()).value;
+    await expect(browserTab.locator(".dock-tab-dot")).toBeVisible();
+    await expect(browserTab).toHaveAttribute("aria-description", "The agent opened another page");
+    await expect(page.locator(".dock-tab.active")).toContainText("Context");
+    await expect(browser).toBeHidden();
+    if (opened.url === siteURL + "/popup" && opened.id !== background) await tool("tabs_close", { tabID: opened.id });
+  }
   await composite("test-results/browser-dot.png");
   await browserTab.click();
   await expect(browser).toBeVisible();

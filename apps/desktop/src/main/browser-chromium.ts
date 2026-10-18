@@ -331,6 +331,16 @@ export function createBrowserPage(
     corner.setVisible(false);
     win.contentView.addChildView(corner);
   });
+  /**
+   * A page put away (hidden or closed) while it has the keyboard would leave
+   * the window with no one to type to: the keyboard goes back to the app,
+   * where the element that last had it, such as the message box, keeps its
+   * caret.
+   */
+  const giveBackKeyboard = () => {
+    if (!contents.isDestroyed() && contents.isFocused() && !win.isDestroyed())
+      win.webContents.focus();
+  };
   page = createPage<Browser.File>(surface, cdp, {
     id: options.id,
     publish: () => options.publish(),
@@ -411,6 +421,7 @@ export function createBrowserPage(
       });
     },
     setVisible(visible: boolean) {
+      if (!visible) giveBackKeyboard();
       view.setVisible(visible);
       corners.forEach((corner) => corner.setVisible(visible && !!cornerKey));
     },
@@ -425,6 +436,7 @@ export function createBrowserPage(
       contents.session.off("will-download", download);
       await profiling.dispose();
       cdp.dispose();
+      giveBackKeyboard();
       if (!win.isDestroyed()) {
         corners.forEach((corner) => win.contentView.removeChildView(corner));
         win.contentView.removeChildView(view);
