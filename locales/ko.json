@@ -2455,5 +2455,10 @@
   "First prompt": "첫 프롬프트",
   "Among the chats the sidebar shows, from anywhere but the file editor or a terminal": "사이드바에 표시된 대화 사이에서 이동합니다. 파일 편집기와 터미널에서는 작동하지 않습니다",
   "Shows the sidebar and puts the keyboard on the open chat": "사이드바를 표시하고 키보드 포커스를 열린 대화로 옮깁니다",
-  "In the open chat; in the message box only while it is empty": "열린 대화에서 작동하며, 메시지 상자에서는 비어 있을 때만 작동합니다"
+  "In the open chat; in the message box only while it is empty": "열린 대화에서 작동하며, 메시지 상자에서는 비어 있을 때만 작동합니다",
+  "Open the project's root folder to manage its worktrees.": "작업 트리를 관리하려면 프로젝트의 루트 폴더를 여세요.",
+  "The project is unavailable.": "프로젝트를 사용할 수 없습니다.",
+  "Archived 1 chat": "대화 1개를 보관했습니다",
+  "Archived {count} chats": "대화 {count}개를 보관했습니다",
+  "now": "방금"
 }

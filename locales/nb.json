@@ -2455,5 +2455,10 @@
   "First prompt": "Første ledetekst",
   "Among the chats the sidebar shows, from anywhere but the file editor or a terminal": "Blant chattene sidefeltet viser, fra hvor som helst unntatt filredigeringen eller en terminal",
   "Shows the sidebar and puts the keyboard on the open chat": "Viser sidefeltet og flytter tastaturet til den åpne chatten",
-  "In the open chat; in the message box only while it is empty": "I den åpne chatten; i meldingsfeltet bare mens det er tomt"
+  "In the open chat; in the message box only while it is empty": "I den åpne chatten; i meldingsfeltet bare mens det er tomt",
+  "Open the project's root folder to manage its worktrees.": "Åpne prosjektets rotmappe for å administrere worktreene.",
+  "The project is unavailable.": "Prosjektet er ikke tilgjengelig.",
+  "Archived 1 chat": "1 chat arkivert",
+  "Archived {count} chats": "{count} chatter arkivert",
+  "now": "nå"
 }

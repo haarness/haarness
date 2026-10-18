@@ -93,9 +93,9 @@ async function rootConnection(
 ) {
   const root = primaryLocation(project);
   if (root.remote || root.workspace !== project.root)
-    throw new Error("Open the project's root folder to manage its worktrees.");
+    throw new Error(t("Open the project's root folder to manage its worktrees."));
   const connection = await app.projectConnection(root.id);
-  if (!connection) throw new Error("The project is unavailable.");
+  if (!connection) throw new Error(t("The project is unavailable."));
   return connection;
 }
 

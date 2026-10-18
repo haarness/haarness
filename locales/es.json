@@ -2455,5 +2455,10 @@
   "First prompt": "Primera instrucción",
   "Among the chats the sidebar shows, from anywhere but the file editor or a terminal": "Entre los chats que muestra la barra lateral, desde cualquier lugar salvo el editor de archivos o un terminal",
   "Shows the sidebar and puts the keyboard on the open chat": "Muestra la barra lateral y lleva el teclado al chat abierto",
-  "In the open chat; in the message box only while it is empty": "En el chat abierto; en el cuadro de mensaje solo mientras está vacío"
+  "In the open chat; in the message box only while it is empty": "En el chat abierto; en el cuadro de mensaje solo mientras está vacío",
+  "Open the project's root folder to manage its worktrees.": "Abre la carpeta raíz del proyecto para gestionar sus worktrees.",
+  "The project is unavailable.": "El proyecto no está disponible.",
+  "Archived 1 chat": "1 chat archivado",
+  "Archived {count} chats": "{count} chats archivados",
+  "now": "ahora"
 }

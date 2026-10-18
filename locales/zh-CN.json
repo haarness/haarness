@@ -2455,5 +2455,10 @@
   "First prompt": "第一条提示",
   "Among the chats the sidebar shows, from anywhere but the file editor or a terminal": "在侧边栏显示的对话之间切换，文件编辑器和终端中除外",
   "Shows the sidebar and puts the keyboard on the open chat": "显示侧边栏，并将键盘焦点移到当前对话",
-  "In the open chat; in the message box only while it is empty": "在当前对话中；在消息框中仅当其为空时可用"
+  "In the open chat; in the message box only while it is empty": "在当前对话中；在消息框中仅当其为空时可用",
+  "Open the project's root folder to manage its worktrees.": "请打开项目的根文件夹来管理其工作树。",
+  "The project is unavailable.": "该项目不可用。",
+  "Archived 1 chat": "已归档 1 个对话",
+  "Archived {count} chats": "已归档 {count} 个对话",
+  "now": "刚刚"
 }

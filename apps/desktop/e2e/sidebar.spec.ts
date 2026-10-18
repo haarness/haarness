@@ -52,11 +52,11 @@ async function close() {
     if (child.exitCode === null) child.kill("SIGTERM");
   }
 }
-async function open(name: string) {
+async function open(name: string, config = "") {
   const directory = join(temporary, "projects", name);
   if (!directories.includes(directory)) directories.push(directory);
   await mkdir(join(directory, ".haarness"), { recursive: true });
-  await writeFile(join(directory, ".haarness", "config.toml"), '[defaults]\nprovider="echo"\nmodel="echo-1"\n');
+  await writeFile(join(directory, ".haarness", "config.toml"), '[defaults]\nprovider="echo"\nmodel="echo-1"\n' + config);
   await app.evaluate(({ dialog }, directory) => {
     const original = dialog.showOpenDialog;
     dialog.showOpenDialog = async () => {
@@ -428,7 +428,8 @@ test("sidebar session mouse reordering remains stable across repeated gestures a
   let expected = ["Five", "Four", "Three", "Two", "One"];
   await expect(labels).toHaveText(expected);
   await sessions.getByRole("button", { name: "Three", exact: true }).click();
-  const selected = project("alpha").locator('.session-row > button[aria-current="true"]');
+  // The selected row's title; the row also shows when the chat was last active.
+  const selected = project("alpha").locator('.session-row > button[aria-current="true"] .session-title');
   for (let round = 0; round < 12; round++) {
     const from = round % 2 ? 0 : expected.length - 1;
     const to = round % 2 ? expected.length - 1 : 0;
@@ -823,4 +824,32 @@ test("sidebar prompt keys move through the open chat's prompts and back to the n
   await composer.press(`${mod}+ArrowUp`);
   await expect(reading).toHaveAttribute("aria-label", "Jump to prompt 3");
   await expect(latest).toBeVisible();
+});
+
+test("sidebar rows show when a chat was last active, and a scheduled run's waiting label and Archive chats' count speak the reader's language", async () => {
+  const de: Record<string, string> = JSON.parse(await readFile(resolve("../../locales/de.json"), "utf8"));
+  const alpha = await open("alpha", '[permissions]\nbash="ask"\n');
+  await alpha.createThread({ title: "Quiet chat", provider: "echo", model: "echo-1" });
+  // The age sits in the row without joining its name.
+  const quiet = project("alpha").getByRole("button", { name: "Quiet chat", exact: true });
+  await expect(quiet.locator(".session-age")).toHaveText("now");
+  await expect(quiet.locator(".session-age")).toHaveAttribute("aria-hidden", "true");
+  const run = await alpha.createThread({
+    title: "Scheduled run", provider: "echo", model: "echo-1",
+    schedule: { id: crypto.randomUUID(), name: "Nightly" },
+  });
+  await alpha.startTurn(run.id, { requestId: crypto.randomUUID(), text: '!tool bash {"command":"printf waiting-proof"}' });
+  await expect.poll(async () => (await alpha.listPermissions()).length).toBe(1);
+  await page.evaluate(() => window.haarness.preferences({ language: "de" }));
+  const group = page.getByRole("region", { name: de["Project {name}"].replace("{name}", "alpha"), exact: true });
+  await expect(group.locator(".session-age")).toHaveText(de["now"]);
+  await group.locator(".scheduled-heading").click();
+  await group.locator(".schedule-group-heading").click();
+  await expect(group.locator(".schedule-runs .session-waiting")).toHaveText(de["Needs approval"]);
+  await group.getByRole("button", { name: de["Project options for {name}"].replace("{name}", "alpha"), exact: true }).click();
+  await page.getByRole("menuitem", { name: de["Archive chats"], exact: true }).click();
+  await page.getByRole("dialog", { name: de["Archive all chats in {name}?"].replace("{name}", "alpha"), exact: true })
+    .getByRole("button", { name: de["Archive chats"], exact: true }).click();
+  await expect(page.locator(".toast")).toHaveText(de["Archived {count} chats"].replace("{count}", "2"));
+  await page.evaluate(() => window.haarness.preferences({ language: "en" }));
 });
