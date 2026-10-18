@@ -1,5 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { listScreenshots, readListedScreenshots } from "../src/main/screenshot-files";
 import {
   SCREENSHOT_LIMIT,
   createScreenshotListings,
@@ -77,6 +81,48 @@ test("a pick names places in the window's last listing, and nothing else", () =>
   assert.throws(() => listings.resolve(1, "/other/x.png", [0]), /changed/);
   listings.forget(1);
   assert.throws(() => listings.resolve(1, second, [0]), /changed/);
+});
+
+test("a screenshot swapped for a link or another file after it was listed is refused, not read", async () => {
+  const folder = await mkdtemp(join(tmpdir(), "haarness-screenshots-"));
+  try {
+    await writeFile(join(folder, "a.png"), "first");
+    await writeFile(join(folder, "b.png"), "second");
+    await writeFile(join(folder, "c.png"), "third");
+    await writeFile(join(folder, "private.png"), "another file");
+    await symlink(join(folder, "private.png"), join(folder, "link.png"));
+    const listed = await listScreenshots(folder);
+    // A link is never listed.
+    assert.deepEqual(listed.map((entry) => entry.name).sort(), ["a.png", "b.png", "c.png", "private.png"]);
+    const pick = (name: string) => listed.find((entry) => entry.name === name)!;
+    let reads = 0;
+    const read = (paths: string[]) => {
+      reads++;
+      return Promise.all(paths.map((path) => readFile(path, "utf8")));
+    };
+    assert.deepEqual(await readListedScreenshots([pick("b.png"), pick("a.png")], read), ["second", "first"]);
+    // Made a link to another file since the listing: refused before anything is read.
+    await rm(join(folder, "a.png"));
+    await symlink(join(folder, "private.png"), join(folder, "a.png"));
+    reads = 0;
+    await assert.rejects(readListedScreenshots([pick("b.png"), pick("a.png")], read), /changed/);
+    assert.equal(reads, 0);
+    // Rewritten since the listing.
+    await writeFile(join(folder, "b.png"), "rewritten");
+    await assert.rejects(readListedScreenshots([pick("b.png")], read), /changed/);
+    assert.equal(reads, 0);
+    // Swapped for a link while it was being read.
+    await assert.rejects(
+      readListedScreenshots([pick("c.png")], async (paths) => {
+        await rm(paths[0]);
+        await symlink(join(folder, "private.png"), paths[0]);
+        return read(paths);
+      }),
+      /changed/,
+    );
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
 });
 
 test("picked screenshots are numbered in the order they were clicked", () => {

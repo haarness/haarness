@@ -73,38 +73,41 @@ export function imageName(name: string) {
 }
 
 /** The newest images of a folder listing, without hidden files or other kinds. */
-export function newestImages(entries: FolderEntry[], limit = SCREENSHOT_LIMIT): FolderEntry[] {
+export function newestImages<T extends FolderEntry>(entries: T[], limit = SCREENSHOT_LIMIT): T[] {
   return entries
     .filter((entry) => entry.file && imageName(entry.name))
     .sort((a, b) => b.modified - a.modified || a.name.localeCompare(b.name))
     .slice(0, limit);
 }
 
+/** Why a pick from a listing that no longer holds is refused (translated in main). */
+export const SCREENSHOTS_CHANGED = "The screenshots changed. Open Screenshots again.";
+
 /**
  * The last listing each window showed. A pick names a listing and places in
  * it; a listing the window has since replaced, or a place outside it, is
  * refused.
  */
-export function createScreenshotListings() {
-  const listings = new Map<number, { id: string; paths: string[] }>();
+export function createScreenshotListings<T>() {
+  const listings = new Map<number, { id: string; items: T[] }>();
   return {
-    remember(owner: number, paths: string[]) {
+    remember(owner: number, items: T[]) {
       const id = randomUUID();
-      listings.set(owner, { id, paths: [...paths] });
+      listings.set(owner, { id, items: [...items] });
       return id;
     },
-    resolve(owner: number, id: unknown, indexes: unknown): string[] {
+    resolve(owner: number, id: unknown, indexes: unknown): T[] {
       const listing = listings.get(owner);
-      if (!listing || listing.id !== id) throw new Error("The screenshots changed. Open Screenshots again.");
+      if (!listing || listing.id !== id) throw new Error(SCREENSHOTS_CHANGED);
       if (
         !Array.isArray(indexes) ||
         !indexes.length ||
         indexes.length > SCREENSHOT_PICK_LIMIT ||
         new Set(indexes).size !== indexes.length ||
-        !indexes.every((index) => Number.isInteger(index) && index >= 0 && index < listing.paths.length)
+        !indexes.every((index) => Number.isInteger(index) && index >= 0 && index < listing.items.length)
       )
         throw new Error("Choose up to 20 screenshots from the list.");
-      return indexes.map((index) => listing.paths[index]);
+      return indexes.map((index) => listing.items[index]);
     },
     forget(owner: number) {
       listings.delete(owner);
