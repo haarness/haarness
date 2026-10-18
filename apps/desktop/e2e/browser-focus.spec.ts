@@ -112,7 +112,7 @@ test.afterAll(async () => {
   if (temporary) await rm(temporary, { recursive: true, force: true }).catch(() => {});
 });
 
-/** Where the keyboard is: the app's own page or a browser page, and the message box's caret. */
+/** Where the keyboard is: the app's own page or a browser page, and whether the message box has it there. */
 const keyboard = async () => ({
   ...(await app.evaluate(({ BrowserWindow, webContents }) => {
     const win = BrowserWindow.getAllWindows()[0];
@@ -127,7 +127,10 @@ const keyboard = async () => ({
   })),
   ...(await page.evaluate(() => {
     const box = document.querySelector<HTMLTextAreaElement>("[data-composer-input]");
-    return { composer: document.activeElement === box, caret: box?.selectionStart };
+    const active = document.activeElement;
+    // Named for a failure message only.
+    const element = active ? [active.tagName, active.getAttribute("aria-label") ?? active.className].join(" ") : "";
+    return { composer: active === box, element };
   })),
 });
 /** Makes the window the one the system types into: only then does a page holding the keyboard show. */
@@ -138,13 +141,14 @@ async function activate() {
   });
   await expect.poll(async () => (await keyboard()).window).toBe(true);
 }
-/** Where the keyboard is once a step has settled, with the window active again if another app took it. */
+/** Where the keyboard is once a step has settled, with the window active again whenever another app took it. */
 async function settled() {
   await page.waitForTimeout(400);
-  const value = await keyboard();
-  if (value.window) return value;
-  await activate();
-  return keyboard();
+  for (let attempt = 0; ; attempt++) {
+    const value = await keyboard();
+    if (value.window || attempt === 5) return value;
+    await activate();
+  }
 }
 /** Gives a page the keyboard, as a click in it does. */
 const typeInPage = (search: string) =>
@@ -152,7 +156,8 @@ const typeInPage = (search: string) =>
     webContents.getAllWebContents().find((contents) => contents.getURL().endsWith("/focus" + search))!.focus();
   }, search);
 
-const inMessageBox = { app: true, pages: [], composer: true, caret: 4 };
+// The caret is not compared: the person may type while the window is active.
+const inMessageBox = { app: true, pages: [], composer: true };
 
 test("the message box keeps the keyboard while the agent loads, clicks and types in pages that ask for it", async () => {
   const box = page.getByRole("textbox", { name: "Message" });
@@ -195,7 +200,9 @@ test("the message box keeps the keyboard while the agent loads, clicks and types
 
 test("a page put away while it has the keyboard gives it back to the message box", async () => {
   const box = page.getByRole("textbox", { name: "Message" });
-  const [first] = (await tool("tabs_list")).tabs.map((tab: { id: string }) => tab.id);
+  const first =
+    (await tool("tabs_list")).tabs.find((tab: { url: string }) => tab.url.endsWith("/focus?first"))?.id ??
+    (await tool("tabs_open", { url: siteURL + "/focus?first" })).id;
   await box.evaluate((element: HTMLTextAreaElement) => {
     element.focus();
     element.setSelectionRange(4, 4);
@@ -213,6 +220,15 @@ test("a page put away while it has the keyboard gives it back to the message box
   expect(await settled()).toMatchObject({ app: false, pages: ["?other"] });
   await tool("tabs_close", { tabID: other });
   expect(await settled()).toMatchObject(inMessageBox);
+  // A control other than the message box, left with the window's keyboard,
+  // does not get keys meant for the page.
+  await page.getByRole("button", { name: "Hide side panel", exact: true }).focus();
+  await typeInPage("?first");
+  expect(await settled()).toMatchObject({ app: false, pages: ["?first"] });
+  const another = (await tool("tabs_open", { url: siteURL + "/focus?another" })).id;
+  expect(await settled()).toMatchObject({ app: false, pages: [] });
+  await tool("tabs_close", { tabID: another });
+  await tool("tabs_focus", { tabID: first });
   expect(errors).toEqual([]);
 });
 

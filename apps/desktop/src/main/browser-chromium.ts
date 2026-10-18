@@ -16,6 +16,7 @@ import { createCdp } from "./browser/cdp";
 import { createBrowserFiles } from "./browser/files";
 import { createProfiling } from "./browser/profiling";
 import { createCornerImages } from "./browser/corners";
+import { returnKeyboard } from "./browser-keyboard";
 import type { BrowserNetwork } from "./browser/network";
 
 /** Any stable id outside Electron's own worlds, for the agent cursor; one per page document. */
@@ -331,16 +332,7 @@ export function createBrowserPage(
     corner.setVisible(false);
     win.contentView.addChildView(corner);
   });
-  /**
-   * A page put away (hidden or closed) while it has the keyboard would leave
-   * the window with no one to type to: the keyboard goes back to the app,
-   * where the element that last had it, such as the message box, keeps its
-   * caret.
-   */
-  const giveBackKeyboard = () => {
-    if (!contents.isDestroyed() && contents.isFocused() && !win.isDestroyed())
-      win.webContents.focus();
-  };
+  const giveBackKeyboard = () => void returnKeyboard(win, contents);
   page = createPage<Browser.File>(surface, cdp, {
     id: options.id,
     publish: () => options.publish(),
