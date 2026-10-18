@@ -14,7 +14,8 @@ root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-mcp-redaction-', dir=os.en
 workspace = root/'project'; workspace.mkdir()
 state = root/'state'; (state/'config').mkdir(parents=True); (state/'data').mkdir()
 SECRETS = ['hunter2', 'fixture-url-secret', 'fixture-arg-secret', 'fixture-flag-secret',
-           'fixture-clone-secret', 'fixture-instruction-secret', 'fixture-command-secret']
+           'fixture-clone-secret', 'fixture-instruction-secret', 'fixture-command-secret',
+           'fixture-review-secret']
 # Port 9 (discard) refuses the connection, so the server reports why it could not connect.
 (state/'config/config.toml').write_text('''[defaults]
 provider = "echo"
@@ -146,6 +147,17 @@ try:
     until(lambda: 'approved once (Auto)' in logs(), 'no Auto approval line in the log')
     clean(logs(), 'daemon log')
     check("the Auto approval log line hides the command's token")
+
+    # A request waiting for a person is logged the same way.
+    review = api('/threads', {'title': 'Review log', 'provider': 'echo', 'model': 'echo-1', 'agent': 'build'})['id']
+    command = json.dumps({'command': 'echo --token fixture-review-secret > /dev/null'})
+    api(f'/threads/{review}/turns', {'requestId': str(uuid.uuid4()), 'text': f'!tool bash {command}'})
+    waiting = until(lambda: [item for item in api('/permissions') if item['threadId'] == review], 'no request waited')
+    api(f"/permissions/{waiting[0]['permissionId']}", {'decision': 'reject'})
+    until(lambda: not api('/turns/active'), 'turn still active')
+    until(lambda: 'permission requested; waiting for a reply' in logs(), 'no waiting line in the log')
+    clean(logs(), 'daemon log')
+    check("the waiting request's log line hides the command's token")
     assert 'skipped remote instructions http://<redacted>@127.0.0.1:9/rules.md?token=<redacted>' in logs(), \
         'no redacted notice for the unreachable instruction URL'
     check('an unreachable instruction URL is logged without its credentials')
