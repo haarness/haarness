@@ -2421,6 +2421,7 @@
   "Open a project to open links to its files.": "Dosyalarına giden bağlantıları açmak için bir proje açın.",
   "Links to network locations do not open.": "Ağ konumlarına giden bağlantılar açılmaz.",
   "Only files in this project open from a link.": "Bağlantıdan yalnızca bu projedeki dosyalar açılır.",
+  "This file is a link to somewhere outside the project, so it does not open here.": "Bu dosya proje dışındaki bir konuma bağlantı olduğu için burada açılmaz.",
   "This kind of link does not open in Haarness.": "Bu tür bağlantılar Haarness’ta açılmaz.",
   "{path} was not found in this project.": "{path} bu projede bulunamadı.",
   "This Haarness link could not be opened.": "Bu Haarness bağlantısı açılamadı.",

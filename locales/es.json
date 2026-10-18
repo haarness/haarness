@@ -2421,6 +2421,7 @@
   "Open a project to open links to its files.": "Abre un proyecto para abrir enlaces a sus archivos.",
   "Links to network locations do not open.": "Los enlaces a ubicaciones de red no se abren.",
   "Only files in this project open from a link.": "Desde un enlace solo se abren archivos de este proyecto.",
+  "This file is a link to somewhere outside the project, so it does not open here.": "Este archivo es un enlace a un lugar fuera del proyecto, así que no se abre aquí.",
   "This kind of link does not open in Haarness.": "Este tipo de enlace no se abre en Haarness.",
   "{path} was not found in this project.": "No se encontró {path} en este proyecto.",
   "This Haarness link could not be opened.": "No se pudo abrir este enlace de Haarness.",

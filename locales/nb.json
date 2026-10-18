@@ -2421,6 +2421,7 @@
   "Open a project to open links to its files.": "Åpne et prosjekt for å åpne lenker til filene i det.",
   "Links to network locations do not open.": "Lenker til nettverksplasseringer åpnes ikke.",
   "Only files in this project open from a link.": "Bare filer i dette prosjektet kan åpnes fra en lenke.",
+  "This file is a link to somewhere outside the project, so it does not open here.": "Denne filen er en lenke til et sted utenfor prosjektet, så den åpnes ikke her.",
   "This kind of link does not open in Haarness.": "Denne typen lenke åpnes ikke i Haarness.",
   "{path} was not found in this project.": "Fant ikke {path} i dette prosjektet.",
   "This Haarness link could not be opened.": "Denne Haarness-lenken kunne ikke åpnes.",
