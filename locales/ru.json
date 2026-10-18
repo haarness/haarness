@@ -2510,6 +2510,9 @@
   "Link from the app": "Ссылка из приложения",
   "This app wants to open a link.": "Это приложение хочет открыть ссылку.",
   "This tool comes with an app; open the chat in Haarness Desktop to use it.": "У этого инструмента есть приложение; откройте чат в Haarness Desktop, чтобы им воспользоваться.",
+  "Message from the app": "Сообщение из приложения",
+  "This app wants to write a message for you.": "Это приложение хочет написать сообщение за вас.",
+  "Insert app message": "Вставить сообщение приложения",
   "Comment on selection": "Прокомментировать выделенное",
   "Comment on these lines…": "Комментарий к этим строкам…",
   "Comment added to your message": "Комментарий добавлен к вашему сообщению"

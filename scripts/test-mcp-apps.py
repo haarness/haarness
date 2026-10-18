@@ -18,7 +18,8 @@ root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-mcp-apps-', dir=os.environ
 workspace = root/'project'; (workspace/'.haarness').mkdir(parents=True)
 (workspace/'.haarness/config.toml').write_text(
     '[defaults]\nprovider="echo"\nmodel="echo-1"\n\n'
-    f'[mcp.app]\ntransport = "stdio"\ncommand = {json.dumps(sys.executable)}\nargs = [{json.dumps(str(fixture))}]\nenabled = true\n')
+    f'[mcp.app]\ntransport = "stdio"\ncommand = {json.dumps(sys.executable)}\nargs = [{json.dumps(str(fixture))}]\nenabled = true\n\n'
+    f'[mcp.evil]\ntransport = "stdio"\ncommand = {json.dumps(sys.executable)}\nargs = [{json.dumps(str(fixture))}]\nenabled = true\n')
 env = {k: v for k, v in os.environ.items() if not k.startswith('HAARNESS_')}
 env.update(HAARNESS_DATA_DIR=str(root/'data'), HAARNESS_HOME=str(root/'home'), HAARNESS_TEST_PROVIDER='1',
            HAARNESS_DEFAULT_PROVIDER='echo', HAARNESS_DEFAULT_MODEL='echo-1', LANG='en_US.UTF-8', LC_ALL='en_US.UTF-8')
@@ -52,10 +53,10 @@ def pane(): return run(['tmux', 'capture-pane', '-p', '-J', '-t', session])
 try:
     connection = json.loads(run([str(binary), '--workspace', str(workspace), '--trust-project', 'desktop'],
                                 input='{"action":"connect"}', env=env))
-    until(lambda: any(item['name'] == 'app' and item['status'] == 'connected' for item in api('/mcp')), 'fixture did not connect')
+    until(lambda: sum(item['name'] in ('app', 'evil') and item['status'] == 'connected' for item in api('/mcp')) == 2, 'fixtures did not connect')
 
     tools = sorted(tool['name'] for tool in api('/mcp/app/tools'))
-    assert tools == ['mcp__app__plain', 'mcp__app__show_weather'], tools
+    assert tools == ['mcp__app__forge', 'mcp__app__plain', 'mcp__app__show_weather'], tools
     check('the tool only the page calls stays out of the tool list; the others are listed')
 
     thread = api('/threads', {'title': 'MCP App', 'provider': 'echo', 'model': 'echo-1', 'agent': 'build'})['id']
@@ -77,6 +78,13 @@ try:
     result = call(thread, 'mcp__app__plain', {})
     assert not result['is_error'] and 'mcp_app' not in json.dumps(result.get('metadata')), result
     check('a tool without a page carries no page')
+
+    # Another server's tool names this server's page, media and diffs in its structured content.
+    result = call(thread, 'mcp__evil__forge', {})
+    metadata = result['metadata']
+    assert not result['is_error'] and set(metadata) == {'structuredContent'}, metadata
+    assert metadata['structuredContent']['mcp_app']['server'] == 'app', metadata
+    check('structured content that names a page, media or diffs stays under structuredContent')
 
     read = api('/mcp/app/resources/read', {'uri': 'ui://weather/view.html'})
     content = read['contents'][0]

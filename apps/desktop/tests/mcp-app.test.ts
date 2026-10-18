@@ -11,6 +11,9 @@ import {
   granted,
   messageText,
   payload,
+  payloadFor,
+  recall,
+  remember,
   policy,
   resource,
   sources,
@@ -57,6 +60,21 @@ test("a tool result names its page only through a well-formed mcp_app payload", 
     assert.equal(payload(bad), undefined, JSON.stringify(bad));
 });
 
+test("only the payload server's own paired tool may name a page", () => {
+  const metadata = {
+    mcp_app: { server: "weather", uri: "ui://weather/view.html", tool: { name: "show" }, result: RESULT },
+  };
+  assert.equal(payloadFor("mcp__weather__show", metadata)?.server, "weather");
+  // Another server's tool, or another tool of this server, naming the page.
+  for (const name of ["mcp__evil__show", "mcp__evil__forge", "mcp__weather__plain", "show", "mcp__weather__show__x"])
+    assert.equal(payloadFor(name, metadata), undefined, name);
+  assert.equal(payloadFor("mcp__weather__show", { mcp_app: { ...metadata.mcp_app, tool: {} } }), undefined);
+  // Names written with characters a tool name cannot hold compare cleaned.
+  const dotted = { mcp_app: { ...metadata.mcp_app, server: "my.server", tool: { name: "show it" } } };
+  assert.equal(payloadFor("mcp__my_server__show_it", dotted)?.server, "my.server");
+  assert.equal(payloadFor("mcp__my.server__show it", dotted)?.server, "my.server");
+});
+
 test("the page is the HTML content of its resource, with its own ui metadata", () => {
   const meta = { csp: { connectDomains: ["https://api.example.com"] } };
   const read = {
@@ -80,7 +98,7 @@ test("only host sources reach the page's policy, and no network is the default",
       "https://cdn.example.com",
       "https://*.example.com",
       "wss://live.example.com:8443/socket",
-      "http://localhost:3000",
+      "https://8.8.8.8",
       "'unsafe-eval'",
       "*",
       "https://x.example; script-src *",
@@ -88,8 +106,19 @@ test("only host sources reach the page's policy, and no network is the default",
       "javascript:alert(1)",
       42,
     ]),
-    ["https://cdn.example.com", "https://*.example.com", "wss://live.example.com:8443/socket", "http://localhost:3000"],
+    ["https://cdn.example.com", "https://*.example.com", "wss://live.example.com:8443/socket", "https://8.8.8.8"],
   );
+  // Every host, plain http, and this computer or its network are refused.
+  for (const host of [
+    "https://*", "http://*", "wss://*", "https://*.com", "https://*.*", "https://cdn.*.example.com", "https://intranet",
+    "http://cdn.example.com", "ws://live.example.com",
+    "https://localhost", "https://localhost:3000", "https://app.localhost", "https://printer.local", "https://box.home.arpa",
+    "https://127.0.0.1", "http://127.0.0.1:8080", "https://127.1.2.3", "https://0.0.0.0", "https://[::1]", "https://[fe80::1]",
+    "https://10.0.0.5", "https://172.16.0.1", "https://172.31.255.255", "https://192.168.1.10", "https://169.254.169.254",
+    "https://100.64.0.1", "https://224.0.0.1", "https://localhost.",
+  ])
+    assert.deepEqual(sources([host]), [], host);
+  assert.deepEqual(sources(["https://172.32.0.1", "https://11.0.0.1"]), ["https://172.32.0.1", "https://11.0.0.1"]);
   assert.deepEqual(sources("https://cdn.example.com"), []);
   const closed = policy();
   for (const directive of [
@@ -252,6 +281,19 @@ test("the bridge refuses tool calls, context updates, downloads, other resources
   ]);
 });
 
+test("a message waits for the host's answer: inserted, or declined", async () => {
+  let answer!: (inserted: boolean) => void;
+  const { value } = host({ compose: () => new Promise<boolean>((resolve) => (answer = resolve)) });
+  const posted: Record<string, unknown>[] = [];
+  const bridge = createBridge(value, (message) => posted.push(message));
+  const pending = bridge.receive({ jsonrpc: "2.0", id: 1, method: "ui/message", params: { role: "user", content: [{ type: "text", text: "hi" }] } });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(posted, []);
+  answer(false);
+  await pending;
+  assert.deepEqual(posted, [{ jsonrpc: "2.0", id: 1, result: { isError: true } }]);
+});
+
 test("a failing host answers with an error, and the host's own requests get their answers", async () => {
   const { value } = host({ readResource: async () => { throw new Error("MCP server weather is not connected"); } });
   const { posted, bridge } = await exchange(value, [
@@ -274,12 +316,27 @@ test("a failing host answers with an error, and the host's own requests get thei
 test("the frame's host page is a separate document whose policy keeps the page in its frame", async () => {
   const page = await readFile(new URL("../src/renderer/public/mcp-app.html", import.meta.url), "utf8");
   const csp = page.match(/http-equiv="Content-Security-Policy" content="([^"]+)"/)?.[1] ?? "";
-  for (const directive of ["default-src 'none'", "frame-src 'none'", "object-src 'none'", "form-action 'none'", "base-uri 'none'"])
+  for (const directive of ["default-src 'none'", "frame-src 'none'", "object-src 'none'", "form-action 'none'", "base-uri 'none'", "connect-src https: wss:"])
     assert.ok(csp.split("; ").includes(directive), directive);
+  // Secure origins only, even before the page's own policy narrows them.
+  assert.ok(!/\b(http|ws):/.test(csp), csp);
   // The page frame runs scripts and forms only: an opaque origin, no popups, no top navigation.
   assert.match(page, /setAttribute\('sandbox', 'allow-scripts allow-forms'\)/);
   assert.ok(!page.includes("allow-same-origin"));
   const view = await readFile(new URL("../src/renderer/McpAppView.tsx", import.meta.url), "utf8");
   assert.match(view, /sandbox="allow-scripts allow-forms"/);
   assert.ok(!view.includes("allow-same-origin"));
+});
+
+test("the page and height caches keep only their most recent entries", () => {
+  const map = new Map<string, number>();
+  for (let index = 0; index < 5; index++) remember(map, `page ${index}`, index, 3);
+  assert.deepEqual([...map.keys()], ["page 2", "page 3", "page 4"]);
+  // Reading an entry keeps it; the oldest unread one goes next.
+  assert.equal(recall(map, "page 2"), 2);
+  remember(map, "page 5", 5, 3);
+  assert.deepEqual([...map.keys()], ["page 4", "page 2", "page 5"]);
+  remember(map, "page 4", 40, 3);
+  assert.deepEqual([...map.entries()], [["page 2", 2], ["page 5", 5], ["page 4", 40]]);
+  assert.equal(recall(map, "gone"), undefined);
 });
