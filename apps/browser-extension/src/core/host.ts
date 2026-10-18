@@ -55,6 +55,9 @@ interface Server extends ServerEntry {
 }
 
 const OPEN_LIMIT = "Close a browser tab before opening more (32 maximum).";
+/** A focused tab opened in the background of the window the user is using, for the model. */
+const OPENED_IN_BACKGROUND =
+  "The user is using this Chrome window, so the tab opened in the background; it is this chat's focused tab, and browser_snapshot and the other page tools work on it. A screenshot of it needs the user to show the tab.";
 /** A focused tab left in the background of the window the user is using, for the model. */
 const KEPT_IN_BACKGROUND =
   "The user is using this Chrome window, so the tab stays in the background; it is still this chat's focused tab, and browser_snapshot and the other page tools work on it. A screenshot of it needs the user to show the tab; calling browser_tabs_focus again will not bring it forward.";
@@ -106,6 +109,31 @@ export function createHost(options: HostOptions) {
   const publishing = new Set<string>();
 
   const control = { paused: false, stopped: false, focusedAt: 0 };
+  /**
+   * In the window the user is using, the agent may bring its tab forward only
+   * over a tab it opened itself and brought forward itself, in a window the
+   * user has not come back to since: never over a tab the user dragged into
+   * the chat, a page its tab opened that they may be typing into, or one they
+   * are looking at. These are the agent-opened tabs, the tab the agent last
+   * brought forward in each window and when, and when each window last
+   * gained focus.
+   */
+  const agentOpened = new Set<number>();
+  const brought = new Map<number, { tabId: number; at: number }>();
+  const windowFocusedAt = new Map<number, number>();
+  function agentsOwnFront(entry: ThreadRecord, windowId: number, shown: number | undefined) {
+    const front = brought.get(windowId);
+    return (
+      shown !== undefined &&
+      front?.tabId === shown &&
+      agentOpened.has(shown) &&
+      entry.tabs.some((tab) => tab.tabId === shown) &&
+      (windowFocusedAt.get(windowId) ?? -Infinity) < front.at
+    );
+  }
+  function broughtForward(windowId: number, tabId: number) {
+    brought.set(windowId, { tabId, at: platform.now() });
+  }
   let settings: UiSettings = { language: "en", label: "", cursor: true };
   let browserId = "";
   let browser = { name: "Chrome", version: "" };
@@ -428,8 +456,11 @@ export function createHost(options: HostOptions) {
       const live = await owned(entry, record);
       const focused = await platform.tabs.focusedWindow();
       const shown = focused === live.windowId ? await platform.tabs.activeTab(live.windowId) : undefined;
-      const plan = focusPlan(live, focused, shown !== undefined && entry.tabs.some((tab) => tab.tabId === shown));
-      if (plan === "activate") await platform.tabs.activate(record.tabId);
+      const plan = focusPlan(live, focused, agentsOwnFront(entry, live.windowId, shown));
+      if (plan === "activate") {
+        await platform.tabs.activate(record.tabId);
+        broughtForward(live.windowId, record.tabId);
+      }
       entry.focusedTabID = record.id;
       registry.save();
       return value(plan === "keep" ? { ...tabOf(record), note: KEPT_IN_BACKGROUND } : tabOf(record));
@@ -465,9 +496,18 @@ export function createHost(options: HostOptions) {
     focus: boolean,
     context: FetchContext | undefined,
     signal: AbortSignal,
-  ): Promise<Tab> {
+  ): Promise<Tab & { note?: string }> {
     if (entry.tabs.length >= MAX_TABS) throw new Error(OPEN_LIMIT);
-    const live = await platform.tabs.create({ url: "about:blank", active: focus });
+    // New tabs open in the window the user used last; when they are using it,
+    // a focused tab comes forward only where tabs.focus would bring it.
+    let active = focus;
+    if (focus) {
+      const focused = await platform.tabs.focusedWindow();
+      if (focused !== undefined) active = agentsOwnFront(entry, focused, await platform.tabs.activeTab(focused));
+    }
+    const live = await platform.tabs.create({ url: "about:blank", active });
+    agentOpened.add(live.id);
+    if (active) broughtForward(live.windowId, live.id);
     const record: TabRecord = {
       id: tabID(platform.uuid()),
       tabId: live.id,
@@ -496,7 +536,7 @@ export function createHost(options: HostOptions) {
       }
     }
     await sync(record);
-    return tabOf(record);
+    return focus && !active ? { ...tabOf(record), note: OPENED_IN_BACKGROUND } : tabOf(record);
   }
 
   async function page(
@@ -658,6 +698,7 @@ export function createHost(options: HostOptions) {
       void after(() => updated(tabId, change, tab));
     },
     tabRemoved(tabId) {
+      agentOpened.delete(tabId);
       void after(() => {
         if (closing.delete(tabId)) return;
         const owner = registry.owner(tabId);
@@ -665,6 +706,7 @@ export function createHost(options: HostOptions) {
       });
     },
     tabReplaced(added, removed) {
+      if (agentOpened.delete(removed)) agentOpened.add(added);
       void after(() => {
         pages.get(removed)?.dispose();
         pages.delete(removed);
@@ -675,6 +717,7 @@ export function createHost(options: HostOptions) {
     windowFocused(windowId) {
       if (windowId === undefined) return;
       control.focusedAt = platform.now();
+      windowFocusedAt.set(windowId, control.focusedAt);
       // Focus changes come in bursts; one status per second is plenty.
       statusTimer ??= setTimeout(() => {
         statusTimer = undefined;
