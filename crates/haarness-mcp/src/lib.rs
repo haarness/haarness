@@ -815,10 +815,32 @@ fn schema_identity(
     Some(hash.finalize().into())
 }
 
+/// Whether the model may call `tool`. An MCP App (`_meta.ui`, see
+/// <https://modelcontextprotocol.io/extensions/apps>) may mark a tool as one
+/// only its own page calls (`"visibility": ["app"]`); such a tool never
+/// reaches the model's tool list. A list naming neither `"model"` nor `"app"`
+/// (empty, malformed, or only values from a later spec) counts as omitted,
+/// which means both: hiding a tool because its server sent something unknown
+/// would be a silent, hard-to-trace loss.
+fn visible_to_model(tool: &rmcp::model::Tool) -> bool {
+    let Some(visibility) = tool
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("ui"))
+        .and_then(|ui| ui.get("visibility"))
+        .and_then(Value::as_array)
+    else {
+        return true;
+    };
+    let named = |value: &str| visibility.iter().any(|item| item.as_str() == Some(value));
+    named("model") || !named("app")
+}
+
 fn definitions(tools: &[rmcp::model::Tool]) -> Vec<ToolDefinition> {
     let limit = description_limit(std::env::var(DESCRIPTION_LIMIT_ENV).ok().as_deref());
     tools
         .iter()
+        .filter(|tool| visible_to_model(tool))
         .map(|tool| {
             let original = tool.description.as_deref().unwrap_or("MCP tool");
             let description = capped_description(original, limit);
@@ -2185,6 +2207,59 @@ mod tests {
         assert!(long.starts_with("éé"));
         // MCP requires an object root; a schema that leaves it implied gets it.
         assert_eq!(definitions[0].input_schema, json!({"type": "object"}));
+    }
+
+    #[test]
+    fn tools_only_an_mcp_app_calls_stay_out_of_the_model_tool_list() {
+        let tool = |name: &str, meta: Option<Value>| {
+            let mut tool = rmcp::model::Tool::new(
+                name.to_owned(),
+                name.to_owned(),
+                Arc::new(Default::default()),
+            );
+            tool.meta = meta.map(|meta| {
+                rmcp::model::MetaObject(meta.as_object().expect("meta is an object").clone())
+            });
+            tool
+        };
+        let tools = [
+            tool("plain", None),
+            tool("other_meta", Some(json!({"vendor": {"x": 1}}))),
+            tool(
+                "app_only",
+                Some(json!({"ui": {"resourceUri": "ui://x/view.html", "visibility": ["app"]}})),
+            ),
+            tool("model_only", Some(json!({"ui": {"visibility": ["model"]}}))),
+            tool(
+                "both",
+                Some(json!({"ui": {"visibility": ["app", "model"]}})),
+            ),
+            tool(
+                "widget",
+                Some(json!({"ui": {"resourceUri": "ui://x/view.html"}})),
+            ),
+            // Unknown or empty lists count as omitted: both.
+            tool("empty", Some(json!({"ui": {"visibility": []}}))),
+            tool("future", Some(json!({"ui": {"visibility": ["host"]}}))),
+            tool("malformed", Some(json!({"ui": {"visibility": "app"}}))),
+        ];
+        let names: Vec<_> = definitions(&tools)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "plain",
+                "other_meta",
+                "model_only",
+                "both",
+                "widget",
+                "empty",
+                "future",
+                "malformed"
+            ]
+        );
     }
 
     #[test]
