@@ -11,6 +11,7 @@ mod input_settings;
 mod insights;
 mod jsonconfig;
 mod layout;
+mod logs;
 mod management;
 mod marketplace;
 mod memory_settings;
@@ -287,6 +288,8 @@ enum Command {
         /// Print the last N lines of the newest log file.
         #[arg(long)]
         tail: Option<usize>,
+        #[command(subcommand)]
+        action: Option<LogsCommand>,
     },
     /// Install a checksum-verified release from Haarness Cloud.
     Upgrade(upgrade::UpgradeArgs),
@@ -1353,6 +1356,9 @@ async fn main() -> Result<()> {
         cli.trust_project.then_some(true)
     };
     let base_paths = Paths::new(cli.data_dir.as_deref())?;
+    // An edit of the global configuration asks a person; tell the
+    // permission engine which folder that is in this process.
+    haarness_core::set_global_config_dir(base_paths.config_dir().to_path_buf());
     // Analytics must not register workspaces, migrate databases, start daemons or load credentials.
     match &cli.command {
         Some(Command::Login(args)) => return account::login(args).await,
@@ -1412,15 +1418,20 @@ async fn main() -> Result<()> {
         None | Some(Command::Tui(_) | Command::Attach(_)) => otel::ProcessRole::Tui,
         _ => otel::ProcessRole::Cli,
     };
+    let command_name = cli.command.as_ref().map_or("tui", Command::name);
+    if let Some(level) = &cli.log_level {
+        // The workspace server this process starts logs at the same level.
+        let _ = REQUESTED_LOG_LEVEL.set(level.clone());
+    }
     let telemetry_guard = init_logging(
         &base_paths,
         cli.log_level.as_deref(),
         stderr_logs,
         file_logs,
         role,
+        command_name,
         !long_running && io::stderr().is_terminal(),
     )?;
-    let command_name = cli.command.as_ref().map_or("tui", Command::name);
     let workspace = cli
         .workspace
         .canonicalize()
@@ -1606,7 +1617,17 @@ async fn main() -> Result<()> {
             .await
         }
         Some(Command::Doctor) => doctor(&paths),
-        Some(Command::Logs { tail }) => logs_command(&paths, tail),
+        Some(Command::Logs { tail, action }) => match action {
+            None => logs_command(&paths, tail),
+            Some(LogsCommand::Level {
+                level,
+                window,
+                until_stopped,
+            }) => logs::level_command(&paths.data, level.as_deref(), window, until_stopped),
+            Some(LogsCommand::Export { output, full }) => {
+                logs::export_command(&paths.data, output, full)
+            }
+        },
         Some(Command::Upgrade(args)) => upgrade::run(args),
         }
     }
@@ -1614,6 +1635,31 @@ async fn main() -> Result<()> {
     .await;
     drop(telemetry_guard);
     outcome
+}
+
+#[derive(Subcommand)]
+enum LogsCommand {
+    /// Show the log level, raise it for every Haarness process on this
+    /// machine for a while, or stop a raised level.
+    Level {
+        /// trace, debug, info, warn or error; or stop.
+        level: Option<String>,
+        /// How long the level lasts, like 30m or 2h (default 30m, at most 4h).
+        #[arg(long = "for", value_parser = logs::parse_duration, conflicts_with = "until_stopped")]
+        window: Option<Duration>,
+        /// Keep the level until `haarness logs level stop`, across restarts.
+        #[arg(long)]
+        until_stopped: bool,
+    },
+    /// Pack the log files into a zip with known secret shapes removed.
+    Export {
+        /// Where to write the zip (default: haarness-logs-<time>.zip here).
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+        /// Pack the files as they are, removing nothing.
+        #[arg(long)]
+        full: bool,
+    },
 }
 
 impl Command {
@@ -2555,8 +2601,15 @@ fn remote_skill_roots(paths: &Paths, file_config: &FileConfig) -> Vec<PathBuf> {
                     roots.push(root);
                 }
             }
-            Ok(None) => tracing::warn!("config: remote skill index {url} lists no usable skills"),
-            Err(error) => tracing::warn!("config: skipped remote skill index {url}: {error}"),
+            Ok(None) => tracing::warn!(
+                "config: remote skill index {} lists no usable skills",
+                haarness_core::redact::url(url)
+            ),
+            Err(error) => tracing::warn!(
+                "config: skipped remote skill index {}: {}",
+                haarness_core::redact::url(url),
+                haarness_core::redact::urls_in(&error)
+            ),
         }
     }
     roots
@@ -9027,27 +9080,128 @@ impl Drop for TelemetryGuard {
     }
 }
 
+/// The `--log-level` this process was given, passed on to the workspace
+/// server it starts.
+static REQUESTED_LOG_LEVEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Each log line's time, then the process that wrote it: every process
+/// (the TUI, each workspace server, one-shot commands) writes the same daily
+/// file.
+struct ProcessStamp {
+    pid: u32,
+    role: &'static str,
+}
+
+impl tracing_subscriber::fmt::time::FormatTime for ProcessStamp {
+    fn format_time(
+        &self,
+        writer: &mut tracing_subscriber::fmt::format::Writer<'_>,
+    ) -> std::fmt::Result {
+        tracing_subscriber::fmt::time::SystemTime.format_time(writer)?;
+        write!(writer, " {} {}", self.pid, self.role)
+    }
+}
+
+/// A log writer that shows every URL in a line the way
+/// `haarness_core::redact::url` does. Haarness's own lines already hide
+/// credentials; this catches libraries (rmcp, reqwest) that log the address
+/// they could not reach with its query, which can hold an API key.
+struct RedactUrls<M>(M);
+
+impl<'a, M: tracing_subscriber::fmt::MakeWriter<'a>> tracing_subscriber::fmt::MakeWriter<'a>
+    for RedactUrls<M>
+{
+    type Writer = RedactedUrls<M::Writer>;
+    fn make_writer(&'a self) -> Self::Writer {
+        RedactedUrls(self.0.make_writer())
+    }
+}
+
+/// One event's writer for [`RedactUrls`]. The formatter writes a whole line
+/// at once, so a URL is never split across two writes.
+struct RedactedUrls<W>(W);
+
+impl<W: Write> Write for RedactedUrls<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match std::str::from_utf8(buf) {
+            Ok(text) if text.contains("://") => {
+                self.0.write_all(urls_between_escapes(text).as_bytes())?;
+            }
+            _ => self.0.write_all(buf)?,
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+/// `text` with its URLs shown as `haarness_core::redact::urls_in` shows them,
+/// looked for between terminal colour sequences: on a coloured terminal a URL
+/// right after `ESC[0m` would otherwise read as `0mhttps://…`, which is not a
+/// URL, and pass unredacted. The sequences are kept as they are.
+fn urls_between_escapes(text: &str) -> String {
+    if !text.contains('\u{1b}') {
+        return haarness_core::redact::urls_in(text).into_owned();
+    }
+    let mut shown = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('\u{1b}') {
+        shown.push_str(&haarness_core::redact::urls_in(&rest[..start]));
+        let sequence = &rest[start..];
+        // CSI: ESC [ parameters, then one final byte in @..~.
+        let end = if sequence.as_bytes().get(1) == Some(&b'[') {
+            sequence[2..]
+                .find(|character: char| ('@'..='~').contains(&character))
+                .map_or(sequence.len(), |index| index + 3)
+        } else {
+            sequence
+                .chars()
+                .nth(1)
+                .map_or(1, |next| 1 + next.len_utf8())
+        };
+        shown.push_str(&sequence[..end]);
+        rest = &sequence[end..];
+    }
+    shown.push_str(&haarness_core::redact::urls_in(rest));
+    shown
+}
+
 /// Rotating file logging (daily, under `<data>/logs/`), optional stderr
 /// streaming, and opt-in OTLP/HTTP trace export. The returned guard must live
 /// for the whole process so both asynchronous pipelines flush on shutdown.
+/// The log filters follow `haarness logs level` (see [`logs::watch`]).
 fn init_logging(
     paths: &Paths,
     level: Option<&str>,
     stderr_logs: bool,
     file_logs: bool,
     role: otel::ProcessRole,
+    command: &'static str,
     interactive: bool,
 ) -> Result<TelemetryGuard> {
     use tracing_subscriber::Layer as _;
     use tracing_subscriber::filter::FilterExt as _;
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
-    let log_filter = match level {
-        Some(level) => EnvFilter::new(haarness_filter(level)),
-        None => EnvFilter::try_from_env("HAARNESS_LOG")
-            .or_else(|_| EnvFilter::try_from_default_env())
-            .unwrap_or_else(|_| EnvFilter::new(haarness_filter("info"))),
+    // Kept as text too: a raised level (`haarness logs level`) is laid over
+    // these directives.
+    let directives = level.map(haarness_filter).unwrap_or_else(|| {
+        ["HAARNESS_LOG", "RUST_LOG"]
+            .into_iter()
+            .find_map(|key| {
+                std::env::var(key)
+                    .ok()
+                    .filter(|value| EnvFilter::try_new(value).is_ok())
+            })
+            .unwrap_or_else(|| haarness_filter("info"))
+    });
+    let log_filter = EnvFilter::new(&directives);
+    let stamp = || ProcessStamp {
+        pid: std::process::id(),
+        role: command,
     };
+    let mut reloads = Vec::new();
     let mut layers: Vec<
         Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>,
     > = Vec::new();
@@ -9056,23 +9210,29 @@ fn init_logging(
         fs::create_dir_all(&logs)?;
         let (file_writer, guard) =
             tracing_appender::non_blocking(tracing_appender::rolling::daily(&logs, "haarness.log"));
+        let (filter, reload) = tracing_subscriber::reload::Layer::new(log_filter.clone());
+        reloads.push(reload);
         layers.push(Box::new(
             tracing_subscriber::fmt::layer()
-                .with_writer(file_writer)
+                .with_writer(RedactUrls(file_writer))
                 .with_ansi(false)
-                .with_filter(log_filter.clone()),
+                .with_timer(stamp())
+                .with_filter(filter),
         ));
         Some(guard)
     } else {
         None
     };
     if stderr_logs {
+        let (filter, reload) = tracing_subscriber::reload::Layer::new(log_filter.clone());
+        reloads.push(reload);
         layers.push(Box::new(
             tracing_subscriber::fmt::layer()
-                .with_writer(io::stderr)
+                .with_writer(RedactUrls(io::stderr))
                 // Colour only for a terminal: not in files, pipes or journald.
                 .with_ansi(io::stderr().is_terminal())
-                .with_filter(log_filter),
+                .with_timer(stamp())
+                .with_filter(filter),
         ));
     }
     let otel::Tracing {
@@ -9102,6 +9262,13 @@ fn init_logging(
         .with(layers)
         .try_init()
         .context("initialize tracing subscriber")?;
+    logs::watch(
+        paths.data.clone(),
+        log_filter,
+        directives,
+        reloads,
+        HAARNESS_TARGETS,
+    );
     for notice in &notices {
         tracing::warn!("{notice}");
         if interactive {
@@ -9119,27 +9286,30 @@ fn init_logging(
 fn haarness_filter(level: &str) -> String {
     use std::fmt::Write as _;
     let mut filter = String::from("warn");
-    for name in [
-        "haarness",
-        "haarness_cli",
-        "haarness_core",
-        "haarness_language",
-        "haarness_server",
-        "haarness_providers",
-        "haarness_store",
-        "haarness_tui",
-        "haarness_mcp",
-        "haarness_opentui",
-        "haarness_pty",
-        "haarness_scheduler",
-        "haarness_workflow_catalog",
-        "haarness_workflows",
-        "haarness_workspaces",
-    ] {
+    for name in HAARNESS_TARGETS {
         let _ = write!(filter, ",{name}={level}");
     }
     filter
 }
+
+/// The log targets of the Haarness crates.
+const HAARNESS_TARGETS: &[&str] = &[
+    "haarness",
+    "haarness_cli",
+    "haarness_core",
+    "haarness_language",
+    "haarness_server",
+    "haarness_providers",
+    "haarness_store",
+    "haarness_tui",
+    "haarness_mcp",
+    "haarness_opentui",
+    "haarness_pty",
+    "haarness_scheduler",
+    "haarness_workflow_catalog",
+    "haarness_workflows",
+    "haarness_workspaces",
+];
 
 /// A count and its noun: `1 model`, `3 models`.
 fn plural(count: usize, one: &str, many: &str) -> String {
@@ -9983,6 +10153,12 @@ async fn ensure_workspace_server_at(
             if trust { "0" } else { "1" },
         )
         .args(yolo.then_some("--yolo"))
+        .args(
+            REQUESTED_LOG_LEVEL
+                .get()
+                .into_iter()
+                .flat_map(|level| ["--log-level", level.as_str()]),
+        )
         .arg("serve")
         .arg("--host")
         .arg(address.ip().to_string())
@@ -10229,6 +10405,149 @@ fn random_token() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn the_permission_engine_protects_the_global_configuration_the_cli_reads() {
+        use std::{
+            collections::HashMap,
+            ffi::OsString,
+            path::{Path, PathBuf},
+        };
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("haarness-global-config-{}", uuid::Uuid::now_v7()));
+        let home = root.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let path = |name: &str| root.join(name).into_os_string();
+        let cases: Vec<HashMap<&str, OsString>> = vec![
+            HashMap::from([("HOME", home.clone().into_os_string())]),
+            HashMap::from([
+                ("HOME", home.clone().into_os_string()),
+                ("XDG_CONFIG_HOME", path("xdg")),
+            ]),
+            HashMap::from([
+                ("HOME", home.clone().into_os_string()),
+                ("XDG_CONFIG_HOME", OsString::from("relative")),
+                ("HAARNESS_HOME", path("haarness-home")),
+            ]),
+            HashMap::from([
+                ("HOME", home.clone().into_os_string()),
+                ("HAARNESS_HOME", path("haarness-home")),
+                ("HAARNESS_DATA_DIR", path("data")),
+            ]),
+        ];
+        for vars in cases {
+            let env = |name: &str| vars.get(name).cloned();
+            // Where the CLI itself reads it: the data folder's `Paths`, or
+            // the layout from HOME, HAARNESS_HOME and XDG_CONFIG_HOME.
+            let expected = match env("HAARNESS_DATA_DIR") {
+                Some(data) => super::Paths::new(Some(Path::new(&data)))
+                    .unwrap()
+                    .config_dir()
+                    .to_path_buf(),
+                None => {
+                    let haarness_home = env("HAARNESS_HOME").map(PathBuf::from);
+                    super::layout::Layout::resolve(&home, haarness_home.as_deref(), |key| {
+                        env(key).map(PathBuf::from)
+                    })
+                    .unwrap()
+                    .config
+                }
+            };
+            assert_eq!(
+                haarness_core::global_config_dir_from(&env),
+                Some(expected),
+                "{vars:?}"
+            );
+        }
+        // Dotfiles kept elsewhere and linked in, file by file or the whole
+        // folder, as stow does: their real files are protected too.
+        let dotfiles = root.join("dotfiles/haarness");
+        fs::create_dir_all(dotfiles.join("extensions")).unwrap();
+        for name in ["config.toml", "notes.md", "extensions/approve.js"] {
+            fs::write(dotfiles.join(name), "x").unwrap();
+        }
+        let config = home.join(".config/haarness");
+        fs::create_dir_all(&config).unwrap();
+        std::os::unix::fs::symlink(dotfiles.join("config.toml"), config.join("config.toml"))
+            .unwrap();
+        std::os::unix::fs::symlink(dotfiles.join("extensions"), config.join("extensions")).unwrap();
+        let folded = root.join("folded");
+        std::os::unix::fs::symlink(&dotfiles, &folded).unwrap();
+        for global in [&config, &folded] {
+            for name in ["config.toml", "extensions/approve.js"] {
+                assert!(
+                    haarness_core::is_global_config_path(&dotfiles.join(name), global),
+                    "{name} through {}",
+                    global.display()
+                );
+            }
+            assert!(!haarness_core::is_global_config_path(
+                &dotfiles.join("notes.md"),
+                global
+            ));
+        }
+        assert!(haarness_core::is_global_config_path(
+            &folded.join("config.toml"),
+            &folded
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn log_lines_never_carry_a_credential_in_a_url() {
+        use std::io::Write as _;
+        use tracing_subscriber::fmt::MakeWriter as _;
+        struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = {
+            let written = written.clone();
+            move || Sink(written.clone())
+        };
+        let writer = super::RedactUrls(sink);
+        let line = "ERROR rmcp::transport::worker: Client(reqwest::Error { url: \"http://u:PRIVATE_SUFFIX@127.0.0.1:9/mcp?api_key=PRIVATE_SUFFIX&region=eu\" })\n";
+        writer.make_writer().write_all(line.as_bytes()).unwrap();
+        writer
+            .make_writer()
+            .write_all(b"plain line, no address\n")
+            .unwrap();
+        let written = String::from_utf8(written.lock().unwrap().clone()).unwrap();
+        assert!(!written.contains("PRIVATE_SUFFIX"), "{written}");
+        assert!(
+            written.contains("\"http://<redacted>@127.0.0.1:9/mcp?api_key=<redacted>&region=eu\""),
+            "{written}"
+        );
+        assert!(written.ends_with("plain line, no address\n"), "{written}");
+    }
+
+    #[test]
+    fn a_coloured_log_line_hides_a_url_right_after_a_colour_reset() {
+        // How the stderr formatter colours a field: the URL follows `ESC[0m`.
+        let line = "\u{1b}[2mERROR\u{1b}[0m url=\u{1b}[3m\u{1b}[0mhttps://u:PRIVATE_SUFFIX@host/x?api_key=PRIVATE_SUFFIX \u{1b}[1mdone\u{1b}[0m\n";
+        let shown = super::urls_between_escapes(line);
+        assert!(!shown.contains("PRIVATE_SUFFIX"), "{shown:?}");
+        assert!(
+            shown.contains(
+                "\u{1b}[0mhttps://<redacted>@host/x?api_key=<redacted> \u{1b}[1mdone\u{1b}[0m\n"
+            ),
+            "the colours stay: {shown:?}"
+        );
+        assert_eq!(
+            super::urls_between_escapes("no colour, no URL"),
+            "no colour, no URL"
+        );
+    }
+
     #[test]
     fn session_archives_are_written_whole_private_and_never_through_a_link() {
         let root = std::env::temp_dir().join(format!("haarness-archive-{}", uuid::Uuid::now_v7()));

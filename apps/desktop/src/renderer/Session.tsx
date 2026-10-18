@@ -69,12 +69,21 @@ import { isTextEntry, typingElsewhere } from "./text-entry";
 import { Markdown } from "./Markdown";
 import { ConversationOutline } from "./ConversationOutline";
 import { promptTitle, readingMark } from "./outline-layout";
+import {
+  keyPlace,
+  movesPrompts,
+  overlayOpen,
+  promptTarget,
+  type PromptMove,
+} from "./keyboard-nav";
 import { MenuButton, type MenuAction } from "./MenuButton";
+import { ScreenshotPicker } from "./ScreenshotPicker";
+import { Portal } from "solid-js/web";
 import { isWorktree, locationName } from "../projects";
 import { createWorktree } from "./worktrees";
 import { ChangePreview, ToolActivity } from "./ToolActivity";
 import { Mark } from "./brand";
-import { matchesShortcut, shortcutText } from "./search";
+import { matchesShortcut, shortcutLabel, shortcutText } from "./search";
 import {
   describeTool,
   errorRecovery,
@@ -213,6 +222,10 @@ export function Session() {
     [effort, setEffort] = createSignal(""),
     [follow, setFollow] = createSignal(true);
   const attachments = () => app.attachmentDraft(app.draftKey());
+  /** The draft the open Screenshots dialog adds to, chosen when it opened,
+   * and the token main gave the Attach menu it was chosen in. */
+  const [screenshotsFor, setScreenshotsFor] = createSignal<{ key: string; token: Promise<string | null> }>();
+  let screenshotMenu: Promise<string | null> | undefined;
   const setAttachments = (value: Attachment[] | ((items: Attachment[]) => Attachment[])) =>
     app.setAttachmentDraft(app.draftKey(), value);
   const fileDrop = createFileDrop(
@@ -1017,6 +1030,73 @@ export function Session() {
     setReadingPrompt(prompt.id);
     virtual.scrollToIndex(prompt.index, { align: "start" });
   }
+  /** The prompt keys: a step from the prompt being read, either end, or
+   * back to following the newest output. False when there is nowhere to go. */
+  function movePrompt(move: PromptMove) {
+    const prompts = outline();
+    const reading = prompts.findIndex((prompt) => prompt.id === readingPrompt());
+    const target = promptTarget(move, prompts.length, reading, follow());
+    if (target === undefined) return false;
+    if (target === "latest") {
+      setFollow(true);
+      followLatest();
+    } else jumpToPrompt(target);
+    return true;
+  }
+  onMount(() => {
+    const keys = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || state.panel !== "chat")
+        return;
+      const { promptPrev, promptNext, promptFirst, promptLast } =
+        state.preferences.shortcuts;
+      const move = (
+        [
+          ["previous", promptPrev],
+          ["next", promptNext],
+          ["first", promptFirst],
+          ["last", promptLast],
+        ] as const
+      ).find(
+        ([, keys]) => keys && matchesShortcut(event, keys, state.platform),
+      )?.[0];
+      if (
+        !move ||
+        !movesPrompts(
+          keyPlace(document.activeElement, draft(), overlayOpen(document)),
+        )
+      )
+        return;
+      if (movePrompt(move)) event.preventDefault();
+    };
+    window.addEventListener("keydown", keys);
+    onCleanup(() => window.removeEventListener("keydown", keys));
+  });
+  app.registerSearch("prompts", () =>
+    outline().length
+      ? (
+          [
+            ["prompt-previous", "Previous prompt", "promptPrev", "move-up", "previous"],
+            ["prompt-next", "Next prompt", "promptNext", "move-down", "next"],
+            ["prompt-first", "First prompt", "promptFirst", "up", "first"],
+            ["prompt-latest", "Jump to latest", "promptLast", "jump", "last"],
+          ] as const
+        ).map(([key, name, shortcut, icon, move]) => ({
+          key,
+          group: "Chat actions",
+          name: t(name),
+          keywords: "message navigate scroll conversation",
+          icon,
+          hint: shortcutLabel(
+            state.preferences.shortcuts[shortcut] ?? "",
+            state.platform,
+          ),
+          action: () => {
+            set("panel", "chat");
+            movePrompt(move);
+          },
+        }))
+      : [],
+  );
   // The outline's lane sits over the transcript, so wheel input it does not
   // use scrolls the conversation here, as the user's own gesture.
   function outlineWheel(event: WheelEvent) {
@@ -1191,6 +1271,21 @@ export function Session() {
     stream()?.reasoning;
     virtual.getTotalSize();
     followLatest();
+  });
+  // A message an MCP App page asks to send goes into the message box, after
+  // what is already there; the person sends it, or not.
+  onMount(() => {
+    const appMessage = (event: Event) => {
+      const detail = (event as CustomEvent<{ text: string; accepted: boolean }>).detail;
+      if (!project() || !editable() || !composer?.isConnected || composer.disabled) return;
+      const current = draft();
+      change(current.trim() ? current.trimEnd() + "\n\n" + detail.text : detail.text);
+      composer.focus({ preventScroll: true });
+      composer.setSelectionRange(composer.value.length, composer.value.length);
+      detail.accepted = true;
+    };
+    scrolling.addEventListener("mcp-app-message", appMessage);
+    onCleanup(() => scrolling.removeEventListener("mcp-app-message", appMessage));
   });
   /** Text at the message box's caret, as typing it would: Cmd+Z takes it
    * out again. */
@@ -2055,18 +2150,54 @@ export function Session() {
               </Show>
               <footer>
                 <div class="composer-leading">
-                  <Button
+                  <MenuButton
+                    label={t("Attach")}
                     icon="plus"
-                    label={t("Attach files")}
                     disabled={!project()}
-                    onClick={() =>
-                      app.run(async () => {
-                        const key = app.draftKey();
-                        const values = await window.haarness.attachments();
-                        await app.addAttachments(key, relabelAttachments(values));
-                      })
-                    }
+                    // Main lists screenshots for a choice in this menu only.
+                    onOpen={() => {
+                      screenshotMenu = window.haarness.screenshotMenu().catch(() => null);
+                    }}
+                    items={[
+                      {
+                        label: t("Attach files"),
+                        icon: "attach",
+                        run: () =>
+                          void app.run(async () => {
+                            const key = app.draftKey();
+                            const values = await window.haarness.attachments();
+                            await app.addAttachments(key, relabelAttachments(values));
+                          }),
+                      },
+                      {
+                        label: t("Attach screenshots"),
+                        icon: "image",
+                        run: () => {
+                          setScreenshotsFor({ key: app.draftKey(), token: screenshotMenu ?? Promise.resolve(null) });
+                          screenshotMenu = undefined;
+                        },
+                      },
+                    ]}
                   />
+                  {/* In the body, so the composer's own styles stay off the dialog. */}
+                  <Show when={screenshotsFor()}>
+                    {(open) => (
+                      <Portal>
+                        <ScreenshotPicker
+                          token={open().token}
+                          close={(values) => {
+                            // Read before closing: the dialog's draft key goes with it.
+                            const target = open().key;
+                            setScreenshotsFor(undefined);
+                            if (values?.length)
+                              void app.run(() => app.addAttachments(target, relabelAttachments(values)));
+                            if (composer?.isConnected && !composer.disabled)
+                              composer.focus({ preventScroll: true });
+                          }}
+                        />
+                      </Portal>
+                    )}
+                  </Show>
                   <Show when={state.connection}>
                     {/* The name carries the mode it shows, so a voice user
                         can say what they see (WCAG 2.5.3); a name that changes
@@ -2368,6 +2499,7 @@ function Message(props: {
                   name={tool().name}
                   args={tool().arguments}
                   result={result()}
+                  id={props.item.id}
                   expanded={!app.state.preferences.compactTools}
                   waiting={app.state.permissions.some(
                     (permission) =>

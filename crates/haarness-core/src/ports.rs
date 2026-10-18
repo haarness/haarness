@@ -72,6 +72,31 @@ impl CoreError {
 
 pub type CoreResult<T> = Result<T, CoreError>;
 
+/// A subagent launched (or moved) into the background whose run ended
+/// without its result reaching the chat that launched it: the server
+/// stopped while it ran, or stopped between its end and the delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrandedTask {
+    pub parent_thread_id: ThreadId,
+    /// The turn that launched it, which holds its task checkpoints.
+    pub parent_turn_id: Option<TurnId>,
+    pub call_id: String,
+    pub child_thread_id: ThreadId,
+    pub child_turn_id: TurnId,
+    /// The task's state as recovery recorded it: `done`, `failed` or
+    /// `interrupted`.
+    pub state: String,
+    /// The `task` call's description, or the subagent chat's title.
+    pub description: String,
+    /// The subagent's last reply in that run, when it gave one.
+    pub reply: Option<String>,
+    /// Why its run failed, when it did.
+    pub error: Option<String>,
+}
+
+/// What recovery records in the chat that launched a [`StrandedTask`].
+pub type StrandedReport<'a> = dyn Fn(&StrandedTask) -> Vec<ItemData> + Send + Sync + 'a;
+
 #[async_trait]
 pub trait ThreadRepository: Send + Sync {
     /// Export one root thread and its complete descendant tree as a portable
@@ -237,6 +262,19 @@ pub trait ThreadRepository: Send + Sync {
         workspace: &str,
     ) -> CoreResult<Vec<crate::PermissionRule>>;
     async fn recover_interrupted(&self) -> CoreResult<u64>;
+    /// [`Self::recover_interrupted`], also recording in each launching chat
+    /// the background subagents whose result it is still owed: `report`'s
+    /// items are written with the task's final checkpoint, in one step, so a
+    /// crash or failure cannot record one without the other. A chat that
+    /// already holds the result, or is archived, gets none. Returns the items
+    /// written. A repository that does not track task checkpoints records
+    /// none.
+    async fn recover_interrupted_tasks(
+        &self,
+        _report: &StrandedReport<'_>,
+    ) -> CoreResult<(u64, Vec<Item>)> {
+        Ok((self.recover_interrupted().await?, Vec::new()))
+    }
     /// Standing goal + loop configuration for a thread (absent by default).
     async fn thread_extras(
         &self,
@@ -384,6 +422,11 @@ pub enum ProviderEvent {
         provider_metadata: Value,
     },
     StructuredOutput(Value),
+    /// The response began content the adapter holds back until it is whole:
+    /// a tool call's arguments, or structured output. Only the request's
+    /// first-token clock reads it; nothing is stored or shown, and it does
+    /// not count as an answer for the retry rules.
+    ContentStarted,
     /// One request's token counts. `input_tokens` is the whole prompt, cache reads and writes included (`OpenAI`'s
     /// convention; Anthropic and Bedrock adapters add their separate cache counters in), so it measures the context
     /// for compaction and the context meter. `cache_read_tokens` and `cache_write_tokens` say how much of it was
@@ -549,6 +592,11 @@ pub trait ToolInvoker: Send + Sync {
     /// Resolve a provider namespace before policy checks or composite planning.
     fn resolve_name(&self, name: &str) -> String {
         name.to_owned()
+    }
+    /// The rules this call's agent reads files under, so a search can leave
+    /// out a file a `read` rule denies instead of returning its lines or name.
+    fn read_rules(&self) -> Option<crate::PermissionEngine> {
+        None
     }
     async fn invoke(&self, name: &str, arguments: Value) -> CoreResult<ToolOutput>;
     async fn definition_shell(&self, command: String) -> CoreResult<ToolOutput> {

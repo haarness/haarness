@@ -5,6 +5,9 @@ export interface PtyControl {
   start: number;
   end: number;
   truncated: boolean;
+  /** On a truncated replay: the sequences that restore the terminal modes
+   * the dropped output left on, to write to a reset terminal first. */
+  modes?: string;
 }
 export type PtyMessage = Uint8Array | PtyControl;
 /** One PTY socket. Closing it only detaches; deletePty terminates the process. */

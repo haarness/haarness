@@ -1,4 +1,5 @@
 import { test as base, expect, _electron, type ElectronApplication, type Page } from "@playwright/test";
+import { attachFiles } from "./fixtures/composer";
 import { mkdtemp, mkdir, realpath, writeFile, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -343,7 +344,7 @@ test("audit: Tab moves focus everywhere, agent keys stay in the message box and 
 test("audit: unsent image drafts survive reload and project switching and removal stays removed", async ({ desktop }) => {
   const { app, page, a } = desktop;
   await page.getByRole("textbox", { name: "Message", exact: true }).fill("Retained draft");
-  await choose(app, join(a, "proof.png")); await button(page, "Attach files").click();
+  await choose(app, join(a, "proof.png")); await attachFiles(page);
   await expect(button(page, "Remove proof.png")).toBeVisible();
   await page.reload(); await expect(button(page, "Remove proof.png")).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Message", exact: true })).toHaveValue("Retained draft");
@@ -404,7 +405,7 @@ test("audit: reads and searches started in a previous workspace cannot publish a
 test("audit: attachment drafts larger than preferences storage survive an immediate reload", async ({ desktop: { app, page, a } }) => {
   const path = join(a, "large.png");
   await writeFile(path, Buffer.alloc(3 * 1024 * 1024, 7));
-  await choose(app, path); await button(page, "Attach files").click();
+  await choose(app, path); await attachFiles(page);
   await expect(button(page, "Remove large.png")).toBeVisible(); await page.reload();
   await expect(button(page, "Remove large.png")).toBeVisible();
   const value = await page.evaluate(async () => {

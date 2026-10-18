@@ -3,7 +3,7 @@
 from __future__ import annotations
 import json
 from typing import Iterator, AsyncIterator, Literal, cast
-from typing_extensions import Self, TypedDict
+from typing_extensions import NotRequired, Self, TypedDict
 from websockets.sync.client import connect as sync_connect
 from websockets.asyncio.client import connect as async_connect, ClientConnection
 from websockets.exceptions import ConnectionClosedOK
@@ -15,6 +15,9 @@ class PtyControl(TypedDict):
     start: int
     end: int
     truncated: bool
+    # On a truncated replay: the sequences that restore the terminal modes the
+    # dropped output left on, to write to a reset terminal first.
+    modes: NotRequired[str]
 
 
 class PtyConnection:

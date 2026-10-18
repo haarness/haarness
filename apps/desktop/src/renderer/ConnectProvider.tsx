@@ -249,7 +249,7 @@ export function ConnectProvider(props: {
     } finally {
       setBusy(false);
     }
-    app.notify(t("{name} is connected").replace("{name}", provider.name));
+    app.notify(t("{name} is connected", { name: provider.name }));
     close();
   }
 
@@ -278,8 +278,8 @@ export function ConnectProvider(props: {
     if (current.kind === "pick")
       return props.onboarding ? t("Welcome to Haarness") : t("Connect a provider");
     if (current.kind === "login")
-      return t("Sign in to {name}").replace("{name}", current.provider.name);
-    return t("Connect {name}").replace("{name}", current.provider.name);
+      return t("Sign in to {name}", { name: current.provider.name });
+    return t("Connect {name}", { name: current.provider.name });
   });
   const subtitle = createMemo(() => {
     const current = step();
@@ -304,7 +304,7 @@ export function ConnectProvider(props: {
       return [
         t("Connected"),
         how ? t(how) : "",
-        models === 1 ? t("1 model") : models ? t("{count} models").replace("{count}", String(models)) : "",
+        models === 1 ? t("1 model") : models ? t("{count} models", { count: models }) : "",
       ]
         .filter(Boolean)
         .join(" · ");

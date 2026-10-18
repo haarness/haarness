@@ -546,6 +546,75 @@ html[data-order-dragging] * {
 .session-row:focus-within .session-waiting {
   display: none;
 }
+/* Select chats: a tick box in place of the status dot (rows keep their own
+   backgrounds, so the open chat still stands out), and the bar of actions
+   above the footer. */
+/* Drawn like the app's checkboxes (base.css). */
+.pick-box {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  display: inline-grid;
+  place-content: center;
+  border: 1px solid color-mix(in srgb, var(--muted) 55%, transparent);
+  border-radius: var(--r-xs);
+}
+.pick-box::after {
+  content: "";
+  width: 9px;
+  height: 9px;
+  transform: scale(0);
+  transition: transform var(--fast) var(--ease);
+  background: var(--page);
+  clip-path: polygon(14% 46%, 0 60%, 38% 100%, 100% 24%, 86% 10%, 38% 71%);
+}
+.pick-box.picked {
+  background: var(--primary);
+  border-color: var(--primary);
+}
+.pick-box.picked::after {
+  transform: scale(1);
+}
+.pick-tree {
+  border: 0;
+  min-height: 0;
+  width: 26px;
+  height: 28px;
+  padding: 0;
+  flex: none;
+}
+.selection-bar {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  border-top: 1px solid var(--hairline);
+  padding: var(--s2) var(--s1) 0;
+}
+.selection-bar-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s1);
+}
+.selection-count {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--ui-sm);
+  color: var(--muted);
+}
+.selection-bar-row:last-child > button {
+  flex: 1;
+}
+/* When the chat was last active: quiet, narrow, and in figures that keep
+   their width as they count up. */
+.session-age {
+  font-size: var(--ui-xs);
+  color: var(--muted);
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 /* Row-trailing controls share one column with the project and checkout menus. */
 .session-row > .icon-button {
   width: 26px;
@@ -955,15 +1024,89 @@ html[dir="rtl"] :is(.session-title, .session-bar-name) {
   width: 24px;
   height: 24px;
 }
+.terminal-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
 .terminal-view {
   flex: 1;
   min-height: 0;
   padding: var(--s2) var(--s3);
   background: var(--page);
+  transition: opacity var(--fast) var(--ease);
 }
 .terminal-view .xterm {
   height: 100%;
 }
+/* Cut off from its shell: what the terminal still shows is out of date. */
+.terminal-stage[data-link="disconnected"] .terminal-view {
+  opacity: 0.6;
+}
+.terminal-reconnecting {
+  position: absolute;
+  top: var(--s2);
+  inset-inline-end: var(--s3);
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  height: 24px;
+  padding: 0 var(--s2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-pill);
+  background: var(--raised);
+  box-shadow: var(--shadow-1);
+  color: var(--muted);
+  font-size: var(--ui-sm);
+  pointer-events: none;
+}
+/* A banner over the top of the terminal: the output stays visible and
+   selectable around it, so it can still be copied. */
+.terminal-disconnected {
+  position: absolute;
+  top: var(--s2);
+  inset-inline: var(--s3);
+  z-index: 1;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+.terminal-disconnected > div {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  column-gap: var(--s3);
+  max-width: 620px;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  background: var(--raised);
+  box-shadow: var(--shadow-1);
+  font-size: var(--ui);
+  pointer-events: auto;
+}
+.terminal-disconnected .icon {
+  grid-row: span 2;
+  color: var(--danger);
+}
+.terminal-disconnected strong {
+  color: var(--text);
+}
+.terminal-disconnected p {
+  grid-column: 2;
+  margin: 0;
+  color: var(--muted);
+}
+.terminal-disconnected > div > div {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  display: flex;
+  gap: var(--s2);
+}
+
 .terminal-empty {
   flex: 1;
   display: flex;

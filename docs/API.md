@@ -51,6 +51,7 @@ Primary resources:
 - `GET /v1/threads/{id}/archive[?sanitize=true]`; `POST /v1/session-archives/import`
 - `GET|POST /v1/ptys`; `GET|PATCH|DELETE /v1/ptys/{id}`; WebSocket `GET /v1/ptys/{id}/connect?cursor=N`
 - `POST /v1/threads/{id}/fork`, `/turns`, `/commands`, `/compact`
+  A turn needs text or an attachment: `/turns` refuses text that is empty or only whitespace with neither an attachment nor a `command` (`400`, "text or an attachment is required"), as queued input always did, and the `task` tool refuses a blank `prompt`. Claude refuses whitespace-only text, and a blank message kept in the chat would fail every later turn. For the same reason, a reply that is only whitespace (the line breaks a model can stream before a tool call) is kept in the chat but never sent back to a model, and the Anthropic and Bedrock adapters leave out blank text next to an image or a document (Bedrock, which needs text beside a document, gets `(document attached)`, and an empty tool result reads `(no output)`).
 - `GET /v1/threads/{id}/items`, `/todos`, `/active`, `/background`, `/pending-question`, `/goal`
 - `GET /v1/threads/{id}/activity` → `{"activeTurn": Turn | null, "background": N, "lastTurn": Turn | null}` (all keys always present; `404` for an unknown chat): the turn running in the chat, how many background results it is still owed, and its newest turn by creation whatever its status (null for a chat without turns). `lastTurn` is read after the other two, so a consumer holding an earlier turn can tell a chat that went quiet with that turn as its newest (it was stopped while idle) from one where a follow-up turn started and ended between two reads. Work a chat started in the background (child agents launched with `background: true` or moved there, workflow runs started without waiting) delivers its result into that chat when it ends, starting a new turn when the chat is idle; work a stop cancelled owes nothing. A chat is quiet, and its last root turn is where it stopped, only with no active turn and `background` 0. A published chat's scope may read it for every chat in its tree. A background workflow run that is paused owes nothing until it is resumed. Servers before 2026-10-17 answer `404`; fall back to `/active` there.
 - `GET /v1/threads/{id}/diff` for the last completed turn that changed files and is not undone; `POST /v1/threads/{id}/revert` and `/unrevert` for stepwise undo/redo
@@ -147,7 +148,17 @@ shell. Patch changes the title and/or resizes using both dimensions. A WebSocket
 client sends raw input as binary frames and receives raw output as binary
 frames. JSON text control frames mark replay boundaries and acknowledge the
 monotonic byte `cursor`; reconnecting with the last acknowledged cursor replays
-the missing range from a bounded two-megabyte buffer. Lifecycle changes also
+the missing range from a bounded two-megabyte buffer; leaving `cursor` out is
+the same as 0. A cursor older than the buffer gets `truncated: true` and a
+replay that starts where the buffer does when that is a line start, else at
+the first whole line still buffered (or, without a line break within 64 KiB,
+the first character outside an escape sequence; a string such as an image or
+a clipboard copy is skipped to its end), whose offset is `start`; `modes` then
+holds the escape sequences that restore the terminal modes the dropped output
+left on (alternate screen, application cursor keys and keypad, mouse tracking
+and encoding, focus reports, bracketed paste, a hidden cursor, autowrap off,
+insert mode). A client resets its terminal and applies `modes` before the
+replay; clients that predate the field ignore it. Lifecycle changes also
 publish `pty.created`, `pty.updated`, `pty.exited`, and `pty.deleted` SSE events.
 Disconnecting a socket never terminates its process. DELETE does, as does
 graceful server shutdown. A configuration hot reload (a provider connected,
@@ -200,6 +211,27 @@ Terminal state is persisted as a `TaskState` transcript item and a background
 completion is queued back into the parent automatically after its launch tool
 result is durable. The registry itself is process-local: restart recovery
 interrupts orphaned work rather than replaying it.
+
+A background subagent the server stopped (a crash, `serve --stop`, an upgrade)
+is not resumed, but the chat that launched it is told on the next start, once.
+Nothing starts by itself after a restart, in any chat, scheduled ones
+included: the result is recorded as a hidden user message the model reads
+with the next message the person sends, `<task id="…" state="error">` saying
+Haarness restarted before the task finished and that it can be continued with
+its `task_id` once what it changed has been checked (`state="completed"` with
+the result for a subagent that finished before its result was delivered).
+Beside it an `error` item tells the person, in every app: “Haarness restarted
+before the background task “…” finished. It was not resumed; your next
+message tells the agent, which can continue it.” Both are written in the
+same database step as the task's final checkpoint, so a crash or an error
+during recovery cannot record one without the other. A chat that already
+holds the result (its own checkpoint was lost, or a late one followed the
+delivery) is not told again, and an archived chat is not told. A shutdown no
+longer records such a task as `cancelled`: its row reads `interrupted` after
+the restart. A result that ended before the shutdown but was still waiting
+for its chat (the launching round had not finished) is recorded the same way
+on the next start. Foreground subagents stop with the turn that waits for
+them, which already says so.
 
 The server is the sole execution owner. Graceful server shutdown interrupts
 active turns/workflows into durable terminal states after a bounded drain.

@@ -2508,6 +2508,12 @@ impl App {
                         "Last request input: {latest} tokens (includes provider context)"
                     ));
                 }
+                if let Some(pace) = self.request_pace_label() {
+                    lines.push(
+                        self.language
+                            .format("Last request: {details}", &[("details", &pace)]),
+                    );
+                }
                 lines.push(format!("Conversation items: {}", self.items.len()));
                 if let Some(descendants) = usage.get("descendants") {
                     lines.push(format!("Descendant sessions: {}", descendants["count"]));

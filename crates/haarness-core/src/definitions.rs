@@ -8,29 +8,31 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// The frontmatter of a definition file and the body after it. The block
+/// is YAML between two `---` lines (`---yaml` or `---yml` also opens one) or
+/// a JSON object after `---json`. Frontmatter is never run as code: a block
+/// that opens with any other language (`---js`, `---coffee`) fails, so the
+/// file is skipped rather than loaded without the fields it declares. A
+/// file whose first line is not a `---` fence has no frontmatter.
 pub fn markdown(content: &str) -> CoreResult<(BTreeMap<String, String>, &str)> {
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
-    let Some(rest) = content
-        .strip_prefix("---\n")
-        .or_else(|| content.strip_prefix("---\r\n"))
-    else {
+    let Some((language, rest)) = opening_fence(content) else {
         return Ok((BTreeMap::new(), content));
+    };
+    let json = match language.to_ascii_lowercase().as_str() {
+        "" | "yaml" | "yml" => false,
+        "json" => true,
+        _ => return Err(CoreError::Invalid(refused_language(language))),
     };
     let mut offset = 0;
     for line in rest.split_inclusive('\n') {
-        if line.trim_end_matches(['\r', '\n']) == "---" {
+        if line.trim_end() == "---" {
             let front = &rest[..offset];
-            let docs = yaml_rust::YamlLoader::load_from_str(front)
-                .or_else(|original| {
-                    // Anthropic's legacy public agents put unindented XML examples
-                    // in description. Repair only that scalar; malformed policy
-                    // fields still fail YAML parsing instead of becoming permissive.
-                    yaml_rust::YamlLoader::load_from_str(&legacy_description(front))
-                        .or_else(|_| yaml_rust::YamlLoader::load_from_str(&text_values(front)))
-                        .map_err(|_| original)
-                })
-                .map_err(|e| CoreError::Invalid(format!("invalid definition frontmatter: {e}")))?;
-            let value = docs.first().map(yaml_json).unwrap_or(Value::Null);
+            let value = if json {
+                json_front(front)?
+            } else {
+                yaml_front(front)?
+            };
             if !value.is_object() && !value.is_null() {
                 return Err(CoreError::Invalid(
                     "definition frontmatter must be a mapping".into(),
@@ -49,6 +51,54 @@ pub fn markdown(content: &str) -> CoreResult<(BTreeMap<String, String>, &str)> {
     Err(CoreError::Invalid(
         "definition frontmatter is missing its closing delimiter".into(),
     ))
+}
+
+/// The language named after an opening `---` and the text after that line,
+/// when the first line is a fence: `---`, then an optional language, then
+/// optional spaces. A line of four or more dashes is a horizontal rule.
+fn opening_fence(content: &str) -> Option<(&str, &str)> {
+    let (line, rest) = content.split_once('\n')?;
+    let language = line.strip_prefix("---")?;
+    if language.starts_with('-') {
+        return None;
+    }
+    Some((language.trim(), rest))
+}
+
+/// Why a block in `language` is refused. The rest of the opening line can
+/// hold anything, so it is shown clipped and redacted.
+fn refused_language(language: &str) -> String {
+    let lower = language.to_ascii_lowercase();
+    if matches!(lower.as_str(), "js" | "javascript") {
+        return "JavaScript frontmatter is not supported; write it as YAML or JSON".into();
+    }
+    let clipped: String = language.chars().take(32).collect();
+    format!(
+        "frontmatter language \"{}\" is not supported; write it as YAML or JSON",
+        crate::redact::log_text(&clipped, 48)
+    )
+}
+
+fn yaml_front(front: &str) -> CoreResult<Value> {
+    let docs = yaml_rust::YamlLoader::load_from_str(front)
+        .or_else(|original| {
+            // Anthropic's legacy public agents put unindented XML examples
+            // in description. Repair only that scalar; malformed policy
+            // fields still fail YAML parsing instead of becoming permissive.
+            yaml_rust::YamlLoader::load_from_str(&legacy_description(front))
+                .or_else(|_| yaml_rust::YamlLoader::load_from_str(&text_values(front)))
+                .map_err(|_| original)
+        })
+        .map_err(|e| CoreError::Invalid(format!("invalid definition frontmatter: {e}")))?;
+    Ok(docs.first().map(yaml_json).unwrap_or(Value::Null))
+}
+
+fn json_front(front: &str) -> CoreResult<Value> {
+    if front.trim().is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_str(front)
+        .map_err(|e| CoreError::Invalid(format!("invalid definition frontmatter: {e}")))
 }
 
 fn front_value(value: &Value) -> String {
@@ -783,6 +833,65 @@ mod tests {
         assert_eq!(front["metadata"], "{\"author\":\"test\"}");
         assert_eq!(body, "Body\r\n");
         assert!(markdown("---\ntools: [Read\n---\nbody").is_err());
+    }
+    #[test]
+    fn frontmatter_is_yaml_or_json_and_never_another_language() {
+        for opening in ["---", "---yaml", "---YML", "--- yaml ", "---  "] {
+            let text =
+                format!("{opening}\ntools: [Read]\ndisable-model-invocation: true\n---  \nBody\n");
+            let (front, body) =
+                markdown(&text).unwrap_or_else(|error| panic!("{opening:?}: {error}"));
+            assert_eq!(list(front.get("tools")), vec!["Read"], "{opening:?}");
+            assert_eq!(front["disable-model-invocation"], "true", "{opening:?}");
+            assert_eq!(body, "Body\n", "{opening:?}");
+        }
+        let (front, body) = markdown(
+            "---json\r\n{\"tools\": [\"Read\"], \"permission\": {\"bash\": \"deny\"}, \"model\": \"echo/one\"}\r\n---\r\nBody",
+        )
+        .unwrap();
+        assert_eq!(list(front.get("tools")), vec!["Read"]);
+        assert_eq!(front["permission"], r#"{"bash":"deny"}"#);
+        assert_eq!(front["model"], "echo/one");
+        assert_eq!(body, "Body");
+        assert!(markdown("---json\n---\nBody").unwrap().0.is_empty());
+        assert!(markdown("---json\n[1]\n---\nBody").is_err());
+        assert!(markdown("---json\n{tools: Read}\n---\nBody").is_err());
+        for (opening, message) in [
+            ("---js", "JavaScript frontmatter is not supported"),
+            ("---JavaScript", "JavaScript frontmatter is not supported"),
+            ("--- js ", "JavaScript frontmatter is not supported"),
+            (
+                "---coffee",
+                "frontmatter language \"coffee\" is not supported",
+            ),
+            ("---toml", "frontmatter language \"toml\" is not supported"),
+        ] {
+            let text = format!("{opening}\n{{ tools: (() => 'Bash')() }}\n---\nBody");
+            match markdown(&text) {
+                Err(CoreError::Invalid(error)) => assert!(error.starts_with(message), "{error}"),
+                other => panic!("{opening:?}: {other:?}"),
+            }
+        }
+        // The rest of the opening line is shown redacted and clipped.
+        let Err(CoreError::Invalid(error)) =
+            markdown("---token=PRIVATE_SUFFIX0123456789abcdefghijklmnopqrstuvwxyz\nx: 1\n---\n")
+        else {
+            panic!("an unknown language is refused");
+        };
+        assert!(!error.contains("PRIVATE_SUFFIX"), "{error}");
+        assert!(error.contains("[redacted]"), "{error}");
+        // A horizontal rule or a file without a fence line has no frontmatter.
+        for text in ["----\nBody", "-----\n---\nBody", "Body\n---\n", "---"] {
+            let (front, body) = markdown(text).unwrap();
+            assert!(front.is_empty(), "{text:?}");
+            assert_eq!(body, text);
+        }
+        assert_eq!(
+            markdown("\u{feff}---json\n{\"name\":\"bom\"}\n---\n")
+                .unwrap()
+                .0["name"],
+            "bom"
+        );
     }
     #[test]
     fn claude_arguments_are_zero_based_quoted_and_non_recursive() {

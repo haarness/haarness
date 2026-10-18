@@ -195,7 +195,7 @@ impl Tool for PreviewTool {
             let path = relative.to_string_lossy().replace('\\', "/");
             // The model may have named a file that never existed.
             let missing = |error: Failure| if error.0 == StatusCode::NOT_FOUND { bad(format!("File not found: {path}")) } else { error };
-            let target = files::resolve(&root, &path, false).map_err(missing)?;
+            let target = files::resolve_for_read(&root, &path).map_err(missing)?;
             let kind = kind(&path).ok_or_else(|| bad("Preview supports HTML, Markdown, SVG and images"))?;
             let data = files::bytes(&target).map_err(missing)?;
             if kind != "image" && !std::str::from_utf8(&data).is_ok_and(|text| !text.contains('\0')) { return Err(bad("Preview requires UTF-8 text")); }

@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { Item, ItemData, Thread } from "@haarness/sdk";
-import { contextUsage } from "../src/renderer/context-usage";
+import {
+  contextUsage,
+  paceSeconds,
+  paceSpeed,
+  requestPace,
+} from "../src/renderer/context-usage";
 const thread = { id: "one" } as Thread;
 const item = (sequence: number, data: ItemData): Item => ({
   id: String(sequence),
@@ -78,4 +83,38 @@ test("context estimates exclude media payloads, reasoning and accounting rows", 
   assert.equal(result.attachments, 1);
   assert.equal(result.reports, 1);
   assert.equal(contextUsage([], thread).latest, undefined);
+});
+
+test("a timed request reports its first-token time, and its speed only over half a second of streaming", () => {
+  const usage = (fields: Record<string, number>): ItemData => ({
+    type: "usage",
+    input_tokens: 1000,
+    output_tokens: 170,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    cost_usd: null,
+    ...fields,
+  });
+  assert.deepEqual(requestPace(usage({ first_token_ms: 1240, stream_ms: 2000 })), {
+    firstTokenMs: 1240,
+    tokensPerSecond: 85,
+  });
+  // What streamed, not the provider's count with its hidden reasoning.
+  assert.deepEqual(
+    requestPace(usage({ output_tokens: 4000, first_token_ms: 1240, stream_ms: 2000, stream_tokens: 120 })),
+    { firstTokenMs: 1240, tokensPerSecond: 60 },
+  );
+  // One burst is no rate, and a stopped or older record has no timing.
+  assert.deepEqual(requestPace(usage({ first_token_ms: 300, stream_ms: 120 })), {
+    firstTokenMs: 300,
+    tokensPerSecond: undefined,
+  });
+  assert.equal(requestPace(usage({})), undefined);
+  assert.equal(requestPace({ type: "user_message", text: "hi" }), undefined);
+  assert.equal(paceSeconds(1240, "en"), "1.2s");
+  assert.equal(paceSeconds(9960, "en"), "10s");
+  // The decimal mark and the unit follow the reader's language.
+  assert.match(paceSeconds(1240, "de"), /^1,2\s?\S/);
+  assert.equal(paceSpeed(85.4, "en"), "85");
+  assert.equal(paceSpeed(9.94, "en"), "9.9");
 });

@@ -39,6 +39,9 @@ import { UniversalSearch } from "./UniversalSearch";
 import { Wordmark } from "./brand";
 import { matchesShortcut, shortcutLabel, type SearchEntry } from "./search";
 import { registerCyclePanel, stepFocusedPanel, tabButton } from "./tab-cycle";
+import { keyPlace, overlayOpen, stepIndex, stepsChats } from "./keyboard-nav";
+import { SelectionBar } from "./SelectionBar";
+import { selection } from "./sidebar-selection";
 import { createWorktree, resetWorktree, removeWorktree } from "./worktrees";
 import { parseDeepLink } from "../deep-link";
 type Dock = "files" | "diff" | "context" | "browser";
@@ -322,6 +325,99 @@ export function App() {
     window.addEventListener("keydown", step, true);
     onCleanup(() => window.removeEventListener("keydown", step, true));
   });
+  /** The chat rows the sidebar draws, top to bottom: rows inside a collapsed
+   * project, checkout or schedule are not drawn and are passed over. */
+  const chatRows = () => [
+    ...document.querySelectorAll<HTMLButtonElement>(
+      ".sidebar .session-row > button[aria-current]",
+    ),
+  ];
+  /** Opens the chat `offset` rows from the open one, wrapping. The keyboard
+   * goes back to the message box when the step started there. */
+  function stepChat(offset: number, from: Element | null) {
+    // In Select chats a row click picks it instead of opening it.
+    if (selection()) return;
+    const rows = chatRows();
+    const at = rows.findIndex((row) => row.getAttribute("aria-current") === "true");
+    const target = rows[stepIndex(rows.length, at, offset) ?? -1];
+    if (!target || target === rows[at]) return;
+    target.click();
+    if (!from?.matches("[data-composer-input]")) return;
+    let frames = 300;
+    const land = () => {
+      if (loading() && frames-- > 0) return void setTimeout(land, 16);
+      document.querySelector<HTMLElement>("[data-composer-input]")?.focus();
+    };
+    setTimeout(land);
+  }
+  /** Shows the sidebar and puts the keyboard on the open chat's row, opening
+   * its project and checkout when they are collapsed. */
+  async function focusSidebar() {
+    setSidebarVisible(true);
+    const project = app.currentProject();
+    if (project) await app.expandProject(project.id, true);
+    const location = app.project();
+    if (location && app.state.expandedLocations[location.id] === false)
+      await app.expandLocation(location.id, true);
+    setTimeout(() => {
+      const row =
+        chatRows().find((row) => row.getAttribute("aria-current") === "true") ??
+        chatRows()[0] ??
+        document.querySelector<HTMLElement>(".sidebar-lists button");
+      row?.focus();
+      row?.scrollIntoView({ block: "nearest" });
+    });
+  }
+  /** On a chat row that has the keyboard, ↑ and ↓ move it to the row above
+   * or below, and Home and End to the first or last, as in a list; Enter
+   * opens the chat. Alt with an arrow still moves the row itself (Sortable
+   * stops that key first). */
+  function walkRows(event: KeyboardEvent) {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
+    if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return false;
+    const rows = chatRows();
+    const at = rows.indexOf(document.activeElement as HTMLButtonElement);
+    if (at < 0) return false;
+    const target =
+      rows[
+        event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? rows.length - 1
+            : Math.min(rows.length - 1, Math.max(0, at + (event.key === "ArrowDown" ? 1 : -1)))
+      ];
+    target.focus();
+    target.scrollIntoView({ block: "nearest" });
+    return true;
+  }
+  onMount(() => {
+    const keys = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing) return;
+      if (walkRows(event)) return void event.preventDefault();
+      const { chatPrev, chatNext, focusSidebar: focus } = state.preferences.shortcuts;
+      const offset =
+        chatNext && matchesShortcut(event, chatNext, state.platform)
+          ? 1
+          : chatPrev && matchesShortcut(event, chatPrev, state.platform)
+            ? -1
+            : 0;
+      const focusing = !!focus && matchesShortcut(event, focus, state.platform);
+      if (!offset && !focusing) return;
+      const from = document.activeElement;
+      const draft =
+        document.querySelector<HTMLTextAreaElement>("[data-composer-input]")?.value ?? "";
+      const place = keyPlace(from, draft, overlayOpen(document));
+      if (focusing ? place === "overlay" : !stepsChats(place, state.platform === "darwin"))
+        return;
+      event.preventDefault();
+      if (focusing) void app.run(focusSidebar);
+      else stepChat(offset, from);
+    };
+    // After the page's own handlers: a sidebar row that has the keyboard
+    // moves itself with Alt and an arrow and stops the key there.
+    window.addEventListener("keydown", keys);
+    onCleanup(() => window.removeEventListener("keydown", keys));
+  });
   const selected = () => state.threads.find((t) => t.id === state.selected);
   /** A chat tab's name, read where it is shown so a generated title or a
    * rename reaches an open tab. */
@@ -450,6 +546,33 @@ export function App() {
         name: sidebarVisible() ? t("Hide sidebar") : t("Show sidebar"),
         icon: "sidebar",
         action: () => setSidebarVisible((value) => !value),
+      },
+      {
+        key: "focus-sidebar",
+        group: "Commands",
+        name: t("Focus sidebar"),
+        keywords: "keyboard chats list navigate",
+        icon: "sidebar",
+        hint: hint("focusSidebar"),
+        action: focusSidebar,
+      },
+      {
+        key: "chat-previous",
+        group: "Commands",
+        name: t("Previous chat"),
+        keywords: "sidebar step up conversation session",
+        icon: "move-up",
+        hint: hint("chatPrev"),
+        action: () => stepChat(-1, null),
+      },
+      {
+        key: "chat-next",
+        group: "Commands",
+        name: t("Next chat"),
+        keywords: "sidebar step down conversation session",
+        icon: "move-down",
+        hint: hint("chatNext"),
+        action: () => stepChat(1, null),
       },
       {
         key: "panel",
@@ -922,6 +1045,7 @@ export function App() {
               </Show>
             </div>
           </div>
+          <SelectionBar />
           <footer class="sidebar-footer">
             <AccountMenu />
             <button
