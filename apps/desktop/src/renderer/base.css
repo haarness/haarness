@@ -400,6 +400,10 @@ html[dir="rtl"] :is(pre, code, .cm-editor, .xterm) {
      the wordmark optically flush with whatever sits under it. */
   margin-inline-start: -0.06em;
   direction: ltr;
+  /* The box fits the macOS system face. Where the stack falls back to a wider
+     one (DejaVu Sans on most Linux systems), the word runs past the box
+     instead of losing its last letters. */
+  overflow: visible;
 }
 .badge {
   display: inline-flex;

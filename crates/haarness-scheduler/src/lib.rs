@@ -363,6 +363,9 @@ impl Scheduler {
         self.ensure_unique_name(&schedule)?;
         self.persist(&schedule)?;
         if let Err(error) = self.install(&schedule) {
+            // A unit the system refused to start is still written and
+            // enabled; take it away with the schedule it belonged to.
+            let _ = self.uninstall(&schedule);
             let _ = fs::remove_file(self.job_path(schedule.id));
             return Err(error);
         }
@@ -783,7 +786,7 @@ impl Scheduler {
         let service = format!(
             "[Unit]\nDescription=Haarness scheduled run {}\n\n[Service]\nType=oneshot\n{environment}WorkingDirectory={}\nExecStart={}\nStandardOutput=append:{}\nStandardError=append:{}\n",
             systemd_escape(&schedule.name),
-            systemd_argument(schedule.workspace.as_os_str()),
+            systemd_path(&schedule.workspace),
             args.iter()
                 .map(|value| systemd_argument(value))
                 .collect::<Vec<_>>()
@@ -1722,14 +1725,15 @@ fn systemd_argument(value: &OsStr) -> String {
     )
 }
 
+/// A path setting (WorkingDirectory=, StandardOutput=append:) takes the path
+/// as written: systemd neither strips quotes nor decodes escapes there, so a
+/// quoted path is "not absolute" and the unit never loads. Only specifiers and
+/// line breaks need care.
 fn systemd_path(value: &Path) -> String {
     value
         .to_string_lossy()
         .replace('%', "%%")
-        .replace('\\', "\\x5c")
-        .replace(' ', "\\x20")
-        .replace('\t', "\\x09")
-        .replace('\n', "")
+        .replace(['\n', '\r'], "")
 }
 
 fn windows_argument(value: &OsStr) -> String {
@@ -2043,6 +2047,25 @@ mod tests {
             }
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn systemd_paths_are_written_as_systemd_reads_them() {
+        let (root, scheduler) = fixture(Backend::SystemdUser);
+        let mut schedule = create(&scheduler, &root, Trigger::Interval { seconds: 3600 });
+        schedule.workspace = root.join("my 100% project");
+        let (service, _) = scheduler.render_systemd(&schedule).unwrap();
+        // systemd neither strips quotes nor decodes escapes in a path setting:
+        // a quoted WorkingDirectory is "not absolute", the unit never loads and
+        // its timer refuses to start (systemd 249, Ubuntu 22.04).
+        let directory = format!("WorkingDirectory={}/my 100%% project\n", root.display());
+        assert!(service.contains(&directory), "{service}");
+        let log = format!(
+            "StandardOutput=append:{}\n",
+            systemd_path(&scheduler.log_path(schedule.id))
+        );
+        assert!(service.contains(&log) && !log.contains('"'), "{service}");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
