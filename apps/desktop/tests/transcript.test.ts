@@ -12,6 +12,7 @@ import {
   toolTitle,
   batchSteps,
   batchLabel,
+  batchTarget,
   toolActivity,
   toolInput,
   toolOutput,
@@ -216,6 +217,30 @@ test("batch presentation pairs ordered outputs and individual failures without J
     }),
     steps,
   );
+});
+
+test("a collapsed batch names what its steps acted on, the first two and then a count", () => {
+  const steps = (calls: [string, unknown][]) =>
+    batchSteps({ tool_calls: calls.map(([tool, parameters]) => ({ tool, parameters })) });
+  assert.equal(
+    batchTarget(steps([["read", { path: "src/a.ts" }], ["read", { path: "src/b.ts" }]])),
+    "src/a.ts, src/b.ts",
+  );
+  // Repeated targets count once; a search names its pattern and folder.
+  assert.equal(
+    batchTarget(
+      steps([
+        ["read", { path: "src/a.ts" }],
+        ["read", { path: "src/a.ts", offset: 40 }],
+        ["grep", { pattern: "TODO", path: "src" }],
+        ["bash", { command: "npm test" }],
+        ["read", { path: "README.md" }],
+      ]),
+    ),
+    "src/a.ts, TODO in src +2",
+  );
+  assert.equal(batchTarget(steps([["todoread", {}]])), "");
+  assert.equal(batchTarget([]), "");
 });
 
 test("an unknown tool is named rather than described", () => {

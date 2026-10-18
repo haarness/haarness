@@ -435,6 +435,19 @@ export function batchLabel(steps: BatchStep[]) {
   const actions = [...new Set(steps.map((step) => batchDone[batchGroup(step.name)]))];
   return phraseList(actions.map((action) => t(action)));
 }
+/**
+ * What a batch acted on, for its collapsed row: the steps' distinct targets,
+ * the first two and then "+N", as an apply_patch row lists its files. Rows
+ * start collapsed, and "Read files" alone does not say which.
+ */
+export function batchTarget(steps: BatchStep[]) {
+  const targets = [
+    ...new Set(steps.map((step) => describeTool(step.name, step.args).target).filter(Boolean)),
+  ];
+  return targets.length > 2
+    ? `${targets[0]}, ${targets[1]} +${targets.length - 2}`
+    : targets.join(", ");
+}
 /** The argument a tool row names, as the call wrote it. */
 function targetText(args: unknown): string {
   if (!args || typeof args !== "object") return "";
