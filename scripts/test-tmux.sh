@@ -862,7 +862,7 @@ while [ "$attempt" -lt 100 ]; do
   sleep 0.1
 done
 preface_row="$(echo "$pane" | awk '/inspect the repository first/ { print NR; exit }')"
-grep_row="$(echo "$pane" | awk '/grep README.md/ { print NR; exit }')"
+grep_row="$(echo "$pane" | awk '/grep haarness in README.md/ { print NR; exit }')"
 if [ -z "$preface_row" ] || [ -z "$grep_row" ] || [ "$preface_row" -ge "$grep_row" ]; then
   echo "$pane" >&2
   echo "Assistant preface did not render before its grep activity" >&2
