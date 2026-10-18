@@ -86,7 +86,16 @@ pub struct StrandedTask {
     /// The task's state as recovery recorded it: `done`, `failed` or
     /// `interrupted`.
     pub state: String,
+    /// The `task` call's description, or the subagent chat's title.
+    pub description: String,
+    /// The subagent's last reply in that run, when it gave one.
+    pub reply: Option<String>,
+    /// Why its run failed, when it did.
+    pub error: Option<String>,
 }
+
+/// What recovery records in the chat that launched a [`StrandedTask`].
+pub type StrandedReport<'a> = dyn Fn(&StrandedTask) -> Vec<ItemData> + Send + Sync + 'a;
 
 #[async_trait]
 pub trait ThreadRepository: Send + Sync {
@@ -253,10 +262,17 @@ pub trait ThreadRepository: Send + Sync {
         workspace: &str,
     ) -> CoreResult<Vec<crate::PermissionRule>>;
     async fn recover_interrupted(&self) -> CoreResult<u64>;
-    /// [`Self::recover_interrupted`], also naming the background subagents
-    /// whose result the launching chat is still owed. A repository that does
-    /// not track task checkpoints names none.
-    async fn recover_interrupted_tasks(&self) -> CoreResult<(u64, Vec<StrandedTask>)> {
+    /// [`Self::recover_interrupted`], also recording in each launching chat
+    /// the background subagents whose result it is still owed: `report`'s
+    /// items are written with the task's final checkpoint, in one step, so a
+    /// crash or failure cannot record one without the other. A chat that
+    /// already holds the result, or is archived, gets none. Returns the items
+    /// written. A repository that does not track task checkpoints records
+    /// none.
+    async fn recover_interrupted_tasks(
+        &self,
+        _report: &StrandedReport<'_>,
+    ) -> CoreResult<(u64, Vec<Item>)> {
         Ok((self.recover_interrupted().await?, Vec::new()))
     }
     /// Standing goal + loop configuration for a thread (absent by default).
