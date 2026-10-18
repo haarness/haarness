@@ -1,9 +1,8 @@
 import { execFile } from "node:child_process";
-import { readdir, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
 import { nativeImage } from "electron";
-import { imageName, newestImages, parseDefaultsLocation, screenshotFolder } from "../screenshots";
+import { parseDefaultsLocation, screenshotFolder } from "../screenshots";
 
 /** Thumbnail width: two device pixels for each of a tile's CSS pixels. */
 const THUMBNAIL = 280;
@@ -36,30 +35,6 @@ export async function defaultScreenshotFolder(remembered: unknown) {
     location: await macLocation(home),
     remembered,
   });
-}
-
-/** The newest images in `folder`. A folder that does not exist (yet) has none. */
-export async function listScreenshots(folder: string) {
-  let names;
-  try {
-    names = await readdir(folder, { withFileTypes: true });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
-  // Only image names are looked at: a Desktop may hold thousands of other files.
-  const entries = await Promise.all(
-    names
-      .filter((entry) => entry.isFile() && imageName(entry.name))
-      .map(async (entry) => {
-        const info = await stat(join(folder, entry.name)).catch(() => undefined);
-        return info ? { name: entry.name, modified: info.mtimeMs, file: info.isFile() } : undefined;
-      }),
-  );
-  return newestImages(entries.filter((entry) => !!entry)).map((entry) => ({
-    ...entry,
-    path: join(folder, entry.name),
-  }));
 }
 
 async function thumbnail(path: string) {

@@ -1,5 +1,5 @@
 import { test, expect, _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
-import { mkdtemp, mkdir, writeFile, realpath, rm, utimes } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, realpath, rm, symlink, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -194,4 +194,19 @@ test("a pick names only places in the window's latest listing", async () => {
   const picked = (result.picked as { value: { name: string; data: string }[] }).value;
   expect(picked.map((item) => item.name)).toEqual(["Screenshot 1.png", "Screenshot 3.png"]);
   expect(picked[0].data).toMatch(/^data:image\/png;/);
+
+  // A screenshot swapped for a link to another file since it was listed is refused, not followed.
+  const path = join(shots, "Screenshot 1.png");
+  const original = await readFile(path);
+  const latest = await page.evaluate(async () => ((await window.haarness.screenshots({})) as { listing: string }).listing);
+  await rm(path);
+  await symlink(join(other, "Elsewhere.png"), path);
+  const swapped = await page.evaluate(
+    (listing) => window.haarness.screenshotAttach(listing, [2]).then(() => "attached", (error: Error) => error.message),
+    latest,
+  );
+  expect(swapped).toBe("The screenshots changed. Open Screenshots again.");
+  await rm(path);
+  await writeFile(path, original);
+  await utimes(path, Date.now() / 1000 - 3600, Date.now() / 1000 - 3600);
 });

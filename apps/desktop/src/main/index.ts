@@ -5,7 +5,8 @@ import { browserData, removeBrowserData, saveBrowserDownload } from "./browser-d
 import { createBrowserHost } from "./browser-host";
 import { chromeSetup, revealChromeExtension, setupChromeOnLaunch } from "./chrome-setup";
 import { createAttachmentDraftStorage } from "./attachment-drafts";
-import { defaultScreenshotFolder, listScreenshots, screenshotThumbnails } from "./screenshot-folder";
+import { defaultScreenshotFolder, screenshotThumbnails } from "./screenshot-folder";
+import { listScreenshots, readListedScreenshots, type FileIdentity } from "./screenshot-files";
 import { createScreenshotListings, displayFolder } from "../screenshots";
 import { terminalSockets } from "./terminal-sockets";
 import { translate } from "../localization";
@@ -133,7 +134,7 @@ function socketOpen(socket: PtyConnection) {
 }
 const projectTransaction = createProjectQueue();
 /** Each window's last screenshot listing; the renderer picks by place in it. */
-const screenshotListings = createScreenshotListings();
+const screenshotListings = createScreenshotListings<{ path: string; identity: FileIdentity }>();
 const worktreeOperations = new Set<string>();
 const voice = createVoiceInput((locale) =>
   launchVoice(
@@ -1142,7 +1143,10 @@ function installHandlers() {
     const thumbnails = await screenshotThumbnails(images.map((image) => image.path));
     return {
       folder: displayFolder(folder, homedir()),
-      listing: screenshotListings.remember(win.id, images.map((image) => image.path)),
+      listing: screenshotListings.remember(
+        win.id,
+        images.map(({ path, identity }) => ({ path, identity })),
+      ),
       items: images.map((image, index) => ({
         name: image.name,
         modified: image.modified,
@@ -1151,14 +1155,15 @@ function installHandlers() {
     };
   });
   handle("screenshotAttach", async (win, listing: unknown, indexes: unknown) => {
-    let paths: string[];
     try {
-      paths = screenshotListings.resolve(win.id, listing, indexes);
+      const picks = screenshotListings.resolve(win.id, listing, indexes);
+      // Only files that are still the ones listed: a name swapped for a link
+      // or another file since is refused, never followed.
+      const values = await readListedScreenshots(picks, attachments);
+      return values.map((data, index) => ({ data, name: basename(picks[index].path) }));
     } catch (error) {
       throw new Error(say(error instanceof Error ? error.message : String(error)));
     }
-    const values = await attachments(paths);
-    return values.map((data, index) => ({ data, name: basename(paths[index]) }));
   });
   handle("save", async (win, name: string, content: string) => {
     bounded(content);
