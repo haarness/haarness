@@ -32,8 +32,15 @@ export function boundaryOf(host: HTMLElement, container: Node, offset: number): 
         codeLine = undefined;
       }
     }
-    if (current.tagName === "LI" && parent && /^(UL|OL)$/.test(parent.tagName))
-      path.unshift({ kind: "item", index: Array.from(parent.children).filter((item) => item.tagName === "LI").indexOf(current) });
+    if (current.tagName === "LI" && parent && /^(UL|OL)$/.test(parent.tagName)) {
+      // Items nested in an item count across all of its lists, as the source
+      // map lists them: an item may hold a list, a paragraph, then another list.
+      const outer = parent.parentElement?.tagName === "LI" ? parent.parentElement : undefined;
+      const siblings = outer
+        ? Array.from(outer.querySelectorAll(":scope > ul > li, :scope > ol > li"))
+        : Array.from(parent.children).filter((item) => item.tagName === "LI");
+      path.unshift({ kind: "item", index: siblings.indexOf(current) });
+    }
     else if (current.tagName === "TR") {
       const table = current.closest("table");
       if (table) path.unshift({ kind: "row", index: Array.from(table.rows).indexOf(current as HTMLTableRowElement) });
@@ -55,23 +62,31 @@ export function previewLines(
   if (!host.contains(range.startContainer) || !host.contains(range.endContainer)) return undefined;
   const start = boundaryOf(host, range.startContainer, range.startOffset);
   let end = boundaryOf(host, range.endContainer, range.endOffset);
-  // A selection that ends at the very start of a block (as a triple click
-  // does) ends with the text before it.
-  if (start && end && range.endOffset === 0 && end.block > start.block) {
-    const before = textBefore(host, range.endContainer);
-    if (before) end = boundaryOf(host, before, before.length) ?? end;
+  // A selection that ends at the start of a line (Shift+Down, a triple
+  // click, a drag to the next item) does not cover that line: it ends with
+  // the last character it does cover, in one block or across several.
+  const text = selection.toString();
+  if (start && end && (/\n\s*$/.test(text) || range.endOffset === 0)) {
+    const last = lastSelected(host, range);
+    if (last) end = boundaryOf(host, last.node, last.offset) ?? end;
   }
   if (!start || !end) return undefined;
   return selectionLines(source, blocks, start, end, selection.toString());
 }
 
-/** The last text in `host` that comes before `node`. */
-function textBefore(host: HTMLElement, node: Node): Text | undefined {
+/** Just after the last non-blank character the range covers, or none when it covers none. */
+function lastSelected(host: HTMLElement, range: Range): { node: Text; offset: number } | undefined {
   const walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
-  let last: Text | undefined;
-  for (let text = walker.nextNode(); text; text = walker.nextNode()) {
-    if (text === node || node.contains(text) || !(node.compareDocumentPosition(text) & Node.DOCUMENT_POSITION_PRECEDING)) break;
-    if ((text as Text).data.trim()) last = text as Text;
+  const texts: Text[] = [];
+  for (let node = walker.nextNode(); node; node = walker.nextNode())
+    if (range.intersectsNode(node) && !(node.parentElement?.closest(".code-copy"))) texts.push(node as Text);
+  for (let index = texts.length - 1; index >= 0; index--) {
+    const node = texts[index];
+    const from = node === range.startContainer ? range.startOffset : 0;
+    const to = node === range.endContainer ? range.endOffset : node.data.length;
+    const covered = node.data.slice(from, to);
+    const at = covered.search(/\S\s*$/);
+    if (at >= 0) return { node, offset: from + at + 1 };
   }
-  return last;
+  return undefined;
 }

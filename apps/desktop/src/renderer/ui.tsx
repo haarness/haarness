@@ -19,6 +19,8 @@ export const Button = (props: {
   size?: IconSize;
   // Extra explanation for the tooltip; the accessible name stays terse.
   hint?: string;
+  /** Pressing it leaves the page's text selection, which it acts on, as it was. */
+  keepSelection?: boolean;
 }) => (
   <button
     type="button"
@@ -28,6 +30,7 @@ export const Button = (props: {
     aria-label={props.label}
     aria-pressed={props.active === undefined ? undefined : props.active}
     onClick={props.onClick}
+    onMouseDown={props.keepSelection ? (event) => event.preventDefault() : undefined}
     disabled={props.disabled}
   >
     <Icon name={props.icon} size={props.size} />
