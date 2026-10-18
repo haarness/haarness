@@ -80,6 +80,18 @@ test("list items, nested items included, have their own lines", () => {
   assert.deepEqual(lines(at(list, [{ kind: "row", index: 4 }]), at(list, [{ kind: "row", index: 4 }])), { from: 6, to: 10 });
 });
 
+test("an item's nested items count across all of its lists, a blank line or a paragraph between them", () => {
+  const text = ["- outer", "  - inner one", "", "  between", "", "  - inner two", "- last", ""].join("\n");
+  const map = sourceBlocks(text);
+  const item = (outer: number, inner?: number) => ({
+    block: 0,
+    path: [{ kind: "item" as const, index: outer }, ...(inner === undefined ? [] : [{ kind: "item" as const, index: inner }])],
+  });
+  assert.deepEqual(selectionLines(text, map, item(0, 0), item(0, 0), ""), { from: 2, to: 2 });
+  assert.deepEqual(selectionLines(text, map, item(0, 1), item(0, 1), ""), { from: 6, to: 6 });
+  assert.deepEqual(selectionLines(text, map, item(1), item(1), ""), { from: 7, to: 7 });
+});
+
 test("quoted paragraphs and lists inside a quote keep their lines", () => {
   const quote = block("blockquote");
   const paragraph = [{ kind: "child" as const, index: 0 }];
