@@ -2522,5 +2522,7 @@
   "Preview comment": "Kommentar til forhåndsvisningen",
   "{count} failed": "{count} mislyktes",
   "+{count} more": "{count} til",
-  "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "Denne appen prøvde å åpne en lenke som Haarness ikke åpner. Apper kan bare åpne http-, https- og mailto-lenker."
+  "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "Denne appen prøvde å åpne en lenke som Haarness ikke åpner. Apper kan bare åpne http-, https- og mailto-lenker.",
+  "Load image from {host}": "Last inn bilde fra {host}",
+  "The image from {host} could not be loaded.": "Bildet fra {host} kunne ikke lastes inn."
 }

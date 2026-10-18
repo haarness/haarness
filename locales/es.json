@@ -2522,5 +2522,7 @@
   "Preview comment": "Comentario sobre la vista previa",
   "{count} failed": "{count} con error",
   "+{count} more": "{count} más",
-  "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "Esta app intentó abrir un enlace que Haarness no abre. Las apps solo pueden abrir enlaces http, https y mailto."
+  "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "Esta app intentó abrir un enlace que Haarness no abre. Las apps solo pueden abrir enlaces http, https y mailto.",
+  "Load image from {host}": "Cargar imagen de {host}",
+  "The image from {host} could not be loaded.": "No se pudo cargar la imagen de {host}."
 }
