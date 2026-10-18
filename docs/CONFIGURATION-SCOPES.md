@@ -149,6 +149,8 @@ The parser and mapping live in `crates/haarness-cli/src/config_specs.rs`; `exten
 
 The `hooks` object in any configuration layer (and `hooks/hooks.json` in a plugin bundle) runs shell commands at the lifecycle events listed below. Each handler receives one JSON document on stdin with `hook_event_name`, `cwd` and, where a thread exists, `session_id`; exit code 2 or a JSON `{"decision": "block"}` answer blocks the events that can be blocked.
 
+A `command` runs through `sh -lc` from the project folder, with `HAARNESS_PROJECT_DIR`, `CLAUDE_PROJECT_DIR` and `OPENCODE_PROJECT_DIR` set to it (and `CLAUDE_PLUGIN_ROOT`, `HAARNESS_PLUGIN_ROOT`, `OPENCODE_PLUGIN_ROOT`, `CLAUDE_PLUGIN_DATA` and `HAARNESS_PLUGIN_DATA` for a plugin's hooks). The shell expands `${CLAUDE_PROJECT_DIR}` and the others itself, so inside double quotes a folder name with spaces, quotes or `$(…)` stays one value and never runs. A `command` with an `args` list runs without a shell, and those placeholders are filled into the program and each argument; a `shell: "powershell"` command has them filled into its text.
+
 | Event | When | Payload beyond the common fields | Matcher compares |
 | --- | --- | --- | --- |
 | `SessionStart` | a chat is created; not a chat started inside another (a task subagent, a workflow's thread or agent), so a slow hook never holds up their first prompt | `source` (`startup`), `agent` | `source` |
