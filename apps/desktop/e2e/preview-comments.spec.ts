@@ -33,6 +33,13 @@ const GUIDE = [
   "const a = 1;", //                     17
   "const b = 2;", //                     18
   "```", //                              19
+  "", //                                 20
+  "- outer", //                          21
+  "  - inner one", //                    22
+  "", //                                 23
+  "  between", //                        24
+  "", //                                 25
+  "  - inner two", //                    26
   "",
 ].join("\n");
 
@@ -154,7 +161,7 @@ test("a comment on Preview lines adds the lines and the comment to the message",
   await button("Comment on selection").click();
   const form = page.getByRole("form", { name: "Comment on docs/guide.md:7" });
   await expect(form).toBeVisible();
-  const box = form.getByRole("textbox", { name: "Comment", exact: true });
+  const box = form.getByRole("textbox", { name: "Preview comment", exact: true });
   await expect(box).toBeFocused();
   await box.fill("Say why this item comes second.");
   await page.locator(".explorer").screenshot({ path: info.outputPath("preview-comment.png") });
@@ -169,8 +176,86 @@ test("a comment on Preview lines adds the lines and the comment to the message",
   await showFiles();
   await select("first item");
   await button("Comment on selection").click();
-  await page.getByRole("form", { name: "Comment on docs/guide.md:6" }).getByRole("textbox", { name: "Comment", exact: true }).press("Escape");
+  await page.getByRole("form", { name: "Comment on docs/guide.md:6" }).getByRole("textbox", { name: "Preview comment", exact: true }).press("Escape");
   await expect(page.getByRole("form", { name: "Comment on docs/guide.md:6" })).toHaveCount(0);
   await expect(message).toHaveValue("Comment on docs/guide.md:7:\nSay why this item comes second.");
+  expect(errors).toEqual([]);
+});
+
+const shortcut = process.platform === "darwin" ? "Meta+Shift+L" : "Control+Shift+L";
+const chips = () => context().locator(".prompt-context-item");
+
+test("a selection ending at the start of a line does not take that line", async () => {
+  // Shift+Down from the start of a code line ends at the start of the next one.
+  await showFiles();
+  await select("const a", "const b", false);
+  await button("Add selection to context").click();
+  await expect(context()).toContainText("docs/guide.md:17");
+  await expect(context()).not.toContainText("docs/guide.md:17-18");
+  // A drag from one item to the start of the next takes the first only.
+  await showFiles();
+  await select("first item", "second item", false);
+  await button("Add selection to context").click();
+  await expect(context()).toContainText("docs/guide.md:6");
+  await expect(context()).not.toContainText("docs/guide.md:6-7");
+  expect(errors).toEqual([]);
+});
+
+test("items nested in one item count across its lists, a paragraph between them", async () => {
+  await showFiles();
+  await select("inner two");
+  await button("Add selection to context").click();
+  await expect(context()).toContainText("docs/guide.md:26");
+  expect(errors).toEqual([]);
+});
+
+test("the shortcut acts only on a live selection in the visible Preview", async () => {
+  await showFiles();
+  const before = await chips().count();
+  await select("third item");
+  // A click elsewhere collapses the selection outside the Preview: its lines go.
+  await page.locator(".conversation-empty h2").click();
+  await page.keyboard.press(shortcut);
+  await page.waitForTimeout(300);
+  await expect(chips()).toHaveCount(before);
+  // With the Files panel hidden, a selection still in its Preview is not acted on.
+  await showFiles();
+  await select("third item");
+  await expect(button("Add selection to context")).toBeVisible();
+  await button("Hide side panel").click();
+  await expect(page.locator(".explorer")).toBeHidden();
+  await page.keyboard.press(shortcut);
+  await page.waitForTimeout(300);
+  await expect(chips()).toHaveCount(before);
+  expect(errors).toEqual([]);
+});
+
+test("a comment keeps the lines as they read when its box opened", async () => {
+  await showFiles();
+  await select("second item");
+  await button("Comment on selection").click();
+  const form = page.getByRole("form", { name: "Comment on docs/guide.md:7" });
+  await expect(form).toBeVisible();
+  // The file changes while the box is open: a line goes in at the top.
+  await page.locator(".file-actions").getByRole("button", { name: "Code", exact: true }).click();
+  const editor = page.locator(".file-preview .cm-content");
+  await editor.focus();
+  await editor.press(process.platform === "darwin" ? "Meta+ArrowUp" : "Control+Home");
+  await editor.pressSequentially("Inserted line\n");
+  await page.locator(".file-actions").getByRole("button", { name: "Preview", exact: true }).click();
+  await form.getByRole("textbox", { name: "Preview comment", exact: true }).fill("Still about the second item.");
+  await form.getByRole("button", { name: "Add to message", exact: true }).click();
+  const chip = chips().filter({ hasText: "docs/guide.md:7" }).last();
+  await expect(chip).not.toContainText("unsaved");
+  await chip.locator("summary").click();
+  await expect(chip.locator("pre")).toHaveText("- second item");
+  // Undo the edit, so the window closes without unsaved changes.
+  await showFiles();
+  await page.locator(".file-actions").getByRole("button", { name: "Code", exact: true }).click();
+  await editor.focus();
+  for (let attempt = 0; attempt < 5 && (await editor.textContent())?.includes("Inserted line"); attempt++)
+    await editor.press(process.platform === "darwin" ? "Meta+z" : "Control+z");
+  await expect(editor).not.toContainText("Inserted line");
+  await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
   expect(errors).toEqual([]);
 });
