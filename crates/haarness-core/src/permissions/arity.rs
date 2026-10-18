@@ -14,13 +14,27 @@ use std::sync::OnceLock;
 #[must_use]
 pub fn prefix(tokens: &[String]) -> Vec<String> {
     let table = table();
-    for length in (1..=tokens.len()).rev() {
+    // No key is longer than the longest one, so a long command costs no more
+    // than a short one.
+    for length in (1..=tokens.len().min(longest_key())).rev() {
         let candidate = tokens[..length].join(" ");
         if let Some(&arity) = table.get(candidate.as_str()) {
             return tokens[..arity.min(tokens.len())].to_vec();
         }
     }
     tokens.first().cloned().into_iter().collect()
+}
+
+/// How many words the longest key in [`table`] has.
+fn longest_key() -> usize {
+    static LONGEST: OnceLock<usize> = OnceLock::new();
+    *LONGEST.get_or_init(|| {
+        table()
+            .keys()
+            .map(|key| key.split(' ').count())
+            .max()
+            .unwrap_or(1)
+    })
 }
 
 #[allow(clippy::too_many_lines)]
