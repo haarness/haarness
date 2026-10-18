@@ -357,18 +357,6 @@ impl PermissionEngine {
 
     #[must_use]
     pub fn evaluate_detailed(&self, operation: &str) -> Evaluation {
-        self.evaluate_with(operation, false)
-    }
-
-    /// [`Self::evaluate_detailed`] for an edit the caller knows widens what an
-    /// agent, command or skill may do (its frontmatter's `permission` or
-    /// `tools` change): asked like a configuration file edit.
-    #[must_use]
-    pub fn evaluate_guarded(&self, operation: &str) -> Evaluation {
-        self.evaluate_with(operation, true)
-    }
-
-    fn evaluate_with(&self, operation: &str, guarded: bool) -> Evaluation {
         let operation = normalize_operation_alias(operation);
         let spellings = self.path_spellings(&operation);
         let names = |rule: &&PermissionRule| rule_names(rule, &operation, &spellings);
@@ -402,7 +390,7 @@ impl PermissionEngine {
             .split_once(':')
             .filter(|(permission, _)| *permission == "edit")
             .map(|(_, target)| target)
-            .filter(|target| guarded || is_config_path(Path::new(target)))
+            .filter(|target| is_config_path(Path::new(target)))
         {
             let name = Path::new(target)
                 .file_name()
