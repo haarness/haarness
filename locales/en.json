@@ -2450,5 +2450,8 @@
   "This result is too large to show in the app.": "This result is too large to show in the app.",
   "Link from the app": "Link from the app",
   "This app wants to open a link.": "This app wants to open a link.",
-  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "This tool comes with an app; open the chat in Haarness Desktop to use it."
+  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "This tool comes with an app; open the chat in Haarness Desktop to use it.",
+  "Message from the app": "Message from the app",
+  "This app wants to write a message for you.": "This app wants to write a message for you.",
+  "Insert app message": "Insert app message"
 }

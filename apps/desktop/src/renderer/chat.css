@@ -937,6 +937,14 @@ html[dir="rtl"] .tool-target {
   flex: 1;
   min-width: 0;
 }
+/* A page's message, shown as it would go in: a few lines at most. */
+.mcp-app-message {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: pre-wrap;
+}
 .mcp-app-action {
   flex: none;
   min-height: var(--control-sm);

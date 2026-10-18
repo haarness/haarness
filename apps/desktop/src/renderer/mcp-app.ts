@@ -306,8 +306,8 @@ export interface Host {
   resize(size: { width?: number; height?: number }): void;
   /** Opens a link the bridge allowed; false when the person declined or it failed. */
   openLink(url: string): Promise<boolean>;
-  /** Puts text in the message box; false when this chat cannot take it. */
-  compose(text: string): boolean;
+  /** Puts text in the message box; false when the person declined or this chat cannot take it. */
+  compose(text: string): boolean | Promise<boolean>;
   /** Reads a `ui://` resource of the page's own server. */
   readResource(uri: string): Promise<unknown>;
   log?(params: unknown): void;
@@ -352,7 +352,7 @@ export function createBridge(host: Host, post: (message: Record<string, unknown>
       case "ui/message": {
         const text = messageText(params);
         if (!text) throw new RpcError(-32602, REFUSED.message);
-        return host.compose(text) ? {} : { isError: true };
+        return (await host.compose(text)) ? {} : { isError: true };
       }
       case "resources/read": {
         const uri = params.uri;

@@ -73,6 +73,7 @@ export function McpAppView(props: {
   const [left, setLeft] = createSignal(false);
   const [height, setHeight] = createSignal(heights.get(props.callKey) ?? 0);
   const [request, setRequest] = createSignal<{ url: string; answer: (open: boolean) => void }>();
+  const [message, setMessage] = createSignal<{ text: string; answer: (insert: boolean) => void }>();
   const [render, setRender] = createSignal(0);
   let root!: HTMLDivElement;
   let frame!: HTMLIFrameElement;
@@ -154,11 +155,7 @@ export function McpAppView(props: {
         setHeight(next);
       },
       openLink: (url) => {
-        // Right after a click or key press inside the page, the person asked for it.
-        const gesture =
-          globalThis.document.activeElement === frame &&
-          !!(navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation?.isActive;
-        if (gesture) return open(url);
+        if (gesture()) return open(url);
         return new Promise<boolean>((resolve) => {
           request()?.answer(false);
           setRequest({
@@ -170,12 +167,21 @@ export function McpAppView(props: {
           });
         });
       },
+      // A message goes into the message box, and the keyboard with it, only
+      // when the person just acted in the page or picks "Insert app message":
+      // a page writing on its own must not change a draft or take the focus.
       compose: (text) => {
-        const detail = { text, accepted: false };
-        root.dispatchEvent(new CustomEvent("mcp-app-message", { bubbles: true, detail }));
-        if (detail.accepted) app.notify(t("The app's message is in the message box. Send it when you are ready."));
-        else app.notify(t("This chat cannot take a message from the app."), "blocked");
-        return detail.accepted;
+        if (gesture()) return insert(text);
+        return new Promise<boolean>((resolve) => {
+          message()?.answer(false);
+          setMessage({
+            text,
+            answer: (accepted) => {
+              setMessage(undefined);
+              resolve(accepted ? insert(text) : false);
+            },
+          });
+        });
       },
       readResource: (uri) =>
         window.haarness.api(connection, "readMcpResource", [props.payload.server, { uri }]),
@@ -183,6 +189,20 @@ export function McpAppView(props: {
     },
     send,
   );
+  /** Right after a click or key press inside the page: the person asked for it. */
+  function gesture() {
+    return (
+      globalThis.document.activeElement === frame &&
+      !!(navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation?.isActive
+    );
+  }
+  function insert(text: string) {
+    const detail = { text, accepted: false };
+    root.dispatchEvent(new CustomEvent("mcp-app-message", { bubbles: true, detail }));
+    if (detail.accepted) app.notify(t("The app's message is in the message box. Send it when you are ready."));
+    else app.notify(t("This chat cannot take a message from the app."), "blocked");
+    return detail.accepted;
+  }
   async function open(url: string) {
     try {
       await window.haarness.openLink(connection || undefined, thread, url);
@@ -270,6 +290,7 @@ export function McpAppView(props: {
       themeObserver.disconnect();
       resize.disconnect();
       request()?.answer(false);
+      message()?.answer(false);
       if (initialized) void bridge.request("ui/resource-teardown");
     });
   });
@@ -344,6 +365,23 @@ export function McpAppView(props: {
           <Icon name="alert" size="sm" />
           <span>{t("This result is too large to show in the app.")}</span>
         </div>
+      </Show>
+      <Show when={message()}>
+        {(pending) => (
+          <div class="notice-inline mcp-app-request" role="group" aria-label={t("Message from the app")}>
+            <Icon name="chat" size="sm" />
+            <span>
+              {t("This app wants to write a message for you.")}
+              <span class="notice-detail mcp-app-message">{pending().text}</span>
+            </span>
+            <button class="mcp-app-action" onClick={() => pending().answer(true)}>
+              {t("Insert app message")}
+            </button>
+            <button class="mcp-app-action" onClick={() => pending().answer(false)}>
+              {t("Dismiss")}
+            </button>
+          </div>
+        )}
       </Show>
       <Show when={request()}>
         {(pending) => (

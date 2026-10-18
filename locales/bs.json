@@ -2450,5 +2450,8 @@
   "This result is too large to show in the app.": "Ovaj rezultat je prevelik da bi se prikazao u aplikaciji.",
   "Link from the app": "Link iz aplikacije",
   "This app wants to open a link.": "Ova aplikacija želi otvoriti link.",
-  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "Ovaj alat dolazi s aplikacijom; otvori chat u Haarness Desktopu da bi je koristio."
+  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "Ovaj alat dolazi s aplikacijom; otvori chat u Haarness Desktopu da bi je koristio.",
+  "Message from the app": "Poruka iz aplikacije",
+  "This app wants to write a message for you.": "Ova aplikacija želi napisati poruku umjesto tebe.",
+  "Insert app message": "Umetni poruku aplikacije"
 }

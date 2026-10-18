@@ -268,6 +268,19 @@ test("the bridge refuses tool calls, context updates, downloads, other resources
   ]);
 });
 
+test("a message waits for the host's answer: inserted, or declined", async () => {
+  let answer!: (inserted: boolean) => void;
+  const { value } = host({ compose: () => new Promise<boolean>((resolve) => (answer = resolve)) });
+  const posted: Record<string, unknown>[] = [];
+  const bridge = createBridge(value, (message) => posted.push(message));
+  const pending = bridge.receive({ jsonrpc: "2.0", id: 1, method: "ui/message", params: { role: "user", content: [{ type: "text", text: "hi" }] } });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(posted, []);
+  answer(false);
+  await pending;
+  assert.deepEqual(posted, [{ jsonrpc: "2.0", id: 1, result: { isError: true } }]);
+});
+
 test("a failing host answers with an error, and the host's own requests get their answers", async () => {
   const { value } = host({ readResource: async () => { throw new Error("MCP server weather is not connected"); } });
   const { posted, bridge } = await exchange(value, [

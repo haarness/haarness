@@ -2450,5 +2450,8 @@
   "This result is too large to show in the app.": "هذه النتيجة أكبر من أن تُعرض في التطبيق.",
   "Link from the app": "رابط من التطبيق",
   "This app wants to open a link.": "يريد هذا التطبيق فتح رابط.",
-  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "لهذه الأداة تطبيق؛ افتح الدردشة في Haarness Desktop لاستخدامه."
+  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "لهذه الأداة تطبيق؛ افتح الدردشة في Haarness Desktop لاستخدامه.",
+  "Message from the app": "رسالة من التطبيق",
+  "This app wants to write a message for you.": "يريد هذا التطبيق كتابة رسالة نيابةً عنك.",
+  "Insert app message": "إدراج رسالة التطبيق"
 }
