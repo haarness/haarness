@@ -1398,6 +1398,18 @@ mod tests {
 
     #[tokio::test]
     async fn whitespace_only_text_is_never_sent_as_a_text_block() {
+        fn texts(value: &Value, found: &mut Vec<String>) {
+            match value {
+                Value::Object(map) => {
+                    if map.get("type").and_then(Value::as_str) == Some("text") {
+                        found.push(map["text"].as_str().unwrap_or_default().to_owned());
+                    }
+                    map.values().for_each(|value| texts(value, found));
+                }
+                Value::Array(items) => items.iter().for_each(|value| texts(value, found)),
+                _ => {}
+            }
+        }
         let state = FixtureState::default();
         let router = Router::new()
             .route("/messages", post(messages))
@@ -1458,18 +1470,6 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(roles, ["user", "assistant", "user", "user"]);
         // Every text block anywhere, tool results included, holds text.
-        fn texts(value: &Value, found: &mut Vec<String>) {
-            match value {
-                Value::Object(map) => {
-                    if map.get("type").and_then(Value::as_str) == Some("text") {
-                        found.push(map["text"].as_str().unwrap_or_default().to_owned());
-                    }
-                    map.values().for_each(|value| texts(value, found));
-                }
-                Value::Array(items) => items.iter().for_each(|value| texts(value, found)),
-                _ => {}
-            }
-        }
         let mut found = Vec::new();
         texts(&requests[0]["messages"], &mut found);
         assert_eq!(found, ["look"]);
