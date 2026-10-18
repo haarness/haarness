@@ -401,6 +401,11 @@ export interface Host {
    * its request arrived.
    */
   openLink(url: string, gesture: boolean): Promise<boolean>;
+  /**
+   * A link the bridge refused (any scheme but http, https and mailto). The page is told
+   * why; this lets the host tell the person, who may have just clicked it.
+   */
+  refusedLink?(url: string, gesture: boolean): void;
   /** Puts text in the message box; false when the person declined or this chat cannot take it. */
   compose(text: string, gesture: boolean): boolean | Promise<boolean>;
   /** Reads a `ui://` resource of the page's own server. */
@@ -441,7 +446,10 @@ export function createBridge(host: Host, post: (message: Record<string, unknown>
         return {};
       case "ui/open-link": {
         const url = webLink(params.url);
-        if (!url) throw new RpcError(-32602, REFUSED.link);
+        if (!url) {
+          host.refusedLink?.(typeof params.url === "string" ? params.url : "", gesture);
+          throw new RpcError(-32602, REFUSED.link);
+        }
         return (await host.openLink(url, gesture)) ? {} : { isError: true };
       }
       case "ui/message": {
