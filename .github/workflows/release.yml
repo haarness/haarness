@@ -48,7 +48,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
       - uses: dtolnay/rust-toolchain@stable
-        with: { toolchain: 1.94.0 }
+        with: { toolchain: 1.94.0, targets: '${{ matrix.target }}' }
       - uses: Swatinem/rust-cache@v2
       - name: Install the glibc-pinning linker
         if: matrix.glibc
@@ -86,19 +86,24 @@ jobs:
       - name: Build the CLI
         shell: bash
         run: |
+          # Always name the target: a runner's host toolchain may not match
+          # the architecture this job publishes (windows-11-arm).
           if [ -n "${{ matrix.glibc }}" ]; then
             cargo zigbuild --release -p haarness-cli --target "${{ matrix.target }}.${{ matrix.glibc }}"
-            binary="target/${{ matrix.target }}/release/haarness"
           else
-            cargo build --release -p haarness-cli
-            binary="target/release/haarness${{ runner.os == 'Windows' && '.exe' || '' }}"
+            cargo build --release -p haarness-cli --target "${{ matrix.target }}"
           fi
+          binary="target/${{ matrix.target }}/release/haarness${{ runner.os == 'Windows' && '.exe' || '' }}"
           echo "HAARNESS_BIN=${{ github.workspace }}/$binary" >> "$GITHUB_ENV"
       - run: npm --prefix apps/desktop ci
       - run: npm --prefix apps/desktop test
       - name: Installer verification
         if: runner.os != 'Windows'
         run: python scripts/test-release-install.py
+      # install.ps1 under PowerShell 7 everywhere; on Windows it also installs
+      # the release binary over a previous copy.
+      - name: PowerShell installer verification
+        run: python scripts/test-release-install-ps1.py
       - name: macOS quarantine regression
         if: runner.os == 'macOS'
         run: python scripts/test-release-quarantine.py

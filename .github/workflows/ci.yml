@@ -18,6 +18,9 @@ jobs:
           toolchain: 1.94.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # One Python on every runner (Windows images have no python3 command).
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
       # Haarness is a commercial product: no internal identifiers may
       # reach a release. The self-test proves the gate still detects them.
       - run: sh ./scripts/check-commercial-boundary.sh --self-test
@@ -33,8 +36,8 @@ jobs:
         env:
           HAARNESS_BIN: ./target/release/haarness${{ runner.os == 'Windows' && '.exe' || '' }}
         run: |
-          python3 vendor/ripgrep/verify.py
-          python3 scripts/test-ripgrep.py
+          python vendor/ripgrep/verify.py
+          python scripts/test-ripgrep.py
       - name: Install terminal test dependency
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y tmux
@@ -59,6 +62,10 @@ jobs:
         env:
           HAARNESS_BIN: ./target/release/haarness
         run: python3 scripts/test-tui-cursor.py
+      - name: PowerShell installer
+        env:
+          HAARNESS_BIN: ./target/release/haarness${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: python scripts/test-release-install-ps1.py
       - run: ./target/release/haarness doctor
         if: runner.os != 'Windows'
       - run: .\target\release\haarness.exe doctor
