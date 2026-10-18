@@ -2449,5 +2449,6 @@
   "This app's page could not be loaded.": "Stranica ove aplikacije se nije mogla učitati.",
   "This result is too large to show in the app.": "Ovaj rezultat je prevelik da bi se prikazao u aplikaciji.",
   "Link from the app": "Link iz aplikacije",
-  "This app wants to open a link.": "Ova aplikacija želi otvoriti link."
+  "This app wants to open a link.": "Ova aplikacija želi otvoriti link.",
+  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "Ovaj alat dolazi s aplikacijom; otvori chat u Haarness Desktopu da bi je koristio."
 }

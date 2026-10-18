@@ -2449,5 +2449,6 @@
   "This app's page could not be loaded.": "このアプリのページを読み込めませんでした。",
   "This result is too large to show in the app.": "この結果は大きすぎてアプリに表示できません。",
   "Link from the app": "アプリからのリンク",
-  "This app wants to open a link.": "このアプリがリンクを開こうとしています。"
+  "This app wants to open a link.": "このアプリがリンクを開こうとしています。",
+  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "このツールにはアプリがあります。使うには Haarness Desktop でチャットを開いてください。"
 }

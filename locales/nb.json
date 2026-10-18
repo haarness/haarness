@@ -2449,5 +2449,6 @@
   "This app's page could not be loaded.": "Siden til denne appen kunne ikke lastes inn.",
   "This result is too large to show in the app.": "Dette resultatet er for stort til å vises i appen.",
   "Link from the app": "Lenke fra appen",
-  "This app wants to open a link.": "Denne appen vil åpne en lenke."
+  "This app wants to open a link.": "Denne appen vil åpne en lenke.",
+  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "Dette verktøyet har en app; åpne chatten i Haarness Desktop for å bruke den."
 }
