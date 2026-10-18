@@ -211,12 +211,22 @@ test("a link the app may not open is refused, with a notice naming its scheme on
   );
   await page.waitForTimeout(300);
   await expect(view.locator(".mcp-app-refused")).toHaveCount(0);
-  // After a click in the page, the person who clicked sees why nothing opened: its scheme, not its text.
+  // After a click in the page, the person who clicked sees why nothing opened. A scheme that is
+  // not a well-known one could be words the page chose, so the notice names none.
+  await content(view).getByRole("button", { name: "Open a worded link" }).click();
+  await expect(content(view).locator("#status")).toHaveText(
+    "worded link error Haarness opens only http, https and mailto links from an app.",
+  );
+  const notice = view.locator(".mcp-app-refused");
+  await expect(notice).toHaveText(
+    /^This app tried to open a link Haarness does not open\. Apps may open only http, https and mailto links\.\s*Dismiss$/,
+  );
+  await expect(notice).not.toContainText("haarness-help");
+  // A well-known scheme is named; the rest of the address, the page's text, is not.
   await content(view).getByRole("button", { name: "Open a file link" }).click();
   await expect(content(view).locator("#status")).toHaveText(
     "file link error Haarness opens only http, https and mailto links from an app.",
   );
-  const notice = view.locator(".mcp-app-refused");
   await expect(notice).toHaveText(
     /^This app tried to open a file: link\. Apps may open only http, https and mailto links\.\s*Dismiss$/,
   );

@@ -30,6 +30,7 @@ p{margin:4px 0}button{margin:4px 4px 0 0}
 <button id="ask-twice">Ask twice</button>
 <button id="open-twice">Open twice</button>
 <button id="file-link">Open a file link</button>
+<button id="worded-link">Open a worded link</button>
 <button id="refresh">Refresh</button>
 <button id="read-own">Read own page</button>
 <button id="read-other">Read another resource</button>
@@ -90,6 +91,7 @@ click("open-twice", () => {
   request("ui/open-link", { url: "https://example.com/first" }).then((reply) => out("status", "first link " + answer(reply)));
   request("ui/open-link", { url: "https://example.com/second" }).then((reply) => out("result", "second link " + answer(reply)));
 });
+click("worded-link", () => request("ui/open-link", { url: "sign-in.at.haarness-help.com:443/now" }).then((reply) => out("status", "worded link " + answer(reply))));
 click("file-link", () => request("ui/open-link", { url: "file:///etc/hosts" }).then((reply) => out("status", "file link " + answer(reply))));
 click("refresh", () => request("tools/call", { name: "refresh_weather", arguments: {} }).then((reply) => out("status", "call " + answer(reply))));
 click("read-own", () => request("resources/read", { uri: "ui://weather/view.html" })

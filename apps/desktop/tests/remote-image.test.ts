@@ -11,6 +11,7 @@ import {
   loadedImage,
   loadImage,
   madeHere,
+  onImageSettled,
   relabelImages,
   rememberImage,
   remoteImageHost,
@@ -145,6 +146,34 @@ test("an image is fetched once at a time per chat, and again after a failure", a
   void loadImage("chat", "https://x/b.png", fetch).catch(() => {});
   assert.deepEqual(fetched, ["https://x/a.png", "https://x/b.png", "https://x/b.png"]);
   fail(new Error("again"));
+  forgetImages();
+});
+
+test("every reply hears when a fetch settles, including one drawn after it began", async () => {
+  forgetImages();
+  const heard: [string, string, string | undefined, boolean][] = [];
+  let finish!: (data: string) => void;
+  let fail!: (error: Error) => void;
+  const fetch = () =>
+    new Promise<string>((resolve, reject) => {
+      finish = resolve;
+      fail = reject;
+    });
+  const clicked = loadImage("chat", "https://x/a.png", fetch);
+  // The row scrolls back into view while the fetch runs: a new reply listens.
+  const stop = onImageSettled((scope, src, data) => heard.push([scope, src, data, imageLoading(scope, src)]));
+  const gone = onImageSettled(() => heard.push(["unmounted", "", undefined, false]));
+  gone();
+  finish("data:a");
+  await clicked;
+  // It hears the image, after the fetch is over, so it draws the image and not a disabled button.
+  assert.deepEqual(heard, [["chat", "https://x/a.png", "data:a", false]]);
+  const failing = loadImage("chat", "https://x/b.png", fetch);
+  fail(new Error("refused"));
+  await assert.rejects(failing, /refused/);
+  // A failure reaches it too, so its button takes clicks again.
+  assert.deepEqual(heard[1], ["chat", "https://x/b.png", undefined, false]);
+  stop();
   forgetImages();
 });
 

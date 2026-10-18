@@ -345,9 +345,12 @@ test("a refused link reaches the host too, so the person who clicked it can be t
 test("a refused link is named only by its scheme, never by the page's own text", () => {
   assert.equal(linkScheme("file:///etc/hosts"), "file:");
   assert.equal(linkScheme(" JavaScript:alert(1)"), "javascript:");
-  assert.equal(linkScheme("vscode://open?x=1"), "vscode:");
-  // Only the scheme of a worded address is repeated; text that is not one, never.
-  assert.equal(linkScheme("Haarness: sign in at https://evil.example"), "haarness:");
+  assert.equal(linkScheme("SMB://server/share"), "smb:");
+  // Any other scheme could be words the page chose: the notice names none.
+  assert.equal(linkScheme("vscode://open?x=1"), undefined);
+  assert.equal(linkScheme("sign-in.at.haarness-help.com:443"), undefined);
+  // Nor a worded address, or text with no scheme at all.
+  assert.equal(linkScheme("Haarness: sign in at https://evil.example"), undefined);
   assert.equal(linkScheme("Sign in at https://evil.example"), undefined);
   assert.equal(linkScheme("relative/path"), undefined);
   assert.equal(linkScheme(""), undefined);
