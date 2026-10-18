@@ -19,7 +19,8 @@ def collect(args):
     dirty = subprocess.check_output(['git','status','--porcelain','--untracked-files=no'], cwd=ROOT, text=True).strip()
     if dirty and not args.allow_dirty: raise ValueError('Commit build sources before collecting a publishable release (or --allow-dirty for local proof).')
     os_name = {'Darwin':'macos','Linux':'linux','Windows':'windows'}[platform.system()]
-    arch = {'arm64':'arm64','aarch64':'arm64','AMD64':'x64','x86_64':'x64'}[platform.machine()]
+    # Windows reports ARM64 in capitals (and AMD64), macOS arm64, Linux aarch64.
+    arch = {'arm64':'arm64','aarch64':'arm64','amd64':'x64','x86_64':'x64'}[platform.machine().lower()]
     binary = Path(args.binary).resolve()
     version = subprocess.check_output([str(binary),'--version'],text=True).strip().removeprefix('haarness ')
     desktop = json.loads((ROOT/'apps/desktop/package.json').read_text())
