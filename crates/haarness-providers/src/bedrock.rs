@@ -252,7 +252,7 @@ fn bedrock_request(request: ProviderRequest) -> CoreResult<Value> {
                 // A document must come with text; an image needs none.
                 let content = if !content.trim().is_empty() {
                     Some(content)
-                } else if media.iter().any(|item| item.is_pdf()) {
+                } else if media.iter().any(crate::media::LoadedMedia::is_pdf) {
                     Some(ATTACHED_DOCUMENT.to_owned())
                 } else {
                     None
@@ -801,6 +801,18 @@ mod tests {
 
     #[test]
     fn converse_never_sends_a_blank_text_block() {
+        fn texts(value: &Value, found: &mut Vec<String>) {
+            match value {
+                Value::Object(map) => {
+                    if let Some(text) = map.get("text").and_then(Value::as_str) {
+                        found.push(text.to_owned());
+                    }
+                    map.values().for_each(|value| texts(value, found));
+                }
+                Value::Array(items) => items.iter().for_each(|value| texts(value, found)),
+                _ => {}
+            }
+        }
         let image = || "data:image/png;base64,iVBORw0KGgo=".to_owned();
         let call = |id: &str| ProviderMessage::ToolCall {
             call_id: id.into(),
@@ -847,18 +859,6 @@ mod tests {
             output_schema: None,
         })
         .unwrap();
-        fn texts(value: &Value, found: &mut Vec<String>) {
-            match value {
-                Value::Object(map) => {
-                    if let Some(text) = map.get("text").and_then(Value::as_str) {
-                        found.push(text.to_owned());
-                    }
-                    map.values().for_each(|value| texts(value, found));
-                }
-                Value::Array(items) => items.iter().for_each(|value| texts(value, found)),
-                _ => {}
-            }
-        }
         let mut found = Vec::new();
         texts(&body["messages"], &mut found);
         assert!(
