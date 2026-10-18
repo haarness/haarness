@@ -34,7 +34,11 @@ export function ScreenshotPicker(props: { close: (values?: Attachment[]) => void
     if (!choose) setLoading(true);
     try {
       const value = await window.haarness.screenshots({ choose });
-      if ("canceled" in value) return;
+      if ("canceled" in value) {
+        // Declining to show the screenshots closes the dialog; declining another folder keeps it.
+        if (!choose) close();
+        return;
+      }
       setSelected([]);
       setNeedsFolder("needsFolder" in value);
       setListing("listing" in value ? value : undefined);
