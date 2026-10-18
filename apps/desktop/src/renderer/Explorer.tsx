@@ -1,16 +1,21 @@
 import { Preview } from "./preview";
 import { PreviewContent } from "./PreviewContent";
 import { t } from "./i18n";
-import { For, Show, batch, createSignal, createEffect, onCleanup } from "solid-js";
+import { For, Show, batch, createMemo, createSignal, createEffect, onCleanup } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type { FileContent, FileEntry } from "../shared";
 import { useApp } from "./state";
 import { Button, Icon, ask, confirm, Empty } from "./ui";
 import { Editor, type EditorSession } from "./Editor";
-import { fileContext } from "./prompt-context";
-import { shortcutLabel, shortcutText } from "./search";
+import { contextLabel, fileContext, fileLinesContext } from "./prompt-context";
+import { matchesShortcut, shortcutLabel, shortcutText } from "./search";
+import { InlineComment } from "./InlineComment";
+import { sourceBlocks, type SourceRange } from "./markdown-source";
+import { previewLines } from "./preview-selection";
 import { registerCyclePanel } from "./tab-cycle";
 /** `changed` is the file on disk when it moved on under unsaved edits. */
+/** What a comment on Preview lines is about, taken when its box opens. */
+type CommentTarget = { path: string; from: number; to: number; content: string; unsaved: boolean };
 type OpenFile = FileContent & { editor: EditorSession; mode?: "preview" | "code"; pin?: string; changed?: FileContent };
 const emptyHash =
   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -33,10 +38,62 @@ export function Explorer() {
   const pendingSaves = new Map<EditorSession, Promise<void>>();
   const file = () => tabs().find((item) => item.path === selected());
   const [selection, setSelection] = createSignal({ from: 0, to: 0 });
+  /** The source lines selected in a Markdown file's Preview. */
+  const [previewSelection, setPreviewSelection] = createSignal<SourceRange>();
+  /** The open comment on Preview lines: the lines and the file's text when it opened, and the note. */
+  const [comment, setComment] = createSignal<CommentTarget & { text: string }>();
   createEffect(() => {
     selected();
     setSelection({ from: 0, to: 0 });
+    setPreviewSelection(undefined);
+    setComment(undefined);
   });
+  let panel!: HTMLElement;
+  const markdownPreview = () => {
+    const value = file();
+    return !!value && value.mode !== "code" && Preview.kind(value.path) === "markdown";
+  };
+  const fileText = () => {
+    const value = file();
+    return value ? (edits()[value.path] ?? value.content) : "";
+  };
+  const previewBlocks = createMemo(() => (markdownPreview() ? sourceBlocks(fileText()) : []));
+  const previewHost = () =>
+    panel?.querySelector<HTMLElement>(".file-preview .document-preview > .markdown") ?? undefined;
+  /** The lines of the live selection, when it is in this panel's visible Preview. */
+  const liveLines = () => {
+    const host = previewHost();
+    if (!markdownPreview() || !host || !panel.checkVisibility()) return undefined;
+    return previewLines(host, fileText(), document.getSelection(), previewBlocks());
+  };
+  // A selection in the Preview names its source lines. The two buttons that
+  // act on them keep the selection when pressed; any other selection, or one
+  // that collapses outside the comment box, lets them go.
+  const trackPreview = () => {
+    const current = document.getSelection();
+    const anchor = current?.anchorNode;
+    const element = anchor instanceof Element ? anchor : anchor?.parentElement;
+    if (current?.isCollapsed && element?.closest(".preview-comment")) return;
+    setPreviewSelection(liveLines());
+  };
+  document.addEventListener("selectionchange", trackPreview);
+  onCleanup(() => document.removeEventListener("selectionchange", trackPreview));
+  // The editor binds Mod+Shift+L itself; in the Preview it works on the
+  // selected lines, only while the Preview shows and holds the selection.
+  const previewShortcut = (event: KeyboardEvent) => {
+    if (!matchesShortcut(event, "Mod+Shift+L", app.state.platform)) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest?.("input, textarea, [contenteditable]")) return;
+    const lines = liveLines();
+    if (!lines) return;
+    event.preventDefault();
+    setPreviewSelection(lines);
+    void app.run(attachContext);
+  };
+  document.addEventListener("keydown", previewShortcut);
+  onCleanup(() => document.removeEventListener("keydown", previewShortcut));
+  const hasSelection = () =>
+    markdownPreview() ? !!previewSelection() : selection().from !== selection().to;
   const canAttach = () =>
     !file()?.pin && file()?.encoding === "utf8" &&
     !app.state.threads.find((thread) => thread.id === app.state.selected)
@@ -45,18 +102,45 @@ export function Explorer() {
     const value = file();
     if (!value || !canAttach()) return;
     const key = app.draftKey();
+    const lines = markdownPreview() ? previewSelection() : undefined;
     await app.addPromptContext(
-      fileContext(
-        value.path,
-        edits()[value.path] ?? value.content,
-        selection(),
-        dirty(value.path),
-      ),
+      lines
+        ? fileLinesContext(value.path, fileText(), lines.from, lines.to, dirty(value.path))
+        : fileContext(
+            value.path,
+            edits()[value.path] ?? value.content,
+            selection(),
+            dirty(value.path),
+          ),
       key,
     );
     if (app.draftKey() === key) {
       app.set("panel", "chat");
       app.notify(t("File context added to your message"));
+    }
+  }
+  /**
+   * A comment on lines of the Preview reaches the chat as a diff comment
+   * does: the lines go in as context (the same chip as "Add selection to
+   * context") and the comment as text in the message, both for the chat being
+   * written.
+   */
+  async function addComment(target: CommentTarget, text: string) {
+    const value = file();
+    if (!value || value.path !== target.path || !canAttach()) return;
+    const key = app.draftKey();
+    // The lines as they read when the comment opened, even if the file changed since.
+    const item = fileLinesContext(target.path, target.content, target.from, target.to, target.unsaved);
+    await app.addPromptContext(item, key);
+    const storage = "draft:" + (app.state.selected ? (app.project()?.id ?? "") : app.newDraftScope()) + ":" + (app.state.selected ?? "");
+    const current = app.state.drafts[key] ?? (await window.haarness.storage(storage)) ?? "";
+    const merged = [String(current).trimEnd(), `Comment on ${contextLabel(item)}:\n${text}`].filter(Boolean).join("\n\n");
+    app.set("drafts", key, merged);
+    await window.haarness.storage(storage, merged);
+    setComment(undefined);
+    if (app.draftKey() === key) {
+      app.set("panel", "chat");
+      app.notify(t("Comment added to your message"));
     }
   }
   const dirty = (path: string) =>
@@ -342,6 +426,18 @@ export function Explorer() {
           : open(request.path, request),
     );
   });
+  /** A file in the tree. The server refuses a link that leads out of the
+   * project (it would show any file on the computer to anyone connected), so
+   * that refusal is said in words rather than as the server's error. */
+  async function openEntry(path: string) {
+    try {
+      await open(path);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/escapes the workspace/i.test(message)) throw error;
+      app.notify(t("This file is a link to somewhere outside the project, so it does not open here."), "blocked");
+    }
+  }
   /** A link's target: a file opens (at its line), a folder opens in the tree,
    * and anything else is named as missing rather than shown as a server error. */
   async function openLink(path: string, line?: number) {
@@ -561,7 +657,7 @@ export function Explorer() {
     setVersion((v) => v + 1);
   }
   return (
-    <section class="explorer" data-cycle-panel="files">
+    <section class="explorer" data-cycle-panel="files" ref={panel}>
       <div class="panel-toolbar">
         <input
           class="panel-search"
@@ -596,7 +692,7 @@ export function Explorer() {
                 version={version()}
                 hidden={true}
                 selected={selected()}
-                open={(path) => app.run(() => open(path))}
+                open={(path) => app.run(() => openEntry(path))}
                 expanded={(path) => expanded().has(path)}
                 toggle={toggle}
               />
@@ -656,14 +752,28 @@ export function Explorer() {
                   <Button
                     icon="file"
                     label={
-                      selection().from !== selection().to
+                      hasSelection()
                         ? t("Add selection to context")
                         : t("Add file to context")
                     }
                     hint={shortcutText("Mod+Shift+L", app.state.platform)}
                     disabled={!canAttach()}
+                    keepSelection
                     onClick={() => app.run(attachContext)}
                   />
+                  <Show when={markdownPreview()}>
+                    <Button
+                      icon="chat"
+                      label={t("Comment on selection")}
+                      disabled={!canAttach() || !previewSelection()}
+                      keepSelection
+                      onClick={() => {
+                        const lines = previewSelection();
+                        const path = file()!.path;
+                        if (lines) setComment({ path, ...lines, content: fileText(), unsaved: dirty(path), text: "" });
+                      }}
+                    />
+                  </Show>
                   <Button
                     icon="edit"
                     label={t("Rename")}
@@ -794,7 +904,28 @@ export function Explorer() {
                     line={jump()?.path === value().path ? jump() : undefined}
                   />
                 </Show>
-                </>}><PreviewContent file={{ ...value(), content: edits()[value().path] ?? value().content }} /></Show>
+                </>}>
+                  <PreviewContent file={{ ...value(), content: edits()[value().path] ?? value().content }} />
+                  <Show when={comment()?.path === value().path ? comment() : undefined}>
+                    {(open) => {
+                      const label = () =>
+                        contextLabel(fileLinesContext(open().path, open().content, open().from, open().to));
+                      return (
+                        <div class="preview-comment">
+                          <InlineComment
+                            label={label()}
+                            inputLabel={t("Preview comment")}
+                            placeholder={t("Comment on these lines…")}
+                            value={open().text}
+                            onInput={(text) => setComment((current) => current && { ...current, text })}
+                            onCancel={() => setComment(undefined)}
+                            onSubmit={(text) => app.run(() => addComment(open(), text)).then(() => {})}
+                          />
+                        </div>
+                      );
+                    }}
+                  </Show>
+                </Show>
               </>
             )}
           </Show>

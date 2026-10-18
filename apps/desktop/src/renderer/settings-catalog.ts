@@ -86,6 +86,7 @@ export const settingsControls = [
   ["general", "Theme", "color colours palette"],
   ["general", "Chat text size", "chat font message size"],
   ["general", "Terminal text size", "terminal font size"],
+  ["general", "Option as Meta key", "terminal option alt meta escape keyboard mac"],
   ["general", "Task notifications", "alerts notify background"],
   ["general", "Compact tool activity", "collapse expand tool output arguments"],
   ["general", "Show reasoning", "thinking thought reasoning visibility"],
@@ -100,6 +101,8 @@ export const settingsControls = [
   ["about", "Updates", "check update download version"],
   ["about", "Reopen project", "refresh conversations files reconnect"],
 ] as const;
+/** Rows Settings shows on macOS only, so search offers them only there. */
+export const macOnlyControls: ReadonlySet<string> = new Set(["Option as Meta key"]);
 export const shortcutTitles: Record<string, string> = {
   new: "New chat",
   settings: "Settings",
@@ -112,6 +115,13 @@ export const shortcutTitles: Record<string, string> = {
   agentPrev: "Previous agent",
   tabNext: "Next tab",
   tabPrev: "Previous tab",
+  chatPrev: "Previous chat",
+  chatNext: "Next chat",
+  focusSidebar: "Focus sidebar",
+  promptPrev: "Previous prompt",
+  promptNext: "Next prompt",
+  promptFirst: "First prompt",
+  promptLast: "Jump to latest",
 };
 /** Composer keys work only in the message box; Tab elsewhere moves focus. */
 export const shortcutDescriptions: Record<string, string> = {
@@ -119,4 +129,11 @@ export const shortcutDescriptions: Record<string, string> = {
   agentPrev: "While the message box has focus",
   tabNext: "In the chats, terminal, files, browser or side panel that has the keyboard",
   tabPrev: "In the chats, terminal, files, browser or side panel that has the keyboard",
+  chatPrev: "Among the chats the sidebar shows, from anywhere but the file editor or a terminal",
+  chatNext: "Among the chats the sidebar shows, from anywhere but the file editor or a terminal",
+  focusSidebar: "Shows the sidebar and puts the keyboard on the open chat",
+  promptPrev: "In the open chat; in the message box only while it is empty",
+  promptNext: "In the open chat; in the message box only while it is empty",
+  promptFirst: "In the open chat; in the message box only while it is empty",
+  promptLast: "In the open chat; in the message box only while it is empty",
 };

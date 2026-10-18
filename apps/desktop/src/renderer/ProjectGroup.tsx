@@ -21,6 +21,29 @@ import { Button, Icon, ask, confirm, type IconName } from "./ui";
 import { SessionActions } from "./SessionActions";
 import { createFileDrop } from "./file-drop";
 import { chatTitle } from "./chat-title";
+import { relativeAge } from "./relative-age";
+import {
+  drawnChats,
+  emptySelection,
+  pickChat,
+  pickTree,
+  selecting,
+  selection,
+  setSelection,
+  startsPick,
+} from "./sidebar-selection";
+
+/** One clock for every row's last-activity age, read by the rows that show
+ * one and ticking twice a minute from the first read. */
+const [clock, setClock] = createSignal(Date.now());
+let ticking = false;
+function now() {
+  if (!ticking) {
+    ticking = true;
+    setInterval(() => setClock(Date.now()), 30_000);
+  }
+  return clock();
+}
 
 function ProjectGroup(props: {
   project: DesktopProject;
@@ -287,12 +310,20 @@ function ProjectGroup(props: {
             },
             {
               divider: true,
+              label: t("Select chats"),
+              icon: "check",
+              run: () => {
+                setSelection(emptySelection(props.project.id));
+                void app.run(() => app.expandProject(props.project.id, true));
+              },
+            },
+            {
               label: t("Archive chats"),
               icon: "archive",
               run: () =>
                 void app.run(async () => {
                   if (
-                    await confirm(
+                    !(await confirm(
                       t("Archive all chats in {name}?", {
                         name: props.project.label,
                       }),
@@ -300,9 +331,15 @@ function ProjectGroup(props: {
                         "Archived chats leave the sidebar. Search still finds them, and each one can be restored.",
                       ),
                       { submit: t("Archive chats") },
-                    )
+                    ))
                   )
-                    await app.archiveProjectChats(props.project.id);
+                    return;
+                  const count = await app.archiveProjectChats(props.project.id);
+                  app.notify(
+                    count === 1
+                      ? t("Archived 1 chat")
+                      : t("Archived {count} chats", { count }),
+                  );
                 }),
             },
             {
@@ -455,12 +492,25 @@ export function ProjectSection(props: {
   );
 }
 
+/** The tick box a row shows in Select chats; the row's button carries the
+ * state for assistive technology as `aria-pressed`. */
+function PickBox(props: { picked: boolean }) {
+  return (
+    <span class="pick-box" classList={{ picked: props.picked }} aria-hidden="true" />
+  );
+}
+
 function LocationGroup(props: { project: DesktopProject; location: Recent }) {
   const app = useApp();
   const name = () => t(locationName(props.location));
   const expanded = () => app.state.expandedLocations[props.location.id] ?? true;
   const missing = () => props.location.checkout?.exists === false;
   const current = () => app.project()?.id === props.location.id;
+  /** A worktree Haarness made can be picked for removal in Select chats;
+   * the project folder itself cannot. */
+  const pickable = () =>
+    selecting(props.project.id) && !!props.location.checkout?.managed;
+  const picked = () => !!selection()?.trees.includes(props.location.id);
   return (
     <section
       class="worktree-group"
@@ -468,6 +518,18 @@ function LocationGroup(props: { project: DesktopProject; location: Recent }) {
       classList={{ current: current(), missing: missing() }}
     >
       <div class="worktree-row">
+        <Show when={pickable()}>
+          <button
+            class="pick-tree"
+            aria-label={t("Select worktree {name}", { name: name() })}
+            aria-pressed={picked()}
+            onClick={() =>
+              setSelection((value) => value && pickTree(value, props.location.id))
+            }
+          >
+            <PickBox picked={picked()} />
+          </button>
+        </Show>
         <button
           class="worktree-heading"
           aria-label={
@@ -590,6 +652,8 @@ export function SessionList(props: {
           a.key.localeCompare(b.key),
       );
   const split = createMemo(() => splitSchedules(rows()));
+  /** The list Select chats belongs to: the project, or the flat list. */
+  const scope = () => props.project?.id ?? "all";
   const order = createOrdering(
     () =>
       "list:sessions:" +
@@ -634,6 +698,20 @@ export function SessionList(props: {
             conversationRoot(state.threads, state.selected) ===
               row().thread.id &&
             state.panel === "chat";
+          const picking = () => selecting(scope());
+          const picked = () => picking() && !!selection()?.chats.includes(key);
+          /** In Select chats, a click picks the row (Shift: the rows since
+           * the last one); Command- or Control-click starts the mode here. */
+          const pick = (event: MouseEvent) => {
+            if (!picking()) {
+              if (!startsPick(event, state.platform === "darwin")) return false;
+              setSelection(emptySelection(scope()));
+            }
+            setSelection((current) =>
+              current && pickChat(current, key, event.shiftKey, drawnChats(scope())),
+            );
+            return true;
+          };
           const sort = order.dropProps(
             key,
             t("chat {name}", { name: chatTitle(row().thread.title) }),
@@ -667,6 +745,8 @@ export function SessionList(props: {
               {...sort}
               ref={(element) => { sort.ref(element); fileDrop.ref(element); }}
               classList={{ selected: selected(), "file-drop-active": fileDrop.dragging() }}
+              data-pick-scope={scope()}
+              data-pick-key={key}
             >
               <button
                 aria-description={
@@ -683,24 +763,33 @@ export function SessionList(props: {
                     .join(". ") || undefined
                 }
                 aria-current={selected()}
+                aria-pressed={picking() ? picked() : undefined}
                 title={chatTitle(row().thread.title)}
-                onClick={() =>
-                  app.run(() =>
+                onClick={(event) => {
+                  if (pick(event)) return;
+                  void app.run(() =>
                     app.chooseProjectSession(
                       row().location.id,
                       row().thread.id,
                     ),
-                  )
-                }
+                  );
+                }}
               >
-                <span
-                  class="session-status"
-                  classList={{
-                    running: !row().waiting && row().running,
-                    waiting: !!row().waiting,
-                  }}
-                  aria-hidden="true"
-                />
+                <Show
+                  when={picking()}
+                  fallback={
+                    <span
+                      class="session-status"
+                      classList={{
+                        running: !row().waiting && row().running,
+                        waiting: !!row().waiting,
+                      }}
+                      aria-hidden="true"
+                    />
+                  }
+                >
+                  <PickBox picked={picked()} />
+                </Show>
                 <span class="session-label">
                   <span class="session-title">
                     {chatTitle(row().thread.title)}
@@ -720,7 +809,16 @@ export function SessionList(props: {
                     )}
                   </Show>
                 </span>
-                <Show when={row().waiting}>
+                {/* What the chat waits for, or else how long ago it was
+                    last active; the title stays the row's whole name. */}
+                <Show
+                  when={row().waiting}
+                  fallback={
+                    <span class="session-age" aria-hidden="true">
+                      {relativeAge(row().thread.updatedAt, now(), language(), t("now"))}
+                    </span>
+                  }
+                >
                   <span class="session-waiting" aria-hidden="true">
                     {t(row().waiting)}
                   </span>
@@ -948,7 +1046,7 @@ function ScheduledSessions(props: { rows: Conversation[] }) {
                                     class="session-waiting"
                                     aria-hidden="true"
                                   >
-                                    {row().waiting}
+                                    {t(row().waiting)}
                                   </span>
                                 </Show>
                               </button>

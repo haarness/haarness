@@ -10,11 +10,25 @@ import {
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { sizePusher } from "./terminal-size";
-import { inputQueue, reconnectDelay, shownOutput, terminalStream, writeChunks } from "./terminal-stream";
+import { optionKeys } from "./terminal-keys";
+import { terminalTheme, type ThemeId } from "../themes";
+import {
+  inputQueue,
+  linkWatch,
+  reconnects,
+  restoredLine,
+  scrollPlaces,
+  topText,
+  shownOutput,
+  terminalStream,
+  writeChunks,
+  type Link,
+  type ScrollPlace,
+} from "./terminal-stream";
 import "@xterm/xterm/css/xterm.css";
 import type { PtyInfo } from "@haarness/sdk";
 import { useApp } from "./state";
-import { Button, ask } from "./ui";
+import { Button, Icon, ask } from "./ui";
 import { createOrdering } from "./Sortable";
 import { registerCyclePanel } from "./tab-cycle";
 
@@ -104,6 +118,18 @@ export function TerminalPanel() {
     setSelected("");
     setStarting(true);
     void app.run(() => refresh(true));
+  });
+  // A server that was replaced (restarted, or stopped and started again)
+  // has none of the old terminals and sends no event for them: list them
+  // again, which also opens a shell when none is left.
+  let instance = { connection: "", id: "" };
+  createEffect(() => {
+    const connection = app.state.connection?.id ?? "";
+    const id = app.state.connection?.info.serverInstanceId ?? "";
+    const previous = instance;
+    instance = { connection, id };
+    if (connection && previous.connection === connection && previous.id && id !== previous.id)
+      void app.run(() => refresh(true));
   });
   const off = window.haarness.onEvent((event) => {
     if (
@@ -255,13 +281,25 @@ export function TerminalPanel() {
           </div>
         }
       >
-        {(id) => <TerminalView id={id} />}
+        {(id) => (
+          <TerminalView
+            id={id}
+            // The server answered without this terminal (it was replaced
+            // while this view was cut off): show what it has instead.
+            onGone={() => void app.run(() => refresh(true))}
+            onNew={() => void app.run(create)}
+          />
+        )}
       </Show>
     </section>
   );
 }
-function TerminalView(props: { id: string }) {
+/** Lines a terminal view keeps above its screen. */
+const SCROLLBACK = 5000;
+function TerminalView(props: { id: string; onGone: () => void; onNew: () => void }) {
   const app = useApp();
+  const [link, setLink] = createSignal<Link>("connected");
+  let retryNow = () => {};
   let host!: HTMLDivElement;
   let terminal: Terminal;
   let fit: FitAddon;
@@ -274,38 +312,18 @@ function TerminalView(props: { id: string }) {
       fontFamily: "SFMono-Regular, Menlo, Consolas, monospace",
       fontSize: app.state.preferences.terminalFontSize,
       cursorBlink: true,
-      scrollback: 5000,
+      scrollback: SCROLLBACK,
       allowProposedApi: false,
     });
     fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(host);
     const applyTheme = () => {
-      const style = getComputedStyle(document.documentElement);
-      const color = (name: string) =>
-        style.getPropertyValue("--" + name).trim();
-      terminal.options.theme = {
-        background: color("page"),
-        foreground: color("text"),
-        cursor: color("primary"),
-        selectionBackground: color("selected"),
-        black: color("page"),
-        brightBlack: color("muted"),
-        red: color("danger"),
-        green: color("green"),
-        yellow: color("syntax-number"),
-        blue: color("syntax-property"),
-        magenta: color("syntax-keyword"),
-        cyan: color("primary"),
-        white: color("text"),
-        brightRed: color("danger"),
-        brightGreen: color("green"),
-        brightYellow: color("syntax-number"),
-        brightBlue: color("syntax-property"),
-        brightMagenta: color("syntax-keyword"),
-        brightCyan: color("primary"),
-        brightWhite: color("text"),
-      };
+      const root = document.documentElement;
+      terminal.options.theme = terminalTheme(
+        (root.dataset.palette ?? "haarness") as ThemeId,
+        root.dataset.theme === "light" ? "light" : "dark",
+      );
     };
     applyTheme();
     const themeObserver = new MutationObserver(applyTheme);
@@ -318,6 +336,17 @@ function TerminalView(props: { id: string }) {
       terminal.options.fontSize = app.state.preferences.terminalFontSize;
       fit.fit();
     });
+    // Option as Meta (Settings, macOS only): xterm reads its switch as it
+    // handles each key, so it is set for the Option key held just before.
+    const option = optionKeys();
+    const optionMode = () =>
+      app.state.platform === "darwin" ? app.state.preferences.terminalOptionAsMeta : "off";
+    terminal.attachCustomKeyEventHandler((event) => {
+      terminal.options.macOptionIsMeta = option.meta(event, optionMode());
+      return true;
+    });
+    window.addEventListener("blur", option.reset);
+    onCleanup(() => window.removeEventListener("blur", option.reset));
     fit.fit();
     // This view's own connection: main ignores a late connect or detach of
     // a view of the same terminal that was replaced.
@@ -382,26 +411,58 @@ function TerminalView(props: { id: string }) {
         start?: number;
         end?: number;
         truncated?: boolean;
+        modes?: string;
         view?: string;
       };
       if (data.view && data.view !== view) return;
       if (data.type === "replay" && typeof data.start === "number" && typeof data.end === "number") {
         shownOutput.adopt(key, data.end);
         stream.replay(Math.min(Math.max(requested, data.start), data.end));
+        if (replayStart === undefined) {
+          replayStart = data.start;
+          place = scrollPlaces.take(key);
+        }
       }
       if (data.bytes) stream.bytes(new Uint8Array(data.bytes));
       if (data.type === "cursor" && typeof data.end === "number") {
         stream.cursor(data.end);
         cursor = data.end;
-        attempt = 0;
+        loop.reset();
+        // Once xterm has drawn the replay, open where the view was
+        // scrolled to before, if that line still holds the same text.
+        if (place !== undefined && !restoring) {
+          restoring = true;
+          const end = data.end;
+          terminal.write(new Uint8Array(), () => {
+            if (disposed) return;
+            const line = restoredLine(place, {
+              start: replayStart!,
+              end,
+              cols: terminal.cols,
+              rows: terminal.rows,
+              trimmed: terminal.buffer.active.length >= terminal.rows + SCROLLBACK,
+              text: (index) => topText(lineText, index),
+            });
+            place = undefined;
+            if (line !== undefined) terminal.scrollToLine(line);
+          });
+        }
       }
+      // Older output is gone, so the replay does not continue what the view
+      // shows: start over (ESC c), say so, and put the terminal in the modes
+      // the lost output left on, such as a full-screen program's alternate
+      // screen, cursor keys, mouse reporting and bracketed paste.
       if (data.truncated && data.type === "replay")
-        terminal.writeln(
-          "\r\n[" + t("Earlier terminal output is no longer available") + "]\r\n",
+        stream.quiet(
+          new TextEncoder().encode(
+            "\x1bc[" + t("Earlier terminal output is no longer available") + "]\r\n" +
+              (data.modes ?? ""),
+          ),
         );
       if (data.type === "closed") {
         live = false;
-        reconnect();
+        watch.lost();
+        loop.after();
       }
     });
     // The output this view has, as the server counts it. When the socket
@@ -410,45 +471,62 @@ function TerminalView(props: { id: string }) {
     // keeps its keys and the missed output is replayed once.
     let cursor = 0;
     let requested = 0;
-    let attempt = 0;
-    let retry: ReturnType<typeof setTimeout> | undefined;
+    // Where this view's first replay started, and where the view was before,
+    // to open at once xterm has drawn it (see scrollPlaces).
+    let replayStart: number | undefined;
+    let place: ScrollPlace | undefined;
+    let restoring = false;
+    const lineText = (index: number) =>
+      terminal.buffer.active.getLine(index)?.translateToString(true);
     let focused = false;
-    const connect = () => {
-      requested = cursor;
-      void window.haarness
-        .terminal(connection, "connect", props.id, { cursor, view })
-        .then(() => {
-          if (disposed) return;
-          if (!focused) terminal.focus();
-          focused = true;
-          live = true;
-          for (const bytes of waiting.take()) send(bytes);
-          sizes.schedule({ cols: terminal.cols, rows: terminal.rows });
-        })
-        .catch((error) => {
-          if (disposed) return;
-          if (!focused) app.set("error", String(error));
-          reconnect();
-        });
+    // What the view says while the connection is down; reconnects go on
+    // whatever it says.
+    const watch = linkWatch({ onState: setLink });
+    // One attempt at a time (see reconnects). The first connects at once;
+    // later ones ask the server first, which keeps them trying while it
+    // cannot say. A shell that exited sends nothing more, and its tab says
+    // so; a terminal the server no longer has (it was replaced meanwhile)
+    // gives way to what it has.
+    let first = true;
+    const loop = reconnects({
+      attempt: async () => {
+        if (!first) {
+          const tabs = await window.haarness.api<PtyInfo[]>(connection, "listPtys", []);
+          if (disposed) return true;
+          const tab = tabs.find((tab) => tab.id === props.id);
+          if (tab?.status !== "running") {
+            watch.connected();
+            if (!tab) props.onGone();
+            return true;
+          }
+        }
+        first = false;
+        requested = cursor;
+        try {
+          await window.haarness.terminal(connection, "connect", props.id, { cursor, view });
+        } catch {
+          if (!disposed) watch.lost();
+          return disposed;
+        }
+        if (disposed) return true;
+        if (!focused) terminal.focus();
+        focused = true;
+        live = true;
+        watch.connected();
+        for (const bytes of waiting.take()) send(bytes);
+        sizes.schedule({ cols: terminal.cols, rows: terminal.rows });
+        return true;
+      },
+    });
+    retryNow = () => {
+      watch.retry();
+      loop.now();
     };
-    function reconnect() {
-      if (disposed) return;
-      clearTimeout(retry);
-      retry = setTimeout(async () => {
-        // A shell that exited, or a terminal closed elsewhere, sends nothing
-        // more; while the server cannot say, keep trying.
-        const tabs = await window.haarness
-          .api<PtyInfo[]>(connection, "listPtys", [])
-          .catch(() => undefined);
-        if (disposed) return;
-        if (!tabs) return reconnect();
-        if (tabs.find((tab) => tab.id === props.id)?.status === "running") connect();
-      }, reconnectDelay(attempt++));
-    }
-    connect();
+    loop.now();
     onCleanup(() => {
       disposed = true;
-      clearTimeout(retry);
+      watch.dispose();
+      loop.dispose();
       clearTimeout(timer);
       sizes.dispose();
       sized.dispose();
@@ -456,10 +534,54 @@ function TerminalView(props: { id: string }) {
       resize.disconnect();
       unsubscribe();
       void window.haarness.terminal(connection, "detach", props.id, view);
+      if (replayStart !== undefined) {
+        const buffer = terminal.buffer.active;
+        scrollPlaces.save(
+          key,
+          place ??
+            (buffer.viewportY < buffer.baseY
+              ? {
+                  start: replayStart,
+                  end: cursor,
+                  line: buffer.viewportY,
+                  cols: terminal.cols,
+                  rows: terminal.rows,
+                  text: topText(lineText, buffer.viewportY),
+                }
+              : undefined),
+        );
+      }
       terminal.dispose();
     });
   });
+  // xterm owns the view's children, so what the view says about its
+  // connection sits beside it.
   return (
-    <div class="terminal-view" aria-label={t("Workspace terminal")} ref={host} />
+    <div class="terminal-stage" data-link={link()}>
+      <div class="terminal-view" aria-label={t("Workspace terminal")} ref={host} />
+      <Show when={link() === "reconnecting"}>
+        <div class="terminal-reconnecting" role="status">
+          <span class="spinner" />
+          {t("Reconnecting…")}
+        </div>
+      </Show>
+      <Show when={link() === "disconnected"}>
+        <div class="terminal-disconnected">
+          <div role="alert">
+            <Icon name="alert" size="lg" />
+            <strong>{t("Terminal disconnected")}</strong>
+            <p>{t("Haarness can't reach this terminal. Its shell may still be running.")}</p>
+            <div>
+              <button type="button" onClick={() => props.onNew()}>
+                {t("New terminal")}
+              </button>
+              <button type="button" class="primary" onClick={() => retryNow()}>
+                {t("Retry")}
+              </button>
+            </div>
+          </div>
+        </div>
+      </Show>
+    </div>
   );
 }

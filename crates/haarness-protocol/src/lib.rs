@@ -367,6 +367,23 @@ pub enum ItemData {
         /// never anchors the context size.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         estimated: bool,
+        /// Milliseconds from sending the request to its first streamed
+        /// content (text, reasoning or a tool call). Absent on a request
+        /// that streamed nothing, was stopped or failed, and on records made
+        /// before requests were timed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        first_token_ms: Option<u64>,
+        /// Milliseconds from that first content to the last, the span the
+        /// output streamed across; present exactly when `first_token_ms` is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream_ms: Option<u64>,
+        /// Tokens in what streamed (text, visible reasoning, tool calls),
+        /// counted with the model family's token weights; present exactly
+        /// when `first_token_ms` is. Output speed divides this, not
+        /// `output_tokens`, by `stream_ms`: a provider's output count also
+        /// holds reasoning it never streamed, produced before the first token.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream_tokens: Option<u64>,
     },
     Todo {
         items: Vec<TodoEntry>,
@@ -1405,6 +1422,45 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn usage_timing_is_left_out_until_a_request_was_timed() {
+        let untimed: ItemData = serde_json::from_value(json!({
+            "type": "usage",
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cost_usd": null
+        }))
+        .unwrap();
+        assert!(matches!(
+            untimed,
+            ItemData::Usage {
+                first_token_ms: None,
+                stream_ms: None,
+                ..
+            }
+        ));
+        let written = serde_json::to_value(&untimed).unwrap();
+        assert!(written.get("first_token_ms").is_none(), "{written}");
+        assert!(written.get("stream_ms").is_none(), "{written}");
+        let timed: ItemData = serde_json::from_value(json!({
+            "type": "usage",
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cost_usd": null,
+            "first_token_ms": 820,
+            "stream_ms": 2400
+        }))
+        .unwrap();
+        let written = serde_json::to_value(&timed).unwrap();
+        assert_eq!(
+            (
+                written["first_token_ms"].as_u64(),
+                written["stream_ms"].as_u64()
+            ),
+            (Some(820), Some(2400))
+        );
     }
 
     #[test]

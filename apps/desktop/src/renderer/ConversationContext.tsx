@@ -1,4 +1,4 @@
-import { t } from "./i18n";
+import { language, t } from "./i18n";
 import {
   createEffect,
   createMemo,
@@ -13,7 +13,13 @@ import { useApp } from "./state";
 import { Button } from "./ui";
 import { ProviderLabel } from "./ProviderIcon";
 import { modelName } from "../model-names";
-import { contextUsage, tokenNumber } from "./context-usage";
+import {
+  contextUsage,
+  paceSeconds,
+  paceSpeed,
+  requestPace,
+  tokenNumber,
+} from "./context-usage";
 import { chatTitle } from "./chat-title";
 import "./conversation-context.css";
 
@@ -99,6 +105,7 @@ export function ConversationContext() {
     const data = context()?.latest?.data;
     return data?.type === "usage" ? data : undefined;
   };
+  const pace = () => requestPace(latest());
   const metrics = () =>
     [
       ["Input tokens", totals()?.inputTokens],
@@ -267,7 +274,36 @@ export function ConversationContext() {
                 <dt>{t("Cache write")}</dt>
                 <dd>{tokenNumber(latest()?.cache_write_tokens ?? 0)}</dd>
               </div>
+              <Show when={pace()}>
+                {(pace) => (
+                  <>
+                    <div>
+                      <dt>{t("First token")}</dt>
+                      <dd data-testid="first-token">
+                        {paceSeconds(pace().firstTokenMs, language())}
+                      </dd>
+                    </div>
+                    <Show when={pace().tokensPerSecond}>
+                      {(speed) => (
+                        <div>
+                          <dt>{t("Output speed")}</dt>
+                          <dd data-testid="output-speed">
+                            {t("{count} tokens/s", {
+                              count: paceSpeed(speed(), language()),
+                            })}
+                          </dd>
+                        </div>
+                      )}
+                    </Show>
+                  </>
+                )}
+              </Show>
             </dl>
+            <Show when={pace()}>
+              <p class="context-note">
+                {t("First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.")}
+              </p>
+            </Show>
             <p class="context-note">
               {latest()?.estimated
                 ? t("Estimated locally: the provider reported no usage for this request.")

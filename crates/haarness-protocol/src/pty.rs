@@ -100,7 +100,17 @@ pub struct PtyUpdateRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PtyCursor {
+    /// Where the replay that follows starts. A truncated replay starts at the
+    /// first whole line (or character) after the oldest byte still buffered.
     pub start: u64,
     pub end: u64,
+    /// The client asked for output older than the buffer holds.
     pub truncated: bool,
+    /// On a truncated replay, the escape sequences that restore the terminal
+    /// modes the dropped output left on (alternate screen, application cursor
+    /// keys and keypad, mouse reporting, bracketed paste, a hidden cursor…),
+    /// for a client to apply to a reset terminal before the replay. Absent
+    /// when there are none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modes: Option<String>,
 }

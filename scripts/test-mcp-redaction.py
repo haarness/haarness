@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real CLI and server, echo provider: MCP settings and connection errors never show the credentials
-in a server's URL or command arguments, while the rest stays readable.
+in a server's URL or command arguments, while the rest stays readable. Nor do a failed marketplace
+clone, a remote instruction URL that cannot be reached, or the log line of a request Auto approved.
 
 Usage: HAARNESS_BIN=target/debug/haarness python3 scripts/test-mcp-redaction.py
 Set HAARNESS_E2E_DIR to keep the run's state under a chosen folder.
@@ -12,7 +13,9 @@ binary = pathlib.Path(os.environ.get('HAARNESS_BIN', 'target/debug/haarness')).r
 root = pathlib.Path(tempfile.mkdtemp(prefix='haarness-mcp-redaction-', dir=os.environ.get('HAARNESS_E2E_DIR'))).resolve()
 workspace = root/'project'; workspace.mkdir()
 state = root/'state'; (state/'config').mkdir(parents=True); (state/'data').mkdir()
-SECRETS = ['hunter2', 'fixture-url-secret', 'fixture-arg-secret', 'fixture-flag-secret']
+SECRETS = ['hunter2', 'fixture-url-secret', 'fixture-arg-secret', 'fixture-flag-secret',
+           'fixture-clone-secret', 'fixture-instruction-secret', 'fixture-command-secret',
+           'fixture-review-secret']
 # Port 9 (discard) refuses the connection, so the server reports why it could not connect.
 (state/'config/config.toml').write_text('''[defaults]
 provider = "echo"
@@ -28,7 +31,12 @@ transport = "stdio"
 command = "/nonexistent/fixture-mcp"
 args = ["--api-key", "fixture-arg-secret", "--token", "fixture-flag-secret", "--region", "eu"]
 enabled = false
+
+[permissions]
+bash = "ask"
 ''')
+(state/'config/haarness.json').write_text(json.dumps({'instructions': [
+    'http://fixture:fixture-instruction-secret@127.0.0.1:9/rules.md?token=fixture-instruction-secret']}))
 env = {k: v for k, v in os.environ.items() if not k.startswith('HAARNESS_')}
 env.update(HAARNESS_DATA_DIR=str(state), HAARNESS_HOME=str(root/'home'), HAARNESS_TEST_PROVIDER='1',
            HAARNESS_DEFAULT_PROVIDER='echo', HAARNESS_DEFAULT_MODEL='echo-1')
@@ -53,6 +61,7 @@ def clean(text, label):
         assert secret not in text, f'{label} shows {secret}: {text}'
 def check(label):
     checks.append(label); print('PASS ' + label, flush=True)
+def logs(): return '\n'.join(path.read_text(errors='replace') for path in state.rglob('*.log*') if path.is_file())
 
 try:
     run([str(binary), '--workspace', str(workspace), 'serve', '--daemon', '--port', '0'], env=env)
@@ -116,6 +125,42 @@ try:
     results = [item['data'] for item in items if item['data']['type'] == 'tool_result']
     assert results and '<redacted>' in results[-1]['output'], results
     check('the model reading MCP settings with mcp_manage sees no credentials')
+
+    # A marketplace whose URL carries a token: git cannot reach it, and the error names it without the token.
+    failed_clone = subprocess.run([str(binary), '--workspace', str(workspace), 'plugin', 'marketplace', 'add',
+                                   'https://oauth2:fixture-clone-secret@127.0.0.1:9/team/market.git'],
+                                  env=env, text=True, capture_output=True, timeout=60)
+    assert failed_clone.returncode != 0, failed_clone.stdout
+    clean(failed_clone.stdout + failed_clone.stderr, 'marketplace add')
+    assert 'git clone failed for https://<redacted>@127.0.0.1:9/team/market.git' in failed_clone.stderr, failed_clone.stderr
+    check('a failed marketplace clone names the source without its token')
+
+    # A request Auto answers is logged with the command's credentials hidden.
+    chat = api('/threads', {'title': 'Auto log', 'provider': 'echo', 'model': 'echo-1', 'agent': 'build'})['id']
+    request = urllib.request.Request(f'{url}/v1/threads/{chat}/approval-mode', method='PUT',
+                                     data=json.dumps({'mode': 'auto'}).encode(),
+                                     headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token})
+    urllib.request.urlopen(request, timeout=15).read()
+    command = json.dumps({'command': 'echo --token fixture-command-secret > /dev/null'})
+    api(f'/threads/{chat}/turns', {'requestId': str(uuid.uuid4()), 'text': f'!tool bash {command}'})
+    until(lambda: not api('/turns/active'), 'turn still active')
+    until(lambda: 'approved once (Auto)' in logs(), 'no Auto approval line in the log')
+    clean(logs(), 'daemon log')
+    check("the Auto approval log line hides the command's token")
+
+    # A request waiting for a person is logged the same way.
+    review = api('/threads', {'title': 'Review log', 'provider': 'echo', 'model': 'echo-1', 'agent': 'build'})['id']
+    command = json.dumps({'command': 'echo --token fixture-review-secret > /dev/null'})
+    api(f'/threads/{review}/turns', {'requestId': str(uuid.uuid4()), 'text': f'!tool bash {command}'})
+    waiting = until(lambda: [item for item in api('/permissions') if item['threadId'] == review], 'no request waited')
+    api(f"/permissions/{waiting[0]['permissionId']}", {'decision': 'reject'})
+    until(lambda: not api('/turns/active'), 'turn still active')
+    until(lambda: 'permission requested; waiting for a reply' in logs(), 'no waiting line in the log')
+    clean(logs(), 'daemon log')
+    check("the waiting request's log line hides the command's token")
+    assert 'skipped remote instructions http://<redacted>@127.0.0.1:9/rules.md?token=<redacted>' in logs(), \
+        'no redacted notice for the unreachable instruction URL'
+    check('an unreachable instruction URL is logged without its credentials')
 
     (root/'result.json').write_text(json.dumps({'passed': True, 'checks': checks}, indent=2))
     print(f'PASS {len(checks)} MCP redaction scenarios.', flush=True)

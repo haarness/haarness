@@ -110,13 +110,32 @@ impl Language {
             .map_or(key, String::as_str)
     }
 
-    /// [`Self::text`] with its `{placeholder}`s filled in.
+    /// [`Self::text`] with its `{placeholder}`s filled in, in one pass: a
+    /// value is inserted as it is, so a file or provider name holding
+    /// `{count}` is never filled in again.
     pub fn format(self, key: &str, values: &[(&str, &str)]) -> String {
-        values
-            .iter()
-            .fold(self.text(key).to_owned(), |text, (name, value)| {
-                text.replace(&format!("{{{name}}}"), value)
-            })
+        let text = self.text(key);
+        let mut filled = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(start) = rest.find('{') {
+            filled.push_str(&rest[..start]);
+            let after = &rest[start + 1..];
+            let value = after.split_once('}').and_then(|(name, _)| {
+                values
+                    .iter()
+                    .find(|(known, _)| *known == name)
+                    .map(|(_, value)| (name.len(), *value))
+            });
+            if let Some((length, value)) = value {
+                filled.push_str(value);
+                rest = &after[length + 1..];
+            } else {
+                filled.push('{');
+                rest = after;
+            }
+        }
+        filled.push_str(rest);
+        filled
     }
 
     /// Languages written right to left. The terminal grid itself stays left
@@ -210,6 +229,18 @@ mod tests {
         }
         assert_eq!(Language::parse("xx"), None);
         assert_eq!(Language::default(), Language::English);
+    }
+    #[test]
+    fn format_inserts_each_value_as_it_is() {
+        let english = Language::English;
+        assert_eq!(
+            english.format("{a} then {b} and {a}", &[("a", "{b}"), ("b", "two $1 {a}")]),
+            "{b} then two $1 {a} and {b}"
+        );
+        assert_eq!(
+            english.format("{unknown} {a", &[("a", "x")]),
+            "{unknown} {a"
+        );
     }
     #[test]
     fn shared_catalogs_have_complete_keys_and_matching_language_inventory() {
