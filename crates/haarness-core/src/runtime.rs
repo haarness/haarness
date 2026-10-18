@@ -11509,7 +11509,6 @@ fn operation_for_log(operation: &str) -> String {
     crate::redact::log_text(operation, 300)
 }
 
-/// Why a scheduled run's request that always asks failed instead of waiting.
 /// Text kept to 200 characters for logs and messages, with `…` when cut.
 fn clip(text: &str) -> String {
     match text.char_indices().nth(200) {
@@ -11518,6 +11517,7 @@ fn clip(text: &str) -> String {
     }
 }
 
+/// Why a scheduled run's request that always asks failed instead of waiting.
 fn cannot_ask_forced(operation: &str) -> String {
     format!(
         "'{operation}' needs the user's approval every time, and this scheduled run cannot ask. Do not retry it here; ask the user to do it in an interactive chat."
