@@ -7,6 +7,10 @@ class CloudApi(Transport):
         """GET /.well-known/apple-app-site-association."""
         return cast("T.AppleAppSiteAssociation", self.request('GET', f'/.well-known/apple-app-site-association', binary_body=False, binary_response=False, options=options))
 
+    def android_asset_links(self, *, options: RequestOptions | None = None) -> list[T.AndroidAssetLinkStatement]:
+        """GET /.well-known/assetlinks.json."""
+        return cast("list[T.AndroidAssetLinkStatement]", self.request('GET', f'/.well-known/assetlinks.json', binary_body=False, binary_response=False, options=options))
+
     def native_router_session(self, body: T.NativeRouterSessionRequest, *, options: RequestOptions | None = None) -> T.NativeRouterSessionResponse:
         """POST /api/v1/account/router-session."""
         return cast("T.NativeRouterSessionResponse", self.request('POST', f'/api/v1/account/router-session', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
@@ -603,9 +607,17 @@ class CloudApi(Transport):
         """POST /api/v1/workspaces/{id}/tickets/revoke."""
         return cast("None", self.request('POST', f'/api/v1/workspaces/{self.segment(id)}/tickets/revoke', binary_body=False, binary_response=False, options=options))
 
+    def email_confirm(self, body: T.EmailConfirmRequest, *, options: RequestOptions | None = None) -> T.SignInResponse:
+        """POST /auth/email/confirm."""
+        return cast("T.SignInResponse", self.request('POST', f'/auth/email/confirm', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
     def email_forgot(self, body: T.EmailAccountRequest, *, options: RequestOptions | None = None) -> T.JsonValue:
         """POST /auth/email/forgot-password."""
         return cast("T.JsonValue", self.request('POST', f'/auth/email/forgot-password', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    def email_link(self, body: T.EmailLinkRequest, *, options: RequestOptions | None = None) -> T.EmailLinkResponse:
+        """POST /auth/email/link."""
+        return cast("T.EmailLinkResponse", self.request('POST', f'/auth/email/link', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     def email_login(self, body: T.EmailLoginRequest, *, options: RequestOptions | None = None) -> T.SignInResponse:
         """POST /auth/email/login."""
@@ -615,13 +627,9 @@ class CloudApi(Transport):
         """POST /auth/email/reset-password."""
         return cast("T.JsonValue", self.request('POST', f'/auth/email/reset-password', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
-    def email_signup(self, body: T.EmailAccountRequest, *, options: RequestOptions | None = None) -> T.JsonValue:
-        """POST /auth/email/signup."""
-        return cast("T.JsonValue", self.request('POST', f'/auth/email/signup', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
-
-    def email_verify(self, body: T.EmailPasswordRequest, *, options: RequestOptions | None = None) -> T.JsonValue:
-        """POST /auth/email/verify."""
-        return cast("T.JsonValue", self.request('POST', f'/auth/email/verify', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+    def email_start(self, body: T.EmailAccountRequest, *, options: RequestOptions | None = None) -> T.JsonValue:
+        """POST /auth/email/start."""
+        return cast("T.JsonValue", self.request('POST', f'/auth/email/start', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     def google_callback(self, query: T.GoogleCallbackQuery, *, options: RequestOptions | None = None) -> T.HttpRedirect:
         """GET /auth/google/callback."""
@@ -759,6 +767,10 @@ class AsyncCloudApi(AsyncTransport):
     async def apple_app_site_association(self, *, options: RequestOptions | None = None) -> T.AppleAppSiteAssociation:
         """GET /.well-known/apple-app-site-association."""
         return cast("T.AppleAppSiteAssociation", await self.request('GET', f'/.well-known/apple-app-site-association', binary_body=False, binary_response=False, options=options))
+
+    async def android_asset_links(self, *, options: RequestOptions | None = None) -> list[T.AndroidAssetLinkStatement]:
+        """GET /.well-known/assetlinks.json."""
+        return cast("list[T.AndroidAssetLinkStatement]", await self.request('GET', f'/.well-known/assetlinks.json', binary_body=False, binary_response=False, options=options))
 
     async def native_router_session(self, body: T.NativeRouterSessionRequest, *, options: RequestOptions | None = None) -> T.NativeRouterSessionResponse:
         """POST /api/v1/account/router-session."""
@@ -1356,9 +1368,17 @@ class AsyncCloudApi(AsyncTransport):
         """POST /api/v1/workspaces/{id}/tickets/revoke."""
         return cast("None", await self.request('POST', f'/api/v1/workspaces/{self.segment(id)}/tickets/revoke', binary_body=False, binary_response=False, options=options))
 
+    async def email_confirm(self, body: T.EmailConfirmRequest, *, options: RequestOptions | None = None) -> T.SignInResponse:
+        """POST /auth/email/confirm."""
+        return cast("T.SignInResponse", await self.request('POST', f'/auth/email/confirm', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
     async def email_forgot(self, body: T.EmailAccountRequest, *, options: RequestOptions | None = None) -> T.JsonValue:
         """POST /auth/email/forgot-password."""
         return cast("T.JsonValue", await self.request('POST', f'/auth/email/forgot-password', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+
+    async def email_link(self, body: T.EmailLinkRequest, *, options: RequestOptions | None = None) -> T.EmailLinkResponse:
+        """POST /auth/email/link."""
+        return cast("T.EmailLinkResponse", await self.request('POST', f'/auth/email/link', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     async def email_login(self, body: T.EmailLoginRequest, *, options: RequestOptions | None = None) -> T.SignInResponse:
         """POST /auth/email/login."""
@@ -1368,13 +1388,9 @@ class AsyncCloudApi(AsyncTransport):
         """POST /auth/email/reset-password."""
         return cast("T.JsonValue", await self.request('POST', f'/auth/email/reset-password', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
-    async def email_signup(self, body: T.EmailAccountRequest, *, options: RequestOptions | None = None) -> T.JsonValue:
-        """POST /auth/email/signup."""
-        return cast("T.JsonValue", await self.request('POST', f'/auth/email/signup', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
-
-    async def email_verify(self, body: T.EmailPasswordRequest, *, options: RequestOptions | None = None) -> T.JsonValue:
-        """POST /auth/email/verify."""
-        return cast("T.JsonValue", await self.request('POST', f'/auth/email/verify', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
+    async def email_start(self, body: T.EmailAccountRequest, *, options: RequestOptions | None = None) -> T.JsonValue:
+        """POST /auth/email/start."""
+        return cast("T.JsonValue", await self.request('POST', f'/auth/email/start', body=body, content_type='application/json', binary_body=False, binary_response=False, options=options))
 
     async def google_callback(self, query: T.GoogleCallbackQuery, *, options: RequestOptions | None = None) -> T.HttpRedirect:
         """GET /auth/google/callback."""
