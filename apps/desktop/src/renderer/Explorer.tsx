@@ -1,14 +1,17 @@
 import { Preview } from "./preview";
 import { PreviewContent } from "./PreviewContent";
 import { t } from "./i18n";
-import { For, Show, batch, createSignal, createEffect, onCleanup } from "solid-js";
+import { For, Show, batch, createMemo, createSignal, createEffect, onCleanup } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type { FileContent, FileEntry } from "../shared";
 import { useApp } from "./state";
 import { Button, Icon, ask, confirm, Empty } from "./ui";
 import { Editor, type EditorSession } from "./Editor";
-import { fileContext } from "./prompt-context";
-import { shortcutLabel, shortcutText } from "./search";
+import { contextLabel, fileContext, fileLinesContext } from "./prompt-context";
+import { matchesShortcut, shortcutLabel, shortcutText } from "./search";
+import { InlineComment } from "./InlineComment";
+import { sourceBlocks, type SourceRange } from "./markdown-source";
+import { previewLines } from "./preview-selection";
 import { registerCyclePanel } from "./tab-cycle";
 /** `changed` is the file on disk when it moved on under unsaved edits. */
 type OpenFile = FileContent & { editor: EditorSession; mode?: "preview" | "code"; pin?: string; changed?: FileContent };
@@ -33,10 +36,55 @@ export function Explorer() {
   const pendingSaves = new Map<EditorSession, Promise<void>>();
   const file = () => tabs().find((item) => item.path === selected());
   const [selection, setSelection] = createSignal({ from: 0, to: 0 });
+  /** The source lines selected in a Markdown file's Preview. */
+  const [previewSelection, setPreviewSelection] = createSignal<SourceRange>();
+  /** The open comment on Preview lines, with the lines it was opened on. */
+  const [comment, setComment] = createSignal<{ path: string; from: number; to: number; text: string }>();
   createEffect(() => {
     selected();
     setSelection({ from: 0, to: 0 });
+    setPreviewSelection(undefined);
+    setComment(undefined);
   });
+  let panel!: HTMLElement;
+  const markdownPreview = () => {
+    const value = file();
+    return !!value && value.mode !== "code" && Preview.kind(value.path) === "markdown";
+  };
+  const fileText = () => {
+    const value = file();
+    return value ? (edits()[value.path] ?? value.content) : "";
+  };
+  const previewBlocks = createMemo(() => (markdownPreview() ? sourceBlocks(fileText()) : []));
+  const previewHost = () =>
+    panel?.querySelector<HTMLElement>(".file-preview .document-preview > .markdown") ?? undefined;
+  // A selection in the Preview names its source lines. Clicking a control
+  // keeps the selection, so the lines stay until the selection changes.
+  const trackPreview = () => {
+    const host = previewHost();
+    const current = document.getSelection();
+    if (!markdownPreview() || !host) return setPreviewSelection(undefined);
+    if (!current || current.isCollapsed) {
+      if (!current || !current.anchorNode || host.contains(current.anchorNode)) setPreviewSelection(undefined);
+      return;
+    }
+    setPreviewSelection(previewLines(host, fileText(), current, previewBlocks()));
+  };
+  document.addEventListener("selectionchange", trackPreview);
+  onCleanup(() => document.removeEventListener("selectionchange", trackPreview));
+  // The editor binds Mod+Shift+L itself; in the Preview it works on the
+  // selected lines. A text field keeps its own keys.
+  const previewShortcut = (event: KeyboardEvent) => {
+    const target = event.target as HTMLElement | null;
+    if (target?.closest?.("input, textarea, [contenteditable]")) return;
+    if (!previewSelection() || !matchesShortcut(event, "Mod+Shift+L", app.state.platform)) return;
+    event.preventDefault();
+    void app.run(attachContext);
+  };
+  document.addEventListener("keydown", previewShortcut);
+  onCleanup(() => document.removeEventListener("keydown", previewShortcut));
+  const hasSelection = () =>
+    markdownPreview() ? !!previewSelection() : selection().from !== selection().to;
   const canAttach = () =>
     !file()?.pin && file()?.encoding === "utf8" &&
     !app.state.threads.find((thread) => thread.id === app.state.selected)
@@ -45,18 +93,44 @@ export function Explorer() {
     const value = file();
     if (!value || !canAttach()) return;
     const key = app.draftKey();
+    const lines = markdownPreview() ? previewSelection() : undefined;
     await app.addPromptContext(
-      fileContext(
-        value.path,
-        edits()[value.path] ?? value.content,
-        selection(),
-        dirty(value.path),
-      ),
+      lines
+        ? fileLinesContext(value.path, fileText(), lines.from, lines.to, dirty(value.path))
+        : fileContext(
+            value.path,
+            edits()[value.path] ?? value.content,
+            selection(),
+            dirty(value.path),
+          ),
       key,
     );
     if (app.draftKey() === key) {
       app.set("panel", "chat");
       app.notify(t("File context added to your message"));
+    }
+  }
+  /**
+   * A comment on lines of the Preview reaches the chat as a diff comment
+   * does: the lines go in as context (the same chip as "Add selection to
+   * context") and the comment as text in the message, both for the chat being
+   * written.
+   */
+  async function addComment(target: { path: string; from: number; to: number }, text: string) {
+    const value = file();
+    if (!value || value.path !== target.path || !canAttach()) return;
+    const key = app.draftKey();
+    const item = fileLinesContext(target.path, fileText(), target.from, target.to, dirty(target.path));
+    await app.addPromptContext(item, key);
+    const storage = "draft:" + (app.state.selected ? (app.project()?.id ?? "") : app.newDraftScope()) + ":" + (app.state.selected ?? "");
+    const current = app.state.drafts[key] ?? (await window.haarness.storage(storage)) ?? "";
+    const merged = [String(current).trimEnd(), `Comment on ${contextLabel(item)}:\n${text}`].filter(Boolean).join("\n\n");
+    app.set("drafts", key, merged);
+    await window.haarness.storage(storage, merged);
+    setComment(undefined);
+    if (app.draftKey() === key) {
+      app.set("panel", "chat");
+      app.notify(t("Comment added to your message"));
     }
   }
   const dirty = (path: string) =>
@@ -561,7 +635,7 @@ export function Explorer() {
     setVersion((v) => v + 1);
   }
   return (
-    <section class="explorer" data-cycle-panel="files">
+    <section class="explorer" data-cycle-panel="files" ref={panel}>
       <div class="panel-toolbar">
         <input
           class="panel-search"
@@ -656,7 +730,7 @@ export function Explorer() {
                   <Button
                     icon="file"
                     label={
-                      selection().from !== selection().to
+                      hasSelection()
                         ? t("Add selection to context")
                         : t("Add file to context")
                     }
@@ -664,6 +738,17 @@ export function Explorer() {
                     disabled={!canAttach()}
                     onClick={() => app.run(attachContext)}
                   />
+                  <Show when={markdownPreview()}>
+                    <Button
+                      icon="chat"
+                      label={t("Comment on selection")}
+                      disabled={!canAttach() || !previewSelection()}
+                      onClick={() => {
+                        const lines = previewSelection();
+                        if (lines) setComment({ path: file()!.path, ...lines, text: "" });
+                      }}
+                    />
+                  </Show>
                   <Button
                     icon="edit"
                     label={t("Rename")}
@@ -794,7 +879,28 @@ export function Explorer() {
                     line={jump()?.path === value().path ? jump() : undefined}
                   />
                 </Show>
-                </>}><PreviewContent file={{ ...value(), content: edits()[value().path] ?? value().content }} /></Show>
+                </>}>
+                  <PreviewContent file={{ ...value(), content: edits()[value().path] ?? value().content }} />
+                  <Show when={comment()?.path === value().path ? comment() : undefined}>
+                    {(open) => {
+                      const label = () =>
+                        contextLabel(fileLinesContext(open().path, fileText(), open().from, open().to));
+                      return (
+                        <div class="preview-comment">
+                          <InlineComment
+                            label={label()}
+                            inputLabel={t("Comment")}
+                            placeholder={t("Comment on these lines…")}
+                            value={open().text}
+                            onInput={(text) => setComment((current) => current && { ...current, text })}
+                            onCancel={() => setComment(undefined)}
+                            onSubmit={(text) => app.run(() => addComment(open(), text)).then(() => {})}
+                          />
+                        </div>
+                      );
+                    }}
+                  </Show>
+                </Show>
               </>
             )}
           </Show>
