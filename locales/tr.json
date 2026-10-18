@@ -2524,5 +2524,8 @@
   "+{count} more": "{count} tane daha",
   "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "Bu uygulama Haarness'ın açmadığı bir bağlantıyı açmaya çalıştı. Uygulamalar yalnızca http, https ve mailto bağlantılarını açabilir.",
   "Load image from {host}": "Görseli {host} adresinden yükle",
-  "The image from {host} could not be loaded.": "{host} adresindeki görsel yüklenemedi."
+  "The image from {host} could not be loaded.": "{host} adresindeki görsel yüklenemedi.",
+  "This app tried to open a {scheme} link. Apps may open only http, https and mailto links.": "Bu uygulama bir {scheme} bağlantısı açmaya çalıştı. Uygulamalar yalnızca http, https ve mailto bağlantılarını açabilir.",
+  "{first}, {second}": "{first}, {second}",
+  "{first}, {second} +{count}": "{first}, {second} ve {count} tane daha"
 }

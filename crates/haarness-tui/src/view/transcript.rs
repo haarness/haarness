@@ -31,6 +31,18 @@ const SHELL_OUTPUT_ROWS: usize = 10;
 const USER_BLOCK_ROWS: usize = 12;
 const USER_PREVIEW_ROWS: usize = 8;
 const TOOL_BLOCK_ROWS: usize = 12;
+/// A tool name as the server matches it: without a `functions.` namespace,
+/// and compared ignoring ASCII case, so a model writing `Read` gets `read`.
+fn bare_tool(name: &str) -> &str {
+    name.get(..10)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("functions."))
+        .map_or(name, |_| &name[10..])
+}
+
+fn same_tool(name: &str, tool: &str) -> bool {
+    bare_tool(name).eq_ignore_ascii_case(tool)
+}
+
 /// The argument worth showing beside an ordinary tool name (path, command, …).
 /// A search names what it looks for and where, as Desktop's rows do: two
 /// greps in `src` must not both read `grep src`.
@@ -45,7 +57,7 @@ fn primary_argument(
             .and_then(serde_json::Value::as_str)
             .filter(|value| !value.trim().is_empty())
     };
-    if matches!(name, "grep" | "glob")
+    if (same_tool(name, "grep") || same_tool(name, "glob"))
         && let Some(pattern) = text("pattern")
     {
         return Some(text("path").map_or_else(
@@ -81,11 +93,11 @@ fn tool_target(
     name: &str,
     arguments: &serde_json::Value,
 ) -> Option<String> {
-    if name == "workflow" {
+    if same_tool(name, "workflow") {
         return Some(workflow_argument(arguments));
     }
     primary_argument(language, name, arguments).or_else(|| {
-        (name == "apply_patch")
+        same_tool(name, "apply_patch")
             .then(|| patch_argument(arguments))
             .flatten()
     })
@@ -167,8 +179,7 @@ fn batch_is_only_tasks(arguments: &serde_json::Value) -> bool {
                 && calls.iter().all(|call| {
                     call.get("tool")
                         .and_then(serde_json::Value::as_str)
-                        .map(|tool| tool.strip_prefix("functions.").unwrap_or(tool))
-                        == Some("task")
+                        .is_some_and(|tool| same_tool(tool, "task"))
                 })
         })
 }
@@ -210,45 +221,66 @@ struct BatchStep<'a> {
     failed: Option<bool>,
 }
 
+/// Each entry of a batch result as (tool, failed). The metadata holds every
+/// step's whole output, so it is read in place, and the text output is parsed
+/// only for a result without it.
+fn batch_outcomes(output: &str, metadata: &serde_json::Value) -> Vec<(String, bool)> {
+    let read = |results: &serde_json::Value| {
+        results.as_array().map(|entries| {
+            entries
+                .iter()
+                .map(|entry| {
+                    let tool = entry.get("tool").and_then(serde_json::Value::as_str);
+                    (
+                        tool.unwrap_or_default().to_owned(),
+                        entry.get("error").is_some(),
+                    )
+                })
+                .collect()
+        })
+    };
+    metadata
+        .get("results")
+        .and_then(read)
+        .or_else(|| {
+            serde_json::from_str::<serde_json::Value>(output)
+                .ok()
+                .and_then(|payload| payload.get("results").and_then(read))
+        })
+        .unwrap_or_default()
+}
+
 /// The steps of a `batch` call, matched to its result by position. The
 /// server returns results in input order; an entry counts only when it names
-/// the step's tool, as Desktop's `batchSteps` matches them.
-fn batch_steps<'a>(arguments: &'a serde_json::Value, result: Option<&Item>) -> Vec<BatchStep<'a>> {
-    let bare = |tool: &'a str| tool.strip_prefix("functions.").unwrap_or(tool);
+/// the step's tool, as Desktop's `batchSteps` matches them. A result's
+/// entries are read once and kept, since the transcript is drawn every frame.
+fn batch_steps<'a>(
+    app: &App,
+    arguments: &'a serde_json::Value,
+    result: Option<&Item>,
+) -> Vec<BatchStep<'a>> {
     let Some(calls) = arguments
         .get("tool_calls")
         .and_then(serde_json::Value::as_array)
     else {
         return Vec::new();
     };
-    let payload = result.and_then(|item| match &item.data {
+    let outcomes = result.and_then(|item| match &item.data {
         ItemData::ToolResult {
             output, metadata, ..
-        } => metadata
-            .get("results")
-            .map(|_| metadata.clone())
-            .or_else(|| serde_json::from_str::<serde_json::Value>(output).ok()),
+        } => Some(app.cached_batch_results(item.id, || batch_outcomes(output, metadata))),
         _ => None,
     });
-    let results = payload
-        .as_ref()
-        .and_then(|payload| payload.get("results"))
-        .and_then(serde_json::Value::as_array);
     calls
         .iter()
         .enumerate()
         .filter_map(|(index, call)| {
-            let tool = bare(call.get("tool")?.as_str()?);
-            let failed = results
-                .and_then(|results| results.get(index))
-                .filter(|entry| {
-                    entry
-                        .get("tool")
-                        .and_then(serde_json::Value::as_str)
-                        .map(|name| name.strip_prefix("functions.").unwrap_or(name))
-                        == Some(tool)
-                })
-                .map(|entry| entry.get("error").is_some());
+            let tool = bare_tool(call.get("tool")?.as_str()?);
+            let failed = outcomes
+                .as_ref()
+                .and_then(|outcomes| outcomes.get(index))
+                .filter(|(name, _)| same_tool(name, tool))
+                .map(|(_, failed)| *failed);
             Some(BatchStep {
                 index: index + 1,
                 tool,
@@ -1334,7 +1366,7 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                 // A batch succeeds as a call and reports its failed steps
                 // in its metadata; any failed step fails the row.
                 let steps = if name == "batch" {
-                    batch_steps(arguments, result)
+                    batch_steps(app, arguments, result)
                 } else {
                     Vec::new()
                 };
@@ -1587,7 +1619,9 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                         batch_children.iter().map(|(index, _, _)| *index).collect();
                     let listed: Vec<&BatchStep> = steps
                         .iter()
-                        .filter(|step| !(step.tool == "task" && delegated.contains(&step.index)))
+                        .filter(|step| {
+                            !(same_tool(step.tool, "task") && delegated.contains(&step.index))
+                        })
                         .collect();
                     let expanded = result.is_some_and(|item| app.expanded.contains(&item.id));
                     let shown = if expanded {
@@ -1597,6 +1631,16 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                     } else {
                         listed.len()
                     };
+                    // The step running now: the turn's status names it as
+                    // `<call id>:N`, the batch's Nth step.
+                    let running = app
+                        .phase
+                        .as_ref()
+                        .filter(|phase| phase.state == "tool")
+                        .and_then(|phase| phase.call_id.as_deref())
+                        .and_then(|active| active.strip_prefix(call_id.as_str()))
+                        .and_then(|rest| rest.strip_prefix(':'))
+                        .and_then(|index| index.parse::<usize>().ok());
                     let mut push = |row: Line| match result {
                         Some(result) => block.push_tagged(row, HitTarget::ToolToggle(result.id)),
                         None => block.push(row),
@@ -1608,10 +1652,17 @@ pub fn transcript_lines(app: &App, width: usize) -> TaggedLines {
                                 ("●".to_owned(), theme.muted)
                             }
                             (None, Some(_)) => ("⊘".to_owned(), theme.muted),
-                            (None, None) if queued => ("○".to_owned(), theme.muted),
-                            (None, None) => (spinner(app.tick).to_string(), theme.accent),
+                            (None, None) if running == Some(step.index) => {
+                                (spinner(app.tick).to_string(), theme.accent)
+                            }
+                            // Steps run in order: one before the running step
+                            // has had its turn; its outcome comes with the batch.
+                            (None, None) if running.is_some_and(|running| step.index < running) => {
+                                ("●".to_owned(), theme.muted)
+                            }
+                            (None, None) => ("○".to_owned(), theme.muted),
                         };
-                        let target = if step.tool == "task" {
+                        let target = if same_tool(step.tool, "task") {
                             Some(batch_task_label(arguments, step.index))
                         } else {
                             tool_target(app.language, step.tool, step.parameters)

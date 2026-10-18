@@ -4065,6 +4065,64 @@ async fn echo_thread(runtime: &AgentRuntime) -> Thread {
         .unwrap()
 }
 
+/// Clients pair a batch's steps with their call ids `<batch call id>:N`, so a
+/// step refused before it runs must not move the numbers of those after it.
+#[tokio::test]
+async fn every_batch_step_keeps_its_number_after_a_step_refused_before_it_runs() {
+    use haarness_protocol::ItemData;
+    use serde_json::json;
+    let workspace =
+        std::env::temp_dir().join(format!("haarness-batch-numbers-{}", uuid::Uuid::now_v7()));
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    tokio::fs::write(workspace.join("sample.txt"), "numbered")
+        .await
+        .unwrap();
+    let runtime = AgentRuntime::with_config(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(Capturing::default()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(NativeToolRegistry::new(workspace.clone())),
+        EventBus::new(128),
+        workspace.clone(),
+        String::new(),
+        RuntimeConfig::default(),
+    );
+    let thread = echo_thread(&runtime).await;
+    let calls = json!({"tool_calls":[
+        {"tool":"missing","parameters":{}},
+        {"tool":"batch","parameters":{"tool_calls":[]}},
+        {"tool":"read","parameters":{"path":"sample.txt"}}
+    ]});
+    let turn = runtime
+        .start_turn(thread.id, turn_request(&format!("!tool batch {calls}")))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let batch_call = runtime
+        .items(thread.id, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|item| match item.data {
+            ItemData::ToolCall { call_id, name, .. } if name == "batch" => Some(call_id),
+            _ => None,
+        })
+        .expect("the batch call is recorded");
+    let read_call = runtime
+        .events()
+        .subscribe(None)
+        .replay
+        .iter()
+        .find(|event| event.event_type == "turn.status" && event.payload["tool"] == "read")
+        .and_then(|event| event.payload["callId"].as_str().map(str::to_owned))
+        .expect("the read step reports itself running");
+    assert_eq!(read_call, format!("{batch_call}:3"));
+}
+
 #[tokio::test]
 async fn provider_namespaces_resolve_before_batch_planning_and_permission_checks() {
     use haarness_protocol::ItemData;

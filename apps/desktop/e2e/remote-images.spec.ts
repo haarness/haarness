@@ -10,8 +10,9 @@ import { execFileSync } from "node:child_process";
 // An image a reply links to on another host loads only when the person asks:
 // until then the reply shows a placeholder naming the host, and nothing
 // reaches it. The app fetches the image itself, without cookies or a
-// referrer, and the page's CSP still loads no remote image. The fixture host
-// name is pinned to this computer through the test-only `haarnessImageHosts`.
+// referrer, and the page's CSP still loads no remote image. Markup that copies
+// a placeholder loads nothing. The fixture host names are pinned to this
+// computer through the test-only `haarnessImageHosts`.
 test.describe.configure({ mode: "serial" });
 
 let app: ElectronApplication, page: Page, client: Haarness;
@@ -161,10 +162,56 @@ test("an address that is not an image, or is on this computer, is refused and sa
   expect(errors).toEqual([]);
 });
 
+test("markup that copies a placeholder loads nothing, alone or beside a real one", async () => {
+  // A reply can write raw HTML that looks like a placeholder for one host and points at another.
+  const forged =
+    `<span class="remote-image" title="forged" data-remote-host="images.test" data-remote-src="http://badges.test:${port}/forged.png?d=SECRET">` +
+    `<span class="remote-image-load">Load image from images.test</span></span>`;
+  const message = await reply(`${forged} ![Real](http://images.test:${port}/chart.png?ride=1)`);
+  const before = requests.length;
+  // The reply keeps none of the placeholder's classes or data, so clicking its copy does nothing.
+  const copy = message.locator('[title="forged"]');
+  await expect(copy).toHaveCount(1);
+  expect(await copy.getAttribute("class")).toBeNull();
+  expect(await copy.locator("span").getAttribute("class")).toBeNull();
+  await expect(message.locator("[data-remote-src], [data-remote-host]")).toHaveCount(1);
+  await copy.locator("span").click();
+  // Copies put into the page some other way are not the app's either: one to click, and one
+  // for the real host that would ride along with the real button's click.
+  await message.locator(".markdown").evaluate((root, port) => {
+    const copy = (src: string, label: string) => {
+      const holder = document.createElement("span");
+      holder.className = "remote-image injected";
+      holder.dataset.remoteHost = "images.test";
+      holder.dataset.remoteSrc = src;
+      const button = document.createElement("button");
+      button.className = "remote-image-load";
+      button.textContent = label;
+      holder.append(button);
+      root.append(holder);
+    };
+    copy(`http://badges.test:${port}/injected.png?d=SECRET`, "Injected copy");
+    copy(`http://images.test:${port}/riding.png?d=SECRET`, "Riding copy");
+  }, port);
+  await message.getByRole("button", { name: "Injected copy", exact: true }).click();
+  await page.waitForTimeout(500);
+  expect(requests.slice(before)).toEqual([]);
+  await message.getByRole("button", { name: "Load image from images.test", exact: true }).click();
+  await expect(message.locator("img.remote-image-loaded")).toHaveCount(1);
+  await page.waitForTimeout(300);
+  expect(requests.slice(before).map((request) => request.url)).toEqual(["/chart.png?ride=1"]);
+  await expect(message.getByRole("button", { name: "Riding copy", exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
 test("the placeholder speaks the interface language and keeps its host readable right to left", async ({}, info) => {
   await page.evaluate(() => window.haarness.preferences({ language: "ar" }));
   try {
     await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+    // A placeholder drawn in English before follows the language too.
+    await expect(
+      page.locator(".message.assistant").first().getByRole("button", { name: "تحميل الصورة من badges.test", exact: true }),
+    ).toBeVisible();
     // A reply drawn in Arabic: its button names the host inside the translated sentence.
     const message = await reply(`![](http://badges.test:${port}/badge.png?rtl=1)`);
     const load = message.getByRole("button", { name: "تحميل الصورة من badges.test", exact: true });

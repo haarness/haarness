@@ -1,7 +1,7 @@
 import DOMPurify from "dompurify";
 import { cssReferencesOutside, loadsNetworkPath, parsedAddress } from "./link-target";
 import type { MarkdownPatch } from "./markdown-project";
-import { holdRemoteImages, type RemoteImageLabels } from "./remote-images";
+import { holdRemoteImages, madeHere, replyAttribute, type RemoteImageLabels } from "./remote-images";
 
 type Block = { html: string; start: Comment; end: Comment };
 
@@ -26,6 +26,14 @@ const purifier = DOMPurify(window);
 // tabs and newlines anywhere, so `/<TAB>/host/x.png` names one too. A CSS
 // `url()` (an SVG `mask`, `filter`, `fill`…) may point only into the reply.
 purifier.addHook("uponSanitizeAttribute", (node, data) => {
+  // Image placeholders are the app's own (remote-images.ts): a reply keeps
+  // none of their classes or data attributes, so it cannot forge one.
+  const kept = replyAttribute(data.attrName, data.attrValue);
+  if (kept === undefined) {
+    data.keepAttr = false;
+    return;
+  }
+  data.attrValue = kept;
   if (!URL_ATTRIBUTES.has(data.attrName)) {
     const css = CSS_URL_ATTRIBUTES.has(data.attrName) || /url\(/i.test(data.attrValue);
     if (css && cssReferencesOutside(data.attrValue)) data.keepAttr = false;
@@ -62,8 +70,11 @@ function nodes(parent: Node, previous: Node[], next: Node[], end: Node | null = 
     const target = next[index];
     const current = previous[index];
     if (!current) { parent.insertBefore(target, end); continue; }
+    // An image placeholder is replaced, never patched from or into a reply's
+    // own element, so only placeholders the app made carry its button.
     if (current.nodeType !== target.nodeType || current.nodeName !== target.nodeName ||
-      (current instanceof Element && target instanceof Element && current.namespaceURI !== target.namespaceURI)) {
+      (current instanceof Element && target instanceof Element && current.namespaceURI !== target.namespaceURI) ||
+      madeHere(current) !== madeHere(target)) {
       parent.replaceChild(target, current);
       continue;
     }
@@ -109,7 +120,11 @@ export function markdownBlockIndex(host: HTMLElement, node: Node): number | unde
  */
 export function createMarkdownDOM(
   host: HTMLElement,
-  images?: { loaded: (src: string) => string | undefined; labels: () => RemoteImageLabels },
+  images?: {
+    loaded: (src: string) => string | undefined;
+    loading: (src: string) => boolean;
+    labels: () => RemoteImageLabels;
+  },
 ) {
   const blocks: Block[] = [];
   hosts.set(host, blocks);
@@ -133,7 +148,7 @@ export function createMarkdownDOM(
         FORBID_TAGS: ["style", "form", "input", "button", "iframe"],
         FORBID_ATTR: ["style"],
       });
-      if (images) holdRemoteImages(fragment, images.loaded, images.labels());
+      if (images) holdRemoteImages(fragment, images.loaded, images.labels(), images.loading);
       nodes(host, between(block), Array.from(fragment.childNodes), block.end);
       block.html = html;
     });

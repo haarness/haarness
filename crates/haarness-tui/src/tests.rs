@@ -16823,9 +16823,16 @@ fn batch_items(
         let results: Vec<serde_json::Value> = steps
             .iter()
             .zip(entries)
-            .map(|((tool, _), entry)| match entry {
-                Ok(output) => serde_json::json!({"tool": tool, "output": output, "metadata": {}}),
-                Err(error) => serde_json::json!({"tool": tool, "error": error}),
+            .map(|((tool, _), entry)| {
+                // The server names each entry by the tool it resolved: no
+                // namespace, registered case.
+                let tool = tool.trim_start_matches("functions.").to_ascii_lowercase();
+                match entry {
+                    Ok(output) => {
+                        serde_json::json!({"tool": tool, "output": output, "metadata": {}})
+                    }
+                    Err(error) => serde_json::json!({"tool": tool, "error": error}),
+                }
             })
             .collect();
         let failures = entries.iter().filter(|entry| entry.is_err()).count();
@@ -16860,8 +16867,9 @@ fn a_running_batch_lists_its_steps_under_the_row() {
         vec![],
         vec![],
     );
-    // The running tool is one of the batch's own steps: the batch is live
-    // work, not a call queued behind another tool.
+    // The running tool is the batch's second step (`<call id>:2`): the batch
+    // is live work, not a call queued behind another tool, and only that
+    // step spins. The first has had its turn; the third waits for its own.
     app.phase = Some(crate::state::PhaseInfo {
         state: "tool".into(),
         call_id: Some("call-batch:2".into()),
@@ -16873,9 +16881,122 @@ fn a_running_batch_lists_its_steps_under_the_row() {
     assert!(text.contains(&format!("{spin} batch")), "{text}");
     assert!(!text.contains("queued"), "{text}");
     let batch = rows.iter().position(|row| row.contains("batch")).unwrap();
-    assert_eq!(rows[batch + 1].trim(), format!("{spin} read src/main.rs"));
+    assert_eq!(rows[batch + 1].trim(), "● read src/main.rs");
     assert_eq!(rows[batch + 2].trim(), format!("{spin} grep TODO in src"));
-    assert_eq!(rows[batch + 3].trim(), format!("{spin} bash cargo check"));
+    assert_eq!(rows[batch + 3].trim(), "○ bash cargo check");
+    // Waiting on something with no step named, nothing pretends to run.
+    app.phase = Some(crate::state::PhaseInfo {
+        state: "waiting_permission".into(),
+        ..Default::default()
+    });
+    let rows: Vec<String> = app.lines((100, 40)).iter().map(Line::text).collect();
+    assert_eq!(rows[batch + 2].trim(), "○ grep TODO in src");
+}
+
+#[test]
+fn batch_steps_match_their_results_whatever_case_the_model_wrote() {
+    let thread = fixture_thread();
+    // The server resolves `READ` and `functions.Grep` to `read` and `grep`.
+    let steps = [
+        ("Read", serde_json::json!({"path":"README.md"})),
+        ("READ", serde_json::json!({"path":"missing.txt"})),
+        (
+            "functions.Grep",
+            serde_json::json!({"pattern":"TODO","path":"src"}),
+        ),
+    ];
+    let outcomes = [
+        Ok("# Readme"),
+        Err("No such file or directory"),
+        Ok("src/a.rs"),
+    ];
+    let app = App::new(
+        thread.clone(),
+        vec![thread.clone()],
+        batch_items(&thread, &steps, Some(&outcomes)),
+        vec![],
+        vec![],
+    );
+    let text = app
+        .lines((100, 40))
+        .iter()
+        .map(Line::text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("✗ batch  1 failed"), "{text}");
+    assert!(text.contains("● Read README.md"), "{text}");
+    assert!(text.contains("✗ READ missing.txt"), "{text}");
+    assert!(text.contains("● Grep TODO in src"), "{text}");
+    assert!(!text.contains('⊘'), "{text}");
+}
+
+#[test]
+fn a_batch_result_is_read_once_and_without_metadata_from_its_text() {
+    let thread = fixture_thread();
+    let steps = [
+        ("read", serde_json::json!({"path":"a.txt"})),
+        ("read", serde_json::json!({"path":"missing.txt"})),
+    ];
+    let mut items = batch_items(&thread, &steps, Some(&[Ok("a"), Err("missing")]));
+    // An older result keeps its entries only in its text.
+    if let ItemData::ToolResult { metadata, .. } = &mut items[1].data {
+        *metadata = serde_json::Value::Null;
+    }
+    let result_id = items[1].id;
+    let app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    for _ in 0..3 {
+        let text = app
+            .lines((100, 40))
+            .iter()
+            .map(Line::text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("✗ batch  1 failed"), "{text}");
+        assert!(text.contains("✗ read missing.txt"), "{text}");
+    }
+    // Every frame reuses the entries read the first time.
+    let cache = app.batch_results.borrow();
+    assert_eq!(cache.len(), 1);
+    assert_eq!(
+        cache[&result_id].as_ref(),
+        &[("read".to_owned(), false), ("read".to_owned(), true)]
+    );
+}
+
+#[test]
+fn a_delegation_after_a_refused_step_is_listed_once() {
+    let thread = fixture_thread();
+    let child = ThreadId::new();
+    // The server numbers every step, refused or not, so the task, the
+    // second step, is `call-batch:2`.
+    let mut items = batch_items(
+        &thread,
+        &[
+            ("missing", serde_json::json!({})),
+            (
+                "task",
+                serde_json::json!({"agent":"review","description":"Audit the server","prompt":"…"}),
+            ),
+        ],
+        None,
+    );
+    items.push(message_item(
+        3,
+        &thread,
+        ItemData::TaskLink {
+            call_id: "call-batch:2".into(),
+            child_thread_id: child,
+        },
+    ));
+    let app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    let text = app
+        .lines((100, 40))
+        .iter()
+        .map(Line::text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("missing"), "{text}");
+    assert_eq!(text.matches("Audit the server").count(), 1, "{text}");
 }
 
 #[test]
