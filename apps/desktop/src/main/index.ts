@@ -1308,7 +1308,10 @@ function createWindow() {
   const theme = data().preferences.theme;
   const dark = theme === "dark" || (theme === "system" && nativeTheme.shouldUseDarkColors);
   const win = new BrowserWindow({
-    show: process.env.HAARNESS_DESKTOP_TEST !== "1",
+    // Test runs keep windows hidden, except on Linux: X11 (and Xvfb in CI)
+    // draws no frames for a window that was never shown, so every screenshot
+    // and visual check would wait forever.
+    show: process.env.HAARNESS_DESKTOP_TEST !== "1" || process.platform === "linux",
     width: state?.width ?? 1420,
     height: state?.height ?? 940,
     minWidth: 900,

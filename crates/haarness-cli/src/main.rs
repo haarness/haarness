@@ -1342,6 +1342,10 @@ async fn main() -> Result<()> {
         let matches = cli_command().get_matches_from(normalize_natural_language_args(args));
         Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
     };
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    if !matches!(cli.command, Some(Command::Doctor | Command::Logs { .. })) {
+        require_system_certificates()?;
+    }
     let project_config = !cli.disable_project_config;
     let project_config_override = if cli.disable_project_config {
         Some(false)
@@ -7946,6 +7950,26 @@ fn write_provider_entry(path: &Path, id: &str, entry: Option<&ProviderSection>) 
     Ok(())
 }
 
+/// Linux keeps its trusted roots in a package (ca-certificates) that minimal
+/// systems and container images leave out. Every HTTPS client then fails to
+/// build, which surfaced only as a server that exited during startup.
+#[cfg(all(unix, not(target_vendor = "apple")))]
+fn system_certificate_count() -> usize {
+    rustls_native_certs::load_native_certs().certs.len()
+}
+
+#[cfg(all(unix, not(target_vendor = "apple")))]
+fn require_system_certificates() -> Result<()> {
+    if system_certificate_count() == 0 {
+        anyhow::bail!(
+            "No trusted CA certificates were found on this system, so Haarness cannot make HTTPS connections. \
+             Install your distribution's ca-certificates package (for example `sudo apt install ca-certificates`), \
+             or point SSL_CERT_FILE at a certificate bundle."
+        );
+    }
+    Ok(())
+}
+
 fn doctor(paths: &Paths) -> Result<()> {
     let report = haarness_opentui::doctor()?;
     println!("Haarness {}", env!("CARGO_PKG_VERSION"));
@@ -7966,6 +7990,11 @@ fn doctor(paths: &Paths) -> Result<()> {
     println!("rg: {}", ripgrep.display());
     println!("rg sha256: {}", haarness_ripgrep::SHA256);
     println!("data: {}", paths.data.display());
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    match system_certificate_count() {
+        0 => println!("certificates: none found (install ca-certificates or set SSL_CERT_FILE)"),
+        count => println!("certificates: {count} trusted roots"),
+    }
     println!("{}", browser::doctor_line(&paths.data));
     println!("permissions: application-level policy (not an operating-system sandbox)");
     Ok(())
@@ -9977,6 +10006,7 @@ async fn ensure_workspace_server_at(
     {
         use std::os::unix::process::CommandExt as _;
         command.process_group(0);
+        keep_inherited_descriptors_from_children();
     }
     let mut child = command
         .spawn()
@@ -10000,6 +10030,20 @@ async fn ensure_workspace_server_at(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// Electron keeps Chromium's descriptors (IPC sockets, app.asar, the Local
+/// Storage lock) open without close-on-exec, and Node hands every one of them
+/// to the CLI that Desktop starts. Marked before the project server starts,
+/// they stay out of that long-lived server and all it runs: a server holding
+/// Desktop's sockets and storage lock outlived Desktop, and test drivers never
+/// saw the app close. Everything this process opens itself is close-on-exec
+/// already.
+#[cfg(unix)]
+fn keep_inherited_descriptors_from_children() {
+    close_fds::CloseFdsBuilder::new()
+        .threadsafe(true)
+        .cloexecfrom(3);
 }
 
 async fn acquire_connection_lease(paths: &Paths) -> Result<fs::File> {
