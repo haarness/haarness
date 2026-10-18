@@ -66,7 +66,7 @@ use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, HashMap},
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs,
     io::{self, IsTerminal as _, Read as _, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -342,6 +342,10 @@ struct ServeArgs {
     /// Internal marker used by the detached launcher.
     #[arg(long, hide = true)]
     background_child: bool,
+    /// Internal: where a detached server writes why it stopped, for the
+    /// launcher to quote (its own stderr goes nowhere).
+    #[arg(long, hide = true, requires = "background_child")]
+    start_log: Option<PathBuf>,
     /// Accept requests without a password or token. A network address needs
     /// this to listen without one: anyone who can reach the port can then run
     /// commands as you.
@@ -1321,6 +1325,14 @@ struct ScheduleUpdateArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let outcome = Box::pin(cli_main()).await;
+    if let Err(error) = &outcome {
+        record_start_failure(&format!("{error:#}"));
+    }
+    outcome
+}
+
+async fn cli_main() -> Result<()> {
     quiet_closed_stdout();
     let args = std::env::args_os().collect::<Vec<_>>();
     // Chrome's bridge: stdout is its message channel, and it must not touch
@@ -1345,6 +1357,13 @@ async fn main() -> Result<()> {
         let matches = cli_command().get_matches_from(normalize_natural_language_args(args));
         Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
     };
+    if let Some(Command::Serve(ServeArgs {
+        start_log: Some(path),
+        ..
+    })) = &cli.command
+    {
+        watch_start_failures(path.clone());
+    }
     #[cfg(all(unix, not(target_vendor = "apple")))]
     if !matches!(cli.command, Some(Command::Doctor | Command::Logs { .. })) {
         require_system_certificates()?;
@@ -1633,6 +1652,15 @@ async fn main() -> Result<()> {
     }
     .instrument(command_span)
     .await;
+    // Returned from main, the error reaches only stderr, which a detached
+    // server does not have and the TUI hides: the log keeps why it ended.
+    if let Err(error) = &outcome {
+        tracing::error!(
+            command = command_name,
+            error = %haarness_core::redact::log_text(&format!("{error:#}"), 2_000),
+            "command failed"
+        );
+    }
     drop(telemetry_guard);
     outcome
 }
@@ -9100,6 +9128,68 @@ impl Drop for TelemetryGuard {
 /// server it starts.
 static REQUESTED_LOG_LEVEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+/// `serve --start-log`: the file a detached server writes why it stopped to.
+static START_LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The file a detached server's launcher reads when the server exits during
+/// startup, in the logs folder. Every server writes only its failure there,
+/// one line each, so it stays small; past 64 KiB a launcher empties it.
+const SERVER_START_LOG: &str = "server-start.log";
+const SERVER_START_LOG_LIMIT: u64 = 64 * 1024;
+
+fn prepare_start_log(data: &Path) -> Option<PathBuf> {
+    let logs = data.join("logs");
+    fs::create_dir_all(&logs).ok()?;
+    let path = logs.join(SERVER_START_LOG);
+    if fs::metadata(&path).is_ok_and(|metadata| metadata.len() > SERVER_START_LOG_LIMIT) {
+        fs::write(&path, "").ok()?;
+    }
+    Some(path)
+}
+
+/// Record this server's failures, and its panics (which print only to the
+/// stderr it does not have), in its launcher's start log.
+fn watch_start_failures(path: PathBuf) {
+    if START_LOG.set(path).is_err() {
+        return;
+    }
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        record_start_failure(&format!("panicked: {info}"));
+        previous(info);
+    }));
+}
+
+/// One line, `pid <pid>: <text>`, redacted, so concurrent launchers each
+/// find their own server's line.
+fn record_start_failure(text: &str) {
+    let Some(path) = START_LOG.get() else {
+        return;
+    };
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let line = haarness_core::redact::log_text(text, 2_000);
+        let _ = writeln!(file, "pid {}: {line}", std::process::id());
+    }
+}
+
+/// What the server `pid` wrote to the start log before it exited: its last
+/// lines, joined.
+fn start_failure(path: &Path, pid: u32) -> Option<String> {
+    let mut text = String::new();
+    fs::File::open(path)
+        .ok()?
+        .take(SERVER_START_LOG_LIMIT * 2)
+        .read_to_string(&mut text)
+        .ok()?;
+    let prefix = format!("pid {pid}: ");
+    let lines: Vec<&str> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix(&prefix))
+        .collect();
+    let reason = lines[lines.len().saturating_sub(3)..].join(" ");
+    (!reason.is_empty()).then_some(reason)
+}
+
 /// Each log line's time, then the process that wrote it: every process
 /// (the TUI, each workspace server, one-shot commands) writes the same daily
 /// file.
@@ -10156,6 +10246,7 @@ async fn ensure_workspace_server_at(
 
     let access = access.unwrap_or_default();
     let executable = std::env::current_exe().context("cannot locate the Haarness executable")?;
+    let start_log = prepare_start_log(&paths.data);
     let mut command = ProcessCommand::new(executable);
 
     command
@@ -10181,6 +10272,11 @@ async fn ensure_workspace_server_at(
         .arg("--port")
         .arg(address.port().to_string())
         .arg("--background-child")
+        .args(
+            start_log
+                .iter()
+                .flat_map(|path| [OsStr::new("--start-log"), path.as_os_str()]),
+        )
         .args(matches!(access, haarness_server::auth::ServerAccess::Open).then_some("--anonymous"))
         .env("HAARNESS_SERVER_TOKEN", token)
         .env_remove("HAARNESS_SERVER_USERNAME")
@@ -10212,7 +10308,11 @@ async fn ensure_workspace_server_at(
             if let Some(discovery) = discover_workspace_server(paths, workspace).await? {
                 return Ok(discovery);
             }
-            anyhow::bail!("Haarness server exited during startup ({status})");
+            let reason = start_log
+                .as_deref()
+                .and_then(|path| start_failure(path, child.id()))
+                .map_or_else(String::new, |reason| format!(": {reason}"));
+            anyhow::bail!("Haarness server exited during startup ({status}){reason}");
         }
         if Instant::now() >= deadline {
             anyhow::bail!("Haarness server did not become ready within 8 seconds");
@@ -10776,10 +10876,10 @@ mod tests {
         current_executable_fingerprint, finish_goal_run, goal_idle_timeout_from, load_output_style,
         loaded_mcp_entry, local_server_compatibility_error, mcp_config_for_display,
         migrate_legacy_workspace_database, normalize_natural_language_args, parse_mcp_key_values,
-        read_mcp_entry, replace_incompatible_workspace_server, resolved_credentials,
-        select_run_thread_client, server_compatibility_error, set_goal_for_run_client,
-        valid_provider_url, wait_for_goal_client, write_mcp_entry, write_provider_entry,
-        write_runtime,
+        prepare_start_log, read_mcp_entry, replace_incompatible_workspace_server,
+        resolved_credentials, select_run_thread_client, server_compatibility_error,
+        set_goal_for_run_client, start_failure, valid_provider_url, wait_for_goal_client,
+        write_mcp_entry, write_provider_entry, write_runtime,
     };
     use super::{
         Approver, NO_MODEL_CONNECTED, RunWatch, TurnStatus, allow_rule_example,
@@ -11224,6 +11324,27 @@ mod tests {
                 command: McpCommand::Remove { .. }
             })
         ));
+    }
+
+    /// Launchers sharing the start log each quote only their own server's
+    /// last lines, and the log is emptied once it grows past its limit.
+    #[test]
+    fn the_start_log_is_read_per_server_and_kept_small() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-start-log-{}", uuid::Uuid::now_v7()));
+        let path = prepare_start_log(&root).unwrap();
+        assert_eq!(path, root.join("logs/server-start.log"));
+        fs::write(
+            &path,
+            "pid 7: old\npid 8: other server\npid 7: one\npid 7: two\npid 7: three\npid 70: not mine\n",
+        )
+        .unwrap();
+        assert_eq!(start_failure(&path, 7).as_deref(), Some("one two three"));
+        assert_eq!(start_failure(&path, 9), None);
+        fs::write(&path, "x".repeat(70 * 1024)).unwrap();
+        prepare_start_log(&root).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// `haarness mcp enable/disable` write back the entry as read, so the
