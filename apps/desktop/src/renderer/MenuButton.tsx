@@ -48,6 +48,8 @@ export function MenuButton(props: {
   items: MenuAction[];
   /** A menu that replaces its trigger's value is at least as wide as it. */
   matchWidth?: boolean;
+  /** Called each time the menu opens. */
+  onOpen?: () => void;
   onKeyDown?: (
     event: KeyboardEvent & { currentTarget: HTMLButtonElement },
   ) => void;
@@ -67,6 +69,7 @@ export function MenuButton(props: {
   createEffect(
     on(open, (visible) => {
       if (!visible) return;
+      props.onOpen?.();
       const outside = (event: Event) => {
         if (
           !menu?.contains(event.target as Node) &&
