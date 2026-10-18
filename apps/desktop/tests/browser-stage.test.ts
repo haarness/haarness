@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { agentReveal, putAway, type BrowserStage } from "../src/renderer/browser-stage";
+import { agentReveal, awayChats, putAway, type BrowserStage } from "../src/renderer/browser-stage";
 
 const stage = (patch: Partial<BrowserStage> = {}): BrowserStage => ({
   chat: "local:/work\u0000chat-1",
@@ -48,4 +48,21 @@ test("an agent's page never takes the side panel from another panel and does not
   assert.equal(agentReveal(stage({ hidden: false }), true), "notify");
   assert.equal(agentReveal(shown, false), "none");
   assert.equal(agentReveal(shown, true), "none");
+});
+
+test("each chat keeps its own put-away Browser", () => {
+  const other = "local:/work\u0000chat-2";
+  let away: ReadonlySet<string> = new Set();
+  away = awayChats(away, shown, stage({ hidden: true }));
+  assert.deepEqual([...away], [shown.chat]);
+  // Another chat, its side panel still hidden: its pages may still open the Browser.
+  away = awayChats(away, stage(), stage({ chat: other }));
+  assert.equal(away.has(other), false);
+  assert.equal(agentReveal(stage({ chat: other }), away.has(other)), "show");
+  // That chat's Browser shows; the first chat's stays put away.
+  away = awayChats(away, stage({ chat: other }), stage({ chat: other, shown: true, hidden: false }));
+  assert.deepEqual([...away], [shown.chat]);
+  // Back in the first chat, its Browser on screen again: no longer away.
+  away = awayChats(away, stage({ chat: other, shown: true, hidden: false }), shown);
+  assert.deepEqual([...away], []);
 });
