@@ -514,6 +514,15 @@ test("an agent's page opens a closed side panel on the Browser, but never brings
   await expect(toggle).not.toHaveAttribute("aria-description", /./);
   await tool("tabs_close", { tabID: other });
   await tool("tabs_focus", { tabID });
+  // Putting the Browser away belongs to its chat: another chat's agent pages
+  // still open the side panel on its Browser.
+  await hide();
+  await select(second);
+  const elsewhere = (await tool("tabs_open", { url: siteURL + "/popup" }, second)).value.id;
+  await expect(browser).toBeVisible();
+  await tool("tabs_close", { tabID: elsewhere }, second);
+  await select(thread);
+  await expect(browser).toBeVisible();
   // Closing the Browser's own tab puts it away too: the agent's page brings
   // the tab back with a dot, and the panel launcher stays.
   await page.getByRole("button", { name: "Close browser panel", exact: true }).click();

@@ -33,6 +33,24 @@ export function putAway(prev: BrowserStage | undefined, next: BrowserStage): boo
 }
 
 /**
+ * The chats whose Browser the person put away, after the stage moved from
+ * `prev` to `next`: each chat keeps its own, so putting the Browser away in
+ * one chat never holds back another chat's pages.
+ */
+export function awayChats(
+  away: ReadonlySet<string>,
+  prev: BrowserStage | undefined,
+  next: BrowserStage,
+): ReadonlySet<string> {
+  const value = putAway(prev, next);
+  if (value === undefined || value === away.has(next.chat)) return away;
+  const chats = new Set(away);
+  if (value) chats.add(next.chat);
+  else chats.delete(next.chat);
+  return chats;
+}
+
+/**
  * What a page the agent opened, focused or took elsewhere does: nothing when
  * the Browser is on screen already; it opens a hidden side panel, or one
  * showing only its launcher, unless the person put the Browser away;

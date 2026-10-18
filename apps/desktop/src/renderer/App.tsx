@@ -40,7 +40,7 @@ import { Wordmark } from "./brand";
 import { matchesShortcut, shortcutLabel, type SearchEntry } from "./search";
 import { registerCyclePanel, stepFocusedPanel, tabButton } from "./tab-cycle";
 import { keyPlace, overlayOpen, stepIndex, stepsChats } from "./keyboard-nav";
-import { agentReveal, putAway, type BrowserStage } from "./browser-stage";
+import { agentReveal, awayChats, type BrowserStage } from "./browser-stage";
 import { SelectionBar } from "./SelectionBar";
 import { selection } from "./sidebar-selection";
 import { createWorktree, resetWorktree, removeWorktree } from "./worktrees";
@@ -191,16 +191,14 @@ export function App() {
     tab: dockTabs().includes("browser"),
   });
   /**
-   * The person put the Browser away: hid the side panel or closed the
-   * Browser's tab while it showed, and has not shown it since.
+   * The chats whose Browser the person put away: hid the side panel or closed
+   * the Browser's tab while it showed, and has not shown it since.
    */
-  const [browserAway, setBrowserAway] = createSignal(false);
+  const [awayIn, setAwayIn] = createSignal<ReadonlySet<string>>(new Set());
   createEffect(
-    on(browserStage, (next, prev) => {
-      const away = putAway(prev, next);
-      if (away !== undefined) setBrowserAway(away);
-    }),
+    on(browserStage, (next, prev) => setAwayIn((away) => awayChats(away, prev, next))),
   );
+  const browserAway = () => awayIn().has(browserStage().chat);
   /**
    * The agent opened or focused a tab, or took the tab the Browser shows to
    * another page. A closed side panel (or one showing only the panel
