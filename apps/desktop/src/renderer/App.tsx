@@ -40,6 +40,7 @@ import { Wordmark } from "./brand";
 import { matchesShortcut, shortcutLabel, type SearchEntry } from "./search";
 import { registerCyclePanel, stepFocusedPanel, tabButton } from "./tab-cycle";
 import { keyPlace, overlayOpen, stepIndex, stepsChats } from "./keyboard-nav";
+import { agentReveal, putAway, type BrowserStage } from "./browser-stage";
 import { SelectionBar } from "./SelectionBar";
 import { selection } from "./sidebar-selection";
 import { createWorktree, resetWorktree, removeWorktree } from "./worktrees";
@@ -181,19 +182,44 @@ export function App() {
       { defer: true },
     ),
   );
+  /** Where the Browser stands: on screen, the side panel hidden or on its launcher, a tab of its own. */
+  const browserStage = (): BrowserStage => ({
+    chat: JSON.stringify([state.connection?.id ?? "", state.selected ?? ""]),
+    shown: dockVisible() && dock() === "browser",
+    hidden: dock() === null,
+    launcher: dock() === "tools",
+    tab: dockTabs().includes("browser"),
+  });
   /**
-   * The agent took the tab the Browser shows to another page. A closed side
-   * panel (or one showing only the panel launcher) opens on the Browser,
-   * also after the user closed it; another panel keeps the side panel and
-   * the Browser tab gets a dot instead. Unlike a tab the agent opens, this
-   * never leaves another page for the chat.
+   * The person put the Browser away: hid the side panel or closed the
+   * Browser's tab while it showed, and has not shown it since.
+   */
+  const [browserAway, setBrowserAway] = createSignal(false);
+  createEffect(
+    on(browserStage, (next, prev) => {
+      const away = putAway(prev, next);
+      if (away !== undefined) setBrowserAway(away);
+    }),
+  );
+  /**
+   * The agent opened or focused a tab, or took the tab the Browser shows to
+   * another page. A closed side panel (or one showing only the panel
+   * launcher) opens on the Browser, unless the person put the Browser away;
+   * otherwise the Browser keeps its place, or gets one back, with a dot that
+   * goes once the person looks. The agent never takes the side panel from
+   * another panel or leaves another page for the chat.
    */
   function revealBrowser() {
-    if (dock() === "browser") return;
+    const step = agentReveal(browserStage(), browserAway());
+    if (step === "none") return;
     if (!dockTabs().includes("browser"))
       setDockTabs((tabs) => [...tabs, "browser"]);
-    if (dock() === null || dock() === "tools") setDock("browser");
+    if (step === "show") setDock("browser");
     else setBrowserMoved(true);
+  }
+  /** Shows the side panel: on the Browser when the agent left it a dot. */
+  function showDock(fallback: Dock | "tools") {
+    setDock(browserMoved() ? "browser" : fallback);
   }
   function closeDock(value: Dock) {
     if (value === "browser") setBrowserMoved(false);
@@ -582,7 +608,8 @@ export function App() {
         disabled: !connected,
         action: () => {
           set("panel", "chat");
-          setDock(dockVisible() ? null : "tools");
+          if (dockVisible()) setDock(null);
+          else showDock("tools");
         },
       },
       {
@@ -886,10 +913,16 @@ export function App() {
               label={dockVisible() ? t("Hide side panel") : t("Show side panel")}
               disabled={!state.connection}
               active={dockVisible()}
+              dot={!dockVisible() && browserMoved()}
+              description={
+                !dockVisible() && browserMoved()
+                  ? t("The agent opened another page")
+                  : undefined
+              }
               onClick={() =>
                 dockVisible()
                   ? setDock(null)
-                  : setDock(dockTabs().at(-1) ?? "tools")
+                  : showDock(dockTabs().at(-1) ?? "tools")
               }
             />
           </Show>
@@ -1328,7 +1361,7 @@ export function App() {
               <Show when={state.connection && dock() === "context"}>
                 <ConversationContext />
               </Show>
-              <BrowserPanel visible={dockVisible() && dock() === "browser"} onOpen={() => openDock("browser")} onReveal={revealBrowser} />
+              <BrowserPanel visible={dockVisible() && dock() === "browser"} onOpen={(agent) => (agent ? revealBrowser() : openDock("browser"))} onReveal={revealBrowser} />
             </aside>
           </div>
           <Show when={state.connection && state.terminal}>

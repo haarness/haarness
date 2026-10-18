@@ -54,9 +54,9 @@ function covered(area: DOMRect) {
 }
 export function BrowserPanel(props: {
   visible: boolean;
-  /** The agent opened or focused a tab: show the Browser. */
-  onOpen: () => void;
-  /** The agent took the shown tab to another page: bring the Browser back if it is closed. */
+  /** A tab was opened or focused, by the person or (`agent`) by the agent. */
+  onOpen: (agent: boolean) => void;
+  /** The agent took the shown tab to another page. */
   onReveal: () => void;
 }) {
   const app = useApp();
@@ -267,11 +267,12 @@ export function BrowserPanel(props: {
         error?: string;
         focus?: boolean;
         reveal?: boolean;
+        agent?: boolean;
         disconnected?: boolean;
       };
       if (data.state) setBrowser(data.state);
       if (data.error) setError(data.error);
-      if (data.focus) props.onOpen();
+      if (data.focus) props.onOpen(!!data.agent);
       else if (data.reveal) props.onReveal();
       if (data.disconnected) {
         setConnected(false);

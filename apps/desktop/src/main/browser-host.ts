@@ -58,12 +58,13 @@ export function createBrowserHost(
     focusedTabID: e.focusedTabID,
   });
   /**
-   * Sends the tabs to the server and the window. `focus` brings the Browser
-   * panel forward (the agent opened or focused a tab); `reveal` says the
-   * agent took the shown tab to another page, which reopens a closed panel
-   * and marks the Browser tab when another panel is showing.
+   * Sends the tabs to the server and the window. `focus` says a tab was
+   * opened or focused; `reveal` says the agent took the shown tab to another
+   * page. `agent` says the agent did it, not the person: the window then
+   * brings the Browser forward only into a closed side panel the person did
+   * not close on it, and otherwise marks the Browser's tab with a dot.
    */
-  function publish(e: Entry, error?: string, focus = false, reveal = false) {
+  function publish(e: Entry, error?: string, show?: "focus" | "reveal", agent = false) {
     if (e.disposed) return;
     const inventory = state(e);
     if (e.socket.readyState === WebSocket.OPEN)
@@ -72,7 +73,13 @@ export function createBrowserHost(
       kind: "browser",
       connection: e.connection,
       id: e.thread,
-      data: { state: withIcons(e, inventory), error, focus, reveal },
+      data: {
+        state: withIcons(e, inventory),
+        error,
+        focus: show === "focus",
+        reveal: show === "reveal",
+        agent,
+      },
     });
     clearTimeout(e.save);
     e.save = setTimeout(() => {
@@ -168,9 +175,9 @@ export function createBrowserHost(
     page?.layout(bounds, undefined, 0);
     page?.setVisible(true);
   }
-  function focus(e: Entry, id: Browser.TabID) {
+  function focus(e: Entry, id: Browser.TabID, agent = false) {
     e.focusedTabID = id;
-    publish(e, undefined, true);
+    publish(e, undefined, "focus", agent);
   }
   async function closePage(e: Entry, id: Browser.TabID) {
     for (const [request, tab] of e.requestTabs)
@@ -224,7 +231,8 @@ export function createBrowserHost(
       translate: (key) => translate(data().preferences.language, key),
       popup: (options) => {
         const popup = create(e, false, options);
-        focus(e, popup.state().id);
+        // A popup the page opens while an agent command runs in it is the agent's.
+        focus(e, popup.state().id, [...e.requestTabs.values()].includes(id));
         return popup.contents;
       },
     });
@@ -263,7 +271,7 @@ export function createBrowserHost(
           files: [],
         };
       const page = create(e);
-      if (a.focus !== false) focus(e, page.state().id);
+      if (a.focus !== false) focus(e, page.state().id, agent);
       await page.ready;
       await page.execute(
         {
@@ -296,7 +304,7 @@ export function createBrowserHost(
       )
         throw new Error("Browser target changed while permission was pending");
       if (a.type === "tabs.focus") {
-        focus(e, a.tabID);
+        focus(e, a.tabID, agent);
         return { value: tab, files: [] };
       }
       await closePage(e, a.tabID);
@@ -305,16 +313,18 @@ export function createBrowserHost(
     const page = e.pages.get(a.tabID) ?? create(e, true, undefined, tab);
     await page.ready;
     const result = await page.execute(command, signal);
-    // The agent took the tab the Browser shows to another page: the Browser
-    // comes back if the user closed it. A reload is the same page again.
+    // The agent took the tab the Browser shows to another page; a reload is
+    // the same page again.
     publish(
       e,
       undefined,
-      false,
       agent &&
         !command.inspect &&
         (a.type === "navigate" || a.type === "back" || a.type === "forward") &&
-        a.tabID === e.focusedTabID,
+        a.tabID === e.focusedTabID
+        ? "reveal"
+        : undefined,
+      agent,
     );
     return result;
   }
