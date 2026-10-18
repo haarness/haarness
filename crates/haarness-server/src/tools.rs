@@ -2796,16 +2796,18 @@ impl Tool for BuiltinTool {
             Kind::List => {
                 let requested = string(&args, "path")?;
                 let path = self.resolve_existing(requested, &context)?;
-                let secrets = SecretFilter::new(&self.workspace, requested, &path);
+                let secrets = SecretFilter::new(&self.workspace, requested, &path, None);
                 let mut entries = tokio::fs::read_dir(&path).await.map_err(tool_error)?;
                 let mut names = Vec::new();
-                let mut skipped = 0;
+                let mut skipped = Skipped::default();
                 while let Some(entry) = entries.next_entry().await.map_err(tool_error)? {
                     let full = entry.path();
                     // Folders stay listed; a secret-named file, or a link to
                     // one, is left out and only counted.
-                    if !full.is_dir() && secrets.hides(&full) {
-                        skipped += 1;
+                    if !full.is_dir()
+                        && let Some(hidden) = secrets.hides(&full)
+                    {
+                        skipped.count(hidden);
                         continue;
                     }
                     names.push(entry.file_name().to_string_lossy().into_owned());
@@ -2830,9 +2832,14 @@ impl Tool for BuiltinTool {
                     .join(string(&args, "pattern")?)
                     .to_string_lossy()
                     .into_owned();
-                let secrets = SecretFilter::new(&self.workspace, requested, &root);
+                // A file a `read` rule denies is left out like a secret one.
+                let rules = context
+                    .invoker
+                    .as_ref()
+                    .and_then(|invoker| invoker.read_rules());
+                let secrets = SecretFilter::new(&self.workspace, requested, &root, rules);
                 let mut values = Vec::new();
-                let mut skipped = 0;
+                let mut skipped = Skipped::default();
                 let mut partial = false;
                 for path in glob::glob(&pattern)
                     .map_err(tool_error)?
@@ -2845,8 +2852,10 @@ impl Tool for BuiltinTool {
                     }
                     // `*` matches dotfiles and `**` follows linked folders, so
                     // each file is checked by where it really leads as well.
-                    if !path.is_dir() && secrets.hides(&path) {
-                        skipped += 1;
+                    if !path.is_dir()
+                        && let Some(hidden) = secrets.hides(&path)
+                    {
+                        skipped.count(hidden);
                         continue;
                     }
                     values.push(
@@ -2866,16 +2875,27 @@ impl Tool for BuiltinTool {
                 let regex = regex::Regex::new(string(&args, "pattern")?).map_err(tool_error)?;
                 let requested = args.get("path").and_then(Value::as_str).unwrap_or(".");
                 let root = self.resolve_existing(requested, &context)?;
-                let secrets = SecretFilter::new(&self.workspace, requested, &root);
+                // A file a `read` rule denies is left out like a secret one.
+                let rules = context
+                    .invoker
+                    .as_ref()
+                    .and_then(|invoker| invoker.read_rules());
+                let secrets = SecretFilter::new(&self.workspace, requested, &root, rules);
                 // The walker searches a file it is given whatever its filters
-                // say, so a secret-named one, or a link to one, is left out
-                // here, before anything reads it.
-                if root.is_file() && secrets.hides(&root) {
-                    return Ok(with_skipped(output(String::new()), 1, false));
+                // say, so a secret-named or denied one, or a link to one, is
+                // left out here, before anything reads it.
+                if root.is_file()
+                    && let Some(hidden) = secrets.hides(&root)
+                {
+                    return Ok(with_skipped(
+                        output(String::new()),
+                        Skipped::one(hidden),
+                        false,
+                    ));
                 }
                 let mut matches = Vec::new();
                 let mut files = 0;
-                let mut skipped = 0;
+                let mut skipped = Skipped::default();
                 let mut partial = false;
                 // Match ripgrep semantics: respect .gitignore,
                 // .ignore, repository excludes, hidden files, and parent
@@ -2892,8 +2912,8 @@ impl Tool for BuiltinTool {
                         break;
                     }
                     files += 1;
-                    if secrets.names_secret(entry.path()) {
-                        skipped += 1;
+                    if let Some(hidden) = secrets.names_hidden(entry.path()) {
+                        skipped.count(hidden);
                         continue;
                     }
                     if let Ok(text) = std::fs::read_to_string(entry.path()) {
@@ -3028,6 +3048,26 @@ impl Tool for BuiltinTool {
             Kind::ApplyPatch => {
                 let operations = haarness_core::patch::parse_patch(string(&args, "input")?)
                     .map_err(CoreError::Tool)?;
+                // A move onto the file itself (the same path, a `./` spelling,
+                // another case on a case-insensitive disk) would write the
+                // file and then delete it. Refused before anything is written.
+                for operation in &operations {
+                    if let haarness_core::patch::FileOp::Update {
+                        path,
+                        move_to: Some(target),
+                        ..
+                    } = operation
+                        && let (Ok(source), Ok(destination)) = (
+                            self.resolve_existing(path, &context),
+                            self.resolve_new(target, &context),
+                        )
+                        && same_file(&source, &destination)
+                    {
+                        return Err(CoreError::Invalid(format!(
+                            "{path}: *** Move to: {target} names the same file; leave out the Move to line to update it in place"
+                        )));
+                    }
+                }
                 let mut report = Vec::new();
                 let mut diffs = Vec::new();
                 let mut diffs_truncated = false;
@@ -3064,6 +3104,12 @@ impl Tool for BuiltinTool {
                                 .map_err(|error| CoreError::Tool(format!("{path}: {error}")))?;
                             if let Some(target) = move_to {
                                 let destination = self.resolve_new(&target, &context)?;
+                                // A file the patch added earlier is checked here.
+                                if same_file(&resolved, &destination) {
+                                    return Err(CoreError::Invalid(format!(
+                                        "{path}: *** Move to: {target} names the same file; leave out the Move to line to update it in place"
+                                    )));
+                                }
                                 let destination_before = existing_diff_body(&destination).await;
                                 if let Some(parent) = destination.parent() {
                                     tokio::fs::create_dir_all(parent)
@@ -3292,10 +3338,49 @@ struct SecretFilter {
     /// named it, which may run through a link.
     root: PathBuf,
     named_root: PathBuf,
+    /// The calling agent's rules, when the search also leaves out files a
+    /// `read` rule denies (grep and glob).
+    rules: Option<haarness_core::PermissionEngine>,
+}
+
+/// Why a search leaves a file out.
+#[derive(Clone, Copy)]
+enum Hidden {
+    /// The built-in read rules ask about it (`.env`).
+    Secret,
+    /// A configured, agent or inherited `read` rule denies it.
+    Denied,
+}
+
+/// How many files a search left out, by why.
+#[derive(Default, Clone, Copy)]
+struct Skipped {
+    secret: usize,
+    denied: usize,
+}
+
+impl Skipped {
+    fn one(hidden: Hidden) -> Self {
+        let mut skipped = Self::default();
+        skipped.count(hidden);
+        skipped
+    }
+
+    fn count(&mut self, hidden: Hidden) {
+        match hidden {
+            Hidden::Secret => self.secret += 1,
+            Hidden::Denied => self.denied += 1,
+        }
+    }
 }
 
 impl SecretFilter {
-    fn new(workspace: &Path, requested: &str, root: &Path) -> Self {
+    fn new(
+        workspace: &Path,
+        requested: &str,
+        root: &Path,
+        rules: Option<haarness_core::PermissionEngine>,
+    ) -> Self {
         Self {
             workspaces: [
                 workspace
@@ -3305,62 +3390,119 @@ impl SecretFilter {
             ],
             root: root.to_path_buf(),
             named_root: workspace.join(requested),
+            rules,
         }
     }
 
-    fn secret(&self, path: &Path) -> bool {
-        let relative = self
-            .workspaces
+    /// `path` workspace-relative when it is inside the workspace.
+    fn relative<'a>(&self, path: &'a Path) -> &'a Path {
+        self.workspaces
             .iter()
-            .find_map(|workspace| path.strip_prefix(workspace).ok());
-        haarness_core::is_secret_path(relative.unwrap_or(path))
+            .find_map(|workspace| path.strip_prefix(workspace).ok())
+            .unwrap_or(path)
     }
 
-    /// Whether `path`, beneath the searched root, is secret-named by its own
+    fn judge(&self, path: &Path) -> Option<Hidden> {
+        let relative = self.relative(path);
+        if haarness_core::is_secret_path(relative) {
+            return Some(Hidden::Secret);
+        }
+        self.rules
+            .as_ref()
+            .is_some_and(|rules| {
+                rules.evaluate(&format!("read:{}", relative.display()))
+                    == haarness_core::PermissionDecision::Deny
+            })
+            .then_some(Hidden::Denied)
+    }
+
+    /// Whether `path`, beneath the searched root, is left out by its own
     /// path or by the path the model named, such as a linked package under
     /// `node_modules` whose real folder holds a `.env`.
-    fn names_secret(&self, path: &Path) -> bool {
-        self.secret(path)
-            || path.strip_prefix(&self.root).is_ok_and(|rest| {
-                self.secret(&if rest.as_os_str().is_empty() {
-                    self.named_root.clone()
-                } else {
-                    self.named_root.join(rest)
-                })
+    fn names_hidden(&self, path: &Path) -> Option<Hidden> {
+        self.judge(path).or_else(|| {
+            let rest = path.strip_prefix(&self.root).ok()?;
+            self.judge(&if rest.as_os_str().is_empty() {
+                self.named_root.clone()
+            } else {
+                self.named_root.join(rest)
             })
+        })
     }
 
-    /// [`Self::names_secret`], or a link that leads to a secret-named file.
-    fn hides(&self, path: &Path) -> bool {
-        self.names_secret(path)
-            || std::fs::canonicalize(path)
-                .is_ok_and(|target| target != path && self.secret(&target))
+    /// [`Self::names_hidden`], or a link that leads to a file left out.
+    fn hides(&self, path: &Path) -> Option<Hidden> {
+        self.names_hidden(path).or_else(|| {
+            std::fs::canonicalize(path)
+                .ok()
+                .filter(|target| target != path)
+                .and_then(|target| self.judge(&target))
+        })
     }
 }
 
-/// Ends a search's output with how many secret-named files it left out, and
-/// records the count as `skipped`. The note follows any truncation so the
-/// model always sees it; `partial` means the search stopped at its result
-/// limit, so files it never reached went uncounted.
-fn with_skipped(mut output: ToolOutput, skipped: usize, partial: bool) -> ToolOutput {
-    if skipped == 0 {
+/// Whether two paths name one existing file: the same device and inode on
+/// Unix, the same canonical path elsewhere (Windows canonicalizes case too).
+fn same_file(left: &Path, right: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if let (Ok(left), Ok(right)) = (std::fs::metadata(left), std::fs::metadata(right)) {
+            return left.dev() == right.dev() && left.ino() == right.ino();
+        }
+        false
+    }
+    #[cfg(not(unix))]
+    {
+        matches!(
+            (left.canonicalize(), right.canonicalize()),
+            (Ok(left), Ok(right)) if left == right
+        )
+    }
+}
+
+/// Ends a search's output with how many files it left out and why, and
+/// records the counts as `skipped` (secret-named) and `denied` (a `read` rule
+/// refuses them). The note follows any truncation so the model always sees
+/// it; `partial` means the search stopped at its result limit, so files it
+/// never reached went uncounted.
+fn with_skipped(mut output: ToolOutput, skipped: Skipped, partial: bool) -> ToolOutput {
+    let at_least = if partial { "at least " } else { "" };
+    let plural = |count: usize| if count == 1 { "" } else { "s" };
+    let mut reasons = Vec::new();
+    if skipped.secret > 0 {
+        reasons.push(format!(
+            "{at_least}{} secret-named file{}",
+            skipped.secret,
+            plural(skipped.secret)
+        ));
+    }
+    if skipped.denied > 0 {
+        reasons.push(format!(
+            "{at_least}{} file{} a read rule denies",
+            skipped.denied,
+            plural(skipped.denied)
+        ));
+    }
+    if reasons.is_empty() {
         return output;
     }
-    let note = format!(
-        "(skipped {}{skipped} secret-named file{})",
-        if partial { "at least " } else { "" },
-        if skipped == 1 { "" } else { "s" }
-    );
+    let note = format!("(skipped {})", reasons.join(" and "));
     output.text = if output.text.is_empty() {
         format!("No files found\n\n{note}")
     } else {
         format!("{}\n\n{note}", output.text)
     };
-    match &mut output.metadata {
-        Value::Object(metadata) => {
-            metadata.insert("skipped".into(), json!(skipped));
+    if !output.metadata.is_object() {
+        output.metadata = json!({});
+    }
+    if let Value::Object(metadata) = &mut output.metadata {
+        if skipped.secret > 0 {
+            metadata.insert("skipped".into(), json!(skipped.secret));
         }
-        metadata => *metadata = json!({"skipped": skipped}),
+        if skipped.denied > 0 {
+            metadata.insert("denied".into(), json!(skipped.denied));
+        }
     }
     output
 }
@@ -5171,6 +5313,67 @@ export default workflow({
     }
 
     #[tokio::test]
+    async fn apply_patch_refuses_a_move_onto_the_same_file() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-patch-self-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        tokio::fs::write(workspace.join("notes.txt"), "one\n")
+            .await
+            .unwrap();
+        tokio::fs::write(workspace.join("first.txt"), "first\n")
+            .await
+            .unwrap();
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let run = |input: String| {
+            let registry = &registry;
+            let context = tool_context(&workspace);
+            async move {
+                registry
+                    .get("apply_patch")
+                    .unwrap()
+                    .execute(json!({ "input": input }), context)
+                    .await
+            }
+        };
+        let mut targets = vec!["notes.txt".to_owned(), "./notes.txt".to_owned()];
+        // On a case-insensitive disk another case is the same file too.
+        if workspace.join("NOTES.TXT").exists() {
+            targets.push("NOTES.TXT".to_owned());
+        }
+        for target in targets {
+            let input = format!(
+                "*** Begin Patch\n*** Update File: first.txt\n@@\n-first\n+changed\n\
+                 *** Update File: notes.txt\n*** Move to: {target}\n@@\n-one\n+two\n*** End Patch\n"
+            );
+            let error = run(input).await.unwrap_err().to_string();
+            assert!(error.contains("names the same file"), "{target}: {error}");
+            assert_eq!(
+                std::fs::read_to_string(workspace.join("notes.txt")).unwrap(),
+                "one\n"
+            );
+            // Refused before anything was written.
+            assert_eq!(
+                std::fs::read_to_string(workspace.join("first.txt")).unwrap(),
+                "first\n"
+            );
+        }
+        // A file the same patch added, moved onto itself.
+        let error = run(
+            "*** Begin Patch\n*** Add File: added.txt\n+a\n*** Update File: added.txt\n*** Move to: ./added.txt\n@@\n-a\n+b\n*** End Patch\n"
+                .to_owned(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("names the same file"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("added.txt")).unwrap(),
+            "a\n"
+        );
+        tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn apply_patch_executes_v4a_envelopes_across_files() {
         let workspace =
             std::env::temp_dir().join(format!("haarness-patch-{}", uuid::Uuid::now_v7()));
@@ -5712,6 +5915,119 @@ export default workflow({
             none(1)
         );
         tokio::fs::remove_dir_all(workspace).await.unwrap();
+    }
+
+    /// An agent turn whose rules deny reading `private/*`.
+    struct DenyPrivate(PathBuf);
+
+    #[async_trait]
+    impl haarness_core::ToolInvoker for DenyPrivate {
+        async fn invoke(&self, _name: &str, _arguments: Value) -> CoreResult<ToolOutput> {
+            unreachable!("search tools never re-enter")
+        }
+        fn side_effectful_for(&self, _name: &str, _arguments: &Value) -> CoreResult<bool> {
+            Ok(false)
+        }
+        fn read_rules(&self) -> Option<haarness_core::PermissionEngine> {
+            let mut rules = haarness_core::PermissionEngine::build_defaults();
+            rules.add_rule(haarness_core::PermissionRule {
+                pattern: "read:private/*".into(),
+                decision: haarness_core::PermissionDecision::Deny,
+            });
+            rules.set_workspace(&self.0);
+            Some(rules)
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn searches_leave_out_files_a_read_rule_denies_and_say_how_many() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-search-denied-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(workspace.join("private")).unwrap();
+        std::fs::create_dir_all(workspace.join("public")).unwrap();
+        // Search output names files relative to the workspace as configured.
+        let workspace = workspace.canonicalize().unwrap();
+        for file in [
+            "private/key.txt",
+            "private/notes.md",
+            "public/readme.md",
+            "public/.env",
+        ] {
+            std::fs::write(workspace.join(file), format!("needle {file}\n")).unwrap();
+        }
+        std::os::unix::fs::symlink("../private/key.txt", workspace.join("public/link.txt"))
+            .unwrap();
+        let registry = NativeToolRegistry::new(workspace.clone());
+        let run = |tool: &'static str, args: Value, rules: bool| {
+            let registry = &registry;
+            let mut context = tool_context(&workspace);
+            if rules {
+                context.invoker = Some(Arc::new(DenyPrivate(workspace.clone())));
+            }
+            async move {
+                registry
+                    .get(tool)
+                    .unwrap()
+                    .execute(args, context)
+                    .await
+                    .unwrap()
+            }
+        };
+        let grep = run("grep", json!({"pattern":"needle","path":"."}), true).await;
+        assert!(
+            grep.text.contains("public/readme.md:1:needle"),
+            "{}",
+            grep.text
+        );
+        assert!(!grep.text.contains("needle private/"), "{}", grep.text);
+        assert!(
+            grep.text.ends_with("(skipped 2 files a read rule denies)"),
+            "{}",
+            grep.text
+        );
+        assert_eq!(grep.metadata["denied"], 2);
+        assert!(grep.metadata.get("skipped").is_none());
+        // Named directly, the file is never read.
+        let direct = run(
+            "grep",
+            json!({"pattern":"needle","path":"private/key.txt"}),
+            true,
+        )
+        .await;
+        assert_eq!(
+            direct.text,
+            "No files found\n\n(skipped 1 file a read rule denies)"
+        );
+        // glob matches dotfiles and links: a secret and a link to a denied
+        // file are counted under their own reasons.
+        let glob = run("glob", json!({"pattern":"**/*"}), true).await;
+        let names = glob.text.lines().collect::<Vec<_>>();
+        assert!(names.contains(&"public/readme.md"), "{}", glob.text);
+        for hidden in [
+            "private/key.txt",
+            "private/notes.md",
+            "public/link.txt",
+            "public/.env",
+        ] {
+            assert!(!names.contains(&hidden), "{hidden}: {}", glob.text);
+        }
+        assert!(
+            glob.text
+                .ends_with("(skipped 1 secret-named file and 3 files a read rule denies)"),
+            "{}",
+            glob.text
+        );
+        assert_eq!(glob.metadata["skipped"], 1);
+        assert_eq!(glob.metadata["denied"], 3);
+        // Without an agent's rules (a direct call), only secret names are left out.
+        let plain = run("grep", json!({"pattern":"needle","path":"."}), false).await;
+        assert!(
+            plain.text.contains("needle private/key.txt"),
+            "{}",
+            plain.text
+        );
+        std::fs::remove_dir_all(workspace).unwrap();
     }
 
     #[tokio::test]

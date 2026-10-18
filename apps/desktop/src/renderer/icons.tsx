@@ -71,6 +71,7 @@ import Minimize from "lucide-solid/icons/minimize-2";
 import PanelLeft from "lucide-solid/icons/panel-left";
 import PanelRight from "lucide-solid/icons/panel-right";
 import Paperclip from "lucide-solid/icons/paperclip";
+import ImageIcon from "lucide-solid/icons/image";
 import Pencil from "lucide-solid/icons/pencil";
 import Pin from "lucide-solid/icons/pin";
 import PinOff from "lucide-solid/icons/pin-off";
@@ -157,6 +158,7 @@ const catalog = {
   refresh: RefreshCw,
   copy: Copy,
   attach: Paperclip,
+  image: ImageIcon,
 
   // Engine capabilities
   agents: Bot,

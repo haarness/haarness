@@ -18,6 +18,7 @@ mod prefix_warmup;
 pub mod redact;
 mod runtime;
 mod side_question;
+mod stream_clock;
 mod stream_limits;
 mod tool_catalog;
 mod tool_validation;
@@ -35,8 +36,9 @@ pub use execution::ExecutionSettings;
 pub use goal::{MAX_GOAL_CHARS, apply_goal_action, goal_line, legacy_goal_state, new_goal_state};
 pub use permissions::bash::is_obviously_read_only as bash_is_obviously_read_only;
 pub use permissions::{
-    EXPLICIT_GRANT_PREFIX, PermissionDecision, PermissionEngine, PermissionRule, explicit_decision,
-    explicit_granted, is_secret_path, resolve_permission_path,
+    CONFIG_EDIT_RULE, EXPLICIT_GRANT_PREFIX, PermissionDecision, PermissionEngine, PermissionRule,
+    explicit_decision, explicit_granted, global_config_dir_from, is_config_path,
+    is_global_config_path, is_secret_path, resolve_permission_path, set_global_config_dir,
 };
 pub use ports::*;
 pub use runtime::{

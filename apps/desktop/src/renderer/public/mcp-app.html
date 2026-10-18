@@ -1,0 +1,37 @@
+<!doctype html><html><head><meta charset="UTF-8">
+<!-- The ceiling for every MCP App page this frame holds, secure origins only: the page's own policy (mcp-app.ts) narrows it to the public hosts its server declared. frame-src 'none' keeps the page from navigating its frame anywhere. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https:; style-src 'unsafe-inline' https:; img-src data: blob: https:; font-src data: https:; media-src data: blob: https:; connect-src https: wss:; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>App sandbox</title><style>html,body,iframe{margin:0;border:0;width:100%;height:100%;display:block;overflow:hidden;background:transparent}</style></head><body>
+<script>
+// Only the app fills this frame, and only the page it put here talks back through it.
+let frame, key;
+addEventListener('message', (event) => {
+  const data = event.data;
+  if (event.source === parent && data && typeof data.mcpApp === 'string') {
+    if (data.type === 'render' && typeof data.html === 'string') {
+      key = data.mcpApp;
+      if (frame) frame.remove();
+      frame = document.createElement('iframe');
+      frame.title = typeof data.title === 'string' ? data.title : 'App';
+      frame.setAttribute('sandbox', 'allow-scripts allow-forms');
+      frame.setAttribute('referrerpolicy', 'no-referrer');
+      if (data.clipboard === true) frame.setAttribute('allow', 'clipboard-write');
+      frame.addEventListener('load', () => parent.postMessage({ mcpApp: key, type: 'loaded' }, '*'));
+      frame.srcdoc = data.html;
+      document.body.append(frame);
+    } else if (data.type === 'send' && frame && data.mcpApp === key) {
+      frame.contentWindow.postMessage(data.message, '*');
+    }
+    return;
+  }
+  // Whether the person had just clicked or typed in the page when this message
+  // arrived, read here, where the activation is seen as it happens.
+  const active = !!(navigator.userActivation && navigator.userActivation.isActive) && document.activeElement === frame;
+  if (frame && event.source === frame.contentWindow) parent.postMessage({ mcpApp: key, type: 'receive', message: data, active }, '*');
+});
+// A page that tries to navigate its frame is stopped here; the app closes it.
+addEventListener('securitypolicyviolation', (event) => {
+  if (event.effectiveDirective === 'frame-src') parent.postMessage({ mcpApp: key, type: 'navigation' }, '*');
+});
+parent.postMessage({ type: 'mcp-app-host-ready' }, '*');
+</script></body></html>

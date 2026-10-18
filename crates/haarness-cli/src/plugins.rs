@@ -436,14 +436,17 @@ fn git<S: AsRef<std::ffi::OsStr>>(args: impl IntoIterator<Item = S>) -> Result<(
         .context("running git")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // Git quotes the remote's address, which can carry a token.
         bail!(
             "{}",
-            stderr
-                .lines()
-                .rev()
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or("git failed")
-                .trim()
+            haarness_core::redact::urls_in(
+                stderr
+                    .lines()
+                    .rev()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("git failed")
+                    .trim()
+            )
         );
     }
     Ok(())
@@ -480,6 +483,9 @@ fn git_checkout(url: &str, revision: &GitRevision<'_>, destination: &Path) -> Re
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("plugin");
+    // Messages name the source with any user name, password or secret query
+    // parameter hidden; git itself still gets the address as written.
+    let shown = haarness_core::redact::url(url);
     let nonce = uuid::Uuid::now_v7();
     let staging = parent.join(format!(".{leaf}.stage-{nonce}"));
     let backup = parent.join(format!(".{leaf}.backup-{nonce}"));
@@ -509,14 +515,14 @@ fn git_checkout(url: &str, revision: &GitRevision<'_>, destination: &Path) -> Re
                 url,
                 reference.unwrap_or("HEAD"),
             ])
-            .with_context(|| format!("commit {sha} is not available from {url}"))?;
+            .with_context(|| format!("commit {sha} is not available from {shown}"))?;
         }
         git(["-C", staged, "checkout", "-q", "--detach", &sha])
-            .with_context(|| format!("commit {sha} is not available from {url}"))
+            .with_context(|| format!("commit {sha} is not available from {shown}"))
     })();
     if let Err(error) = fetched {
         let _ = fs::remove_dir_all(&staging);
-        return Err(error.context(format!("git clone failed for {url}")));
+        return Err(error.context(format!("git clone failed for {shown}")));
     }
     if destination.exists() {
         fs::rename(destination, &backup)?;
@@ -1231,6 +1237,23 @@ mod tests {
             "kit is not a folder on this computer, and no plugin marketplace has been added to install it from",
             "a plain name is still a marketplace plugin"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_failed_clone_never_quotes_the_credential_in_its_source() {
+        let root = std::env::temp_dir().join(format!("haarness-clone-{}", uuid::Uuid::now_v7()));
+        let data = root.join("data");
+        // Nothing listens on port 1, so git fails at once without a network.
+        for source in [
+            "https://fixture:PRIVATE_SUFFIX@127.0.0.1:1/market.git",
+            "https://127.0.0.1:1/market.git?access_token=PRIVATE_SUFFIX",
+        ] {
+            let error = format!("{:#}", marketplace_add(&data, source).unwrap_err());
+            assert!(!error.contains("PRIVATE_SUFFIX"), "{error}");
+            assert!(error.contains("git clone failed for https://"), "{error}");
+            assert!(error.contains("127.0.0.1:1/market.git"), "{error}");
+        }
         let _ = fs::remove_dir_all(root);
     }
 

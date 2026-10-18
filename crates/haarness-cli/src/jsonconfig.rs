@@ -328,10 +328,30 @@ pub fn load_layers(
     layers.instruction_files = local_files.iter().map(|(file, _)| file.clone()).collect();
     let mut segments = Vec::new();
     let mut import_budget = ImportBudget::default();
+    // Nothing asks before instructions load, so an import a configured
+    // `read` rule denies is left out rather than put in every prompt.
+    let mut read_rules = layers
+        .native
+        .permissions
+        .as_ref()
+        .and_then(|permissions| super::compile_permissions(permissions).ok())
+        .unwrap_or_default();
+    read_rules.extend(layers.rules.iter().cloned());
+    let mut read_rules = haarness_core::PermissionEngine::new(read_rules);
+    read_rules.set_workspace(workspace);
+    let denied = |file: &Path| {
+        (read_rules.evaluate(&format!("read:{}", file.display()))
+            == haarness_core::PermissionDecision::Deny)
+            .then_some("a read rule denies it")
+    };
     for (file, trusted) in local_files {
-        if let Some(content) =
-            instruction_files::read_with_imports(&file, workspace, &mut import_budget, trusted)
-        {
+        if let Some(content) = instruction_files::read_with_imports(
+            &file,
+            workspace,
+            &mut import_budget,
+            trusted,
+            &denied,
+        ) {
             segments.push(instruction_files::segment(
                 &file.display().to_string(),
                 &content,
@@ -339,16 +359,20 @@ pub fn load_layers(
         }
     }
     for url in urls {
+        // The address can carry a key in its user name or query: the prompt
+        // and the notices name it with those parts hidden.
+        let shown = haarness_core::redact::url(&url);
         match fetch_remote_instructions(&url) {
             Ok(body) if !body.trim().is_empty() => {
-                segments.push(instruction_files::segment(&url, &body));
+                segments.push(instruction_files::segment(&shown, &body));
             }
             Ok(_) => layers
                 .notices
-                .push(format!("remote instructions {url} are empty")),
-            Err(error) => layers
-                .notices
-                .push(format!("skipped remote instructions {url}: {error}")),
+                .push(format!("remote instructions {shown} are empty")),
+            Err(error) => layers.notices.push(format!(
+                "skipped remote instructions {shown}: {}",
+                haarness_core::redact::urls_in(&error)
+            )),
         }
     }
     let assembled = segments.join("\n\n");
@@ -1952,6 +1976,94 @@ mod tests {
     }
 
     #[test]
+    fn instruction_imports_leave_out_files_a_read_rule_denies_and_secrets() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-instruction-denied-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        let workspace = root.join("project");
+        for dir in [
+            config.clone(),
+            workspace.join(".git"),
+            workspace.join("private"),
+            workspace.join("public"),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(
+            workspace.join("haarness.json"),
+            r#"{"permission":{"read":{"private/*":"deny"}}}"#,
+        )
+        .unwrap();
+        fs::write(workspace.join("private/notes.md"), "PRIVATE_BODY").unwrap();
+        fs::write(workspace.join("public/notes.md"), "PUBLIC_BODY").unwrap();
+        fs::write(workspace.join(".env"), "ENV_SECRET").unwrap();
+        fs::write(
+            workspace.join("AGENTS.md"),
+            "@private/notes.md\n@public/notes.md\n@.env\n",
+        )
+        .unwrap();
+        let layers = load_layers(&config, None, &workspace, true, &[]);
+        let instructions = layers.instructions.expect("instructions");
+        assert!(instructions.contains("PUBLIC_BODY"), "{instructions}");
+        assert!(!instructions.contains("PRIVATE_BODY"), "{instructions}");
+        assert!(!instructions.contains("ENV_SECRET"), "{instructions}");
+        assert!(
+            instructions
+                .contains("[Instruction import omitted: private/notes.md (a read rule denies it)]")
+        );
+        assert!(instructions.contains("[Instruction import omitted: .env (it is a secret file)]"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn remote_instruction_urls_hide_their_credentials_in_the_prompt_and_notices() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-instruction-credentials-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        let workspace = root.join("project");
+        for dir in [config.clone(), workspace.join(".git")] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let base = serve(vec![("/remote.md?token=PRIVATE_SUFFIX", "REMOTE_RULES")]);
+        let reachable = format!(
+            "{}/remote.md?token=PRIVATE_SUFFIX",
+            base.replacen("http://", "http://fixture:PRIVATE_SUFFIX@", 1)
+        );
+        fs::write(
+            config.join("haarness.json"),
+            serde_json::json!({"instructions": [
+                reachable,
+                "http://fixture:PRIVATE_SUFFIX@127.0.0.1:1/down.md?api_key=PRIVATE_SUFFIX",
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let layers = load_layers(&config, None, &workspace, true, &[]);
+        let instructions = layers.instructions.expect("instructions");
+        assert!(instructions.contains("REMOTE_RULES"), "{instructions}");
+        assert!(!instructions.contains("PRIVATE_SUFFIX"), "{instructions}");
+        assert!(
+            instructions.contains("/remote.md?token=<redacted>"),
+            "{instructions}"
+        );
+        let skipped = layers
+            .notices
+            .iter()
+            .find(|notice| notice.starts_with("skipped remote instructions"))
+            .expect("a notice for the address that cannot be reached");
+        assert!(!skipped.contains("PRIVATE_SUFFIX"), "{skipped}");
+        assert!(
+            skipped.contains("http://<redacted>@127.0.0.1:1/down.md?api_key=<redacted>"),
+            "{skipped}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn configured_instruction_entries_resolve_globs_home_paths_and_urls() {
         let root = std::env::temp_dir().join(format!(
             "haarness-instruction-entries-{}",
@@ -2312,6 +2424,101 @@ mod tests {
                     .iter()
                     .any(|notice| notice.starts_with(&prefix)),
                 "{prefix}\n{:?}",
+                layers.notices
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn json_frontmatter_keeps_its_limits_and_code_frontmatter_is_skipped() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-frontmatter-languages-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let config = root.join("config");
+        let workspace = root.join("workspace");
+        for directory in [
+            config.clone(),
+            workspace.join(".git"),
+            workspace.join(".haarness/agents"),
+            workspace.join(".haarness/commands"),
+            workspace.join(".haarness/skills/scripted"),
+        ] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        fs::write(
+            workspace.join(".haarness/agents/limited.md"),
+            "---json\n{\"description\": \"Limited\", \"permission\": {\"bash\": \"deny\"}}\n---\nReview only.",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join(".haarness/agents/yaml-limited.md"),
+            "---yaml\ndescription: Yaml limited\npermission:\n  edit: deny\n---\nRead only.",
+        )
+        .unwrap();
+        let skipped = [
+            (
+                "agent",
+                workspace.join(".haarness/agents/scripted.md"),
+                "---js\nmodule.exports = { permission: {} }\n---\nDo anything.",
+                "JavaScript frontmatter is not supported",
+            ),
+            (
+                "command",
+                workspace.join(".haarness/commands/scripted.md"),
+                "---coffee\ndescription: 'x'\n---\nRun it.",
+                "frontmatter language \"coffee\" is not supported",
+            ),
+            (
+                "skill",
+                workspace.join(".haarness/skills/scripted/SKILL.md"),
+                "---javascript\n({ name: 'scripted' })\n---\nSteps.",
+                "JavaScript frontmatter is not supported",
+            ),
+        ];
+        for (_, path, text, _) in &skipped {
+            fs::write(path, text).unwrap();
+        }
+        let layers = load_layers(&config, None, &workspace, true, &[]);
+        let limited = layers
+            .agents
+            .iter()
+            .find(|agent| agent.id == "limited")
+            .expect("the JSON agent loads");
+        assert_eq!(limited.description, "Limited");
+        assert_eq!(limited.prompt, "Review only.");
+        assert!(
+            limited
+                .permissions
+                .iter()
+                .any(|rule| rule.pattern == "bash:*"
+                    && rule.decision == haarness_core::PermissionDecision::Deny),
+            "{:?}",
+            limited.permissions
+        );
+        let yaml = layers
+            .agents
+            .iter()
+            .find(|agent| agent.id == "yaml-limited")
+            .expect("the ---yaml agent loads");
+        assert_eq!(yaml.prompt, "Read only.");
+        assert!(!yaml.permissions.is_empty());
+        assert!(!layers.agents.iter().any(|agent| agent.id == "scripted"));
+        assert!(
+            !layers
+                .commands
+                .iter()
+                .any(|command| command.name == "scripted")
+        );
+        for (kind, path, _, reason) in skipped {
+            let expected = format!("skipped {kind} {}: {reason}", path.display());
+            assert!(
+                layers
+                    .notices
+                    .iter()
+                    .any(|notice| notice.starts_with(&expected)),
+                "{expected}\n{:?}",
                 layers.notices
             );
         }

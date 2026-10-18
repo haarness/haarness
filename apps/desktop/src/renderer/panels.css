@@ -606,6 +606,13 @@
 .html-preview iframe { display: block; border: 0; width: 100%; height: 100%; }
 .preview-notice { flex: none; padding: 8px 12px; font: 12px/1.4 var(--font); background: var(--surface); color: var(--muted); }
 .document-preview { overflow: auto; padding: 24px; flex: 1; }
+/* A comment on lines of a Markdown file's Preview, docked under it (Explorer). */
+.preview-comment {
+  flex: none;
+  padding: var(--s2) var(--s3) var(--s3);
+  border-block-start: 1px solid var(--hairline);
+  background: var(--page);
+}
 .preview-banner { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin: 12px 0; }
 .preview-banner-heading { display: flex; align-items: center; gap: 10px; padding: 12px; }
 .preview-title { text-align: left; flex: 1; min-width: 0; display: grid; gap: 4px; }

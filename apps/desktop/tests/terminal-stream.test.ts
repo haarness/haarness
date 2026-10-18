@@ -1,6 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { inputQueue, reconnectDelay, shownOutput, terminalStream, writeChunks, WRITE_LIMIT } from "../src/renderer/terminal-stream";
+import {
+  DISCONNECTED_AFTER,
+  RECONNECTING_AFTER,
+  inputQueue,
+  linkWatch,
+  reconnectDelay,
+  reconnects,
+  restoredLine,
+  scrollPlaces,
+  shownOutput,
+  terminalStream,
+  topText,
+  writeChunks,
+  WRITE_LIMIT,
+  type Link,
+} from "../src/renderer/terminal-stream";
 
 /**
  * A stand-in for xterm: written bytes are parsed later, in order, and a
@@ -81,6 +96,16 @@ test("after a reconnect only the output missed while it was down is answered", (
   assert.deepEqual(other.answered, [10, 11]);
 });
 
+test("the view's own bytes before a truncated replay are never answered, and the replay's new output is", () => {
+  const view = fakeTerminal(new Map());
+  // A reset, the notice and the restored modes, then output never shown.
+  view.stream.replay(5);
+  view.stream.quiet(text("\u001bc?notice?\u001b[?1h"));
+  view.stream.bytes(text("x?"));
+  view.parse();
+  assert.deepEqual(view.answered, [16]);
+});
+
 test("input typed while the connection is down is kept in order, up to a limit", () => {
   const queue = inputQueue(4);
   queue.add(2, text("b"));
@@ -125,4 +150,141 @@ test("a terminal this window did not start counts its first replay as shown", ()
   assert.equal(shownOutput.get("c:old"), 500);
   shownOutput.keep("c:", ["new"]);
   assert.equal(shownOutput.get("c:old"), 0);
+});
+
+/** A clock the test moves: timers run when it passes their time. */
+function clock() {
+  let now = 0;
+  let timers: { at: number; run: () => void; id: number }[] = [];
+  let next = 0;
+  return {
+    schedule: (run: () => void, ms: number) => {
+      const id = ++next;
+      timers.push({ at: now + ms, run, id });
+      return id as unknown as ReturnType<typeof setTimeout>;
+    },
+    cancel: (timer: ReturnType<typeof setTimeout>) => {
+      timers = timers.filter((item) => item.id !== (timer as unknown as number));
+    },
+    advance(ms: number) {
+      now += ms;
+      for (const item of timers.filter((item) => item.at <= now).sort((a, b) => a.at - b.at)) {
+        timers = timers.filter((other) => other !== item);
+        item.run();
+      }
+    },
+  };
+}
+
+test("a dropped terminal says nothing for a quick reconnect, then that it reconnects, then that it cannot reach its shell", () => {
+  const time = clock();
+  const states: Link[] = [];
+  const watch = linkWatch({ onState: (link) => states.push(link), ...time });
+  // The server lets go of a view behind a burst and it connects at once.
+  watch.lost();
+  time.advance(RECONNECTING_AFTER - 1);
+  watch.connected();
+  time.advance(DISCONNECTED_AFTER);
+  assert.deepEqual(states, []);
+  // The server is gone: a second on, it reconnects; later, it gives up saying so.
+  watch.lost();
+  time.advance(RECONNECTING_AFTER);
+  watch.lost();
+  assert.deepEqual(states, ["reconnecting"]);
+  time.advance(DISCONNECTED_AFTER - RECONNECTING_AFTER);
+  assert.deepEqual(states, ["reconnecting", "disconnected"]);
+  // Retry says so at once and waits the whole time again.
+  watch.retry();
+  time.advance(DISCONNECTED_AFTER - 1);
+  assert.deepEqual(states, ["reconnecting", "disconnected", "reconnecting"]);
+  time.advance(1);
+  assert.deepEqual(states, ["reconnecting", "disconnected", "reconnecting", "disconnected"]);
+  // The background reconnect that succeeds clears it.
+  watch.connected();
+  assert.equal(states.at(-1), "connected");
+  watch.dispose();
+});
+
+test("a terminal shown again opens where it was scrolled to, while that line holds the same text", () => {
+  const lines = (from: number) => (index: number) => `row ${index + from}`;
+  const saved = { start: 0, end: 9000, line: 120, cols: 80, rows: 24, text: topText(lines(0), 120) };
+  assert.equal(saved.text, "row 120\nrow 121");
+  const text = (from: number) => (line: number) => topText(lines(from), line);
+  const now = { start: 0, end: 9000, cols: 80, rows: 24, trimmed: false, text: text(0) };
+  // The same output at the same size, even past xterm's scrollback.
+  assert.equal(restoredLine(saved, now), 120);
+  assert.equal(restoredLine(saved, { ...now, trimmed: true }), 120);
+  // More output while hidden: the lines stay put until xterm drops some.
+  assert.equal(restoredLine(saved, { ...now, end: 12000 }), 120);
+  assert.equal(restoredLine(saved, { ...now, end: 12000, trimmed: true }), undefined);
+  // Another height: the same, since xterm keeps rows plus its scrollback.
+  assert.equal(restoredLine(saved, { ...now, rows: 30 }), 120);
+  assert.equal(restoredLine(saved, { ...now, rows: 30, trimmed: true }), undefined);
+  // Another width wraps other lines; a replay that starts later holds others.
+  assert.equal(restoredLine(saved, { ...now, cols: 100 }), undefined);
+  assert.equal(restoredLine(saved, { ...now, start: 4096 }), undefined);
+  assert.equal(restoredLine(undefined, now), undefined);
+  // The scrollback was erased while hidden and refilled: other text there.
+  assert.equal(restoredLine(saved, { ...now, end: 12000, text: text(500) }), undefined);
+  // Lines xterm no longer has read as empty.
+  assert.equal(topText(() => undefined, 3), "\n");
+
+  scrollPlaces.save("c:a", saved);
+  assert.deepEqual(scrollPlaces.take("c:a"), saved);
+  // Taken once: a reconnect's replay does not scroll the view back.
+  assert.equal(scrollPlaces.take("c:a"), undefined);
+  // At the bottom, nothing is kept.
+  scrollPlaces.save("c:a", saved);
+  scrollPlaces.save("c:a", undefined);
+  assert.equal(scrollPlaces.take("c:a"), undefined);
+  // A terminal that is gone is forgotten.
+  scrollPlaces.save("c:b", saved);
+  shownOutput.keep("c:", ["a"]);
+  assert.equal(scrollPlaces.take("c:b"), undefined);
+});
+
+test("a terminal never has two reconnect attempts under way, and Retry during one backs off from the start", async () => {
+  const time = clock();
+  const settled = () => new Promise((resolve) => setImmediate(resolve));
+  const attempts: ((done: boolean) => void)[] = [];
+  const loop = reconnects({
+    attempt: () => new Promise<boolean>((resolve) => attempts.push(resolve)),
+    ...time,
+  });
+  loop.now();
+  time.advance(0);
+  assert.equal(attempts.length, 1);
+  // Retry, and a drop reported meanwhile, while the attempt is out.
+  loop.now();
+  loop.after();
+  time.advance(10_000);
+  assert.equal(attempts.length, 1);
+  // It fails: the next comes after the shortest delay, then longer ones.
+  attempts[0](false);
+  await settled();
+  time.advance(249);
+  assert.equal(attempts.length, 1);
+  time.advance(1);
+  assert.equal(attempts.length, 2);
+  attempts[1](false);
+  await settled();
+  time.advance(499);
+  assert.equal(attempts.length, 2);
+  time.advance(1);
+  assert.equal(attempts.length, 3);
+  // Retry while waiting goes at once.
+  attempts[2](false);
+  await settled();
+  loop.now();
+  time.advance(0);
+  assert.equal(attempts.length, 4);
+  // Connected: nothing more until the connection ends again.
+  attempts[3](true);
+  await settled();
+  time.advance(10_000);
+  assert.equal(attempts.length, 4);
+  loop.after();
+  loop.dispose();
+  time.advance(10_000);
+  assert.equal(attempts.length, 4);
 });

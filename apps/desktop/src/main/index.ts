@@ -5,6 +5,9 @@ import { browserData, removeBrowserData, saveBrowserDownload } from "./browser-d
 import { createBrowserHost } from "./browser-host";
 import { chromeSetup, revealChromeExtension, setupChromeOnLaunch } from "./chrome-setup";
 import { createAttachmentDraftStorage } from "./attachment-drafts";
+import { defaultScreenshotFolder, screenshotThumbnails } from "./screenshot-folder";
+import { listScreenshots, readListedScreenshots, type FileIdentity } from "./screenshot-files";
+import { createScreenshotIntents, createScreenshotListings, displayFolder, inputKind } from "../screenshots";
 import { terminalSockets } from "./terminal-sockets";
 import { translate } from "../localization";
 import { globalAccelerator, globalShortcutError, type GlobalShortcut } from "../global-shortcut";
@@ -28,6 +31,7 @@ import {
   globalShortcut,
 } from "electron";
 import { readFile, writeFile, realpath, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join, resolve, basename, sep, isAbsolute } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -129,9 +133,14 @@ if (process.env.HAARNESS_DESKTOP_TEST === "1" && process.env.HAARNESS_TELEMETRY 
   process.env.HAARNESS_TELEMETRY = "0";
 const commandOwners = new Map<string, number>();
 const terminals = terminalSockets<PtyConnection>();
-// End-to-end tests end terminal sockets as a server or network outage does.
+// End-to-end tests end terminal sockets as a server or network outage does,
+// and keep the outage going by refusing new ones while
+// `haarnessTerminalOutage` is set.
 if (process.env.HAARNESS_DESKTOP_TEST === "1")
-  Object.assign(globalThis, { haarnessTerminalSockets: terminals });
+  Object.assign(globalThis, { haarnessTerminalSockets: terminals, haarnessTerminalOutage: false });
+const terminalOutage = () =>
+  process.env.HAARNESS_DESKTOP_TEST === "1" &&
+  (globalThis as { haarnessTerminalOutage?: boolean }).haarnessTerminalOutage === true;
 /** Whether a terminal socket still takes input. The SDK keeps its WebSocket
  * to itself; while that cannot be read, the socket counts as open. */
 function socketOpen(socket: PtyConnection) {
@@ -139,6 +148,10 @@ function socketOpen(socket: PtyConnection) {
   return state === undefined || state === 1;
 }
 const projectTransaction = createProjectQueue();
+/** Each window's last screenshot listing; the renderer picks by place in it. */
+const screenshotListings = createScreenshotListings<{ path: string; identity: FileIdentity }>();
+/** Each window's presses and Attach menu: the screenshots folder is listed for that menu's choice. */
+const screenshotIntents = createScreenshotIntents();
 const worktreeOperations = new Set<string>();
 const voice = createVoiceInput((locale) =>
   launchVoice(
@@ -1038,6 +1051,7 @@ function installHandlers() {
         .object({ cursor: z.number().int().min(0), view: z.string().min(1).max(100) })
         .parse(input);
       terminals.begin(key, request.view);
+      if (terminalOutage()) throw new Error("The terminal server cannot be reached");
       const socket = await connection(id).client.connectPty(pty, {
         cursor: request.cursor,
       });
@@ -1123,6 +1137,82 @@ function installHandlers() {
       data,
       name: basename(result.filePaths[i]),
     }));
+  });
+  // The composer's Attach menu opened: a token its Attach screenshots choice lists with.
+  handle("screenshotMenu", (win) => screenshotIntents.menu(win.id));
+  // The Screenshots dialog: the newest images of the screenshots folder, with
+  // thumbnails. The renderer gets names, times and thumbnails, never paths,
+  // and attaches by place in this listing.
+  handle("screenshots", async (win, raw: unknown) => {
+    const input = z
+      .object({ choose: z.boolean().optional(), token: z.string().max(100).optional() })
+      .strict()
+      .parse(raw ?? {});
+    let folder: string | undefined;
+    if (input.choose) {
+      const result = await dialog.showOpenDialog(win, {
+        title: say("Choose your screenshots folder"),
+        properties: ["openDirectory"],
+      });
+      if (result.canceled || !result.filePaths[0]) return { canceled: true };
+      folder = result.filePaths[0];
+      // Linux has no screenshots folder of its own: the picker opens the
+      // chosen one next time. Elsewhere it opens the system's folder again.
+      if (process.platform === "linux") {
+        data().screenshotFolder = folder;
+        await persist();
+      }
+    } else {
+      // The person chose Attach screenshots in the Attach menu, with presses
+      // main saw on their way to this window. Otherwise (VoiceOver's VO-Space
+      // and Voice Control press a control without either) Desktop asks
+      // first, so a page never lists the folder unseen.
+      if (!screenshotIntents.chosen(win.id, input.token)) {
+        const choice = await dialog.showMessageBox(win, {
+          type: "question",
+          message: say("Show your newest screenshots?"),
+          detail: say(
+            "Haarness shows previews of the newest images in your screenshots folder so you can pick some to attach.",
+          ),
+          buttons: [say("Show screenshots"), say("Cancel")],
+          defaultId: 0,
+          cancelId: 1,
+        });
+        if (choice.response !== 0) return { canceled: true };
+      }
+      folder = await defaultScreenshotFolder(data().screenshotFolder);
+    }
+    if (!folder) {
+      screenshotListings.forget(win.id);
+      return { needsFolder: true };
+    }
+    const images = await listScreenshots(folder);
+    const thumbnails = await screenshotThumbnails(images);
+    return {
+      folder: displayFolder(folder, homedir()),
+      listing: screenshotListings.remember(
+        win.id,
+        images.map(({ path, identity }) => ({ path, identity })),
+      ),
+      items: images.map((image, index) => ({
+        name: image.name,
+        modified: image.modified,
+        thumbnail: thumbnails[index],
+      })),
+    };
+  });
+  handle("screenshotAttach", async (win, listing: unknown, indexes: unknown) => {
+    try {
+      const picks = screenshotListings.resolve(win.id, listing, indexes);
+      // Only files that are still the ones listed: a name swapped for a link
+      // or another file since is refused, never followed.
+      const values = await readListedScreenshots(picks);
+      // A listing attaches once: another pick needs the dialog opened again.
+      screenshotListings.forget(win.id);
+      return values.map((data, index) => ({ data, name: basename(picks[index].path) }));
+    } catch (error) {
+      throw new Error(say(error instanceof Error ? error.message : String(error)));
+    }
   });
   handle("save", async (win, name: string, content: string) => {
     bounded(content);
@@ -1351,6 +1441,10 @@ function createWindow() {
   win.webContents.on("will-navigate", (event, url) => {
     if (!source(url)) event.preventDefault();
   });
+  win.webContents.on("input-event", (_event, input) => {
+    const kind = inputKind(input);
+    if (kind) screenshotIntents.input(win.id, kind);
+  });
   win.webContents.session.setPermissionRequestHandler(
     (_web, permission, callback) =>
       callback(permission === "clipboard-sanitized-write"),
@@ -1403,6 +1497,8 @@ function createWindow() {
     resumeShortcut(win.id);
   });
   win.on("closed", () => {
+    screenshotListings.forget(win.id);
+    screenshotIntents.forget(win.id);
     resumeShortcut(win.id);
     voice.stop(win.id);
     windows.delete(win);

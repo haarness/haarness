@@ -1459,6 +1459,510 @@ async fn restart_recovery_suspends_an_orphaned_goal_instead_of_leaving_it_runnin
 }
 
 #[tokio::test]
+async fn restart_recovery_reports_background_tasks_to_the_chat_that_launched_them() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let request = |text: &str| StartTurnRequest {
+        request_id: RequestId::new(),
+        text: text.into(),
+        ..turn_request("")
+    };
+    let echo = || CreateThreadRequest {
+        provider: Some("echo".into()),
+        model: Some("echo-1".into()),
+        ..Default::default()
+    };
+    // `ended` is the child's turn as the restart found it, `parent_done`
+    // whether the launching chat had finished its own turn.
+    let mut chats = Vec::new();
+    for (name, ended, parent_done) in [
+        ("Audit the parser", TurnStatus::Running, true),
+        ("Summarize the logs", TurnStatus::Completed, true),
+        ("Check the build", TurnStatus::Running, false),
+    ] {
+        let parent = store.create_thread(echo()).await.unwrap();
+        let parent_turn = store
+            .start_turn(parent.id, request("launch it"))
+            .await
+            .unwrap()
+            .0;
+        store
+            .append_item(
+                parent.id,
+                Some(parent_turn.id),
+                haarness_protocol::ItemData::ToolCall {
+                    call_id: "call-task".into(),
+                    name: "task".into(),
+                    arguments: serde_json::json!({"description": name, "prompt": "work", "background": true}),
+                    provider_metadata: Value::Null,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .append_item(
+                parent.id,
+                Some(parent_turn.id),
+                haarness_protocol::ItemData::ToolResult {
+                    call_id: "call-task".into(),
+                    name: "task".into(),
+                    output: "The subagent is working in the background.".into(),
+                    is_error: false,
+                    metadata: Value::Null,
+                },
+            )
+            .await
+            .unwrap();
+        if parent_done {
+            store
+                .set_turn_status(parent_turn.id, TurnStatus::Completed, None)
+                .await
+                .unwrap();
+        }
+        let child = store
+            .create_thread(CreateThreadRequest {
+                parent_id: Some(parent.id),
+                ..echo()
+            })
+            .await
+            .unwrap();
+        let child_turn = store.start_turn(child.id, request("work")).await.unwrap().0;
+        store
+            .append_item(
+                parent.id,
+                Some(parent_turn.id),
+                haarness_protocol::ItemData::TaskState {
+                    call_id: "call-task".into(),
+                    child_thread_id: child.id,
+                    child_turn_id: child_turn.id,
+                    state: "background".into(),
+                },
+            )
+            .await
+            .unwrap();
+        if ended == TurnStatus::Completed {
+            store
+                .append_item(
+                    child.id,
+                    Some(child_turn.id),
+                    haarness_protocol::ItemData::AssistantMessage {
+                        text: "LOGS_SUMMARY".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            store
+                .set_turn_status(child_turn.id, ended, None)
+                .await
+                .unwrap();
+        }
+        chats.push((parent.id, child.id));
+    }
+
+    // The restarted server, over the same store.
+    let provider = Capturing::default();
+    let runtime = AgentRuntime::new(
+        store.clone(),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(256),
+    );
+    assert_eq!(runtime.recover().await.unwrap(), 3);
+    for (parent, _) in &chats {
+        wait_idle(&runtime, *parent).await;
+    }
+    let notice = |parent| {
+        let runtime = &runtime;
+        async move {
+            runtime
+                .items(parent, None)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter_map(|item| match item.data {
+                    haarness_protocol::ItemData::UserMessage {
+                        text,
+                        synthetic: true,
+                        ..
+                    } => Some((item.turn_id, text)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        }
+    };
+
+    let (audit, audit_child) = chats[0];
+    let delivered = notice(audit).await;
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    let delivered_audit = delivered[0].1.clone();
+    let text = &delivered[0].1;
+    assert!(
+        text.starts_with(&format!("<task id=\"{audit_child}\" state=\"error\">")),
+        "{text}"
+    );
+    assert!(text.contains("Audit the parser: failed"), "{text}");
+    assert!(
+        text.contains("not resumed") && text.contains(&format!("task_id \"{audit_child}\"")),
+        "{text}"
+    );
+
+    let (logs, _) = chats[1];
+    let delivered = notice(logs).await;
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert!(
+        delivered[0].1.contains("state=\"completed\"") && delivered[0].1.contains("LOGS_SUMMARY"),
+        "a result the restart kept from the chat is delivered: {delivered:?}"
+    );
+
+    // Nothing starts by itself after a restart, in an idle chat or one the
+    // restart stopped: no turn, no model request.
+    let (build, build_child) = chats[2];
+    let delivered = notice(build).await;
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert!(
+        delivered[0]
+            .1
+            .contains(&format!("task_id \"{build_child}\""))
+    );
+    assert!(provider.requests.lock().unwrap().is_empty());
+    for (parent, _) in &chats {
+        assert!(runtime.active_turn(*parent).await.unwrap().is_none());
+        let items = runtime.items(*parent, None).await.unwrap();
+        let turns = items
+            .iter()
+            .filter_map(|item| item.turn_id)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(turns.len(), 1, "no turn starts: {items:?}");
+        // The person sees it: an error notice in the chat, which the model
+        // does not get.
+        let notices = items
+            .iter()
+            .filter_map(|item| match &item.data {
+                haarness_protocol::ItemData::Error { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .filter(|message| message.starts_with("Haarness restarted before"))
+            .collect::<Vec<_>>();
+        assert_eq!(notices.len(), 1, "{items:?}");
+    }
+    let shown = runtime.items(audit, None).await.unwrap();
+    assert!(shown.iter().any(|item| matches!(&item.data,
+        haarness_protocol::ItemData::Error { message, retryable: false }
+            if message.contains("\u{201c}Audit the parser\u{201d}") && message.contains("not resumed"))));
+
+    // The person's next message carries the result to the model.
+    let turn = runtime
+        .start_turn(audit, turn_request("what happened?"))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let requests = provider.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    let users = requests[0]
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            ProviderMessage::Text { role, content } if role == "user" => Some(content.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let at = |wanted: &str| users.iter().position(|text| *text == wanted);
+    assert!(
+        at(&delivered_audit).is_some() && at(&delivered_audit) < at("what happened?"),
+        "the result goes before the new message: {users:?}"
+    );
+    assert!(
+        !users
+            .iter()
+            .any(|text| text.starts_with("Haarness restarted before")),
+        "the notice for the person stays out of the request"
+    );
+
+    // A second restart names nothing again.
+    assert_eq!(runtime.recover().await.unwrap(), 0);
+    for (parent, _) in &chats {
+        wait_idle(&runtime, *parent).await;
+        assert_eq!(notice(*parent).await.len(), 1);
+    }
+}
+
+/// `Capturing`, except that a chat whose prompt is `HANG` gets a response
+/// that never begins: a subagent still working when the server stops.
+#[derive(Clone, Default)]
+struct HangingChild(Capturing);
+
+#[async_trait]
+impl ModelProvider for HangingChild {
+    fn id(&self) -> &str {
+        "echo"
+    }
+    fn info(&self) -> ProviderInfo {
+        self.0.info()
+    }
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        cancel: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        let hangs = request.messages.iter().any(|message| {
+            matches!(message, ProviderMessage::Text { role, content } if role == "user" && content == "HANG")
+        });
+        if hangs {
+            return Ok(Box::pin(stream::pending()));
+        }
+        self.0.stream(request, cancel).await
+    }
+}
+
+#[tokio::test]
+async fn a_shutdown_leaves_a_background_task_to_be_reported_on_the_next_start() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let runtime = |provider: HangingChild| {
+        AgentRuntime::with_config(
+            store.clone(),
+            Arc::new(StaticProviderRegistry::new(vec![
+                Arc::new(provider) as Arc<dyn ModelProvider>
+            ])),
+            Arc::new(haarness_server::NativeToolRegistry::new(
+                std::env::temp_dir(),
+            )),
+            EventBus::new(512),
+            std::env::temp_dir(),
+            String::new(),
+            RuntimeConfig::default(),
+        )
+    };
+    let first = runtime(HangingChild::default());
+    let thread = first
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let turn = first
+        .start_turn(
+            thread.id,
+            turn_request(
+                r#"!tool task {"description":"Long audit","prompt":"HANG","background":true}"#,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wait_done(&first, &turn).await.status, TurnStatus::Completed);
+    let child = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let child = first
+                .items(thread.id, None)
+                .await
+                .unwrap()
+                .into_iter()
+                .find_map(|item| match item.data {
+                    haarness_protocol::ItemData::TaskState {
+                        child_thread_id,
+                        state,
+                        ..
+                    } if state == "background" => Some(child_thread_id),
+                    _ => None,
+                });
+            if let Some(child) = child
+                && first.active_turn(child).await.unwrap().is_some()
+            {
+                return child;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the background subagent starts");
+
+    first
+        .interrupt_active_turns("Haarness stopped")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while first.active_turn(child).await.unwrap().is_some() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the subagent stops with the server");
+    // Let the subagent's runner finish its bookkeeping.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let states = |items: Vec<haarness_protocol::Item>| {
+        items
+            .into_iter()
+            .filter_map(|item| match item.data {
+                haarness_protocol::ItemData::TaskState { state, .. } => Some(state),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        states(first.items(thread.id, None).await.unwrap()),
+        ["background"],
+        "not marked cancelled: nobody stopped it on purpose"
+    );
+    drop(first);
+
+    let provider = HangingChild::default();
+    let second = runtime(provider.clone());
+    second.recover().await.unwrap();
+    wait_idle(&second, thread.id).await;
+    let items = second.items(thread.id, None).await.unwrap();
+    assert_eq!(states(items.clone()), ["background", "interrupted"]);
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            haarness_protocol::ItemData::UserMessage { text, synthetic: true, .. }
+                if text.contains("Long audit: failed") && text.contains(&format!("task_id \"{child}\"")))),
+        "{items:?}"
+    );
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            haarness_protocol::ItemData::Error { message, .. }
+                if message.contains("\u{201c}Long audit\u{201d} finished"))),
+        "the person sees it: {items:?}"
+    );
+    assert!(
+        provider.0.requests.lock().unwrap().is_empty(),
+        "nothing starts by itself after a restart"
+    );
+    assert!(second.active_turn(thread.id).await.unwrap().is_none());
+}
+
+/// The native tools, `task` among them, and the blocking one.
+struct WithBlocking(haarness_server::NativeToolRegistry, Arc<BlockingWriteTool>);
+impl ToolRegistry for WithBlocking {
+    fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        if name == "blocking_write" {
+            Some(self.1.clone() as Arc<dyn Tool>)
+        } else {
+            self.0.get(name)
+        }
+    }
+    fn list(&self) -> Vec<ToolDefinition> {
+        let mut list = self.0.list();
+        list.push(self.1.definition());
+        list
+    }
+}
+
+#[tokio::test]
+async fn a_result_still_waiting_for_its_chat_at_a_shutdown_is_recorded_on_the_next_start() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let tool = Arc::new(BlockingWriteTool {
+        started: Arc::new(tokio::sync::Semaphore::new(0)),
+    });
+    let workspace = std::env::temp_dir();
+    let runtime = |provider: Capturing, tools: Arc<dyn ToolRegistry>| {
+        AgentRuntime::with_config(
+            store.clone(),
+            Arc::new(StaticProviderRegistry::new(vec![
+                Arc::new(provider) as Arc<dyn ModelProvider>
+            ])),
+            tools,
+            EventBus::new(512),
+            workspace.clone(),
+            String::new(),
+            {
+                let mut config = RuntimeConfig::default();
+                config.base_rules.push(haarness_core::PermissionRule {
+                    pattern: "blocking_write:*".into(),
+                    decision: haarness_core::PermissionDecision::Allow,
+                });
+                config
+            },
+        )
+    };
+    let first = runtime(
+        Capturing::default(),
+        Arc::new(WithBlocking(
+            haarness_server::NativeToolRegistry::new(workspace.clone()),
+            tool.clone(),
+        )),
+    );
+    let thread = first
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    // The subagent finishes at once, but its result waits for the launching
+    // round, which is held by a tool that runs until the server stops.
+    let calls = serde_json::json!([
+        {"name": "blocking_write", "arguments": {}},
+        {"name": "task", "arguments": {"description": "Quick audit", "prompt": "QUICK", "background": true}},
+    ]);
+    first
+        .start_turn(thread.id, turn_request(&format!("!multi {calls}")))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), tool.started.acquire())
+        .await
+        .expect("the blocking tool starts")
+        .unwrap()
+        .forget();
+    let states = |items: &[haarness_protocol::Item]| {
+        items
+            .iter()
+            .filter_map(|item| match &item.data {
+                haarness_protocol::ItemData::TaskState { state, .. } => Some(state.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !states(&first.items(thread.id, None).await.unwrap()).contains(&"done".into()) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the subagent finishes");
+    let delivered = |items: &[haarness_protocol::Item]| {
+        items.iter().any(|item| {
+            matches!(&item.data, haarness_protocol::ItemData::UserMessage { text, .. }
+                if text.starts_with("<task id="))
+        })
+    };
+    assert!(
+        !delivered(&first.items(thread.id, None).await.unwrap()),
+        "the result is still waiting for its chat"
+    );
+
+    first
+        .interrupt_active_turns("Haarness stopped")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop(first);
+
+    let provider = Capturing::default();
+    let second = runtime(provider.clone(), Arc::new(EmptyToolRegistry));
+    second.recover().await.unwrap();
+    let items = second.items(thread.id, None).await.unwrap();
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            haarness_protocol::ItemData::UserMessage { text, synthetic: true, .. }
+                if text.contains("state=\"completed\"") && text.contains("Echo: QUICK"))),
+        "the waiting result is recorded: {items:?}"
+    );
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            haarness_protocol::ItemData::Error { message, .. }
+                if message.contains("result of the background task \u{201c}Quick audit\u{201d}"))),
+        "{items:?}"
+    );
+    assert!(provider.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn detached_sse_client_and_thread_switch_leave_turn_owned_by_server_until_interrupt() {
     let provider = SlowText::default();
     let runtime = Arc::new(AgentRuntime::new(
@@ -6182,6 +6686,55 @@ async fn workspace_tools_match_haarness_and_do_not_serialize_across_threads() {
     }
 
     tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn blank_turns_and_blank_task_prompts_are_refused_before_any_request() {
+    let workspace = std::env::temp_dir();
+    let (runtime, provider) = p0_runtime(&workspace, true);
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let refused = runtime
+        .start_turn(thread.id, turn_request(" \n\t "))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&refused, CoreError::Invalid(message) if message.contains("text or an attachment")),
+        "{refused:?}"
+    );
+    assert!(runtime.items(thread.id, None).await.unwrap().is_empty());
+    assert!(provider.requests.lock().unwrap().is_empty());
+
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(r#"!tool task {"description":"blank","prompt":"   "}"#),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            haarness_protocol::ItemData::ToolResult { name, output, is_error: true, .. }
+                if name == "task" && output.contains("task.prompt is required"))),
+        "{items:?}"
+    );
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item.data, haarness_protocol::ItemData::TaskState { .. })),
+        "no child chat starts from a blank prompt"
+    );
 }
 
 #[tokio::test]
@@ -12005,6 +12558,90 @@ async fn auto_approves_once_without_a_prompt_and_review_asks() {
         )
         .await;
     assert!(matches!(stale, Err(CoreError::Conflict(_))), "{stale:?}");
+    tokio::fs::remove_dir_all(workspace).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_configuration_file_edit_waits_for_a_person_even_in_auto() {
+    let workspace =
+        std::env::temp_dir().join(format!("haarness-config-edit-{}", uuid::Uuid::now_v7()));
+    tokio::fs::create_dir_all(workspace.join(".haarness"))
+        .await
+        .unwrap();
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let providers = Arc::new(StaticProviderRegistry::new(vec![
+        Arc::new(Capturing::default()) as Arc<dyn ModelProvider>,
+    ]));
+    // A person who allows every edit, as `"edit": "allow"` does.
+    let mut config = haarness_core::RuntimeConfig::default();
+    config.base_rules.push(haarness_core::PermissionRule {
+        pattern: "edit:*".into(),
+        decision: haarness_core::PermissionDecision::Allow,
+    });
+    let runtime = AgentRuntime::with_config(
+        store,
+        providers,
+        Arc::new(haarness_server::NativeToolRegistry::new(workspace.clone())),
+        EventBus::new(64),
+        workspace.clone(),
+        String::new(),
+        config,
+    );
+    let thread = echo_thread(&runtime).await;
+    runtime
+        .set_approval_mode(
+            thread.id,
+            haarness_protocol::SetApprovalModeRequest {
+                mode: haarness_protocol::ApprovalModeSetting::Auto,
+                revision: None,
+            },
+        )
+        .await
+        .unwrap();
+    let turn = runtime
+        .start_turn(
+            thread.id,
+            turn_request(r#"!tool write {"path":"notes.txt","content":"ordinary"}"#),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert!(workspace.join("notes.txt").exists());
+
+    // Neither Auto nor a turn that approves its own requests answers this one.
+    let mut request = turn_request(
+        r#"!tool write {"path":".haarness/haarness.json","content":"{\"permission\":\"allow\"}"}"#,
+    );
+    request.auto_approve = true;
+    let turn = runtime.start_turn(thread.id, request).await.unwrap();
+    let permission = wait_permission(&runtime, thread.id).await;
+    let pending = runtime
+        .pending_permissions()
+        .into_iter()
+        .find(|item| item.permission_id == permission)
+        .expect("the request waits");
+    assert_eq!(pending.permission, "edit");
+    assert_eq!(pending.patterns, vec![".haarness/haarness.json"]);
+    assert_eq!(
+        pending.allow_always,
+        Some(false),
+        "no always for a config file"
+    );
+    runtime
+        .reply_permission(
+            &permission,
+            haarness_protocol::PermissionReply {
+                decision: haarness_protocol::PermissionReplyDecision::Reject,
+                feedback: None,
+            },
+        )
+        .await
+        .unwrap();
+    wait_done(&runtime, &turn).await;
+    assert!(!workspace.join(".haarness/haarness.json").exists());
     tokio::fs::remove_dir_all(workspace).await.unwrap();
 }
 

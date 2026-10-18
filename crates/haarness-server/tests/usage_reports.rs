@@ -1,7 +1,9 @@
 //! Usage is the provider's report when it sends one, and the local estimate,
-//! marked `estimated`, only when it sends none: on every exit of a round.
+//! marked `estimated`, only when it sends none: on every exit of a round. A
+//! request that finished cleanly also records when its first content came
+//! and how long its output streamed.
 use async_trait::async_trait;
-use futures::stream;
+use futures::{StreamExt, stream};
 use haarness_core::{
     AgentRuntime, CoreError, CoreResult, McpRegistry, ModelProvider, ProviderEvent,
     ProviderRequest, ProviderStream, SkillRegistry, StaticProviderRegistry, ToolDefinition,
@@ -14,19 +16,41 @@ use haarness_protocol::{
 use haarness_server::{NativeToolRegistry, ServerState, serve};
 use haarness_store::SqliteStore;
 use serde_json::{Value, json};
-use std::{collections::VecDeque, path::PathBuf, sync::Arc};
+use std::{
+    collections::VecDeque,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
+
+/// One request's events, each sent after its pause.
+type Script = Vec<(Duration, ProviderEvent)>;
 
 /// Answers each request with the next scripted event list.
 #[derive(Clone, Default)]
 struct ScriptedProvider {
-    scripts: Arc<std::sync::Mutex<VecDeque<Vec<ProviderEvent>>>>,
+    scripts: Arc<std::sync::Mutex<VecDeque<Script>>>,
+    /// Set once a request has sent its first event.
+    answered: Arc<AtomicBool>,
 }
 
 impl ScriptedProvider {
     fn push(&self, events: Vec<ProviderEvent>) {
-        self.scripts.lock().unwrap().push_back(events);
+        self.push_paced(events.into_iter().map(|event| (0, event)).collect());
+    }
+
+    fn push_paced(&self, events: Vec<(u64, ProviderEvent)>) {
+        self.scripts.lock().unwrap().push_back(
+            events
+                .into_iter()
+                .map(|(pause, event)| (Duration::from_millis(pause), event))
+                .collect(),
+        );
     }
 }
 
@@ -57,13 +81,26 @@ impl ModelProvider for ScriptedProvider {
     async fn stream(&self, _: ProviderRequest, _: CancellationToken) -> CoreResult<ProviderStream> {
         let events = self.scripts.lock().unwrap().pop_front().unwrap_or_else(|| {
             vec![
-                ProviderEvent::TextDelta("Done.".into()),
-                ProviderEvent::Finished {
-                    reason: "stop".into(),
-                },
+                (Duration::ZERO, ProviderEvent::TextDelta("Done.".into())),
+                (
+                    Duration::ZERO,
+                    ProviderEvent::Finished {
+                        reason: "stop".into(),
+                    },
+                ),
             ]
         });
-        Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+        let answered = self.answered.clone();
+        Ok(Box::pin(stream::iter(events).then(
+            move |(pause, event)| {
+                let answered = answered.clone();
+                async move {
+                    tokio::time::sleep(pause).await;
+                    answered.store(true, Ordering::SeqCst);
+                    Ok(event)
+                }
+            },
+        )))
     }
 }
 
@@ -218,8 +255,8 @@ impl TestServer {
             .unwrap()
     }
 
-    /// Runs one turn to its end and returns the thread's usage items.
-    async fn turn(&self, thread: &Thread, text: &str) -> Vec<Value> {
+    /// Starts a turn and returns its id.
+    async fn start(&self, thread: &Thread, text: &str) -> String {
         let turn: Value = self
             .client
             .post(format!("{}/v1/threads/{}/turns", self.base, thread.id))
@@ -232,7 +269,17 @@ impl TestServer {
             .json()
             .await
             .unwrap();
-        let id = turn["id"].as_str().unwrap();
+        turn["id"].as_str().unwrap().to_owned()
+    }
+
+    /// Runs one turn to its end and returns the thread's usage items.
+    async fn turn(&self, thread: &Thread, text: &str) -> Vec<Value> {
+        let id = self.start(thread, text).await;
+        self.wait(thread, &id).await
+    }
+
+    /// Waits for a started turn to end and returns the thread's usage items.
+    async fn wait(&self, thread: &Thread, id: &str) -> Vec<Value> {
         self.client
             .get(format!("{}/v1/turns/{id}/wait?timeout_ms=20000", self.base))
             .send()
@@ -297,6 +344,8 @@ async fn reported_usage_is_recorded_and_anchors_the_context() {
         (Some(1_000), Some(20))
     );
     assert!(usages[0].get("estimated").is_none(), "{:?}", usages[0]);
+    assert!(usages[0]["first_token_ms"].is_u64(), "{:?}", usages[0]);
+    assert_eq!(usages[0]["stream_ms"], 0, "{:?}", usages[0]);
     assert_eq!(server.context(&thread).await["reportedTokens"], 1_020);
     server.handle.shutdown().await.unwrap();
     std::fs::remove_dir_all(root).ok();
@@ -363,6 +412,105 @@ async fn usage_received_before_a_failure_is_kept() {
     assert_eq!(usages.len(), 1, "{usages:?}");
     assert_eq!(usages[0]["input_tokens"], 4_200);
     assert!(usages[0].get("estimated").is_none());
+    // A refused request says nothing about the provider's pace.
+    assert!(usages[0].get("first_token_ms").is_none(), "{usages:?}");
+    assert!(usages[0].get("stream_ms").is_none(), "{usages:?}");
+    server.handle.shutdown().await.unwrap();
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
+async fn a_finished_request_records_its_first_token_time_and_streaming_span() {
+    let (server, provider, root) = server("timed").await;
+    let thread = server.thread().await;
+    provider.push_paced(vec![
+        (300, ProviderEvent::ReasoningDelta("Thinking.".into())),
+        (200, ProviderEvent::TextDelta("Hello ".into())),
+        (250, ProviderEvent::TextDelta("there.".into())),
+        // The provider's output count holds reasoning it never streamed.
+        (100, usage(1_000, 5_000)),
+        (0, finished()),
+    ]);
+    let usages = server.turn(&thread, "hi").await;
+    assert_eq!(usages.len(), 1, "{usages:?}");
+    let first = usages[0]["first_token_ms"].as_u64().unwrap();
+    let stream = usages[0]["stream_ms"].as_u64().unwrap();
+    // Measured from the request to the reasoning, then to the last text: the
+    // usage report and the finish carry no content and do not extend it.
+    assert!((300..10_000).contains(&first), "{usages:?}");
+    assert!((450..10_000).contains(&stream), "{usages:?}");
+    // Output speed divides what streamed, not the provider's 5,000.
+    let streamed = usages[0]["stream_tokens"].as_u64().unwrap();
+    assert!((1..50).contains(&streamed), "{usages:?}");
+    server.handle.shutdown().await.unwrap();
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
+async fn a_tool_call_is_timed_from_when_it_started_not_when_its_arguments_were_whole() {
+    let (server, provider, root) = server("tool-timed").await;
+    let thread = server.thread().await;
+    // As Anthropic streams a call: its block starts, its arguments stream as
+    // fragments the adapter holds, and the whole call arrives at the end.
+    provider.push_paced(vec![
+        (300, ProviderEvent::ContentStarted),
+        (
+            1_500,
+            ProviderEvent::ToolCall {
+                call_id: "call-1".into(),
+                name: "read".into(),
+                arguments: json!({"path": "missing.txt"}),
+                provider_metadata: Value::Null,
+            },
+        ),
+        (0, usage(900, 1_200)),
+        (
+            0,
+            ProviderEvent::Finished {
+                reason: "tool_use".into(),
+            },
+        ),
+    ]);
+    let usages = server.turn(&thread, "read it").await;
+    assert_eq!(usages.len(), 2, "{usages:?}");
+    let first = usages[0]["first_token_ms"].as_u64().unwrap();
+    let stream = usages[0]["stream_ms"].as_u64().unwrap();
+    assert!((300..1_500).contains(&first), "{usages:?}");
+    assert!((1_400..10_000).contains(&stream), "{usages:?}");
+    server.handle.shutdown().await.unwrap();
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
+async fn a_stopped_request_is_not_timed() {
+    let (server, provider, root) = server("stopped").await;
+    let thread = server.thread().await;
+    provider.push_paced(vec![
+        (0, ProviderEvent::TextDelta("A start ".into())),
+        (60_000, ProviderEvent::TextDelta("never sent".into())),
+        (0, finished()),
+    ]);
+    let id = server.start(&thread, "go").await;
+    for _ in 0..200 {
+        if provider.answered.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(provider.answered.load(Ordering::SeqCst));
+    server
+        .client
+        .post(format!("{}/v1/turns/{id}/interrupt", server.base))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let usages = server.wait(&thread, &id).await;
+    // The streamed start is still counted, as an estimate, without timing.
+    assert_eq!(usages.len(), 1, "{usages:?}");
+    assert_eq!(usages[0]["estimated"], true, "{usages:?}");
+    assert!(usages[0].get("first_token_ms").is_none(), "{usages:?}");
     server.handle.shutdown().await.unwrap();
     std::fs::remove_dir_all(root).ok();
 }

@@ -9,6 +9,7 @@ import {
   type Page,
   type Locator,
 } from "@playwright/test";
+import { attachFiles } from "./fixtures/composer";
 import {
   mkdtemp,
   mkdir,
@@ -2143,7 +2144,7 @@ async function attachComposerFile(name: string) {
       return { canceled: false, filePaths: [path] };
     };
   }, path);
-  await page.getByRole("button", { name: "Attach files", exact: true }).click();
+  await attachFiles(page);
   await expect(page.getByRole("button", { name: `Remove ${name}`, exact: true })).toBeVisible();
 }
 
@@ -2419,7 +2420,7 @@ test("first-message attachments stay with their draft and never leak into a new 
       return { canceled: false, filePaths: [path] };
     };
   }, path);
-  await page.getByRole("button", { name: "Attach files", exact: true }).click();
+  await attachFiles(page);
   await expect(
     page.getByRole("button", { name: "Remove draft-proof.png", exact: true }),
   ).toBeVisible();
@@ -10578,7 +10579,7 @@ test("chat-only composer preserves recall and drafts and rejects removed shell e
     await expect(page.getByRole("textbox", { name: "Shell command", exact: true })).toHaveCount(0);
   }
   await expect(page.getByRole("combobox", { name: "Model", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Attach files", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Attach", exact: true })).toBeEnabled();
   await page.getByRole("button", { name: "Search", exact: true }).click();
   await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("Switch to shell mode");
   await expect(page.getByRole("option", { name: "Switch to shell mode", exact: true })).toHaveCount(0);
@@ -11246,7 +11247,7 @@ test("conversation context inspector shows measured usage, retained estimates an
     {type:"compaction",summary:"s".repeat(40),files_touched:[],outstanding:[]},
     {type:"user_message",text:"next"},
     {type:"assistant_message",text:"reply123"},
-    {type:"usage",input_tokens:500,output_tokens:100,cache_read_tokens:200,cache_write_tokens:20,cost_usd:null},
+    {type:"usage",input_tokens:500,output_tokens:100,cache_read_tokens:200,cache_write_tokens:20,cost_usd:null,first_token_ms:1240,stream_ms:2000,stream_tokens:80},
   ];
   archive.threads[0].items = data.map((data,index) => ({id:crypto.randomUUID(),threadId:id,turnId:null,createdAt:now,sequence:index+1,data})) as (typeof archive.threads)[number]["items"];
   await client.importSessionArchive({archive});
@@ -11265,6 +11266,11 @@ test("conversation context inspector shows measured usage, retained estimates an
   await expect(metric(totals,"Cache write tokens")).toHaveText("100");
   await expect(metric(totals,"Known cost")).toHaveText("$0.0250");
   await expect(metric(latest,"Input")).toHaveText("500");
+  // Its pace: 1.24 s to the first content, then 80 streamed tokens over 2 s;
+  // the other 20 output tokens never streamed.
+  await expect(metric(latest,"First token")).toHaveText("1.2s");
+  await expect(metric(latest,"Output speed")).toHaveText("40 tokens/s");
+  await expect(latest).toContainText("at least half a second");
   // The last report after the compaction (500 in + 100 out), nothing appended since.
   const inUse = panel.getByRole("region", {name:"Context in use",exact:true});
   await expect(inUse.getByTestId("context-tokens")).toHaveText("600");
@@ -11298,6 +11304,11 @@ test("conversation context inspector shows measured usage, retained estimates an
   const reports = await client.listItems(empty.id);
   const report = reports.filter(item => item.data.type === "usage").at(-1)!;
   expect(report.data.type === "usage" && report.data.prompt?.system_tokens).toBeGreaterThan(0);
+  // The server timed the request; an echo reply streams in one burst, so it
+  // has a first-token time and no speed.
+  expect(report.data.type === "usage" && report.data.first_token_ms).toEqual(expect.any(Number));
+  await expect(metric(latest,"First token")).toHaveText(/^\d+(\.\d)?s$/);
+  await expect(metric(latest,"Output speed")).toHaveCount(0);
   await page.screenshot({path:test.info().outputPath("prepared-context-live.png")});
 
   await expect.poll(() => page.evaluate(() => window.haarness.storage("layout:v2"))).toMatchObject({dock:"context"});

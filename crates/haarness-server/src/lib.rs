@@ -26,4 +26,5 @@ pub use plugins::PluginRegistry;
 pub use skills::FilesystemSkillRegistry;
 pub use tools::{ManagementRegistry, NativeToolRegistry};
 pub use workflow::WorkflowRuntimeAdapter;
+
 mod shell;

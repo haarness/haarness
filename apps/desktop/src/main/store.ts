@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   defaults,
+  defaultShortcuts,
   migrateAgentKeys,
   migrateTabKeys,
   optionalShortcuts,
@@ -27,9 +28,12 @@ interface Data {
   credentials: Record<string, string>;
   /** Set once the old Tab agent keys have moved to the current defaults. */
   agentKeysMigrated?: boolean;
+  /** The screenshots folder chosen on Linux, where the picker opens next
+   * time. Kept outside `values`, which the renderer may write. */
+  screenshotFolder?: string;
 }
 let state: Data = {
-  preferences: { ...defaults },
+  preferences: { ...defaults, shortcuts: defaultShortcuts(process.platform) },
   recent: [],
   servers: [],
   values: {},
@@ -45,7 +49,7 @@ export async function load() {
     state = {
       ...state,
       ...raw,
-      preferences: { ...defaults, ...raw.preferences, shortcuts: { ...defaults.shortcuts, ...raw.preferences?.shortcuts }, globalShortcut: { ...defaults.globalShortcut, ...raw.preferences?.globalShortcut }, language: displayLanguage(raw.preferences?.language) },
+      preferences: { ...defaults, ...raw.preferences, shortcuts: { ...defaultShortcuts(process.platform), ...raw.preferences?.shortcuts }, globalShortcut: { ...defaults.globalShortcut, ...raw.preferences?.globalShortcut }, language: displayLanguage(raw.preferences?.language) },
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT")
@@ -144,6 +148,7 @@ export async function preferences(input: Partial<Preferences>) {
       palette: z.enum(themeIds),
       fontSize: z.number().int().min(11).max(24),
       terminalFontSize: z.number().int().min(10).max(24),
+      terminalOptionAsMeta: z.enum(["off", "left", "both"]),
       notifications: z.boolean(),
       completionNotifications: z.enum(["background", "always", "never"]),
       permissionNotifications: z.boolean(),
@@ -172,6 +177,13 @@ export async function preferences(input: Partial<Preferences>) {
         agentPrev: z.string(),
         tabNext: z.string(),
         tabPrev: z.string(),
+        chatPrev: z.string(),
+        chatNext: z.string(),
+        focusSidebar: z.string(),
+        promptPrev: z.string(),
+        promptNext: z.string(),
+        promptFirst: z.string(),
+        promptLast: z.string(),
       }),
       globalShortcut: z.object({
         enabled: z.boolean(),
@@ -188,15 +200,16 @@ export async function preferences(input: Partial<Preferences>) {
   )
     throw new Error("Invalid appearance setting");
   // Menu shortcuts become native accelerators, so they need a modifier and a
-  // single character. Composer and tab shortcuts are matched in the page and
-  // may also use a named key, such as Tab for people who want the TUI's.
+  // single character. Composer, tab, chat and prompt shortcuts are matched in
+  // the page and may also use a named key, such as Tab for people who want
+  // the TUI's, or the arrows the page reports as ArrowUp and so on.
   const KEY = "[a-z0-9,.;/\\[\\]\\\\\\-=`]|F(?:[1-9]|1[0-9]|2[0-4])";
-  const NAMED = `${KEY}|Tab|Enter|Space|Escape|Backspace|Up|Down|Left|Right`;
+  const NAMED = `${KEY}|Tab|Enter|Space|Escape|Backspace|Up|Down|Left|Right|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Home|End|PageUp|PageDown`;
   const MODIFIER = "Mod|Ctrl|Alt|Shift|Meta";
   const accelerator = new RegExp(
     `^(${MODIFIER})(\\+(${MODIFIER}))*\\+(${KEY})$`, "i");
   const composer = new RegExp(`^((${MODIFIER})\\+)*(${NAMED})$`, "i");
-  const composerKeys = new Set(["agentNext", "agentPrev", "tabNext", "tabPrev"]);
+  const composerKeys = new Set(["agentNext", "agentPrev", ...optionalShortcuts]);
   if (
     Object.entries(candidate.shortcuts).some(
       ([name, value]) =>

@@ -44,6 +44,21 @@ test("a view that lets go while connecting gets no socket", () => {
   assert.equal(sockets.ended("k", first), false);
 });
 
+test("two connects of one view that overlap leave one socket", () => {
+  const sockets = terminalSockets<ReturnType<typeof socket>>();
+  // Both start before either finishes (a retry while an attempt was out).
+  sockets.begin("k", "A");
+  sockets.begin("k", "A");
+  const first = socket("first"), second = socket("second");
+  assert.equal(sockets.accept("k", "A", 1, first), true);
+  assert.equal(sockets.accept("k", "A", 1, second), true);
+  assert.equal(first.closed, true);
+  assert.equal(second.closed, false);
+  assert.deepEqual(sockets.all(), [second]);
+  // The closed one ending is not the view's connection ending.
+  assert.equal(sockets.ended("k", first), false);
+});
+
 test("a closed window's sockets close, and other windows keep theirs", () => {
   const sockets = terminalSockets<ReturnType<typeof socket>>();
   const one = socket("one"), two = socket("two");

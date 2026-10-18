@@ -10,7 +10,14 @@ import {
   shortcutText,
   type SearchEntry,
 } from "../src/renderer/search";
-import { defaults, migrateAgentKeys, migrateTabKeys, shortcutKeys, shortcutsClash } from "../src/shared";
+import {
+  defaults,
+  defaultShortcuts,
+  migrateAgentKeys,
+  migrateTabKeys,
+  shortcutKeys,
+  shortcutsClash,
+} from "../src/shared";
 const entry = (
   key: string,
   name: string,
@@ -163,6 +170,39 @@ test("the tab step defaults give way to keys people already chose", () => {
     assert.equal(shortcutsClash(defaults.shortcuts, platform), false);
   // Unset keys are no clash.
   assert.equal(shortcutsClash({ a: "", b: "" }, "darwin"), false);
+});
+
+test("the chat, sidebar and prompt keys clash with nothing on any platform", () => {
+  for (const platform of ["darwin", "win32", "linux"]) {
+    const shortcuts = defaultShortcuts(platform);
+    assert.equal(shortcutsClash(shortcuts, platform), false, platform);
+    // The file editor's "Add selection to context" is Mod+Shift+L, which off
+    // macOS is the Control+Shift+L Focus sidebar takes on macOS.
+    assert.notEqual(
+      shortcutKeys(shortcuts.focusSidebar, platform),
+      shortcutKeys("Mod+Shift+L", platform),
+      platform,
+    );
+    // Control+Alt is AltGr on many keyboards, which types letters.
+    assert.doesNotMatch(shortcuts.focusSidebar, /Ctrl\+Alt/);
+  }
+  assert.equal(defaultShortcuts("darwin").focusSidebar, "Ctrl+Shift+L");
+  assert.equal(defaultShortcuts("linux").focusSidebar, "Alt+Shift+L");
+  assert.equal(shortcutLabel("Alt+ArrowUp", "darwin"), "⌥ ↑");
+  assert.equal(shortcutLabel("Mod+Shift+ArrowDown", "win32"), "Ctrl+Shift+↓");
+  assert.equal(matchesShortcut({ key: "ArrowDown", metaKey: false, ctrlKey: false, altKey: true, shiftKey: false }, "Alt+ArrowDown", "linux"), true);
+  assert.equal(matchesShortcut({ key: "ArrowDown", metaKey: true, ctrlKey: false, altKey: false, shiftKey: true }, "Mod+Shift+ArrowDown", "darwin"), true);
+  assert.equal(matchesShortcut({ key: "ArrowDown", metaKey: true, ctrlKey: false, altKey: false, shiftKey: false }, "Mod+Shift+ArrowDown", "darwin"), false);
+  // Saved before these keys existed: one already taken by another action
+  // is left unset, and the rest arrive.
+  const saved = { ...defaults.shortcuts, agentNext: "Alt+ArrowDown" };
+  const before = Object.fromEntries(
+    Object.entries(saved).filter(([name]) => !name.startsWith("chat") && !name.startsWith("prompt") && name !== "focusSidebar"),
+  );
+  const migrated = migrateTabKeys(before, saved, "darwin");
+  assert.equal(migrated.chatNext, "");
+  assert.equal(migrated.chatPrev, "Alt+ArrowUp");
+  assert.equal(shortcutsClash(migrated, "darwin"), false);
 });
 
 test("shortcut fields write Ctrl off macOS and save it as Mod, the same key there", () => {

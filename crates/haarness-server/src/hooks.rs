@@ -26,13 +26,11 @@
 //! stripped of control characters and clipped first.
 
 use std::path::PathBuf;
-use std::sync::LazyLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use haarness_core::{HookDecision, HookPort, PermissionDecision};
 use haarness_protocol::ThreadId;
-use regex::Regex;
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone)]
@@ -164,28 +162,16 @@ impl ConfiguredHooks {
     async fn run(&self, entry: &HookEntry, payload: &Value) -> HookOutcome {
         use tokio::io::AsyncWriteExt as _;
         use tokio::process::Command;
-        let expand = |value: &str| expand_hook_value(value, entry, &self.workspace);
-        let mut command = if entry.args.is_empty() {
-            let shell = entry.shell.as_deref().unwrap_or("sh");
-            let mut command = Command::new(shell);
-            if shell.eq_ignore_ascii_case("powershell") {
-                command.args(["-NoProfile", "-Command"]);
-            } else {
-                command.arg("-lc");
-            }
-            command.arg(expand(&entry.command));
-            command
-        } else {
-            let mut command = Command::new(expand(&entry.command));
-            command.args(entry.args.iter().map(|arg| expand(arg)));
-            command
-        };
+        let (program, arguments) = hook_invocation(entry, &self.workspace);
+        let mut command = Command::new(program);
+        command.args(arguments);
         for name in haarness_core::private_env_names() {
             command.env_remove(name);
         }
         command
             .current_dir(dunce::simplified(&self.workspace))
             .env("HAARNESS_PROJECT_DIR", &self.workspace)
+            .env("OPENCODE_PROJECT_DIR", &self.workspace)
             .env("CLAUDE_PROJECT_DIR", &self.workspace)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -374,24 +360,311 @@ impl ConfiguredHooks {
     }
 }
 
+/// The program a hook runs and its arguments. A shell reads the placeholders
+/// from the environment the hook gets (a POSIX shell's `${CLAUDE_PROJECT_DIR}`,
+/// PowerShell's `${env:CLAUDE_PROJECT_DIR}`), so a folder name holding `$(…)`,
+/// a quote or a space is never read as shell syntax, as it would be if pasted
+/// into the command text. A hook with an `args` list runs without a shell and
+/// gets the values filled in.
+fn hook_invocation(entry: &HookEntry, workspace: &std::path::Path) -> (String, Vec<String>) {
+    let expand = |value: &str| expand_hook_value(value, entry, workspace);
+    let value = |name: &str| placeholder_value(name, entry, workspace);
+    if !entry.args.is_empty() {
+        // A program that is itself a shell, also behind `env NAME=value`,
+        // reads its script argument as shell text, which gets the shell
+        // form's treatment; any other argument, and any other program's,
+        // gets the value filled in.
+        let program = expand(&entry.command);
+        let script = shell_script(&program, &entry.args);
+        let arguments = entry
+            .args
+            .iter()
+            .enumerate()
+            .map(|(index, arg)| match script.filter(|(at, _)| *at == index) {
+                Some((_, ShellKind::Posix)) => quoted_placeholders(ShellKind::Posix, arg, &value),
+                Some((_, ShellKind::PowerShell)) => powershell_command(arg, &value),
+                None => expand(arg),
+            })
+            .collect();
+        return (program, arguments);
+    }
+    let shell = entry.shell.as_deref().unwrap_or("sh");
+    let arguments = if shell_kind(shell) == Some(ShellKind::PowerShell) {
+        vec![
+            "-NoProfile".to_owned(),
+            "-Command".to_owned(),
+            powershell_command(&entry.command, &value),
+        ]
+    } else {
+        vec![
+            "-lc".to_owned(),
+            quoted_placeholders(ShellKind::Posix, &entry.command, &value),
+        ]
+    };
+    (shell.to_owned(), arguments)
+}
+
+/// The shells whose script text a hook's placeholders must not be pasted
+/// into. `cmd` is not one: it expands `%NAME%` before it parses, so a value
+/// holding `&` splits the command either way, and its scripts keep the
+/// value filled in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ShellKind {
+    Posix,
+    PowerShell,
+}
+
+fn shell_kind(program: &str) -> Option<ShellKind> {
+    let name = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    match name.strip_suffix(".exe").unwrap_or(&name) {
+        "sh" | "bash" | "zsh" | "dash" | "ksh" => Some(ShellKind::Posix),
+        "powershell" | "pwsh" => Some(ShellKind::PowerShell),
+        _ => None,
+    }
+}
+
+/// The argument of `args` a shell reads as its script, and which shell: the
+/// program itself, or the first word after an `env` program's `NAME=value`
+/// assignments and options. Windows PowerShell 5's bare positional command
+/// (no `-Command`) is not recognised and keeps the values filled in.
+fn shell_script(program: &str, args: &[String]) -> Option<(usize, ShellKind)> {
+    let is_env = program.rsplit(['/', '\\']).next().is_some_and(|name| {
+        name.eq_ignore_ascii_case("env") || name.eq_ignore_ascii_case("env.exe")
+    });
+    let (offset, kind) = if is_env {
+        let at = args
+            .iter()
+            .position(|arg| !arg.contains('=') && !arg.starts_with('-'))?;
+        (at + 1, shell_kind(&args[at])?)
+    } else {
+        (0, shell_kind(program)?)
+    };
+    let rest = &args[offset..];
+    let flag = rest.iter().position(|arg| match kind {
+        ShellKind::Posix => {
+            arg.starts_with('-')
+                && !arg.starts_with("--")
+                && arg[1..].chars().all(|c| c.is_ascii_alphabetic())
+                && arg.contains('c')
+        }
+        ShellKind::PowerShell => powershell_command_flag(arg),
+    })?;
+    (flag + 1 < rest.len()).then_some((offset + flag + 1, kind))
+}
+
+/// Whether `arg` is PowerShell's `-Command` in any of the spellings it
+/// accepts: `-c`, any prefix of `-Command` from `-co`, `/Command` and its
+/// prefixes, and `-CommandWithArgs` (`-cwa`).
+fn powershell_command_flag(arg: &str) -> bool {
+    let Some(name) = arg.strip_prefix('-').or_else(|| arg.strip_prefix('/')) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    !name.is_empty() && ("command".starts_with(&name) || name == "commandwithargs" || name == "cwa")
+}
+
+/// The placeholders a hook may use, all set in its environment.
+const HOOK_PLACEHOLDERS: [&str; 8] = [
+    "HAARNESS_PROJECT_DIR",
+    "OPENCODE_PROJECT_DIR",
+    "CLAUDE_PROJECT_DIR",
+    "HAARNESS_PLUGIN_ROOT",
+    "OPENCODE_PLUGIN_ROOT",
+    "CLAUDE_PLUGIN_ROOT",
+    "HAARNESS_PLUGIN_DATA",
+    "CLAUDE_PLUGIN_DATA",
+];
+
+/// A PowerShell command whose placeholders PowerShell itself resolves, so a
+/// folder named `a$(calc)` never runs `calc`. Each statement that starts
+/// with a placeholder (at the start, after `;`, `|`, `&&`, `||` or a line
+/// break) is a path to run, so that word is quoted and called with `&`.
+fn powershell_command(command: &str, value: &dyn Fn(&str) -> String) -> String {
+    quoted_placeholders(ShellKind::PowerShell, command, value)
+}
+
+/// The placeholder `rest` starts with, if any.
+fn placeholder_at(rest: &str) -> Option<&'static str> {
+    HOOK_PLACEHOLDERS
+        .iter()
+        .copied()
+        .find(|name| rest.starts_with(&format!("${{{name}}}")))
+}
+
+/// Whether a value can be written inside PowerShell single quotes as it is:
+/// only characters no PowerShell reads specially there.
+fn powershell_plain(value: &str) -> bool {
+    value.chars().all(|character| {
+        character.is_ascii_alphanumeric()
+            || matches!(character, ' ' | '_' | '.' | '/' | ':' | '\\' | '-')
+    })
+}
+
+/// `command` with each placeholder left for the shell to expand from the
+/// environment the hook gets, as the scanner reads the shell's quotes:
+/// - outside single quotes a POSIX shell's `${NAME}` stays and PowerShell's
+///   becomes `${env:NAME}`;
+/// - inside single quotes, where nothing expands, POSIX gets `'"${NAME}"'`
+///   (close, expand in double quotes, reopen), which stays safe even where
+///   the scanner misjudges the quotes (a comment, a here-document, `$'…'`);
+///   PowerShell gets the value itself only when it is made of plain
+///   characters, every single-quote character (ASCII and U+2018–U+201B)
+///   doubled, and `${env:NAME}` otherwise, which is then read literally:
+///   wrong, but never run.
+fn quoted_placeholders(kind: ShellKind, command: &str, value: &dyn Fn(&str) -> String) -> String {
+    use std::fmt::Write as _;
+    #[derive(PartialEq)]
+    enum Quote {
+        None,
+        Single,
+        Double,
+    }
+    let escape = if kind == ShellKind::Posix { '\\' } else { '`' };
+    let single = |character: char| {
+        character == '\''
+            || (kind == ShellKind::PowerShell && ('\u{2018}'..='\u{201b}').contains(&character))
+    };
+    let mut out = String::with_capacity(command.len());
+    let mut quote = Quote::None;
+    let mut statement_start = true;
+    // After PowerShell's own `&` or `.` the word is already called.
+    let mut called = false;
+    let mut rest = command;
+    while let Some(character) = rest.chars().next() {
+        if let Some(name) = placeholder_at(rest) {
+            match (&quote, kind) {
+                (Quote::None, ShellKind::PowerShell) if statement_start => {
+                    // A path to run: quote the whole word and call it. The
+                    // word ends at a space or a statement or block end that
+                    // is not part of a placeholder.
+                    let mut end = 0;
+                    while end < rest.len() {
+                        if let Some(inner) = placeholder_at(&rest[end..]) {
+                            end += inner.len() + 3;
+                            continue;
+                        }
+                        let next = rest[end..].chars().next().expect("not at the end");
+                        if next.is_whitespace() || matches!(next, ';' | '|' | '&' | ')' | '}') {
+                            break;
+                        }
+                        end += next.len_utf8();
+                    }
+                    let word = HOOK_PLACEHOLDERS.iter().fold(
+                        rest[..end].replace('"', "`\""),
+                        |word, name| {
+                            word.replace(&format!("${{{name}}}"), &format!("${{env:{name}}}"))
+                        },
+                    );
+                    let call = if called { "" } else { "& " };
+                    let _ = write!(out, "{call}\"{word}\"");
+                    rest = &rest[end..];
+                    statement_start = false;
+                    called = false;
+                    continue;
+                }
+                (Quote::Single, ShellKind::Posix) => {
+                    let _ = write!(out, "'\"${{{name}}}\"'");
+                }
+                (Quote::Single, ShellKind::PowerShell) => {
+                    let text = value(name);
+                    if powershell_plain(&text) {
+                        for character in text.chars() {
+                            out.push(character);
+                            if single(character) {
+                                out.push(character);
+                            }
+                        }
+                    } else {
+                        let _ = write!(out, "${{env:{name}}}");
+                    }
+                }
+                (_, ShellKind::Posix) => {
+                    let _ = write!(out, "${{{name}}}");
+                }
+                (_, ShellKind::PowerShell) => {
+                    let _ = write!(out, "${{env:{name}}}");
+                }
+            }
+            rest = &rest[name.len() + 3..];
+            statement_start = false;
+            continue;
+        }
+        if quote == Quote::None && (rest.starts_with("&&") || rest.starts_with("||")) {
+            out.push_str(&rest[..2]);
+            rest = &rest[2..];
+            statement_start = true;
+            called = false;
+            continue;
+        }
+        let mut length = character.len_utf8();
+        match (&quote, character) {
+            (Quote::None, _) if single(character) => quote = Quote::Single,
+            (Quote::Single, _) if single(character) => quote = Quote::None,
+            (Quote::Double, '"') => quote = Quote::None,
+            (Quote::None, '"') => quote = Quote::Double,
+            (Quote::None | Quote::Double, _) if character == escape => {
+                // The escaped character goes with it, whatever it is.
+                length += rest[length..].chars().next().map_or(0, char::len_utf8);
+            }
+            _ => {}
+        }
+        if quote == Quote::None {
+            if matches!(character, ';' | '|' | '\n' | '{') {
+                statement_start = true;
+                called = false;
+            } else if statement_start
+                && matches!(character, '&' | '.')
+                && rest[1..].starts_with(char::is_whitespace)
+            {
+                called = true;
+            } else if !(character.is_whitespace() || (character == '&' && statement_start)) {
+                statement_start = false;
+                called = false;
+            }
+        } else {
+            statement_start = false;
+            called = false;
+        }
+        out.push_str(&rest[..length]);
+        rest = &rest[length..];
+    }
+    out
+}
+
+/// What `${name}` stands for in a hook of `entry` run for `workspace`.
+fn placeholder_value(name: &str, entry: &HookEntry, workspace: &std::path::Path) -> String {
+    let root = || {
+        entry
+            .plugin_root
+            .as_deref()
+            .map_or_else(String::new, |root| root.display().to_string())
+    };
+    match name {
+        "HAARNESS_PROJECT_DIR" | "OPENCODE_PROJECT_DIR" | "CLAUDE_PROJECT_DIR" => {
+            workspace.display().to_string()
+        }
+        "HAARNESS_PLUGIN_ROOT" | "OPENCODE_PLUGIN_ROOT" | "CLAUDE_PLUGIN_ROOT" => root(),
+        "HAARNESS_PLUGIN_DATA" | "CLAUDE_PLUGIN_DATA" => entry
+            .plugin_root
+            .as_deref()
+            .map_or_else(String::new, |root| root.join(".data").display().to_string()),
+        _ => String::new(),
+    }
+}
+
 fn expand_hook_value(value: &str, entry: &HookEntry, workspace: &std::path::Path) -> String {
-    let root = entry
-        .plugin_root
-        .as_deref()
-        .map_or_else(String::new, |root| root.display().to_string());
-    let data = entry
-        .plugin_root
-        .as_deref()
-        .map_or_else(String::new, |root| root.join(".data").display().to_string());
-    value
-        .replace("${HAARNESS_PROJECT_DIR}", &workspace.display().to_string())
-        .replace("${OPENCODE_PROJECT_DIR}", &workspace.display().to_string())
-        .replace("${CLAUDE_PROJECT_DIR}", &workspace.display().to_string())
-        .replace("${HAARNESS_PLUGIN_ROOT}", &root)
-        .replace("${OPENCODE_PLUGIN_ROOT}", &root)
-        .replace("${CLAUDE_PLUGIN_ROOT}", &root)
-        .replace("${HAARNESS_PLUGIN_DATA}", &data)
-        .replace("${CLAUDE_PLUGIN_DATA}", &data)
+    HOOK_PLACEHOLDERS
+        .iter()
+        .fold(value.to_owned(), |text, name| {
+            text.replace(
+                &format!("${{{name}}}"),
+                &placeholder_value(name, entry, workspace),
+            )
+        })
 }
 
 #[derive(Default)]
@@ -737,88 +1010,9 @@ fn head(text: &str, max: usize) -> &str {
     }
 }
 
-/// At most `max` characters, ending with `…` when cut. Never splits a char.
-pub(crate) fn clip(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_owned();
-    }
-    let mut clipped: String = text.chars().take(max.saturating_sub(1)).collect();
-    clipped.push('…');
-    clipped
-}
-
-/// Free text made safe for one log field: redacted, with C0/C1 control
-/// characters and line breaks collapsed to single spaces, then clipped.
-pub(crate) fn log_text(text: &str, max: usize) -> String {
-    let redacted = redact(text);
-    let words: Vec<&str> = redacted
-        .split(|character: char| character.is_whitespace() || character.is_control())
-        .filter(|word| !word.is_empty())
-        .collect();
-    clip(&words.join(" "), max)
-}
-
-/// Replaces obvious credential shapes with `[redacted]`: credential headers,
-/// `Bearer`/`Basic` values, curl user flags, `key=value`, `key: value` and
-/// `--key value` pairs whose key names a credential, URL user info, JWTs,
-/// well-known token prefixes and long opaque runs. Over-redaction is fine;
-/// this is for log lines, not data.
-pub(crate) fn redact(text: &str) -> String {
-    const KEYS: &str = r"token|secret|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key|auth|cookie|credential|session";
-    const VALUE: &str = r#""[^"\r\n]*"?|'[^'\r\n]*'?"#;
-    static RULES: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
-        [
-            // A cookie header can hold several credentials; drop the rest of its line.
-            (r#"(?i)\b((?:set-)?cookie)(["']?[ \t]*:[ \t]*)[^\r\n]*"#.to_owned(), "${1}${2}[redacted]"),
-            // Verbose curl repeats the identity outside its headers.
-            (r"(?i)\b((?:server|proxy) auth using )[^\r\n]*".to_owned(), "${1}[redacted]"),
-            // Any scheme, including `Token …` and `Digest …`.
-            (
-                format!(r#"(?i)\b((?:proxy-)?authorization)(["']?[ \t]*[:=][ \t]*)({VALUE}|[^\r\n"']*)"#),
-                "${1}${2}[redacted]",
-            ),
-            (r#"(?i)\b(bearer|basic)[ \t]+[^\s"',;]+"#.to_owned(), "${1} [redacted]"),
-            (
-                format!(r#"(?i)(^|[^\w-])(--(?:proxy-)?user(?:=|[ \t]+))({VALUE}|[^\s"',;&]+)"#),
-                "${1}${2}[redacted]",
-            ),
-            // `-u user:password`, but not `sort -u file`.
-            (
-                r#"(^|[^\w-])(-[uU][ \t]*)("[^"\r\n]*:[^"\r\n]*"?|'[^'\r\n]*:[^'\r\n]*'?|[^\s"',;&:]*:[^\s"',;&]*)"#.to_owned(),
-                "${1}${2}[redacted]",
-            ),
-            (
-                format!(r#"(?i)\b([\w.-]*(?:{KEYS})[\w.-]*)(["']?[ \t]*[=:][ \t]*)({VALUE}|[^\s"',;&]+)"#),
-                "${1}${2}[redacted]",
-            ),
-            // `--token VALUE`, `-password VALUE`, as `set -x` traces print them.
-            (
-                format!(r#"(?i)(^|[^\w-])(--?[\w.-]*(?:{KEYS})[\w.-]*)[ \t]+({VALUE}|[^\s"',;&-][^\s"',;&]*)"#),
-                "${1}${2} [redacted]",
-            ),
-            (r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@]+@".to_owned(), "${1}[redacted]@"),
-            (r"\beyJ[\w-]{5,}\.[\w-]{5,}\.[\w-]*".to_owned(), "[redacted]"),
-            (
-                r"\b(?:gh[pousr]_|github_pat_|glpat-|xox[abeprs]-|sk-(?:ant-|proj-)?|AKIA|ASIA)[A-Za-z0-9_-]{12,}".to_owned(),
-                "[redacted]",
-            ),
-            // Long opaque runs, without `/` or `.` so paths and hosts survive.
-            (r"[A-Za-z0-9+_=-]{40,}".to_owned(), "[redacted]"),
-        ]
-        .into_iter()
-        .map(|(pattern, replacement)| {
-            (Regex::new(&pattern).expect("static redaction pattern"), replacement)
-        })
-        .collect()
-    });
-    let mut text = text.to_owned();
-    for (pattern, replacement) in RULES.iter() {
-        if pattern.is_match(&text) {
-            text = pattern.replace_all(&text, *replacement).into_owned();
-        }
-    }
-    text
-}
+/// The free-text scrubbers live in `haarness_core::redact`; these names stay
+/// for the server's own log lines.
+pub(crate) use haarness_core::redact::{log_text, text as redact};
 
 /// Native tools whose successful completion changes workspace files, with
 /// the argument that names the file. Shell commands are not inspected.
@@ -1341,6 +1535,166 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn powershell_hooks_read_placeholders_from_the_environment() {
+        let entry = |command: &str, args: &[&str], shell: Option<&str>, root: &str| HookEntry {
+            event: "Stop".into(),
+            matcher: None,
+            command: command.into(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            shell: shell.map(str::to_owned),
+            timeout: Duration::from_secs(1),
+            plugin_root: Some(PathBuf::from(root)),
+            asynchronous: false,
+        };
+        let folder = std::path::Path::new(r"C:\src\a$(calc)");
+        let script = |command: &str, shell: &str, root: &str| {
+            hook_invocation(&entry(command, &[], Some(shell), root), folder)
+                .1
+                .last()
+                .cloned()
+                .unwrap_or_default()
+        };
+        // Double quotes and bare words read the environment. Inside single
+        // quotes a plain value goes in as it is; any other is never pasted.
+        assert_eq!(
+            script(
+                r#"Get-Item "${CLAUDE_PROJECT_DIR}\x"; & '${CLAUDE_PLUGIN_ROOT}\gate.ps1' '${CLAUDE_PROJECT_DIR}' ${HOME}"#,
+                "powershell",
+                r"C:\plugins\kit",
+            ),
+            r#"Get-Item "${env:CLAUDE_PROJECT_DIR}\x"; & 'C:\plugins\kit\gate.ps1' '${env:CLAUDE_PROJECT_DIR}' ${HOME}"#
+        );
+        for root in [
+            r"C:\plugins\it's",
+            "C:\\plugins\\it\u{2019}s",
+            r"C:\a$(calc)",
+        ] {
+            let command = script("& '${CLAUDE_PLUGIN_ROOT}\\gate.ps1'", "powershell", root);
+            assert_eq!(command, r"& '${env:CLAUDE_PLUGIN_ROOT}\gate.ps1'", "{root}");
+        }
+        // A curly quote closes a PowerShell single-quoted string too.
+        assert_eq!(
+            script(
+                "Write-Output \u{2018}${CLAUDE_PROJECT_DIR}\u{2019}",
+                "pwsh",
+                r"C:\p"
+            ),
+            "Write-Output \u{2018}${env:CLAUDE_PROJECT_DIR}\u{2019}"
+        );
+        // A quote inside double quotes, or escaped, does not open a string.
+        assert_eq!(
+            script(
+                r#"Write-Output "it's ${CLAUDE_PROJECT_DIR}" `'${CLAUDE_PROJECT_DIR}"#,
+                "powershell",
+                r"C:\p"
+            ),
+            r#"Write-Output "it's ${env:CLAUDE_PROJECT_DIR}" `'${env:CLAUDE_PROJECT_DIR}"#
+        );
+        // Every statement that starts with a placeholder is a path to call.
+        assert_eq!(
+            script(
+                "${CLAUDE_PLUGIN_ROOT}\\a.ps1 -Strict; Write-Output x | ${CLAUDE_PROJECT_DIR}\\b.ps1\n${CLAUDE_PLUGIN_ROOT}\\c.ps1 && ${CLAUDE_PLUGIN_ROOT}\\d.ps1 || & ${CLAUDE_PLUGIN_ROOT}\\e.ps1; . ${CLAUDE_PLUGIN_ROOT}\\f.ps1",
+                "pwsh",
+                r"C:\p",
+            ),
+            "& \"${env:CLAUDE_PLUGIN_ROOT}\\a.ps1\" -Strict; Write-Output x | & \"${env:CLAUDE_PROJECT_DIR}\\b.ps1\"\n& \"${env:CLAUDE_PLUGIN_ROOT}\\c.ps1\" && & \"${env:CLAUDE_PLUGIN_ROOT}\\d.ps1\" || & \"${env:CLAUDE_PLUGIN_ROOT}\\e.ps1\"; . \"${env:CLAUDE_PLUGIN_ROOT}\\f.ps1\""
+        );
+        // An argument list whose program is a shell, also behind `env`, in
+        // any spelling of -Command: its script argument is shell text;
+        // other arguments, and other programs, get the value.
+        for flag in [
+            "-Command",
+            "-c",
+            "-com",
+            "-COMM",
+            "/Command",
+            "/c",
+            "-CommandWithArgs",
+            "-cwa",
+        ] {
+            let (program, arguments) = hook_invocation(
+                &entry(
+                    "pwsh.exe",
+                    &["-NoProfile", flag, "& \"${CLAUDE_PROJECT_DIR}\\x.ps1\""],
+                    None,
+                    r"C:\p",
+                ),
+                folder,
+            );
+            assert_eq!(program, "pwsh.exe");
+            assert_eq!(
+                arguments[2], "& \"${env:CLAUDE_PROJECT_DIR}\\x.ps1\"",
+                "{flag}"
+            );
+        }
+        let (_, arguments) = hook_invocation(
+            &entry(
+                "/usr/bin/env",
+                &[
+                    "LANG=C",
+                    "-i",
+                    "bash",
+                    "-c",
+                    "cat '${CLAUDE_PROJECT_DIR}/x' \"$1\"",
+                    "sh",
+                    "${CLAUDE_PROJECT_DIR}",
+                ],
+                None,
+                r"C:\p",
+            ),
+            folder,
+        );
+        assert_eq!(arguments[4], "cat ''\"${CLAUDE_PROJECT_DIR}\"'/x' \"$1\"");
+        assert_eq!(arguments[6], r"C:\src\a$(calc)");
+        assert_eq!(
+            hook_invocation(
+                &entry("gate.exe", &["${CLAUDE_PROJECT_DIR}"], None, r"C:\p"),
+                folder
+            )
+            .1,
+            [r"C:\src\a$(calc)"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_hooks_never_read_the_project_folder_name_as_shell_syntax() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-hook-folder-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("it's $(touch INJECTED) \"here\"");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let marker = root.join("hook.txt");
+        let hooks = ConfiguredHooks::new(
+            ConfiguredHooks::parse_block(&json!({
+                "PostToolUseFailure": [{"hooks": [{
+                    "command": format!(
+                        "printf '%s|%s|%s|%s' \"${{CLAUDE_PROJECT_DIR}}\" \"${{OPENCODE_PROJECT_DIR}}\" \"$HAARNESS_PROJECT_DIR\" '${{CLAUDE_PROJECT_DIR}}' > '{}'",
+                        marker.display()
+                    )
+                }]}]
+            })),
+            workspace.clone(),
+        );
+        let _ = hooks
+            .post_tool_use(
+                ThreadId::new(),
+                "bash",
+                &json!({"command": "false"}),
+                "failed",
+                true,
+            )
+            .await;
+        let rendered = workspace.display().to_string();
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            format!("{rendered}|{rendered}|{rendered}|{rendered}")
+        );
+        assert!(!workspace.join("INJECTED").exists());
+        assert!(!root.join("INJECTED").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn permission_request_hooks_can_resolve_the_prompt() {
         let hooks = ConfiguredHooks::new(
@@ -1706,103 +2060,7 @@ mod tests {
     }
 
     #[test]
-    fn redaction_covers_credential_shapes_and_keeps_ordinary_text() {
-        for (input, secret) in [
-            ("--token=PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            ("gh --password PRIVATE_SUFFIX api", "PRIVATE_SUFFIX"),
-            ("tool -password 'PRIVATE SUFFIX'", "PRIVATE SUFFIX"),
-            ("--api-key PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            (
-                "curl -H 'Authorization: Bearer PRIVATE.SUFFIX' https://x.test",
-                "PRIVATE.SUFFIX",
-            ),
-            ("Authorization: Token PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            (
-                "proxy-authorization=Digest PRIVATE_SUFFIX",
-                "PRIVATE_SUFFIX",
-            ),
-            ("bearer PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            ("Basic UFJJVkFURV9TVUZGSVg=", "UFJJVkFURV9TVUZGSVg="),
-            (
-                r#"{"api_key": "PRIVATE SUFFIX", "ok": 1}"#,
-                "PRIVATE SUFFIX",
-            ),
-            (r#"{"password":"PRIVATE_SUFFIX"}"#, "PRIVATE_SUFFIX"),
-            ("API_KEY=PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            ("client_secret: PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            ("private-key=PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            ("passwd=PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            ("session=PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            ("credentials: PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            ("Cookie: a=1; sid=PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            (
-                "* Server auth using Basic with user 'PRIVATE_SUFFIX'",
-                "PRIVATE_SUFFIX",
-            ),
-            (
-                "https://alice:PRIVATE_SUFFIX@git.example.test/repo",
-                "PRIVATE_SUFFIX",
-            ),
-            (
-                "https://PRIVATE_SUFFIX@github.com/org/repo",
-                "PRIVATE_SUFFIX",
-            ),
-            (
-                "GET /cb?code=1&access_token=PRIVATE_SUFFIX&x=1",
-                "PRIVATE_SUFFIX",
-            ),
-            (
-                "curl -u alice:PRIVATE_SUFFIX https://x.test",
-                "PRIVATE_SUFFIX",
-            ),
-            ("curl --user 'alice:PRIVATE SUFFIX'", "PRIVATE SUFFIX"),
-            ("password: \"PRIVATE_SUFFIX\nnext line", "PRIVATE_SUFFIX"),
-            ("token=秘密の値 rest", "秘密の値"),
-            ("ghp_PRIVATESUFFIX0123456789", "PRIVATESUFFIX"),
-            ("key sk-ant-PRIVATESUFFIX01234", "PRIVATESUFFIX"),
-            (
-                "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJQUklWQVRFIn0.c2ln",
-                "eyJzdWIiOiJQUklWQVRFIn0",
-            ),
-            (
-                "x PRIVATESUFFIX0123456789abcdefghijklmnopqrstuv x",
-                "PRIVATESUFFIX",
-            ),
-        ] {
-            let redacted = redact(input);
-            assert!(!redacted.contains(secret), "{input:?} -> {redacted:?}");
-            assert!(redacted.contains("[redacted]"), "{input:?} -> {redacted:?}");
-        }
-        for ordinary in [
-            "build failed: missing file src/lib.rs",
-            "mkdir -p out && sort -u names.txt",
-            "listening on 127.0.0.1:4096",
-            "authentication failed for user",
-            "日本語のエラー: ファイルがありません",
-        ] {
-            assert_eq!(redact(ordinary), ordinary);
-        }
-        assert_eq!(
-            redact("--token=a\n--token b"),
-            "--token=[redacted]\n--token [redacted]"
-        );
-    }
-
-    #[test]
-    fn log_text_strips_controls_and_clips_on_char_boundaries() {
-        assert_eq!(
-            log_text("a\u{1b}[31mb\u{7}\r\nc\u{85}d\u{9b}e\u{7f}f\t g", 100),
-            "a [31mb c d e f g"
-        );
-        assert_eq!(clip("日本語テキスト", 4), "日本語…");
-        assert_eq!(clip("日本語", 3), "日本語");
-        assert_eq!(clip("🙂🙂🙂🙂", 2), "🙂…");
-        for max in 0..12 {
-            let clipped = log_text("é🙂 token=秘密 ü", max);
-            assert!(clipped.chars().count() <= max.max(1), "{max}: {clipped:?}");
-            assert!(!clipped.contains("秘密"));
-        }
-        // The pre-redaction cut drops a partial word rather than keeping it.
+    fn the_pre_redaction_cut_drops_a_partial_word() {
         assert_eq!(head("one two three", 6), "one");
         assert_eq!(head("one two three", 7), "one two");
         assert_eq!(head("PRIVATESUFFIXPRIVATESUFFIX", 10), "");

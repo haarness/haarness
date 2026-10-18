@@ -228,8 +228,17 @@ struct PtyClientConnection {
 #[derive(Clone, Debug)]
 pub enum PtyClientEvent {
     Connected(PtyId),
-    Replay { id: PtyId, truncated: bool },
-    Output { id: PtyId, bytes: Vec<u8> },
+    /// A replay follows. A truncated one (older output is gone) comes with
+    /// the escape sequences that restore the modes that output left on.
+    Replay {
+        id: PtyId,
+        truncated: bool,
+        modes: Option<String>,
+    },
+    Output {
+        id: PtyId,
+        bytes: Vec<u8>,
+    },
     Disconnected(PtyId),
     Exited(PtyId),
 }
@@ -1675,6 +1684,7 @@ impl ApiClient {
                                         let _ = self.pty_events.send(PtyClientEvent::Replay {
                                             id,
                                             truncated: control["truncated"].as_bool().unwrap_or(false),
+                                            modes: control["modes"].as_str().map(str::to_owned),
                                         });
                                     }
                                     Some("cursor") => {
