@@ -2594,8 +2594,15 @@ fn remote_skill_roots(paths: &Paths, file_config: &FileConfig) -> Vec<PathBuf> {
                     roots.push(root);
                 }
             }
-            Ok(None) => tracing::warn!("config: remote skill index {url} lists no usable skills"),
-            Err(error) => tracing::warn!("config: skipped remote skill index {url}: {error}"),
+            Ok(None) => tracing::warn!(
+                "config: remote skill index {} lists no usable skills",
+                haarness_core::redact::url(url)
+            ),
+            Err(error) => tracing::warn!(
+                "config: skipped remote skill index {}: {}",
+                haarness_core::redact::url(url),
+                haarness_core::redact::urls_in(&error)
+            ),
         }
     }
     roots
@@ -9061,6 +9068,40 @@ impl tracing_subscriber::fmt::time::FormatTime for ProcessStamp {
     }
 }
 
+/// A log writer that shows every URL in a line the way
+/// `haarness_core::redact::url` does. Haarness's own lines already hide
+/// credentials; this catches libraries (rmcp, reqwest) that log the address
+/// they could not reach with its query, which can hold an API key.
+struct RedactUrls<M>(M);
+
+impl<'a, M: tracing_subscriber::fmt::MakeWriter<'a>> tracing_subscriber::fmt::MakeWriter<'a>
+    for RedactUrls<M>
+{
+    type Writer = RedactedUrls<M::Writer>;
+    fn make_writer(&'a self) -> Self::Writer {
+        RedactedUrls(self.0.make_writer())
+    }
+}
+
+/// One event's writer for [`RedactUrls`]. The formatter writes a whole line
+/// at once, so a URL is never split across two writes.
+struct RedactedUrls<W>(W);
+
+impl<W: Write> Write for RedactedUrls<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match std::str::from_utf8(buf) {
+            Ok(text) if text.contains("://") => self
+                .0
+                .write_all(haarness_core::redact::urls_in(text).as_bytes())?,
+            _ => self.0.write_all(buf)?,
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
 /// Rotating file logging (daily, under `<data>/logs/`), optional stderr
 /// streaming, and opt-in OTLP/HTTP trace export. The returned guard must live
 /// for the whole process so both asynchronous pipelines flush on shutdown.
@@ -9101,7 +9142,7 @@ fn init_logging(
         reloads.push(reload);
         layers.push(Box::new(
             tracing_subscriber::fmt::layer()
-                .with_writer(file_writer)
+                .with_writer(RedactUrls(file_writer))
                 .with_ansi(false)
                 .with_timer(stamp())
                 .with_filter(filter),
@@ -9115,7 +9156,7 @@ fn init_logging(
         reloads.push(reload);
         layers.push(Box::new(
             tracing_subscriber::fmt::layer()
-                .with_writer(io::stderr)
+                .with_writer(RedactUrls(io::stderr))
                 // Colour only for a terminal: not in files, pipes or journald.
                 .with_ansi(io::stderr().is_terminal())
                 .with_timer(stamp())
@@ -10245,6 +10286,41 @@ fn random_token() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn log_lines_never_carry_a_credential_in_a_url() {
+        use std::io::Write as _;
+        use tracing_subscriber::fmt::MakeWriter as _;
+        struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = {
+            let written = written.clone();
+            move || Sink(written.clone())
+        };
+        let writer = super::RedactUrls(sink);
+        let line = "ERROR rmcp::transport::worker: Client(reqwest::Error { url: \"http://u:PRIVATE_SUFFIX@127.0.0.1:9/mcp?api_key=PRIVATE_SUFFIX&region=eu\" })\n";
+        writer.make_writer().write_all(line.as_bytes()).unwrap();
+        writer
+            .make_writer()
+            .write_all(b"plain line, no address\n")
+            .unwrap();
+        let written = String::from_utf8(written.lock().unwrap().clone()).unwrap();
+        assert!(!written.contains("PRIVATE_SUFFIX"), "{written}");
+        assert!(
+            written.contains("\"http://<redacted>@127.0.0.1:9/mcp?api_key=<redacted>&region=eu\""),
+            "{written}"
+        );
+        assert!(written.ends_with("plain line, no address\n"), "{written}");
+    }
+
     #[test]
     fn session_archives_are_written_whole_private_and_never_through_a_link() {
         let root = std::env::temp_dir().join(format!("haarness-archive-{}", uuid::Uuid::now_v7()));

@@ -292,30 +292,61 @@ pub fn locate(reference: &str, base: &Path, home: Option<&Path>) -> PathBuf {
     base.join(path)
 }
 
+/// Why an import is left out of the prompt, if it is: the caller's verdict
+/// on a file (a `read` rule that denies it) for its real path.
+pub type ImportFilter<'a> = &'a dyn Fn(&Path) -> Option<&'static str>;
+
 /// Read one instruction file and resolve its `@path` imports (depth ≤ 5,
 /// ≤ 20 files, 40 KiB per file, 200 KiB total). Imported bodies follow the
 /// line that referenced them. Targets outside the workspace are only
 /// followed when `trusted` (global configuration); references that do not
-/// name an existing file are left as written.
+/// name an existing file are left as written. A secret-named file (`.env`),
+/// or one `omit` refuses, is never read: an `[Instruction import omitted: …]`
+/// line takes its place, as nothing asks before instructions load.
 #[must_use]
 pub fn read_with_imports(
     path: &Path,
     workspace: &Path,
     budget: &mut ImportBudget,
     trusted: bool,
+    omit: ImportFilter<'_>,
 ) -> Option<String> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    resolve(path, workspace, home.as_deref(), budget, trusted, 0)
+    let scope = Scope {
+        workspace,
+        home: home.as_deref(),
+        trusted,
+        omit,
+    };
+    resolve(path, &scope, budget, 0)
+}
+
+/// What stays the same across one file's imports.
+struct Scope<'a> {
+    workspace: &'a Path,
+    home: Option<&'a Path>,
+    trusted: bool,
+    omit: ImportFilter<'a>,
+}
+
+/// Why an import of `canonical` is left out, if it is.
+fn omitted(canonical: &Path, workspace: Option<&Path>, scope: &Scope<'_>) -> Option<&'static str> {
+    let relative = workspace
+        .and_then(|workspace| canonical.strip_prefix(workspace).ok())
+        .unwrap_or(canonical);
+    if crate::is_secret_path(relative) {
+        return Some("it is a secret file");
+    }
+    (scope.omit)(canonical)
 }
 
 fn resolve(
     path: &Path,
-    workspace: &Path,
-    home: Option<&Path>,
+    scope: &Scope<'_>,
     budget: &mut ImportBudget,
-    trusted: bool,
     depth: usize,
 ) -> Option<String> {
+    let (workspace, home, trusted) = (scope.workspace, scope.home, scope.trusted);
     if depth > MAX_DEPTH || budget.files == 0 {
         return None;
     }
@@ -355,15 +386,23 @@ fn resolve(
             if !canonical.is_file() {
                 continue;
             }
-            let inside = workspace
-                .canonicalize()
-                .map(|workspace| canonical.starts_with(&workspace))
-                .unwrap_or(false);
+            let root = workspace.canonicalize().ok();
+            let inside = root
+                .as_deref()
+                .is_some_and(|workspace| canonical.starts_with(workspace));
             if !inside && !trusted {
                 continue; // outside the workspace: never auto-imported
             }
-            if let Some(imported) = resolve(&canonical, workspace, home, budget, trusted, depth + 1)
-            {
+            if let Some(reason) = omitted(&canonical, root.as_deref(), scope) {
+                write!(
+                    out,
+                    "\n[Instruction import omitted: {} ({reason})]\n",
+                    reference.path
+                )
+                .expect("writing to a String cannot fail");
+                continue;
+            }
+            if let Some(imported) = resolve(&canonical, scope, budget, depth + 1) {
                 write!(
                     out,
                     "\n<imported from=\"{}\">\n{imported}\n</imported>\n",
@@ -464,7 +503,10 @@ mod tests {
         )
         .unwrap();
         let mut budget = ImportBudget::default();
-        let text = read_with_imports(&root.join("AGENTS.md"), &root, &mut budget, false).unwrap();
+        let text = read_with_imports(&root.join("AGENTS.md"), &root, &mut budget, false, &|_| {
+            None
+        })
+        .unwrap();
         assert_eq!(text.matches("EXTRA").count(), 1);
         assert_eq!(text.matches("PLAIN").count(), 1);
         assert!(text.contains("<imported from=\"with space/extra.md\">"));
@@ -474,9 +516,57 @@ mod tests {
             files: 1,
             bytes: 1024,
         };
-        let text =
-            read_with_imports(&root.join("AGENTS.md"), &root, &mut exhausted, false).unwrap();
+        let text = read_with_imports(
+            &root.join("AGENTS.md"),
+            &root,
+            &mut exhausted,
+            false,
+            &|_| None,
+        )
+        .unwrap();
         assert!(!text.contains("EXTRA"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn secret_files_and_files_a_rule_refuses_are_never_imported() {
+        let root = temp("omitted");
+        fs::create_dir_all(root.join("private")).unwrap();
+        fs::create_dir_all(root.join("public")).unwrap();
+        fs::write(root.join(".env"), "ENV_SECRET").unwrap();
+        fs::write(root.join(".env.example"), "ENV_EXAMPLE").unwrap();
+        fs::write(root.join("private/notes.md"), "PRIVATE_BODY").unwrap();
+        fs::write(root.join("public/notes.md"), "PUBLIC_BODY").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("../private/notes.md", root.join("public/link.md")).unwrap();
+        fs::write(
+            root.join("AGENTS.md"),
+            "@.env\n@.env.example\n@private/notes.md\n@public/notes.md\n@public/link.md\n",
+        )
+        .unwrap();
+        let private = root.canonicalize().unwrap().join("private");
+        let deny = |file: &Path| {
+            file.starts_with(&private)
+                .then_some("a read rule denies it")
+        };
+        let mut budget = ImportBudget::default();
+        let text =
+            read_with_imports(&root.join("AGENTS.md"), &root, &mut budget, false, &deny).unwrap();
+        for hidden in ["ENV_SECRET", "PRIVATE_BODY"] {
+            assert!(!text.contains(hidden), "{text}");
+        }
+        for shown in ["ENV_EXAMPLE", "PUBLIC_BODY"] {
+            assert!(text.contains(shown), "{text}");
+        }
+        assert!(text.contains("[Instruction import omitted: .env (it is a secret file)]"));
+        assert!(
+            text.contains("[Instruction import omitted: private/notes.md (a read rule denies it)]")
+        );
+        #[cfg(unix)]
+        assert!(
+            text.contains("[Instruction import omitted: public/link.md (a read rule denies it)]"),
+            "{text}"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

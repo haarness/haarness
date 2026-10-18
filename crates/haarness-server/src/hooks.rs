@@ -26,13 +26,11 @@
 //! stripped of control characters and clipped first.
 
 use std::path::PathBuf;
-use std::sync::LazyLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use haarness_core::{HookDecision, HookPort, PermissionDecision};
 use haarness_protocol::ThreadId;
-use regex::Regex;
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone)]
@@ -170,10 +168,15 @@ impl ConfiguredHooks {
             let mut command = Command::new(shell);
             if shell.eq_ignore_ascii_case("powershell") {
                 command.args(["-NoProfile", "-Command"]);
+                command.arg(expand(&entry.command));
             } else {
+                // A POSIX shell expands `${CLAUDE_PROJECT_DIR}` and the other
+                // placeholders itself from the environment set below, so a
+                // folder name holding `$(…)`, a quote or a space is never
+                // read as shell syntax, as it would be if pasted in first.
                 command.arg("-lc");
+                command.arg(&entry.command);
             }
-            command.arg(expand(&entry.command));
             command
         } else {
             let mut command = Command::new(expand(&entry.command));
@@ -186,6 +189,7 @@ impl ConfiguredHooks {
         command
             .current_dir(&self.workspace)
             .env("HAARNESS_PROJECT_DIR", &self.workspace)
+            .env("OPENCODE_PROJECT_DIR", &self.workspace)
             .env("CLAUDE_PROJECT_DIR", &self.workspace)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -737,88 +741,9 @@ fn head(text: &str, max: usize) -> &str {
     }
 }
 
-/// At most `max` characters, ending with `…` when cut. Never splits a char.
-pub(crate) fn clip(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_owned();
-    }
-    let mut clipped: String = text.chars().take(max.saturating_sub(1)).collect();
-    clipped.push('…');
-    clipped
-}
-
-/// Free text made safe for one log field: redacted, with C0/C1 control
-/// characters and line breaks collapsed to single spaces, then clipped.
-pub(crate) fn log_text(text: &str, max: usize) -> String {
-    let redacted = redact(text);
-    let words: Vec<&str> = redacted
-        .split(|character: char| character.is_whitespace() || character.is_control())
-        .filter(|word| !word.is_empty())
-        .collect();
-    clip(&words.join(" "), max)
-}
-
-/// Replaces obvious credential shapes with `[redacted]`: credential headers,
-/// `Bearer`/`Basic` values, curl user flags, `key=value`, `key: value` and
-/// `--key value` pairs whose key names a credential, URL user info, JWTs,
-/// well-known token prefixes and long opaque runs. Over-redaction is fine;
-/// this is for log lines, not data.
-pub(crate) fn redact(text: &str) -> String {
-    const KEYS: &str = r"token|secret|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key|auth|cookie|credential|session";
-    const VALUE: &str = r#""[^"\r\n]*"?|'[^'\r\n]*'?"#;
-    static RULES: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
-        [
-            // A cookie header can hold several credentials; drop the rest of its line.
-            (r#"(?i)\b((?:set-)?cookie)(["']?[ \t]*:[ \t]*)[^\r\n]*"#.to_owned(), "${1}${2}[redacted]"),
-            // Verbose curl repeats the identity outside its headers.
-            (r"(?i)\b((?:server|proxy) auth using )[^\r\n]*".to_owned(), "${1}[redacted]"),
-            // Any scheme, including `Token …` and `Digest …`.
-            (
-                format!(r#"(?i)\b((?:proxy-)?authorization)(["']?[ \t]*[:=][ \t]*)({VALUE}|[^\r\n"']*)"#),
-                "${1}${2}[redacted]",
-            ),
-            (r#"(?i)\b(bearer|basic)[ \t]+[^\s"',;]+"#.to_owned(), "${1} [redacted]"),
-            (
-                format!(r#"(?i)(^|[^\w-])(--(?:proxy-)?user(?:=|[ \t]+))({VALUE}|[^\s"',;&]+)"#),
-                "${1}${2}[redacted]",
-            ),
-            // `-u user:password`, but not `sort -u file`.
-            (
-                r#"(^|[^\w-])(-[uU][ \t]*)("[^"\r\n]*:[^"\r\n]*"?|'[^'\r\n]*:[^'\r\n]*'?|[^\s"',;&:]*:[^\s"',;&]*)"#.to_owned(),
-                "${1}${2}[redacted]",
-            ),
-            (
-                format!(r#"(?i)\b([\w.-]*(?:{KEYS})[\w.-]*)(["']?[ \t]*[=:][ \t]*)({VALUE}|[^\s"',;&]+)"#),
-                "${1}${2}[redacted]",
-            ),
-            // `--token VALUE`, `-password VALUE`, as `set -x` traces print them.
-            (
-                format!(r#"(?i)(^|[^\w-])(--?[\w.-]*(?:{KEYS})[\w.-]*)[ \t]+({VALUE}|[^\s"',;&-][^\s"',;&]*)"#),
-                "${1}${2} [redacted]",
-            ),
-            (r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@]+@".to_owned(), "${1}[redacted]@"),
-            (r"\beyJ[\w-]{5,}\.[\w-]{5,}\.[\w-]*".to_owned(), "[redacted]"),
-            (
-                r"\b(?:gh[pousr]_|github_pat_|glpat-|xox[abeprs]-|sk-(?:ant-|proj-)?|AKIA|ASIA)[A-Za-z0-9_-]{12,}".to_owned(),
-                "[redacted]",
-            ),
-            // Long opaque runs, without `/` or `.` so paths and hosts survive.
-            (r"[A-Za-z0-9+_=-]{40,}".to_owned(), "[redacted]"),
-        ]
-        .into_iter()
-        .map(|(pattern, replacement)| {
-            (Regex::new(&pattern).expect("static redaction pattern"), replacement)
-        })
-        .collect()
-    });
-    let mut text = text.to_owned();
-    for (pattern, replacement) in RULES.iter() {
-        if pattern.is_match(&text) {
-            text = pattern.replace_all(&text, *replacement).into_owned();
-        }
-    }
-    text
-}
+/// The free-text scrubbers live in `haarness_core::redact`; these names stay
+/// for the server's own log lines.
+pub(crate) use haarness_core::redact::{log_text, text as redact};
 
 /// Native tools whose successful completion changes workspace files, with
 /// the argument that names the file. Shell commands are not inspected.
@@ -1341,6 +1266,44 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_hooks_never_read_the_project_folder_name_as_shell_syntax() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-hook-folder-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("it's $(touch INJECTED) \"here\"");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let marker = root.join("hook.txt");
+        let hooks = ConfiguredHooks::new(
+            ConfiguredHooks::parse_block(&json!({
+                "PostToolUseFailure": [{"hooks": [{
+                    "command": format!(
+                        "printf '%s|%s|%s' \"${{CLAUDE_PROJECT_DIR}}\" \"${{OPENCODE_PROJECT_DIR}}\" \"$HAARNESS_PROJECT_DIR\" > '{}'",
+                        marker.display()
+                    )
+                }]}]
+            })),
+            workspace.clone(),
+        );
+        let _ = hooks
+            .post_tool_use(
+                ThreadId::new(),
+                "bash",
+                &json!({"command": "false"}),
+                "failed",
+                true,
+            )
+            .await;
+        let rendered = workspace.display().to_string();
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            format!("{rendered}|{rendered}|{rendered}")
+        );
+        assert!(!workspace.join("INJECTED").exists());
+        assert!(!root.join("INJECTED").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn permission_request_hooks_can_resolve_the_prompt() {
         let hooks = ConfiguredHooks::new(
@@ -1706,103 +1669,7 @@ mod tests {
     }
 
     #[test]
-    fn redaction_covers_credential_shapes_and_keeps_ordinary_text() {
-        for (input, secret) in [
-            ("--token=PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            ("gh --password PRIVATE_SUFFIX api", "PRIVATE_SUFFIX"),
-            ("tool -password 'PRIVATE SUFFIX'", "PRIVATE SUFFIX"),
-            ("--api-key PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            (
-                "curl -H 'Authorization: Bearer PRIVATE.SUFFIX' https://x.test",
-                "PRIVATE.SUFFIX",
-            ),
-            ("Authorization: Token PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            (
-                "proxy-authorization=Digest PRIVATE_SUFFIX",
-                "PRIVATE_SUFFIX",
-            ),
-            ("bearer PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            ("Basic UFJJVkFURV9TVUZGSVg=", "UFJJVkFURV9TVUZGSVg="),
-            (
-                r#"{"api_key": "PRIVATE SUFFIX", "ok": 1}"#,
-                "PRIVATE SUFFIX",
-            ),
-            (r#"{"password":"PRIVATE_SUFFIX"}"#, "PRIVATE_SUFFIX"),
-            ("API_KEY=PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            ("client_secret: PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            ("private-key=PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            ("passwd=PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            ("session=PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            ("credentials: PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            ("Cookie: a=1; sid=PRIVATE_SUFFIX", "PRIVATE_SUFFIX"),
-            (
-                "* Server auth using Basic with user 'PRIVATE_SUFFIX'",
-                "PRIVATE_SUFFIX",
-            ),
-            (
-                "https://alice:PRIVATE_SUFFIX@git.example.test/repo",
-                "PRIVATE_SUFFIX",
-            ),
-            (
-                "https://PRIVATE_SUFFIX@github.com/org/repo",
-                "PRIVATE_SUFFIX",
-            ),
-            (
-                "GET /cb?code=1&access_token=PRIVATE_SUFFIX&x=1",
-                "PRIVATE_SUFFIX",
-            ),
-            (
-                "curl -u alice:PRIVATE_SUFFIX https://x.test",
-                "PRIVATE_SUFFIX",
-            ),
-            ("curl --user 'alice:PRIVATE SUFFIX'", "PRIVATE SUFFIX"),
-            ("password: \"PRIVATE_SUFFIX\nnext line", "PRIVATE_SUFFIX"),
-            ("token=秘密の値 rest", "秘密の値"),
-            ("ghp_PRIVATESUFFIX0123456789", "PRIVATESUFFIX"),
-            ("key sk-ant-PRIVATESUFFIX01234", "PRIVATESUFFIX"),
-            (
-                "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJQUklWQVRFIn0.c2ln",
-                "eyJzdWIiOiJQUklWQVRFIn0",
-            ),
-            (
-                "x PRIVATESUFFIX0123456789abcdefghijklmnopqrstuv x",
-                "PRIVATESUFFIX",
-            ),
-        ] {
-            let redacted = redact(input);
-            assert!(!redacted.contains(secret), "{input:?} -> {redacted:?}");
-            assert!(redacted.contains("[redacted]"), "{input:?} -> {redacted:?}");
-        }
-        for ordinary in [
-            "build failed: missing file src/lib.rs",
-            "mkdir -p out && sort -u names.txt",
-            "listening on 127.0.0.1:4096",
-            "authentication failed for user",
-            "日本語のエラー: ファイルがありません",
-        ] {
-            assert_eq!(redact(ordinary), ordinary);
-        }
-        assert_eq!(
-            redact("--token=a\n--token b"),
-            "--token=[redacted]\n--token [redacted]"
-        );
-    }
-
-    #[test]
-    fn log_text_strips_controls_and_clips_on_char_boundaries() {
-        assert_eq!(
-            log_text("a\u{1b}[31mb\u{7}\r\nc\u{85}d\u{9b}e\u{7f}f\t g", 100),
-            "a [31mb c d e f g"
-        );
-        assert_eq!(clip("日本語テキスト", 4), "日本語…");
-        assert_eq!(clip("日本語", 3), "日本語");
-        assert_eq!(clip("🙂🙂🙂🙂", 2), "🙂…");
-        for max in 0..12 {
-            let clipped = log_text("é🙂 token=秘密 ü", max);
-            assert!(clipped.chars().count() <= max.max(1), "{max}: {clipped:?}");
-            assert!(!clipped.contains("秘密"));
-        }
-        // The pre-redaction cut drops a partial word rather than keeping it.
+    fn the_pre_redaction_cut_drops_a_partial_word() {
         assert_eq!(head("one two three", 6), "one");
         assert_eq!(head("one two three", 7), "one two");
         assert_eq!(head("PRIVATESUFFIXPRIVATESUFFIX", 10), "");

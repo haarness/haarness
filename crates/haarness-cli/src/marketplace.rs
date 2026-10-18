@@ -838,17 +838,32 @@ pub async fn install(
 fn substitute(value: &mut Value, values: &Value) -> Result<()> {
     match value {
         Value::String(text) => {
-            // Resolve declared placeholders without invoking a shell or changing JSON structure.
-            for (key, value) in values.as_object().into_iter().flatten() {
-                if let Some(value) = value.as_str() {
-                    *text = text.replace(&format!("${{{key}}}"), value);
+            // Resolve declared placeholders without invoking a shell or changing
+            // JSON structure, in one pass over the configured text: a value is
+            // inserted as typed, so a password holding `${OTHER}` or `${` is
+            // never read as another placeholder.
+            let mut filled = String::with_capacity(text.len());
+            let mut rest = text.as_str();
+            while let Some(start) = rest.find("${") {
+                filled.push_str(&rest[..start]);
+                let after = &rest[start + 2..];
+                let Some((name, tail)) = after.split_once('}') else {
+                    bail!("Provide a value for {after}: this MCP server needs it to connect");
+                };
+                if name == "CLAUDE_PLUGIN_ROOT" {
+                    // Left for the plugin loader.
+                    filled.push_str(&rest[start..start + 2]);
+                    rest = after;
+                    continue;
                 }
+                let Some(value) = values.get(name).and_then(Value::as_str) else {
+                    bail!("Provide a value for {name}: this MCP server needs it to connect");
+                };
+                filled.push_str(value);
+                rest = tail;
             }
-            let remaining = text.replace("${CLAUDE_PLUGIN_ROOT}", "");
-            if let Some((_, rest)) = remaining.split_once("${") {
-                let name = rest.split_once('}').map_or(rest, |(name, _)| name);
-                bail!("Provide a value for {name}: this MCP server needs it to connect");
-            }
+            filled.push_str(rest);
+            *text = filled;
         }
         Value::Array(items) => {
             for item in items {
@@ -1225,6 +1240,17 @@ mod tests {
         );
         substitute(&mut config, &json!({"TOKEN":"$(do not execute)"})).unwrap();
         assert_eq!(config["env"]["TOKEN"], "$(do not execute)");
+        // A value goes in as typed, even when it looks like a placeholder.
+        let mut config =
+            json!({"env":{"TOKEN":"${TOKEN}","USER":"${USER}"},"args":["--key=${TOKEN}"]});
+        substitute(
+            &mut config,
+            &json!({"TOKEN":"pa${USER}ss${","USER":"me ${TOKEN}"}),
+        )
+        .unwrap();
+        assert_eq!(config["env"]["TOKEN"], "pa${USER}ss${");
+        assert_eq!(config["env"]["USER"], "me ${TOKEN}");
+        assert_eq!(config["args"][0], "--key=pa${USER}ss${");
         fs::remove_dir_all(root).unwrap();
     }
 }

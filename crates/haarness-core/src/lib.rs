@@ -36,8 +36,8 @@ pub use execution::ExecutionSettings;
 pub use goal::{MAX_GOAL_CHARS, apply_goal_action, goal_line, legacy_goal_state, new_goal_state};
 pub use permissions::bash::is_obviously_read_only as bash_is_obviously_read_only;
 pub use permissions::{
-    EXPLICIT_GRANT_PREFIX, PermissionDecision, PermissionEngine, PermissionRule, explicit_decision,
-    explicit_granted, is_secret_path, resolve_permission_path,
+    CONFIG_EDIT_RULE, EXPLICIT_GRANT_PREFIX, PermissionDecision, PermissionEngine, PermissionRule,
+    explicit_decision, explicit_granted, is_config_path, is_secret_path, resolve_permission_path,
 };
 pub use ports::*;
 pub use runtime::{

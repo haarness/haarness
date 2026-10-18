@@ -3917,15 +3917,18 @@ impl AgentRuntime {
             .flat_map(|plan| plan.external_paths.iter().cloned())
             .collect();
         let mut pending_plans = Vec::new();
+        // Asks only a person answers (a configuration file edit).
+        let mut protected = HashSet::new();
         for plan in plans {
             let mut asked = Vec::new();
             for pattern in &plan.patterns {
                 let operation = plan.operation(pattern);
                 let constraint = tool.permission_constraint(&arguments, &operation);
                 let explicit = tool.explicit_approval(&arguments, &operation);
+                let evaluation = engine.evaluate_detailed(&operation);
                 let decision = if explicit {
                     crate::permissions::explicit_decision(
-                        engine.evaluate(&operation),
+                        evaluation.decision,
                         constraint,
                         crate::permissions::explicit_granted(
                             &self.session_rules.lock(),
@@ -3933,7 +3936,7 @@ impl AgentRuntime {
                         ),
                     )
                 } else {
-                    constrained_permission(engine.evaluate(&operation), constraint)
+                    constrained_permission(evaluation.decision, constraint)
                 };
                 match decision {
                     PermissionDecision::Deny => {
@@ -3944,10 +3947,16 @@ impl AgentRuntime {
                     // may, nor where a path leads that the hook never saw.
                     PermissionDecision::Ask
                         if !explicit
+                            && !evaluation.protected
                             && hook_permission == Some(PermissionDecision::Allow)
                             && !plan.is_resolved(pattern)
                             && constraint != Some(PermissionDecision::Ask) => {}
-                    PermissionDecision::Ask => asked.push(pattern.clone()),
+                    PermissionDecision::Ask => {
+                        if evaluation.protected {
+                            protected.insert(operation);
+                        }
+                        asked.push(pattern.clone());
+                    }
                     PermissionDecision::Allow => {}
                 }
             }
@@ -3962,8 +3971,9 @@ impl AgentRuntime {
             }
             let asked = &plan.patterns;
             let forced = asked.iter().any(|pattern| {
-                tool.permission_constraint(&arguments, &plan.operation(pattern))
-                    == Some(PermissionDecision::Ask)
+                protected.contains(&plan.operation(pattern))
+                    || tool.permission_constraint(&arguments, &plan.operation(pattern))
+                        == Some(PermissionDecision::Ask)
             });
             let explicit_operations: Vec<String> = asked
                 .iter()
@@ -3990,7 +4000,11 @@ impl AgentRuntime {
             // schedule, `run --yolo`, ACP or a `--yolo` terminal UI approves
             // them once, as it does its agents' requests.
             if !forced && !explicit && stance.auto_approve {
-                tracing::info!(thread = %thread_id, operation, "approved once (unattended run)");
+                tracing::info!(
+                    thread = %thread_id,
+                    operation = %operation_for_log(&operation),
+                    "approved once (unattended run)"
+                );
                 continue;
             }
             let always_rules = plan.always_rules();
@@ -3998,7 +4012,11 @@ impl AgentRuntime {
             // requests once, ordered with mode changes by the gate.
             let approval_gate = self.approval_modes.gate.lock().await;
             if !forced && !explicit && self.approval_modes.is_auto(thread_id).await {
-                tracing::info!(thread = %thread_id, operation, "approved once (Auto)");
+                tracing::info!(
+                    thread = %thread_id,
+                    operation = %operation_for_log(&operation),
+                    "approved once (Auto)"
+                );
                 continue;
             }
             let id = uuid::Uuid::now_v7().to_string();
@@ -5679,6 +5697,9 @@ impl crate::ToolInvoker for TurnToolInvoker {
     }
     fn workspace(&self) -> Option<String> {
         Some(self.runner.workspace.to_string_lossy().into_owned())
+    }
+    fn read_rules(&self) -> Option<PermissionEngine> {
+        Some(self.runner.permission_engine_for_tool(&self.agent, "read"))
     }
     fn delegable_agents(&self) -> Vec<String> {
         self.runner
@@ -8753,6 +8774,8 @@ impl RunnerTask {
             .collect();
         let engine = self.permission_engine_for_tool(agent, name);
         let mut pending_plans = Vec::new();
+        // Asks only a person answers (a configuration file edit).
+        let mut protected = HashSet::new();
         for plan in plans {
             let mut asked = Vec::new();
             for pattern in &plan.patterns {
@@ -8796,13 +8819,19 @@ impl RunnerTask {
                     // leads that the hook never saw.
                     PermissionDecision::Ask
                         if !explicit
+                            && !evaluation.protected
                             && constraint != Some(PermissionDecision::Ask)
                             && ((hook_permission == Some(PermissionDecision::Allow)
                                 && !plan.is_resolved(pattern))
                                 || (evaluation.matched.is_none()
                                     && self.skill_engine().evaluate(&plan.operation(pattern))
                                         == PermissionDecision::Allow)) => {}
-                    PermissionDecision::Ask => asked.push(pattern.clone()),
+                    PermissionDecision::Ask => {
+                        if evaluation.protected {
+                            protected.insert(plan.operation(pattern));
+                        }
+                        asked.push(pattern.clone());
+                    }
                     PermissionDecision::Allow => {}
                 }
             }
@@ -8812,9 +8841,10 @@ impl RunnerTask {
         }
         for plan in combine_browser_approvals(name, pending_plans) {
             let forced = plan.patterns.iter().any(|pattern| {
-                tool.as_ref().and_then(|tool| {
-                    tool.permission_constraint(&arguments, &plan.operation(pattern))
-                }) == Some(PermissionDecision::Ask)
+                protected.contains(&plan.operation(pattern))
+                    || tool.as_ref().and_then(|tool| {
+                        tool.permission_constraint(&arguments, &plan.operation(pattern))
+                    }) == Some(PermissionDecision::Ask)
             });
             let explicit: Vec<String> = plan
                 .patterns
@@ -9033,7 +9063,10 @@ impl RunnerTask {
                     });
                 }
             }
-            tracing::info!(operation, "auto-approved (--yolo)");
+            tracing::info!(
+                operation = %operation_for_log(&operation),
+                "auto-approved (--yolo)"
+            );
             return Ok(PermissionResolution {
                 allowed: true,
                 feedback: None,
@@ -9089,7 +9122,11 @@ impl RunnerTask {
                 });
             }
             if auto {
-                tracing::info!(thread = %self.thread.id, operation, "approved once (Auto)");
+                tracing::info!(
+                    thread = %self.thread.id,
+                    operation = %operation_for_log(&operation),
+                    "approved once (Auto)"
+                );
                 return Ok(PermissionResolution {
                     allowed: true,
                     feedback: None,
@@ -11274,6 +11311,13 @@ fn turn_panicked(panic: &(dyn std::any::Any + Send)) -> CoreError {
     ))
 }
 
+/// A permission operation as a log line shows it: a command or address
+/// can carry a credential (`curl -H "Authorization: …"`, `https://u:p@host`),
+/// so it is redacted and clipped.
+fn operation_for_log(operation: &str) -> String {
+    crate::redact::log_text(operation, 300)
+}
+
 /// Why a scheduled run's request that always asks failed instead of waiting.
 fn cannot_ask_forced(operation: &str) -> String {
     format!(
@@ -11478,12 +11522,21 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             resolved: Vec::new(),
         }];
         if arguments.get("action").and_then(serde_json::Value::as_str) == Some("create") {
+            // The new file also meets the rules for where a linked
+            // `.haarness/workflows` folder really puts it.
+            let file = format!(".haarness/workflows/{target}.ts");
+            let mut patterns = vec![file.clone()];
+            let mut resolved = Vec::new();
+            if let Some(pattern) = resolved_file_pattern(workspace, &file) {
+                resolved.push((pattern.clone(), pattern.clone()));
+                patterns.push(pattern);
+            }
             plans.push(AskPlan {
                 permission: "edit".into(),
-                patterns: vec![format!(".haarness/workflows/{target}.ts")],
-                always: vec![format!(".haarness/workflows/{target}.ts")],
+                patterns,
+                always: vec![file],
                 external_paths: Vec::new(),
-                resolved: Vec::new(),
+                resolved,
             });
         }
         return plans;
@@ -11638,7 +11691,8 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         patterns.push(pattern);
     }
     let mut resolved = Vec::new();
-    if matches!(name, "read" | "write" | "edit" | "multiedit")
+    // A list through a link meets the rules for the folder it really lists.
+    if matches!(name, "read" | "write" | "edit" | "multiedit" | "list")
         && let Some(pattern) = resolved_file_pattern(workspace, &target)
     {
         resolved.push((pattern.clone(), pattern.clone()));
@@ -13800,7 +13854,12 @@ mod tests {
         assert_eq!(plans[0].always, plans[0].patterns);
         assert_eq!(plans[0].external_paths.len(), 1);
         assert_eq!(plans[1].permission, "list");
-        assert_eq!(plans[1].patterns, vec!["/tmp"]);
+        assert_eq!(plans[1].patterns[0], "/tmp");
+        // Where a linked folder really is (macOS's /tmp is /private/tmp).
+        let real = std::path::Path::new("/tmp").canonicalize().unwrap();
+        if real != std::path::Path::new("/tmp") {
+            assert_eq!(plans[1].patterns[1..], [real.display().to_string()]);
+        }
     }
 
     #[test]
@@ -13898,6 +13957,60 @@ mod tests {
                 assert_eq!(plan.always, vec!["*"]);
             }
         }
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_list_or_a_new_workflow_through_a_link_meets_the_rules_for_where_it_leads() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-linked-list-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(workspace.join("build")).unwrap();
+        std::fs::create_dir_all(workspace.join("private/flows")).unwrap();
+        std::fs::create_dir_all(workspace.join(".haarness")).unwrap();
+        std::os::unix::fs::symlink("build", workspace.join("alias")).unwrap();
+        std::os::unix::fs::symlink("../private/flows", workspace.join(".haarness/workflows"))
+            .unwrap();
+        let mut engine = crate::PermissionEngine::new(vec![
+            crate::PermissionRule {
+                pattern: "*".into(),
+                decision: crate::PermissionDecision::Allow,
+            },
+            crate::PermissionRule {
+                pattern: "list:build".into(),
+                decision: crate::PermissionDecision::Deny,
+            },
+            crate::PermissionRule {
+                pattern: "edit:private/*".into(),
+                decision: crate::PermissionDecision::Deny,
+            },
+        ]);
+        engine.set_workspace(&workspace);
+        let denied = |plan: &super::AskPlan| {
+            plan.patterns.iter().any(|pattern| {
+                engine.evaluate(&plan.operation(pattern)) == crate::PermissionDecision::Deny
+            })
+        };
+        let list = super::ask_plans("list", &json!({"path":"alias"}), &workspace).remove(0);
+        assert_eq!(list.patterns, vec!["alias", "build"]);
+        assert!(denied(&list));
+        let plain = super::ask_plans("list", &json!({"path":"src"}), &workspace).remove(0);
+        assert_eq!(plain.patterns, vec!["src"]);
+        assert!(!denied(&plain));
+        let create = super::ask_plans(
+            "workflow",
+            &json!({"action":"create","name":"audit","source":"x"}),
+            &workspace,
+        );
+        let edit = create
+            .iter()
+            .find(|plan| plan.permission == "edit")
+            .unwrap();
+        assert_eq!(
+            edit.patterns,
+            vec![".haarness/workflows/audit.ts", "private/flows/audit.ts"]
+        );
+        assert!(denied(edit));
         std::fs::remove_dir_all(workspace).unwrap();
     }
 

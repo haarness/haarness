@@ -82,11 +82,18 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
             .filter(|child| {
                 matches!(
                     child.kind(),
-                    "command_name" | "word" | "number" | "string" | "raw_string" | "concatenation"
+                    "command_name"
+                        | "word"
+                        | "number"
+                        | "string"
+                        | "raw_string"
+                        | "concatenation"
+                        | "simple_expansion"
+                        | "expansion"
                 )
             })
             .map(|child| {
-                let (value, complete) = literal(child, command);
+                let (value, complete) = path_literal(child, command);
                 (value, complete, node_text(child, command))
             })
             .collect::<Vec<_>>();
@@ -115,7 +122,7 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
         let Some(dest) = redirect.child_by_field_name("destination") else {
             continue;
         };
-        let (value, complete) = literal(dest, command);
+        let (value, complete) = path_literal(dest, command);
         let descriptor = (0..redirect.child_count())
             .filter_map(|i| redirect.child(i))
             .any(|child| matches!(node_text(child, command).as_str(), ">&" | "<&"));
@@ -423,6 +430,62 @@ fn resolve_path(path: &Path, depth: u8) -> PathBuf {
     resolved
 }
 
+/// Variables that name a folder outside the project, which the command's
+/// shell inherits from the server.
+const FOLDER_VARIABLES: [&str; 6] = [
+    "HOME",
+    "TMPDIR",
+    "HAARNESS_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+];
+
+/// The folder `$NAME` or `${NAME}` stands for, when it is one of
+/// [`FOLDER_VARIABLES`] and set to an absolute path.
+fn folder_variable(text: &str) -> Option<String> {
+    let name = text
+        .strip_prefix("${")
+        .and_then(|rest| rest.strip_suffix('}'))
+        .or_else(|| text.strip_prefix('$'))?;
+    if !FOLDER_VARIABLES.contains(&name) {
+        return None;
+    }
+    std::env::var(name)
+        .ok()
+        .filter(|value| Path::new(value).is_absolute())
+}
+
+/// [`literal`] for a path argument or redirect target: a leading `$HOME`,
+/// `${HOME}` or other [`FOLDER_VARIABLES`] entry, bare or in double quotes,
+/// reads as the folder the shell puts there, so `> $HOME/.profile` is judged
+/// as the file it writes, like `~/.profile`.
+fn path_literal(node: tree_sitter::Node<'_>, source: &str) -> (String, bool) {
+    match node.kind() {
+        "simple_expansion" | "expansion" => folder_variable(&node_text(node, source))
+            .map_or_else(|| (String::new(), false), |folder| (folder, true)),
+        "concatenation" | "string" => {
+            let mut value = String::new();
+            for index in 0..node.named_child_count() {
+                let Some(child) = node.named_child(index) else {
+                    continue;
+                };
+                let (part, complete) = if index == 0 {
+                    path_literal(child, source)
+                } else {
+                    literal(child, source)
+                };
+                value.push_str(&part);
+                if !complete {
+                    return (value, false);
+                }
+            }
+            (value, true)
+        }
+        _ => literal(node, source),
+    }
+}
+
 /// Decode literal shell syntax without evaluating variables or substitutions.
 /// Incomplete values retain only their known leading portion for path checks.
 fn literal(node: tree_sitter::Node<'_>, source: &str) -> (String, bool) {
@@ -727,6 +790,57 @@ mod regression {
             assert_eq!(
                 analyze(command, &workspace).external_dirs,
                 vec![expected],
+                "{command}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_leading_home_variable_is_the_home_folder() {
+        let root = std::env::temp_dir().join(format!("haarness-home-var-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let Some(home) = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|home| home.is_absolute())
+        else {
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        };
+        let home = resolve(&home, "");
+        if workspace.canonicalize().unwrap().starts_with(&home) {
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        let new = format!("haarness-home-var-{}", uuid::Uuid::now_v7());
+        for (command, expected) in [
+            (format!("touch $HOME/{new}"), glob(&home)),
+            (format!("echo x > \"${{HOME}}/{new}\""), glob(&home)),
+            (
+                format!("cp a.json $HOME/{new}/b.json"),
+                glob(&home.join(&new)),
+            ),
+            ("cd $HOME".to_owned(), glob(&home)),
+            ("rm -rf \"$HOME\"".to_owned(), glob(&home)),
+            (format!("cat $HOME/{new}/$name"), glob(&home.join(&new))),
+        ] {
+            assert_eq!(
+                analyze(&command, &workspace).external_dirs,
+                vec![expected],
+                "{command}"
+            );
+        }
+        // Single quotes keep the text, and an expansion with an operator or
+        // an unknown variable stays unjudged, as before.
+        for command in [
+            format!("touch '$HOME/{new}'"),
+            format!("touch ${{HOME:-x}}/{new}"),
+            format!("touch $PROJECT_OUT/{new}"),
+            format!("touch sub$HOME/{new}"),
+        ] {
+            assert!(
+                analyze(&command, &workspace).external_dirs.is_empty(),
                 "{command}"
             );
         }

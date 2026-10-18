@@ -27,11 +27,4 @@ pub use skills::FilesystemSkillRegistry;
 pub use tools::{ManagementRegistry, NativeToolRegistry};
 pub use workflow::WorkflowRuntimeAdapter;
 
-/// Known credential shapes in free text replaced with `[redacted]`, as hook
-/// log lines get them: for logs that leave the machine (`haarness logs
-/// export`).
-#[must_use]
-pub fn redact_log_text(text: &str) -> String {
-    hooks::redact(text)
-}
 mod shell;

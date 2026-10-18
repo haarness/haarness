@@ -2421,6 +2421,7 @@
   "Open a project to open links to its files.": "파일 링크를 열려면 먼저 프로젝트를 여세요.",
   "Links to network locations do not open.": "네트워크 위치로 연결되는 링크는 열리지 않습니다.",
   "Only files in this project open from a link.": "링크로는 이 프로젝트 안의 파일만 열 수 있습니다.",
+  "This file is a link to somewhere outside the project, so it does not open here.": "이 파일은 프로젝트 밖을 가리키는 링크라서 여기서 열 수 없습니다.",
   "This kind of link does not open in Haarness.": "이런 종류의 링크는 Haarness에서 열리지 않습니다.",
   "{path} was not found in this project.": "이 프로젝트에서 {path}을(를) 찾을 수 없습니다.",
   "This Haarness link could not be opened.": "이 Haarness 링크를 열 수 없습니다.",

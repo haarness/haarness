@@ -2421,6 +2421,7 @@
   "Open a project to open links to its files.": "Otvorite projekat da biste otvarali linkove na njegove datoteke.",
   "Links to network locations do not open.": "Linkovi na mrežne lokacije se ne otvaraju.",
   "Only files in this project open from a link.": "Iz linka se otvaraju samo datoteke iz ovog projekta.",
+  "This file is a link to somewhere outside the project, so it does not open here.": "Ova datoteka je link na mjesto izvan projekta, pa se ovdje ne otvara.",
   "This kind of link does not open in Haarness.": "Ova vrsta linka se ne otvara u Haarnessu.",
   "{path} was not found in this project.": "{path} nije pronađen u ovom projektu.",
   "This Haarness link could not be opened.": "Ovaj Haarness link nije moguće otvoriti.",
