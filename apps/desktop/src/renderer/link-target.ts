@@ -54,6 +54,22 @@ export function loadsNetworkPath(value: string) {
   return value.split(",").some((part) => networkPath(parsedAddress(part)));
 }
 
+/**
+ * Whether a CSS value, as an SVG presentation attribute (`mask`, `filter`,
+ * `fill`, `marker-end`, …) holds one, points anywhere but into the reply
+ * itself: a `url()` whose target is not a `#fragment`. This window resolves
+ * any other target like an address, `url(//host/x.svg#a)` to a network share
+ * included. A CSS escape could spell `url(`, so a value with one counts too.
+ */
+export function cssReferencesOutside(value: string) {
+  if (value.includes("\\")) return true;
+  for (const match of value.matchAll(/url\(/gi)) {
+    const target = value.slice(match.index + 4).replace(/^[\s"']+/, "");
+    if (!target.startsWith("#")) return true;
+  }
+  return false;
+}
+
 export function linkTarget(href: string, place: LinkPlace): LinkTarget {
   const raw = parsedAddress(href);
   if (!raw || raw.startsWith("#")) return { kind: "none" };
