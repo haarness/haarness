@@ -2451,5 +2451,8 @@
   "Add screenshots": "Adicionar capturas",
   "Choose your screenshots folder": "Escolha a pasta das suas capturas de tela",
   "The screenshots changed. Open Screenshots again.": "As capturas de tela mudaram. Abra Capturas de tela de novo.",
-  "Choose up to 20 screenshots from the list.": "Escolha até 20 capturas da lista."
+  "Choose up to 20 screenshots from the list.": "Escolha até 20 capturas da lista.",
+  "Show your newest screenshots?": "Mostrar suas capturas de tela mais recentes?",
+  "Haarness shows previews of the newest images in your screenshots folder so you can pick some to attach.": "O Haarness mostra prévias das imagens mais recentes da sua pasta de capturas de tela para você escolher quais anexar.",
+  "Show screenshots": "Mostrar capturas de tela"
 }

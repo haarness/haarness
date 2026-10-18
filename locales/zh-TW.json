@@ -2451,5 +2451,8 @@
   "Add screenshots": "加入螢幕截圖",
   "Choose your screenshots folder": "選擇螢幕截圖資料夾",
   "The screenshots changed. Open Screenshots again.": "螢幕截圖已變更。請重新開啟「螢幕截圖」。",
-  "Choose up to 20 screenshots from the list.": "從清單中最多選擇 20 張螢幕截圖。"
+  "Choose up to 20 screenshots from the list.": "從清單中最多選擇 20 張螢幕截圖。",
+  "Show your newest screenshots?": "要顯示你最新的螢幕截圖嗎？",
+  "Haarness shows previews of the newest images in your screenshots folder so you can pick some to attach.": "Haarness 會顯示螢幕截圖資料夾中最新圖片的預覽，方便你挑選要附加的圖片。",
+  "Show screenshots": "顯示螢幕截圖"
 }

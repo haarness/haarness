@@ -2451,5 +2451,8 @@
   "Add screenshots": "Ekran görüntüsü ekle",
   "Choose your screenshots folder": "Ekran görüntüleri klasörünüzü seçin",
   "The screenshots changed. Open Screenshots again.": "Ekran görüntüleri değişti. Ekran görüntülerini yeniden açın.",
-  "Choose up to 20 screenshots from the list.": "Listeden en fazla 20 ekran görüntüsü seçin."
+  "Choose up to 20 screenshots from the list.": "Listeden en fazla 20 ekran görüntüsü seçin.",
+  "Show your newest screenshots?": "En yeni ekran görüntüleriniz gösterilsin mi?",
+  "Haarness shows previews of the newest images in your screenshots folder so you can pick some to attach.": "Haarness, ekran görüntüleri klasörünüzdeki en yeni görsellerin önizlemelerini gösterir; böylece eklemek istediklerinizi seçebilirsiniz.",
+  "Show screenshots": "Ekran görüntülerini göster"
 }

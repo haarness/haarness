@@ -2451,5 +2451,8 @@
   "Add screenshots": "Tilføj skærmbilleder",
   "Choose your screenshots folder": "Vælg mappen med dine skærmbilleder",
   "The screenshots changed. Open Screenshots again.": "Skærmbillederne har ændret sig. Åbn Skærmbilleder igen.",
-  "Choose up to 20 screenshots from the list.": "Vælg op til 20 skærmbilleder på listen."
+  "Choose up to 20 screenshots from the list.": "Vælg op til 20 skærmbilleder på listen.",
+  "Show your newest screenshots?": "Vis dine nyeste skærmbilleder?",
+  "Haarness shows previews of the newest images in your screenshots folder so you can pick some to attach.": "Haarness viser eksempler på de nyeste billeder i din mappe med skærmbilleder, så du kan vælge nogle at vedhæfte.",
+  "Show screenshots": "Vis skærmbilleder"
 }

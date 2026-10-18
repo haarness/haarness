@@ -114,3 +114,37 @@ export function createScreenshotListings<T>() {
     },
   };
 }
+
+/** How long a click or key press lets its window list screenshots: Chromium's own span for user activation. */
+export const ACTIVATION_SPAN = 5000;
+
+/**
+ * Whether an input event Electron reports for a window (`input-event`) is the
+ * person choosing something: a click, a tap, Enter or Space. Main sees it on
+ * its way to the page, so a page cannot make one up.
+ */
+export function activatingInput(input: { type: string; key?: string }) {
+  if (input.type === "mouseDown" || input.type === "touchEnd" || input.type === "gestureTap") return true;
+  return (input.type === "keyDown" || input.type === "rawKeyDown") && (input.key === "Enter" || input.key === " ");
+}
+
+/**
+ * When each window last had such an input. Listing screenshots takes it:
+ * one click or key press lists the folder once, and only shortly after.
+ */
+export function createActivations(span = ACTIVATION_SPAN, now = () => Date.now()) {
+  const last = new Map<number, number>();
+  return {
+    note(owner: number) {
+      last.set(owner, now());
+    },
+    take(owner: number) {
+      const at = last.get(owner);
+      last.delete(owner);
+      return at !== undefined && now() - at <= span;
+    },
+    forget(owner: number) {
+      last.delete(owner);
+    },
+  };
+}
