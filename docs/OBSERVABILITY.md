@@ -81,7 +81,7 @@ Every Haarness process using a data folder (the terminal UI, the workspace serve
 2026-10-18T07:12:03.418Z 48211 serve  INFO haarness_core::runtime: reporting a background task the restart stopped …
 ```
 
-A workspace server started in the background (by `serve --daemon`, the terminal UI or Desktop) has no stderr. If it stops before it is ready, it writes why (its error, or a panic) as one line, `pid <pid>: <reason>`, to `<data>/logs/server-start.log`, and its launcher adds that to the error it reports: `Haarness server exited during startup (exit status: 1): Port 4096 on 127.0.0.1 is already in use. …`. A launcher empties the file once it passes 64 KiB.
+A workspace server started in the background (by `serve --daemon`, the terminal UI or Desktop) has no stderr. If it stops before it is listening, it writes why (its error, or a panic) to `<data>/logs/server-start.log` as one line marked with an id its launcher chose, and its launcher adds that to the error it reports: `Haarness server exited during startup (exit status: 1): Port 4096 on 127.0.0.1 is already in use. …`. Once listening, a server writes nothing more there. A launcher moves a file past 64 KiB to `server-start.log.old`, and reads the end of both.
 
 A process starts at `info` for the Haarness crates and `warn` elsewhere, or at `--log-level` (`trace`, `debug`, `info`, `warn`, `error`) or `HAARNESS_LOG` / `RUST_LOG`. `--log-level` also applies to the workspace server that command starts; a server that is already running keeps its level.
 

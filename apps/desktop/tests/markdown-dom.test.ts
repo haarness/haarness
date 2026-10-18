@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
-import { loadsNetworkPath, parsedAddress } from "../src/renderer/link-target";
+import { cssReferencesOutside, loadsNetworkPath, parsedAddress } from "../src/renderer/link-target";
 
 // Markdown sanitizing needs a DOM, which these tests do not have, so this
 // reads the source: replies are sanitized by a DOMPurify of their own, and
@@ -60,4 +60,30 @@ test("an address a reply loads by itself never names a network path, however it 
     assert.ok(attributes.includes(`"${name}"`), name);
   assert.match(markdown, /if \(loadsNetworkPath\(data\.attrValue\)\) data\.keepAttr = false;/);
   assert.match(markdown, /const value = parsedAddress\(data\.attrValue\);/);
+});
+
+// SVG presentation attributes are CSS, and their `url()` loads what it names:
+// `<rect mask="url(//host/s/m.svg#m)">` reaches a network share from a file:
+// window just as an image does. Only a `#fragment` of the reply itself stays.
+test("an SVG attribute's url() may point only into the reply", async () => {
+  for (const value of [
+    "url(//evil.example/s/f.svg#f)",
+    "url( '//evil.example/s/m.svg#m' )",
+    'URL("\\\\\\\\evil.example\\\\s\\\\m.svg#m")',
+    "url(m.svg#m)",
+    "url(https://example.com/f.svg#f)",
+    "url(#a) url(//evil.example/b.svg#b)",
+    "\\75 rl(//evil.example/f.svg#f)",
+    "u\\rl(//evil.example/f.svg#f)",
+  ])
+    assert.equal(cssReferencesOutside(value), true, JSON.stringify(value));
+  for (const value of ["url(#clip)", "url( '#mask' )", 'url("#f") red', "red", "none", "#fff"])
+    assert.equal(cssReferencesOutside(value), false, JSON.stringify(value));
+
+  const markdown = await readFile(new URL("../src/renderer/markdown-dom.ts", import.meta.url), "utf8");
+  const attributes = /const CSS_URL_ATTRIBUTES = new Set\(\[([^\]]*)\]\)/.exec(markdown)?.[1] ?? "";
+  for (const name of ["fill", "stroke", "filter", "mask", "clip-path", "marker", "marker-start", "marker-mid", "marker-end", "cursor"])
+    assert.ok(attributes.includes(`"${name}"`), name);
+  assert.match(markdown, /CSS_URL_ATTRIBUTES\.has\(data\.attrName\) \|\| \/url\\\(\/i\.test\(data\.attrValue\)/);
+  assert.match(markdown, /if \(css && cssReferencesOutside\(data\.attrValue\)\) data\.keepAttr = false;/);
 });

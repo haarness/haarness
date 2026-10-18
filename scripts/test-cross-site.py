@@ -87,6 +87,12 @@ try:
         else:
             # A loopback server already refuses a Host that is not loopback.
             assert request(port, host=f'attacker.example:{port}') == 403
+            # A page on another local port is another web site: on this open
+            # server it could otherwise stop it with a no-cors POST.
+            for origin in (f'http://localhost:{port + 1}', 'http://127.0.0.1:3000', 'http://127.0.0.1'):
+                assert request(port, '/v1/shutdown', 'POST', Origin=origin, Sec_Fetch_Site='same-site') == 403, origin
+                assert request(port, Origin=origin) == 403, origin
+            assert request(port, Origin=f'http://localhost:{port}') == 200
 
         # The CLI still attaches and runs a turn.
         client = state / 'client'
