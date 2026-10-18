@@ -12,7 +12,7 @@ use std::{collections::HashMap, path::Path, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use haarness_core::{CoreError, CoreResult, ThreadRepository};
+use haarness_core::{CoreError, CoreResult, StrandedTask, ThreadRepository};
 use haarness_protocol::{
     CompactRequest, CreateThreadRequest, GoalState, Item, ItemData, ItemId, RequestId,
     SessionArchive, SessionArchiveImportResult, StartTurnRequest, Thread, ThreadId, Turn, TurnId,
@@ -87,7 +87,13 @@ impl SqliteStore {
     /// after the child turn becomes terminal but before its runner appends the
     /// matching parent `TaskState`. Without this startup pass, clients rebuild
     /// an agent that appears to run forever even though no process owns it.
-    fn reconcile_task_states(tx: &rusqlite::Transaction<'_>, updated_at: &str) -> CoreResult<u64> {
+    ///
+    /// Returns the background tasks among them: the chat that launched each
+    /// was told its result would be delivered, and it never will be.
+    fn reconcile_task_states(
+        tx: &rusqlite::Transaction<'_>,
+        updated_at: &str,
+    ) -> CoreResult<Vec<StrandedTask>> {
         struct Checkpoint {
             parent_thread_id: ThreadId,
             parent_turn_id: Option<TurnId>,
@@ -140,7 +146,7 @@ impl SqliteStore {
             }
         }
 
-        let mut reconciled = 0_u64;
+        let mut stranded = Vec::new();
         for checkpoint in latest.into_values() {
             if !matches!(
                 checkpoint.state.as_str(),
@@ -167,6 +173,16 @@ impl SqliteStore {
             }) else {
                 continue;
             };
+            if checkpoint.state == "background" {
+                stranded.push(StrandedTask {
+                    parent_thread_id: checkpoint.parent_thread_id,
+                    parent_turn_id: checkpoint.parent_turn_id,
+                    call_id: checkpoint.call_id.clone(),
+                    child_thread_id: checkpoint.child_thread_id,
+                    child_turn_id: checkpoint.child_turn_id,
+                    state: state.into(),
+                });
+            }
             let data = ItemData::TaskState {
                 call_id: checkpoint.call_id,
                 child_thread_id: checkpoint.child_thread_id,
@@ -192,9 +208,8 @@ impl SqliteStore {
                 params![checkpoint.parent_thread_id.to_string(), updated_at],
             )
             .map_err(storage)?;
-            reconciled += 1;
         }
-        Ok(reconciled)
+        Ok(stranded)
     }
 
     fn migrate(&self) -> CoreResult<()> {
@@ -1325,6 +1340,9 @@ impl ThreadRepository for SqliteStore {
         Ok(())
     }
     async fn recover_interrupted(&self) -> CoreResult<u64> {
+        Ok(self.recover_interrupted_tasks().await?.0)
+    }
+    async fn recover_interrupted_tasks(&self) -> CoreResult<(u64, Vec<StrandedTask>)> {
         let mut connection = self.connection.lock();
         let tx = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -1387,9 +1405,9 @@ impl ThreadRepository for SqliteStore {
             )
             .map_err(storage)?;
         }
-        Self::reconcile_task_states(&tx, &updated_at)?;
+        let stranded = Self::reconcile_task_states(&tx, &updated_at)?;
         tx.commit().map_err(storage)?;
-        u64::try_from(orphaned.len()).map_err(storage)
+        Ok((u64::try_from(orphaned.len()).map_err(storage)?, stranded))
     }
 }
 
@@ -2534,6 +2552,97 @@ mod tests {
             })
             .count();
         assert_eq!(reconciled, 1, "recovery must be idempotent");
+    }
+
+    #[tokio::test]
+    async fn recovery_names_the_background_tasks_whose_result_never_arrived() {
+        let store = SqliteStore::in_memory().unwrap();
+        let request = |text: &str| StartTurnRequest {
+            request_id: RequestId::new(),
+            text: text.into(),
+            attachments: vec![],
+            synthetic: false,
+            auto_approve: false,
+            agent: None,
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            tools: None,
+            command: None,
+        };
+        // An idle chat whose background subagent was running, and a busy one
+        // whose foreground subagent was.
+        let idle = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let busy = store
+            .create_thread(CreateThreadRequest::default())
+            .await
+            .unwrap();
+        let idle_turn = store
+            .start_turn(idle.id, request("launch in the background"))
+            .await
+            .unwrap()
+            .0;
+        store
+            .set_turn_status(idle_turn.id, TurnStatus::Completed, None)
+            .await
+            .unwrap();
+        let busy_turn = store
+            .start_turn(busy.id, request("launch in the foreground"))
+            .await
+            .unwrap()
+            .0;
+        let mut children = Vec::new();
+        for (parent, turn, state) in [
+            (idle.id, idle_turn.id, "background"),
+            (busy.id, busy_turn.id, "running"),
+        ] {
+            let child = store
+                .create_thread(CreateThreadRequest {
+                    parent_id: Some(parent),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let child_turn = store
+                .start_turn(child.id, request("child work"))
+                .await
+                .unwrap()
+                .0;
+            store
+                .append_item(
+                    parent,
+                    Some(turn),
+                    ItemData::TaskState {
+                        call_id: format!("call-{state}"),
+                        child_thread_id: child.id,
+                        child_turn_id: child_turn.id,
+                        state: state.into(),
+                    },
+                )
+                .await
+                .unwrap();
+            children.push((child.id, child_turn.id));
+        }
+
+        let (stopped, stranded) = store.recover_interrupted_tasks().await.unwrap();
+        assert_eq!(stopped, 3, "both children and the busy chat's turn");
+        assert_eq!(
+            stranded,
+            [StrandedTask {
+                parent_thread_id: idle.id,
+                parent_turn_id: Some(idle_turn.id),
+                call_id: "call-background".into(),
+                child_thread_id: children[0].0,
+                child_turn_id: children[0].1,
+                state: "interrupted".into(),
+            }],
+            "only a background task is owed a result; a foreground one's chat was stopped with it"
+        );
+        let (_, again) = store.recover_interrupted_tasks().await.unwrap();
+        assert!(again.is_empty(), "a task is named once");
     }
 
     #[tokio::test]
