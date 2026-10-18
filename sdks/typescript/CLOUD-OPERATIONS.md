@@ -3,6 +3,7 @@
 | Python | TypeScript | HTTP |
 | --- | --- | --- |
 | `apple_app_site_association` | `appleAppSiteAssociation` | `GET /.well-known/apple-app-site-association` |
+| `android_asset_links` | `androidAssetLinks` | `GET /.well-known/assetlinks.json` |
 | `native_router_session` | `nativeRouterSession` | `POST /api/v1/account/router-session` |
 | `list_accounts` | `listAccounts` | `GET /api/v1/accounts` |
 | `create_account` | `createAccount` | `POST /api/v1/accounts` |
@@ -156,11 +157,12 @@
 | `start_workspace` | `startWorkspace` | `POST /api/v1/workspaces/{id}/start` |
 | `stop_workspace` | `stopWorkspace` | `POST /api/v1/workspaces/{id}/stop` |
 | `revoke_workspace_tickets` | `revokeWorkspaceTickets` | `POST /api/v1/workspaces/{id}/tickets/revoke` |
+| `email_confirm` | `emailConfirm` | `POST /auth/email/confirm` |
 | `email_forgot` | `emailForgot` | `POST /auth/email/forgot-password` |
+| `email_link` | `emailLink` | `POST /auth/email/link` |
 | `email_login` | `emailLogin` | `POST /auth/email/login` |
 | `email_reset` | `emailReset` | `POST /auth/email/reset-password` |
-| `email_signup` | `emailSignup` | `POST /auth/email/signup` |
-| `email_verify` | `emailVerify` | `POST /auth/email/verify` |
+| `email_start` | `emailStart` | `POST /auth/email/start` |
 | `google_callback` | `googleCallback` | `GET /auth/google/callback` |
 | `google_start` | `googleStart` | `GET /auth/google/start` |
 | `logout` | `logout` | `POST /auth/logout` |

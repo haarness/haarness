@@ -6,6 +6,10 @@ export class CloudApi extends Transport {
   appleAppSiteAssociation(options: RequestOptions = {}): Promise<T.AppleAppSiteAssociation> {
     return this.request("GET", `/.well-known/apple-app-site-association`, { binaryBody: false, binaryResponse: false, ...options });
   }
+  /** GET /.well-known/assetlinks.json */
+  androidAssetLinks(options: RequestOptions = {}): Promise<Array<T.AndroidAssetLinkStatement>> {
+    return this.request("GET", `/.well-known/assetlinks.json`, { binaryBody: false, binaryResponse: false, ...options });
+  }
   /** POST /api/v1/account/router-session */
   nativeRouterSession(body: T.NativeRouterSessionRequest, options: RequestOptions = {}): Promise<T.NativeRouterSessionResponse> {
     return this.request("POST", `/api/v1/account/router-session`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
@@ -606,9 +610,17 @@ export class CloudApi extends Transport {
   revokeWorkspaceTickets(id: string, options: RequestOptions = {}): Promise<void> {
     return this.request("POST", `/api/v1/workspaces/${this.segment(id)}/tickets/revoke`, { binaryBody: false, binaryResponse: false, ...options });
   }
+  /** POST /auth/email/confirm */
+  emailConfirm(body: T.EmailConfirmRequest, options: RequestOptions = {}): Promise<T.SignInResponse> {
+    return this.request("POST", `/auth/email/confirm`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
   /** POST /auth/email/forgot-password */
   emailForgot(body: T.EmailAccountRequest, options: RequestOptions = {}): Promise<T.JsonValue> {
     return this.request("POST", `/auth/email/forgot-password`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  }
+  /** POST /auth/email/link */
+  emailLink(body: T.EmailLinkRequest, options: RequestOptions = {}): Promise<T.EmailLinkResponse> {
+    return this.request("POST", `/auth/email/link`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
   }
   /** POST /auth/email/login */
   emailLogin(body: T.EmailLoginRequest, options: RequestOptions = {}): Promise<T.SignInResponse> {
@@ -618,13 +630,9 @@ export class CloudApi extends Transport {
   emailReset(body: T.EmailPasswordRequest, options: RequestOptions = {}): Promise<T.JsonValue> {
     return this.request("POST", `/auth/email/reset-password`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
   }
-  /** POST /auth/email/signup */
-  emailSignup(body: T.EmailAccountRequest, options: RequestOptions = {}): Promise<T.JsonValue> {
-    return this.request("POST", `/auth/email/signup`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
-  }
-  /** POST /auth/email/verify */
-  emailVerify(body: T.EmailPasswordRequest, options: RequestOptions = {}): Promise<T.JsonValue> {
-    return this.request("POST", `/auth/email/verify`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
+  /** POST /auth/email/start */
+  emailStart(body: T.EmailAccountRequest, options: RequestOptions = {}): Promise<T.JsonValue> {
+    return this.request("POST", `/auth/email/start`, { body, contentType: "application/json", binaryBody: false, binaryResponse: false, ...options });
   }
   /** GET /auth/google/callback */
   googleCallback(query: T.GoogleCallbackQuery, options: RequestOptions = {}): Promise<T.HttpRedirect> {
