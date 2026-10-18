@@ -2522,5 +2522,7 @@
   "Preview comment": "预览评论",
   "{count} failed": "{count} 项失败",
   "+{count} more": "还有 {count} 项",
-  "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "此应用尝试打开 Haarness 不会打开的链接。应用只能打开 http、https 和 mailto 链接。"
+  "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "此应用尝试打开 Haarness 不会打开的链接。应用只能打开 http、https 和 mailto 链接。",
+  "Load image from {host}": "从 {host} 加载图片",
+  "The image from {host} could not be loaded.": "无法加载来自 {host} 的图片。"
 }

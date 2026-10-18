@@ -1,5 +1,6 @@
 import DOMPurify from "dompurify";
 import type { MarkdownPatch } from "./markdown-project";
+import { holdRemoteImages, type RemoteImageLabels } from "./remote-images";
 
 type Block = { html: string; start: Comment; end: Comment };
 
@@ -92,7 +93,14 @@ export function markdownBlockIndex(host: HTMLElement, node: Node): number | unde
   return undefined;
 }
 
-export function createMarkdownDOM(host: HTMLElement) {
+/**
+ * `images` decides what an image from another host shows: the one this chat
+ * already loaded, or a placeholder whose button loads it (remote-images.ts).
+ */
+export function createMarkdownDOM(
+  host: HTMLElement,
+  images?: { loaded: (src: string) => string | undefined; labels: () => RemoteImageLabels },
+) {
   const blocks: Block[] = [];
   hosts.set(host, blocks);
   const between = (block: Block) => {
@@ -115,6 +123,7 @@ export function createMarkdownDOM(host: HTMLElement) {
         FORBID_TAGS: ["style", "form", "input", "button", "iframe"],
         FORBID_ATTR: ["style"],
       });
+      if (images) holdRemoteImages(fragment, images.loaded, images.labels());
       nodes(host, between(block), Array.from(fragment.childNodes), block.end);
       block.html = html;
     });

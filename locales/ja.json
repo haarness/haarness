@@ -2522,5 +2522,7 @@
   "Preview comment": "プレビューへのコメント",
   "{count} failed": "{count} 件失敗",
   "+{count} more": "あと {count} 件",
-  "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "このアプリは Haarness が開かないリンクを開こうとしました。アプリが開けるのは http、https、mailto のリンクだけです。"
+  "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "このアプリは Haarness が開かないリンクを開こうとしました。アプリが開けるのは http、https、mailto のリンクだけです。",
+  "Load image from {host}": "{host} から画像を読み込む",
+  "The image from {host} could not be loaded.": "{host} の画像を読み込めませんでした。"
 }
