@@ -44,10 +44,12 @@ export function keyPlace(
   return "page";
 }
 
-/** Previous and next chat answer from the page and the message box, draft
- * or not: Alt and an arrow do nothing there that a reader would miss. */
-export const stepsChats = (place: KeyPlace) =>
-  place === "page" || place === "composer" || place === "draft";
+/** Previous and next chat answer from the page and the message box. In a
+ * draft on macOS, Option and an arrow move the caret to the paragraph's
+ * start or end, so there the draft keeps them; elsewhere Alt and an arrow do
+ * nothing in a draft. */
+export const stepsChats = (place: KeyPlace, mac: boolean) =>
+  place === "page" || place === "composer" || (place === "draft" && !mac);
 
 /** The prompt keys answer from the page, and from the message box only
  * while it is empty. */
