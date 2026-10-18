@@ -9,4 +9,7 @@ if [ -z "${HAARNESS_DESKTOP_SESSION:-}" ]; then
 fi
 printf 'haarness-test' | gnome-keyring-daemon --unlock --replace >/dev/null 2>&1
 gnome-keyring-daemon --start --components=secrets >/dev/null 2>&1
+# Chromium chooses its password store from the desktop: under a bare X server
+# it would keep secrets in plain text, which Desktop refuses.
+export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-GNOME}"
 exec xvfb-run -a -s '-screen 0 1600x1000x24' "$@"
