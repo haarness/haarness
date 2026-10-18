@@ -235,20 +235,8 @@ impl Service {
         // subagent that asked after the last one ended) come first. The event
         // stream starts with the server's recent events; those from before
         // the turn are skipped below, so each request is taken once.
-        if let Ok(pending) = self.client.pending_permissions().await {
-            for info in pending {
-                if info.thread_id != thread && info.root_thread_id != Some(thread) {
-                    continue;
-                }
-                let child = if info.thread_id == thread {
-                    None
-                } else {
-                    Some(self.child(info.thread_id, &mut children).await)
-                };
-                let payload = serde_json::to_value(&info).map_err(internal)?;
-                approvals.wait(info.permission_id, payload, child);
-            }
-        }
+        self.refresh_pending(thread, &mut approvals, &mut children)
+            .await;
         let result = async {
             loop {
                 self.show_next(&mut approvals, &request.session_id, connection, &calls)
@@ -372,17 +360,24 @@ impl Service {
                             break finish(finished);
                         }
                     }
+                    // Events may have been missed: requests raised or settled
+                    // meanwhile are read again from the server.
                     SubscriptionEvent::ResyncRequired => {
                         let current = self.client.turn(turn.id).await.map_err(internal)?;
                         if !matches!(current.status, TurnStatus::Queued | TurnStatus::Running) {
                             break finish(current);
                         }
+                        self.refresh_pending(thread, &mut approvals, &mut children)
+                            .await;
+                    }
+                    SubscriptionEvent::Reconnected => {
+                        self.refresh_pending(thread, &mut approvals, &mut children)
+                            .await;
                     }
                     SubscriptionEvent::Event(_)
                     | SubscriptionEvent::ConnectionLost { .. }
                     | SubscriptionEvent::ServerRestarting
-                    | SubscriptionEvent::ServerRestartFailed(_)
-                    | SubscriptionEvent::Reconnected => {}
+                    | SubscriptionEvent::ServerRestartFailed(_) => {}
                 }
             }
         }
@@ -525,6 +520,41 @@ impl Service {
             }
             result => result.map_err(internal),
         }
+    }
+
+    /// Reads the requests the server holds for the session's chats: those
+    /// not taken yet wait to be shown, and those taken but no longer held
+    /// (settled while events were missed) are dropped. A server that cannot
+    /// be read leaves the queue as it is.
+    async fn refresh_pending(
+        &self,
+        thread: ThreadId,
+        approvals: &mut Approvals,
+        children: &mut HashMap<ThreadId, Child>,
+    ) {
+        let Ok(pending) = self.client.pending_permissions().await else {
+            return;
+        };
+        let mut held = Vec::new();
+        for info in pending {
+            if info.thread_id != thread && info.root_thread_id != Some(thread) {
+                continue;
+            }
+            let child = if info.thread_id == thread {
+                None
+            } else {
+                Some(self.child(info.thread_id, children).await)
+            };
+            let Ok(payload) = serde_json::to_value(&info) else {
+                continue;
+            };
+            held.push(Asked {
+                id: info.permission_id,
+                payload,
+                child,
+            });
+        }
+        approvals.refresh(held);
     }
 
     /// Shows the oldest waiting request when none is up, skipping those the
@@ -879,6 +909,27 @@ impl Approvals {
         self.waiting.push_back(Asked { id, payload, child });
     }
 
+    /// The requests the server holds now, read after events may have been
+    /// missed: new ones wait, taken ones it no longer holds are settled.
+    fn refresh(&mut self, held: Vec<Asked>) {
+        let ids = held
+            .iter()
+            .map(|asked| asked.id.clone())
+            .collect::<HashSet<_>>();
+        let gone = self
+            .taken
+            .iter()
+            .filter(|id| !ids.contains(*id) && !self.settled.contains(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for id in gone {
+            self.settle(&id);
+        }
+        for asked in held {
+            self.wait(asked.id, asked.payload, asked.child);
+        }
+    }
+
     fn settle(&mut self, id: &str) {
         self.settled.insert(id.to_owned());
         self.waiting.retain(|asked| asked.id != id);
@@ -1230,6 +1281,35 @@ mod tests {
             asked_call(&calls, None, &json!({"path": "own.md"})).as_deref(),
             Some("call-1")
         );
+    }
+
+    #[test]
+    fn a_refresh_after_missed_events_asks_new_requests_and_drops_settled_ones() {
+        let asked = |id: &str| Asked {
+            id: id.to_owned(),
+            payload: json!({"permissionId": id}),
+            child: None,
+        };
+        let mut approvals = Approvals::default();
+        approvals.wait("shown".into(), json!({}), None);
+        approvals.wait("waiting".into(), json!({}), None);
+        let shown = approvals.waiting.pop_front().unwrap();
+        approvals.shown = Some((shown.id, Box::pin(std::future::pending())));
+        // `shown` was settled and `missed` raised while events were lost.
+        approvals.refresh(vec![asked("waiting"), asked("missed")]);
+        assert!(approvals.shown.is_none(), "a settled request is withdrawn");
+        assert!(approvals.settled.contains("shown"));
+        assert_eq!(
+            approvals
+                .waiting
+                .iter()
+                .map(|asked| asked.id.as_str())
+                .collect::<Vec<_>>(),
+            ["waiting", "missed"]
+        );
+        // A second read changes nothing.
+        approvals.refresh(vec![asked("waiting"), asked("missed")]);
+        assert_eq!(approvals.waiting.len(), 2);
     }
 
     #[test]

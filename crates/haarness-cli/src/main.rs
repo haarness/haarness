@@ -9150,12 +9150,19 @@ fn init_logging(
     use tracing_subscriber::filter::FilterExt as _;
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
-    let log_filter = match level {
-        Some(level) => EnvFilter::new(haarness_filter(level)),
-        None => EnvFilter::try_from_env("HAARNESS_LOG")
-            .or_else(|_| EnvFilter::try_from_default_env())
-            .unwrap_or_else(|_| EnvFilter::new(haarness_filter("info"))),
-    };
+    // Kept as text too: a raised level (`haarness logs level`) is laid over
+    // these directives.
+    let directives = level.map(haarness_filter).unwrap_or_else(|| {
+        ["HAARNESS_LOG", "RUST_LOG"]
+            .into_iter()
+            .find_map(|key| {
+                std::env::var(key)
+                    .ok()
+                    .filter(|value| EnvFilter::try_new(value).is_ok())
+            })
+            .unwrap_or_else(|| haarness_filter("info"))
+    });
+    let log_filter = EnvFilter::new(&directives);
     let stamp = || ProcessStamp {
         pid: std::process::id(),
         role: command,
@@ -9221,7 +9228,13 @@ fn init_logging(
         .with(layers)
         .try_init()
         .context("initialize tracing subscriber")?;
-    logs::watch(paths.data.clone(), log_filter, reloads, haarness_filter);
+    logs::watch(
+        paths.data.clone(),
+        log_filter,
+        directives,
+        reloads,
+        HAARNESS_TARGETS,
+    );
     for notice in &notices {
         tracing::warn!("{notice}");
         if interactive {
@@ -9239,27 +9252,30 @@ fn init_logging(
 fn haarness_filter(level: &str) -> String {
     use std::fmt::Write as _;
     let mut filter = String::from("warn");
-    for name in [
-        "haarness",
-        "haarness_cli",
-        "haarness_core",
-        "haarness_language",
-        "haarness_server",
-        "haarness_providers",
-        "haarness_store",
-        "haarness_tui",
-        "haarness_mcp",
-        "haarness_opentui",
-        "haarness_pty",
-        "haarness_scheduler",
-        "haarness_workflow_catalog",
-        "haarness_workflows",
-        "haarness_workspaces",
-    ] {
+    for name in HAARNESS_TARGETS {
         let _ = write!(filter, ",{name}={level}");
     }
     filter
 }
+
+/// The log targets of the Haarness crates.
+const HAARNESS_TARGETS: &[&str] = &[
+    "haarness",
+    "haarness_cli",
+    "haarness_core",
+    "haarness_language",
+    "haarness_server",
+    "haarness_providers",
+    "haarness_store",
+    "haarness_tui",
+    "haarness_mcp",
+    "haarness_opentui",
+    "haarness_pty",
+    "haarness_scheduler",
+    "haarness_workflow_catalog",
+    "haarness_workflows",
+    "haarness_workspaces",
+];
 
 /// A count and its noun: `1 model`, `3 models`.
 fn plural(count: usize, one: &str, many: &str) -> String {
