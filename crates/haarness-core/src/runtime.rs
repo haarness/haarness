@@ -1700,10 +1700,9 @@ impl AgentRuntime {
     /// Tells a chat how a background subagent it launched ended when the
     /// result could not reach it: the server stopped while the subagent ran
     /// (it is not resumed: nothing it was doing is repeated), or between its
-    /// end and the delivery. The chat takes it as a delivered result would
-    /// arrive, which starts a turn when it is idle; a chat whose own last
-    /// turn was stopped (by the same restart) gets the notice without a turn,
-    /// for when it goes on.
+    /// end and the delivery. Nothing starts by itself after a restart: the
+    /// result is recorded where the model reads it with the next message the
+    /// person sends, and a notice in the chat tells the person.
     async fn report_stranded_task(&self, task: StrandedTask) -> CoreResult<()> {
         let parent = self.repository.get_thread(task.parent_thread_id).await?;
         if parent.archived {
@@ -1767,27 +1766,35 @@ impl AgentRuntime {
             ),
         };
         let text = task_envelope_for(child, &description, state, &text);
-        info!(parent = %parent.id, %child, state = task.state, "reporting a background task the restart stopped");
-        let parent_stopped = self
-            .repository
-            .last_turn(parent.id)
-            .await?
-            .is_some_and(|turn| turn.status == TurnStatus::Interrupted);
-        if parent_stopped {
+        let notice = if task.state == "interrupted" {
+            format!(
+                "Haarness restarted before the background task \u{201c}{description}\u{201d} finished. \
+                 It was not resumed; your next message tells the agent, which can continue it."
+            )
+        } else {
+            format!(
+                "Haarness restarted before the result of the background task \u{201c}{description}\u{201d} \
+                 reached this chat; your next message passes it to the agent."
+            )
+        };
+        info!(parent = %parent.id, %child, state = task.state, "recorded a background task the restart stopped");
+        let root = self.resolve_root(&parent).await;
+        for data in [
+            ItemData::UserMessage {
+                text,
+                attachments: Vec::new(),
+                queued: false,
+                synthetic: true,
+            },
+            ItemData::Error {
+                message: notice,
+                retryable: false,
+            },
+        ] {
             let item = self
                 .repository
-                .append_item(
-                    parent.id,
-                    task.parent_turn_id,
-                    ItemData::UserMessage {
-                        text,
-                        attachments: Vec::new(),
-                        queued: false,
-                        synthetic: true,
-                    },
-                )
+                .append_item(parent.id, task.parent_turn_id, data)
                 .await?;
-            let root = self.resolve_root(&parent).await;
             self.events.publish_scoped(
                 "item.created",
                 Some(parent.id),
@@ -1796,27 +1803,7 @@ impl AgentRuntime {
                 Some(item.id),
                 json!(item),
             );
-            return Ok(());
         }
-        // A scheduled run's chat never waits for a person, as when it ran.
-        let unattended = scheduled_lineage(self.repository.as_ref(), parent.id).await;
-        self.queue_input_with_options(
-            parent.id,
-            QueueInputRequest {
-                preview: None,
-                reasoning_effort: None,
-                delivery: haarness_protocol::InputDelivery::Steer,
-                request_id: RequestId::new(),
-                text,
-                attachments: Vec::new(),
-                synthetic: true,
-            },
-            unattended,
-            unattended,
-            unattended.then(|| HashMap::from([("question".to_owned(), false)])),
-            None,
-        )
-        .await?;
         Ok(())
     }
 
