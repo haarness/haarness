@@ -20,7 +20,7 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
-use tracing_subscriber::{EnvFilter, Registry, reload};
+use tracing_subscriber::{EnvFilter, Registry, filter::LevelFilter, reload};
 
 /// The levels a window can raise every Haarness crate to.
 pub const LEVELS: [&str; 5] = ["trace", "debug", "info", "warn", "error"];
@@ -74,9 +74,19 @@ fn write_control(data: &Path, control: &Control) -> Result<()> {
     Ok(())
 }
 
+/// Whether `level` logs more than a process whose own filter logs at most
+/// `own`: a raised level never lowers a process started more verbose (with
+/// `--log-level debug`, say).
+fn louder(level: &str, own: Option<LevelFilter>) -> bool {
+    level
+        .parse::<LevelFilter>()
+        .is_ok_and(|level| own.is_none_or(|own| level > own))
+}
+
 /// Swaps the log filters of this process whenever the control file asks for
-/// another level, and back to `base` (the level the process started with)
-/// once no window is in force. Runs for the life of the process.
+/// a level louder than its own, and back to `base` (the level the process
+/// started with) once no such window is in force. Runs for the life of the
+/// process.
 pub fn watch(
     data: PathBuf,
     base: EnvFilter,
@@ -86,6 +96,7 @@ pub fn watch(
     if handles.is_empty() {
         return;
     }
+    let own = base.max_level_hint();
     let apply = move |level: Option<&str>| {
         let filter = level.map_or_else(|| base.clone(), |level| EnvFilter::new(raised(level)));
         for handle in &handles {
@@ -98,6 +109,7 @@ pub fn watch(
         let wanted = control
             .as_ref()
             .and_then(|control| control.level_at(Utc::now()))
+            .filter(|level| louder(level, own))
             .map(str::to_owned);
         if wanted == current {
             return;
@@ -253,13 +265,47 @@ pub fn level_command(
             "{level} until `haarness logs level stop` (running Haarness processes follow within about 2 seconds)"
         ),
     }
+    println!("A process that already logs at {level} or more keeps its own level.");
     Ok(())
 }
 
 /// Known secret shapes removed from one log line, as Haarness's own log
 /// lines and hook output get them.
 fn scrub(line: &str) -> String {
-    haarness_core::redact::text(line)
+    haarness_core::redact::text(&haarness_core::redact::urls_in(&without_private_keys(line)))
+}
+
+/// A line with every private key written on it (as a JSON string or an
+/// escaped error, `-----BEGIN … PRIVATE KEY-----` to `-----END … PRIVATE
+/// KEY-----`) replaced.
+fn without_private_keys(line: &str) -> String {
+    const LABEL: &str = "PRIVATE KEY-----";
+    let mut shown = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(start) = rest.find("-----BEGIN ") {
+        let block = &rest[start..];
+        let Some(end) = block.find(LABEL).and_then(|header| {
+            let footer = header + block[header..].find("-----END ")?;
+            Some(footer + block[footer..].find(LABEL)? + LABEL.len())
+        }) else {
+            break;
+        };
+        shown.push_str(&rest[..start]);
+        shown.push_str("[redacted private key]");
+        rest = &block[end..];
+    }
+    shown.push_str(rest);
+    shown
+}
+
+/// Whether a line opens a private key block that goes on below it.
+fn opens_private_key(line: &str) -> bool {
+    line.contains("-----BEGIN ") && line.contains("PRIVATE KEY-----") && !line.contains("-----END ")
+}
+
+/// Whether a line closes a private key block.
+fn closes_private_key(line: &str) -> bool {
+    line.contains("-----END ") && line.contains("PRIVATE KEY-----")
 }
 
 /// `haarness logs export [--output PATH] [--full]`.
@@ -326,11 +372,23 @@ fn export(files: &[(PathBuf, u64)], output: &Path, full: bool) -> Result<(usize,
         } else {
             let mut reader = BufReader::new(fs::File::open(path)?);
             let mut line = Vec::new();
+            // Inside a private key that spans lines: they are left out.
+            let mut key = false;
             while reader.read_until(b'\n', &mut line)? > 0 {
                 let text = String::from_utf8_lossy(&line);
                 let ending = if text.ends_with('\n') { "\n" } else { "" };
-                zip.write_all(scrub(text.trim_end_matches('\n')).as_bytes())?;
-                zip.write_all(ending.as_bytes())?;
+                let text = text.trim_end_matches('\n');
+                if key {
+                    key = !closes_private_key(text);
+                } else if opens_private_key(text) {
+                    key = true;
+                    let before = &text[..text.find("-----BEGIN ").unwrap_or(0)];
+                    zip.write_all(scrub(before).as_bytes())?;
+                    zip.write_all(b"[redacted private key]\n")?;
+                } else {
+                    zip.write_all(scrub(text).as_bytes())?;
+                    zip.write_all(ending.as_bytes())?;
+                }
                 line.clear();
             }
         }
@@ -445,6 +503,44 @@ mod tests {
         fs::remove_dir_all(data).unwrap();
     }
 
+    #[test]
+    fn a_raised_level_never_lowers_a_process_started_more_verbose() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let data = scratch("lower");
+        let (filter, handle) = reload::Layer::new(EnvFilter::new("debug"));
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let writer = {
+            let seen = seen.clone();
+            move || Line(seen.clone())
+        };
+        let subscriber =
+            tracing_subscriber::registry().with(tracing_subscriber::Layer::with_filter(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(writer)
+                    .with_ansi(false),
+                filter,
+            ));
+        let _guard = tracing::subscriber::set_default(subscriber);
+        level_command(&data, Some("info"), None, true).unwrap();
+        watch(
+            data.clone(),
+            EnvFilter::new("debug"),
+            vec![handle],
+            str::to_owned,
+        );
+        tracing::debug!("DEBUG_KEPT");
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains("DEBUG_KEPT"))
+        );
+        assert!(louder("trace", Some(LevelFilter::DEBUG)));
+        assert!(!louder("info", Some(LevelFilter::DEBUG)));
+        assert!(!louder("debug", Some(LevelFilter::DEBUG)));
+        fs::remove_dir_all(data).unwrap();
+    }
+
     struct Line(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
     impl std::io::Write for Line {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -465,7 +561,14 @@ mod tests {
         fs::create_dir_all(data.join("logs")).unwrap();
         fs::write(
             data.join("logs/haarness.log.2026-10-18"),
-            "INFO request failed Authorization: Bearer sk-live-1234567890abcdef\nINFO plain line\n",
+            "INFO request failed Authorization: Bearer sk-live-1234567890abcdef\n\
+             WARN mcp: cannot reach https://mcp.example.com/sse?X-Amz-Signature=QUERYSECRET42 (refused)\n\
+             ERROR key read failed: \"-----BEGIN RSA PRIVATE KEY-----\\nMIIEINLINEKEY\\n-----END RSA PRIVATE KEY-----\" rest\n\
+             DEBUG loaded -----BEGIN PRIVATE KEY-----\n\
+             MIIBLOCKLINEONE\n\
+             MIIBLOCKLINETWO\n\
+             -----END PRIVATE KEY-----\n\
+             INFO plain line\n",
         )
         .unwrap();
         let output = data.join("out.zip");
@@ -477,7 +580,27 @@ mod tests {
             &mut log,
         )
         .unwrap();
-        assert!(!log.contains("sk-live-1234567890abcdef"), "{log}");
+        for secret in [
+            "sk-live-1234567890abcdef",
+            "QUERYSECRET42",
+            "MIIEINLINEKEY",
+            "MIIBLOCKLINEONE",
+            "MIIBLOCKLINETWO",
+        ] {
+            assert!(!log.contains(secret), "{secret} in {log}");
+        }
+        assert!(
+            log.contains("https://mcp.example.com/sse?X-Amz-Signature="),
+            "{log}"
+        );
+        assert!(
+            log.contains("\" rest\n"),
+            "the text after a key stays: {log}"
+        );
+        assert!(
+            log.contains("DEBUG loaded [redacted private key]\nINFO plain line"),
+            "{log}"
+        );
         assert!(
             log.contains("[redacted]") && log.contains("INFO plain line\n"),
             "{log}"
