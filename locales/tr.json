@@ -2521,5 +2521,6 @@
   "Comment added to your message": "Mesajınıza yorum eklendi",
   "Preview comment": "Önizleme yorumu",
   "{count} failed": "{count} başarısız",
-  "+{count} more": "{count} tane daha"
+  "+{count} more": "{count} tane daha",
+  "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "Bu uygulama Haarness'ın açmadığı bir bağlantıyı açmaya çalıştı. Uygulamalar yalnızca http, https ve mailto bağlantılarını açabilir."
 }

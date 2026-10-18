@@ -2521,5 +2521,6 @@
   "Comment added to your message": "已将评论添加到你的消息",
   "Preview comment": "预览评论",
   "{count} failed": "{count} 项失败",
-  "+{count} more": "还有 {count} 项"
+  "+{count} more": "还有 {count} 项",
+  "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "此应用尝试打开 Haarness 不会打开的链接。应用只能打开 http、https 和 mailto 链接。"
 }
