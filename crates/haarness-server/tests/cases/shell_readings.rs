@@ -492,3 +492,70 @@ async fn a_command_too_long_to_read_under_an_ask_waits_for_a_person_in_auto_and_
     );
     assert!(!fixture.0.join("hi.txt").exists());
 }
+
+#[tokio::test]
+async fn a_line_too_large_to_read_asks_a_person_after_an_always_and_keeps_its_outside_paths() {
+    let fixture = Fixture::new();
+    let outside = Fixture::new();
+    let nested = format!("echo {}x{}", "$(echo ".repeat(1500), ")".repeat(1500));
+    let line = format!("{nested}; printf done > done.txt");
+    // An Always on `echo`, then the line in Auto: only a person answers.
+    let review = runtime(&fixture.0, &[("bash:echo *", D::Ask)]);
+    let thread = echo_thread(&review).await;
+    let turn = review
+        .start_turn(thread.id, turn_request(&bash("echo hi")))
+        .await
+        .unwrap();
+    wait_pending_permissions(&review, 1).await;
+    let pending = review.pending_permissions().remove(0);
+    reply(&review, &pending.permission_id, Reply::Always).await;
+    wait_done(&review, &turn).await;
+    auto(&review, &thread).await;
+    let turn = review
+        .start_turn(thread.id, turn_request(&bash(&line)))
+        .await
+        .unwrap();
+    wait_pending_permissions(&review, 1).await;
+    let pending = review.pending_permissions().remove(0);
+    assert_eq!(pending.permission, "bash");
+    assert_eq!(pending.allow_always, Some(false));
+    // The card names the bash rule that may apply.
+    assert_eq!(pending.detail["__readLimit"], "echo *");
+    assert!(pending.operation.len() < 1024);
+    reply(&review, &pending.permission_id, Reply::Reject).await;
+    wait_done(&review, &turn).await;
+    assert!(!fixture.0.join("done.txt").exists());
+    // A bash deny refuses it.
+    let denied = runtime(&fixture.0, &[("bash:git push *", D::Deny)]);
+    let thread = echo_thread(&denied).await;
+    run(&denied, &thread, &line).await;
+    let errors = tool_errors(&denied, &thread).await;
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("Haarness could not read all of")),
+        "{errors:?}"
+    );
+    // A path outside the project after the limit still asks.
+    let plain = runtime(&fixture.0, &[]);
+    let thread = echo_thread(&plain).await;
+    let touching = format!("{nested}; touch {}/x", outside.0.display());
+    let turn = plain
+        .start_turn(thread.id, turn_request(&bash(&touching)))
+        .await
+        .unwrap();
+    wait_pending_permissions(&plain, 1).await;
+    let pending = plain.pending_permissions().remove(0);
+    assert_eq!(pending.permission, "external_directory");
+    assert!(
+        pending
+            .patterns
+            .iter()
+            .any(|pattern| pattern.starts_with(&outside.0.display().to_string())),
+        "{:?}",
+        pending.patterns
+    );
+    reply(&plain, &pending.permission_id, Reply::Reject).await;
+    wait_done(&plain, &turn).await;
+    assert!(!outside.0.join("x").exists());
+}

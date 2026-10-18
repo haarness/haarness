@@ -38,6 +38,10 @@ pub struct BashAnalysis {
     /// [`Self::patterns`] too; their "always" patterns are not in
     /// [`Self::always`].
     pub derived: Vec<Derived>,
+    /// The line is too large to read as the shell would (its patterns passed
+    /// [`MAX_PATTERN_BYTES`], or it is longer than [`MAX_COMMAND_BYTES`]):
+    /// its written patterns may be clipped, and no rule allows it.
+    pub unreadable: bool,
 }
 
 /// One command as written in the line.
@@ -86,6 +90,10 @@ const MAX_ALL_READINGS: usize = 16 * 1024;
 /// it the line is judged as one command that could not be read (a deeply
 /// nested `$(…)` repeats most of its text in every command).
 const MAX_PATTERN_BYTES: usize = 4 * 1024 * 1024;
+/// A command line longer than this is not parsed: it is unreadable.
+const MAX_COMMAND_BYTES: usize = 1024 * 1024;
+/// How long a written pattern is kept once the line is unreadable.
+const CLIPPED_PATTERN_BYTES: usize = 256;
 /// How many commands one command line reads in text run again, in all.
 const MAX_NESTED_COMMANDS: usize = 4096;
 
@@ -103,6 +111,11 @@ const STDIN_PATHS: &[&str] = &["/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"];
 /// allowing).
 #[must_use]
 pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
+    if command.len() > MAX_COMMAND_BYTES {
+        let mut analysis = fallback(&clipped(command));
+        analysis.unreadable = true;
+        return analysis;
+    }
     let mut reader = Reader {
         workspace,
         analysis: BashAnalysis::default(),
@@ -121,16 +134,24 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
     if !reader.read(command, Depth::default()) {
         return fallback(command);
     }
-    if reader.overflow {
-        let mut analysis = fallback(command);
-        analysis.written[0].incomplete = true;
-        return analysis;
-    }
     let Reader {
         mut analysis,
         written,
+        overflow,
         ..
     } = reader;
+    if overflow {
+        // Patterns past the limit are clipped and the line's readings stop,
+        // but its paths outside the project and its commands as written
+        // (clipped) are all kept.
+        analysis.unreadable = true;
+        if analysis.written.is_empty() {
+            let fallback = fallback(&clipped(command));
+            analysis.patterns.extend(fallback.patterns);
+            analysis.always.extend(fallback.always);
+            analysis.written = fallback.written;
+        }
+    }
     if analysis.patterns.is_empty() && analysis.external_dirs.is_empty() {
         return fallback(command);
     }
@@ -163,7 +184,8 @@ struct Reader<'w> {
     nested_commands: usize,
     /// Bytes of patterns, written and read.
     pattern_bytes: usize,
-    /// The written patterns passed [`MAX_PATTERN_BYTES`].
+    /// The patterns passed [`MAX_PATTERN_BYTES`]: from then on commands as
+    /// written are kept clipped, their paths checked, and nothing more read.
     overflow: bool,
     /// How many strings deep the text being read is.
     text_depth: u8,
@@ -285,7 +307,16 @@ impl Reader<'_> {
 
         for (node, parent) in command_nodes {
             if self.overflow {
-                break;
+                if depth.text > 0 {
+                    break;
+                }
+                // Past the pattern limit only what stays cheap however the
+                // line is nested: the command as written, clipped, and the
+                // paths it names.
+                self.source = None;
+                self.write_clipped(node, parent, command);
+                self.check_paths_cheaply(node, command);
+                continue;
             }
             if depth.text > 0 {
                 self.nested_commands += 1;
@@ -330,6 +361,9 @@ impl Reader<'_> {
                 .named_children(&mut cursor)
                 .any(|child| child.kind() == "variable_assignment");
             self.spell(&words, assigned);
+            if self.overflow {
+                continue;
+            }
             let stdin = Stdin {
                 node,
                 parent,
@@ -375,8 +409,14 @@ impl Reader<'_> {
             self.source = Some(index);
             return;
         }
-        if self.pattern_bytes + pattern.len() > MAX_PATTERN_BYTES {
+        let pattern = if self.overflow || self.pattern_bytes + pattern.len() > MAX_PATTERN_BYTES {
             self.overflow = true;
+            clipped(&pattern)
+        } else {
+            pattern
+        };
+        if let Some(&index) = self.written.get(&pattern) {
+            self.source = Some(index);
             return;
         }
         self.pattern_bytes += pattern.len();
@@ -394,8 +434,46 @@ impl Reader<'_> {
         });
     }
 
+    /// A command as written once the line is past the pattern limit: its
+    /// pattern clipped from its start, never copied whole, and generalized
+    /// by its program.
+    fn write_clipped(
+        &mut self,
+        node: tree_sitter::Node<'_>,
+        parent: Option<tree_sitter::Node<'_>>,
+        source: &str,
+    ) {
+        let statement = parent
+            .filter(|parent| parent.kind() == "redirected_statement")
+            .unwrap_or(node);
+        let start = statement.start_byte();
+        let mut end = statement.end_byte().min(start + CLIPPED_PATTERN_BYTES + 1);
+        while !source.is_char_boundary(end) {
+            end -= 1;
+        }
+        let Some(text) = source.get(start..end) else {
+            return;
+        };
+        let Some(program) = node.child_by_field_name("name") else {
+            return;
+        };
+        let (name, complete) = path_literal(program, source);
+        if complete && name == "cd" {
+            return;
+        }
+        let name = if complete {
+            name
+        } else {
+            node_text(program, source)
+        };
+        self.write(clipped(text), format!("{} *", clipped(&name)));
+    }
+
     /// A pattern read from inside the written command being read.
     fn derive(&mut self, pattern: String, always: String) {
+        if self.overflow {
+            return;
+        }
         let Some(source) = self.source else {
             return;
         };
@@ -717,6 +795,37 @@ impl Reader<'_> {
             Input::Text(text) => self.nested(&text, depth),
             Input::Unread => self.stopped(),
             Input::Unknown => {}
+        }
+    }
+
+    /// The outside-the-project check without copying a command's words: a
+    /// substitution in a deeply nested line holds most of the line, so only
+    /// the words of the commands in [`PATH_COMMANDS`] are read, and no
+    /// substitution.
+    fn check_paths_cheaply(&mut self, node: tree_sitter::Node<'_>, source: &str) {
+        let Some(program) = node.child_by_field_name("name") else {
+            return;
+        };
+        let (name, complete) = path_literal(program, source);
+        let name = program_name(&name);
+        if !complete || !PATH_COMMANDS.contains(&name.as_str()) {
+            return;
+        }
+        for word in node.named_children(&mut node.walk()) {
+            if word.id() == program.id()
+                || !WORD_KINDS.contains(&word.kind())
+                || matches!(word.kind(), "command_substitution" | "process_substitution")
+            {
+                continue;
+            }
+            let (argument, complete) = path_literal(word, source);
+            if argument.starts_with('-') || (name == "chmod" && argument.starts_with('+')) {
+                continue;
+            }
+            let raw = node_text(word, source);
+            if let Some(dir) = external_dir(self.workspace, &raw, &argument, complete) {
+                push_unique(&mut self.analysis.external_dirs, glob(&dir));
+            }
         }
     }
 
@@ -1386,6 +1495,18 @@ fn fallback(command: &str) -> BashAnalysis {
     }
 }
 
+/// `text` kept to [`CLIPPED_PATTERN_BYTES`], with `…` when cut.
+fn clipped(text: &str) -> String {
+    if text.len() <= CLIPPED_PATTERN_BYTES {
+        return text.to_owned();
+    }
+    let mut end = CLIPPED_PATTERN_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
 fn node_text(node: tree_sitter::Node, source: &str) -> String {
     source
         .get(node.start_byte()..node.end_byte())
@@ -1570,9 +1691,14 @@ fn path_literal(node: tree_sitter::Node<'_>, source: &str) -> (String, bool) {
 /// Decode literal shell syntax without evaluating variables or substitutions.
 /// Incomplete values retain only their known leading portion for path checks.
 fn literal(node: tree_sitter::Node<'_>, source: &str) -> (String, bool) {
-    let text = node_text(node, source);
+    // The text is copied only for the kinds that use it: a substitution can
+    // hold most of a long line.
+    let text = || node_text(node, source);
     match node.kind() {
-        "raw_string" => (text[1..text.len() - 1].into(), true),
+        "raw_string" => {
+            let text = text();
+            (text[1..text.len() - 1].into(), true)
+        }
         "command_name" | "concatenation" | "string" => {
             let mut value = String::new();
             for index in 0..node.named_child_count() {
@@ -1588,6 +1714,7 @@ fn literal(node: tree_sitter::Node<'_>, source: &str) -> (String, bool) {
             (value, true)
         }
         "word" | "number" | "string_content" => {
+            let text = text();
             let mut value = String::new();
             let mut chars = text.chars();
             while let Some(c) = chars.next() {
@@ -2335,12 +2462,18 @@ mod readings {
         );
         let analysis = analyze(&many, &workspace());
         assert!(analysis.written.iter().any(|written| written.incomplete));
-        // A line whose patterns would pass the size limit is one command
-        // that could not be read.
+        // A line whose patterns would pass the size limit is unreadable,
+        // and keeps every command, the later ones clipped.
         let nested = format!("{}rm x{}", "echo $(".repeat(3000), ")".repeat(3000));
         let analysis = analyze(&nested, &workspace());
-        assert_eq!(analysis.patterns, vec![nested]);
-        assert!(analysis.written[0].incomplete);
+        assert!(analysis.unreadable);
+        assert!(analysis.patterns.contains(&"rm x".to_owned()));
+        assert!(
+            analysis
+                .patterns
+                .iter()
+                .all(|pattern| pattern.len() <= MAX_PATTERN_BYTES)
+        );
     }
 
     #[test]
@@ -2375,6 +2508,55 @@ mod readings {
                 "{command}"
             );
         }
+    }
+
+    #[test]
+    fn a_line_too_large_to_read_keeps_its_commands_and_paths_and_is_unreadable() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-unreadable-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let expected = vec![glob(&outside.canonicalize().unwrap())];
+        let nested = format!("echo {}x{}", "$(echo ".repeat(1500), ")".repeat(1500));
+        let command = format!(
+            "{nested}; touch {}/x; echo y > {}/z",
+            outside.display(),
+            outside.display()
+        );
+        let (analysis, took) = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                (analyze(&command, &workspace), started.elapsed())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+        assert!(analysis.unreadable);
+        // The paths outside the project are all still asked about, and the
+        // commands after the limit are kept, clipped.
+        assert_eq!(analysis.external_dirs, expected);
+        assert!(
+            analysis
+                .patterns
+                .iter()
+                .any(|pattern| pattern.starts_with("touch ")),
+            "{:?}",
+            analysis.patterns.iter().rev().take(3).collect::<Vec<_>>()
+        );
+        let bytes: usize = analysis.patterns.iter().map(String::len).sum();
+        assert!(bytes < MAX_PATTERN_BYTES + 1600 * (CLIPPED_PATTERN_BYTES + 4));
+        // A line over 1 MiB is unreadable without being parsed.
+        let huge = analyze(&format!("echo {}", "a".repeat(MAX_COMMAND_BYTES)), &root);
+        assert!(huge.unreadable && huge.patterns[0].len() <= CLIPPED_PATTERN_BYTES + 4);
+        // Ordinary lines are readable.
+        for command in ["git status && bash -c 'rm x'", "sh <<EOF\nrm x\nEOF"] {
+            assert!(!analyze(command, &root).unreadable, "{command}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
