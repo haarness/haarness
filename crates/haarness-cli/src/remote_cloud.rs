@@ -1251,7 +1251,7 @@ fn running(file: &Path) -> Result<bool> {
     let lock = std::fs::OpenOptions::new().write(true).open(path)?;
     match fs2::FileExt::try_lock_exclusive(&lock) {
         Ok(()) => Ok(false),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(true),
+        Err(error) if crate::lock_busy(&error) => Ok(true),
         Err(error) => Err(error.into()),
     }
 }

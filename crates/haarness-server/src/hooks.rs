@@ -184,7 +184,7 @@ impl ConfiguredHooks {
             command.env_remove(name);
         }
         command
-            .current_dir(&self.workspace)
+            .current_dir(dunce::simplified(&self.workspace))
             .env("HAARNESS_PROJECT_DIR", &self.workspace)
             .env("CLAUDE_PROJECT_DIR", &self.workspace)
             .stdin(std::process::Stdio::piped())

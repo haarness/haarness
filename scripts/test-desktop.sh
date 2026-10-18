@@ -13,7 +13,7 @@ npm --prefix apps/desktop ci
 npm --prefix apps/desktop run build
 npm --prefix apps/desktop test
 if [ "$(uname -s)" = Linux ]; then
-  xvfb-run -a npm --prefix apps/desktop run test:e2e
+  scripts/linux-desktop-session.sh npm --prefix apps/desktop run test:e2e
 else
   npm --prefix apps/desktop run test:e2e
 fi

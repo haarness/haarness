@@ -220,7 +220,7 @@ impl Process {
             .arg("--no-install")
             .arg("--no-env-file")
             .arg(&runner)
-            .current_dir(workspace)
+            .current_dir(dunce::simplified(workspace))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(if log_stderr {

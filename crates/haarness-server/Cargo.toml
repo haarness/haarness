@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+dunce.workspace = true
 haarness-ripgrep = { path = "../haarness-ripgrep" }
 anyhow.workspace = true
 async-stream.workspace = true

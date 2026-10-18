@@ -116,7 +116,9 @@ impl PtyManager {
             .map_err(pty_error)?;
         let mut builder = CommandBuilder::new(&command);
         builder.args(&request.args);
-        builder.cwd(&cwd);
+        // cmd.exe treats a \\?\ working directory as a UNC path and opens in
+        // C:\Windows; give children the plain form.
+        builder.cwd(dunce::simplified(&cwd));
         for name in haarness_core::private_env_names() {
             builder.env_remove(name);
         }
@@ -407,13 +409,20 @@ impl OutputBuffer {
 }
 
 fn default_shell() -> String {
-    std::env::var("SHELL").unwrap_or_else(|_| {
-        if cfg!(windows) {
-            "cmd.exe".into()
-        } else {
-            "/bin/sh".into()
-        }
-    })
+    // Git Bash exports SHELL=/usr/bin/bash, a path Windows cannot start;
+    // there the terminal opens the system's command processor instead.
+    if cfg!(windows) {
+        return std::env::var("SHELL")
+            .ok()
+            .filter(|shell| Path::new(shell).is_absolute() && Path::new(shell).is_file())
+            .or_else(|| {
+                std::env::var("COMSPEC")
+                    .ok()
+                    .filter(|shell| !shell.is_empty())
+            })
+            .unwrap_or_else(|| "cmd.exe".into());
+    }
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
 }
 
 /// The `LANG` a terminal or an agent's shell command gets when Haarness

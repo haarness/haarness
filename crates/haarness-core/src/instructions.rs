@@ -304,7 +304,7 @@ pub fn read_with_imports(
     budget: &mut ImportBudget,
     trusted: bool,
 ) -> Option<String> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = haarness_protocol::home_dir();
     resolve(path, workspace, home.as_deref(), budget, trusted, 0)
 }
 

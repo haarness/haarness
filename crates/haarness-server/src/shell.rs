@@ -39,7 +39,7 @@ pub(crate) async fn run(
     let error = |e: std::io::Error| CoreError::Tool(e.to_string());
     let mut command = haarness_ripgrep::shell_command(command).map_err(error)?;
     command
-        .current_dir(workdir)
+        .current_dir(dunce::simplified(workdir))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

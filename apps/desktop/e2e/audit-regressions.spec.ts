@@ -101,34 +101,34 @@ async function held(app: ElectronApplication, count = 1) {
 
 test("audit: saving retains focus, undo and redo; switching files retains separate histories", async ({ desktop: { page, a } }) => {
   await files(page); await file(page, "alpha.txt").click();
-  await editor(page).fill("Edited alpha"); await editor(page).press("Meta+s");
+  await editor(page).fill("Edited alpha"); await editor(page).press("ControlOrMeta+s");
   await expect(button(page, "Save")).toBeDisabled();
   await expect(editor(page)).toBeFocused();
-  await editor(page).press("Meta+z"); await expect(editor(page)).toHaveText("Original alpha");
-  await editor(page).press("Meta+Shift+z"); await expect(editor(page)).toHaveText("Edited alpha");
+  await editor(page).press("ControlOrMeta+z"); await expect(editor(page)).toHaveText("Original alpha");
+  await editor(page).press("ControlOrMeta+Shift+z"); await expect(editor(page)).toHaveText("Edited alpha");
   await file(page, "beta.txt").click(); await editor(page).fill("Edited beta");
-  await file(page, "alpha.txt").click(); await editor(page).press("Meta+z"); await expect(editor(page)).toHaveText("Original alpha");
-  await file(page, "beta.txt").click(); await editor(page).press("Meta+z"); await expect(editor(page)).toHaveText("Original beta");
+  await file(page, "alpha.txt").click(); await editor(page).press("ControlOrMeta+z"); await expect(editor(page)).toHaveText("Original alpha");
+  await file(page, "beta.txt").click(); await editor(page).press("ControlOrMeta+z"); await expect(editor(page)).toHaveText("Original beta");
   expect(await readFile(join(a, "alpha.txt"), "utf8")).toBe("Edited alpha");
 });
 
 test("audit: pending saves retain newer edits and reject external conflicts without losing history", async ({ desktop: { app, page, a } }) => {
   await files(page); await file(page, "alpha.txt").click(); await editor(page).fill("Saved version");
-  await hold(app, "PUT"); await editor(page).press("Meta+s"); await held(app);
-  await editor(page).fill("Newer unsaved version"); await editor(page).press("Meta+s"); await held(app);
+  await hold(app, "PUT"); await editor(page).press("ControlOrMeta+s"); await held(app);
+  await editor(page).fill("Newer unsaved version"); await editor(page).press("ControlOrMeta+s"); await held(app);
   await release(app);
   await expect.poll(() => readFile(join(a, "alpha.txt"), "utf8")).toBe("Saved version");
   await expect(editor(page)).toHaveText("Newer unsaved version"); await expect(button(page, "Save")).toBeEnabled();
-  await editor(page).press("Meta+s"); await expect(button(page, "Save")).toBeDisabled();
+  await editor(page).press("ControlOrMeta+s"); await expect(button(page, "Save")).toBeDisabled();
   expect(await readFile(join(a, "alpha.txt"), "utf8")).toBe("Newer unsaved version");
   await writeFile(join(a, "alpha.txt"), "External edit");
-  await editor(page).fill("Local edit"); await editor(page).press("Meta+s");
+  await editor(page).fill("Local edit"); await editor(page).press("ControlOrMeta+s");
   await expect(page.getByRole("alert")).toContainText(/changed|conflict/i);
   await expect(editor(page)).toHaveText("Local edit"); await expect(button(page, "Save")).toBeEnabled();
   expect(await readFile(join(a, "alpha.txt"), "utf8")).toBe("External edit");
   // Save again while the choice is open: it points at the bar, not nowhere.
   const changed = page.locator(".file-changed");
-  await editor(page).press("Meta+s");
+  await editor(page).press("ControlOrMeta+s");
   await expect(changed).toBeFocused(); await expect(changed).toHaveClass(/attention/);
   await expect(changed).not.toHaveClass(/attention/);
   await button(page, "Save").click();
@@ -140,7 +140,7 @@ test("audit: pending saves retain newer edits and reject external conflicts with
   await expect(changed.getByRole("button", { name: "Keep mine", exact: true })).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(changed).toHaveCount(0); await expect(editor(page)).toBeFocused();
-  await editor(page).press("Meta+s");
+  await editor(page).press("ControlOrMeta+s");
   await expect.poll(() => readFile(join(a, "alpha.txt"), "utf8")).toBe("Local edit");
 });
 
@@ -160,7 +160,7 @@ test("audit: duplicate opens share one read and slow reads respect latest select
 test("audit: a workspace switch discards stale reads, writes and search results", async ({ desktop }) => {
   const { app, page, a } = desktop;
   await files(page); await file(page, "alpha.txt").click(); await editor(page).fill("Saved in A");
-  await hold(app, "PUT"); await editor(page).press("Meta+s"); await held(app);
+  await hold(app, "PUT"); await editor(page).press("ControlOrMeta+s"); await held(app);
   await page.getByRole("textbox", { name: "Find files", exact: true }).fill("beta");
   await expect(page.locator(".file-tree")).toContainText("beta.txt");
   await choose(app, desktop.b); await button(page, "Open another project").click();
@@ -189,7 +189,7 @@ test("audit: invalid create and rename retain input, retry successfully and pres
   await expect(rename.getByRole("alert")).toBeVisible(); await expect(rename.getByRole("textbox")).toHaveValue("alpha.txt");
   await rename.getByRole("textbox").fill("renamed.txt"); await rename.getByRole("button", { name: "Save", exact: true }).click();
   await expect(rename).toHaveCount(0); await expect(editor(page)).toHaveText("Unsaved rename draft");
-  await editor(page).press("Meta+z"); await expect(editor(page)).toHaveText("");
+  await editor(page).press("ControlOrMeta+z"); await expect(editor(page)).toHaveText("");
   expect(await readFile(join(a, "alpha.txt"), "utf8")).toBe("Original alpha");
   expect(await readFile(join(a, "renamed.txt"), "utf8")).toBe("");
 });
@@ -379,9 +379,9 @@ test("audit: editor selection and undo survive media previews; closed files rele
   await editor(page).press("Home"); await editor(page).press("Shift+ArrowRight");
   await file(page, "proof.png").click(); await expect(page.locator(".media-preview img")).toBeVisible();
   await file(page, "alpha.txt").click(); await expect(button(page, "Add selection to context")).toBeVisible();
-  await editor(page).press("Meta+z"); await expect(editor(page)).toHaveText("Original alpha");
+  await editor(page).press("ControlOrMeta+z"); await expect(editor(page)).toHaveText("Original alpha");
   await button(page, "Close alpha.txt").click(); await file(page, "alpha.txt").click();
-  await editor(page).press("Meta+Shift+z"); await expect(editor(page)).toHaveText("Original alpha");
+  await editor(page).press("ControlOrMeta+Shift+z"); await expect(editor(page)).toHaveText("Original alpha");
 });
 
 test("audit: reads and searches started in a previous workspace cannot publish after switching back", async ({ desktop }) => {
