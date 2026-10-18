@@ -1707,14 +1707,14 @@ fn mcp_error(error: impl std::fmt::Display) -> CoreError {
     CoreError::Tool(error.to_string())
 }
 
+/// The headers [`resolve_headers`] returned, already resolved.
 fn mcp_headers(values: &BTreeMap<String, String>) -> CoreResult<HashMap<HeaderName, HeaderValue>> {
     values
         .iter()
         .map(|(name, value)| {
             let name = HeaderName::from_bytes(name.as_bytes())
                 .map_err(|error| CoreError::Invalid(format!("invalid MCP header name: {error}")))?;
-            let resolved = expand_env_reference(value);
-            let value = HeaderValue::from_str(&resolved).map_err(|error| {
+            let value = HeaderValue::from_str(value).map_err(|error| {
                 CoreError::Invalid(format!("invalid MCP header value: {error}"))
             })?;
             Ok((name, value))
@@ -1724,12 +1724,20 @@ fn mcp_headers(values: &BTreeMap<String, String>) -> CoreResult<HashMap<HeaderNa
 
 const HEADERS_HELPER_OUTPUT_LIMIT: usize = 64 * 1024;
 
+/// The headers a connection sends: the configured ones with their `${VAR}`
+/// references resolved, once, then whatever the headers helper printed, as
+/// printed.
 async fn resolve_headers(
     name: &str,
     config: &McpConfigureRequest,
 ) -> CoreResult<BTreeMap<String, String>> {
+    let mut headers: BTreeMap<String, String> = config
+        .headers
+        .iter()
+        .map(|(name, value)| (name.clone(), expand_env_reference(value)))
+        .collect();
     let Some(helper) = &config.headers_helper else {
-        return Ok(config.headers.clone());
+        return Ok(headers);
     };
     let url = config.url.as_deref().unwrap_or_default();
     // cmd.exe reads its own command line: hand it the helper as written.
@@ -1752,7 +1760,12 @@ async fn resolve_headers(
         command.env_remove(name);
     }
     command
-        .envs(&config.env)
+        .envs(
+            config
+                .env
+                .iter()
+                .map(|(key, value)| (key, expand_env_reference(value))),
+        )
         .env("CLAUDE_CODE_MCP_SERVER_NAME", name)
         .env("CLAUDE_CODE_MCP_SERVER_URL", url)
         .stdin(std::process::Stdio::null())
@@ -1790,7 +1803,6 @@ async fn resolve_headers(
                 "headersHelper for MCP server \"{name}\" returned malformed JSON"
             ))
         })?;
-    let mut headers = config.headers.clone();
     for (name, value) in dynamic {
         let previous = headers
             .keys()
@@ -1823,7 +1835,9 @@ fn refreshable_helper_error(error: &CoreError) -> bool {
 
 /// Resolve the `${VAR}` and `${VAR:-fallback}` forms used by Claude Code and
 /// Haarness MCP configuration at connection time. Keeping the reference in
-/// the config avoids copying bearer tokens into generated config files.
+/// the config avoids copying bearer tokens into generated config files. One
+/// pass: a variable's value is spliced in and never read again, so a value
+/// that holds `${OTHER}` reaches the server as that text.
 fn expand_env_reference(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     let mut rest = value;
@@ -2614,6 +2628,45 @@ mod tests {
             headers.get("X-URL").map(String::as_str),
             Some("https://example.test/mcp")
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Configured headers and the helper's environment resolve `${VAR}` once,
+    /// when connecting; what the helper prints is sent as printed.
+    #[tokio::test]
+    async fn headers_resolve_configured_references_once_and_helper_output_never() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let root =
+            std::env::temp_dir().join(format!("haarness-mcp-references-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("headers.sh");
+        std::fs::write(
+            &script,
+            r#"printf '{"X-Helper":"${HOME}","X-Env":"%s"}' "$FIXTURE_HOME""#,
+        )
+        .unwrap();
+        let mut config: McpConfigureRequest = serde_json::from_value(json!({
+            "transport": "streamable_http", "url": "https://example.test/mcp",
+            "env": {"FIXTURE_HOME": "${HOME}"},
+            "headers": {"X-Static": "at ${HOME}", "X-Missing": "${HAARNESS_MCP_FIXTURE_UNSET:-fallback}"},
+            "headersHelper": format!("sh {}", script.display()),
+            "timeoutMs": 2_000
+        }))
+        .unwrap();
+        let sent = mcp_headers(&resolve_headers("weather", &config).await.unwrap()).unwrap();
+        let header = |name: &'static str| {
+            sent[&HeaderName::from_static(name)]
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(header("x-static"), format!("at {home}"));
+        assert_eq!(header("x-missing"), "fallback");
+        assert_eq!(header("x-env"), home);
+        assert_eq!(header("x-helper"), "${HOME}");
+        config.headers_helper = None;
+        let sent = mcp_headers(&resolve_headers("weather", &config).await.unwrap()).unwrap();
+        assert_eq!(sent.len(), 2);
         std::fs::remove_dir_all(root).unwrap();
     }
 
