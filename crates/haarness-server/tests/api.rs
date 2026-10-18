@@ -11864,6 +11864,9 @@ mod session_start;
 #[path = "cases/inherited_ceilings.rs"]
 mod inherited_ceilings;
 
+#[path = "cases/shell_readings.rs"]
+mod shell_readings;
+
 #[tokio::test]
 async fn workspace_file_routes_answer_a_missing_file_with_404_in_plain_words() {
     let workspace =
