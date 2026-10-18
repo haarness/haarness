@@ -119,9 +119,14 @@ if (process.env.HAARNESS_DESKTOP_TEST === "1" && process.env.HAARNESS_TELEMETRY 
   process.env.HAARNESS_TELEMETRY = "0";
 const commandOwners = new Map<string, number>();
 const terminals = terminalSockets<PtyConnection>();
-// End-to-end tests end terminal sockets as a server or network outage does.
+// End-to-end tests end terminal sockets as a server or network outage does,
+// and keep the outage going by refusing new ones while
+// `haarnessTerminalOutage` is set.
 if (process.env.HAARNESS_DESKTOP_TEST === "1")
-  Object.assign(globalThis, { haarnessTerminalSockets: terminals });
+  Object.assign(globalThis, { haarnessTerminalSockets: terminals, haarnessTerminalOutage: false });
+const terminalOutage = () =>
+  process.env.HAARNESS_DESKTOP_TEST === "1" &&
+  (globalThis as { haarnessTerminalOutage?: boolean }).haarnessTerminalOutage === true;
 /** Whether a terminal socket still takes input. The SDK keeps its WebSocket
  * to itself; while that cannot be read, the socket counts as open. */
 function socketOpen(socket: PtyConnection) {
@@ -1023,6 +1028,7 @@ function installHandlers() {
         .object({ cursor: z.number().int().min(0), view: z.string().min(1).max(100) })
         .parse(input);
       terminals.begin(key, request.view);
+      if (terminalOutage()) throw new Error("The terminal server cannot be reached");
       const socket = await connection(id).client.connectPty(pty, {
         cursor: request.cursor,
       });

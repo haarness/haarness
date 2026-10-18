@@ -7,6 +7,8 @@
 const shown = new Map<string, number>();
 /** Terminals this window started, whose whole output is new to it. */
 const started = new Set<string>();
+/** Where views were scrolled up to when they went; see `scrollPlaces`. */
+const places = new Map<string, { start: number; line: number }>();
 export const shownOutput = {
   get: (key: string) => shown.get(key) ?? 0,
   set: (key: string, end: number) => shown.set(key, Math.max(end, shown.get(key) ?? 0)),
@@ -21,11 +23,34 @@ export const shownOutput = {
   },
   /** Forget terminals that are gone. */
   keep: (prefix: string, ids: readonly string[]) => {
-    for (const key of [...shown.keys(), ...started])
+    for (const key of [...shown.keys(), ...started, ...places.keys()])
       if (key.startsWith(prefix) && !ids.includes(key.slice(prefix.length))) {
         shown.delete(key);
         started.delete(key);
+        places.delete(key);
       }
+  },
+};
+
+/**
+ * The line each terminal's view was scrolled up to when it went (the panel
+ * hidden, another tab chosen), by `<connection>:<pty>`, so the view shown
+ * again opens there instead of at the bottom. A place belongs to the replay
+ * it was read in, named by where that replay started: one that starts
+ * elsewhere (older output was dropped meanwhile) holds other lines, and
+ * opens at the bottom.
+ */
+export const scrollPlaces = {
+  /** A view goes: scrolled up to `line`, or at the bottom (`undefined`). */
+  save(key: string, start: number, line: number | undefined) {
+    if (line === undefined) places.delete(key);
+    else places.set(key, { start, line });
+  },
+  /** A view's first replay starts at `start`: where it should open. */
+  take(key: string, start: number) {
+    const place = places.get(key);
+    places.delete(key);
+    return place?.start === start ? place.line : undefined;
   },
 };
 
@@ -84,6 +109,13 @@ export function terminalStream(input: {
     cursor(end: number) {
       offset = end;
     },
+    /** Bytes of the view's own, not the shell's (a reset, a notice, the
+     * modes a truncated replay restores): xterm's answers to them stay out
+     * of the shell. */
+    quiet(bytes: Uint8Array) {
+      plan(false);
+      input.write(bytes);
+    },
     /** Whether xterm's answers may go to the shell now. */
     open: () => open,
   };
@@ -132,4 +164,66 @@ export function writeChunks(bytes: Uint8Array, limit = WRITE_LIMIT) {
  * 250 ms, doubling up to 5 s. */
 export function reconnectDelay(attempt: number) {
   return Math.min(5000, 250 * 2 ** Math.min(attempt, 5));
+}
+
+/** What a terminal view says about its connection. */
+export type Link = "connected" | "reconnecting" | "disconnected";
+/** A drop mended within this long (the server lets go of a view that fell
+ * behind a burst of output, and it connects again at once) shows nothing. */
+export const RECONNECTING_AFTER = 1000;
+/** After this long without its connection, a terminal says it cannot reach
+ * its shell, and offers to retry or to open another terminal. */
+export const DISCONNECTED_AFTER = 15_000;
+
+/**
+ * Follows a terminal's connection for what its view shows. While the server
+ * cannot be reached the shell's state is unknown, so the view keeps the
+ * terminal and keeps reconnecting in the background; it only says so.
+ */
+export function linkWatch(input: {
+  onState: (link: Link) => void;
+  schedule?: (run: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  cancel?: (timer: ReturnType<typeof setTimeout>) => void;
+}) {
+  const schedule = input.schedule ?? ((run, ms) => setTimeout(run, ms));
+  const cancel = input.cancel ?? ((timer) => clearTimeout(timer));
+  let link: Link = "connected";
+  let down = false;
+  let timers: ReturnType<typeof setTimeout>[] = [];
+  const set = (next: Link) => {
+    if (next === link) return;
+    link = next;
+    input.onState(next);
+  };
+  const clear = () => {
+    for (const timer of timers) cancel(timer);
+    timers = [];
+  };
+  return {
+    /** The connection ended, or connecting failed. */
+    lost() {
+      if (down) return;
+      down = true;
+      timers = [
+        schedule(() => set("reconnecting"), RECONNECTING_AFTER),
+        schedule(() => set("disconnected"), DISCONNECTED_AFTER),
+      ];
+    },
+    /** The person asked to try again: it says so at once, and gives up
+     * again only after the whole wait. */
+    retry() {
+      clear();
+      down = true;
+      set("reconnecting");
+      timers = [schedule(() => set("disconnected"), DISCONNECTED_AFTER)];
+    },
+    /** Connected again, or there is nothing left to connect to (the shell
+     * exited, the terminal is gone). */
+    connected() {
+      clear();
+      down = false;
+      set("connected");
+    },
+    dispose: clear,
+  };
 }

@@ -86,6 +86,7 @@ export const settingsControls = [
   ["general", "Theme", "color colours palette"],
   ["general", "Chat text size", "chat font message size"],
   ["general", "Terminal text size", "terminal font size"],
+  ["general", "Option as Meta key", "terminal option alt meta escape keyboard mac"],
   ["general", "Task notifications", "alerts notify background"],
   ["general", "Compact tool activity", "collapse expand tool output arguments"],
   ["general", "Show reasoning", "thinking thought reasoning visibility"],
@@ -100,6 +101,8 @@ export const settingsControls = [
   ["about", "Updates", "check update download version"],
   ["about", "Reopen project", "refresh conversations files reconnect"],
 ] as const;
+/** Rows Settings shows on macOS only, so search offers them only there. */
+export const macOnlyControls: ReadonlySet<string> = new Set(["Option as Meta key"]);
 export const shortcutTitles: Record<string, string> = {
   new: "New chat",
   settings: "Settings",

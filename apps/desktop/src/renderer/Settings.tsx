@@ -470,6 +470,30 @@ function General() {
           }
         />
       </Row>
+      {/* Only macOS composes characters with Option; elsewhere Alt is Meta. */}
+      <Show when={app.state.platform === "darwin"}>
+        <Row
+          title="Option as Meta key"
+          description="Make Option send Meta (Esc) shortcuts in the terminal instead of typing special characters."
+        >
+          <Select
+            aria-label={t("Option as Meta key")}
+            value={app.state.preferences.terminalOptionAsMeta}
+            onChange={(value) =>
+              app.run(() =>
+                app.settings({
+                  terminalOptionAsMeta: value as Preferences["terminalOptionAsMeta"],
+                }),
+              )
+            }
+            options={[
+              { value: "off", label: t("Off") },
+              { value: "left", label: t("Left Option") },
+              { value: "both", label: t("Both Option keys") },
+            ]}
+          />
+        </Row>
+      </Show>
       <For
         each={
           [
