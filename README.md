@@ -161,7 +161,7 @@ with status 130. See
 | **Your Chrome** | Haarness for Chrome lets agents use your own signed-in Chrome; every site asks in each chat. [Use your Chrome](https://haarness.ai/docs/desktop/use-your-chrome) |
 | **Your product** | A versioned `/v1` server API with generated TypeScript and Python SDKs. [API](docs/API.md) · [SDKs](sdks/README.md) |
 | **Haarness Cloud** | Sessions that keep running, schedules, remote control of your own computers, one account for every model. [haarness.ai](https://haarness.ai) |
-| **iPhone** | Follow every chat, approve and answer from the Lock Screen. [Haarness for iPhone](https://github.com/haarness/haarness-ios) |
+| **Your phone** | Follow every chat, approve and answer from the Lock Screen or the notification shade. [Haarness for iPhone](https://github.com/haarness/haarness-ios) · [Haarness for Android](https://github.com/haarness/haarness-android) |
 
 <p align="center">
   <img alt="The Haarness terminal UI after a finished chat" src=".github/assets/tui.png" width="100%">
@@ -272,6 +272,7 @@ DTOs, MCP SDK types, CLI parsing or OpenTUI; outer crates implement those ports,
 | **[haarness-router](https://github.com/haarness/haarness-router)** | A stateless, OpenAI-compatible model router you can host yourself. MIT. |
 | **[haarness-cloud](https://github.com/haarness/haarness-cloud)** | Haarness Cloud: accounts, hosted sessions, the attach gateway, billing and the marketplace. |
 | **[haarness-ios](https://github.com/haarness/haarness-ios)** | Haarness for iPhone: remote hosts, Cloud sessions and agents, approvals on the go. |
+| **[haarness-android](https://github.com/haarness/haarness-android)** | Haarness for Android: the same remote hosts, Cloud sessions, agents and approvals, for Android phones and tablets. |
 
 ## Contributing
 

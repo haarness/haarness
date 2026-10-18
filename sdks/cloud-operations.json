@@ -9,6 +9,18 @@
     }
   },
   {
+    "name": "android_asset_links",
+    "method": "GET",
+    "path": "/.well-known/assetlinks.json",
+    "pathParams": [],
+    "response": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/AndroidAssetLinkStatement"
+      }
+    }
+  },
+  {
     "name": "native_router_session",
     "method": "POST",
     "path": "/api/v1/account/router-session",
@@ -1886,6 +1898,19 @@
     }
   },
   {
+    "name": "email_confirm",
+    "method": "POST",
+    "path": "/auth/email/confirm",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/SignInResponse"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/EmailConfirmRequest"
+    }
+  },
+  {
     "name": "email_forgot",
     "method": "POST",
     "path": "/auth/email/forgot-password",
@@ -1894,6 +1919,19 @@
     "contentType": "application/json",
     "body": {
       "$ref": "#/components/schemas/EmailAccountRequest"
+    }
+  },
+  {
+    "name": "email_link",
+    "method": "POST",
+    "path": "/auth/email/link",
+    "pathParams": [],
+    "response": {
+      "$ref": "#/components/schemas/EmailLinkResponse"
+    },
+    "contentType": "application/json",
+    "body": {
+      "$ref": "#/components/schemas/EmailLinkRequest"
     }
   },
   {
@@ -1921,25 +1959,14 @@
     }
   },
   {
-    "name": "email_signup",
+    "name": "email_start",
     "method": "POST",
-    "path": "/auth/email/signup",
+    "path": "/auth/email/start",
     "pathParams": [],
     "response": {},
     "contentType": "application/json",
     "body": {
       "$ref": "#/components/schemas/EmailAccountRequest"
-    }
-  },
-  {
-    "name": "email_verify",
-    "method": "POST",
-    "path": "/auth/email/verify",
-    "pathParams": [],
-    "response": {},
-    "contentType": "application/json",
-    "body": {
-      "$ref": "#/components/schemas/EmailPasswordRequest"
     }
   },
   {

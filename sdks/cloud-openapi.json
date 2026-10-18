@@ -38,6 +38,41 @@
         }
       }
     },
+    "/.well-known/assetlinks.json": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "The Digital Asset Links file Android fetches for Haarness for Android: which of this Cloud's web pages the app\nopens (App Links).",
+        "description": "Auth: public. Built from `HAARNESS_CLOUD_ANDROID_APP_LINKS`: one statement per package, `handle_all_urls` with its\nsigning certificates' SHA-256 fingerprints, and the same paths as the iOS file as Android 15+ dynamic app link\ncomponents. Always JSON (never the web app, never a redirect), `Cache-Control: public, max-age=3600`.",
+        "operationId": "android_asset_links",
+        "responses": {
+          "200": {
+            "description": "The statements",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AndroidAssetLinkStatement"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "This Cloud names no app (`HAARNESS_CLOUD_ANDROID_APP_LINKS` is unset)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/account/router-session": {
       "post": {
         "tags": [
@@ -4673,7 +4708,7 @@
           "push"
         ],
         "summary": "Register a Live Activity's push token.",
-        "description": "The activity id is the app's `ActivityKit` id. Cloud updates the activity while its chat waits on you and ends\nit when the chat finishes. Registering again refreshes the token. The target must be a computer, shared chat\nor Cloud session of an account you belong to.\nAuth: native bearer token of a sign-in (refresh family) with scope `account`; cookies and API keys get `403`.",
+        "description": "A chat the phone follows live: on an iPhone a Live Activity (the id is its `ActivityKit` id, the token its own\npush token), on an Android phone an ongoing notification (`platform: android`, the id the app's, the token the\ndevice's FCM registration token). Cloud updates it while its chat waits on you and ends it when the chat finishes.\nRegistering again refreshes the token. The target must be a computer, shared chat or Cloud session of an account\nyou belong to.\nAuth: native bearer token of a sign-in (refresh family) with scope `account`; cookies and API keys get `403`.",
         "operationId": "register_live_activity",
         "parameters": [
           {
@@ -4708,7 +4743,7 @@
             }
           },
           "400": {
-            "description": "Invalid token or target",
+            "description": "Invalid token, environment or target",
             "content": {
               "application/json": {
                 "schema": {
@@ -4748,7 +4783,7 @@
             }
           },
           "409": {
-            "description": "The activity ended",
+            "description": "The activity ended, or `push_platform_unavailable`",
             "content": {
               "application/json": {
                 "schema": {
@@ -4758,7 +4793,7 @@
             }
           },
           "422": {
-            "description": "Another app's bundle identifier",
+            "description": "Another app's bundle identifier or package name",
             "content": {
               "application/json": {
                 "schema": {
@@ -4862,7 +4897,7 @@
           "push"
         ],
         "summary": "List the devices that receive your notifications.",
-        "description": "`current` marks the device making the request. Auth: scope `account` (cookie or bearer).",
+        "description": "Only devices that can still receive are listed: one whose sign-in was revoked or ran out is left out. `current`\nmarks the device making the request. Auth: scope `account` (cookie or bearer).",
         "operationId": "list_push_devices",
         "responses": {
           "200": {
@@ -4904,7 +4939,7 @@
           "push"
         ],
         "summary": "Register this device for push notifications.",
-        "description": "Stores the APNs token of the signed-in app making the request, tied to its sign-in: a new token replaces the\nsign-in's previous one, and a token registered before by another sign-in moves here. The token is never\nreturned. `bundleId` must be the app this Cloud sends to (`422 unprocessable` otherwise).\nAuth: native bearer token of a sign-in (refresh family) with scope `account`; cookies and API keys get `403`.",
+        "description": "Stores the push token of the signed-in app making the request, tied to its sign-in: an APNs device token for an\niPhone (`platform: ios`, the default), an FCM registration token for an Android phone (`platform: android`). A new\ntoken replaces the sign-in's previous one, and a token registered before by another sign-in moves here. The token\nis never returned. A platform this Cloud has no push service for is `409 push_platform_unavailable`; `bundleId`\n(Android: the package name, also accepted as `appId`) must be an app this Cloud sends to (`422 unprocessable`\notherwise).\nAuth: native bearer token of a sign-in (refresh family) with scope `account`; cookies and API keys get `403`.",
         "operationId": "register_push_device",
         "requestBody": {
           "content": {
@@ -4928,7 +4963,7 @@
             }
           },
           "400": {
-            "description": "Invalid token, locale or version",
+            "description": "Invalid token, environment, locale or version",
             "content": {
               "application/json": {
                 "schema": {
@@ -4957,8 +4992,18 @@
               }
             }
           },
+          "409": {
+            "description": "`push_platform_unavailable`: this Cloud sends nothing to this kind of phone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
           "422": {
-            "description": "Another app's bundle identifier",
+            "description": "Another app's bundle identifier or package name",
             "content": {
               "application/json": {
                 "schema": {
@@ -5120,7 +5165,7 @@
           "push"
         ],
         "summary": "Read your notification settings.",
-        "description": "One switch per category, shared by all your devices (all on until changed). `available` is false when this\nCloud delivers no pushes. Auth: scope `account` (cookie or bearer).",
+        "description": "One switch per category, shared by all your devices (all on until changed). `available` is false when this\nCloud delivers no pushes; `platforms` lists the phones it accepts registrations for (`ios`, `android`).\nAuth: scope `account` (cookie or bearer).",
         "operationId": "get_push_preferences",
         "responses": {
           "200": {
@@ -9567,12 +9612,55 @@
         }
       }
     },
+    "/auth/email/confirm": {
+      "post": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Sign in with an emailed link or code (creating the account for a new address); sets `HttpOnly` session and CSRF\ncookies.",
+        "operationId": "email_confirm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmailConfirmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`redirectTo` continuation, or `mfaRequired` with an `HttpOnly` `hc_mfa` cookie when the account uses two-factor authentication",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignInResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid, expired or used link"
+          },
+          "401": {
+            "description": "No code is waiting in this browser"
+          },
+          "422": {
+            "description": "Wrong code"
+          },
+          "429": {
+            "description": "Rate limited"
+          }
+        }
+      }
+    },
     "/auth/email/forgot-password": {
       "post": {
         "tags": [
           "identity"
         ],
-        "summary": "Request a one-use password reset link. Requires configured web Origin and JSON.",
+        "summary": "Request a one-use link to set or reset the password. Requires configured web Origin and JSON.",
         "operationId": "email_forgot",
         "requestBody": {
           "content": {
@@ -9587,6 +9675,40 @@
         "responses": {
           "200": {
             "description": "Same message for known and unknown email addresses"
+          }
+        }
+      }
+    },
+    "/auth/email/link": {
+      "post": {
+        "tags": [
+          "identity"
+        ],
+        "summary": "Describe an emailed sign-in link without using it: whose it is and whether this browser asked for it.",
+        "operationId": "email_link",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmailLinkRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The link's address",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailLinkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid, expired or used link"
           }
         }
       }
@@ -9633,7 +9755,7 @@
         "tags": [
           "identity"
         ],
-        "summary": "Consume reset link and revoke existing sessions/native credentials. Then sign in explicitly.",
+        "summary": "Consume reset link, set the password (also the first one for an account made by email link) and revoke existing\nsessions/native credentials. Then sign in explicitly.",
         "operationId": "email_reset",
         "requestBody": {
           "content": {
@@ -9655,13 +9777,13 @@
         }
       }
     },
-    "/auth/email/signup": {
+    "/auth/email/start": {
       "post": {
         "tags": [
           "identity"
         ],
-        "summary": "Begin email verification. Requires the configured web Origin and JSON. Does not create an account yet.",
-        "operationId": "email_signup",
+        "summary": "Continue with email: mails a sign-in link and 6-digit code, or for a new address a link that creates the account.\nRequires the configured web Origin and JSON. Creates no account yet. Sets the `HttpOnly` `hc_email` cookie that the\ncode only works with.",
+        "operationId": "email_start",
         "requestBody": {
           "content": {
             "application/json": {
@@ -9678,33 +9800,9 @@
           },
           "429": {
             "description": "Rate limited"
-          }
-        }
-      }
-    },
-    "/auth/email/verify": {
-      "post": {
-        "tags": [
-          "identity"
-        ],
-        "summary": "Consume verification link, set password and provision the personal account. Then sign in explicitly.",
-        "operationId": "email_verify",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/EmailPasswordRequest"
-              }
-            }
           },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Account created; returnTo and message"
-          },
-          "400": {
-            "description": "Invalid, expired or used link"
+          "503": {
+            "description": "Email could not be sent"
           }
         }
       }
@@ -11059,7 +11157,7 @@
         "description": "Auth: public. `Cache-Control: no-store`. A reused code or refresh token revokes the whole family.",
         "operationId": "oauth_token",
         "requestBody": {
-          "description": "`grant_type` (`authorization_code` | `refresh_token` | `urn:ietf:params:oauth:grant-type:device_code`), `client_id`, and `code` + `redirect_uri` + `code_verifier`, `refresh_token` or `device_code`",
+          "description": "`grant_type` (`authorization_code` | `refresh_token` | `urn:ietf:params:oauth:grant-type:device_code`), `client_id`, and `code` + `redirect_uri` + `code_verifier` (optionally `device_label`, naming a phone's new sign-in in Settings → Devices, e.g. `Pixel 8 · Android 16`), `refresh_token` or `device_code`",
           "content": {
             "application/x-www-form-urlencoded": {
               "schema": {
@@ -11592,6 +11690,94 @@
           }
         }
       },
+      "AndroidAppLinkComponent": {
+        "type": "object",
+        "description": "One path pattern; `exclude` leaves matching links to the browser.",
+        "required": [
+          "/"
+        ],
+        "properties": {
+          "/": {
+            "type": "string"
+          },
+          "exclude": {
+            "type": "boolean"
+          }
+        }
+      },
+      "AndroidAppTarget": {
+        "type": "object",
+        "description": "The app: `namespace` `android_app`, its package and the SHA-256 fingerprints of the certificates that sign it\n(`AA:BB:…`, 32 colon-separated bytes in capitals).",
+        "required": [
+          "namespace",
+          "package_name",
+          "sha256_cert_fingerprints"
+        ],
+        "properties": {
+          "namespace": {
+            "type": "string"
+          },
+          "package_name": {
+            "type": "string"
+          },
+          "sha256_cert_fingerprints": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "AndroidAssetLinkStatement": {
+        "type": "object",
+        "description": "One statement of `/.well-known/assetlinks.json` (the file is a JSON array of them): one Android app, by package and\nsigning certificates, may open this site's links — on Android 15+ only the paths of `relation_extensions`.",
+        "required": [
+          "relation",
+          "relation_extensions",
+          "target"
+        ],
+        "properties": {
+          "relation": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`[\"delegate_permission/common.handle_all_urls\"]`."
+          },
+          "relation_extensions": {
+            "$ref": "#/components/schemas/AndroidRelationExtensions"
+          },
+          "target": {
+            "$ref": "#/components/schemas/AndroidAppTarget"
+          }
+        }
+      },
+      "AndroidHandleAllUrls": {
+        "type": "object",
+        "required": [
+          "dynamic_app_link_components"
+        ],
+        "properties": {
+          "dynamic_app_link_components": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AndroidAppLinkComponent"
+            }
+          }
+        }
+      },
+      "AndroidRelationExtensions": {
+        "type": "object",
+        "description": "Android 15+ dynamic app links: the paths `handle_all_urls` covers.",
+        "required": [
+          "delegate_permission/common.handle_all_urls"
+        ],
+        "properties": {
+          "delegate_permission/common.handle_all_urls": {
+            "$ref": "#/components/schemas/AndroidHandleAllUrls"
+          }
+        }
+      },
       "ApiKeyContextDto": {
         "type": "object",
         "required": [
@@ -11667,30 +11853,11 @@
         "type": "object",
         "description": "The whole association file.",
         "required": [
-          "applinks",
-          "webcredentials"
+          "applinks"
         ],
         "properties": {
           "applinks": {
             "$ref": "#/components/schemas/AppleAppLinks"
-          },
-          "webcredentials": {
-            "$ref": "#/components/schemas/AppleWebCredentials"
-          }
-        }
-      },
-      "AppleWebCredentials": {
-        "type": "object",
-        "description": "The apps that may offer this site's saved passwords.",
-        "required": [
-          "apps"
-        ],
-        "properties": {
-          "apps": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
           }
         }
       },
@@ -11913,7 +12080,8 @@
           "permission",
           "question",
           "turn_completed",
-          "turn_failed"
+          "turn_failed",
+          "turn_stopped"
         ]
       },
       "AttentionSource": {
@@ -13690,13 +13858,14 @@
       },
       "EmailAccountRequest": {
         "type": "object",
-        "description": "Start mailbox verification or request a password reset. Both use non-enumerating responses.",
+        "description": "Continue with email, or request a password reset. Both use non-enumerating responses.",
         "required": [
           "email"
         ],
         "properties": {
           "displayName": {
-            "type": "string"
+            "type": "string",
+            "description": "The name for an account the link creates; empty takes it from the address."
           },
           "email": {
             "type": "string"
@@ -13706,6 +13875,57 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "EmailConfirmRequest": {
+        "type": "object",
+        "description": "`POST /auth/email/confirm`: the emailed link's token, or its 6-digit code in the browser that asked for it.",
+        "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "EmailLinkRequest": {
+        "type": "object",
+        "description": "`POST /auth/email/link`: what an emailed sign-in link is for, without using it.",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string"
+          }
+        }
+      },
+      "EmailLinkResponse": {
+        "type": "object",
+        "description": "The page that opens a link signs in at once in the browser that asked for it (`sameBrowser`); anywhere else it\nasks first, so a forwarded link or a mail scanner never signs anyone in.",
+        "required": [
+          "email",
+          "newAccount",
+          "sameBrowser"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "newAccount": {
+            "type": "boolean",
+            "description": "The link creates the account."
+          },
+          "sameBrowser": {
+            "type": "boolean"
           }
         }
       },
@@ -13878,6 +14098,7 @@
           "idempotency_mismatch",
           "invalid_state",
           "concurrency_limit",
+          "push_platform_unavailable",
           "gone",
           "insufficient_credits",
           "budget_exceeded",
@@ -16014,6 +16235,7 @@
         "type": "object",
         "required": [
           "id",
+          "platform",
           "environment",
           "bundleId",
           "target",
@@ -16035,6 +16257,9 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "platform": {
+            "$ref": "#/components/schemas/PushPlatform"
           },
           "target": {
             "$ref": "#/components/schemas/LiveActivityTargetDto"
@@ -16301,7 +16526,8 @@
         "description": "How the first factor of a waiting sign-in was proven.",
         "enum": [
           "google",
-          "password"
+          "password",
+          "email"
         ]
       },
       "MfaRecoveryCodesResponse": {
@@ -18409,6 +18635,7 @@
         "required": [
           "id",
           "familyId",
+          "platform",
           "environment",
           "bundleId",
           "createdAt",
@@ -18458,6 +18685,10 @@
               "null"
             ]
           },
+          "platform": {
+            "$ref": "#/components/schemas/PushPlatform",
+            "description": "The phone: `ios` or `android`."
+          },
           "updatedAt": {
             "type": "string",
             "format": "date-time"
@@ -18486,16 +18717,25 @@
           "production"
         ]
       },
+      "PushPlatform": {
+        "type": "string",
+        "description": "The phone a device or Live Activity registration is for, and so the push service that delivers to it: Apple's\nfor `ios`, Firebase Cloud Messaging for `android`. Registrations that predate Android read as `ios`.",
+        "enum": [
+          "ios",
+          "android"
+        ]
+      },
       "PushPreferencesDto": {
         "type": "object",
         "required": [
           "available",
+          "platforms",
           "categories"
         ],
         "properties": {
           "available": {
             "type": "boolean",
-            "description": "Whether this Cloud delivers pushes at all (a provider other than `log` is configured)."
+            "description": "Whether this Cloud delivers pushes at all (a provider other than `log` is configured). A phone receives them\nwhen this is true and its platform is in `platforms`."
           },
           "categories": {
             "type": "array",
@@ -18503,6 +18743,13 @@
               "$ref": "#/components/schemas/PushCategoryPreference"
             },
             "description": "Every category, in the order settings show them: `approvals`, `completions`, `failures`, `billing`,\n`security`."
+          },
+          "platforms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PushPlatform"
+            },
+            "description": "The phones this Cloud accepts device registrations for (`ios`, `android`): both while it delivers nothing\n(`log`) or writes a development outbox (`file`), otherwise those it has a push service for."
           }
         }
       },
@@ -18533,20 +18780,32 @@
       },
       "RegisterLiveActivityRequest": {
         "type": "object",
-        "description": "`PUT /api/v1/push/activities/{activityId}`: a Live Activity's push token (the id is the app's `ActivityKit` id).",
+        "description": "`PUT /api/v1/push/activities/{activityId}`: a chat the phone follows live (the id is the app's: iOS its\n`ActivityKit` id, Android its ongoing notification's), and the token its updates go to.",
         "required": [
           "token",
-          "environment",
           "bundleId",
           "target",
           "threadId"
         ],
         "properties": {
           "bundleId": {
-            "type": "string"
+            "type": "string",
+            "description": "The bundle identifier (iOS) or package name (Android; also accepted as `appId`)."
           },
           "environment": {
-            "$ref": "#/components/schemas/PushEnvironment"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PushEnvironment",
+                "description": "iOS (required): as for the device. Android: ignored and stored as `production`."
+              }
+            ]
+          },
+          "platform": {
+            "$ref": "#/components/schemas/PushPlatform",
+            "description": "The phone: `ios` (the default) or `android`."
           },
           "target": {
             "$ref": "#/components/schemas/LiveActivityTargetDto"
@@ -18557,16 +18816,16 @@
             "description": "The root chat."
           },
           "token": {
-            "type": "string"
+            "type": "string",
+            "description": "iOS: the Live Activity's own push token (hex). Android: the device's FCM registration token."
           }
         }
       },
       "RegisterPushDeviceRequest": {
         "type": "object",
-        "description": "`PUT /api/v1/push/devices/current`: the APNs device token of the app making the request.",
+        "description": "`PUT /api/v1/push/devices/current`: the push token of the app making the request.",
         "required": [
           "token",
-          "environment",
           "bundleId"
         ],
         "properties": {
@@ -18578,18 +18837,25 @@
           },
           "bundleId": {
             "type": "string",
-            "description": "The app's bundle identifier; must be the one this Cloud sends to."
+            "description": "The app's bundle identifier (iOS) or package name (Android; also accepted as `appId`); must be an app this\nCloud sends to."
           },
           "deviceLabel": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Names the sign-in in Settings → Devices when it has no name yet, e.g. `iPhone · iOS 26`."
+            "description": "Names the sign-in in Settings → Devices when it has no name yet, e.g. `iPhone · iOS 26` or\n`Pixel 8 · Android 16`."
           },
           "environment": {
-            "$ref": "#/components/schemas/PushEnvironment",
-            "description": "`sandbox` for development builds, `production` for `TestFlight` and App Store builds."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PushEnvironment",
+                "description": "iOS (required): `sandbox` for development builds, `production` for `TestFlight` and App Store builds. Android:\nignored and stored as `production` (FCM has no sandbox)."
+              }
+            ]
           },
           "locale": {
             "type": [
@@ -18598,9 +18864,13 @@
             ],
             "description": "BCP 47, e.g. `fr-FR`."
           },
+          "platform": {
+            "$ref": "#/components/schemas/PushPlatform",
+            "description": "The phone: `ios` (the default) or `android`. Must be one of `platforms` in `GET /api/v1/push/preferences`, or\nthe answer is `409 push_platform_unavailable`."
+          },
           "token": {
             "type": "string",
-            "description": "The device token as hex (64–200 characters; stored lowercase)."
+            "description": "iOS: the APNs device token as hex (64–200 characters; stored lowercase). Android: the FCM registration token\n(20–4096 letters, digits, `_`, `:` or `-`; kept exactly as sent)."
           }
         }
       },
@@ -19538,7 +19808,7 @@
         "properties": {
           "mfaRequired": {
             "type": "boolean",
-            "description": "The password was right; the sign-in now waits for a code (`POST /auth/mfa/verify`)."
+            "description": "The first factor was right; the sign-in now waits for a code (`POST /auth/mfa/verify`)."
           },
           "redirectTo": {
             "type": [
@@ -21677,7 +21947,7 @@
     },
     {
       "name": "push",
-      "description": "Push notifications and Live Activities for Haarness for iOS"
+      "description": "Push notifications and live chat updates for the phone apps (iOS and Android)"
     },
     {
       "name": "cloud-schedules",
@@ -21733,7 +22003,7 @@
     },
     {
       "name": "meta",
-      "description": "Health, readiness, capabilities, this document and the iOS app's link file"
+      "description": "Health, readiness, capabilities, this document and the phone apps' link files"
     }
   ]
 }
