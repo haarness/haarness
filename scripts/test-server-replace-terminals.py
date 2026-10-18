@@ -14,6 +14,7 @@ once the terminal is closed, B replaces the idle server.
 import json
 import os
 import pathlib
+import shlex
 import shutil
 import subprocess
 import sys
@@ -46,7 +47,10 @@ def main() -> None:
         command += list(args)
         if tty:
             # A terminal on stderr, as the TUI and an interactive CLI have.
-            command = ["script", "-q", "/dev/null", *command]
+            if sys.platform == "darwin":
+                command = ["script", "-q", "/dev/null", *command]
+            else:  # util-linux script takes one command string and -e for its exit code
+                command = ["script", "-q", "-e", "-c", shlex.join(command), "/dev/null"]
         return subprocess.run(command, input=stdin, capture_output=True, text=True, env=env, timeout=120)
 
     def connect(build):
