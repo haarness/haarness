@@ -247,6 +247,20 @@ def case_config_files():
     haarness(guarded, 'run', '!tool write {"path":"src/ok.txt","content":"ok"}')
     assert (guarded / 'src' / 'ok.txt').read_text() == 'ok'
     passed('an edit of haarness.json, also through a link and with --yolo, stops for a person under "edit": "allow"')
+    # Files with the same power: a project plugin's hooks, extension code, a
+    # name Windows would trim, and an agent whose permissions change.
+    for path, content in [('.haarness/plugins/kit/hooks/hooks.json', '{"hooks":{}}'),
+                          ('.haarness/extensions/approve.js', 'export default {}'),
+                          ('haarness.json ', '{}'),
+                          ('.haarness/agents/open.md', '---\npermission:\n  bash: allow\n---\nDo it.')]:
+        result = haarness(guarded, 'run', '!tool write ' + json.dumps({'path': path, 'content': content}), check=False)
+        assert result.returncode != 0, f'{path}: {result.stdout}'
+        assert 'which always needs an answer' in result.stderr, result.stderr
+        assert not (guarded / path).exists(), path
+    haarness(guarded, 'run', '!tool write ' + json.dumps({'path': '.haarness/agents/plain.md',
+                                                         'content': '---\ndescription: Plain\n---\nRead.'}))
+    assert (guarded / '.haarness' / 'agents' / 'plain.md').exists()
+    passed("plugin hooks, extension code, a trimmed name and an agent's new permissions ask; a plain agent does not")
     haarness(guarded, 'schedule', 'add', '--name', 'widen', '--every', '1d', '--prompt', f'!tool write {widen}')
     run = json.loads(haarness(guarded, 'schedule', 'run', 'widen', '--json', timeout=60).stdout)
     assert run['status'] == 'success', run
@@ -254,11 +268,15 @@ def case_config_files():
     assert (guarded / 'haarness.json').read_text() == original
     assert api(connect(guarded), '/permissions') == [], 'a scheduled run left an approval waiting'
     passed('a scheduled run is refused the edit at once and leaves nothing waiting')
-    named = project('config-named', {'permission': {'edit': {'*': 'allow', 'pkg/haarness.json': 'allow'}}})
+    named = project('config-named', {'permission': {'edit': {'*': 'allow', 'pkg/haarness.json': 'allow',
+                                                             '.haarness/**': 'allow', '*.toml': 'allow'}}})
     nested = json.dumps({'path': 'pkg/haarness.json', 'content': '{"model":"echo/echo-1"}'})
     haarness(named, 'run', f'!tool write {nested}')
     assert (named / 'pkg' / 'haarness.json').exists()
-    passed('a rule naming the file lets the edit run')
+    folder = json.dumps({'path': '.haarness/config.toml', 'content': '[permissions]\nbash = "allow"\n'})
+    result = haarness(named, 'run', f'!tool write {folder}', check=False)
+    assert result.returncode != 0 and not (named / '.haarness' / 'config.toml').exists(), result.stdout
+    passed('a rule naming the file lets the edit run; a folder or file-kind allow does not')
 
 
 def case_home_variable():

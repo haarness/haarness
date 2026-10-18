@@ -3777,6 +3777,7 @@ impl AgentRuntime {
             .iter()
             .flat_map(|plan| plan.external_paths.iter().cloned())
             .collect();
+        let guarded = definition_grant_edits(name, &arguments, &self.workspace);
         let mut pending_plans = Vec::new();
         // Asks only a person answers (a configuration file edit).
         let mut protected = HashSet::new();
@@ -3786,7 +3787,11 @@ impl AgentRuntime {
                 let operation = plan.operation(pattern);
                 let constraint = tool.permission_constraint(&arguments, &operation);
                 let explicit = tool.explicit_approval(&arguments, &operation);
-                let evaluation = engine.evaluate_detailed(&operation);
+                let evaluation = if plan.permission == "edit" && guarded.contains(pattern) {
+                    engine.evaluate_guarded(&operation)
+                } else {
+                    engine.evaluate_detailed(&operation)
+                };
                 let decision = if explicit {
                     crate::permissions::explicit_decision(
                         evaluation.decision,
@@ -8592,6 +8597,7 @@ impl RunnerTask {
             .flat_map(|plan| plan.external_paths.iter().cloned())
             .collect();
         let engine = self.permission_engine_for_tool(agent, name);
+        let guarded = definition_grant_edits(name, &arguments, &self.workspace);
         let mut pending_plans = Vec::new();
         // Asks only a person answers (a configuration file edit).
         let mut protected = HashSet::new();
@@ -8605,7 +8611,11 @@ impl RunnerTask {
                         "This tool is disabled by the active skill".into(),
                     ));
                 }
-                let evaluation = engine.evaluate_detailed(&plan.operation(pattern));
+                let evaluation = if plan.permission == "edit" && guarded.contains(pattern) {
+                    engine.evaluate_guarded(&plan.operation(pattern))
+                } else {
+                    engine.evaluate_detailed(&plan.operation(pattern))
+                };
                 let constraint = tool.as_ref().and_then(|tool| {
                     tool.permission_constraint(&arguments, &plan.operation(pattern))
                 });
@@ -11587,6 +11597,103 @@ fn resolved_file_pattern(workspace: &Path, target: &str) -> Option<String> {
     (pattern != target).then_some(pattern)
 }
 
+/// The edit patterns of a call that change what an agent, command or skill
+/// may do when it runs (`definitions::grants_change`), each as written and
+/// where it really leads. They are asked like a configuration file edit; an
+/// edit of a definition's prompt or description is not.
+fn definition_grant_edits(
+    name: &str,
+    arguments: &serde_json::Value,
+    workspace: &Path,
+) -> HashSet<String> {
+    let mut guarded = HashSet::new();
+    let read = |target: &str| {
+        std::fs::read_to_string(crate::permissions::resolve_permission_path(
+            workspace, target,
+        ))
+        .ok()
+    };
+    let mut check = |target: &str, before: Option<String>, after: Option<String>| {
+        let resolved = crate::permissions::resolve_permission_path(workspace, target);
+        if !(crate::definitions::is_definition_path(Path::new(target))
+            || crate::definitions::is_definition_path(&resolved))
+        {
+            return;
+        }
+        if after.is_some_and(|after| crate::definitions::grants_change(before.as_deref(), &after)) {
+            guarded.insert(target.to_owned());
+            guarded.extend(resolved_file_pattern(workspace, target));
+        }
+    };
+    let text = |key: &str| arguments.get(key).and_then(serde_json::Value::as_str);
+    match name {
+        "write" => {
+            if let (Some(path), Some(content)) = (text("path"), text("content")) {
+                check(path, read(path), Some(content.to_owned()));
+            }
+        }
+        "edit" => {
+            if let (Some(path), Some(old), Some(new)) = (text("path"), text("old"), text("new")) {
+                let before = read(path);
+                let after = before
+                    .as_deref()
+                    .filter(|before| before.contains(old))
+                    .map(|before| before.replacen(old, new, 1));
+                check(path, before, after);
+            }
+        }
+        "multiedit" => {
+            if let Some(path) = text("path") {
+                let before = read(path);
+                let mut after = before.clone();
+                for edit in arguments["edits"].as_array().into_iter().flatten() {
+                    let (Some(old), Some(new)) = (edit["old"].as_str(), edit["new"].as_str())
+                    else {
+                        continue;
+                    };
+                    after = after.map(|text| {
+                        if edit["replaceAll"].as_bool() == Some(true) {
+                            text.replace(old, new)
+                        } else {
+                            text.replacen(old, new, 1)
+                        }
+                    });
+                }
+                check(path, before, after);
+            }
+        }
+        "apply_patch" => {
+            let operations = text("input")
+                .and_then(|input| crate::patch::parse_patch(input).ok())
+                .unwrap_or_default();
+            for operation in operations {
+                match operation {
+                    crate::patch::FileOp::Add { path, content } => {
+                        check(&path, read(&path), Some(content));
+                    }
+                    crate::patch::FileOp::Update {
+                        path,
+                        move_to,
+                        hunks,
+                    } => {
+                        let before = read(&path);
+                        let after = before
+                            .as_deref()
+                            .and_then(|before| crate::patch::apply_hunks(before, &hunks).ok());
+                        check(&path, before, after.clone());
+                        if let Some(target) = move_to {
+                            check(&target, read(&target), after);
+                        }
+                    }
+                    crate::patch::FileOp::Delete { .. } => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    guarded
+}
+
 #[cfg(test)]
 mod switch_permission_tests {
     use super::*;
@@ -13749,6 +13856,86 @@ mod tests {
             vec![".haarness/workflows/audit.ts", "private/flows/audit.ts"]
         );
         assert!(denied(edit));
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn edits_that_change_a_definitions_grants_are_guarded_and_others_are_not() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-grant-edits-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(workspace.join(".haarness/agents")).unwrap();
+        std::fs::write(
+            workspace.join(".haarness/agents/reviewer.md"),
+            "---\ndescription: Reviewer\npermission:\n  bash: deny\n---\nReview.\n",
+        )
+        .unwrap();
+        let guarded = |name: &str, arguments: serde_json::Value| {
+            let mut found = super::definition_grant_edits(name, &arguments, &workspace)
+                .into_iter()
+                .collect::<Vec<_>>();
+            found.sort();
+            found
+        };
+        let reviewer = ".haarness/agents/reviewer.md";
+        // Opening the agent's bash, by edit, multiedit, write or patch.
+        assert_eq!(
+            guarded(
+                "edit",
+                json!({"path": reviewer, "old": "bash: deny", "new": "bash: allow"})
+            ),
+            vec![reviewer]
+        );
+        assert_eq!(
+            guarded(
+                "multiedit",
+                json!({"path": reviewer, "edits": [{"old": "  bash: deny\n", "new": ""}]})
+            ),
+            vec![reviewer]
+        );
+        assert_eq!(
+            guarded(
+                "write",
+                json!({"path": ".haarness/agents/new.md", "content": "---\ntools: Bash\n---\nGo."})
+            ),
+            vec![".haarness/agents/new.md"]
+        );
+        let patch = "*** Begin Patch\n*** Update File: .haarness/agents/reviewer.md\n@@\n-  bash: deny\n+  bash: allow\n*** End Patch";
+        assert_eq!(
+            guarded("apply_patch", json!({"input": patch})),
+            vec![reviewer]
+        );
+        // The prompt changing, a plain new agent, or another file.
+        assert!(
+            guarded(
+                "edit",
+                json!({"path": reviewer, "old": "Review.", "new": "Review well."})
+            )
+            .is_empty()
+        );
+        assert!(
+            guarded(
+                "write",
+                json!({"path": ".haarness/agents/plain.md", "content": "---\ndescription: x\n---\nGo."})
+            )
+            .is_empty()
+        );
+        assert!(
+            guarded(
+                "write",
+                json!({"path": "notes.md", "content": "---\ntools: Bash\n---\n"})
+            )
+            .is_empty()
+        );
+        // Guarded, the edit asks a person even under the default allow.
+        let mut engine = crate::PermissionEngine::build_defaults();
+        engine.set_workspace(&workspace);
+        let evaluation = engine.evaluate_guarded(&format!("edit:{reviewer}"));
+        assert_eq!(evaluation.decision, crate::PermissionDecision::Ask);
+        assert!(evaluation.protected);
+        assert_eq!(
+            engine.evaluate(&format!("edit:{reviewer}")),
+            crate::PermissionDecision::Allow
+        );
         std::fs::remove_dir_all(workspace).unwrap();
     }
 
