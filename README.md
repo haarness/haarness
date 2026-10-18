@@ -87,17 +87,34 @@ replay, and restart recovery that never replays a shell command or an edit.
 > The install service goes live with the first public release. Until then,
 > [build from source](#build-from-source).
 
-```sh
-# CLI and terminal UI (macOS, Linux)
-curl -fsSL https://app.haarness.ai/install.sh | sh
+One command installs the CLI and terminal UI, or the Desktop app. It checks the download's
+SHA-256 before it replaces anything, and needs no administrator rights.
 
-# Desktop app (macOS, Linux)
-curl -fsSL https://app.haarness.ai/install.sh | HAARNESS_PRODUCT=desktop sh
+**macOS and Linux**
+
+```sh
+curl -fsSL https://app.haarness.ai/install.sh | sh                           # CLI and terminal UI
+curl -fsSL https://app.haarness.ai/install.sh | HAARNESS_PRODUCT=desktop sh  # Desktop app
 ```
 
-On Windows, run `irm https://app.haarness.ai/install.ps1 | iex` in PowerShell (set
-`$env:HAARNESS_PRODUCT='desktop'` first for Desktop). Installers verify SHA-256 before replacing
-anything; `haarness doctor` checks the result and `haarness upgrade` installs a newer release.
+**Windows** (PowerShell)
+
+```powershell
+irm https://app.haarness.ai/install.ps1 | iex                                  # CLI and terminal UI
+$env:HAARNESS_PRODUCT='desktop'; irm https://app.haarness.ai/install.ps1 | iex # Desktop app
+```
+
+<table>
+<tr><th></th><th>macOS</th><th>Linux</th><th>Windows</th></tr>
+<tr><td><b>CLI</b></td><td><code>~/.local/bin/haarness</code></td><td><code>~/.local/bin/haarness</code></td><td><code>%LOCALAPPDATA%\Haarness\bin</code>, added to your PATH</td></tr>
+<tr><td><b>Desktop</b></td><td><code>~/Applications/Haarness.app</code></td><td>AppImage with a <code>haarness-desktop</code> command and a menu entry</td><td>Installer, then the Start menu</td></tr>
+<tr><td><b>Downloads</b></td><td><code>.dmg</code> · <code>.zip</code></td><td><code>.AppImage</code> · <code>.deb</code></td><td><code>.exe</code></td></tr>
+<tr><td><b>Runs on</b></td><td>Apple silicon and Intel</td><td>x64 and ARM64; CLI on glibc 2.17+, Desktop on GTK 3 desktops such as Ubuntu 20.04+</td><td>x64 and ARM64, Windows 10 and 11</td></tr>
+</table>
+
+On Debian and Ubuntu you can also install Desktop system-wide from the
+[download page](https://haarness.ai/download): `sudo apt install ./Haarness-<version>-linux-x64.deb`.
+`haarness doctor` checks an install and `haarness upgrade` replaces it with a newer release;
 `HAARNESS_CHANNEL=preview` selects preview builds and `HAARNESS_VERSION` pins one. Full guide:
 [Install Haarness](https://haarness.ai/docs/start/install).
 

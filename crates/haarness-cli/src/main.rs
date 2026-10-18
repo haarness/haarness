@@ -1345,6 +1345,10 @@ async fn main() -> Result<()> {
         let matches = cli_command().get_matches_from(normalize_natural_language_args(args));
         Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
     };
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    if !matches!(cli.command, Some(Command::Doctor | Command::Logs { .. })) {
+        require_system_certificates()?;
+    }
     let project_config = !cli.disable_project_config;
     let project_config_override = if cli.disable_project_config {
         Some(false)
@@ -2219,7 +2223,7 @@ fn agents_command(
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = haarness_protocol::home_dir();
     let plugin_roots =
         plugins::all_enabled_roots(&paths.data, paths.config_dir(), workspace, trust);
     let layers = jsonconfig::load_layers(
@@ -2289,7 +2293,7 @@ fn asset_layers(paths: &Paths, workspace: &Path, trust: bool) -> jsonconfig::Jso
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = haarness_protocol::home_dir();
     let plugins = plugins::all_enabled_roots(&paths.data, paths.config_dir(), workspace, trust);
     jsonconfig::load_layers(&config, home.as_deref(), workspace, trust, &plugins)
 }
@@ -2532,7 +2536,7 @@ fn skill_roots(
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = haarness_protocol::home_dir();
     let plugins = plugins::all_enabled_roots(&paths.data, paths.config_dir(), workspace, trust);
     let mut roots = plugins
         .into_iter()
@@ -4139,7 +4143,7 @@ async fn stop_workspace_server(paths: &Paths, workspace: &Path) -> Result<()> {
             );
             return Ok(());
         }
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+        Err(error) if lock_busy(&error) => {}
         Err(error) => return Err(error).context("cannot inspect the Haarness workspace lease"),
     }
 
@@ -5891,7 +5895,7 @@ fn compose_runtime_sources(
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = haarness_protocol::home_dir();
     let plugin_roots =
         plugins::all_enabled_roots(&paths.data, paths.config_dir(), workspace, trust);
     let mut json_layers = jsonconfig::load_layers(
@@ -6484,7 +6488,7 @@ fn runtime_source_fingerprint_for(
     for name in [".haarness", ".opencode", ".agents"] {
         roots.push(workspace.join(name));
     }
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = haarness_protocol::home_dir() {
         roots.extend([
             home.join(".agents/skills"),
             home.join(".opencode/commands"),
@@ -6535,7 +6539,7 @@ fn runtime_source_fingerprint_for(
                 roots.push(base.join(".claude/skills"));
             }
         };
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        if let Some(home) = haarness_protocol::home_dir() {
             claude_roots(&home.join(".claude"), false);
         }
         for directory in layout::project_directories(workspace) {
@@ -7251,9 +7255,11 @@ fn open_browser(url: &str) -> Result<()> {
     let status = ProcessCommand::new("open").arg(url).status()?;
     #[cfg(target_os = "linux")]
     let status = ProcessCommand::new("xdg-open").arg(url).status()?;
+    // Not `cmd /C start`: cmd ends the command at the first `&`, which cut
+    // every sign-in URL short. The URL protocol handler takes it whole.
     #[cfg(target_os = "windows")]
-    let status = ProcessCommand::new("cmd")
-        .args(["/C", "start", "", url])
+    let status = ProcessCommand::new("rundll32.exe")
+        .args(["url.dll,FileProtocolHandler", url])
         .status()?;
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     anyhow::bail!("automatic browser opening is not supported on this platform");
@@ -7999,6 +8005,26 @@ fn write_provider_entry(path: &Path, id: &str, entry: Option<&ProviderSection>) 
     Ok(())
 }
 
+/// Linux keeps its trusted roots in a package (ca-certificates) that minimal
+/// systems and container images leave out. Every HTTPS client then fails to
+/// build, which surfaced only as a server that exited during startup.
+#[cfg(all(unix, not(target_vendor = "apple")))]
+fn system_certificate_count() -> usize {
+    rustls_native_certs::load_native_certs().certs.len()
+}
+
+#[cfg(all(unix, not(target_vendor = "apple")))]
+fn require_system_certificates() -> Result<()> {
+    if system_certificate_count() == 0 {
+        anyhow::bail!(
+            "No trusted CA certificates were found on this system, so Haarness cannot make HTTPS connections. \
+             Install your distribution's ca-certificates package (for example `sudo apt install ca-certificates`), \
+             or point SSL_CERT_FILE at a certificate bundle."
+        );
+    }
+    Ok(())
+}
+
 fn doctor(paths: &Paths) -> Result<()> {
     let report = haarness_opentui::doctor()?;
     println!("Haarness {}", env!("CARGO_PKG_VERSION"));
@@ -8019,6 +8045,11 @@ fn doctor(paths: &Paths) -> Result<()> {
     println!("rg: {}", ripgrep.display());
     println!("rg sha256: {}", haarness_ripgrep::SHA256);
     println!("data: {}", paths.data.display());
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    match system_certificate_count() {
+        0 => println!("certificates: none found (install ca-certificates or set SSL_CERT_FILE)"),
+        count => println!("certificates: {count} trusted roots"),
+    }
     println!("{}", browser::doctor_line(&paths.data));
     println!("permissions: application-level policy (not an operating-system sandbox)");
     Ok(())
@@ -8628,7 +8659,7 @@ fn spawn_snapshot_retention(
 }
 
 fn load_config(paths: &Paths, workspace: &Path, trust: bool) -> Result<FileConfig> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = haarness_protocol::home_dir();
     let layers =
         jsonconfig::load_layers(paths.config_dir(), home.as_deref(), workspace, trust, &[]);
     if !layers.errors.is_empty() {
@@ -10145,15 +10176,11 @@ async fn ensure_workspace_server_at(
             ],
             _ => vec![],
         })
-        .current_dir(workspace)
+        .current_dir(dunce::simplified(workspace))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        command.process_group(0);
-    }
+    detach_from_caller(&mut command);
     let mut child = command
         .spawn()
         .context("cannot start the Haarness server")?;
@@ -10178,6 +10205,48 @@ async fn ensure_workspace_server_at(
     }
 }
 
+/// Start `command` apart from whoever started this process: in a process
+/// group of its own (on Windows with no console, so closing the terminal or
+/// Ctrl+C there leaves it running), holding none of the descriptors or
+/// handles this process inherited (Desktop's, or a shell pipe's).
+pub(crate) fn detach_from_caller(command: &mut ProcessCommand) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+        keep_inherited_descriptors_from_children();
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+        haarness_opentui::keep_standard_handles_from_children();
+    }
+}
+
+/// Electron keeps Chromium's descriptors (IPC sockets, app.asar, the Local
+/// Storage lock) open without close-on-exec, and Node hands every one of them
+/// to the CLI that Desktop starts. Marked before the project server starts,
+/// they stay out of that long-lived server and all it runs: a server holding
+/// Desktop's sockets and storage lock outlived Desktop, and test drivers never
+/// saw the app close. Everything this process opens itself is close-on-exec
+/// already.
+#[cfg(unix)]
+fn keep_inherited_descriptors_from_children() {
+    close_fds::CloseFdsBuilder::new()
+        .threadsafe(true)
+        .cloexecfrom(3);
+}
+
+/// Whether a non-blocking lock failed only because another process holds it.
+/// fs2 reports that on Windows as ERROR_LOCK_VIOLATION (33), which the
+/// standard library does not call WouldBlock.
+pub(crate) fn lock_busy(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock || (cfg!(windows) && error.raw_os_error() == Some(33))
+}
+
 async fn acquire_connection_lease(paths: &Paths) -> Result<fs::File> {
     let file = fs::OpenOptions::new()
         .create(true)
@@ -10190,7 +10259,7 @@ async fn acquire_connection_lease(paths: &Paths) -> Result<fs::File> {
     loop {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(file),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            Err(error) if lock_busy(&error) => {
                 if Instant::now() >= deadline {
                     anyhow::bail!(
                         "Another connection to this workspace is still starting; retry shortly"
@@ -10213,7 +10282,7 @@ fn acquire_server_lease(paths: &Paths) -> Result<fs::File> {
         .with_context(|| format!("cannot open {}", paths.server_lock.display()))?;
     match file.try_lock_exclusive() {
         Ok(()) => Ok(file),
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => anyhow::bail!(
+        Err(error) if lock_busy(&error) => anyhow::bail!(
             "Another Haarness server is starting for this project. Wait a moment, or stop it with `haarness serve --stop`."
         ),
         Err(error) => Err(error).with_context(|| {

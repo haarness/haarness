@@ -629,7 +629,7 @@ fn expand_references(text: &str, invoker: &dyn crate::ToolInvoker) -> String {
         .workspace()
         .map(PathBuf::from)
         .and_then(|path| path.canonicalize().ok());
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = haarness_protocol::home_dir();
     let agents = invoker.delegable_agents();
     let mut seen = std::collections::HashSet::new();
     let mut blocks = Vec::new();

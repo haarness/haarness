@@ -328,7 +328,9 @@ pub fn resolve_extension(spec: &ExtensionSpec, data: &Path) -> Result<Resolution
     }
     let raw = text.strip_prefix("file://").unwrap_or(text);
     let path = if let Some(rest) = raw.strip_prefix("~/") {
-        PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(rest)
+        haarness_protocol::home_dir()
+            .context("the home folder is unknown (set HOME or USERPROFILE)")?
+            .join(rest)
     } else if Path::new(raw).is_absolute() {
         PathBuf::from(raw)
     } else {

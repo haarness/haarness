@@ -75,7 +75,11 @@ for (const outcome of ["resolve", "reject"] as const) {
           reject(new Error(`Desktop did not quit: ${output}`));
         }, 30000);
       });
-      expect(output).toContain("startup-read-completed-during-teardown");
+      // Electron destroys unowned web contents before exiting only on macOS,
+      // where the reported crash was; elsewhere the read stays pending and the
+      // app must still exit cleanly.
+      if (process.platform === "darwin")
+        expect(output).toContain("startup-read-completed-during-teardown");
       expect(result, output).toEqual({ code: 0, signal: null });
     } finally {
       clearTimeout(timer);

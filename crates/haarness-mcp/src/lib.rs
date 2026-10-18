@@ -1732,11 +1732,15 @@ async fn resolve_headers(
         return Ok(config.headers.clone());
     };
     let url = config.url.as_deref().unwrap_or_default();
-    let mut command = if cfg!(windows) {
+    // cmd.exe reads its own command line: hand it the helper as written.
+    #[cfg(windows)]
+    let mut command = {
         let mut command = tokio::process::Command::new("cmd.exe");
-        command.args(["/d", "/s", "/c", helper]);
+        command.raw_arg(format!("/d /s /c \"{helper}\""));
         command
-    } else {
+    };
+    #[cfg(not(windows))]
+    let mut command = {
         let mut command = tokio::process::Command::new("sh");
         command.args(["-lc", helper]);
         command

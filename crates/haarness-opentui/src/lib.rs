@@ -112,6 +112,8 @@ pub fn extracted_library_path() -> Result<PathBuf, OpenTuiError> {
     file.write_all(&bytes)?;
     file.sync_all()?;
     fs::rename(&temporary, &output)?;
+    // Windows cannot open a directory as a file; NTFS journals the rename.
+    #[cfg(unix)]
     fs::File::open(&directory)?.sync_all()?;
     Ok(output)
 }
@@ -233,6 +235,9 @@ pub struct ColorSupport {
 /// The values mirror `OpenTUI` v0.5.9's attribute bitfield. Rendering paths must
 /// treat them as best-effort styling: a terminal or a future native build that
 /// ignores a bit simply falls back to plain text in the span's colors.
+mod handles;
+pub use handles::keep_standard_handles_from_children;
+
 pub mod attr {
     pub const NONE: u32 = 0;
     pub const BOLD: u32 = 1;

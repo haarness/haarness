@@ -306,7 +306,7 @@ impl WorkflowCatalog {
             ));
         }
 
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        if let Some(home) = haarness_protocol::home_dir() {
             roots.extend([
                 WorkflowRoot::global(home.join(".opencode/workflows"), true),
                 WorkflowRoot::global(home.join(".config/opencode/workflows"), true),

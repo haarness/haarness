@@ -363,6 +363,9 @@ impl Scheduler {
         self.ensure_unique_name(&schedule)?;
         self.persist(&schedule)?;
         if let Err(error) = self.install(&schedule) {
+            // A unit the system refused to start is still written and
+            // enabled; take it away with the schedule it belonged to.
+            let _ = self.uninstall(&schedule);
             let _ = fs::remove_file(self.job_path(schedule.id));
             return Err(error);
         }
@@ -783,7 +786,7 @@ impl Scheduler {
         let service = format!(
             "[Unit]\nDescription=Haarness scheduled run {}\n\n[Service]\nType=oneshot\n{environment}WorkingDirectory={}\nExecStart={}\nStandardOutput=append:{}\nStandardError=append:{}\n",
             systemd_escape(&schedule.name),
-            systemd_argument(schedule.workspace.as_os_str()),
+            systemd_path(&schedule.workspace),
             args.iter()
                 .map(|value| systemd_argument(value))
                 .collect::<Vec<_>>()
@@ -839,7 +842,7 @@ impl Scheduler {
             command = "cmd.exe".into();
         }
         Ok(format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Task version=\"1.4\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n  <RegistrationInfo><Description>Haarness scheduled run {}</Description></RegistrationInfo>\n  <Triggers>\n{}\n  </Triggers>\n  <Principals><Principal id=\"Author\"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\n  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Enabled>true</Enabled></Settings>\n  <Actions Context=\"Author\"><Exec><Command>{}</Command><Arguments>{}</Arguments><WorkingDirectory>{}</WorkingDirectory></Exec></Actions>\n</Task>\n",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Task version=\"1.4\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n  <RegistrationInfo><Description>Haarness scheduled run {}</Description></RegistrationInfo>\n  <Triggers>\n{}\n  </Triggers>\n  <Principals><Principal id=\"Author\"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\n  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Enabled>true</Enabled></Settings>\n  <Actions Context=\"Author\"><Exec><Command>{}</Command><Arguments>{}</Arguments><WorkingDirectory>{}</WorkingDirectory></Exec></Actions>\n</Task>\n",
             xml_escape(&schedule.name),
             triggers,
             xml_escape(command),
@@ -964,11 +967,13 @@ impl Scheduler {
 
     fn uninstall_windows(&self, schedule: &Schedule) -> Result<()> {
         if self.install {
+            // output(), not status(): schtasks prints SUCCESS/ERROR lines that
+            // would land in the terminal UI.
             let _ = Command::new("schtasks.exe")
                 .args(["/Delete", "/TN"])
                 .arg(self.label(schedule))
                 .arg("/F")
-                .status();
+                .output();
         }
         remove_if_exists(&self.windows_xml_path(schedule))
     }
@@ -1024,6 +1029,7 @@ impl Drop for RunGuard {
 const UNVERIFIED_LOCK_AGE: Duration = Duration::from_secs(60 * 60);
 
 /// A process that started this long after a lock was written did not write it.
+#[cfg(unix)]
 const PID_REUSE_MARGIN: chrono::TimeDelta = chrono::TimeDelta::seconds(60);
 
 /// What a run lock records about the run holding it.
@@ -1031,12 +1037,15 @@ const PID_REUSE_MARGIN: chrono::TimeDelta = chrono::TimeDelta::seconds(60);
 #[serde(rename_all = "camelCase")]
 struct LockHolder {
     pid: u32,
+    // Only Unix can tell when a process started (Windows locks stay Unknown).
+    #[cfg_attr(not(unix), allow(dead_code))]
     created_at: DateTime<Utc>,
 }
 
 /// Whether the process a lock names still runs the run that wrote it.
 enum Holder {
     Running,
+    #[cfg_attr(not(unix), allow(dead_code))]
     Gone,
     Unknown,
 }
@@ -1541,8 +1550,9 @@ fn clean_string(value: String) -> Option<String> {
 }
 
 fn canonical_directory(path: &Path) -> Result<PathBuf> {
-    let path = path
-        .canonicalize()
+    // The plain form on Windows: Task Scheduler and cmd.exe do not start in a
+    // \\?\ folder.
+    let path = dunce::canonicalize(path)
         .with_context(|| format!("schedule workspace does not exist: {}", path.display()))?;
     if !path.is_dir() {
         anyhow::bail!("schedule workspace is not a directory: {}", path.display())
@@ -1722,14 +1732,15 @@ fn systemd_argument(value: &OsStr) -> String {
     )
 }
 
+/// A path setting (WorkingDirectory=, StandardOutput=append:) takes the path
+/// as written: systemd neither strips quotes nor decodes escapes there, so a
+/// quoted path is "not absolute" and the unit never loads. Only specifiers and
+/// line breaks need care.
 fn systemd_path(value: &Path) -> String {
     value
         .to_string_lossy()
         .replace('%', "%%")
-        .replace('\\', "\\x5c")
-        .replace(' ', "\\x20")
-        .replace('\t', "\\x09")
-        .replace('\n', "")
+        .replace(['\n', '\r'], "")
 }
 
 fn windows_argument(value: &OsStr) -> String {
@@ -2043,6 +2054,30 @@ mod tests {
             }
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn systemd_paths_are_written_as_systemd_reads_them() {
+        let (root, scheduler) = fixture(Backend::SystemdUser);
+        let mut schedule = create(&scheduler, &root, Trigger::Interval { seconds: 3600 });
+        schedule.workspace = root.join("my 100% project");
+        let (service, _) = scheduler.render_systemd(&schedule).unwrap();
+        // systemd neither strips quotes nor decodes escapes in a path setting:
+        // a quoted WorkingDirectory is "not absolute", the unit never loads and
+        // its timer refuses to start (systemd 249, Ubuntu 22.04).
+        let written = root
+            .join("my 100% project")
+            .display()
+            .to_string()
+            .replace('%', "%%");
+        let directory = format!("WorkingDirectory={written}\n");
+        assert!(service.contains(&directory), "{service}");
+        let log = format!(
+            "StandardOutput=append:{}\n",
+            systemd_path(&scheduler.log_path(schedule.id))
+        );
+        assert!(service.contains(&log) && !log.contains('"'), "{service}");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

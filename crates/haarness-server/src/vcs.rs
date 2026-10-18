@@ -572,6 +572,7 @@ struct FileScan {
 }
 
 const REGULAR_MODE: &str = "100644";
+#[cfg(unix)]
 const EXECUTABLE_MODE: &str = "100755";
 const SYMLINK_MODE: &str = "120000";
 

@@ -1,6 +1,8 @@
 //! Raw-mode/alternate-screen ownership with reliable cleanup.
 
-use anyhow::{Context, Result};
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::Result;
 use crossterm::{
     cursor::{Hide, Show},
     event::{
@@ -450,10 +452,23 @@ fn launch(target: &std::ffi::OsStr) -> bool {
         command.arg(target);
         command
     };
+    // cmd ends a command at the first `&`, so a web address goes to the URL
+    // protocol handler whole; files and folders still open through `start`.
     #[cfg(target_os = "windows")]
     let mut command = {
-        let mut command = Command::new("cmd");
-        command.args(["/C", "start", ""]).arg(target);
+        let web = target
+            .to_str()
+            .is_some_and(|text| text.starts_with("https://") || text.starts_with("http://"));
+        let mut command = if web {
+            let mut command = Command::new("rundll32.exe");
+            command.arg("url.dll,FileProtocolHandler");
+            command
+        } else {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "start", ""]);
+            command
+        };
+        command.arg(target);
         command
     };
     #[cfg(all(unix, not(target_os = "macos")))]

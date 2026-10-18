@@ -542,6 +542,9 @@ function createApp() {
       if (opened) set("tabs", (tabs) => [...tabs, id]);
     });
     if (opened) rememberTabs(connection);
+    // Remembered as soon as it is chosen, not once its history has loaded: a
+    // reload or quit in between brought back the chat shown before.
+    void window.haarness.storage("session:" + connection, id);
     try {
       if (!options.fresh) {
         const items = await api<T.Item[]>("listItems", id);
@@ -555,7 +558,6 @@ function createApp() {
           ].sort((a, b) => a.sequence - b.sequence),
         );
       }
-      await window.haarness.storage("session:" + connection, id);
     } finally {
       if (state.loadingChat === current) set("loadingChat", 0);
     }

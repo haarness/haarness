@@ -122,11 +122,14 @@ async fn run(
 async fn invoke(config: &StatusLineConfig, context: &Context) -> Result<String, String> {
     let input = serde_json::to_vec(context).map_err(|error| error.to_string())?;
     let mut command = match &config.command {
-        StatusLineCommand::Shell(source) if cfg!(windows) => {
+        // cmd.exe reads its own command line: hand it the source as written.
+        #[cfg(windows)]
+        StatusLineCommand::Shell(source) => {
             let mut command = Command::new("cmd");
-            command.args(["/C", source]);
+            command.raw_arg(format!("/d /s /c \"{source}\""));
             command
         }
+        #[cfg(not(windows))]
         StatusLineCommand::Shell(source) => {
             let mut command = Command::new("sh");
             command.args(["-lc", source]);
