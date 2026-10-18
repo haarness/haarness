@@ -11,6 +11,7 @@ mod input_settings;
 mod insights;
 mod jsonconfig;
 mod layout;
+mod logs;
 mod management;
 mod marketplace;
 mod memory_settings;
@@ -287,6 +288,8 @@ enum Command {
         /// Print the last N lines of the newest log file.
         #[arg(long)]
         tail: Option<usize>,
+        #[command(subcommand)]
+        action: Option<LogsCommand>,
     },
     /// Install a checksum-verified release from Haarness Cloud.
     Upgrade(upgrade::UpgradeArgs),
@@ -1408,15 +1411,20 @@ async fn main() -> Result<()> {
         None | Some(Command::Tui(_) | Command::Attach(_)) => otel::ProcessRole::Tui,
         _ => otel::ProcessRole::Cli,
     };
+    let command_name = cli.command.as_ref().map_or("tui", Command::name);
+    if let Some(level) = &cli.log_level {
+        // The workspace server this process starts logs at the same level.
+        let _ = REQUESTED_LOG_LEVEL.set(level.clone());
+    }
     let telemetry_guard = init_logging(
         &base_paths,
         cli.log_level.as_deref(),
         stderr_logs,
         file_logs,
         role,
+        command_name,
         !long_running && io::stderr().is_terminal(),
     )?;
-    let command_name = cli.command.as_ref().map_or("tui", Command::name);
     let workspace = cli
         .workspace
         .canonicalize()
@@ -1602,7 +1610,17 @@ async fn main() -> Result<()> {
             .await
         }
         Some(Command::Doctor) => doctor(&paths),
-        Some(Command::Logs { tail }) => logs_command(&paths, tail),
+        Some(Command::Logs { tail, action }) => match action {
+            None => logs_command(&paths, tail),
+            Some(LogsCommand::Level {
+                level,
+                window,
+                until_stopped,
+            }) => logs::level_command(&paths.data, level.as_deref(), window, until_stopped),
+            Some(LogsCommand::Export { output, full }) => {
+                logs::export_command(&paths.data, output, full)
+            }
+        },
         Some(Command::Upgrade(args)) => upgrade::run(args),
         }
     }
@@ -1610,6 +1628,31 @@ async fn main() -> Result<()> {
     .await;
     drop(telemetry_guard);
     outcome
+}
+
+#[derive(Subcommand)]
+enum LogsCommand {
+    /// Show the log level, raise it for every Haarness process on this
+    /// machine for a while, or stop a raised level.
+    Level {
+        /// trace, debug, info, warn or error; or stop.
+        level: Option<String>,
+        /// How long the level lasts, like 30m or 2h (default 30m, at most 4h).
+        #[arg(long = "for", value_parser = logs::parse_duration, conflicts_with = "until_stopped")]
+        window: Option<Duration>,
+        /// Keep the level until `haarness logs level stop`, across restarts.
+        #[arg(long)]
+        until_stopped: bool,
+    },
+    /// Pack the log files into a zip with known secret shapes removed.
+    Export {
+        /// Where to write the zip (default: haarness-logs-<time>.zip here).
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+        /// Pack the files as they are, removing nothing.
+        #[arg(long)]
+        full: bool,
+    },
 }
 
 impl Command {
@@ -8996,15 +9039,39 @@ impl Drop for TelemetryGuard {
     }
 }
 
+/// The `--log-level` this process was given, passed on to the workspace
+/// server it starts.
+static REQUESTED_LOG_LEVEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Each log line's time, then the process that wrote it: every process
+/// (the TUI, each workspace server, one-shot commands) writes the same daily
+/// file.
+struct ProcessStamp {
+    pid: u32,
+    role: &'static str,
+}
+
+impl tracing_subscriber::fmt::time::FormatTime for ProcessStamp {
+    fn format_time(
+        &self,
+        writer: &mut tracing_subscriber::fmt::format::Writer<'_>,
+    ) -> std::fmt::Result {
+        tracing_subscriber::fmt::time::SystemTime.format_time(writer)?;
+        write!(writer, " {} {}", self.pid, self.role)
+    }
+}
+
 /// Rotating file logging (daily, under `<data>/logs/`), optional stderr
 /// streaming, and opt-in OTLP/HTTP trace export. The returned guard must live
 /// for the whole process so both asynchronous pipelines flush on shutdown.
+/// The log filters follow `haarness logs level` (see [`logs::watch`]).
 fn init_logging(
     paths: &Paths,
     level: Option<&str>,
     stderr_logs: bool,
     file_logs: bool,
     role: otel::ProcessRole,
+    command: &'static str,
     interactive: bool,
 ) -> Result<TelemetryGuard> {
     use tracing_subscriber::Layer as _;
@@ -9017,6 +9084,11 @@ fn init_logging(
             .or_else(|_| EnvFilter::try_from_default_env())
             .unwrap_or_else(|_| EnvFilter::new(haarness_filter("info"))),
     };
+    let stamp = || ProcessStamp {
+        pid: std::process::id(),
+        role: command,
+    };
+    let mut reloads = Vec::new();
     let mut layers: Vec<
         Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>,
     > = Vec::new();
@@ -9025,23 +9097,29 @@ fn init_logging(
         fs::create_dir_all(&logs)?;
         let (file_writer, guard) =
             tracing_appender::non_blocking(tracing_appender::rolling::daily(&logs, "haarness.log"));
+        let (filter, reload) = tracing_subscriber::reload::Layer::new(log_filter.clone());
+        reloads.push(reload);
         layers.push(Box::new(
             tracing_subscriber::fmt::layer()
                 .with_writer(file_writer)
                 .with_ansi(false)
-                .with_filter(log_filter.clone()),
+                .with_timer(stamp())
+                .with_filter(filter),
         ));
         Some(guard)
     } else {
         None
     };
     if stderr_logs {
+        let (filter, reload) = tracing_subscriber::reload::Layer::new(log_filter.clone());
+        reloads.push(reload);
         layers.push(Box::new(
             tracing_subscriber::fmt::layer()
                 .with_writer(io::stderr)
                 // Colour only for a terminal: not in files, pipes or journald.
                 .with_ansi(io::stderr().is_terminal())
-                .with_filter(log_filter),
+                .with_timer(stamp())
+                .with_filter(filter),
         ));
     }
     let otel::Tracing {
@@ -9071,6 +9149,7 @@ fn init_logging(
         .with(layers)
         .try_init()
         .context("initialize tracing subscriber")?;
+    logs::watch(paths.data.clone(), log_filter, reloads, haarness_filter);
     for notice in &notices {
         tracing::warn!("{notice}");
         if interactive {
@@ -9952,6 +10031,12 @@ async fn ensure_workspace_server_at(
             if trust { "0" } else { "1" },
         )
         .args(yolo.then_some("--yolo"))
+        .args(
+            REQUESTED_LOG_LEVEL
+                .get()
+                .into_iter()
+                .flat_map(|level| ["--log-level", level.as_str()]),
+        )
         .arg("serve")
         .arg("--host")
         .arg(address.ip().to_string())

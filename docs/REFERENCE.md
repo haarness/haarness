@@ -175,7 +175,13 @@ with `--workspace`, `--provider`, `--model`, and `--agent`. Session working
 directories must resolve to that workspace; additional workspace roots are
 rejected rather than advertised. PDF/image/audio/video prompts and embedded
 context, MCP servers, approvals, streamed tool results, and session reload are
-supported.
+supported. Approvals and tool calls of the subagents and workflow agents a
+prompt starts reach the client on the session itself, while that prompt runs:
+their titles start with the subagent's name (`Write the proof · Edit notes.md`,
+from the `task` call's `description`, otherwise its chat title) and `_meta`
+carries `{"haarness": {"childSessionId", "childTitle"}}`. A subagent's own
+messages and plan stay in its chat. A background subagent that asks after the
+prompt has ended is answered from another Haarness app.
 
 `haarness attach <url>` is the first-class interactive client for an existing
 server; `tui --connect` remains an alias-shaped compatibility entrypoint, and

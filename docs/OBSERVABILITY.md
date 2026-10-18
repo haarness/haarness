@@ -73,6 +73,29 @@ A failed turn, model request or tool call has status ERROR with `error.type` set
 
 The batch processor is flushed during ordinary process shutdown, including graceful `serve` shutdown.
 
+## Logs and log levels
+
+Every Haarness process using a data folder (the terminal UI, the workspace servers behind it and Desktop, one-shot commands) writes to the same daily file, `<data>/logs/haarness.log.<date>`; `haarness logs` lists the files and `haarness logs --tail 50` prints the newest lines. Each line names the process that wrote it after its time: its process id and role, the command it runs (`serve` for a workspace server, `tui`, `run`, `acp`, `desktop`, …):
+
+```text
+2026-10-18T07:12:03.418Z 48211 serve  INFO haarness_core::runtime: reporting a background task the restart stopped …
+```
+
+A process starts at `info` for the Haarness crates and `warn` elsewhere, or at `--log-level` (`trace`, `debug`, `info`, `warn`, `error`) or `HAARNESS_LOG` / `RUST_LOG`. `--log-level` also applies to the workspace server that command starts; a server that is already running keeps its level.
+
+To see more from processes that are already running, without restarting a server (which stops its turns), raise the level for a while:
+
+```sh
+haarness logs level debug --for 30m   # 30m by default, at most 4h
+haarness logs level info --until-stopped
+haarness logs level                    # what is in force, and until when
+haarness logs level stop
+```
+
+The level lives in `<data>/log-level.json`. Each process reads it about every 2 seconds, logs `log level raised for a while` (or `… until stopped`) when it follows, and goes back to its own level, logging `log level back to this process's own`, when the time is up or the level is stopped. A level kept until stopped also applies to processes started later.
+
+`haarness logs export` packs the log files into `haarness-logs-<time>.zip` in the current folder (`--output` to choose), newest first up to 200 MB, with a `README.txt` saying what it holds. Known credential shapes are replaced with `[redacted]` (Authorization and cookie values, bearer tokens, credential-named `key=value` and `--key value` pairs, URL user info, JWTs, well-known token prefixes); text you typed or a tool printed can still hold a secret, and paths, host names and chat ids stay. `--full` packs the files as they are.
+
 ## Diagnostic log lines
 
 These lines are designed to be safe to keep in daemon logs (they are not exported with traces):

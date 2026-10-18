@@ -36,8 +36,8 @@ use crate::tool_validation::{unknown_tool, validate_arguments};
 use crate::{
     CoreError, CoreResult, EventBus, ModelProvider, PermissionDecision, PermissionEngine,
     PermissionRule, ProviderEvent, ProviderMessage, ProviderRegistry, ProviderRequest,
-    RuntimeConfig, SystemPromptContext, ThreadRepository, ToolContext, ToolOutput, ToolRegistry,
-    system_prompt_for, system_prompt_with_context,
+    RuntimeConfig, StrandedTask, SystemPromptContext, ThreadRepository, ToolContext, ToolOutput,
+    ToolRegistry, system_prompt_for, system_prompt_with_context,
 };
 
 const MAX_COMPACTIONS_PER_TURN: u8 = 4;
@@ -300,6 +300,9 @@ struct BackgroundTask {
     delivery_unattended: bool,
     delivery_tools: Option<HashMap<String, bool>>,
     suppress_delivery: AtomicBool,
+    /// Stopped because the server is shutting down: its checkpoint is left
+    /// in the background, so the next start tells the parent it stopped.
+    shutdown: AtomicBool,
     /// The result went to the parent's input; from then on the ledger's
     /// handoff counts it until the parent admits it.
     handed_off: AtomicBool,
@@ -347,6 +350,13 @@ impl BackgroundTask {
         self.parent_ready.store(true, Ordering::SeqCst);
         self.ready.notify_waiters();
         self.cancel.cancel();
+    }
+
+    /// A server shutdown stops every child like a stop of its parent, but
+    /// a background one is owed to a chat that never stopped it.
+    fn stop_for_shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        self.cancel_with_parent();
     }
 
     async fn wait_result(&self) -> CoreResult<String> {
@@ -1645,7 +1655,7 @@ impl AgentRuntime {
                 .map_err(|error| CoreError::Storage(format!("invalid lazy tool mode: {error}")))?;
             *self.lazy_tool_mode.write() = Some(mode);
         }
-        let recovered = self.repository.recover_interrupted().await?;
+        let (recovered, stranded) = self.repository.recover_interrupted_tasks().await?;
 
         // A process restart cannot retain the provider/tool program counter.
         // Never leave a durable goal claiming to be actively pursuing while
@@ -1678,7 +1688,136 @@ impl AgentRuntime {
             self.events
                 .publish("goal.updated", Some(thread.id), None, None, payload);
         }
+        for task in stranded {
+            let child = task.child_thread_id;
+            if let Err(error) = self.report_stranded_task(task).await {
+                warn!(%error, %child, "could not report a background task the restart stopped");
+            }
+        }
         Ok(recovered)
+    }
+
+    /// Tells a chat how a background subagent it launched ended when the
+    /// result could not reach it: the server stopped while the subagent ran
+    /// (it is not resumed: nothing it was doing is repeated), or between its
+    /// end and the delivery. The chat takes it as a delivered result would
+    /// arrive, which starts a turn when it is idle; a chat whose own last
+    /// turn was stopped (by the same restart) gets the notice without a turn,
+    /// for when it goes on.
+    async fn report_stranded_task(&self, task: StrandedTask) -> CoreResult<()> {
+        let parent = self.repository.get_thread(task.parent_thread_id).await?;
+        if parent.archived {
+            return Ok(());
+        }
+        let child = task.child_thread_id;
+        let description = self
+            .repository
+            .list_items(parent.id, None)
+            .await?
+            .into_iter()
+            .find_map(|item| match item.data {
+                ItemData::ToolCall {
+                    call_id, arguments, ..
+                } if call_id == task.call_id => arguments["description"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|description| !description.is_empty())
+                    .map(str::to_owned),
+                _ => None,
+            });
+        let description = match description {
+            Some(description) => description,
+            None => self.repository.get_thread(child).await?.title,
+        };
+        let (state, text) = match task.state.as_str() {
+            "done" => (
+                "completed",
+                self.repository
+                    .list_items(child, None)
+                    .await?
+                    .into_iter()
+                    .rev()
+                    .find_map(|item| match item.data {
+                        ItemData::AssistantMessage { text } if !text.trim().is_empty() => {
+                            Some(text)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "Subagent completed without a text response".into()),
+            ),
+            "failed" => (
+                "error",
+                format!(
+                    "{}\nHaarness restarted before this background task's result was delivered.",
+                    self.repository
+                        .get_turn(task.child_turn_id)
+                        .await?
+                        .error
+                        .unwrap_or_else(|| "The subagent failed.".into())
+                ),
+            ),
+            _ => (
+                "error",
+                format!(
+                    "Haarness restarted before this background task finished, and it was not \
+                     resumed, so nothing it was doing was repeated. Its conversation is saved: \
+                     if the work is still needed, check what it may already have changed, then \
+                     continue it with task_id \"{child}\"."
+                ),
+            ),
+        };
+        let text = task_envelope_for(child, &description, state, &text);
+        info!(parent = %parent.id, %child, state = task.state, "reporting a background task the restart stopped");
+        let parent_stopped = self
+            .repository
+            .last_turn(parent.id)
+            .await?
+            .is_some_and(|turn| turn.status == TurnStatus::Interrupted);
+        if parent_stopped {
+            let item = self
+                .repository
+                .append_item(
+                    parent.id,
+                    task.parent_turn_id,
+                    ItemData::UserMessage {
+                        text,
+                        attachments: Vec::new(),
+                        queued: false,
+                        synthetic: true,
+                    },
+                )
+                .await?;
+            let root = self.resolve_root(&parent).await;
+            self.events.publish_scoped(
+                "item.created",
+                Some(parent.id),
+                Some(root),
+                item.turn_id,
+                Some(item.id),
+                json!(item),
+            );
+            return Ok(());
+        }
+        // A scheduled run's chat never waits for a person, as when it ran.
+        let unattended = scheduled_lineage(self.repository.as_ref(), parent.id).await;
+        self.queue_input_with_options(
+            parent.id,
+            QueueInputRequest {
+                preview: None,
+                reasoning_effort: None,
+                delivery: haarness_protocol::InputDelivery::Steer,
+                request_id: RequestId::new(),
+                text,
+                attachments: Vec::new(),
+                synthetic: true,
+            },
+            unattended,
+            unattended,
+            unattended.then(|| HashMap::from([("question".to_owned(), false)])),
+            None,
+        )
+        .await?;
+        Ok(())
     }
 
     /// Whether a chat belongs to a scheduled run: the run's own chat or
@@ -4698,6 +4837,17 @@ impl AgentRuntime {
         queue_revision: Option<u64>,
         unattended: bool,
     ) -> CoreResult<Turn> {
+        // As `queue_input` refuses it: a blank message would stay in the
+        // chat, and Claude refuses whitespace-only text on every later turn.
+        // A command expands into its own text.
+        if request.text.trim().is_empty()
+            && request.attachments.is_empty()
+            && request.command.is_none()
+        {
+            return Err(CoreError::Invalid(
+                "text or an attachment is required".into(),
+            ));
+        }
         let _reload = self.reload_gate.read().await;
         request.attachments = crate::attachments::admit_off_executor(
             std::mem::take(&mut request.attachments),
@@ -5307,7 +5457,7 @@ impl AgentRuntime {
             .map(|entry| Arc::clone(entry.value()))
             .collect::<Vec<_>>()
         {
-            task.cancel_with_parent();
+            task.stop_for_shutdown();
         }
         let active = self
             .active
@@ -9225,6 +9375,7 @@ impl RunnerTask {
         let prompt = arguments
             .get("prompt")
             .and_then(serde_json::Value::as_str)
+            .filter(|prompt| !prompt.trim().is_empty())
             .ok_or_else(|| CoreError::Invalid("task.prompt is required".into()))?
             .to_owned();
         let description = arguments
@@ -9615,6 +9766,7 @@ impl RunnerTask {
                 None
             },
             suppress_delivery: AtomicBool::new(false),
+            shutdown: AtomicBool::new(false),
             handed_off: AtomicBool::new(false),
             delivered: AtomicBool::new(false),
             delivery_done: Notify::new(),
@@ -9661,7 +9813,15 @@ impl RunnerTask {
                 Err(CoreError::Cancelled) => "cancelled",
                 Err(_) => "failed",
             };
-            if let Err(error) = persist_task_state(
+            // The next start reports a background task the shutdown stopped
+            // (its chat is still owed the result); "cancelled" would say a
+            // person stopped it.
+            let stranded = state == "cancelled"
+                && worker.shutdown.load(Ordering::SeqCst)
+                && worker.promoted.load(Ordering::SeqCst);
+            if stranded {
+                info!(child = %child.id, "background task stopped by the shutdown; reported on the next start");
+            } else if let Err(error) = persist_task_state(
                 repository.as_ref(),
                 &events,
                 root_thread_id,
@@ -9866,15 +10026,17 @@ async fn persist_task_state(
 }
 
 fn task_envelope(info: &BackgroundTaskInfo, state: &str, text: &str) -> String {
+    task_envelope_for(info.child_thread_id, &info.description, state, text)
+}
+
+fn task_envelope_for(child: ThreadId, description: &str, state: &str, text: &str) -> String {
     let tag = if state == "error" {
         "task_error"
     } else {
         "task_result"
     };
     format!(
-        "<task id=\"{}\" state=\"{state}\">\n<summary>{}: {}</summary>\n<{tag}>\n{text}\n</{tag}>\n</task>",
-        info.child_thread_id,
-        info.description,
+        "<task id=\"{child}\" state=\"{state}\">\n<summary>{description}: {}</summary>\n<{tag}>\n{text}\n</{tag}>\n</task>",
         match state {
             "running" => "running in background",
             "completed" => "completed",
@@ -10405,6 +10567,11 @@ fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
     for item in provider_visible_items(&items) {
         let item_id = item.id;
         let message = match item.data.clone() {
+            // A blank message saved before turns refused one; Claude would
+            // refuse it on every request.
+            ItemData::UserMessage {
+                text, attachments, ..
+            } if text.trim().is_empty() && attachments.is_empty() => None,
             ItemData::UserMessage {
                 text,
                 attachments,
@@ -10466,6 +10633,10 @@ fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
                     Some(message)
                 }
             }
+            // A whitespace-only reply segment (often the line breaks a model
+            // writes before a tool call) says nothing, and Claude refuses
+            // whitespace-only text, which would fail every later request.
+            ItemData::AssistantMessage { text } if text.trim().is_empty() => None,
             ItemData::AssistantMessage { text } => Some(ProviderMessage::Text {
                 role: "assistant".into(),
                 content: text,
@@ -12541,6 +12712,64 @@ mod tests {
             &messages[1],
             ProviderMessage::Text { content, .. } if content == "fresh question"
         ));
+    }
+
+    #[test]
+    fn provider_messages_leave_out_whitespace_only_text() {
+        let user = |text: &str| ItemData::UserMessage {
+            text: text.into(),
+            attachments: Vec::new(),
+            queued: false,
+            synthetic: false,
+        };
+        let messages = provider_messages(vec![
+            item(1, user("read the file")),
+            // The line breaks a model streams before its tool call.
+            item(
+                2,
+                ItemData::AssistantMessage {
+                    text: "\n\n".into(),
+                },
+            ),
+            item(
+                3,
+                ItemData::ToolCall {
+                    call_id: "call-1".into(),
+                    name: "read".into(),
+                    arguments: json!({"path": "a.txt"}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            item(
+                4,
+                ItemData::ToolResult {
+                    call_id: "call-1".into(),
+                    name: "read".into(),
+                    output: "contents".into(),
+                    is_error: false,
+                    metadata: serde_json::Value::Null,
+                },
+            ),
+            item(
+                5,
+                ItemData::AssistantMessage {
+                    text: "Done.".into(),
+                },
+            ),
+            // Saved before turns refused a blank message.
+            item(6, user("  \n ")),
+            item(7, user("thanks")),
+        ]);
+
+        let texts = messages
+            .iter()
+            .filter_map(|message| match message {
+                ProviderMessage::Text { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(texts, ["read the file", "Done.", "thanks"]);
+        assert_eq!(messages.len(), 5, "the tool call and its result stay");
     }
 
     #[test]
