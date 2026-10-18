@@ -9031,7 +9031,7 @@ impl RunnerTask {
         tracing::info!(
             thread = %self.thread.id,
             permission = id,
-            operation,
+            operation = %operation_for_log(&operation),
             "permission requested; waiting for a reply"
         );
         let resolution = tokio::select! {
