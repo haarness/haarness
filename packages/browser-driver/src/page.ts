@@ -41,6 +41,32 @@ const retainedOperations = new Set<Browser.Method>([
 ]);
 
 /**
+ * Actions that act on the page: its scripts then run with a user's
+ * activation, so the page could open a file chooser over the person's screen
+ * while an agent works. For these the chooser is held back.
+ */
+const actingOperations = new Set<Browser.Method>([
+  "navigate",
+  "back",
+  "forward",
+  "reload",
+  "evaluate",
+  "click",
+  "hover",
+  "drag",
+  "fill",
+  "fill_form",
+  "select",
+  "check",
+  "press",
+  "scroll",
+]);
+/** How long choosers stay held after an action, for a page that opens one a moment later. */
+const CHOOSER_GRACE_MS = 500;
+const FILE_CHOOSER =
+  "The page opened a file chooser, which Haarness kept from appearing: the person's screen stays theirs while an agent works. To choose a file, take a fresh browser.snapshot and call browser.files.upload with the file input's ref. Do not click the control again to open the chooser.";
+
+/**
  * A document's permission resource when targets use origins: its HTTP(S)
  * security origin, else its URL's origin (a sandboxed frame's opaque origin
  * must not escape the gate of the site it loads), else the URL itself.
@@ -212,6 +238,34 @@ export function createPage<F extends Browser.HostFile = Browser.HostFile>(
     dialog = null;
     publish();
   });
+  // While an agent's action runs, and for a moment after, a file chooser the
+  // page opens is not shown (and is cancelled for the page); the action's
+  // result says so. Between actions the person's own choosers open as usual.
+  let chooser: { opened: boolean } | undefined;
+  let chooserRelease: ReturnType<typeof setTimeout> | undefined;
+  events.on("Page.fileChooserOpened", () => {
+    if (chooser) chooser.opened = true;
+  });
+  const holdChoosers = (enabled: boolean) =>
+    Promise.all(
+      [undefined, ...sessions.values()].map((sessionID) =>
+        cdp
+          .send(
+            "Page.setInterceptFileChooserDialog",
+            enabled ? { enabled, cancel: true } : { enabled },
+            sessionID,
+          )
+          .catch(() => undefined),
+      ),
+    );
+  const releaseChoosers = (watch: { opened: boolean }) => {
+    clearTimeout(chooserRelease);
+    chooserRelease = setTimeout(() => {
+      if (chooser !== watch || closed) return;
+      chooser = undefined;
+      void holdChoosers(false);
+    }, CHOOSER_GRACE_MS);
+  };
   // The page exists before its first load starts: a browser can report that
   // navigation's start synchronously, and the host's handler needs the page.
   let ready = Promise.resolve();
@@ -306,20 +360,35 @@ export function createPage<F extends Browser.HostFile = Browser.HostFile>(
         );
       };
       if (command.action.type !== "dialog") dialogs.add(reject);
+      const watch = actingOperations.has(command.action.type)
+        ? { opened: false }
+        : undefined;
+      const held = !!chooser;
+      if (watch) {
+        clearTimeout(chooserRelease);
+        chooser = watch;
+      }
       try {
-        return await Promise.race([
+        if (watch && !held) await holdChoosers(true);
+        const outcome = await Promise.race([
           execute(command.action, command.files, run.signal, command.target),
           modal.promise,
           cancelled.promise,
         ]);
+        const value = outcome.value;
+        return watch?.opened && value && typeof value === "object" && !Array.isArray(value)
+          ? { ...outcome, value: { ...value, fileChooser: FILE_CHOOSER } }
+          : outcome;
       } finally {
         signal.removeEventListener("abort", cancel);
         dialogs.delete(reject);
+        if (watch) releaseChoosers(watch);
       }
     },
     dispose() {
       if (closed) return;
       closed = true;
+      clearTimeout(chooserRelease);
       listeners.forEach((off) => off());
       listeners.clear();
       refs.clear();

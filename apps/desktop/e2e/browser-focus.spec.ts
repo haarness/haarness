@@ -8,8 +8,9 @@ import { createServer, type Server } from "node:http";
 
 // The person's keyboard and screen stay theirs while an agent drives the
 // Haarness browser: pages the agent loads, clicks or types in cannot take the
-// keyboard from the message box, and a page put away while it has the
-// keyboard gives it back to the app.
+// keyboard from the message box, a page put away while it has the keyboard
+// gives it back to the app, and a file chooser a page opens during the
+// agent's action never appears over the window.
 test.describe.configure({ mode: "serial" });
 
 let app: ElectronApplication, page: Page, client: Haarness, thread: Thread, site: Server;
@@ -212,5 +213,32 @@ test("a page put away while it has the keyboard gives it back to the message box
   expect(await settled()).toMatchObject({ app: false, pages: ["?other"] });
   await tool("tabs_close", { tabID: other });
   expect(await settled()).toMatchObject(inMessageBox);
+  expect(errors).toEqual([]);
+});
+
+test("a file chooser a page opens during the agent's click never appears, and the agent is told to upload instead", async () => {
+  const tabID = (await tool("tabs_open", { url: siteURL + "/focus?files" })).id;
+  await activate();
+  const snapshot = (await tool("snapshot", { tabID })).content;
+  const clicked = await tool("click", { tabID, ref: ref(snapshot, "Choose file") });
+  expect(clicked.fileChooser).toMatch(/kept from appearing.*browser_files_upload|kept from appearing.*browser\.files\.upload/);
+  // The page hears that its chooser closed, and the window keeps its place.
+  await expect
+    .poll(async () => (await tool("evaluate", { tabID, script: "document.getElementById('picked').textContent" })).value)
+    .toBe("cancelled");
+  expect((await settled()).window).toBe(true);
+  // A click of the person's own, once the agent is done, opens the system's chooser as usual.
+  const box = (await tool("evaluate", {
+    tabID,
+    script: "(() => { const r = [...document.querySelectorAll('button')].find((b) => b.textContent === 'Choose file').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()",
+  })).value as { x: number; y: number };
+  // Choosers stay held for a moment after the agent's last action (that evaluate).
+  await page.waitForTimeout(1000);
+  await app.evaluate(({ webContents }, { x, y }) => {
+    const contents = webContents.getAllWebContents().find((contents) => contents.getURL().endsWith("/focus?files"))!;
+    contents.sendInputEvent({ type: "mouseDown", x, y, button: "left", clickCount: 1 });
+    contents.sendInputEvent({ type: "mouseUp", x, y, button: "left", clickCount: 1 });
+  }, box);
+  await expect.poll(async () => (await keyboard()).window, { timeout: 5000 }).toBe(false);
   expect(errors).toEqual([]);
 });
