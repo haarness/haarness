@@ -126,9 +126,17 @@ impl TerminalWorkspace {
                 tab.exited = true;
                 tab.info.status = PtyStatus::Exited;
             }
+            // Older output is gone: start over, in the modes it left on.
             PtyClientEvent::Replay {
-                truncated: true, ..
-            } => tab.reset(),
+                truncated: true,
+                modes,
+                ..
+            } => {
+                tab.reset();
+                if let Some(modes) = modes {
+                    tab.parser.process(modes.as_bytes());
+                }
+            }
             PtyClientEvent::Replay { .. } => {}
             PtyClientEvent::Output { bytes, .. } => tab.parser.process(&bytes),
         }
@@ -510,6 +518,52 @@ mod tests {
         assert_eq!(
             wide[5].text(),
             " ctrl+] or f12 chat   alt+←/→ tab   shift+pgup scroll"
+        );
+    }
+
+    fn workspace() -> (TerminalWorkspace, PtyId) {
+        let terminal = TerminalWorkspace::new(vec![PtyInfo {
+            id: PtyId::new(),
+            title: "test".into(),
+            command: "sh".into(),
+            args: Vec::new(),
+            cwd: "/tmp".into(),
+            status: PtyStatus::Running,
+            pid: None,
+            cols: 20,
+            rows: 4,
+        }]);
+        let id = terminal.active_id().unwrap();
+        (terminal, id)
+    }
+
+    #[test]
+    fn a_truncated_replay_starts_over_in_the_modes_the_lost_output_left_on() {
+        let (mut terminal, id) = workspace();
+        terminal.apply(PtyClientEvent::Output {
+            id,
+            bytes: b"old screen".to_vec(),
+        });
+        terminal.apply(PtyClientEvent::Replay {
+            id,
+            truncated: true,
+            modes: Some("\x1b[?1049h\x1b[?1h\x1b[?2004h".into()),
+        });
+        terminal.apply(PtyClientEvent::Output {
+            id,
+            bytes: b"redrawn".to_vec(),
+        });
+        let rendered = frame(&terminal, Theme::editorial_dark(), Language::English, 20, 6);
+        assert!(
+            rendered[1].text().starts_with("redrawn"),
+            "{}",
+            rendered[1].text()
+        );
+        let screen = terminal.tabs[0].parser.screen();
+        assert!(screen.alternate_screen() && screen.application_cursor());
+        assert_eq!(
+            terminal.paste_bytes("p"),
+            Some(b"\x1b[200~p\x1b[201~".to_vec())
         );
     }
 }

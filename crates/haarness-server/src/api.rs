@@ -603,12 +603,16 @@ async fn pty_socket(
     id: PtyId,
     mut subscription: PtySubscription,
 ) {
-    let replay_control = json!({
+    let mut replay_control = json!({
         "type": "replay",
         "start": subscription.cursor.start,
         "end": subscription.cursor.end,
         "truncated": subscription.cursor.truncated,
     });
+    // Only a truncated replay has modes to restore; older clients ignore it.
+    if let Some(modes) = &subscription.cursor.modes {
+        replay_control["modes"] = json!(modes);
+    }
     if socket
         .send(Message::Text(replay_control.to_string().into()))
         .await

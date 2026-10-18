@@ -382,6 +382,7 @@ function TerminalView(props: { id: string }) {
         start?: number;
         end?: number;
         truncated?: boolean;
+        modes?: string;
         view?: string;
       };
       if (data.view && data.view !== view) return;
@@ -395,9 +396,16 @@ function TerminalView(props: { id: string }) {
         cursor = data.end;
         attempt = 0;
       }
+      // Older output is gone, so the replay does not continue what the view
+      // shows: start over (ESC c), say so, and put the terminal in the modes
+      // the lost output left on, such as a full-screen program's alternate
+      // screen, cursor keys, mouse reporting and bracketed paste.
       if (data.truncated && data.type === "replay")
-        terminal.writeln(
-          "\r\n[" + t("Earlier terminal output is no longer available") + "]\r\n",
+        stream.quiet(
+          new TextEncoder().encode(
+            "\x1bc[" + t("Earlier terminal output is no longer available") + "]\r\n" +
+              (data.modes ?? ""),
+          ),
         );
       if (data.type === "closed") {
         live = false;

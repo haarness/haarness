@@ -84,6 +84,13 @@ export function terminalStream(input: {
     cursor(end: number) {
       offset = end;
     },
+    /** Bytes of the view's own, not the shell's (a reset, a notice, the
+     * modes a truncated replay restores): xterm's answers to them stay out
+     * of the shell. */
+    quiet(bytes: Uint8Array) {
+      plan(false);
+      input.write(bytes);
+    },
     /** Whether xterm's answers may go to the shell now. */
     open: () => open,
   };
