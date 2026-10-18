@@ -2525,5 +2525,7 @@
   "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "Denne appen prøvde å åpne en lenke som Haarness ikke åpner. Apper kan bare åpne http-, https- og mailto-lenker.",
   "Load image from {host}": "Last inn bilde fra {host}",
   "The image from {host} could not be loaded.": "Bildet fra {host} kunne ikke lastes inn.",
-  "This app tried to open a {scheme} link. Apps may open only http, https and mailto links.": "Denne appen prøvde å åpne en {scheme}-lenke. Apper kan bare åpne http-, https- og mailto-lenker."
+  "This app tried to open a {scheme} link. Apps may open only http, https and mailto links.": "Denne appen prøvde å åpne en {scheme}-lenke. Apper kan bare åpne http-, https- og mailto-lenker.",
+  "{first}, {second}": "{first}, {second}",
+  "{first}, {second} +{count}": "{first}, {second} og {count} til"
 }
