@@ -44,9 +44,12 @@ export function MenuButton(props: {
   content?: JSX.Element;
   class?: string;
   title?: string;
+  disabled?: boolean;
   items: MenuAction[];
   /** A menu that replaces its trigger's value is at least as wide as it. */
   matchWidth?: boolean;
+  /** Called each time the menu opens. */
+  onOpen?: () => void;
   onKeyDown?: (
     event: KeyboardEvent & { currentTarget: HTMLButtonElement },
   ) => void;
@@ -66,6 +69,7 @@ export function MenuButton(props: {
   createEffect(
     on(open, (visible) => {
       if (!visible) return;
+      props.onOpen?.();
       const outside = (event: Event) => {
         if (
           !menu?.contains(event.target as Node) &&
@@ -136,6 +140,7 @@ export function MenuButton(props: {
           props.class ?? (props.text || props.content ? "" : "icon-button")
         }
         aria-label={props.label}
+        disabled={props.disabled}
         aria-haspopup="menu"
         aria-expanded={open()}
         aria-controls={open() ? id : undefined}

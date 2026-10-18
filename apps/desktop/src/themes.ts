@@ -315,3 +315,39 @@ export function themeColors(id: ThemeId, appearance: Appearance): Colors {
     ...(palettes[id] ?? palettes.haarness)[appearance === "dark" ? 0 : 1],
   };
 }
+
+/**
+ * The terminal's colours, from the palette's roles. Programs take ANSI black
+ * to be dark and white to be light whatever the background: a program that
+ * knows it runs on a light terminal writes black text (`ESC [30m`), and
+ * black on white (`ESC [30;47m`) marks a status line or a badge. So black is
+ * the page in dark and the text in light, and white the other way round.
+ */
+export function terminalTheme(id: ThemeId, appearance: Appearance) {
+  const colors = themeColors(id, appearance);
+  const dark = appearance === "dark";
+  const black = dark ? colors.page : colors.text;
+  const white = dark ? colors.text : colors.raised;
+  return {
+    background: colors.page,
+    foreground: colors.text,
+    cursor: colors.primary,
+    selectionBackground: colors.selected,
+    black,
+    brightBlack: colors.muted,
+    red: colors.danger,
+    green: colors.green,
+    yellow: colors["syntax-number"],
+    blue: colors["syntax-property"],
+    magenta: colors["syntax-keyword"],
+    cyan: colors.primary,
+    white,
+    brightRed: colors.danger,
+    brightGreen: colors.green,
+    brightYellow: colors["syntax-number"],
+    brightBlue: colors["syntax-property"],
+    brightMagenta: colors["syntax-keyword"],
+    brightCyan: colors.primary,
+    brightWhite: dark ? colors.text : colors.page,
+  };
+}

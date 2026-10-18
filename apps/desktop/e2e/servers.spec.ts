@@ -5,6 +5,7 @@ import {
   type ElectronApplication,
   type Page,
 } from "@playwright/test";
+import { attachFiles } from "./fixtures/composer";
 import { Haarness } from "@haarness/sdk";
 import {
   mkdtemp,
@@ -575,7 +576,7 @@ test("switching to a server without a remembered project shows its project home"
       filePaths: [path],
     });
   }, attachment);
-  await page.getByRole("button", { name: "Attach files", exact: true }).click();
+  await attachFiles(page);
   await expect(
     page.getByRole("button", { name: "Remove retained.png", exact: true }),
   ).toBeVisible();

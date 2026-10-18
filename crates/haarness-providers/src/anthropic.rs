@@ -326,7 +326,11 @@ impl ModelProvider for AnthropicProvider {
             .messages
             .into_iter()
             .filter_map(|message| match message {
-                ProviderMessage::Text { role, content } if role != "developer" => {
+                // Claude refuses whitespace-only text blocks, so blank text
+                // is left out wherever it would stand alone.
+                ProviderMessage::Text { role, content }
+                    if role != "developer" && !content.trim().is_empty() =>
+                {
                     Some(Ok(json!({"role":role,"content":[{"type":"text","text":content}]})))
                 }
                 ProviderMessage::Text { .. } => None,
@@ -337,7 +341,7 @@ impl ModelProvider for AnthropicProvider {
                     attachments,
                 } => Some(crate::media::load_all(&attachments).and_then(|media| {
                     let mut blocks = Vec::with_capacity(media.len() + 1);
-                    if !content.is_empty() {
+                    if !content.trim().is_empty() {
                         blocks.push(json!({"type":"text","text":content}));
                     }
                     for item in media {
@@ -379,7 +383,10 @@ impl ModelProvider for AnthropicProvider {
                     let content = if media.is_empty() {
                         Value::String(output)
                     } else {
-                        let mut blocks = vec![json!({"type":"text","text":output})];
+                        let mut blocks = Vec::with_capacity(media.len() + 1);
+                        if !output.trim().is_empty() {
+                            blocks.push(json!({"type":"text","text":output}));
+                        }
                         for item in media {
                             if item.is_image() {
                                 blocks.push(json!({"type":"image","source":{"type":"base64","media_type":item.mime_type,"data":item.base64}}));
@@ -592,13 +599,16 @@ impl ModelProvider for AnthropicProvider {
                         thinking_seen = false;
                         thinking_break = false;
                         if event["content_block"]["type"] == "tool_use" {
+                            // The arguments stream as JSON fragments, held
+                            // until the block stops; the call starts now.
+                            yield ProviderEvent::ContentStarted;
                             tool = Some((
                                 event["content_block"]["id"].as_str().unwrap_or_default().into(),
                                 event["content_block"]["name"].as_str().unwrap_or_default().into(), String::new(), event["content_block"].get("input").cloned().unwrap_or_else(||json!({}))));
                         }
                     },
                     "content_block_delta" => match event["delta"]["type"].as_str().unwrap_or_default() {
-                        "text_delta" => if let Some(text) = event["delta"]["text"].as_str().filter(|text| !text.is_empty()) { if native_json { json_output.push_str(text); } else { yield ProviderEvent::TextDelta(text.into()); } },
+                        "text_delta" => if let Some(text) = event["delta"]["text"].as_str().filter(|text| !text.is_empty()) { if native_json { if json_output.is_empty() { yield ProviderEvent::ContentStarted; } json_output.push_str(text); } else { yield ProviderEvent::TextDelta(text.into()); } },
                         "thinking_delta" => if let Some(text) = event["delta"]["thinking"].as_str().filter(|text| !text.is_empty()) {
                             if let Some(block) = &mut thinking_block {
                                 let mut value = block["thinking"].as_str().unwrap_or_default().to_owned();
@@ -1317,6 +1327,14 @@ mod tests {
             ProviderEvent::ToolCall { call_id, name, arguments, .. }
                 if call_id == "tool_1" && name == "list" && *arguments == json!({"path": "."})
         )));
+        // The call starts at its block's start, before its arguments stream.
+        let started = events
+            .iter()
+            .position(|event| matches!(event, ProviderEvent::ContentStarted));
+        let called = events
+            .iter()
+            .position(|event| matches!(event, ProviderEvent::ToolCall { .. }));
+        assert!(started.is_some() && started < called, "{events:?}");
         assert!(
             events.iter().any(|event| matches!(
                 event,
@@ -1386,6 +1404,94 @@ mod tests {
         assert_eq!(
             requests[0]["messages"][1]["content"][0]["cache_control"]["type"],
             "ephemeral"
+        );
+    }
+
+    #[tokio::test]
+    async fn whitespace_only_text_is_never_sent_as_a_text_block() {
+        fn texts(value: &Value, found: &mut Vec<String>) {
+            match value {
+                Value::Object(map) => {
+                    if map.get("type").and_then(Value::as_str) == Some("text") {
+                        found.push(map["text"].as_str().unwrap_or_default().to_owned());
+                    }
+                    map.values().for_each(|value| texts(value, found));
+                }
+                Value::Array(items) => items.iter().for_each(|value| texts(value, found)),
+                _ => {}
+            }
+        }
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route("/messages", post(messages))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = AnthropicProvider::for_test(format!("http://{address}/messages"));
+        let image = || "data:image/png;base64,iVBORw0KGgo=".to_owned();
+        let request = ProviderRequest {
+            model: "claude-test".into(),
+            system: "test".into(),
+            messages: vec![
+                ProviderMessage::Text {
+                    role: "user".into(),
+                    content: "look".into(),
+                },
+                ProviderMessage::Text {
+                    role: "assistant".into(),
+                    content: "\n\n".into(),
+                },
+                ProviderMessage::ToolCall {
+                    call_id: "shot".into(),
+                    name: "screenshot".into(),
+                    arguments: json!({}),
+                    provider_metadata: Value::Null,
+                },
+                ProviderMessage::ToolResult {
+                    call_id: "shot".into(),
+                    name: "screenshot".into(),
+                    output: String::new(),
+                    is_error: false,
+                    attachments: vec![image()],
+                },
+                ProviderMessage::Media {
+                    role: "user".into(),
+                    content: " \n".into(),
+                    attachments: vec![image()],
+                },
+            ],
+            tools: Vec::new(),
+            reasoning_effort: None,
+            parameters: haarness_core::RequestParameters::default(),
+            output_schema: None,
+        };
+        provider
+            .stream(request, CancellationToken::new())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+
+        let requests = state.0.lock();
+        let messages = requests[0]["messages"].as_array().unwrap();
+        let roles = messages
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(roles, ["user", "assistant", "user", "user"]);
+        // Every text block anywhere, tool results included, holds text.
+        let mut found = Vec::new();
+        texts(&requests[0]["messages"], &mut found);
+        assert_eq!(found, ["look"]);
+        assert_eq!(
+            messages[2]["content"][0]["content"][0]["type"], "image",
+            "the screenshot is the tool result's only block"
+        );
+        assert_eq!(messages[3]["content"][0]["type"], "image");
+        assert_eq!(
+            messages[3]["content"][0]["cache_control"]["type"], "ephemeral",
+            "the cache breakpoint lands on a block that is sent"
         );
     }
 

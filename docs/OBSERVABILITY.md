@@ -73,6 +73,29 @@ A failed turn, model request or tool call has status ERROR with `error.type` set
 
 The batch processor is flushed during ordinary process shutdown, including graceful `serve` shutdown.
 
+## Logs and log levels
+
+Every Haarness process using a data folder (the terminal UI, the workspace servers behind it and Desktop, one-shot commands) writes to the same daily file, `<data>/logs/haarness.log.<date>`; `haarness logs` lists the files and `haarness logs --tail 50` prints the newest lines. Each line names the process that wrote it after its time: its process id and role, the command it runs (`serve` for a workspace server, `tui`, `run`, `acp`, `desktop`, …):
+
+```text
+2026-10-18T07:12:03.418Z 48211 serve  INFO haarness_core::runtime: reporting a background task the restart stopped …
+```
+
+A process starts at `info` for the Haarness crates and `warn` elsewhere, or at `--log-level` (`trace`, `debug`, `info`, `warn`, `error`) or `HAARNESS_LOG` / `RUST_LOG`. `--log-level` also applies to the workspace server that command starts; a server that is already running keeps its level.
+
+To see more from processes that are already running, without restarting a server (which stops its turns), raise the level for a while:
+
+```sh
+haarness logs level debug --for 30m   # 30m by default, at most 4h
+haarness logs level info --until-stopped
+haarness logs level                    # what is in force, and until when
+haarness logs level stop
+```
+
+The level lives in `<data>/log-level.json`. Each process reads it about every 2 seconds, logs `log level raised for a while` (or `… until stopped`) when it follows, and goes back to its own level, logging `log level back to this process's own`, when the time is up or the level is stopped. A level kept until stopped also applies to processes started later. A raised level only ever makes a process log more: it raises the Haarness crates that log less than it and keeps the rest of the process's own filter (from `--log-level`, `HAARNESS_LOG` or `RUST_LOG`), so `haarness logs level info` never quiets a server started with `--log-level debug`, and `haarness logs level debug` under `RUST_LOG=info,hyper=trace` gives Haarness debug while hyper keeps trace.
+
+`haarness logs export` packs the log files into `haarness-logs-<time>.zip` in the current folder (`--output` to choose), newest first up to 200 MB, with a `README.txt` saying what it holds. Known credential shapes are replaced with `[redacted]` (Authorization and cookie values, bearer tokens, credential-named `key=value` and `--key value` pairs, URL user info and credential query parameters, JWTs, well-known token prefixes), and private keys (`-----BEGIN … PRIVATE KEY-----` to `-----END … PRIVATE KEY-----`, PGP's `PRIVATE KEY BLOCK` included, on one line or over several) with `[redacted private key]`; a key whose end line was cut off is left out up to the next log line, or for at most 100 lines, and marked `[the redacted private key had no end line]`; text you typed or a tool printed can still hold a secret, and paths, host names and chat ids stay. `--full` packs the files as they are.
+
 ## Diagnostic log lines
 
 These lines are designed to be safe to keep in daemon logs (they are not exported with traces):
@@ -87,9 +110,11 @@ These lines are designed to be safe to keep in daemon logs (they are not exporte
 - `skipping provider-incompatible tool schema for Claude` (WARN): a tool was left out of Claude requests because Claude rejects its root input schema. Fields: `tool`, `issues`. Once per tool per process.
 - `truncated MCP tool description` (DEBUG): fields `tool`, `original_chars` and `limit`.
 - `panic: <message>` (ERROR): Haarness code panicked, in any thread or task, with `location` (`file:line:column`) and the `thread` name; the message is clipped to 500 characters. A background server's stderr goes nowhere, so this line is the only record. A panic inside a turn also logs `a turn stopped on a panic` and ends that turn as failed with "Haarness stopped this turn after an internal error (…)", so the chat takes the next message instead of staying busy until the server restarts.
-- `config: skipped <command|agent|skill> <path>: <error>` (INFO, at startup and after each applied reload): a definition file whose frontmatter does not parse was left out. `skipped skill whose frontmatter does not parse` (WARN, fields `path` and `error`) is the same report from the skill catalog.
+- `config: skipped <command|agent|skill> <path>: <error>` (INFO, at startup and after each applied reload): a definition file whose frontmatter does not parse, or is written in a language other than YAML or JSON (`JavaScript frontmatter is not supported`, `frontmatter language "coffee" is not supported`), was left out. `skipped skill whose frontmatter does not parse` (WARN, fields `path` and `error`) is the same report from the skill catalog. The language is quoted redacted and clipped to 32 characters, since the rest of the opening line can hold anything.
+- `approved once (Auto)`, `approved once (unattended run)` and `auto-approved (--yolo)` (INFO): a request answered without a prompt, with the `operation` redacted as hook text is and clipped to 300 characters, since a command or address can carry a credential. `shell command failed` (WARN) redacts its `error` the same way.
+- `config: skipped remote instructions <url>: <error>` and `config: skipped remote skill index <url>: <error>`: the address keeps its scheme, host and path, with its user name, password and credential-named query parameters as `<redacted>`, in the error too. The instruction prompt names a remote file the same way.
 
-`program` is the file name of the command's first literal word after any `NAME=value` assignments and `env`/`exec`/`command`/`nohup` wrappers, never its arguments. When only the shell could resolve that word (command substitution, an expansion or unbalanced quotes), the shell's name is logged instead. Hook text is redacted before it is logged: Authorization, cookie and credential-named `key=value`, `key: value` and `--key value` pairs (token, secret, password, API key, private key, auth, credential, session), `Bearer`/`Basic` values, curl user flags, URL user info, JWTs, well-known token prefixes and long opaque strings become `[redacted]`. Control characters are removed, and text is clipped on a character boundary. Authorization, Cookie, Host and Origin header values are never logged.
+`program` is the file name of the command's first literal word after any `NAME=value` assignments and `env`/`exec`/`command`/`nohup` wrappers, never its arguments. When only the shell could resolve that word (command substitution, an expansion or unbalanced quotes), the shell's name is logged instead. Hook text is redacted before it is logged: Authorization, cookie and credential-named `key=value`, `key: value` and `--key value` pairs (token, secret, password, API key, private key, auth, credential, session), `Bearer`/`Basic` values, curl user flags, URL user info, JWTs, well-known token prefixes and long opaque strings become `[redacted]`. Control characters are removed, and text is clipped on a character boundary. Authorization, Cookie, Host and Origin header values are never logged. Every line written to the log file or stderr also shows each URL in it without its user name, password or credential-named query parameters, so a library that logs the address it could not reach (an MCP server's `?api_key=` in a connection error) leaves no key behind; on a coloured terminal the colour sequences around a URL are stepped over, so a URL right after one is still found.
 
 ## Data handling
 

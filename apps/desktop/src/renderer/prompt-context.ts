@@ -77,15 +77,26 @@ export function fileContext(
   const startLine = content.slice(0, from).split("\n").length;
   // A selection ending at the next line's start does not include that line.
   const endLine = content.slice(0, Math.max(from, to - 1)).split("\n").length;
+  return fileLinesContext(path, content, startLine, endLine, unsaved);
+}
+/** Lines `startLine` to `endLine` (from 1, both included) of a file, as
+ * context: a selection in a Markdown file's Preview names its lines. */
+export function fileLinesContext(
+  path: string,
+  content: string,
+  startLine: number,
+  endLine: number,
+  unsaved = false,
+): PromptContext {
+  const lines = content.split("\n");
+  const first = Math.max(1, Math.min(startLine, lines.length));
+  const last = Math.max(first, Math.min(endLine, lines.length));
   return {
     kind: "file",
     path,
-    startLine,
-    endLine,
-    content: content
-      .split("\n")
-      .slice(startLine - 1, endLine)
-      .join("\n"),
+    startLine: first,
+    endLine: last,
+    content: lines.slice(first - 1, last).join("\n"),
     unsaved,
   };
 }

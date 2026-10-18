@@ -28,6 +28,21 @@ base="http://127.0.0.1:$port"
 tmux new-session -d -s "$session" -x 100 -y 30 \
   "'$binary' --data-dir '$test_root/data' --workspace '$test_root/workspace' --trust-project serve --host 127.0.0.1 --port '$port' --token '$token'"
 
+# Waits for the TUI pane to show text matching $1 (a basic regex); else
+# prints the pane and $2 and fails.
+wait_for() {
+  for _ in $(seq 1 400); do
+    pane="$(tmux capture-pane -p -t "$session":tui.0)"
+    if echo "$pane" | grep -q "$1"; then
+      return 0
+    fi
+    sleep 0.05
+  done
+  echo "$pane" >&2
+  echo "$2" >&2
+  exit 1
+}
+
 ready=0
 for _ in $(seq 1 100); do
   if curl -fsS -H "Authorization: Bearer $token" "$base/v1/info" >/dev/null 2>&1; then
@@ -93,6 +108,33 @@ if ! echo "$pane" | grep -q 'TMUX_TUI_PTY'; then
   echo "The TUI did not reconstruct PTY output after detach/reconnect" >&2
   exit 1
 fi
+
+# A program that turns on application cursor keys (vim, less, htop) reads the
+# arrows as ESC O A, as the xterm-256color entry says they are sent.
+tmux send-keys -l -t "$session":tui.0 "printf '\\033[?1h'; printf 'APP_''MODE\\n'; cat -v"
+tmux send-keys -t "$session":tui.0 Enter
+wait_for 'APP_MODE' "The program never started"
+tmux send-keys -t "$session":tui.0 Up
+tmux send-keys -l -t "$session":tui.0 'a'
+tmux send-keys -t "$session":tui.0 Enter
+wait_for '\^\[OAa' "Up did not reach a program in application cursor mode as ESC O A"
+tmux send-keys -t "$session":tui.0 C-d
+
+# The same after that switch has left the server's two-megabyte buffer and the
+# terminal is opened again: the replay brings the mode back.
+tmux send-keys -l -t "$session":tui.0 "clear; printf '\\033[?1h'; seq 1 400000; printf 'SEQ_''DONE\\n'; cat -v"
+tmux send-keys -t "$session":tui.0 Enter
+wait_for 'SEQ_DONE' "The long output never finished"
+tmux send-keys -t "$session":tui.0 'C-]'
+wait_for 'Terminal detached' "Ctrl+] did not return from the terminal to the chat"
+tmux send-keys -l -t "$session":tui.0 '/terminal'
+tmux send-keys -t "$session":tui.0 Enter
+wait_for 'SEQ_DONE' "The TUI did not replay the long output"
+tmux send-keys -t "$session":tui.0 Up
+tmux send-keys -l -t "$session":tui.0 'b'
+tmux send-keys -t "$session":tui.0 Enter
+wait_for '\^\[OAb' "A replay past the buffer lost the program's application cursor mode"
+tmux send-keys -t "$session":tui.0 C-d
 tmux kill-pane -t "$session":tui.0
 
 python3 "$PWD/scripts/test_pty_ws.py" "$base" "$token"

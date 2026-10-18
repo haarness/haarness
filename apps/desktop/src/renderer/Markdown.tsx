@@ -60,9 +60,9 @@ export function Markdown(props: { text: string; live?: boolean; document?: boole
       const button = document.createElement("button");
       button.type = "button";
       button.className = "code-copy";
-      button.setAttribute("aria-label", "Copy code");
-      button.title = "Copy code";
-      button.textContent = "Copy";
+      button.setAttribute("aria-label", t("Copy code"));
+      button.title = t("Copy code");
+      button.textContent = t("Copy");
       block.append(button);
     }
     host.dataset.markdownReady = "true";
@@ -88,11 +88,11 @@ export function Markdown(props: { text: string; live?: boolean; document?: boole
           const code = button.parentElement?.querySelector("code");
           void navigator.clipboard.writeText(code?.textContent ?? "").then(() => {
             if (disposed || !button.isConnected) return;
-            button.textContent = "Copied";
+            button.textContent = t("Copied");
             button.classList.add("done");
             const timer = setTimeout(() => {
               timers.delete(timer);
-              button.textContent = "Copy";
+              button.textContent = t("Copy");
               button.classList.remove("done");
             }, 1600);
             timers.add(timer);

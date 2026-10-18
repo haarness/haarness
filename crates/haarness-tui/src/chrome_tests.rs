@@ -940,6 +940,67 @@ fn browser_rows_say_when_they_ran_in_chrome() {
     assert!(!haarness.contains("Chrome"), "{frame}");
 }
 
+/// An MCP tool whose server pairs it with a page says, under its row, that
+/// the page opens in Desktop; a plain tool and a failed call say nothing.
+#[test]
+fn an_mcp_tool_with_an_app_says_its_app_opens_in_desktop() {
+    let thread = fixture_thread();
+    let call = |sequence, id: &str, name: &str| {
+        message_item(
+            sequence,
+            &thread,
+            ItemData::ToolCall {
+                call_id: id.into(),
+                name: name.into(),
+                arguments: serde_json::json!({"city": "Porto"}),
+                provider_metadata: serde_json::Value::Null,
+            },
+        )
+    };
+    let result = |sequence, id: &str, name: &str, is_error: bool, metadata| {
+        message_item(
+            sequence,
+            &thread,
+            ItemData::ToolResult {
+                call_id: id.into(),
+                name: name.into(),
+                output: "Porto: sunny, 21 C".into(),
+                is_error,
+                metadata,
+            },
+        )
+    };
+    let page = serde_json::json!({
+        "city": "Porto",
+        "mcp_app": {"server": "weather", "uri": "ui://weather/view.html", "result": {"content": []}},
+    });
+    let items = vec![
+        call(1, "c1", "mcp__weather__show_weather"),
+        result(2, "c1", "mcp__weather__show_weather", false, page.clone()),
+        call(3, "c2", "mcp__weather__plain"),
+        result(
+            4,
+            "c2",
+            "mcp__weather__plain",
+            false,
+            serde_json::json!({"city": "Porto"}),
+        ),
+        call(5, "c3", "mcp__weather__broken"),
+        result(6, "c3", "mcp__weather__broken", true, page),
+    ];
+    let app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    let frame = frame_text(&app, (120, 30));
+    // The notice wraps to the transcript's width.
+    let notice = "↳ This tool comes with an app; open the chat in Haarness Desktop";
+    assert_eq!(frame.matches(notice).count(), 1, "{frame}");
+    let rows: Vec<_> = frame.lines().collect();
+    let show = rows
+        .iter()
+        .position(|row| row.contains("mcp__weather__show_weather"))
+        .unwrap();
+    assert!(rows[show + 1].contains(notice), "{frame}");
+}
+
 /// A long address gives way to the Chrome tag on a narrow screen, however
 /// long the browser tool's name is.
 #[test]

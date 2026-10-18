@@ -51,6 +51,29 @@ pub fn compact_count(value: u64) -> String {
     }
 }
 
+/// A request's first-token time: one decimal under ten seconds, whole seconds
+/// from there (`820` → `0.8s`, `14_200` → `14s`). Rounded to tenths first,
+/// so 9.96 s reads `10s`, not `10.0s`.
+pub fn seconds_label(ms: u64) -> String {
+    let tenths = (ms + 50) / 100;
+    if tenths < 100 {
+        format!("{}.{}s", tenths / 10, tenths % 10)
+    } else {
+        format!("{}s", (ms + 500) / 1000)
+    }
+}
+
+/// An output speed in tokens per second: one decimal under ten, whole
+/// numbers from there.
+pub fn speed_label(tokens_per_second: f64) -> String {
+    let tenths = (tokens_per_second * 10.0).round();
+    if tenths < 100.0 {
+        format!("{:.1}", tenths / 10.0)
+    } else {
+        format!("{tokens_per_second:.0}")
+    }
+}
+
 /// One attached file: an inverse badge in the attention color followed by the
 /// file's name. The badge is the same chip shape the status band uses, so
 /// "this is a labelled object" reads the same way everywhere.

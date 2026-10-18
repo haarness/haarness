@@ -2,6 +2,15 @@ import { defaultGlobalShortcut, type GlobalShortcut } from "./global-shortcut";
 import type * as Types from "@haarness/sdk";
 import type { ThemeId } from "./themes";
 import type { Attachment } from "./attachments";
+/** What the Screenshots dialog shows: a folder's newest images, without their paths. */
+export type ScreenshotListing =
+  | { canceled: true }
+  | { needsFolder: true }
+  | {
+      folder: string;
+      listing: string;
+      items: { name: string; modified: number; thumbnail: string }[];
+    };
 export interface ProjectLocation {
   cloudWorkspace?: string;
   cloudSession?: string;
@@ -47,6 +56,9 @@ export interface Preferences {
   editorWrap: boolean;
   diffLayout: "split" | "unified";
   terminalFontSize: number;
+  /** Which Option keys send Meta (ESC and the key) in the terminal instead
+   * of the character the layout composes; macOS only, off by default. */
+  terminalOptionAsMeta: "off" | "left" | "both";
   shortcuts: Record<string, string>;
   /** Shows and hides Haarness from any app; off by default. */
   globalShortcut: GlobalShortcut;
@@ -73,6 +85,7 @@ export const defaults: Preferences = {
   editorWrap: false,
   diffLayout: "split",
   terminalFontSize: 13,
+  terminalOptionAsMeta: "off",
   shortcuts: {
     new: "Mod+N",
     settings: "Mod+,",
@@ -89,6 +102,18 @@ export const defaults: Preferences = {
     // Matched wherever the keyboard is: the tabs of the panel that has it.
     tabNext: "Ctrl+Tab",
     tabPrev: "Ctrl+Shift+Tab",
+    // The chat rows the sidebar draws, from anywhere but a code editor or a
+    // terminal. On a focused sidebar row Alt and an arrow still move the row.
+    chatPrev: "Alt+ArrowUp",
+    chatNext: "Alt+ArrowDown",
+    // Control on macOS too; off macOS see `defaultShortcuts`.
+    focusSidebar: "Ctrl+Shift+L",
+    // The prompts of the open chat. In the message box they act only while
+    // it is empty, so the caret keys keep working on a draft.
+    promptPrev: "Mod+ArrowUp",
+    promptNext: "Mod+ArrowDown",
+    promptFirst: "Mod+Shift+ArrowUp",
+    promptLast: "Mod+Shift+ArrowDown",
   },
   globalShortcut: defaultGlobalShortcut,
   language: "en",
@@ -127,13 +152,36 @@ export function shortcutsClash(shortcuts: Record<string, string>, platform: stri
   const keys = Object.values(shortcuts).filter(Boolean).map((value) => shortcutKeys(value, platform));
   return new Set(keys).size !== keys.length;
 }
-/** Shortcuts that may be left unset. */
-export const optionalShortcuts = new Set(["tabNext", "tabPrev"]);
 /**
- * The tab steps (Ctrl+Tab, Ctrl+Shift+Tab) came after people chose their own
- * keys. A tab default that is already another action's key in `saved` (a
- * `Mod+Tab` agent key off macOS, say) is left unset, so that action keeps
- * it and Settings still saves; a tab key saved before is kept as it is.
+ * The default keys on `platform`. Off macOS Control is Mod, and
+ * Control+Shift+L is the file editor's "Add selection to context", so Focus
+ * sidebar takes Alt+Shift+L there. (Control+Alt would be AltGr on many
+ * keyboards, where Control+Alt+Shift+L types a letter such as Ł.)
+ */
+export function defaultShortcuts(platform: string): Preferences["shortcuts"] {
+  return platform === "darwin"
+    ? defaults.shortcuts
+    : { ...defaults.shortcuts, focusSidebar: "Alt+Shift+L" };
+}
+/** Shortcuts that may be left unset: the ones added after people could
+ * choose their own keys. */
+export const optionalShortcuts = new Set([
+  "tabNext",
+  "tabPrev",
+  "chatPrev",
+  "chatNext",
+  "focusSidebar",
+  "promptPrev",
+  "promptNext",
+  "promptFirst",
+  "promptLast",
+]);
+/**
+ * The tab steps (Ctrl+Tab, Ctrl+Shift+Tab), and later the chat, sidebar and
+ * prompt keys, came after people chose their own keys. A new default that is
+ * already another action's key in `saved` (a `Mod+Tab` agent key off macOS,
+ * say) is left unset, so that action keeps it and Settings still saves; a key
+ * saved before is kept as it is.
  */
 export function migrateTabKeys(
   saved: Record<string, string> | undefined,
@@ -308,6 +356,12 @@ export interface Bridge {
   review(input: import("./review-drafts").ReviewRequest): Promise<import("./review-drafts").ReviewResponse>;
   attachmentDraft(key: string, value?: Attachment[]): Promise<Attachment[]>;
   attachments(): Promise<Attachment[]>;
+  /** The composer's Attach menu opened: a token for listing screenshots from it, or null. */
+  screenshotMenu(): Promise<string | null>;
+  /** The newest images of the screenshots folder (`token` from the Attach menu), or another folder the person chooses. */
+  screenshots(input?: { choose?: boolean; token?: string }): Promise<ScreenshotListing>;
+  /** Reads the screenshots at these places in the window's last listing, in this order. */
+  screenshotAttach(listing: string, indexes: number[]): Promise<Attachment[]>;
   save(name: string, content: string): Promise<boolean>;
   openArchive(): Promise<unknown | null>;
   pick(kind: "file" | "directory"): Promise<string | null>;

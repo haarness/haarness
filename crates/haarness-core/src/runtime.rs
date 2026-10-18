@@ -36,8 +36,8 @@ use crate::tool_validation::{unknown_tool, validate_arguments};
 use crate::{
     CoreError, CoreResult, EventBus, ModelProvider, PermissionDecision, PermissionEngine,
     PermissionRule, ProviderEvent, ProviderMessage, ProviderRegistry, ProviderRequest,
-    RuntimeConfig, SystemPromptContext, ThreadRepository, ToolContext, ToolOutput, ToolRegistry,
-    system_prompt_for, system_prompt_with_context,
+    RuntimeConfig, StrandedTask, SystemPromptContext, ThreadRepository, ToolContext, ToolOutput,
+    ToolRegistry, system_prompt_for, system_prompt_with_context,
 };
 
 const MAX_COMPACTIONS_PER_TURN: u8 = 4;
@@ -300,6 +300,11 @@ struct BackgroundTask {
     delivery_unattended: bool,
     delivery_tools: Option<HashMap<String, bool>>,
     suppress_delivery: AtomicBool,
+    /// Stopped because the server is shutting down: its checkpoint is left
+    /// in the background, so the next start tells the parent it stopped.
+    shutdown: AtomicBool,
+    /// Its final checkpoint (done, failed, cancelled) is written.
+    ended: AtomicBool,
     /// The result went to the parent's input; from then on the ledger's
     /// handoff counts it until the parent admits it.
     handed_off: AtomicBool,
@@ -347,6 +352,13 @@ impl BackgroundTask {
         self.parent_ready.store(true, Ordering::SeqCst);
         self.ready.notify_waiters();
         self.cancel.cancel();
+    }
+
+    /// A server shutdown stops every child like a stop of its parent, but
+    /// a background one is owed to a chat that never stopped it.
+    fn stop_for_shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        self.cancel_with_parent();
     }
 
     async fn wait_result(&self) -> CoreResult<String> {
@@ -1645,7 +1657,28 @@ impl AgentRuntime {
                 .map_err(|error| CoreError::Storage(format!("invalid lazy tool mode: {error}")))?;
             *self.lazy_tool_mode.write() = Some(mode);
         }
-        let recovered = self.repository.recover_interrupted().await?;
+        // A background subagent the restart stopped is recorded in the chat
+        // that launched it with its final checkpoint, before anything else
+        // here can fail.
+        let (recovered, reported) = self
+            .repository
+            .recover_interrupted_tasks(&stranded_report)
+            .await?;
+        for item in reported {
+            let root = match self.repository.get_thread(item.thread_id).await {
+                Ok(thread) => self.resolve_root(&thread).await,
+                Err(_) => item.thread_id,
+            };
+            info!(chat = %item.thread_id, "recorded a background task the restart stopped");
+            self.events.publish_scoped(
+                "item.created",
+                Some(item.thread_id),
+                Some(root),
+                item.turn_id,
+                Some(item.id),
+                json!(item),
+            );
+        }
 
         // A process restart cannot retain the provider/tool program counter.
         // Never leave a durable goal claiming to be actively pursuing while
@@ -2506,7 +2539,7 @@ impl AgentRuntime {
             while let Some(event) = stream.next().await {
                 match event? {
                     ProviderEvent::TextDelta(delta) => answer.push_str(&delta),
-                    ProviderEvent::ReasoningDelta(_) => {}
+                    ProviderEvent::ReasoningDelta(_) | ProviderEvent::ContentStarted => {}
                     ProviderEvent::Finished { reason } => {
                         finished = true;
                         if let Some(error) = ProviderEvent::finish_error(&reason) {
@@ -3778,15 +3811,18 @@ impl AgentRuntime {
             .flat_map(|plan| plan.external_paths.iter().cloned())
             .collect();
         let mut pending_plans = Vec::new();
+        // Asks only a person answers (a configuration file edit).
+        let mut protected = HashSet::new();
         for plan in plans {
             let mut asked = Vec::new();
             for pattern in &plan.patterns {
                 let operation = plan.operation(pattern);
                 let constraint = tool.permission_constraint(&arguments, &operation);
                 let explicit = tool.explicit_approval(&arguments, &operation);
+                let evaluation = engine.evaluate_detailed(&operation);
                 let decision = if explicit {
                     crate::permissions::explicit_decision(
-                        engine.evaluate(&operation),
+                        evaluation.decision,
                         constraint,
                         crate::permissions::explicit_granted(
                             &self.session_rules.lock(),
@@ -3794,7 +3830,7 @@ impl AgentRuntime {
                         ),
                     )
                 } else {
-                    constrained_permission(engine.evaluate(&operation), constraint)
+                    constrained_permission(evaluation.decision, constraint)
                 };
                 match decision {
                     PermissionDecision::Deny => {
@@ -3805,10 +3841,16 @@ impl AgentRuntime {
                     // may, nor where a path leads that the hook never saw.
                     PermissionDecision::Ask
                         if !explicit
+                            && !evaluation.protected
                             && hook_permission == Some(PermissionDecision::Allow)
                             && !plan.is_resolved(pattern)
                             && constraint != Some(PermissionDecision::Ask) => {}
-                    PermissionDecision::Ask => asked.push(pattern.clone()),
+                    PermissionDecision::Ask => {
+                        if evaluation.protected {
+                            protected.insert(operation);
+                        }
+                        asked.push(pattern.clone());
+                    }
                     PermissionDecision::Allow => {}
                 }
             }
@@ -3823,8 +3865,9 @@ impl AgentRuntime {
             }
             let asked = &plan.patterns;
             let forced = asked.iter().any(|pattern| {
-                tool.permission_constraint(&arguments, &plan.operation(pattern))
-                    == Some(PermissionDecision::Ask)
+                protected.contains(&plan.operation(pattern))
+                    || tool.permission_constraint(&arguments, &plan.operation(pattern))
+                        == Some(PermissionDecision::Ask)
             });
             let explicit_operations: Vec<String> = asked
                 .iter()
@@ -3851,7 +3894,11 @@ impl AgentRuntime {
             // schedule, `run --yolo`, ACP or a `--yolo` terminal UI approves
             // them once, as it does its agents' requests.
             if !forced && !explicit && stance.auto_approve {
-                tracing::info!(thread = %thread_id, operation, "approved once (unattended run)");
+                tracing::info!(
+                    thread = %thread_id,
+                    operation = %operation_for_log(&operation),
+                    "approved once (unattended run)"
+                );
                 continue;
             }
             let always_rules = plan.always_rules();
@@ -3859,7 +3906,11 @@ impl AgentRuntime {
             // requests once, ordered with mode changes by the gate.
             let approval_gate = self.approval_modes.gate.lock().await;
             if !forced && !explicit && self.approval_modes.is_auto(thread_id).await {
-                tracing::info!(thread = %thread_id, operation, "approved once (Auto)");
+                tracing::info!(
+                    thread = %thread_id,
+                    operation = %operation_for_log(&operation),
+                    "approved once (Auto)"
+                );
                 continue;
             }
             let id = uuid::Uuid::now_v7().to_string();
@@ -4698,6 +4749,17 @@ impl AgentRuntime {
         queue_revision: Option<u64>,
         unattended: bool,
     ) -> CoreResult<Turn> {
+        // As `queue_input` refuses it: a blank message would stay in the
+        // chat, and Claude refuses whitespace-only text on every later turn.
+        // A command expands into its own text.
+        if request.text.trim().is_empty()
+            && request.attachments.is_empty()
+            && request.command.is_none()
+        {
+            return Err(CoreError::Invalid(
+                "text or an attachment is required".into(),
+            ));
+        }
         let _reload = self.reload_gate.read().await;
         request.attachments = crate::attachments::admit_off_executor(
             std::mem::take(&mut request.attachments),
@@ -5307,7 +5369,7 @@ impl AgentRuntime {
             .map(|entry| Arc::clone(entry.value()))
             .collect::<Vec<_>>()
         {
-            task.cancel_with_parent();
+            task.stop_for_shutdown();
         }
         let active = self
             .active
@@ -5529,6 +5591,9 @@ impl crate::ToolInvoker for TurnToolInvoker {
     }
     fn workspace(&self) -> Option<String> {
         Some(self.runner.workspace.to_string_lossy().into_owned())
+    }
+    fn read_rules(&self) -> Option<PermissionEngine> {
+        Some(self.runner.permission_engine_for_tool(&self.agent, "read"))
     }
     fn delegable_agents(&self) -> Vec<String> {
         self.runner
@@ -7127,6 +7192,10 @@ impl RunnerTask {
                     None => None,
                 };
                 let sent_images = sent_images(&provider_request.messages);
+                // This request's first-token and output-speed clock, started
+                // as it is sent; a retry starts its own.
+                let mut clock =
+                    crate::stream_clock::StreamClock::start(tokio::time::Instant::now().into_std());
                 let stream_result = tokio::select! {
                     biased;
                     () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
@@ -7181,7 +7250,8 @@ impl RunnerTask {
                     let event = tokio::select! {
                         biased;
                         () = self.cancel.cancelled() => {
-                            self.publish_round_usage(usage, prompt_usage.clone(), &streamed, provider_id, &model).await?;
+                            // A stopped request has no finished stream to time.
+                            self.publish_round_usage(usage, prompt_usage.clone(), &streamed, None, provider_id, &model).await?;
                             return Err(CoreError::Cancelled);
                         }
                         event = stream.next().instrument(provider_span.clone()) => event,
@@ -7240,6 +7310,23 @@ impl RunnerTask {
                             break;
                         }
                     };
+                    let content = match &event {
+                        ProviderEvent::TextDelta(delta) | ProviderEvent::ReasoningDelta(delta) => {
+                            !delta.is_empty()
+                        }
+                        ProviderEvent::ToolCall { .. }
+                        | ProviderEvent::StructuredOutput(_)
+                        | ProviderEvent::ContentStarted => true,
+                        ProviderEvent::Usage { .. } | ProviderEvent::Finished { .. } => false,
+                    };
+                    if content {
+                        clock.content(tokio::time::Instant::now().into_std());
+                    }
+                    // Only the clock reads it: nothing reached the person yet,
+                    // so a failure right after it can still be retried.
+                    if matches!(event, ProviderEvent::ContentStarted) {
+                        continue;
+                    }
                     saw_provider_event = true;
                     match event {
                         ProviderEvent::TextDelta(delta) => {
@@ -7355,7 +7442,7 @@ impl RunnerTask {
                                 cache_write_tokens,
                             ));
                         }
-                        ProviderEvent::Usage { .. } => {}
+                        ProviderEvent::Usage { .. } | ProviderEvent::ContentStarted => {}
                         ProviderEvent::Finished { reason } => {
                             finished = true;
                             provider_span.record("gen_ai.response.finish_reasons", reason.as_str());
@@ -7383,6 +7470,9 @@ impl RunnerTask {
                     record_span_error(&provider_span, error);
                 }
                 drop(provider_span);
+                // Only a request that finished cleanly is timed: one cut
+                // short or refused says nothing about the provider's pace.
+                let timing = clock.timing().filter(|_| finished && blocked.is_none());
                 let partial = saw_provider_event
                     && (!text.is_empty() || !reasoning.is_empty() || !calls.is_empty());
                 self.flush_reasoning_segment(&mut reasoning).await?;
@@ -7419,6 +7509,7 @@ impl RunnerTask {
                             usage,
                             prompt_usage.clone(),
                             &streamed,
+                            timing,
                             provider_id,
                             &model,
                         )
@@ -7442,6 +7533,7 @@ impl RunnerTask {
                             usage,
                             prompt_usage.clone(),
                             &streamed,
+                            timing,
                             provider_id,
                             &model,
                         )
@@ -7462,7 +7554,14 @@ impl RunnerTask {
                         .await?;
                 }
                 let usage = self
-                    .publish_round_usage(usage, prompt_usage, &streamed, provider_id, &model)
+                    .publish_round_usage(
+                        usage,
+                        prompt_usage,
+                        &streamed,
+                        timing,
+                        provider_id,
+                        &model,
+                    )
                     .await?;
                 self.checkpoint_goal_accounting(usage.map(
                     |(input_tokens, output_tokens, cache_read_tokens, _)| {
@@ -7819,12 +7918,14 @@ impl RunnerTask {
     /// Records one provider request: its reported usage, or when the provider
     /// reported none for a request that sent and streamed something, the
     /// local estimate (prepared prompt plus streamed output), marked
-    /// `estimated`. Returns what was recorded.
+    /// `estimated`, with the request's timing when it finished cleanly.
+    /// Returns what was recorded.
     async fn publish_round_usage(
         &self,
         reported: Option<(u64, u64, u64, u64)>,
         prompt: Option<haarness_protocol::PromptUsage>,
         streamed: &str,
+        timing: Option<crate::stream_clock::StreamTiming>,
         provider_id: &str,
         model: &str,
     ) -> CoreResult<Option<(u64, u64, u64, u64)>> {
@@ -7858,6 +7959,12 @@ impl RunnerTask {
                 cache_write_tokens,
             ),
             estimated,
+            first_token_ms: timing.map(|timing| timing.first_token_ms),
+            stream_ms: timing.map(|timing| timing.stream_ms),
+            // What streamed, counted here: a provider's output count also
+            // holds reasoning it never streamed (hidden or summarised), made
+            // before the first token, which would inflate the output speed.
+            stream_tokens: timing.map(|_| Tokenizer::for_model(model).text(streamed)),
         })
         .await?;
         Ok(usage)
@@ -8572,6 +8679,8 @@ impl RunnerTask {
             .collect();
         let engine = self.permission_engine_for_tool(agent, name);
         let mut pending_plans = Vec::new();
+        // Asks only a person answers (a configuration file edit).
+        let mut protected = HashSet::new();
         for plan in plans {
             let mut asked = Vec::new();
             for pattern in &plan.patterns {
@@ -8615,13 +8724,19 @@ impl RunnerTask {
                     // leads that the hook never saw.
                     PermissionDecision::Ask
                         if !explicit
+                            && !evaluation.protected
                             && constraint != Some(PermissionDecision::Ask)
                             && ((hook_permission == Some(PermissionDecision::Allow)
                                 && !plan.is_resolved(pattern))
                                 || (evaluation.matched.is_none()
                                     && self.skill_engine().evaluate(&plan.operation(pattern))
                                         == PermissionDecision::Allow)) => {}
-                    PermissionDecision::Ask => asked.push(pattern.clone()),
+                    PermissionDecision::Ask => {
+                        if evaluation.protected {
+                            protected.insert(plan.operation(pattern));
+                        }
+                        asked.push(pattern.clone());
+                    }
                     PermissionDecision::Allow => {}
                 }
             }
@@ -8631,9 +8746,10 @@ impl RunnerTask {
         }
         for plan in combine_browser_approvals(name, pending_plans) {
             let forced = plan.patterns.iter().any(|pattern| {
-                tool.as_ref().and_then(|tool| {
-                    tool.permission_constraint(&arguments, &plan.operation(pattern))
-                }) == Some(PermissionDecision::Ask)
+                protected.contains(&plan.operation(pattern))
+                    || tool.as_ref().and_then(|tool| {
+                        tool.permission_constraint(&arguments, &plan.operation(pattern))
+                    }) == Some(PermissionDecision::Ask)
             });
             let explicit: Vec<String> = plan
                 .patterns
@@ -8852,7 +8968,10 @@ impl RunnerTask {
                     });
                 }
             }
-            tracing::info!(operation, "auto-approved (--yolo)");
+            tracing::info!(
+                operation = %operation_for_log(&operation),
+                "auto-approved (--yolo)"
+            );
             return Ok(PermissionResolution {
                 allowed: true,
                 feedback: None,
@@ -8908,7 +9027,11 @@ impl RunnerTask {
                 });
             }
             if auto {
-                tracing::info!(thread = %self.thread.id, operation, "approved once (Auto)");
+                tracing::info!(
+                    thread = %self.thread.id,
+                    operation = %operation_for_log(&operation),
+                    "approved once (Auto)"
+                );
                 return Ok(PermissionResolution {
                     allowed: true,
                     feedback: None,
@@ -8984,7 +9107,7 @@ impl RunnerTask {
         tracing::info!(
             thread = %self.thread.id,
             permission = id,
-            operation,
+            operation = %operation_for_log(&operation),
             "permission requested; waiting for a reply"
         );
         let resolution = tokio::select! {
@@ -9225,6 +9348,7 @@ impl RunnerTask {
         let prompt = arguments
             .get("prompt")
             .and_then(serde_json::Value::as_str)
+            .filter(|prompt| !prompt.trim().is_empty())
             .ok_or_else(|| CoreError::Invalid("task.prompt is required".into()))?
             .to_owned();
         let description = arguments
@@ -9615,6 +9739,8 @@ impl RunnerTask {
                 None
             },
             suppress_delivery: AtomicBool::new(false),
+            shutdown: AtomicBool::new(false),
+            ended: AtomicBool::new(false),
             handed_off: AtomicBool::new(false),
             delivered: AtomicBool::new(false),
             delivery_done: Notify::new(),
@@ -9661,16 +9787,29 @@ impl RunnerTask {
                 Err(CoreError::Cancelled) => "cancelled",
                 Err(_) => "failed",
             };
-            if let Err(error) = persist_task_state(
-                repository.as_ref(),
-                &events,
-                root_thread_id,
-                &worker.info(),
-                state,
-            )
-            .await
-            {
-                tracing::error!(%error, child = %child.id, "failed to persist child task state");
+            // A background task that ends (stopped, done or failed) while the
+            // server shuts down keeps its background checkpoint: its chat is
+            // still owed the result, which the next start records from the
+            // child's turn. "cancelled" would say a person stopped it.
+            let stranded = worker.shutdown.load(Ordering::SeqCst)
+                && worker.promoted.load(Ordering::SeqCst);
+            if stranded {
+                info!(child = %child.id, "background task ended in the shutdown; recorded on the next start");
+            } else {
+                match persist_task_state(
+                    repository.as_ref(),
+                    &events,
+                    root_thread_id,
+                    &worker.info(),
+                    state,
+                )
+                .await
+                {
+                    Ok(_) => worker.ended.store(true, Ordering::SeqCst),
+                    Err(error) => {
+                        tracing::error!(%error, child = %child.id, "failed to persist child task state");
+                    }
+                }
             }
             *worker.result.lock().await = Some(result);
             worker.done.notify_waiters();
@@ -9739,11 +9878,28 @@ impl RunnerTask {
         let runtime = self.runtime_handle();
         let tasks = self.background_tasks.clone();
         let ledger = self.background_ledger.clone();
+        let root_thread_id = self.root_thread_id;
         tokio::spawn(async move {
             let result = task.wait_result().await;
             task.wait_parent_ready().await;
             if task.suppress_delivery.load(Ordering::SeqCst) {
                 let info = task.info();
+                // A result that ended before the shutdown and was waiting for
+                // its chat: its final checkpoint is already written, so mark
+                // it owed again for the next start to record.
+                if task.shutdown.load(Ordering::SeqCst)
+                    && task.ended.load(Ordering::SeqCst)
+                    && let Err(error) = persist_task_state(
+                        runtime.repository.as_ref(),
+                        &runtime.events,
+                        root_thread_id,
+                        &info,
+                        "background",
+                    )
+                    .await
+                {
+                    tracing::error!(%error, child = %info.child_thread_id, "failed to keep an undelivered result for the next start");
+                }
                 tasks.remove(&info.child_thread_id);
                 task.delivered.store(true, Ordering::SeqCst);
                 task.delivery_done.notify_waiters();
@@ -9866,15 +10022,75 @@ async fn persist_task_state(
 }
 
 fn task_envelope(info: &BackgroundTaskInfo, state: &str, text: &str) -> String {
+    task_envelope_for(info.child_thread_id, &info.description, state, text)
+}
+
+/// What a chat is told of a background subagent it launched whose result
+/// could not reach it: the server stopped while the subagent ran (it is not
+/// resumed: nothing it was doing is repeated), or between its end and the
+/// delivery. Nothing starts by itself after a restart: the result is a hidden
+/// message the model reads with the person's next one, and an error notice
+/// in the chat tells the person.
+fn stranded_report(task: &StrandedTask) -> Vec<ItemData> {
+    let child = task.child_thread_id;
+    let description = &task.description;
+    let (state, text) = match task.state.as_str() {
+        "done" => (
+            "completed",
+            task.reply
+                .clone()
+                .unwrap_or_else(|| "Subagent completed without a text response".into()),
+        ),
+        "failed" => (
+            "error",
+            format!(
+                "{}\nHaarness restarted before this background task's result was delivered.",
+                task.error.as_deref().unwrap_or("The subagent failed.")
+            ),
+        ),
+        _ => (
+            "error",
+            format!(
+                "Haarness restarted before this background task finished, and it was not \
+                 resumed, so nothing it was doing was repeated. Its conversation is saved: \
+                 if the work is still needed, check what it may already have changed, then \
+                 continue it with task_id \"{child}\"."
+            ),
+        ),
+    };
+    let notice = if task.state == "interrupted" {
+        format!(
+            "Haarness restarted before the background task \u{201c}{description}\u{201d} finished. \
+             It was not resumed; your next message tells the agent, which can continue it."
+        )
+    } else {
+        format!(
+            "Haarness restarted before the result of the background task \u{201c}{description}\u{201d} \
+             reached this chat; your next message passes it to the agent."
+        )
+    };
+    vec![
+        ItemData::UserMessage {
+            text: task_envelope_for(child, description, state, &text),
+            attachments: Vec::new(),
+            queued: false,
+            synthetic: true,
+        },
+        ItemData::Error {
+            message: notice,
+            retryable: false,
+        },
+    ]
+}
+
+fn task_envelope_for(child: ThreadId, description: &str, state: &str, text: &str) -> String {
     let tag = if state == "error" {
         "task_error"
     } else {
         "task_result"
     };
     format!(
-        "<task id=\"{}\" state=\"{state}\">\n<summary>{}: {}</summary>\n<{tag}>\n{text}\n</{tag}>\n</task>",
-        info.child_thread_id,
-        info.description,
+        "<task id=\"{child}\" state=\"{state}\">\n<summary>{description}: {}</summary>\n<{tag}>\n{text}\n</{tag}>\n</task>",
         match state {
             "running" => "running in background",
             "completed" => "completed",
@@ -10405,6 +10621,11 @@ fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
     for item in provider_visible_items(&items) {
         let item_id = item.id;
         let message = match item.data.clone() {
+            // A blank message saved before turns refused one; Claude would
+            // refuse it on every request.
+            ItemData::UserMessage {
+                text, attachments, ..
+            } if text.trim().is_empty() && attachments.is_empty() => None,
             ItemData::UserMessage {
                 text,
                 attachments,
@@ -10466,6 +10687,10 @@ fn provider_messages(items: Vec<Item>) -> Vec<ProviderMessage> {
                     Some(message)
                 }
             }
+            // A whitespace-only reply segment (often the line breaks a model
+            // writes before a tool call) says nothing, and Claude refuses
+            // whitespace-only text, which would fail every later request.
+            ItemData::AssistantMessage { text } if text.trim().is_empty() => None,
             ItemData::AssistantMessage { text } => Some(ProviderMessage::Text {
                 role: "assistant".into(),
                 content: text,
@@ -11072,6 +11297,13 @@ fn turn_panicked(panic: &(dyn std::any::Any + Send)) -> CoreError {
     ))
 }
 
+/// A permission operation as a log line shows it: a command or address
+/// can carry a credential (`curl -H "Authorization: …"`, `https://u:p@host`),
+/// so it is redacted and clipped.
+fn operation_for_log(operation: &str) -> String {
+    crate::redact::log_text(operation, 300)
+}
+
 /// Why a scheduled run's request that always asks failed instead of waiting.
 fn cannot_ask_forced(operation: &str) -> String {
     format!(
@@ -11276,12 +11508,21 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             resolved: Vec::new(),
         }];
         if arguments.get("action").and_then(serde_json::Value::as_str) == Some("create") {
+            // The new file also meets the rules for where a linked
+            // `.haarness/workflows` folder really puts it.
+            let file = format!(".haarness/workflows/{target}.ts");
+            let mut patterns = vec![file.clone()];
+            let mut resolved = Vec::new();
+            if let Some(pattern) = resolved_file_pattern(workspace, &file) {
+                resolved.push((pattern.clone(), pattern.clone()));
+                patterns.push(pattern);
+            }
             plans.push(AskPlan {
                 permission: "edit".into(),
-                patterns: vec![format!(".haarness/workflows/{target}.ts")],
-                always: vec![format!(".haarness/workflows/{target}.ts")],
+                patterns,
+                always: vec![file],
                 external_paths: Vec::new(),
-                resolved: Vec::new(),
+                resolved,
             });
         }
         return plans;
@@ -11436,7 +11677,8 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         patterns.push(pattern);
     }
     let mut resolved = Vec::new();
-    if matches!(name, "read" | "write" | "edit" | "multiedit")
+    // A list through a link meets the rules for the folder it really lists.
+    if matches!(name, "read" | "write" | "edit" | "multiedit" | "list")
         && let Some(pattern) = resolved_file_pattern(workspace, &target)
     {
         resolved.push((pattern.clone(), pattern.clone()));
@@ -12544,6 +12786,64 @@ mod tests {
     }
 
     #[test]
+    fn provider_messages_leave_out_whitespace_only_text() {
+        let user = |text: &str| ItemData::UserMessage {
+            text: text.into(),
+            attachments: Vec::new(),
+            queued: false,
+            synthetic: false,
+        };
+        let messages = provider_messages(vec![
+            item(1, user("read the file")),
+            // The line breaks a model streams before its tool call.
+            item(
+                2,
+                ItemData::AssistantMessage {
+                    text: "\n\n".into(),
+                },
+            ),
+            item(
+                3,
+                ItemData::ToolCall {
+                    call_id: "call-1".into(),
+                    name: "read".into(),
+                    arguments: json!({"path": "a.txt"}),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            ),
+            item(
+                4,
+                ItemData::ToolResult {
+                    call_id: "call-1".into(),
+                    name: "read".into(),
+                    output: "contents".into(),
+                    is_error: false,
+                    metadata: serde_json::Value::Null,
+                },
+            ),
+            item(
+                5,
+                ItemData::AssistantMessage {
+                    text: "Done.".into(),
+                },
+            ),
+            // Saved before turns refused a blank message.
+            item(6, user("  \n ")),
+            item(7, user("thanks")),
+        ]);
+
+        let texts = messages
+            .iter()
+            .filter_map(|message| match message {
+                ProviderMessage::Text { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(texts, ["read the file", "Done.", "thanks"]);
+        assert_eq!(messages.len(), 5, "the tool call and its result stay");
+    }
+
+    #[test]
     fn compaction_retains_recent_turns_and_exact_todos() {
         let checkpoint = TodoCheckpoint {
             version: 1,
@@ -13266,6 +13566,9 @@ mod tests {
                     cache_write_tokens: 0,
                     cost_usd: None,
                     estimated: false,
+                    first_token_ms: None,
+                    stream_ms: None,
+                    stream_tokens: None,
                 },
             ),
             item(
@@ -13538,7 +13841,12 @@ mod tests {
         assert_eq!(plans[0].always, plans[0].patterns);
         assert_eq!(plans[0].external_paths.len(), 1);
         assert_eq!(plans[1].permission, "list");
-        assert_eq!(plans[1].patterns, vec!["/tmp"]);
+        assert_eq!(plans[1].patterns[0], "/tmp");
+        // Where a linked folder really is (macOS's /tmp is /private/tmp).
+        let real = std::path::Path::new("/tmp").canonicalize().unwrap();
+        if real != std::path::Path::new("/tmp") {
+            assert_eq!(plans[1].patterns[1..], [real.display().to_string()]);
+        }
     }
 
     #[test]
@@ -13636,6 +13944,100 @@ mod tests {
                 assert_eq!(plan.always, vec!["*"]);
             }
         }
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_list_or_a_new_workflow_through_a_link_meets_the_rules_for_where_it_leads() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-linked-list-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(workspace.join("build")).unwrap();
+        std::fs::create_dir_all(workspace.join("private/flows")).unwrap();
+        std::fs::create_dir_all(workspace.join(".haarness")).unwrap();
+        std::os::unix::fs::symlink("build", workspace.join("alias")).unwrap();
+        std::os::unix::fs::symlink("../private/flows", workspace.join(".haarness/workflows"))
+            .unwrap();
+        let mut engine = crate::PermissionEngine::new(vec![
+            crate::PermissionRule {
+                pattern: "*".into(),
+                decision: crate::PermissionDecision::Allow,
+            },
+            crate::PermissionRule {
+                pattern: "list:build".into(),
+                decision: crate::PermissionDecision::Deny,
+            },
+            crate::PermissionRule {
+                pattern: "edit:private/*".into(),
+                decision: crate::PermissionDecision::Deny,
+            },
+        ]);
+        engine.set_workspace(&workspace);
+        let denied = |plan: &super::AskPlan| {
+            plan.patterns.iter().any(|pattern| {
+                engine.evaluate(&plan.operation(pattern)) == crate::PermissionDecision::Deny
+            })
+        };
+        let list = super::ask_plans("list", &json!({"path":"alias"}), &workspace).remove(0);
+        assert_eq!(list.patterns, vec!["alias", "build"]);
+        assert!(denied(&list));
+        let plain = super::ask_plans("list", &json!({"path":"src"}), &workspace).remove(0);
+        assert_eq!(plain.patterns, vec!["src"]);
+        assert!(!denied(&plain));
+        let create = super::ask_plans(
+            "workflow",
+            &json!({"action":"create","name":"audit","source":"x"}),
+            &workspace,
+        );
+        let edit = create
+            .iter()
+            .find(|plan| plan.permission == "edit")
+            .unwrap();
+        assert_eq!(
+            edit.patterns,
+            vec![".haarness/workflows/audit.ts", "private/flows/audit.ts"]
+        );
+        assert!(denied(edit));
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn a_patch_that_touches_a_configuration_file_anywhere_asks() {
+        let workspace =
+            std::env::temp_dir().join(format!("haarness-config-patch-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut engine = crate::PermissionEngine::build_defaults();
+        engine.set_workspace(&workspace);
+        let protected = |body: &str| {
+            let plans = super::ask_plans(
+                "apply_patch",
+                &json!({"input": format!("*** Begin Patch\n{body}*** End Patch")}),
+                &workspace,
+            );
+            let edit = plans.iter().find(|plan| plan.permission == "edit").unwrap();
+            edit.patterns
+                .iter()
+                .filter(|pattern| engine.evaluate_detailed(&edit.operation(pattern)).protected)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        // A scratch file added and then moved onto haarness.json, a file
+        // moved away from .mcp.json, and a config file deleted.
+        assert_eq!(
+            protected(
+                "*** Add File: tmp/c.json\n+{}\n*** Update File: tmp/c.json\n*** Move to: haarness.json\n@@\n {}\n+\n"
+            ),
+            vec!["haarness.json"]
+        );
+        assert_eq!(
+            protected("*** Update File: .mcp.json\n*** Move to: notes/mcp.txt\n@@\n {}\n+\n"),
+            vec![".mcp.json"]
+        );
+        assert_eq!(
+            protected("*** Delete File: .haarness/config.toml\n"),
+            vec![".haarness/config.toml"]
+        );
+        assert!(protected("*** Add File: notes.md\n+x\n").is_empty());
         std::fs::remove_dir_all(workspace).unwrap();
     }
 

@@ -607,12 +607,16 @@ async fn pty_socket(
     id: PtyId,
     mut subscription: PtySubscription,
 ) {
-    let replay_control = json!({
+    let mut replay_control = json!({
         "type": "replay",
         "start": subscription.cursor.start,
         "end": subscription.cursor.end,
         "truncated": subscription.cursor.truncated,
     });
+    // Only a truncated replay has modes to restore; older clients ignore it.
+    if let Some(modes) = &subscription.cursor.modes {
+        replay_control["modes"] = json!(modes);
+    }
     if socket
         .send(Message::Text(replay_control.to_string().into()))
         .await
@@ -1644,7 +1648,12 @@ async fn run_shell(
     let runtime = Arc::clone(&state.runtime);
     tokio::spawn(async move {
         if let Err(error) = runtime.run_shell(id, request.command).await {
-            tracing::warn!(thread_id = %id, %error, "shell command failed");
+            // The error can quote the command, which can carry a credential.
+            tracing::warn!(
+                thread_id = %id,
+                error = %crate::hooks::log_text(&error.to_string(), 300),
+                "shell command failed"
+            );
         }
     });
     Ok(StatusCode::ACCEPTED)

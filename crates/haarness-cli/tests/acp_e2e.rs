@@ -377,3 +377,391 @@ async fn serves_editor_session_tools_permissions_and_durable_reload_over_acp() {
     assert!(status.success(), "Haarness ACP process failed");
     daemon.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn subagent_requests_and_tool_calls_reach_the_client_named_after_the_subagent() {
+    let directory = TestDirectory::new();
+    let workspace = directory.0.join("workspace");
+    let data = directory.0.join("data");
+    let home = directory.0.join("home");
+    std::fs::create_dir_all(workspace.join(".haarness")).expect("create ACP workspace config");
+    std::fs::write(
+        workspace.join(".haarness/config.toml"),
+        "[permissions]\nwrite = \"ask\"\n",
+    )
+    .expect("configure an approval-requiring ACP tool");
+    std::fs::create_dir_all(&home).expect("create isolated ACP home");
+    let mut daemon = DaemonGuard::new(workspace.clone(), data.clone(), home.clone());
+
+    let mut command = base_command(&workspace, &data, &home);
+    command
+        .arg("acp")
+        .arg("--provider")
+        .arg("echo")
+        .arg("--model")
+        .arg("echo-1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    let mut child = command.spawn().expect("launch Haarness ACP agent");
+    let mut stdin = child.stdin.take().expect("ACP stdin");
+    let mut lines = BufReader::new(child.stdout.take().expect("ACP stdout")).lines();
+    send(
+        &mut stdin,
+        json!({
+            "jsonrpc":"2.0",
+            "id":1,
+            "method":"initialize",
+            "params":{"protocolVersion":1, "clientCapabilities":{}}
+        }),
+    )
+    .await;
+    assert_eq!(receive(&mut lines).await["id"], 1);
+    send(
+        &mut stdin,
+        json!({
+            "jsonrpc":"2.0",
+            "id":2,
+            "method":"session/new",
+            "params":{"cwd":workspace, "mcpServers":[]}
+        }),
+    )
+    .await;
+    let session = receive(&mut lines).await["result"]["sessionId"]
+        .as_str()
+        .expect("ACP session id")
+        .to_owned();
+
+    // The subagent's write asks; before, the request never left Haarness and
+    // the turn waited for it forever.
+    let write = json!({"path":"child-proof.txt", "content":"CHILD_OK"});
+    let task = json!({"description":"Write the proof", "prompt":format!("!tool write {write}")});
+    send(
+        &mut stdin,
+        json!({
+            "jsonrpc":"2.0",
+            "id":3,
+            "method":"session/prompt",
+            "params":{
+                "sessionId":session,
+                "prompt":[{"type":"text", "text":format!("!tool task {task}")}]
+            }
+        }),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let response = receive_response(&mut lines, &mut stdin, 3, &mut messages).await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{messages:?}");
+
+    let request = messages
+        .iter()
+        .find(|message| message["method"].as_str() == Some("session/request_permission"))
+        .unwrap_or_else(|| panic!("the subagent's request did not reach the client: {messages:?}"));
+    assert_eq!(request["params"]["sessionId"], session.as_str());
+    let child_session = request["params"]["_meta"]["haarness"]["childSessionId"]
+        .as_str()
+        .expect("the request names the subagent's chat");
+    assert_ne!(child_session, session);
+    assert_eq!(
+        request["params"]["_meta"]["haarness"]["childTitle"],
+        "Write the proof"
+    );
+    assert!(
+        request["params"]["toolCall"]["title"]
+            .as_str()
+            .is_some_and(|title| title.starts_with("Write the proof · ")),
+        "{request:?}"
+    );
+    let call = messages
+        .iter()
+        .find(|message| {
+            message["params"]["update"]["sessionUpdate"].as_str() == Some("tool_call")
+                && message["params"]["update"]["_meta"]["haarness"]["childSessionId"].as_str()
+                    == Some(child_session)
+        })
+        .unwrap_or_else(|| {
+            panic!("the subagent's tool call did not reach the client: {messages:?}")
+        });
+    assert_eq!(
+        call["params"]["update"]["title"],
+        "Write the proof · Edit child-proof.txt"
+    );
+    assert_eq!(
+        request["params"]["toolCall"]["toolCallId"], call["params"]["update"]["toolCallId"],
+        "the request points at the subagent's call"
+    );
+    assert!(
+        messages.iter().any(|message| {
+            message["params"]["update"]["sessionUpdate"].as_str() == Some("tool_call_update")
+                && message["params"]["update"]["toolCallId"]
+                    == call["params"]["update"]["toolCallId"]
+                && message["params"]["update"]["status"].as_str() == Some("completed")
+        }),
+        "the subagent's result did not reach the client: {messages:?}"
+    );
+    assert!(
+        !messages.iter().any(|message| {
+            message["params"]["update"]["sessionUpdate"].as_str() == Some("agent_message_chunk")
+                && message["params"]["update"]["content"]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("Tool write =>"))
+        }),
+        "the subagent's own reply stays in its chat: {messages:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("child-proof.txt")).expect("subagent's file"),
+        "CHILD_OK"
+    );
+
+    drop(stdin);
+    let status = timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("Haarness ACP agent did not exit after stdin closed")
+        .expect("wait for Haarness ACP agent");
+    assert!(status.success(), "Haarness ACP process failed");
+    daemon.stop().await;
+}
+
+/// The workspace server the ACP agent started, as its discovery file names it.
+fn daemon_api(data: &Path) -> (String, String) {
+    fn find(directory: &Path) -> Option<PathBuf> {
+        for entry in std::fs::read_dir(directory).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(found) = find(&path) {
+                    return Some(found);
+                }
+            } else if path.file_name().is_some_and(|name| name == "runtime.json") {
+                return Some(path);
+            }
+        }
+        None
+    }
+    let path = find(data).expect("the workspace server's runtime.json");
+    let runtime: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    (
+        runtime["url"].as_str().unwrap().to_owned(),
+        runtime["token"].as_str().unwrap().to_owned(),
+    )
+}
+
+async fn daemon(
+    (url, token): &(String, String),
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Value>,
+) -> Value {
+    let mut request = reqwest::Client::new()
+        .request(method, format!("{url}/v1{path}"))
+        .bearer_auth(token);
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    let response = request.send().await.unwrap();
+    assert!(
+        response.status().is_success(),
+        "{path}: {}",
+        response.status()
+    );
+    let bytes = response.bytes().await.unwrap();
+    if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap()
+    }
+}
+
+/// An ACP agent on a workspace whose writes ask, with an open session.
+async fn acp_session(
+    directory: &TestDirectory,
+) -> (
+    DaemonGuard,
+    tokio::process::Child,
+    tokio::process::ChildStdin,
+    Lines<BufReader<ChildStdout>>,
+    PathBuf,
+    PathBuf,
+    String,
+) {
+    let workspace = directory.0.join("workspace");
+    let data = directory.0.join("data");
+    let home = directory.0.join("home");
+    std::fs::create_dir_all(workspace.join(".haarness")).expect("create ACP workspace config");
+    std::fs::write(
+        workspace.join(".haarness/config.toml"),
+        "[permissions]\nwrite = \"ask\"\n",
+    )
+    .expect("configure an approval-requiring ACP tool");
+    std::fs::create_dir_all(&home).expect("create isolated ACP home");
+    let daemon = DaemonGuard::new(workspace.clone(), data.clone(), home.clone());
+    let mut command = base_command(&workspace, &data, &home);
+    command
+        .arg("acp")
+        .arg("--provider")
+        .arg("echo")
+        .arg("--model")
+        .arg("echo-1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    let mut child = command.spawn().expect("launch Haarness ACP agent");
+    let mut stdin = child.stdin.take().expect("ACP stdin");
+    let mut lines = BufReader::new(child.stdout.take().expect("ACP stdout")).lines();
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":1, "method":"initialize",
+               "params":{"protocolVersion":1, "clientCapabilities":{}}}),
+    )
+    .await;
+    assert_eq!(receive(&mut lines).await["id"], 1);
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":2, "method":"session/new",
+               "params":{"cwd":workspace, "mcpServers":[]}}),
+    )
+    .await;
+    let session = receive(&mut lines).await["result"]["sessionId"]
+        .as_str()
+        .expect("ACP session id")
+        .to_owned();
+    (daemon, child, stdin, lines, workspace, data, session)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_settled_elsewhere_is_withdrawn_and_a_late_answer_does_not_fail_the_prompt() {
+    let directory = TestDirectory::new();
+    let (mut daemon_guard, mut child, mut stdin, mut lines, workspace, data, session) =
+        acp_session(&directory).await;
+    let write = json!({"path":"settled.txt", "content":"NEVER"});
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":3, "method":"session/prompt",
+               "params":{"sessionId":session,
+                         "prompt":[{"type":"text", "text":format!("!tool write {write}")}]}}),
+    )
+    .await;
+    let asked = loop {
+        let message = receive(&mut lines).await;
+        if message["method"].as_str() == Some("session/request_permission") {
+            break message;
+        }
+    };
+    // Another app rejects it while the editor still shows it.
+    let api = daemon_api(&data);
+    let pending = daemon(&api, reqwest::Method::GET, "/permissions", None).await;
+    let id = pending[0]["permissionId"].as_str().unwrap().to_owned();
+    daemon(
+        &api,
+        reqwest::Method::POST,
+        &format!("/permissions/{id}"),
+        Some(json!({"decision":"reject"})),
+    )
+    .await;
+    let mut messages = Vec::new();
+    loop {
+        let message = receive(&mut lines).await;
+        if message["method"].as_str() == Some("$/cancel_request") {
+            assert_eq!(message["params"]["requestId"], asked["id"]);
+            break;
+        }
+        messages.push(message);
+    }
+    // An editor that answers anyway: the answer is moot, not a failure.
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":asked["id"].clone(),
+               "result":{"outcome":{"outcome":"selected", "optionId":"once"}}}),
+    )
+    .await;
+    let response = receive_response(&mut lines, &mut stdin, 3, &mut messages).await;
+    assert_eq!(
+        response["result"]["stopReason"], "end_turn",
+        "{response:?} {messages:?}"
+    );
+    assert!(
+        !workspace.join("settled.txt").exists(),
+        "the rejection stands"
+    );
+
+    drop(stdin);
+    let status = timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("Haarness ACP agent did not exit after stdin closed")
+        .expect("wait for Haarness ACP agent");
+    assert!(status.success(), "Haarness ACP process failed");
+    daemon_guard.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_raised_between_prompts_is_asked_on_the_next_one() {
+    let directory = TestDirectory::new();
+    let (mut daemon_guard, mut child, mut stdin, mut lines, workspace, data, session) =
+        acp_session(&directory).await;
+    // A background subagent of the session asks while no prompt runs.
+    let api = daemon_api(&data);
+    let write = json!({"path":"late.txt", "content":"LATE_OK"});
+    let task = json!({"description":"Late writer", "prompt":format!("!tool write {write}"), "background":true});
+    daemon(
+        &api,
+        reqwest::Method::POST,
+        &format!("/threads/{session}/turns"),
+        Some(json!({"requestId":Uuid::new_v4(), "text":format!("!tool task {task}")})),
+    )
+    .await;
+    timeout(Duration::from_secs(20), async {
+        loop {
+            let pending = daemon(&api, reqwest::Method::GET, "/permissions", None).await;
+            if pending.as_array().is_some_and(|pending| {
+                pending
+                    .iter()
+                    .any(|info| info["threadId"] != session.as_str())
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the background subagent asks");
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0", "id":3, "method":"session/prompt",
+               "params":{"sessionId":session, "prompt":[{"type":"text", "text":"hello"}]}}),
+    )
+    .await;
+    let mut messages = Vec::new();
+    let response = receive_response(&mut lines, &mut stdin, 3, &mut messages).await;
+    assert_eq!(response["result"]["stopReason"], "end_turn");
+    let asked = messages
+        .iter()
+        .find(|message| message["method"].as_str() == Some("session/request_permission"))
+        .unwrap_or_else(|| panic!("the waiting request was not asked: {messages:?}"));
+    assert!(
+        asked["params"]["toolCall"]["title"]
+            .as_str()
+            .is_some_and(|title| title.starts_with("Late writer · ")),
+        "{asked:?}"
+    );
+    timeout(Duration::from_secs(20), async {
+        while std::fs::read_to_string(workspace.join("late.txt"))
+            .ok()
+            .as_deref()
+            != Some("LATE_OK")
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the approved write runs");
+
+    drop(stdin);
+    let status = timeout(Duration::from_secs(20), child.wait())
+        .await
+        .expect("Haarness ACP agent did not exit after stdin closed")
+        .expect("wait for Haarness ACP agent");
+    assert!(status.success(), "Haarness ACP process failed");
+    daemon_guard.stop().await;
+}
