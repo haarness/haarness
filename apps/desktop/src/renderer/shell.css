@@ -1107,6 +1107,17 @@ html[dir="rtl"] :is(.session-title, .session-bar-name) {
   gap: var(--s2);
 }
 
+.terminal-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s3);
+  flex-direction: column;
+  color: var(--muted);
+  font-size: var(--ui);
+}
+
 /* --------------------------------------------------------------- narrow UI */
 @media (max-width: 1100px) {
   .workbench.has-dock .chat-pane {
