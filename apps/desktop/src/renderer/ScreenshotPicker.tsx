@@ -13,7 +13,11 @@ type Listing = Extract<ScreenshotListing, { listing: string }>;
  * order. The folder button picks from another folder this once (on Linux,
  * where there is no screenshots folder, the chosen folder is kept).
  */
-export function ScreenshotPicker(props: { close: (values?: Attachment[]) => void }) {
+export function ScreenshotPicker(props: {
+  /** From the Attach menu the dialog was chosen in; main lists the folder for it once. */
+  token: Promise<string | null>;
+  close: (values?: Attachment[]) => void;
+}) {
   const [listing, setListing] = createSignal<Listing>();
   const [needsFolder, setNeedsFolder] = createSignal(false);
   const [loading, setLoading] = createSignal(true);
@@ -33,7 +37,8 @@ export function ScreenshotPicker(props: { close: (values?: Attachment[]) => void
     setError("");
     if (!choose) setLoading(true);
     try {
-      const value = await window.haarness.screenshots({ choose });
+      const token = choose ? null : await props.token;
+      const value = await window.haarness.screenshots(choose ? { choose } : token ? { token } : {});
       if ("canceled" in value) {
         // Declining to show the screenshots closes the dialog; declining another folder keeps it.
         if (!choose) close();

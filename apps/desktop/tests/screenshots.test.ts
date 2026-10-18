@@ -1,13 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, rename, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { attachments } from "@haarness/sdk";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { listScreenshots, readListedScreenshots } from "../src/main/screenshot-files";
 import {
   SCREENSHOT_LIMIT,
-  activatingInput,
-  createActivations,
+  createScreenshotIntents,
+  inputKind,
   createScreenshotListings,
   displayFolder,
   imageName,
@@ -88,38 +89,42 @@ test("a pick names places in the window's last listing, and nothing else", () =>
 test("a screenshot swapped for a link or another file after it was listed is refused, not read", async () => {
   const folder = await mkdtemp(join(tmpdir(), "haarness-screenshots-"));
   try {
-    await writeFile(join(folder, "a.png"), "first");
-    await writeFile(join(folder, "b.png"), "second");
-    await writeFile(join(folder, "c.png"), "third");
-    await writeFile(join(folder, "private.png"), "another file");
+    for (const [name, text] of [["a.png", "first"], ["b.png", "second"], ["c.png", "third"], ["d.png", "fourth"], ["private.png", "another file"]])
+      await writeFile(join(folder, name), text);
     await symlink(join(folder, "private.png"), join(folder, "link.png"));
+    // Over what one message may attach (sparse, so it takes no room).
+    await writeFile(join(folder, "big.png"), "");
+    await truncate(join(folder, "big.png"), 20 * 1024 * 1024 + 1);
     const listed = await listScreenshots(folder);
     // A link is never listed.
-    assert.deepEqual(listed.map((entry) => entry.name).sort(), ["a.png", "b.png", "c.png", "private.png"]);
+    assert.deepEqual(
+      listed.map((entry) => entry.name).sort(),
+      ["a.png", "b.png", "big.png", "c.png", "d.png", "private.png"],
+    );
     const pick = (name: string) => listed.find((entry) => entry.name === name)!;
-    let reads = 0;
-    const read = (paths: string[]) => {
-      reads++;
-      return Promise.all(paths.map((path) => readFile(path, "utf8")));
-    };
-    assert.deepEqual(await readListedScreenshots([pick("b.png"), pick("a.png")], read), ["second", "first"]);
-    // Made a link to another file since the listing: refused before anything is read.
+    const text = (values: string[]) => values.map((value) => Buffer.from(value.split(",")[1], "base64").toString());
+    assert.deepEqual(text(await readListedScreenshots([pick("b.png"), pick("a.png")])), ["second", "first"]);
+    // The same attachments the SDK's reader makes from the paths.
+    assert.deepEqual(await readListedScreenshots([pick("b.png"), pick("a.png")]), await attachments([pick("b.png").path, pick("a.png").path]));
+    await assert.rejects(readListedScreenshots([pick("a.png"), pick("big.png")]), /20 MiB/);
+    // Made a link to another file since the listing.
     await rm(join(folder, "a.png"));
     await symlink(join(folder, "private.png"), join(folder, "a.png"));
-    reads = 0;
-    await assert.rejects(readListedScreenshots([pick("b.png"), pick("a.png")], read), /changed/);
-    assert.equal(reads, 0);
+    await assert.rejects(readListedScreenshots([pick("b.png"), pick("a.png")]), /changed/);
     // Rewritten since the listing.
     await writeFile(join(folder, "b.png"), "rewritten");
-    await assert.rejects(readListedScreenshots([pick("b.png")], read), /changed/);
-    assert.equal(reads, 0);
-    // Swapped for a link while it was being read.
+    await assert.rejects(readListedScreenshots([pick("b.png")]), /changed/);
+    // Swapped for a link after it was checked: what is read is still the listed file, never the link's target.
+    const swapped = await readListedScreenshots([pick("c.png")], {
+      checked: async (path) => {
+        await rename(path, path + ".moved");
+        await symlink(join(folder, "private.png"), path);
+      },
+    });
+    assert.deepEqual(text(swapped), ["third"]);
+    // Written to while it was read.
     await assert.rejects(
-      readListedScreenshots([pick("c.png")], async (paths) => {
-        await rm(paths[0]);
-        await symlink(join(folder, "private.png"), paths[0]);
-        return read(paths);
-      }),
+      readListedScreenshots([pick("d.png")], { checked: (path) => appendFile(path, " and more") }),
       /changed/,
     );
   } finally {
@@ -127,42 +132,83 @@ test("a screenshot swapped for a link or another file after it was listed is ref
   }
 });
 
-test("the folder is listed once per click or key press, and only shortly after it", () => {
-  for (const input of [
-    { type: "mouseDown" },
-    { type: "keyDown", key: "Enter" },
-    { type: "rawKeyDown", key: " " },
-    { type: "touchEnd" },
-    { type: "gestureTap" },
-  ])
-    assert.ok(activatingInput(input), JSON.stringify(input));
-  for (const input of [
-    { type: "mouseMove" },
-    { type: "mouseUp" },
-    { type: "mouseWheel" },
-    { type: "keyDown", key: "a" },
-    { type: "keyDown", key: "Escape" },
-    { type: "keyUp", key: "Enter" },
-    { type: "char", key: "Enter" },
-  ])
-    assert.ok(!activatingInput(input), JSON.stringify(input));
+test("the folder is listed for a choice in the Attach menu, not after any press in the window", () => {
+  const kinds: [object, string | undefined][] = [
+    [{ type: "mouseDown" }, "press"],
+    [{ type: "keyDown", key: "Enter" }, "press"],
+    [{ type: "rawKeyDown", key: " " }, "press"],
+    [{ type: "touchEnd" }, "press"],
+    [{ type: "gestureTap" }, "press"],
+    [{ type: "keyDown", key: "ArrowDown" }, "arrow"],
+    [{ type: "keyDown", key: "a" }, "typing"],
+    [{ type: "keyDown", key: "é" }, "typing"],
+    [{ type: "mouseMove" }, undefined],
+    [{ type: "mouseUp" }, undefined],
+    [{ type: "keyDown", key: "Escape" }, undefined],
+    [{ type: "keyDown", key: "ArrowUp" }, undefined],
+    [{ type: "keyUp", key: "Enter" }, undefined],
+    [{ type: "char", key: "a" }, undefined],
+  ];
+  for (const [input, kind] of kinds) assert.equal(inputKind(input as { type: string }), kind, JSON.stringify(input));
   let now = 1000;
-  const activations = createActivations(5000, () => now);
-  // Nothing yet: a page asking on its own gets nothing.
-  assert.equal(activations.take(1), false);
-  activations.note(1);
-  now += 4000;
-  // Another window's click lists nothing here.
-  assert.equal(activations.take(2), false);
-  assert.equal(activations.take(1), true);
-  // Used up.
-  assert.equal(activations.take(1), false);
-  activations.note(1);
-  now += 5001;
-  assert.equal(activations.take(1), false);
-  activations.note(1);
-  activations.forget(1);
-  assert.equal(activations.take(1), false);
+  const intents = createScreenshotIntents(() => now);
+  // Nothing pressed: no menu token, and a listing without one is not a choice.
+  assert.equal(intents.menu(1), null);
+  assert.equal(intents.chosen(1, undefined), false);
+  // A click opens the menu, a second chooses Attach screenshots: listed once.
+  intents.input(1, "press");
+  const token = intents.menu(1)!;
+  assert.ok(token);
+  now += 3000;
+  intents.input(1, "press");
+  assert.equal(intents.chosen(1, token), true);
+  assert.equal(intents.chosen(1, token), false);
+  // From the keyboard: Enter or ArrowDown opens it, ArrowDown moves, Enter chooses.
+  intents.input(1, "arrow");
+  const keyboard = intents.menu(1)!;
+  intents.input(1, "arrow");
+  intents.input(1, "press");
+  assert.equal(intents.chosen(1, keyboard), true);
+  // The press that sends a message, and a page asking for a menu right after
+  // it: no later press, so nothing is chosen.
+  intents.input(1, "press");
+  assert.equal(intents.chosen(1, intents.menu(1)), false);
+  // Something typed between the menu and the press.
+  intents.input(1, "press");
+  const typed = intents.menu(1);
+  intents.input(1, "typing");
+  intents.input(1, "press");
+  assert.equal(intents.chosen(1, typed), false);
+  // A menu not opened by a press, or opened too long after one.
+  intents.input(1, "typing");
+  assert.equal(intents.menu(1), null);
+  intents.input(1, "press");
+  now += 2001;
+  assert.equal(intents.menu(1), null);
+  // A choice too long after its press, or after the menu.
+  intents.input(1, "press");
+  const slow = intents.menu(1);
+  intents.input(1, "press");
+  now += 2001;
+  assert.equal(intents.chosen(1, slow), false);
+  intents.input(1, "press");
+  const stale = intents.menu(1);
+  now += 15_001;
+  intents.input(1, "press");
+  assert.equal(intents.chosen(1, stale), false);
+  // Another window's menu or token, a made-up token, or a closed window.
+  intents.input(1, "press");
+  const first = intents.menu(1);
+  intents.input(2, "press");
+  intents.input(2, "press");
+  assert.equal(intents.chosen(2, first), false);
+  intents.input(1, "press");
+  assert.equal(intents.chosen(1, "made-up"), false);
+  intents.input(1, "press");
+  const closed = intents.menu(1);
+  intents.forget(1);
+  intents.input(1, "press");
+  assert.equal(intents.chosen(1, closed), false);
 });
 
 test("picked screenshots are numbered in the order they were clicked", () => {

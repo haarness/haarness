@@ -7,7 +7,7 @@ import { chromeSetup, revealChromeExtension, setupChromeOnLaunch } from "./chrom
 import { createAttachmentDraftStorage } from "./attachment-drafts";
 import { defaultScreenshotFolder, screenshotThumbnails } from "./screenshot-folder";
 import { listScreenshots, readListedScreenshots, type FileIdentity } from "./screenshot-files";
-import { activatingInput, createActivations, createScreenshotListings, displayFolder } from "../screenshots";
+import { createScreenshotIntents, createScreenshotListings, displayFolder, inputKind } from "../screenshots";
 import { terminalSockets } from "./terminal-sockets";
 import { translate } from "../localization";
 import { globalAccelerator, globalShortcutError, type GlobalShortcut } from "../global-shortcut";
@@ -140,8 +140,8 @@ function socketOpen(socket: PtyConnection) {
 const projectTransaction = createProjectQueue();
 /** Each window's last screenshot listing; the renderer picks by place in it. */
 const screenshotListings = createScreenshotListings<{ path: string; identity: FileIdentity }>();
-/** Each window's last click or key press: the screenshots folder is listed right after one. */
-const activations = createActivations();
+/** Each window's presses and Attach menu: the screenshots folder is listed for that menu's choice. */
+const screenshotIntents = createScreenshotIntents();
 const worktreeOperations = new Set<string>();
 const voice = createVoiceInput((locale) =>
   launchVoice(
@@ -1123,11 +1123,16 @@ function installHandlers() {
       name: basename(result.filePaths[i]),
     }));
   });
+  // The composer's Attach menu opened: a token its Attach screenshots choice lists with.
+  handle("screenshotMenu", (win) => screenshotIntents.menu(win.id));
   // The Screenshots dialog: the newest images of the screenshots folder, with
   // thumbnails. The renderer gets names, times and thumbnails, never paths,
   // and attaches by place in this listing.
   handle("screenshots", async (win, raw: unknown) => {
-    const input = z.object({ choose: z.boolean().optional() }).strict().parse(raw ?? {});
+    const input = z
+      .object({ choose: z.boolean().optional(), token: z.string().max(100).optional() })
+      .strict()
+      .parse(raw ?? {});
     let folder: string | undefined;
     if (input.choose) {
       const result = await dialog.showOpenDialog(win, {
@@ -1143,11 +1148,11 @@ function installHandlers() {
         await persist();
       }
     } else {
-      // The person opens the dialog from the Attach menu: a click or key press
-      // in this window just before, which the page cannot fake. Without one
-      // (VoiceOver's VO-Space and Voice Control press a control without
-      // either) Desktop asks first, so a page never lists the folder unseen.
-      if (!activations.take(win.id)) {
+      // The person chose Attach screenshots in the Attach menu, with presses
+      // main saw on their way to this window. Otherwise (VoiceOver's VO-Space
+      // and Voice Control press a control without either) Desktop asks
+      // first, so a page never lists the folder unseen.
+      if (!screenshotIntents.chosen(win.id, input.token)) {
         const choice = await dialog.showMessageBox(win, {
           type: "question",
           message: say("Show your newest screenshots?"),
@@ -1186,7 +1191,7 @@ function installHandlers() {
       const picks = screenshotListings.resolve(win.id, listing, indexes);
       // Only files that are still the ones listed: a name swapped for a link
       // or another file since is refused, never followed.
-      const values = await readListedScreenshots(picks, attachments);
+      const values = await readListedScreenshots(picks);
       // A listing attaches once: another pick needs the dialog opened again.
       screenshotListings.forget(win.id);
       return values.map((data, index) => ({ data, name: basename(picks[index].path) }));
@@ -1419,7 +1424,8 @@ function createWindow() {
     if (!source(url)) event.preventDefault();
   });
   win.webContents.on("input-event", (_event, input) => {
-    if (activatingInput(input)) activations.note(win.id);
+    const kind = inputKind(input);
+    if (kind) screenshotIntents.input(win.id, kind);
   });
   win.webContents.session.setPermissionRequestHandler(
     (_web, permission, callback) =>
@@ -1474,7 +1480,7 @@ function createWindow() {
   });
   win.on("closed", () => {
     screenshotListings.forget(win.id);
-    activations.forget(win.id);
+    screenshotIntents.forget(win.id);
     resumeShortcut(win.id);
     voice.stop(win.id);
     windows.delete(win);
