@@ -159,6 +159,16 @@ export function shortcutLabel(value: string, platform: string) {
     .replace(/\bCtrl\b/g, "⌃")
     .replaceAll("+", " ");
 }
+/** A shortcut as a field shows it for editing: Mod is written Ctrl off
+ * macOS, where the two are one key (the field still saves Mod). */
+export function shortcutField(value: string, platform: string) {
+  return platform === "darwin" ? value : value.replace(/\bMod\b/g, "Ctrl");
+}
+/** What a field's text saves as: off macOS, Ctrl is Mod, so a combination
+ * typed either way is the same shortcut to the duplicate check. */
+export function shortcutFromField(value: string, platform: string) {
+  return platform === "darwin" ? value : value.replace(/\bctrl\b/gi, "Mod");
+}
 /** A shortcut inside running text such as a tooltip, isolated left to right. */
 export function shortcutText(value: string, platform: string) {
   return "\u2066" + shortcutLabel(value, platform) + "\u2069";

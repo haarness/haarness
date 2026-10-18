@@ -9,6 +9,7 @@ license.workspace = true
 haarness-protocol = { path = "../haarness-protocol" }
 base64.workspace = true
 chrono.workspace = true
+directories.workspace = true
 fs2.workspace = true
 futures.workspace = true
 rand.workspace = true

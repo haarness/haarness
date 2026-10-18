@@ -473,7 +473,7 @@ fn aws_credentials_from_environment() -> Option<AwsCredentials> {
     let path = std::env::var_os("AWS_SHARED_CREDENTIALS_FILE")
         .map(PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".aws/credentials"))
+            haarness_protocol::home_dir().map(|home| home.join(".aws").join("credentials"))
         })?;
     let profile = std::env::var("AWS_PROFILE").unwrap_or_else(|_| "default".into());
     parse_aws_profile(&std::fs::read_to_string(path).ok()?, &profile)

@@ -300,11 +300,7 @@ fn register_later(paths: &Paths, workspace: &Path, directories: &[PathBuf]) -> R
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        command.process_group(0);
-    }
+    crate::detach_from_caller(&mut command);
     let mut child = command.spawn()?;
     let request = json!({"action": "register", "directories": directories});
     child

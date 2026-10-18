@@ -19,7 +19,8 @@ def collect(args):
     dirty = subprocess.check_output(['git','status','--porcelain','--untracked-files=no'], cwd=ROOT, text=True).strip()
     if dirty and not args.allow_dirty: raise ValueError('Commit build sources before collecting a publishable release (or --allow-dirty for local proof).')
     os_name = {'Darwin':'macos','Linux':'linux','Windows':'windows'}[platform.system()]
-    arch = {'arm64':'arm64','aarch64':'arm64','AMD64':'x64','x86_64':'x64'}[platform.machine()]
+    # Windows reports ARM64 in capitals (and AMD64), macOS arm64, Linux aarch64.
+    arch = {'arm64':'arm64','aarch64':'arm64','amd64':'x64','x86_64':'x64'}[platform.machine().lower()]
     binary = Path(args.binary).resolve()
     version = subprocess.check_output([str(binary),'--version'],text=True).strip().removeprefix('haarness ')
     desktop = json.loads((ROOT/'apps/desktop/package.json').read_text())
@@ -33,10 +34,14 @@ def collect(args):
         artifacts.append(dict(file=name, product=product, kind=kind, os=os_name, arch=arch, size=dest.stat().st_size, sha256=digest(dest)))
     add(binary,'cli','binary',f'haarness-{os_name}-{arch}'+('.exe' if os_name=='windows' else ''))
     extensions = {'macos':{'dmg','zip'},'linux':{'AppImage','deb'},'windows':{'exe'}}[os_name]
+    build_os = {'macos':'mac','linux':'linux','windows':'win'}[os_name]
+    # electron-builder names Linux packages by each format's word for the CPU
+    # (x86_64 for AppImage, amd64 for .deb); publish every package as x64/arm64.
+    arch_names = {'x64':{'x64','x86_64','amd64'},'arm64':{'arm64','aarch64'}}[arch]
     for path in sorted((ROOT/'apps/desktop/release').iterdir()):
         kind = path.suffix.lstrip('.')
-        build_os = {'macos':'mac','linux':'linux','windows':'win'}[os_name]
-        if path.is_file() and kind in extensions and path.name == f'Haarness-{version}-{build_os}-{arch}.{kind}': add(path,'desktop',kind)
+        name = f'Haarness-{version}-{build_os}-{arch}.{kind}'
+        if path.is_file() and kind in extensions and any(path.name == f'Haarness-{version}-{build_os}-{a}.{kind}' for a in arch_names): add(path,'desktop',kind,name)
     if not any(a['product']=='desktop' for a in artifacts): raise ValueError('No Desktop packages found for this version and architecture')
     index = dict(version=version, sourceRevision=revision, dirty=bool(dirty), releasedAt=datetime.now(timezone.utc).isoformat(), artifacts=artifacts)
     path=out/f'index-{os_name}-{arch}.json';path.write_text(json.dumps(index,indent=2)+'\n')

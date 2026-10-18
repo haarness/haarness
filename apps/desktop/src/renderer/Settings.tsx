@@ -1,6 +1,6 @@
 import type { GlobalShortcut } from "../global-shortcut";
 import { createSettingsSearch } from "./settings-search";
-import { physicalKey, searchEntries, shortcutLabel } from "./search";
+import { physicalKey, searchEntries, shortcutField, shortcutFromField, shortcutLabel } from "./search";
 import { SettingRow as Row } from "./SettingRow";
 import { UsageStatisticsSetting } from "./UsageStatistics";
 import { BrowserSettings } from "./BrowserSettings";
@@ -608,7 +608,7 @@ function GlobalShortcutRows() {
       try {
         await app.settings({ globalShortcut: next });
       } finally {
-        field.value = value().keys;
+        field.value = shortcutField(value().keys, app.state.platform);
       }
     });
   return (
@@ -640,7 +640,7 @@ function GlobalShortcutRows() {
           ref={field}
           class="shortcut-input"
           aria-label={t("Global shortcut")}
-          value={value().keys}
+          value={shortcutField(value().keys, app.state.platform)}
           disabled={!value().enabled}
           onFocus={() => {
             recording = true;
@@ -651,11 +651,11 @@ function GlobalShortcutRows() {
             const chord = recordChord(event, app.state.platform);
             if (!chord) return;
             event.preventDefault();
-            event.currentTarget.value = chord;
+            event.currentTarget.value = shortcutField(chord, app.state.platform);
             if (chord !== value().keys) void save({ ...value(), keys: chord });
           }}
           onChange={(event) => {
-            const keys = event.currentTarget.value.trim();
+            const keys = shortcutFromField(event.currentTarget.value.trim(), app.state.platform);
             if (keys !== value().keys) void save({ ...value(), keys });
           }}
         />
@@ -683,12 +683,12 @@ function Shortcuts() {
             <input
               class="shortcut-input"
               aria-label={t("Shortcut {name}", { name })}
-              value={value}
+              value={shortcutField(value, app.state.platform)}
               onKeyDown={(event) => {
                 const chord = recordChord(event, app.state.platform);
                 if (!chord) return;
                 event.preventDefault();
-                event.currentTarget.value = chord;
+                event.currentTarget.value = shortcutField(chord, app.state.platform);
                 event.currentTarget.dispatchEvent(new Event("change"));
               }}
               onChange={(event) =>
@@ -696,7 +696,7 @@ function Shortcuts() {
                   app.settings({
                     shortcuts: {
                       ...app.state.preferences.shortcuts,
-                      [name]: event.currentTarget.value,
+                      [name]: shortcutFromField(event.currentTarget.value, app.state.platform),
                     },
                   }),
                 )

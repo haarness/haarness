@@ -157,11 +157,18 @@ pub fn shell_command(script: &str) -> io::Result<Command> {
 }
 
 fn shell_with_binary(script: &str, binary: &Path) -> io::Result<Command> {
-    let mut command = if cfg!(windows) {
+    #[cfg(windows)]
+    let mut command = {
+        use std::os::windows::process::CommandExt as _;
+        // cmd.exe parses its own command line, not C-runtime quoting: given
+        // `"a b"` as one argument it saw `\"a b\"` and split it. With /s it
+        // drops only the outer quotes and runs the script as written.
         let mut command = Command::new("cmd");
-        command.args(["/C", script]);
+        command.raw_arg(format!("/d /s /c \"{script}\""));
         command
-    } else {
+    };
+    #[cfg(not(windows))]
+    let mut command = {
         let mut command = Command::new("sh");
         command
             .args([

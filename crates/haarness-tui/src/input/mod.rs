@@ -1188,7 +1188,7 @@ pub(crate) fn apply_mention(app: &mut App) -> bool {
     };
     let end = start + 1 + query.len();
     let absolute = if let Some(rest) = path.strip_prefix("~/") {
-        std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(rest))
+        haarness_protocol::home_dir().map(|home| home.join(rest))
     } else if std::path::Path::new(&path).is_absolute() {
         Some(std::path::PathBuf::from(&path))
     } else {

@@ -15,7 +15,7 @@ use axum::{
     },
     routing::{get, post},
 };
-use futures::{FutureExt, Stream, StreamExt};
+use futures::{Stream, StreamExt};
 use haarness_core::{AgentRuntime, CoreError, McpRegistry, SkillRegistry};
 use haarness_language::{FormatterStatus, LanguageService, LanguageStatus};
 use haarness_protocol::{
@@ -583,6 +583,10 @@ struct PtyConnectQuery {
     cursor: Option<u64>,
 }
 
+/// How long a terminal socket that fell behind keeps taking keys before it
+/// closes, so a Ctrl+C already on its way still reaches the program.
+const PTY_LAG_KEY_GRACE: Duration = Duration::from_millis(250);
+
 async fn connect_pty(
     axum::Extension(ptys): axum::Extension<Arc<PtyManager>>,
     Path(id): Path<PtyId>,
@@ -681,11 +685,24 @@ async fn pty_socket(
                     // The client reconnects with its last acknowledged cursor;
                     // the bounded session buffer fills the exact missing range.
                     // Keys it already sent go to the shell before the close.
-                    while let Some(Some(Ok(message))) = socket.recv().now_or_never() {
-                        if let Message::Binary(bytes) = message
-                            && ptys.write(id, &bytes).is_err()
-                        {
-                            break;
+                    // They may still be in flight (Linux PTYs hand a flood
+                    // over in small reads, so this lag comes at once), and a
+                    // poll that only takes what is ready lost the Ctrl+C.
+                    let grace = tokio::time::sleep(PTY_LAG_KEY_GRACE);
+                    tokio::pin!(grace);
+                    loop {
+                        tokio::select! {
+                            biased;
+                            incoming = socket.recv() => match incoming {
+                                Some(Ok(Message::Binary(bytes))) => {
+                                    if ptys.write(id, &bytes).is_err() {
+                                        break;
+                                    }
+                                }
+                                Some(Ok(_)) => {}
+                                Some(Err(_)) | None => break,
+                            },
+                            () = &mut grace => break,
                         }
                     }
                     let _ = socket.send(Message::Close(None)).await;
@@ -1785,7 +1802,7 @@ fn explicit_path_suggestions(
     limit: usize,
 ) -> Option<Vec<String>> {
     let (expanded, exact_directory_prefix) = if query == "~" || query.starts_with("~/") {
-        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        let Some(home) = haarness_protocol::home_dir() else {
             return Some(Vec::new());
         };
         let suffix = query.strip_prefix('~').unwrap_or_default();

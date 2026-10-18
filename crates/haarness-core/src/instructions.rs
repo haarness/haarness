@@ -311,7 +311,7 @@ pub fn read_with_imports(
     trusted: bool,
     omit: ImportFilter<'_>,
 ) -> Option<String> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = haarness_protocol::home_dir();
     let scope = Scope {
         workspace,
         home: home.as_deref(),
