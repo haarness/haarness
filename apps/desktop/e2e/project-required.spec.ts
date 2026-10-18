@@ -94,7 +94,7 @@ test("a fresh desktop shows project home, and canceling never creates a general 
     page.getByRole("button", { name: "Send message", exact: true }),
   ).toHaveCount(0);
   await expect(
-    page.getByRole("button", { name: "Attach files", exact: true }),
+    page.getByRole("button", { name: "Attach", exact: true }),
   ).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Open files", exact: true }),

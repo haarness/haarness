@@ -9,6 +9,7 @@ import {
   type Page,
   type Locator,
 } from "@playwright/test";
+import { attachFiles } from "./fixtures/composer";
 import {
   mkdtemp,
   mkdir,
@@ -2143,7 +2144,7 @@ async function attachComposerFile(name: string) {
       return { canceled: false, filePaths: [path] };
     };
   }, path);
-  await page.getByRole("button", { name: "Attach files", exact: true }).click();
+  await attachFiles(page);
   await expect(page.getByRole("button", { name: `Remove ${name}`, exact: true })).toBeVisible();
 }
 
@@ -2419,7 +2420,7 @@ test("first-message attachments stay with their draft and never leak into a new 
       return { canceled: false, filePaths: [path] };
     };
   }, path);
-  await page.getByRole("button", { name: "Attach files", exact: true }).click();
+  await attachFiles(page);
   await expect(
     page.getByRole("button", { name: "Remove draft-proof.png", exact: true }),
   ).toBeVisible();
@@ -10560,7 +10561,7 @@ test("chat-only composer preserves recall and drafts and rejects removed shell e
     await expect(page.getByRole("textbox", { name: "Shell command", exact: true })).toHaveCount(0);
   }
   await expect(page.getByRole("combobox", { name: "Model", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Attach files", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Attach", exact: true })).toBeEnabled();
   await page.getByRole("button", { name: "Search", exact: true }).click();
   await page.getByRole("combobox", { name: "Search Haarness", exact: true }).fill("Switch to shell mode");
   await expect(page.getByRole("option", { name: "Switch to shell mode", exact: true })).toHaveCount(0);

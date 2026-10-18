@@ -77,6 +77,8 @@ import {
   type PromptMove,
 } from "./keyboard-nav";
 import { MenuButton, type MenuAction } from "./MenuButton";
+import { ScreenshotPicker } from "./ScreenshotPicker";
+import { Portal } from "solid-js/web";
 import { isWorktree, locationName } from "../projects";
 import { createWorktree } from "./worktrees";
 import { ChangePreview, ToolActivity } from "./ToolActivity";
@@ -220,6 +222,8 @@ export function Session() {
     [effort, setEffort] = createSignal(""),
     [follow, setFollow] = createSignal(true);
   const attachments = () => app.attachmentDraft(app.draftKey());
+  /** The draft the open Screenshots dialog adds to, chosen when it opened. */
+  const [screenshotsFor, setScreenshotsFor] = createSignal<string>();
   const setAttachments = (value: Attachment[] | ((items: Attachment[]) => Attachment[])) =>
     app.setAttachmentDraft(app.draftKey(), value);
   const fileDrop = createFileDrop(
@@ -2144,18 +2148,46 @@ export function Session() {
               </Show>
               <footer>
                 <div class="composer-leading">
-                  <Button
+                  <MenuButton
+                    label={t("Attach")}
                     icon="plus"
-                    label={t("Attach files")}
                     disabled={!project()}
-                    onClick={() =>
-                      app.run(async () => {
-                        const key = app.draftKey();
-                        const values = await window.haarness.attachments();
-                        await app.addAttachments(key, relabelAttachments(values));
-                      })
-                    }
+                    items={[
+                      {
+                        label: t("Attach files"),
+                        icon: "attach",
+                        run: () =>
+                          void app.run(async () => {
+                            const key = app.draftKey();
+                            const values = await window.haarness.attachments();
+                            await app.addAttachments(key, relabelAttachments(values));
+                          }),
+                      },
+                      {
+                        label: t("Attach screenshots"),
+                        icon: "image",
+                        run: () => setScreenshotsFor(app.draftKey()),
+                      },
+                    ]}
                   />
+                  {/* In the body, so the composer's own styles stay off the dialog. */}
+                  <Show when={screenshotsFor()}>
+                    {(key) => (
+                      <Portal>
+                        <ScreenshotPicker
+                          close={(values) => {
+                            // Read before closing: the dialog's draft key goes with it.
+                            const target = key();
+                            setScreenshotsFor(undefined);
+                            if (values?.length)
+                              void app.run(() => app.addAttachments(target, relabelAttachments(values)));
+                            if (composer?.isConnected && !composer.disabled)
+                              composer.focus({ preventScroll: true });
+                          }}
+                        />
+                      </Portal>
+                    )}
+                  </Show>
                   <Show when={state.connection}>
                     {/* The name carries the mode it shows, so a voice user
                         can say what they see (WCAG 2.5.3); a name that changes
