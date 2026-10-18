@@ -10,7 +10,7 @@ import { execFileSync } from "node:child_process";
 test.describe.configure({ mode: "serial" });
 
 let app: ElectronApplication, page: Page;
-let temporary: string, workspace: string, shots: string, other: string;
+let temporary: string, workspace: string, shots: string, other: string, shapes: string;
 let binary: string, env: Record<string, string>;
 const errors: string[] = [];
 
@@ -26,9 +26,11 @@ test.beforeAll(async () => {
   workspace = join(temporary, "workspace");
   shots = join(temporary, "Screenshots folder");
   other = join(temporary, "Elsewhere");
+  shapes = join(temporary, "Shapes");
   await mkdir(join(workspace, ".haarness"), { recursive: true });
   await mkdir(shots);
   await mkdir(other);
+  await mkdir(shapes);
   await writeFile(join(workspace, ".haarness/config.toml"), '[defaults]\nprovider="echo"\nmodel="echo-1"\n');
   binary = resolve(process.env.HAARNESS_BIN ?? "../../target/debug/haarness");
   env = {
@@ -49,19 +51,20 @@ test.beforeAll(async () => {
   page.on("pageerror", (error) => errors.push(error.message));
   await page.setViewportSize({ width: 1400, height: 950 });
   // Real images, drawn by Electron, so thumbnails have something to show.
-  const image = (red: number, green: number, blue: number) =>
-    app.evaluate(({ nativeImage }, color) => {
-      const [width, height] = [160, 100];
+  const image = (red: number, green: number, blue: number, width = 160, height = 100) =>
+    app.evaluate(({ nativeImage }, [color, width, height]) => {
       const pixels = Buffer.alloc(width * height * 4);
       for (let index = 0; index < width * height; index++)
         pixels.set([color[2], color[1], color[0], 255], index * 4);
       return nativeImage.createFromBitmap(pixels, { width, height }).toPNG().toString("base64");
-    }, [red, green, blue]);
+    }, [[red, green, blue], width, height] as [number[], number, number]);
   const files: [string, string, number][] = [
     [join(shots, "Screenshot 1.png"), await image(200, 40, 40), 3600],
     [join(shots, "Screenshot 2.png"), await image(40, 160, 60), 600],
     [join(shots, "Screenshot 3.png"), await image(40, 80, 200), 60],
     [join(other, "Elsewhere.png"), await image(220, 180, 40), 120],
+    [join(shapes, "Wide.png"), await image(40, 160, 160), 300],
+    [join(shapes, "Tall.png"), await image(160, 40, 160, 100, 160), 200],
   ];
   const now = Date.now() / 1000;
   for (const [path, data, age] of files) {
@@ -71,6 +74,13 @@ test.beforeAll(async () => {
   // Neither a hidden image nor another kind of file is offered.
   await writeFile(join(shots, ".hidden.png"), Buffer.from(files[0][1], "base64"));
   await writeFile(join(shots, "notes.txt"), "not an image\n");
+  // A few bytes whose header asks for 30000 by 30000 pixels (3.6 GB to decode).
+  const huge = Buffer.alloc(33);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]).copy(huge);
+  huge.writeUInt32BE(30000, 16);
+  huge.writeUInt32BE(30000, 20);
+  huge.set([8, 6, 0, 0, 0], 24);
+  await writeFile(join(shapes, "Huge.png"), huge);
   // The folder dialog answers from a queue: the project first, then folders for the picker.
   await app.evaluate(({ dialog: native }, folders) => {
     const calls: Calls = { folders };
@@ -209,4 +219,25 @@ test("a pick names only places in the window's latest listing", async () => {
   await rm(path);
   await writeFile(path, original);
   await utimes(path, Date.now() / 1000 - 3600, Date.now() / 1000 - 3600);
+});
+
+test("thumbnails keep each image's shape, and an image too large to draw safely shows a placeholder", async ({}, info) => {
+  await app.evaluate((_, folder) => (globalThis as unknown as { calls: Calls }).calls.folders.push(folder), shapes);
+  await page.getByRole("button", { name: "Attach", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Attach screenshots", exact: true }).click();
+  await dialog().getByRole("button", { name: "Choose folder…", exact: true }).click();
+  await expect(dialog().locator(".screenshot-name")).toHaveText(["Huge.png", "Tall.png", "Wide.png"]);
+  const natural = (name: string) =>
+    tile(name)
+      .locator("img")
+      .evaluate((img: HTMLImageElement) => (img.complete ? [img.naturalWidth, img.naturalHeight] : []));
+  await expect.poll(() => natural("Wide.png")).toEqual([160, 100]);
+  await expect.poll(() => natural("Tall.png")).toEqual([100, 160]);
+  // Listed and still pickable, with the image icon in place of a thumbnail.
+  await expect(tile("Huge.png").locator("img")).toHaveCount(0);
+  await expect(tile("Huge.png").locator(".screenshot-thumb svg")).toBeVisible();
+  await dialog().screenshot({ path: info.outputPath("screenshots-shapes.png") });
+  await dialog().getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog()).toHaveCount(0);
+  expect(errors).toEqual([]);
 });

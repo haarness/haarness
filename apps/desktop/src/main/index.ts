@@ -1140,7 +1140,7 @@ function installHandlers() {
       return { needsFolder: true };
     }
     const images = await listScreenshots(folder);
-    const thumbnails = await screenshotThumbnails(images.map((image) => image.path));
+    const thumbnails = await screenshotThumbnails(images);
     return {
       folder: displayFolder(folder, homedir()),
       listing: screenshotListings.remember(

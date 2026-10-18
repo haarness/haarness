@@ -3,9 +3,7 @@ import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { nativeImage } from "electron";
 import { parseDefaultsLocation, screenshotFolder } from "../screenshots";
-
-/** Thumbnail width: two device pixels for each of a tile's CSS pixels. */
-const THUMBNAIL = 280;
+import { createScreenshotThumbnails } from "./screenshot-thumbnails";
 
 /** The Screenshot app's "Save to" folder, when it names a folder that exists. */
 async function macLocation(home: string) {
@@ -37,33 +35,5 @@ export async function defaultScreenshotFolder(remembered: unknown) {
   });
 }
 
-async function thumbnail(path: string) {
-  try {
-    // Electron reads the image itself where it can (on macOS every type the
-    // system knows) and scales it by width, keeping its shape: macOS's own
-    // thumbnails come back square. Windows draws the types Electron cannot.
-    let image = nativeImage.createFromPath(path);
-    if (image.isEmpty() && process.platform === "win32")
-      image = await nativeImage.createThumbnailFromPath(path, { width: THUMBNAIL, height: THUMBNAIL });
-    if (image.isEmpty()) return "";
-    const fitted = image.getSize().width > THUMBNAIL ? image.resize({ width: THUMBNAIL }) : image;
-    return fitted.toDataURL();
-  } catch {
-    return "";
-  }
-}
-
-/** Thumbnails for `paths`, a few at a time; one that cannot be drawn is empty. */
-export async function screenshotThumbnails(paths: string[]) {
-  const output: string[] = new Array(paths.length).fill("");
-  let next = 0;
-  await Promise.all(
-    Array.from({ length: Math.min(6, paths.length) }, async () => {
-      while (next < paths.length) {
-        const index = next++;
-        output[index] = await thumbnail(paths[index]);
-      }
-    }),
-  );
-  return output;
-}
+/** Thumbnails for listed screenshots, kept while their files stay the same. */
+export const screenshotThumbnails = createScreenshotThumbnails({ platform: process.platform, images: nativeImage });
