@@ -202,6 +202,41 @@ test("one click lets the page open one link; a second waits for the person", asy
   expect(errors).toEqual([]);
 });
 
+test("a link the app may not open is refused, with a notice naming its scheme only after a press in the page", async () => {
+  const before = (await calls()).shell.length;
+  // Asked by the page on its own: refused, and nothing shows, so a page cannot repeat or word a notice.
+  const view = await show('{"city":"Tavira","autofile":true}');
+  await expect(content(view).locator("#status")).toHaveText(
+    "autofile error Haarness opens only http, https and mailto links from an app.",
+  );
+  await page.waitForTimeout(300);
+  await expect(view.locator(".mcp-app-refused")).toHaveCount(0);
+  // After a click in the page, the person who clicked sees why nothing opened. A scheme that is
+  // not a well-known one could be words the page chose, so the notice names none.
+  await content(view).getByRole("button", { name: "Open a worded link" }).click();
+  await expect(content(view).locator("#status")).toHaveText(
+    "worded link error Haarness opens only http, https and mailto links from an app.",
+  );
+  const notice = view.locator(".mcp-app-refused");
+  await expect(notice).toHaveText(
+    /^This app tried to open a link Haarness does not open\. Apps may open only http, https and mailto links\.\s*Dismiss$/,
+  );
+  await expect(notice).not.toContainText("haarness-help");
+  // A well-known scheme is named; the rest of the address, the page's text, is not.
+  await content(view).getByRole("button", { name: "Open a file link" }).click();
+  await expect(content(view).locator("#status")).toHaveText(
+    "file link error Haarness opens only http, https and mailto links from an app.",
+  );
+  await expect(notice).toHaveText(
+    /^This app tried to open a file: link\. Apps may open only http, https and mailto links\.\s*Dismiss$/,
+  );
+  await expect(notice).not.toContainText("/etc/hosts");
+  await notice.getByRole("button", { name: "Dismiss", exact: true }).click();
+  await expect(notice).toHaveCount(0);
+  expect((await calls()).shell.slice(before)).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
 test("a theme change outside the colours, such as the font, reaches the page", async () => {
   const view = page.locator(".mcp-app").last();
   await page.evaluate(() => document.documentElement.style.setProperty("--sans", "Georgia, serif"));

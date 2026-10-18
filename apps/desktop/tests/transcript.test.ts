@@ -12,6 +12,8 @@ import {
   toolTitle,
   batchSteps,
   batchLabel,
+  batchTarget,
+  targetList,
   toolActivity,
   toolInput,
   toolOutput,
@@ -26,6 +28,7 @@ import {
   toolVerbKeys,
 } from "../src/renderer/transcript";
 import { lines } from "../src/renderer/diff";
+import { applyLanguage } from "../src/renderer/i18n";
 
 test("shell exit status is reflected in tool presentation without interpreting other tools as processes", () => {
   const result = { output: "stderr", is_error: false, metadata: { exit: 7 } };
@@ -216,6 +219,50 @@ test("batch presentation pairs ordered outputs and individual failures without J
     }),
     steps,
   );
+});
+
+test("a collapsed batch names what its steps acted on, the first two and then a count", () => {
+  const steps = (calls: [string, unknown][]) =>
+    batchSteps({ tool_calls: calls.map(([tool, parameters]) => ({ tool, parameters })) });
+  assert.equal(
+    batchTarget(steps([["read", { path: "src/a.ts" }], ["read", { path: "src/b.ts" }]])),
+    "src/a.ts, src/b.ts",
+  );
+  // Repeated targets count once; a search names its pattern and folder.
+  assert.equal(
+    batchTarget(
+      steps([
+        ["read", { path: "src/a.ts" }],
+        ["read", { path: "src/a.ts", offset: 40 }],
+        ["grep", { pattern: "TODO", path: "src" }],
+        ["bash", { command: "npm test" }],
+        ["read", { path: "README.md" }],
+      ]),
+    ),
+    "src/a.ts, TODO in src +2",
+  );
+  assert.equal(batchTarget(steps([["todoread", {}]])), "");
+  assert.equal(batchTarget([]), "");
+});
+
+test("a list of targets is joined the way the interface language lists things", () => {
+  assert.equal(targetList([]), "");
+  assert.equal(targetList(["a.ts"]), "a.ts");
+  assert.equal(targetList(["a.ts", "b.ts"]), "a.ts, b.ts");
+  assert.equal(targetList(["a.ts", "b.ts", "c.ts", "d.ts"]), "a.ts, b.ts +2");
+  const global = globalThis as { document?: unknown };
+  const saved = global.document;
+  global.document = { documentElement: {} };
+  try {
+    applyLanguage("ja");
+    assert.equal(targetList(["a.ts", "b.ts"]), "a.ts、b.ts");
+    assert.equal(targetList(["a.ts", "b.ts", "c.ts"]), "a.ts、b.ts ほか 1 件");
+    applyLanguage("ar");
+    assert.equal(targetList(["a.ts", "b.ts"]), "a.ts، b.ts");
+  } finally {
+    applyLanguage("en");
+    global.document = saved;
+  }
 });
 
 test("an unknown tool is named rather than described", () => {

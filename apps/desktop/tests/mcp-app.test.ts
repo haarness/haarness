@@ -11,6 +11,7 @@ import {
   createBridge,
   document,
   granted,
+  linkScheme,
   messageText,
   payload,
   payloadFor,
@@ -319,6 +320,41 @@ test("the bridge refuses tool calls, context updates, downloads, other resources
     { jsonrpc: "2.0", id: 8, result: { isError: true } },
     { jsonrpc: "2.0", id: 9, result: { isError: true } },
   ]);
+});
+
+test("a refused link reaches the host too, so the person who clicked it can be told", async () => {
+  const { value, calls } = host({
+    refusedLink: (url, gesture) => void calls.push(gesture ? ["refusedLink", url, "gesture"] : ["refusedLink", url]),
+  });
+  const posted: Record<string, unknown>[] = [];
+  const bridge = createBridge(value, (message) => posted.push(message));
+  await bridge.receive({ jsonrpc: "2.0", id: 1, method: "ui/open-link", params: { url: "file:///etc/hosts" } }, true);
+  await bridge.receive({ jsonrpc: "2.0", id: 2, method: "ui/open-link", params: { url: 42 } });
+  await bridge.receive({ jsonrpc: "2.0", id: 3, method: "ui/open-link", params: { url: "https://example.com/ok" } });
+  assert.deepEqual(calls, [
+    ["refusedLink", "file:///etc/hosts", "gesture"],
+    ["refusedLink", ""],
+    ["openLink", "https://example.com/ok"],
+  ]);
+  assert.deepEqual(posted.slice(0, 2), [
+    { jsonrpc: "2.0", id: 1, error: { code: -32602, message: REFUSED.link } },
+    { jsonrpc: "2.0", id: 2, error: { code: -32602, message: REFUSED.link } },
+  ]);
+});
+
+test("a refused link is named only by its scheme, never by the page's own text", () => {
+  assert.equal(linkScheme("file:///etc/hosts"), "file:");
+  assert.equal(linkScheme(" JavaScript:alert(1)"), "javascript:");
+  assert.equal(linkScheme("SMB://server/share"), "smb:");
+  // Any other scheme could be words the page chose: the notice names none.
+  assert.equal(linkScheme("vscode://open?x=1"), undefined);
+  assert.equal(linkScheme("sign-in.at.haarness-help.com:443"), undefined);
+  // Nor a worded address, or text with no scheme at all.
+  assert.equal(linkScheme("Haarness: sign in at https://evil.example"), undefined);
+  assert.equal(linkScheme("Sign in at https://evil.example"), undefined);
+  assert.equal(linkScheme("relative/path"), undefined);
+  assert.equal(linkScheme(""), undefined);
+  assert.equal(linkScheme("a".repeat(40) + ":x"), undefined);
 });
 
 test("a message waits for the host's answer: inserted, or declined", async () => {

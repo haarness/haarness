@@ -1661,6 +1661,8 @@
   "collapse": "收合",
   "lines {from}–{to} of {total}": "第 {from}–{to} 行，共 {total} 行",
   "always allows": "一律允許",
+  "Haarness could not read all of this command.": "Haarness 無法讀取這條命令的全部內容。",
+  "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness 無法讀取這條命令的全部內容；{rule} 的規則可能適用。",
   "Leads to {path}": "實際指向 {path}",
   "every file edit": "所有檔案編輯",
   "every shell command": "所有 shell 命令",
@@ -2519,5 +2521,13 @@
   "Comment on selection": "評論所選內容",
   "Comment on these lines…": "對這些行發表評論…",
   "Comment added to your message": "已將評論加入你的訊息",
-  "Preview comment": "預覽評論"
+  "Preview comment": "預覽評論",
+  "{count} failed": "{count} 項失敗",
+  "+{count} more": "還有 {count} 項",
+  "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "此應用程式嘗試開啟 Haarness 不會開啟的連結。應用程式只能開啟 http、https 和 mailto 連結。",
+  "Load image from {host}": "從 {host} 載入圖片",
+  "The image from {host} could not be loaded.": "無法載入來自 {host} 的圖片。",
+  "This app tried to open a {scheme} link. Apps may open only http, https and mailto links.": "此應用程式嘗試開啟一個 {scheme} 連結。應用程式只能開啟 http、https 和 mailto 連結。",
+  "{first}, {second}": "{first}、{second}",
+  "{first}, {second} +{count}": "{first}、{second} 及另外 {count} 項"
 }

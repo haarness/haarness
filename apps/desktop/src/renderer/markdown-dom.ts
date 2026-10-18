@@ -1,9 +1,15 @@
 import DOMPurify from "dompurify";
+import { cssReferencesOutside, loadsNetworkPath, parsedAddress } from "./link-target";
 import type { MarkdownPatch } from "./markdown-project";
+import { holdRemoteImages, madeHere, replyAttribute, type RemoteImageLabels } from "./remote-images";
 
 type Block = { html: string; start: Comment; end: Comment };
 
 const URL_ATTRIBUTES = new Set(["href", "xlink:href", "src", "srcset", "poster", "background"]);
+// SVG presentation attributes read as CSS, whose `url()` names what to draw.
+const CSS_URL_ATTRIBUTES = new Set([
+  "fill", "stroke", "filter", "mask", "clip-path", "marker", "marker-start", "marker-mid", "marker-end", "cursor",
+]);
 // Markdown has a sanitizer of its own: a hook or setting another part of the
 // app (or a library it loads, as Mermaid does) adds to the shared DOMPurify
 // never changes what a reply may contain, and the hook below, which keeps
@@ -16,11 +22,25 @@ const purifier = DOMPurify(window);
 // rules would drop (`javascript:`, `vscode:`) becomes a placeholder that only
 // says it does not open. No other address may name a network path: an image
 // there would reach its host as soon as the reply is drawn, on Windows with
-// the user's sign-in.
+// the user's sign-in. Each is read as the URL parser reads it, which drops
+// tabs and newlines anywhere, so `/<TAB>/host/x.png` names one too. A CSS
+// `url()` (an SVG `mask`, `filter`, `fill`…) may point only into the reply.
 purifier.addHook("uponSanitizeAttribute", (node, data) => {
-  if (!URL_ATTRIBUTES.has(data.attrName)) return;
+  // Image placeholders are the app's own (remote-images.ts): a reply keeps
+  // none of their classes or data attributes, so it cannot forge one.
+  const kept = replyAttribute(data.attrName, data.attrValue);
+  if (kept === undefined) {
+    data.keepAttr = false;
+    return;
+  }
+  data.attrValue = kept;
+  if (!URL_ATTRIBUTES.has(data.attrName)) {
+    const css = CSS_URL_ATTRIBUTES.has(data.attrName) || /url\(/i.test(data.attrValue);
+    if (css && cssReferencesOutside(data.attrValue)) data.keepAttr = false;
+    return;
+  }
   if (node.nodeName === "A" && data.attrName === "href") {
-    const value = data.attrValue;
+    const value = parsedAddress(data.attrValue);
     if (/^(?:(?:file|smb|afp|nfs|cifs|dav|davs|webdav|webdavs):|[a-z]:[\\/])/i.test(value))
       data.forceKeepAttr = true;
     else if (/^[a-z][a-z\d+.-]*:/i.test(value) && !/^(?:https?|mailto):/i.test(value)) {
@@ -30,8 +50,7 @@ purifier.addHook("uponSanitizeAttribute", (node, data) => {
     }
     return;
   }
-  if (data.attrValue.split(",").some((part) => /^[\\/]{2}/.test(part.trim())))
-    data.keepAttr = false;
+  if (loadsNetworkPath(data.attrValue)) data.keepAttr = false;
 });
 
 // Patch only the changed interval. Assigning textContent/innerHTML resets
@@ -51,8 +70,11 @@ function nodes(parent: Node, previous: Node[], next: Node[], end: Node | null = 
     const target = next[index];
     const current = previous[index];
     if (!current) { parent.insertBefore(target, end); continue; }
+    // An image placeholder is replaced, never patched from or into a reply's
+    // own element, so only placeholders the app made carry its button.
     if (current.nodeType !== target.nodeType || current.nodeName !== target.nodeName ||
-      (current instanceof Element && target instanceof Element && current.namespaceURI !== target.namespaceURI)) {
+      (current instanceof Element && target instanceof Element && current.namespaceURI !== target.namespaceURI) ||
+      madeHere(current) !== madeHere(target)) {
       parent.replaceChild(target, current);
       continue;
     }
@@ -92,7 +114,18 @@ export function markdownBlockIndex(host: HTMLElement, node: Node): number | unde
   return undefined;
 }
 
-export function createMarkdownDOM(host: HTMLElement) {
+/**
+ * `images` decides what an image from another host shows: the one this chat
+ * already loaded, or a placeholder whose button loads it (remote-images.ts).
+ */
+export function createMarkdownDOM(
+  host: HTMLElement,
+  images?: {
+    loaded: (src: string) => string | undefined;
+    loading: (src: string) => boolean;
+    labels: () => RemoteImageLabels;
+  },
+) {
   const blocks: Block[] = [];
   hosts.set(host, blocks);
   const between = (block: Block) => {
@@ -115,6 +148,7 @@ export function createMarkdownDOM(host: HTMLElement) {
         FORBID_TAGS: ["style", "form", "input", "button", "iframe"],
         FORBID_ATTR: ["style"],
       });
+      if (images) holdRemoteImages(fragment, images.loaded, images.labels(), images.loading);
       nodes(host, between(block), Array.from(fragment.childNodes), block.end);
       block.html = html;
     });

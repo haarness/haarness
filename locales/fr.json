@@ -1661,6 +1661,8 @@
   "collapse": "réduire",
   "lines {from}–{to} of {total}": "lignes {from}–{to} sur {total}",
   "always allows": "autorise toujours",
+  "Haarness could not read all of this command.": "Haarness n'a pas pu lire toute cette commande.",
+  "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness n'a pas pu lire toute cette commande ; une règle pour {rule} peut s'appliquer.",
   "Leads to {path}": "Mène à {path}",
   "every file edit": "chaque modification de fichier",
   "every shell command": "chaque commande shell",
@@ -2519,5 +2521,13 @@
   "Comment on selection": "Commenter la sélection",
   "Comment on these lines…": "Commenter ces lignes…",
   "Comment added to your message": "Commentaire ajouté à votre message",
-  "Preview comment": "Commentaire sur l’aperçu"
+  "Preview comment": "Commentaire sur l’aperçu",
+  "{count} failed": "{count} en échec",
+  "+{count} more": "{count} de plus",
+  "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "Cette app a tenté d’ouvrir un lien que Haarness n’ouvre pas. Les apps ne peuvent ouvrir que des liens http, https et mailto.",
+  "Load image from {host}": "Charger l’image depuis {host}",
+  "The image from {host} could not be loaded.": "L’image de {host} n’a pas pu être chargée.",
+  "This app tried to open a {scheme} link. Apps may open only http, https and mailto links.": "Cette app a tenté d’ouvrir un lien {scheme}. Les apps ne peuvent ouvrir que des liens http, https et mailto.",
+  "{first}, {second}": "{first}, {second}",
+  "{first}, {second} +{count}": "{first}, {second} et {count} de plus"
 }

@@ -1661,6 +1661,8 @@
   "collapse": "접기",
   "lines {from}–{to} of {total}": "{total}줄 중 {from}–{to}줄",
   "always allows": "항상 허용",
+  "Haarness could not read all of this command.": "Haarness가 이 명령을 모두 읽지 못했습니다.",
+  "Haarness could not read all of this command; a rule for {rule} may apply.": "Haarness가 이 명령을 모두 읽지 못했습니다. {rule} 규칙이 적용될 수 있습니다.",
   "Leads to {path}": "실제 대상: {path}",
   "every file edit": "모든 파일 편집",
   "every shell command": "모든 셸 명령",
@@ -2519,5 +2521,13 @@
   "Comment on selection": "선택 영역에 댓글 달기",
   "Comment on these lines…": "이 줄들에 댓글 달기…",
   "Comment added to your message": "메시지에 댓글이 추가되었습니다",
-  "Preview comment": "미리보기 댓글"
+  "Preview comment": "미리보기 댓글",
+  "{count} failed": "{count}개 실패",
+  "+{count} more": "{count}개 더",
+  "This app tried to open a link Haarness does not open. Apps may open only http, https and mailto links.": "이 앱이 Haarness가 열지 않는 링크를 열려고 했습니다. 앱은 http, https, mailto 링크만 열 수 있습니다.",
+  "Load image from {host}": "{host}에서 이미지 불러오기",
+  "The image from {host} could not be loaded.": "{host}의 이미지를 불러올 수 없습니다.",
+  "This app tried to open a {scheme} link. Apps may open only http, https and mailto links.": "이 앱이 {scheme} 링크를 열려고 했습니다. 앱은 http, https, mailto 링크만 열 수 있습니다.",
+  "{first}, {second}": "{first}, {second}",
+  "{first}, {second} +{count}": "{first}, {second} 외 {count}개"
 }

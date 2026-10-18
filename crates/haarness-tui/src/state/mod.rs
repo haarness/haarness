@@ -346,6 +346,9 @@ fn durable_todos(items: &[Item], through: Option<u64>) -> Vec<haarness_protocol:
         .unwrap_or_default()
 }
 
+/// A batch result's entries as (tool, failed), in step order.
+pub type BatchOutcomes = std::rc::Rc<[(String, bool)]>;
+
 /// What the running turn is doing right now, mirrored from `turn.status`
 /// events — the status line renders this instead of a stale free-text notice.
 #[derive(Clone, Default)]
@@ -876,6 +879,10 @@ pub struct App {
     /// Files and lines an edit result changed, keyed by the result item.
     /// Counting means diffing its bodies, too slow to repeat every frame.
     pub diff_stats: std::cell::RefCell<std::collections::HashMap<ItemId, (usize, u64, u64)>>,
+    /// Each batch result's entries as (tool, failed), keyed by the result
+    /// item. Its metadata holds every step's output, too much to walk or
+    /// parse every frame.
+    pub batch_results: std::cell::RefCell<std::collections::HashMap<ItemId, BatchOutcomes>>,
     /// Bumped when rendering inputs beyond width change (theme switches).
     pub render_generation: u64,
 }
@@ -1075,6 +1082,7 @@ impl App {
             last_frame: std::cell::RefCell::new(Vec::new()),
             render_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             diff_stats: std::cell::RefCell::new(std::collections::HashMap::new()),
+            batch_results: std::cell::RefCell::new(std::collections::HashMap::new()),
             render_generation: 0,
         }
     }
@@ -1822,6 +1830,18 @@ impl App {
         count: impl FnOnce() -> (usize, u64, u64),
     ) -> (usize, u64, u64) {
         *self.diff_stats.borrow_mut().entry(id).or_insert_with(count)
+    }
+    /// A batch result's entries, read once: results never change after they land.
+    pub fn cached_batch_results(
+        &self,
+        id: ItemId,
+        read: impl FnOnce() -> Vec<(String, bool)>,
+    ) -> BatchOutcomes {
+        self.batch_results
+            .borrow_mut()
+            .entry(id)
+            .or_insert_with(|| read().into())
+            .clone()
     }
     /// Scroll the transcript; positive steps move toward older content. The
     /// view clamps against the actual transcript height.
