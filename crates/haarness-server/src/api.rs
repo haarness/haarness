@@ -1793,7 +1793,7 @@ fn explicit_path_suggestions(
     limit: usize,
 ) -> Option<Vec<String>> {
     let (expanded, exact_directory_prefix) = if query == "~" || query.starts_with("~/") {
-        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        let Some(home) = haarness_protocol::home_dir() else {
             return Some(Vec::new());
         };
         let suffix = query.strip_prefix('~').unwrap_or_default();

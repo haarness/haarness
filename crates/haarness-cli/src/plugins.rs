@@ -678,7 +678,7 @@ pub fn marketplace_add(data: &Path, source: &str) -> Result<String> {
 /// `../…`. Anything else may be a plugin name or an `owner/repo` shorthand.
 fn local_path(spec: &str) -> Option<PathBuf> {
     if let Some(rest) = spec.strip_prefix("~/") {
-        return std::env::var_os("HOME").map(|home| PathBuf::from(home).join(rest));
+        return haarness_protocol::home_dir().map(|home| home.join(rest));
     }
     let relative = [".", ".."].contains(&spec) || spec.starts_with("./") || spec.starts_with("../");
     (relative || Path::new(spec).is_absolute()).then(|| PathBuf::from(spec))

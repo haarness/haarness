@@ -353,8 +353,7 @@ fn home_expansion(raw: &str, value: &str) -> Option<PathBuf> {
         return None;
     }
     let (user, rest) = value[1..].split_once('/').unwrap_or((&value[1..], ""));
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
+    let home = haarness_protocol::home_dir()
         .filter(|home| home.is_absolute())
         .unwrap_or_else(|| PathBuf::from("/"));
     let base = if user.is_empty() {
