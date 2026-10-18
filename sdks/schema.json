@@ -2807,6 +2807,15 @@
                   "null"
                 ]
               },
+              "stream_tokens": {
+                "description": "Tokens in what streamed (text, visible reasoning, tool calls),\ncounted with the model family's token weights; present exactly\nwhen `first_token_ms` is. Output speed divides this, not\n`output_tokens`, by `stream_ms`: a provider's output count also\nholds reasoning it never streamed, produced before the first token.",
+                "format": "int64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
               "type": {
                 "enum": [
                   "usage"

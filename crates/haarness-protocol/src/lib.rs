@@ -375,6 +375,13 @@ pub enum ItemData {
         /// output streamed across; present exactly when `first_token_ms` is.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stream_ms: Option<u64>,
+        /// Tokens in what streamed (text, visible reasoning, tool calls),
+        /// counted with the model family's token weights; present exactly
+        /// when `first_token_ms` is. Output speed divides this, not
+        /// `output_tokens`, by `stream_ms`: a provider's output count also
+        /// holds reasoning it never streamed, produced before the first token.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream_tokens: Option<u64>,
     },
     Todo {
         items: Vec<TodoEntry>,

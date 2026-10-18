@@ -592,13 +592,16 @@ impl ModelProvider for AnthropicProvider {
                         thinking_seen = false;
                         thinking_break = false;
                         if event["content_block"]["type"] == "tool_use" {
+                            // The arguments stream as JSON fragments, held
+                            // until the block stops; the call starts now.
+                            yield ProviderEvent::ContentStarted;
                             tool = Some((
                                 event["content_block"]["id"].as_str().unwrap_or_default().into(),
                                 event["content_block"]["name"].as_str().unwrap_or_default().into(), String::new(), event["content_block"].get("input").cloned().unwrap_or_else(||json!({}))));
                         }
                     },
                     "content_block_delta" => match event["delta"]["type"].as_str().unwrap_or_default() {
-                        "text_delta" => if let Some(text) = event["delta"]["text"].as_str().filter(|text| !text.is_empty()) { if native_json { json_output.push_str(text); } else { yield ProviderEvent::TextDelta(text.into()); } },
+                        "text_delta" => if let Some(text) = event["delta"]["text"].as_str().filter(|text| !text.is_empty()) { if native_json { if json_output.is_empty() { yield ProviderEvent::ContentStarted; } json_output.push_str(text); } else { yield ProviderEvent::TextDelta(text.into()); } },
                         "thinking_delta" => if let Some(text) = event["delta"]["thinking"].as_str().filter(|text| !text.is_empty()) {
                             if let Some(block) = &mut thinking_block {
                                 let mut value = block["thinking"].as_str().unwrap_or_default().to_owned();
@@ -1317,6 +1320,14 @@ mod tests {
             ProviderEvent::ToolCall { call_id, name, arguments, .. }
                 if call_id == "tool_1" && name == "list" && *arguments == json!({"path": "."})
         )));
+        // The call starts at its block's start, before its arguments stream.
+        let started = events
+            .iter()
+            .position(|event| matches!(event, ProviderEvent::ContentStarted));
+        let called = events
+            .iter()
+            .position(|event| matches!(event, ProviderEvent::ToolCall { .. }));
+        assert!(started.is_some() && started < called, "{events:?}");
         assert!(
             events.iter().any(|event| matches!(
                 event,
