@@ -21,11 +21,14 @@ p{margin:4px 0}button{margin:4px 4px 0 0}
 <h1 id="title">Weather fixture</h1>
 <p id="host">host waiting</p>
 <p id="theme">theme waiting</p>
+<p id="font">font waiting</p>
 <p id="input">input waiting</p>
 <p id="result">result waiting</p>
 <p id="status">status idle</p>
 <button id="link">Open forecast</button>
 <button id="ask">Ask about tomorrow</button>
+<button id="ask-twice">Ask twice</button>
+<button id="open-twice">Open twice</button>
 <button id="refresh">Refresh</button>
 <button id="read-own">Read own page</button>
 <button id="read-other">Read another resource</button>
@@ -66,6 +69,8 @@ addEventListener("message", (event) => {
     out("result", "result " + JSON.stringify(params.structuredContent || null));
   if (message.method === "ui/notifications/tool-cancelled") out("result", "cancelled " + (params.reason || ""));
   if (message.method === "ui/notifications/host-context-changed" && params.theme) out("theme", "theme " + params.theme);
+  if (message.method === "ui/notifications/host-context-changed" && params.styles)
+    out("font", "font " + ((params.styles.variables || {})["--font-sans"] || ""));
   if (message.method === "ui/resource-teardown") parent.postMessage({ jsonrpc: "2.0", id: message.id, result: {} }, "*");
 });
 document.addEventListener("securitypolicyviolation", (event) => out("status", "blocked " + event.effectiveDirective));
@@ -73,6 +78,15 @@ const click = (id, run) => document.getElementById(id).addEventListener("click",
 click("link", () => request("ui/open-link", { url: "https://example.com/forecast" }).then((reply) => out("status", "link " + answer(reply))));
 click("ask", () => request("ui/message", { role: "user", content: [{ type: "text", text: "What about tomorrow in Lisbon?" }] })
   .then((reply) => out("status", "message " + answer(reply))));
+// One click, two messages: only the first may go in without asking.
+click("ask-twice", () => {
+  request("ui/message", { role: "user", content: [{ type: "text", text: "First of two." }] }).then((reply) => out("status", "first " + answer(reply)));
+  request("ui/message", { role: "user", content: [{ type: "text", text: "Second of two." }] }).then((reply) => out("result", "second " + answer(reply)));
+});
+click("open-twice", () => {
+  request("ui/open-link", { url: "https://example.com/first" }).then((reply) => out("status", "first link " + answer(reply)));
+  request("ui/open-link", { url: "https://example.com/second" }).then((reply) => out("result", "second link " + answer(reply)));
+});
 click("refresh", () => request("tools/call", { name: "refresh_weather", arguments: {} }).then((reply) => out("status", "call " + answer(reply))));
 click("read-own", () => request("resources/read", { uri: "ui://weather/view.html" })
   .then((reply) => out("status", "read " + (reply.error ? "error " + reply.error.message : reply.result.contents.length + " contents"))));
@@ -85,6 +99,7 @@ request("ui/initialize", { protocolVersion: "2026-01-26", appInfo: { name: "weat
     const variables = (context.styles && context.styles.variables) || {};
     out("host", "host " + [context.locale, context.displayMode, context.platform, context.toolInfo && context.toolInfo.tool.name].join(" "));
     out("theme", "theme " + context.theme + " " + (variables["--color-background-primary"] ? "styled" : "unstyled"));
+    out("font", "font " + (variables["--font-sans"] || ""));
     notify("ui/notifications/initialized", {});
     notify("ui/notifications/size-changed", { height: document.documentElement.scrollHeight });
   });
