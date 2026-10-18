@@ -808,6 +808,7 @@ test("sidebar Focus sidebar shows a hidden sidebar and puts the keyboard on the 
   await page.keyboard.press(process.platform === "darwin" ? "Control+Shift+L" : "Alt+Shift+L");
   await expect(page.locator(".sidebar")).toBeVisible();
   const row = project("alpha").getByRole("button", { name: "Focus me", exact: true });
+  const other = project("alpha").getByRole("button", { name: "Other chat", exact: true });
   await expect(row).toBeFocused();
   await expect(row).toHaveAttribute("aria-current", "true");
   // From there ↑ and ↓ move between rows without opening them, Enter opens
@@ -922,14 +923,26 @@ test("sidebar Select chats archives several chats at once, notes a chat still wo
     .toEqual([false, true, true, true]);
 
   // Command-click (Control-click off macOS) starts picking on that row; Escape ends it.
-  await alpha.createThread({ title: "Five", provider: "echo", model: "echo-1" });
-  await row("Five").click({ modifiers: [process.platform === "darwin" ? "Meta" : "Control"] });
+  const five = await alpha.createThread({ title: "Five", provider: "echo", model: "echo-1" });
+  await alpha.createThread({ title: "Six", provider: "echo", model: "echo-1" });
+  const pick = process.platform === "darwin" ? "Meta" : "Control";
+  await row("Five").click({ modifiers: [pick] });
   await expect(bar.getByRole("status")).toHaveText("1 selected");
   await expect(row("Five")).toHaveAttribute("aria-pressed", "true");
   await expect(row("One")).toHaveAttribute("aria-current", "true");
+  // A picked chat archived elsewhere no longer counts, and Archive has nothing to do.
+  await alpha.updateThread(five.id, { archived: true });
+  await expect(row("Five")).toHaveCount(0);
+  await expect(bar.getByRole("status")).toHaveText("0 selected");
+  await expect(bar.getByRole("button", { name: "Archive", exact: true })).toBeDisabled();
   await page.keyboard.press("Escape");
   await expect(bar).toHaveCount(0);
-  await expect(row("Five")).not.toHaveAttribute("aria-pressed", /.*/);
+  await expect(row("Six")).not.toHaveAttribute("aria-pressed", /.*/);
+  // The mode belongs to its list: organizing the sidebar another way ends it.
+  await row("Six").click({ modifiers: [pick] });
+  await expect(bar.getByRole("status")).toHaveText("1 selected");
+  await layout("In one list");
+  await expect(bar).toHaveCount(0);
 });
 
 test("sidebar Select chats removes picked worktrees and names the one it keeps for uncommitted changes", async () => {
@@ -946,6 +959,14 @@ test("sidebar Select chats removes picked worktrees and names the one it keeps f
   const dirty = (await repo.createWorkspace({ name: "dirty" })).workspace;
   checkouts.push(clean.path, dirty.path);
   await writeFile(join(dirty.path, "unsaved.txt"), "work in progress\n");
+  // A chat inside the clean worktree, made by its own server, stopped again.
+  const inside = JSON.parse(execFileSync(binary, ["--workspace", clean.path, "--trust-project", "desktop"], {
+    env, input: JSON.stringify({ action: "connect" }), encoding: "utf8", timeout: 30000,
+  }));
+  const cleanClient = new Haarness({ baseUrl: inside.url, token: inside.token });
+  await cleanClient.createThread({ title: "Inside clean", provider: "echo", model: "echo-1" });
+  cleanClient.close();
+  execFileSync(binary, ["--workspace", clean.path, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 });
   await options("repo");
   await item("Enable worktree view").click();
   await options("repo");
@@ -958,10 +979,10 @@ test("sidebar Select chats removes picked worktrees and names the one it keeps f
   const bar = page.getByRole("toolbar", { name: "Chat selection", exact: true });
   // The project folder itself cannot be picked.
   await expect(project("repo").getByRole("button", { name: /^Select worktree / })).toHaveCount(2);
+  await checkout("clean").getByRole("button", { name: "Inside clean", exact: true }).click();
   await checkout("clean").getByRole("button", { name: "Select worktree clean", exact: true }).click();
   await checkout("dirty").getByRole("button", { name: "Select worktree dirty", exact: true }).click();
-  await expect(bar.getByRole("status")).toHaveText("2 selected");
-  await expect(bar.getByRole("button", { name: "Archive", exact: true })).toBeDisabled();
+  await expect(bar.getByRole("status")).toHaveText("3 selected");
   await bar.getByRole("button", { name: "Remove worktrees", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Remove 2 worktrees?", exact: true });
   // Listed in the order the sidebar draws them.
@@ -971,6 +992,8 @@ test("sidebar Select chats removes picked worktrees and names the one it keeps f
   await expect(page.locator(".toast")).toHaveText("Removed 1 worktree 1 failed: dirty: uncommitted changes");
   await expect(checkout("clean")).toHaveCount(0);
   await expect(checkout("dirty")).toBeVisible();
+  // The chat picked inside the removed worktree went with it: nothing is
+  // left to act on, so the mode ends.
   await expect(bar).toHaveCount(0);
   const left = (await repo.workspacesList()).workspaces.map(workspace => workspace.id);
   expect(left).not.toContain(clean.id);
