@@ -112,11 +112,13 @@ jobs:
         env:
           HAARNESS_BIN: ${{ github.workspace }}/target/release/haarness
         run: npm --prefix apps/desktop run test:e2e
-      - name: Electron end-to-end tests under Xvfb
+      - name: Electron end-to-end tests in a Linux desktop session
         if: runner.os == 'Linux'
         env:
           HAARNESS_BIN: ${{ github.workspace }}/target/release/haarness
-        run: xvfb-run -a npm --prefix apps/desktop run test:e2e
+        run: |
+          sudo apt-get install -y gnome-keyring
+          scripts/linux-desktop-session.sh npm --prefix apps/desktop run test:e2e
       - name: Package desktop
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -127,6 +129,12 @@ jobs:
           HAARNESS_BIN: ${{ github.workspace }}/apps/desktop/release/mac-arm64/Haarness.app/Contents/Resources/bin/haarness
           HAARNESS_DESKTOP_EXECUTABLE: ${{ github.workspace }}/apps/desktop/release/mac-arm64/Haarness.app/Contents/MacOS/Haarness
         run: npm --prefix apps/desktop run test:e2e
+      - name: Verify packaged Linux application
+        if: runner.os == 'Linux'
+        env:
+          HAARNESS_BIN: ${{ github.workspace }}/apps/desktop/release/linux-unpacked/resources/bin/haarness
+          HAARNESS_DESKTOP_EXECUTABLE: ${{ github.workspace }}/apps/desktop/release/linux-unpacked/haarness-desktop
+        run: scripts/linux-desktop-session.sh npm --prefix apps/desktop run test:e2e -- e2e/project-required.spec.ts e2e/desktop.spec.ts --grep "project home|real workspace"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
