@@ -2508,5 +2508,8 @@
   "This result is too large to show in the app.": "此結果太大，無法在應用程式中顯示。",
   "Link from the app": "來自應用程式的連結",
   "This app wants to open a link.": "此應用程式想要開啟一個連結。",
-  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "此工具附有一個應用程式；在 Haarness Desktop 中開啟此對話即可使用。"
+  "This tool comes with an app; open the chat in Haarness Desktop to use it.": "此工具附有一個應用程式；在 Haarness Desktop 中開啟此對話即可使用。",
+  "Comment on selection": "評論所選內容",
+  "Comment on these lines…": "對這些行發表評論…",
+  "Comment added to your message": "已將評論加入你的訊息"
 }
