@@ -11,6 +11,7 @@ import {
   loadedImage,
   loadImage,
   madeHere,
+  onImageSettled,
   relabelImages,
 } from "./remote-images";
 
@@ -70,44 +71,44 @@ export function Markdown(props: { text: string; live?: boolean; document?: boole
       from,
     );
     const chat = scope();
-    const waiting = () =>
-      Array.from(host.querySelectorAll<HTMLButtonElement>(".remote-image-load")).filter((other) => {
-        const owner = other.closest<HTMLElement>(".remote-image");
-        return madeHere(other) && madeHere(owner) && owner?.dataset.remoteHost === from;
-      });
-    for (const other of waiting()) other.disabled = true;
-    let failed = false;
-    await Promise.all(
-      sources.map(async (src) => {
-        try {
-          // Kept in state, not in the button: a reply drawn anew while this
-          // runs gets its button back off, and a second click joins this fetch.
-          const data = await loadImage(chat, src, (address) => window.haarness.remoteImage(address));
-          if (disposed) return;
-          // Placeholders are found again: the reply may have been drawn anew meanwhile.
-          for (const other of placeholders()) {
-            if (other.dataset.remoteSrc !== src || other.dataset.remoteHost !== from) continue;
-            const image = loadedElement(document, src, other.dataset.remoteAlt ?? "", data);
-            const keep = focused && other === holder;
-            other.replaceWith(image);
-            if (keep) {
-              // The button is gone, so keyboard focus stays on what replaced it.
-              image.tabIndex = -1;
-              image.focus({ preventScroll: true });
-            }
-          }
-        } catch {
-          failed = true;
-        }
-      }),
+    for (const other of placeholders()) {
+      const load = other.querySelector<HTMLButtonElement>(".remote-image-load");
+      if (other.dataset.remoteHost === from && load && madeHere(load)) load.disabled = true;
+    }
+    // Each fetch is kept with the chat, not in this reply: every mounted reply
+    // swaps in, or turns back on, its own placeholders when it settles
+    // (onImageSettled below), so one drawn anew meanwhile is not left waiting.
+    const results = await Promise.allSettled(
+      sources.map((src) => loadImage(chat, src, (address) => window.haarness.remoteImage(address))),
     );
     if (disposed) return;
-    for (const other of waiting()) {
-      const src = other.closest<HTMLElement>(".remote-image")?.dataset.remoteSrc ?? "";
-      other.disabled = imageLoading(chat, src);
+    if (focused && !holder.isConnected) {
+      // The button is gone, so keyboard focus stays on what replaced it.
+      const image = Array.from(host.querySelectorAll<HTMLImageElement>("img.remote-image-loaded")).find(
+        (other) => other.dataset.remoteSrc === holder.dataset.remoteSrc,
+      );
+      if (image) {
+        image.tabIndex = -1;
+        image.focus({ preventScroll: true });
+      }
     }
-    if (failed) app.notify(t("The image from {host} could not be loaded.", { host: from }), "blocked");
+    if (results.some((result) => result.status === "rejected"))
+      app.notify(t("The image from {host} could not be loaded.", { host: from }), "blocked");
   }
+  /** A fetch for this chat settled: this reply's placeholders for it show the image, or take clicks again. */
+  function settled(chat: string, src: string, data: string | undefined) {
+    if (disposed || !host || chat !== scope()) return;
+    for (const holder of Array.from(host.querySelectorAll<HTMLElement>(".remote-image"))) {
+      if (!madeHere(holder) || holder.dataset.remoteSrc !== src) continue;
+      if (data) {
+        holder.replaceWith(loadedElement(document, src, holder.dataset.remoteAlt ?? "", data));
+        continue;
+      }
+      const load = holder.querySelector<HTMLButtonElement>(".remote-image-load");
+      if (load && madeHere(load)) load.disabled = false;
+    }
+  }
+  onCleanup(onImageSettled(settled));
   const imageLabels = () => ({
     load: (from: string) => t("Load image from {host}", { host: from }),
     unnamed: t("Image"),
