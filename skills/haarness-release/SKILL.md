@@ -32,7 +32,38 @@ python3 scripts/release.py collect
 ```
 
 Use `--linux --arm64`, `--linux --x64`, `--win --arm64`, `--win --x64`, or
-`--mac --x64` on the corresponding native runner. The CLI is a standalone executable;
+`--mac --x64` on the corresponding native runner.
+
+**Linux** never ships a binary linked against the build machine's glibc (an
+ubuntu-24.04 build needs glibc 2.39 and fails on Ubuntu 22.04, Debian 12 and RHEL 9).
+Link against glibc 2.17, as OpenTUI and Bun do, and bundle Bun's baseline build on x64
+(it also runs without AVX2):
+
+```sh
+python3 -m pip install ziglang==0.14.1 cargo-zigbuild==0.23.4
+cargo zigbuild --release -p haarness-cli --target x86_64-unknown-linux-gnu.2.17
+export HAARNESS_BIN="$PWD/target/x86_64-unknown-linux-gnu/release/haarness"
+HAARNESS_BUN=/absolute/path/to/bun-linux-x64-baseline/bun \
+  npm --prefix apps/desktop run package -- --linux --x64
+python3 scripts/test-release-package.py
+python3 scripts/release.py collect --binary "$HAARNESS_BIN"
+python3 scripts/test-release-linux.py
+```
+
+`test-release-linux.py` checks the glibc floor and linked libraries, both packages
+(the release CLI inside, `haarness-desktop` package metadata, launcher entry owning
+`haarness://`, icon sizes), `install.sh` for the CLI and the AppImage, and, with
+Docker, the CLI loading OpenTUI and answering a turn on CentOS 7, Amazon Linux 2,
+Rocky 8, Debian 11 and Ubuntu 22.04 (none has Git; the Debian family lacks
+ca-certificates and must get a plain message). electron-builder names Linux packages
+`linux-x86_64.AppImage` and `linux-amd64.deb`; `collect` publishes both as `linux-x64`.
+Prove Desktop on a real Linux machine too: install the `.deb` with `apt`, run
+`HAARNESS_DESKTOP_EXECUTABLE=/opt/Haarness/haarness-desktop` Electron tests as a
+non-root user under `dbus-run-session -- xvfb-run` with an unlocked gnome-keyring
+(remote servers refuse plain-text credential storage), and start the AppImage without
+libfuse2 through the installed `haarness-desktop` command.
+
+The CLI is a standalone executable;
 Desktop packages include that CLI, Bun and license notices. macOS provides ZIP/DMG,
 Windows NSIS EXE, Linux AppImage/deb. `collect` stages checksummed artifacts and one
 platform index under `dist/releases`. Keep this index unchanged for idempotent retries.
@@ -94,7 +125,10 @@ curl -fsSL http://127.0.0.1:19080/install.sh | \
 ```
 
 Default destinations: CLI `~/.local/bin`, macOS Desktop `~/Applications`, Linux
-Desktop `~/.local/bin/Haarness.AppImage`, Windows CLI `%LOCALAPPDATA%\Haarness\bin`.
+Desktop `~/.local/bin/Haarness.AppImage` plus a `haarness-desktop` command, menu entry
+and icon under `~/.local/share`, Windows CLI `%LOCALAPPDATA%\Haarness\bin`. The Cloud
+serves its own copy of the installers (`haarness-cloud/assets/install.sh` and
+`install.ps1`): keep them identical to this repository's.
 The canonical production command is `curl -fsSL https://app.haarness.ai/install.sh | sh`;
 it is usable only after DNS, API deployment and stable publication are verified.
 For Desktop add `HAARNESS_PRODUCT=desktop` to the `sh` environment. Windows uses

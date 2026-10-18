@@ -4,6 +4,8 @@
   "private": true,
   "description": "Haarness Desktop",
   "author": "Haarness",
+  "homepage": "https://haarness.ai",
+  "desktopName": "haarness-desktop.desktop",
   "license": "Apache-2.0",
   "type": "module",
   "main": "out/main/index.js",
@@ -80,6 +82,7 @@
       }
     ],
     "asar": true,
+    "npmRebuild": false,
     "mac": {
       "category": "public.app-category.developer-tools",
       "target": [
@@ -118,7 +121,15 @@
         "deb"
       ],
       "category": "Development",
-      "icon": "assets/icon.png"
+      "icon": "assets/linux-icons",
+      "executableName": "haarness-desktop",
+      "syncDesktopName": true,
+      "maintainer": "Haarness <admin@haarness.ai>",
+      "synopsis": "Haarness Desktop",
+      "description": "Desktop app for Haarness, a coding agent that works in your project folders."
+    },
+    "deb": {
+      "packageName": "haarness-desktop"
     },
     "protocols": [
       {
