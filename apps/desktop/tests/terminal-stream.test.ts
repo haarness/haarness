@@ -81,6 +81,16 @@ test("after a reconnect only the output missed while it was down is answered", (
   assert.deepEqual(other.answered, [10, 11]);
 });
 
+test("the view's own bytes before a truncated replay are never answered, and the replay's new output is", () => {
+  const view = fakeTerminal(new Map());
+  // A reset, the notice and the restored modes, then output never shown.
+  view.stream.replay(5);
+  view.stream.quiet(text("\u001bc?notice?\u001b[?1h"));
+  view.stream.bytes(text("x?"));
+  view.parse();
+  assert.deepEqual(view.answered, [16]);
+});
+
 test("input typed while the connection is down is kept in order, up to a limit", () => {
   const queue = inputQueue(4);
   queue.add(2, text("b"));

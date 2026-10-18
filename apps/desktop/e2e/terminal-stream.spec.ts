@@ -168,3 +168,37 @@ test("stepping through terminals quickly leaves the one shown connected", async 
   await expect.poll(() => read("stepped.txt"), { timeout: 30_000 }).toBe("stepped");
   expect(errors).toEqual([]);
 });
+
+/** Whether `name` (in the test folder) exists yet. */
+const exists = (name: string) => readFile(join(temporary, name)).then(() => true, () => false);
+/** Starts `command`, which writes to the file `name`, and waits for the file. */
+async function run(command: string, name: string) {
+  await prompt();
+  await input().fill(command);
+  await input().press("Enter");
+  await expect.poll(() => exists(name)).toBe(true);
+}
+
+test("a terminal shown again past two megabytes of output keeps a program's cursor keys and bracketed paste", async () => {
+  test.setTimeout(240_000);
+  // The program turns both on, then writes more than the server keeps.
+  await run(
+    `printf '\\033[?1h\\033[?2004h'; seq 1 400000; printf 'SEQ_''DONE\\n'; cat -v > ${join(temporary, "modes.txt")}`,
+    "modes.txt",
+  );
+  await expect(rows()).toContainText("SEQ_DONE", { timeout: 120_000 });
+  await page.getByRole("button", { name: "Hide terminal", exact: true }).click();
+  await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  await expect(input()).toBeFocused();
+  await expect(rows()).toContainText("SEQ_DONE", { timeout: 60_000 });
+  await input().press("ArrowUp");
+  await input().evaluate((element) => {
+    const data = new DataTransfer();
+    data.setData("text/plain", "pasted");
+    element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+  });
+  await input().press("Enter");
+  await input().press("Control+d");
+  await expect.poll(() => read("modes.txt")).toBe("^[OA^[[200~pasted^[[201~\n");
+  expect(errors).toEqual([]);
+});
