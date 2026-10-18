@@ -7382,7 +7382,7 @@ async fn mcp_command(
             callback_port,
         } => {
             let target = mcp_entry_target(paths, workspace, project, &name);
-            let entry = read_mcp_entry(&target, &name)?;
+            let entry = loaded_mcp_entry(&target, read_mcp_entry(&target, &name)?);
             let registry = oauth_registry(paths, &name, &entry, true).await?;
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, callback_port))
                 .await
@@ -7402,7 +7402,7 @@ async fn mcp_command(
         }
         McpCommand::Logout { name, project } => {
             let target = mcp_entry_target(paths, workspace, project, &name);
-            let entry = read_mcp_entry(&target, &name)?;
+            let entry = loaded_mcp_entry(&target, read_mcp_entry(&target, &name)?);
             let registry = oauth_registry(paths, &name, &entry, false).await?;
             registry.clear_oauth(&name).await?;
             let server = client.configure_mcp(&name, &entry).await?;
@@ -7504,7 +7504,10 @@ async fn mcp_command(
             write_mcp_entry(&target, &name, Some(&entry))?;
             // The entry stays saved when the server cannot start: fixing the
             // program or the URL and reconnecting is the usual next step.
-            match client.configure_mcp(&name, &entry).await {
+            match client
+                .configure_mcp(&name, &loaded_mcp_entry(&target, entry))
+                .await
+            {
                 Ok(server) => println!(
                     "Added MCP server '{name}' to {} ({}).",
                     target.display(),
@@ -7536,7 +7539,7 @@ async fn mcp_command(
         }
         McpCommand::Remove { name, project } => {
             let target = mcp_entry_target(paths, workspace, project, &name);
-            let mut entry = read_mcp_entry(&target, &name)?;
+            let mut entry = loaded_mcp_entry(&target, read_mcp_entry(&target, &name)?);
             entry.enabled = false;
             client.configure_mcp(&name, &entry).await?;
             write_mcp_entry(&target, &name, None)?;
@@ -7650,9 +7653,11 @@ fn set_mcp_enabled(
         if enabled { "Enabled" } else { "Disabled" },
         target.display()
     );
-    Ok(entry)
+    Ok(loaded_mcp_entry(&target, entry))
 }
 
+/// An MCP entry as written in its file, `${VAR}` references included: what
+/// is shown, edited and written back.
 fn read_mcp_entry(path: &Path, name: &str) -> Result<McpConfigureRequest> {
     if path.extension().is_some_and(|value| value != "toml") {
         return jsonconfig::read_json(path)
@@ -7672,6 +7677,17 @@ fn read_mcp_entry(path: &Path, name: &str) -> Result<McpConfigureRequest> {
     value
         .try_into()
         .with_context(|| format!("invalid MCP server '{name}' in {}", path.display()))
+}
+
+/// What a configuration load registers for an entry [`read_mcp_entry`] found
+/// in `path`, for configuring the running server: a JSON file's references
+/// are resolved as at load. The file always gets the entry as read.
+fn loaded_mcp_entry(path: &Path, entry: McpConfigureRequest) -> McpConfigureRequest {
+    if path.extension().is_some_and(|value| value != "toml") {
+        jsonconfig::resolve_mcp_entry(entry)
+    } else {
+        entry
+    }
 }
 
 fn mcp_config_for_display(
@@ -10758,7 +10774,7 @@ mod tests {
         LiveWorkspaceServer, McpCommand, McpConfigureRequest, Paths, ProviderSection, RunFormat,
         RuntimeDiscovery, SessionCommand, assistant_messages_for_turn, configured_mcp,
         current_executable_fingerprint, finish_goal_run, goal_idle_timeout_from, load_output_style,
-        local_server_compatibility_error, mcp_config_for_display,
+        loaded_mcp_entry, local_server_compatibility_error, mcp_config_for_display,
         migrate_legacy_workspace_database, normalize_natural_language_args, parse_mcp_key_values,
         read_mcp_entry, replace_incompatible_workspace_server, resolved_credentials,
         select_run_thread_client, server_compatibility_error, set_goal_for_run_client,
@@ -11208,6 +11224,43 @@ mod tests {
                 command: McpCommand::Remove { .. }
             })
         ));
+    }
+
+    /// `haarness mcp enable/disable` write back the entry as read, so the
+    /// file keeps `${TOKEN}`; only what is sent to the server is resolved.
+    #[test]
+    fn mcp_json_write_back_keeps_references_and_resolves_only_for_the_server() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let root = std::env::temp_dir().join(format!("haarness-mcp-json-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("haarness.json");
+        fs::write(
+            &path,
+            r#"{"mcp": {"fixture": {"command": "${HOME}/server", "enabled": false,
+                "env": {"TOKEN": "${HAARNESS_FIXTURE_UNSET_TOKEN}"}}}}"#,
+        )
+        .unwrap();
+        let mut entry = read_mcp_entry(&path, "fixture").unwrap();
+        assert_eq!(entry.env["TOKEN"], "${HAARNESS_FIXTURE_UNSET_TOKEN}");
+        entry.enabled = true;
+        write_mcp_entry(&path, "fixture", Some(&entry)).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["mcp"]["fixture"]["command"], "${HOME}/server");
+        assert_eq!(
+            written["mcp"]["fixture"]["env"]["TOKEN"],
+            "${HAARNESS_FIXTURE_UNSET_TOKEN}"
+        );
+        let loaded = loaded_mcp_entry(&path, entry.clone());
+        assert_eq!(loaded.command, Some(format!("{home}/server")));
+        assert_eq!(loaded.env["TOKEN"], "${HAARNESS_FIXTURE_UNSET_TOKEN}");
+        // A TOML file's entries are not resolved at load, nor here.
+        let toml = root.join("config.toml");
+        assert_eq!(
+            loaded_mcp_entry(&toml, entry).command.as_deref(),
+            Some("${HOME}/server")
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

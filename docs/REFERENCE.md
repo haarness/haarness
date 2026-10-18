@@ -597,6 +597,14 @@ oauthScopes = ["mcp:tools"]  # optional; otherwise server metadata selects scope
 enabled = true
 ```
 
+`${NAME}` and `${NAME:-fallback}` in an MCP entry come from the server's environment.
+Environment values and headers (and the headers helper's environment) are resolved once,
+when Haarness connects; in a JSON file the other fields are resolved when the
+configuration loads. A variable's value is used as it is, so a `${OTHER}` inside it
+reaches the MCP server as that text, and what a headers helper prints is never resolved.
+The references stay in the file: `haarness mcp enable`/`disable`, `mcp_manage` and Desktop
+edits write the entry back as written, and `haarness mcp get --show-secrets` shows it so.
+
 Answering an approval with **Always** (`a`) saves the rule shown on the card, which is a pattern rather than the exact call (approving `rm -rf build` allows every `rm` command), for every chat on that server until it stops. **This folder** (`w`) and **Repository** (`r`) answers are saved in the local database and apply after restarts. See [Permissions and approvals](https://haarness.ai/docs/security/permissions#what-does-always-remember). Global skills live in `~/.config/haarness/skills/<name>/SKILL.md` (where `haarness skill create` writes them); project skills live in `.haarness/skills/<name>/SKILL.md`.
 
 The JSON/JSONC form (`haarness.json`, including legacy filename aliases) accepts the same sections plus the ecosystem keys `instructions` (extra instruction files: globs, `~/` paths, absolute paths and `http(s)://` URLs), `skills` (`paths` and remote `urls` indexes), and `compatibility.claude_code` (opt-in `instructions`, `agents`, `commands`, `skills` discovery of Claude Code files, all off by default). Markdown agents accept `hidden`, `color`, `steps`, `disable`, `temperature`, `top_p` and `variant`; commands accept `subtask: true` as `context: fork`; `@path` references in command templates attach file snapshots, directory listings or a subagent delegation hint. See [docs/CONFIGURATION-SCOPES.md](CONFIGURATION-SCOPES.md).

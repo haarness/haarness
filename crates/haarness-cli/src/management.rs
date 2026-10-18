@@ -1,7 +1,7 @@
 use super::{
-    Paths, asset_layers, mcp_config_for_display, mcp_config_target, mcp_entry_target, open_browser,
-    read_mcp_entry, receive_oauth_callback, validate_asset_name, validate_mcp_name,
-    validate_qualified_model, write_mcp_entry,
+    Paths, asset_layers, loaded_mcp_entry, mcp_config_for_display, mcp_config_target,
+    mcp_entry_target, open_browser, read_mcp_entry, receive_oauth_callback, validate_asset_name,
+    validate_mcp_name, validate_qualified_model, write_mcp_entry,
 };
 use crate::plugins;
 use anyhow::{Context as _, Result, bail};
@@ -848,7 +848,8 @@ impl ManagementService {
             }
             "logout" => {
                 let name = required_string(input, "name")?;
-                let (_, _, entry) = self.resolve_mcp(name, optional_scope(input)?)?;
+                let (target, _, entry) = self.resolve_mcp(name, optional_scope(input)?)?;
+                let entry = loaded_mcp_entry(&target, entry);
                 self.mcp.clear_oauth(name).await.map_err(core_error)?;
                 let live = if entry.enabled {
                     self.mcp.reconnect(name).await.map_err(core_error)?
@@ -3579,6 +3580,80 @@ mod tests {
         assert!(!config.join("agents/fixture-agent.md").exists());
         assert!(!workspace.join(".haarness/skills/fixture-skill").exists());
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Enable, disable and edit write back the entry as the file has it, so a
+    /// `${TOKEN}` reference is never replaced by the token (or, unset, by
+    /// nothing) in what may be a committed project file.
+    #[tokio::test]
+    async fn mcp_write_backs_keep_environment_references_as_written() {
+        let root = std::env::temp_dir().join(format!(
+            "haarness-management-mcp-references-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let workspace = root.join("workspace");
+        let data = root.join("data");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&data).unwrap();
+        let paths = Paths {
+            root: Some(root.clone()),
+            data: data.clone(),
+            cache: root.join("cache"),
+            database: data.join("haarness.db"),
+            auth: root.join("config/auth.json"),
+            runtime: root.join("cache/runtime.json"),
+            server_lock: root.join("cache/server.lock"),
+            skills: data.join("skills"),
+            config: root.join("config/config.toml"),
+            workspace_id: None,
+        };
+        let skills: Arc<dyn SkillRegistry> = Arc::new(FilesystemSkillRegistry::new(vec![(
+            paths.skills.clone(),
+            true,
+        )]));
+        let mcp = Arc::new(NativeMcpRegistry::with_auth_dir(data.join("mcp-oauth")));
+        let service = ManagementService::new(paths, workspace.clone(), true, skills, mcp);
+        let file = workspace.join("haarness.json");
+        fs::write(
+            &file,
+            r#"{"mcp": {
+                "remote": {"type": "remote", "url": "https://example.test/${HAARNESS_FIXTURE_REGION:-eu}/mcp",
+                           "headers": {"Authorization": "Bearer ${HAARNESS_FIXTURE_TOKEN}"}, "enabled": false},
+                "local": {"type": "local", "command": ["server", "${HAARNESS_FIXTURE_ARG:-default}"],
+                          "environment": {"TOKEN": "${HAARNESS_FIXTURE_TOKEN}"}, "enabled": false}
+            }}"#,
+        )
+        .unwrap();
+        for request in [
+            json!({"action": "enable", "name": "local", "scope": "local"}),
+            json!({"action": "disable", "name": "local", "scope": "local"}),
+            json!({"action": "enable", "name": "remote", "scope": "local"}),
+            json!({"action": "edit", "name": "remote", "scope": "local", "oauth": false}),
+        ] {
+            service.mcp(&request).await.unwrap();
+        }
+        let text = fs::read_to_string(&file).unwrap();
+        let written: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            written["mcp"]["local"]["env"]["TOKEN"],
+            "${HAARNESS_FIXTURE_TOKEN}"
+        );
+        assert_eq!(
+            written["mcp"]["local"]["args"],
+            json!(["${HAARNESS_FIXTURE_ARG:-default}"])
+        );
+        assert_eq!(written["mcp"]["local"]["enabled"], false);
+        assert_eq!(
+            written["mcp"]["remote"]["headers"]["Authorization"],
+            "Bearer ${HAARNESS_FIXTURE_TOKEN}"
+        );
+        assert_eq!(
+            written["mcp"]["remote"]["url"],
+            "https://example.test/${HAARNESS_FIXTURE_REGION:-eu}/mcp"
+        );
+        assert_eq!(written["mcp"]["remote"]["enabled"], true);
+        assert_eq!(written["mcp"]["remote"]["oauth"], false);
         fs::remove_dir_all(root).unwrap();
     }
 
