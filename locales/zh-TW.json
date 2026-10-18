@@ -2439,5 +2439,12 @@
   "Click and press the keys, including a modifier key.": "按一下後按下按鍵，需包含一個輔助鍵。",
   "Use a modifier key and one more key, such as {keys}.": "請使用一個輔助鍵加另一個鍵，例如 {keys}。",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} 已由系統使用。請選擇其他快捷鍵。",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "其他 App 或系統已在使用 {keys}。請選擇其他快捷鍵。"
+  "Another app or the system already uses {keys}. Choose another shortcut.": "其他 App 或系統已在使用 {keys}。請選擇其他快捷鍵。",
+  "first token {time}": "首個 token {time}",
+  "{speed} tok/s": "{speed} token/秒",
+  "Last request: {details}": "最近一次請求：{details}",
+  "First token": "首個 token",
+  "Output speed": "輸出速度",
+  "{count} tokens/s": "{count} token/秒",
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "首個 token 是從送出請求到收到第一段串流內容的等待時間。輸出速度是串流期間每秒的輸出 token 數，僅在串流持續至少半秒時顯示。"
 }

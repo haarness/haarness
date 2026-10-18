@@ -2439,5 +2439,12 @@
   "Click and press the keys, including a modifier key.": "Klikk og trykk tastene, inkludert en modifikatortast.",
   "Use a modifier key and one more key, such as {keys}.": "Bruk en modifikatortast og én tast til, for eksempel {keys}.",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} tilhører systemet. Velg en annen snarvei.",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "En annen app eller systemet bruker allerede {keys}. Velg en annen snarvei."
+  "Another app or the system already uses {keys}. Choose another shortcut.": "En annen app eller systemet bruker allerede {keys}. Velg en annen snarvei.",
+  "first token {time}": "første token {time}",
+  "{speed} tok/s": "{speed} tokens/s",
+  "Last request: {details}": "Siste forespørsel: {details}",
+  "First token": "Første token",
+  "Output speed": "Utdatahastighet",
+  "{count} tokens/s": "{count} tokens/s",
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "Første token er ventetiden fra forespørselen sendes til det første strømmede innholdet. Utdatahastighet er utdata-tokens per sekund mens de ble strømmet, og vises når strømmen varte minst et halvt sekund."
 }

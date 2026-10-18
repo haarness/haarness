@@ -2439,5 +2439,12 @@
   "Click and press the keys, including a modifier key.": "انقر ثم اضغط المفاتيح، بما فيها مفتاح تعديل.",
   "Use a modifier key and one more key, such as {keys}.": "استخدم مفتاح تعديل ومفتاحًا آخر، مثل {keys}.",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} محجوز للنظام. اختر اختصارًا آخر.",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "يستخدم تطبيق آخر أو النظام {keys} بالفعل. اختر اختصارًا آخر."
+  "Another app or the system already uses {keys}. Choose another shortcut.": "يستخدم تطبيق آخر أو النظام {keys} بالفعل. اختر اختصارًا آخر.",
+  "first token {time}": "أول رمز {time}",
+  "{speed} tok/s": "{speed} رمز/ث",
+  "Last request: {details}": "آخر طلب: {details}",
+  "First token": "أول رمز",
+  "Output speed": "سرعة المخرجات",
+  "{count} tokens/s": "{count} رمز/ث",
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "أول رمز هو مدة الانتظار من إرسال الطلب حتى وصول أول محتوى متدفق. سرعة المخرجات هي عدد رموز المخرجات في الثانية أثناء تدفقها، وتظهر عندما يستمر التدفق نصف ثانية على الأقل."
 }

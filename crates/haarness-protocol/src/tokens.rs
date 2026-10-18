@@ -704,6 +704,8 @@ mod tests {
             cache_write_tokens: 0,
             cost_usd: None,
             estimated: false,
+            first_token_ms: None,
+            stream_ms: None,
         }
     }
 
@@ -915,6 +917,8 @@ mod tests {
             cache_write_tokens: 0,
             cost_usd: None,
             estimated: true,
+            first_token_ms: None,
+            stream_ms: None,
         };
         let items = vec![
             item(1, user("hello")),

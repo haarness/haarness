@@ -2439,5 +2439,12 @@
   "Click and press the keys, including a modifier key.": "Щёлкните и нажмите клавиши, включая клавишу-модификатор.",
   "Use a modifier key and one more key, such as {keys}.": "Используйте клавишу-модификатор и ещё одну клавишу, например {keys}.",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} занято системой. Выберите другое сочетание.",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "{keys} уже использует другое приложение или система. Выберите другое сочетание."
+  "Another app or the system already uses {keys}. Choose another shortcut.": "{keys} уже использует другое приложение или система. Выберите другое сочетание.",
+  "first token {time}": "первый токен {time}",
+  "{speed} tok/s": "{speed} ток./с",
+  "Last request: {details}": "Последний запрос: {details}",
+  "First token": "Первый токен",
+  "Output speed": "Скорость вывода",
+  "{count} tokens/s": "{count} токенов/с",
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "Первый токен — время ожидания от отправки запроса до первого потокового содержимого. Скорость вывода — выходные токены в секунду во время потоковой передачи; она показывается, если поток длился не меньше полсекунды."
 }

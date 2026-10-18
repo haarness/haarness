@@ -7127,6 +7127,10 @@ impl RunnerTask {
                     None => None,
                 };
                 let sent_images = sent_images(&provider_request.messages);
+                // This request's first-token and output-speed clock, started
+                // as it is sent; a retry starts its own.
+                let mut clock =
+                    crate::stream_clock::StreamClock::start(tokio::time::Instant::now().into_std());
                 let stream_result = tokio::select! {
                     biased;
                     () = self.cancel.cancelled() => return Err(CoreError::Cancelled),
@@ -7181,7 +7185,8 @@ impl RunnerTask {
                     let event = tokio::select! {
                         biased;
                         () = self.cancel.cancelled() => {
-                            self.publish_round_usage(usage, prompt_usage.clone(), &streamed, provider_id, &model).await?;
+                            // A stopped request has no finished stream to time.
+                            self.publish_round_usage(usage, prompt_usage.clone(), &streamed, None, provider_id, &model).await?;
                             return Err(CoreError::Cancelled);
                         }
                         event = stream.next().instrument(provider_span.clone()) => event,
@@ -7241,6 +7246,16 @@ impl RunnerTask {
                         }
                     };
                     saw_provider_event = true;
+                    let content = match &event {
+                        ProviderEvent::TextDelta(delta) | ProviderEvent::ReasoningDelta(delta) => {
+                            !delta.is_empty()
+                        }
+                        ProviderEvent::ToolCall { .. } | ProviderEvent::StructuredOutput(_) => true,
+                        ProviderEvent::Usage { .. } | ProviderEvent::Finished { .. } => false,
+                    };
+                    if content {
+                        clock.content(tokio::time::Instant::now().into_std());
+                    }
                     match event {
                         ProviderEvent::TextDelta(delta) => {
                             if delta.is_empty() {
@@ -7383,6 +7398,9 @@ impl RunnerTask {
                     record_span_error(&provider_span, error);
                 }
                 drop(provider_span);
+                // Only a request that finished cleanly is timed: one cut
+                // short or refused says nothing about the provider's pace.
+                let timing = clock.timing().filter(|_| finished && blocked.is_none());
                 let partial = saw_provider_event
                     && (!text.is_empty() || !reasoning.is_empty() || !calls.is_empty());
                 self.flush_reasoning_segment(&mut reasoning).await?;
@@ -7419,6 +7437,7 @@ impl RunnerTask {
                             usage,
                             prompt_usage.clone(),
                             &streamed,
+                            timing,
                             provider_id,
                             &model,
                         )
@@ -7442,6 +7461,7 @@ impl RunnerTask {
                             usage,
                             prompt_usage.clone(),
                             &streamed,
+                            timing,
                             provider_id,
                             &model,
                         )
@@ -7462,7 +7482,14 @@ impl RunnerTask {
                         .await?;
                 }
                 let usage = self
-                    .publish_round_usage(usage, prompt_usage, &streamed, provider_id, &model)
+                    .publish_round_usage(
+                        usage,
+                        prompt_usage,
+                        &streamed,
+                        timing,
+                        provider_id,
+                        &model,
+                    )
                     .await?;
                 self.checkpoint_goal_accounting(usage.map(
                     |(input_tokens, output_tokens, cache_read_tokens, _)| {
@@ -7819,12 +7846,14 @@ impl RunnerTask {
     /// Records one provider request: its reported usage, or when the provider
     /// reported none for a request that sent and streamed something, the
     /// local estimate (prepared prompt plus streamed output), marked
-    /// `estimated`. Returns what was recorded.
+    /// `estimated`, with the request's timing when it finished cleanly.
+    /// Returns what was recorded.
     async fn publish_round_usage(
         &self,
         reported: Option<(u64, u64, u64, u64)>,
         prompt: Option<haarness_protocol::PromptUsage>,
         streamed: &str,
+        timing: Option<crate::stream_clock::StreamTiming>,
         provider_id: &str,
         model: &str,
     ) -> CoreResult<Option<(u64, u64, u64, u64)>> {
@@ -7858,6 +7887,8 @@ impl RunnerTask {
                 cache_write_tokens,
             ),
             estimated,
+            first_token_ms: timing.map(|timing| timing.first_token_ms),
+            stream_ms: timing.map(|timing| timing.stream_ms),
         })
         .await?;
         Ok(usage)
@@ -13266,6 +13297,8 @@ mod tests {
                     cache_write_tokens: 0,
                     cost_usd: None,
                     estimated: false,
+                    first_token_ms: None,
+                    stream_ms: None,
                 },
             ),
             item(

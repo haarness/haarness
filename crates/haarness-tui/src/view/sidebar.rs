@@ -40,6 +40,9 @@ pub fn sidebar_lines(app: &App, width: usize, height: usize) -> TaggedLines {
             ),
             theme.muted,
         ));
+        if let Some(pace) = app.request_pace_label() {
+            out.push(line(single_line(&format!("  {pace}"), width), theme.muted));
+        }
         if let Some(fill) = app.context_fill() {
             let cells = width.saturating_sub(12).clamp(6, 24);
             #[allow(

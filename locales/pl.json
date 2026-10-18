@@ -2439,5 +2439,12 @@
   "Click and press the keys, including a modifier key.": "Kliknij i naciśnij klawisze, w tym klawisz modyfikujący.",
   "Use a modifier key and one more key, such as {keys}.": "Użyj klawisza modyfikującego i jeszcze jednego klawisza, np. {keys}.",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} należy do systemu. Wybierz inny skrót.",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "Inna aplikacja lub system już używa {keys}. Wybierz inny skrót."
+  "Another app or the system already uses {keys}. Choose another shortcut.": "Inna aplikacja lub system już używa {keys}. Wybierz inny skrót.",
+  "first token {time}": "pierwszy token {time}",
+  "{speed} tok/s": "{speed} tokenów/s",
+  "Last request: {details}": "Ostatnie żądanie: {details}",
+  "First token": "Pierwszy token",
+  "Output speed": "Szybkość wyjścia",
+  "{count} tokens/s": "{count} tokenów/s",
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "Pierwszy token to czas od wysłania żądania do pierwszej przesłanej strumieniowo treści. Szybkość wyjścia to tokeny wyjściowe na sekundę podczas strumieniowania; jest pokazywana, gdy strumień trwał co najmniej pół sekundy."
 }
