@@ -155,7 +155,8 @@ export async function removeWorktree(
   location: Recent,
 ) {
   if (!location.checkout?.managed) return;
-  const connection = await rootConnection(app, project);
+  // Before asking: a worktree the root cannot manage says so at once.
+  await rootConnection(app, project);
   if (
     !(await confirm(
       t("Remove worktree?"),
@@ -166,11 +167,28 @@ export async function removeWorktree(
     ))
   )
     return;
+  if (await dropWorktree(app, project, location))
+    app.notify(t("Worktree removed."));
+}
+
+/**
+ * Removes a worktree without asking: the folder and its registration, or
+ * only the registration of one whose folder is gone. The server keeps a
+ * worktree with local changes or a running server and says why. False when
+ * Desktop could not switch away from the worktree first.
+ */
+export async function dropWorktree(
+  app: ReturnType<typeof useApp>,
+  project: DesktopProject,
+  location: Recent,
+) {
+  if (!location.checkout?.managed) return false;
+  const connection = await rootConnection(app, project);
   if (
     app.state.connection?.id === location.id &&
     !(await app.activateProject(connection.id))
   )
-    return;
+    return false;
   await window.haarness.api(
     connection.id,
     location.checkout.exists ? "removeWorkspace" : "cleanupWorkspace",
@@ -178,5 +196,5 @@ export async function removeWorktree(
   );
   await window.haarness.forget(location.id);
   await app.refreshProjects();
-  app.notify(t("Worktree removed."));
+  return true;
 }

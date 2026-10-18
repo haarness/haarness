@@ -14,6 +14,8 @@ let temporary: string;
 let env: Record<string, string>;
 let errors: string[];
 let directories: string[];
+/** Worktrees a test made; Desktop may have started their servers. */
+let checkouts: string[];
 const clients: Haarness[] = [];
 const project = (name: string) => page.getByRole("region", { name: `Project ${name}`, exact: true });
 const section = (name: string) => page.getByRole("region", { name: `Section ${name}`, exact: true });
@@ -165,6 +167,7 @@ test.beforeEach(async () => {
   temporary = await realpath(await mkdtemp(join(tmpdir(), "haarness-sidebar-e2e-")));
   errors = [];
   directories = [];
+  checkouts = [];
   env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
   Object.assign(env, {
     HAARNESS_BIN: binary,
@@ -186,6 +189,12 @@ test.afterEach(async () => {
   await close();
   for (const directory of directories) {
     execFileSync(binary, ["--workspace", directory, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 });
+  }
+  // A removed worktree's folder is gone, which this tolerates.
+  for (const directory of checkouts) {
+    try {
+      execFileSync(binary, ["--workspace", directory, "serve", "--stop"], { env, stdio: "ignore", timeout: 30000 });
+    } catch {}
   }
   await rm(temporary, { recursive: true, force: true });
   expect(errors).toEqual([]);
@@ -852,4 +861,99 @@ test("sidebar rows show when a chat was last active, and a scheduled run's waiti
     .getByRole("button", { name: de["Archive chats"], exact: true }).click();
   await expect(page.locator(".toast")).toHaveText(de["Archived {count} chats"].replace("{count}", "2"));
   await page.evaluate(() => window.haarness.preferences({ language: "en" }));
+});
+
+test("sidebar Select chats archives several chats at once, notes a chat still working, and Escape leaves it", async () => {
+  const alpha = await open("alpha", '[permissions]\nbash="ask"\n');
+  const threads: Awaited<ReturnType<Haarness["createThread"]>>[] = [];
+  for (const title of ["One", "Two", "Three", "Four"])
+    threads.push(await alpha.createThread({ title, provider: "echo", model: "echo-1" }));
+  // "Two" waits for an approval, so its turn is still running.
+  await alpha.startTurn(threads[1].id, { requestId: crypto.randomUUID(), text: '!tool bash {"command":"printf still-working"}' });
+  await expect.poll(async () => (await alpha.listPermissions()).length).toBe(1);
+  const row = (title: string) => project("alpha").getByRole("button", { name: title, exact: true });
+  const bar = page.getByRole("toolbar", { name: "Chat selection", exact: true });
+  await row("One").click();
+  await options("alpha");
+  await item("Select chats").click();
+  await expect(bar).toContainText("0 selected");
+  await expect(row("Four")).toHaveAttribute("aria-pressed", "false");
+  // A click picks without opening; Shift picks the rows since.
+  await row("Four").click();
+  await row("Two").click({ modifiers: ["Shift"] });
+  await expect(bar.getByRole("status")).toHaveText("3 selected");
+  for (const title of ["Four", "Three", "Two"]) await expect(row(title)).toHaveAttribute("aria-pressed", "true");
+  await expect(row("One")).toHaveAttribute("aria-current", "true");
+  await page.screenshot({ path: test.info().outputPath("select-chats-bar.png") });
+  await bar.getByRole("button", { name: "Select all shown", exact: true }).click();
+  await expect(bar.getByRole("status")).toHaveText("4 selected");
+  await row("One").click();
+  await expect(row("One")).toHaveAttribute("aria-pressed", "false");
+  await bar.getByRole("button", { name: "Archive", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Archive 3 chats?", exact: true });
+  await expect(dialog).toContainText("Archiving does not stop a chat that is still working.");
+  await expect(dialog.locator(".dialog-list li")).toHaveText(["Four", "Three", /^Two\s*Working$/]);
+  await page.screenshot({ path: test.info().outputPath("select-chats-confirm.png") });
+  await dialog.getByRole("button", { name: "Archive", exact: true }).click();
+  await expect(page.locator(".toast")).toHaveText("Archived 3 chats");
+  await expect(project("alpha").locator(".session-title")).toHaveText(["One"]);
+  await expect(bar).toHaveCount(0);
+  await expect.poll(async () => (await Promise.all(threads.map(thread => alpha.getThread(thread.id)))).map(thread => thread.archived))
+    .toEqual([false, true, true, true]);
+
+  // Command-click (Control-click off macOS) starts picking on that row; Escape ends it.
+  await alpha.createThread({ title: "Five", provider: "echo", model: "echo-1" });
+  await row("Five").click({ modifiers: [process.platform === "darwin" ? "Meta" : "Control"] });
+  await expect(bar.getByRole("status")).toHaveText("1 selected");
+  await expect(row("Five")).toHaveAttribute("aria-pressed", "true");
+  await expect(row("One")).toHaveAttribute("aria-current", "true");
+  await page.keyboard.press("Escape");
+  await expect(bar).toHaveCount(0);
+  await expect(row("Five")).not.toHaveAttribute("aria-pressed", /.*/);
+});
+
+test("sidebar Select chats removes picked worktrees and names the one it keeps for uncommitted changes", async () => {
+  const directory = join(temporary, "projects", "repo");
+  await mkdir(directory, { recursive: true });
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-c", "user.name=Haarness E2E", "-c", "user.email=e2e@example.com", ...args], { cwd: directory, stdio: "ignore" });
+  git("init", "-q", "-b", "main");
+  await writeFile(join(directory, "README.md"), "Select chats fixture\n");
+  git("add", "README.md");
+  git("commit", "-q", "-m", "Initial commit");
+  const repo = await open("repo");
+  const clean = (await repo.createWorkspace({ name: "clean" })).workspace;
+  const dirty = (await repo.createWorkspace({ name: "dirty" })).workspace;
+  checkouts.push(clean.path, dirty.path);
+  await writeFile(join(dirty.path, "unsaved.txt"), "work in progress\n");
+  await options("repo");
+  await item("Enable worktree view").click();
+  await options("repo");
+  await item("Refresh project").click();
+  const checkout = (name: string) => project("repo").getByRole("region", { name: `Checkout ${name}`, exact: true });
+  await expect(checkout("clean")).toBeVisible();
+  await expect(checkout("dirty")).toBeVisible();
+  await options("repo");
+  await item("Select chats").click();
+  const bar = page.getByRole("toolbar", { name: "Chat selection", exact: true });
+  // The project folder itself cannot be picked.
+  await expect(project("repo").getByRole("button", { name: /^Select worktree / })).toHaveCount(2);
+  await checkout("clean").getByRole("button", { name: "Select worktree clean", exact: true }).click();
+  await checkout("dirty").getByRole("button", { name: "Select worktree dirty", exact: true }).click();
+  await expect(bar.getByRole("status")).toHaveText("2 selected");
+  await expect(bar.getByRole("button", { name: "Archive", exact: true })).toBeDisabled();
+  await bar.getByRole("button", { name: "Remove worktrees", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Remove 2 worktrees?", exact: true });
+  // Listed in the order the sidebar draws them.
+  await expect(dialog.locator(".dialog-list li")).toHaveCount(2);
+  expect((await dialog.locator(".dialog-list li").allTextContents()).sort()).toEqual(["clean", "dirty"]);
+  await dialog.getByRole("button", { name: "Remove worktrees", exact: true }).click();
+  await expect(page.locator(".toast")).toHaveText("Removed 1 worktree 1 failed: dirty: uncommitted changes");
+  await expect(checkout("clean")).toHaveCount(0);
+  await expect(checkout("dirty")).toBeVisible();
+  await expect(bar).toHaveCount(0);
+  const left = (await repo.workspacesList()).workspaces.map(workspace => workspace.id);
+  expect(left).not.toContain(clean.id);
+  expect(left).toContain(dirty.id);
+  expect(await readFile(join(dirty.path, "unsaved.txt"), "utf8")).toBe("work in progress\n");
 });
