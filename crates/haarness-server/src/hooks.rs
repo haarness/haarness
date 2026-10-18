@@ -168,10 +168,15 @@ impl ConfiguredHooks {
             let mut command = Command::new(shell);
             if shell.eq_ignore_ascii_case("powershell") {
                 command.args(["-NoProfile", "-Command"]);
+                command.arg(expand(&entry.command));
             } else {
+                // A POSIX shell expands `${CLAUDE_PROJECT_DIR}` and the other
+                // placeholders itself from the environment set below, so a
+                // folder name holding `$(…)`, a quote or a space is never
+                // read as shell syntax, as it would be if pasted in first.
                 command.arg("-lc");
+                command.arg(&entry.command);
             }
-            command.arg(expand(&entry.command));
             command
         } else {
             let mut command = Command::new(expand(&entry.command));
@@ -184,6 +189,7 @@ impl ConfiguredHooks {
         command
             .current_dir(&self.workspace)
             .env("HAARNESS_PROJECT_DIR", &self.workspace)
+            .env("OPENCODE_PROJECT_DIR", &self.workspace)
             .env("CLAUDE_PROJECT_DIR", &self.workspace)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -1257,6 +1263,44 @@ mod tests {
             std::fs::read_to_string(&marker).unwrap(),
             format!("{rendered}|{rendered}")
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_hooks_never_read_the_project_folder_name_as_shell_syntax() {
+        let root =
+            std::env::temp_dir().join(format!("haarness-hook-folder-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("it's $(touch INJECTED) \"here\"");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let marker = root.join("hook.txt");
+        let hooks = ConfiguredHooks::new(
+            ConfiguredHooks::parse_block(&json!({
+                "PostToolUseFailure": [{"hooks": [{
+                    "command": format!(
+                        "printf '%s|%s|%s' \"${{CLAUDE_PROJECT_DIR}}\" \"${{OPENCODE_PROJECT_DIR}}\" \"$HAARNESS_PROJECT_DIR\" > '{}'",
+                        marker.display()
+                    )
+                }]}]
+            })),
+            workspace.clone(),
+        );
+        let _ = hooks
+            .post_tool_use(
+                ThreadId::new(),
+                "bash",
+                &json!({"command": "false"}),
+                "failed",
+                true,
+            )
+            .await;
+        let rendered = workspace.display().to_string();
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            format!("{rendered}|{rendered}|{rendered}")
+        );
+        assert!(!workspace.join("INJECTED").exists());
+        assert!(!root.join("INJECTED").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
