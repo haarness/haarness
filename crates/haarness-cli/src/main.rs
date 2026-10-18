@@ -10336,6 +10336,96 @@ fn random_token() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn the_permission_engine_protects_the_global_configuration_the_cli_reads() {
+        use std::{
+            collections::HashMap,
+            ffi::OsString,
+            path::{Path, PathBuf},
+        };
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("haarness-global-config-{}", uuid::Uuid::now_v7()));
+        let home = root.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let path = |name: &str| root.join(name).into_os_string();
+        let cases: Vec<HashMap<&str, OsString>> = vec![
+            HashMap::from([("HOME", home.clone().into_os_string())]),
+            HashMap::from([
+                ("HOME", home.clone().into_os_string()),
+                ("XDG_CONFIG_HOME", path("xdg")),
+            ]),
+            HashMap::from([
+                ("HOME", home.clone().into_os_string()),
+                ("XDG_CONFIG_HOME", OsString::from("relative")),
+                ("HAARNESS_HOME", path("haarness-home")),
+            ]),
+            HashMap::from([
+                ("HOME", home.clone().into_os_string()),
+                ("HAARNESS_HOME", path("haarness-home")),
+                ("HAARNESS_DATA_DIR", path("data")),
+            ]),
+        ];
+        for vars in cases {
+            let env = |name: &str| vars.get(name).cloned();
+            // Where the CLI itself reads it: the data folder's `Paths`, or
+            // the layout from HOME, HAARNESS_HOME and XDG_CONFIG_HOME.
+            let expected = match env("HAARNESS_DATA_DIR") {
+                Some(data) => super::Paths::new(Some(Path::new(&data)))
+                    .unwrap()
+                    .config_dir()
+                    .to_path_buf(),
+                None => {
+                    let haarness_home = env("HAARNESS_HOME").map(PathBuf::from);
+                    super::layout::Layout::resolve(&home, haarness_home.as_deref(), |key| {
+                        env(key).map(PathBuf::from)
+                    })
+                    .unwrap()
+                    .config
+                }
+            };
+            assert_eq!(
+                haarness_core::global_config_dir_from(&env),
+                Some(expected),
+                "{vars:?}"
+            );
+        }
+        // Dotfiles kept elsewhere and linked in, file by file or the whole
+        // folder, as stow does: their real files are protected too.
+        let dotfiles = root.join("dotfiles/haarness");
+        fs::create_dir_all(dotfiles.join("extensions")).unwrap();
+        for name in ["config.toml", "notes.md", "extensions/approve.js"] {
+            fs::write(dotfiles.join(name), "x").unwrap();
+        }
+        let config = home.join(".config/haarness");
+        fs::create_dir_all(&config).unwrap();
+        std::os::unix::fs::symlink(dotfiles.join("config.toml"), config.join("config.toml"))
+            .unwrap();
+        std::os::unix::fs::symlink(dotfiles.join("extensions"), config.join("extensions")).unwrap();
+        let folded = root.join("folded");
+        std::os::unix::fs::symlink(&dotfiles, &folded).unwrap();
+        for global in [&config, &folded] {
+            for name in ["config.toml", "extensions/approve.js"] {
+                assert!(
+                    haarness_core::is_global_config_path(&dotfiles.join(name), global),
+                    "{name} through {}",
+                    global.display()
+                );
+            }
+            assert!(!haarness_core::is_global_config_path(
+                &dotfiles.join("notes.md"),
+                global
+            ));
+        }
+        assert!(haarness_core::is_global_config_path(
+            &folded.join("config.toml"),
+            &folded
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn log_lines_never_carry_a_credential_in_a_url() {
         use std::io::Write as _;

@@ -247,12 +247,11 @@ def case_config_files():
     haarness(guarded, 'run', '!tool write {"path":"src/ok.txt","content":"ok"}')
     assert (guarded / 'src' / 'ok.txt').read_text() == 'ok'
     passed('an edit of haarness.json, also through a link and with --yolo, stops for a person under "edit": "allow"')
-    # Files with the same power: a project plugin's hooks, extension code, a
-    # name Windows would trim, and an agent whose permissions change.
+    # Files with the same power: a project plugin's hooks, extension code and
+    # a name Windows would trim.
     for path, content in [('.haarness/plugins/kit/hooks/hooks.json', '{"hooks":{}}'),
                           ('.haarness/extensions/approve.js', 'export default {}'),
-                          ('haarness.json ', '{}'),
-                          ('.haarness/agents/open.md', '---\npermission:\n  bash: allow\n---\nDo it.')]:
+                          ('haarness.json ', '{}')]:
         result = haarness(guarded, 'run', '!tool write ' + json.dumps({'path': path, 'content': content}), check=False)
         assert result.returncode != 0, f'{path}: {result.stdout}'
         assert 'which always needs an answer' in result.stderr, result.stderr
@@ -264,18 +263,15 @@ def case_config_files():
         {'path': str(global_config), 'content': '[permissions]\nbash = "allow"\n'}), check=False)
     assert result.returncode != 0 and 'which always needs an answer' in result.stderr, result.stderr
     assert (global_config.read_text() if global_config.exists() else None) == before, 'the global config.toml changed'
-    haarness(guarded, 'run', '!tool write ' + json.dumps({'path': '.haarness/agents/plain.md',
-                                                         'content': '---\ndescription: Plain\n---\nRead.'}))
-    assert (guarded / '.haarness' / 'agents' / 'plain.md').exists()
-    passed("plugin hooks, extension code, a trimmed name, the global config.toml and an agent's new permissions ask; a plain agent does not")
-    # A patch that adds an agent and then gives it permissions, in two steps.
-    two_steps = ('*** Begin Patch\n*** Add File: .haarness/agents/later.md\n+---\n+description: Later\n+---\n+Go.\n'
-                 '*** Update File: .haarness/agents/later.md\n@@\n description: Later\n+permission:\n+  bash: allow\n'
+    passed('plugin hooks, extension code, a trimmed name and the global config.toml ask')
+    # A patch that adds a scratch file and then moves it onto haarness.json.
+    two_steps = ('*** Begin Patch\n*** Add File: tmp/c.json\n+{"permission":"allow"}\n'
+                 '*** Update File: tmp/c.json\n*** Move to: haarness.json\n@@\n {"permission":"allow"}\n+\n'
                  '*** End Patch')
     result = haarness(guarded, 'run', '!tool apply_patch ' + json.dumps({'input': two_steps}), check=False)
     assert result.returncode != 0 and 'which always needs an answer' in result.stderr, result.stderr
-    assert not (guarded / '.haarness' / 'agents' / 'later.md').exists()
-    passed('a patch that adds an agent and then opens its permissions asks')
+    assert (guarded / 'haarness.json').read_text() == original and not (guarded / 'tmp').exists()
+    passed('a patch that moves a scratch file onto haarness.json asks')
     haarness(guarded, 'schedule', 'add', '--name', 'widen', '--every', '1d', '--prompt', f'!tool write {widen}')
     run = json.loads(haarness(guarded, 'schedule', 'run', 'widen', '--json', timeout=60).stdout)
     assert run['status'] == 'success', run
