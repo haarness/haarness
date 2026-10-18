@@ -3819,7 +3819,7 @@ impl AgentRuntime {
                 let operation = plan.operation(pattern);
                 let constraint = tool.permission_constraint(&arguments, &operation);
                 let explicit = tool.explicit_approval(&arguments, &operation);
-                let evaluation = plan.judge(pattern, engine.evaluate_detailed(&operation));
+                let evaluation = plan.evaluate(&engine, pattern);
                 let decision = if explicit {
                     crate::permissions::explicit_decision(
                         evaluation.decision,
@@ -3875,11 +3875,7 @@ impl AgentRuntime {
                 .filter(|operation| tool.explicit_approval(&arguments, operation))
                 .collect();
             let explicit = !explicit_operations.is_empty();
-            let operation = if asked.len() == 1 {
-                format!("{}:{}", plan.permission, asked[0])
-            } else {
-                format!("{}: {}", plan.permission, asked.join("  "))
-            };
+            let operation = plan.describe(asked);
             // Same rule as model calls: a scheduled run's workflow cannot
             // get a person's answer, so it fails now.
             if (explicit || forced) && stance.unattended {
@@ -8684,21 +8680,13 @@ impl RunnerTask {
         for plan in plans {
             let mut asked = Vec::new();
             for pattern in &plan.patterns {
-                if plan
-                    .judge(
-                        pattern,
-                        self.skill_engine()
-                            .evaluate_detailed(&plan.operation(pattern)),
-                    )
-                    .decision
-                    == PermissionDecision::Deny
+                if plan.evaluate(&self.skill_engine(), pattern).decision == PermissionDecision::Deny
                 {
                     return Err(CoreError::PermissionDenied(
                         "This tool is disabled by the active skill".into(),
                     ));
                 }
-                let evaluation =
-                    plan.judge(pattern, engine.evaluate_detailed(&plan.operation(pattern)));
+                let evaluation = plan.evaluate(&engine, pattern);
                 let constraint = tool.as_ref().and_then(|tool| {
                     tool.permission_constraint(&arguments, &plan.operation(pattern))
                 });
@@ -8942,11 +8930,7 @@ impl RunnerTask {
         forced: bool,
         explicit_operations: Vec<String>,
     ) -> CoreResult<PermissionResolution> {
-        let operation = if plan.patterns.len() == 1 {
-            format!("{}:{}", plan.permission, plan.patterns[0])
-        } else {
-            format!("{}: {}", plan.permission, plan.patterns.join("  "))
-        };
+        let operation = plan.describe(&plan.patterns);
         let always_rules = plan.always_rules();
         let explicit = !explicit_operations.is_empty();
         // A run nobody watches (a schedule) cannot get a person's answer:
@@ -9024,7 +9008,7 @@ impl RunnerTask {
                         refreshed.evaluate(&operation) != PermissionDecision::Deny
                             && crate::permissions::explicit_granted(&session_rules, &operation)
                     } else {
-                        refreshed.evaluate(&operation) == PermissionDecision::Allow
+                        plan.evaluate(&refreshed, pattern).decision == PermissionDecision::Allow
                     }
                 })
             {
@@ -11153,10 +11137,69 @@ struct AskPlan {
     /// and extensions judged the arguments, so their answer about the path
     /// given never settles these: see `permission_hook_answer`.
     resolved: Vec<(String, String)>,
-    /// Patterns read from inside a written shell command (another spelling
-    /// of it, or a command it runs), each with the command as written: see
-    /// [`AskPlan::judge`].
-    derived: Vec<crate::permissions::bash::Derived>,
+    /// For a bash group, which patterns are commands as written and which
+    /// are read from inside them: see [`AskPlan::evaluate`].
+    shell: Option<ShellReadings>,
+}
+
+/// What a bash group read from inside its written commands (see
+/// `permissions::bash`).
+struct ShellReadings {
+    /// Each written command as an operation (`bash:sudo rm x`), with its
+    /// "always" pattern and whether a limit stopped its readings.
+    written: Vec<(String, crate::permissions::bash::Written)>,
+    /// Each written command's index, by pattern.
+    index: HashMap<String, usize>,
+    /// Each reading's written commands, by pattern.
+    sources: HashMap<String, Vec<usize>>,
+    /// Each reading's "always" pattern.
+    always: HashMap<String, String>,
+    /// Whether a rule also names a written command, by (index, rule): a
+    /// written command may be long (a here-document), so each is matched
+    /// once per rule.
+    covered: Mutex<HashMap<(usize, String), bool>>,
+}
+
+impl ShellReadings {
+    fn new(analysis: &crate::permissions::bash::BashAnalysis) -> Self {
+        let mut sources: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut always = HashMap::new();
+        for derived in &analysis.derived {
+            sources
+                .entry(derived.pattern.clone())
+                .or_default()
+                .push(derived.written);
+            always
+                .entry(derived.pattern.clone())
+                .or_insert_with(|| derived.always.clone());
+        }
+        Self {
+            written: analysis
+                .written
+                .iter()
+                .map(|written| (format!("bash:{}", written.pattern), written.clone()))
+                .collect(),
+            index: analysis
+                .written
+                .iter()
+                .enumerate()
+                .map(|(index, written)| (written.pattern.clone(), index))
+                .collect(),
+            sources,
+            always,
+            covered: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn covers(&self, rule: &str, index: usize) -> bool {
+        let key = (index, rule.to_owned());
+        if let Some(&covered) = self.covered.lock().get(&key) {
+            return covered;
+        }
+        let covered = crate::permissions::wildcard_match(rule, &self.written[index].0);
+        self.covered.lock().insert(key, covered);
+        covered
+    }
 }
 
 impl AskPlan {
@@ -11178,69 +11221,104 @@ impl AskPlan {
             .iter()
             .any(|(resolved, _)| resolved == pattern)
     }
-    /// The verdict on `pattern`. A pattern read from inside a written
-    /// command is judged only by a rule about it: a rule that also covers
-    /// every command it was read from (a blanket `*`, `"bash": "ask"`, or an
-    /// allow for the wrapper), or no rule at all, judged those commands as
-    /// written already, so it leaves the pattern allowed. A deny or ask for
-    /// `rm *` still reaches `sudo rm x` and `bash -c 'rm x'`.
-    fn judge(
-        &self,
-        pattern: &str,
-        evaluation: crate::permissions::Evaluation,
-    ) -> crate::permissions::Evaluation {
-        if evaluation.decision == PermissionDecision::Allow || evaluation.protected {
-            return evaluation;
+    /// The verdict on `pattern` from `engine`. A pattern read from inside
+    /// a written shell command is judged only by rules about it (see
+    /// [`PermissionEngine::evaluate_reading`]): a deny or ask for `rm *`
+    /// reaches `sudo rm x` and `bash -c 'rm x'`, while a blanket rule or an
+    /// allow for the wrapper adds no question. A written command whose
+    /// readings a limit stopped asks when a bash rule narrower than it denies
+    /// or asks, since its readings may have missed what that rule is about.
+    fn evaluate(&self, engine: &PermissionEngine, pattern: &str) -> crate::permissions::Evaluation {
+        let operation = self.operation(pattern);
+        let Some(shell) = &self.shell else {
+            return engine.evaluate_detailed(&operation);
+        };
+        if let Some(sources) = shell.sources.get(pattern) {
+            return engine.evaluate_reading(&operation, &|rule| {
+                sources.iter().all(|&index| shell.covers(rule, index))
+            });
         }
-        let mut sources = self
-            .derived
-            .iter()
-            .filter(|derived| derived.pattern == pattern)
-            .peekable();
-        if sources.peek().is_none() {
-            return evaluation;
+        let evaluation = engine.evaluate_detailed(&operation);
+        if evaluation.decision == PermissionDecision::Allow
+            && let Some(&index) = shell.index.get(pattern)
+            && shell.written[index].1.incomplete
+            && let Some(rule) = engine.narrower_bash_rule(&|rule| shell.covers(rule, index))
+        {
+            return crate::permissions::Evaluation {
+                decision: PermissionDecision::Ask,
+                matched: Some(rule),
+                protected: false,
+            };
         }
-        let general = evaluation.matched.as_deref().is_none_or(|rule| {
-            sources.all(|derived| {
-                crate::permissions::wildcard_match(rule, &self.operation(&derived.written))
-            })
-        });
-        if general {
-            crate::permissions::Evaluation {
-                decision: PermissionDecision::Allow,
-                ..evaluation
+        evaluation
+    }
+    /// What a prompt about `patterns` is called: for shell commands, the
+    /// commands as written that they belong to, so logs and messages name
+    /// what runs (`bash:sudo tool-x a`), while the patterns name the reading
+    /// a rule asked about (`tool-x a`).
+    fn describe(&self, patterns: &[String]) -> String {
+        let mut named: Vec<&str> = Vec::new();
+        for pattern in patterns {
+            let name = self
+                .shell
+                .as_ref()
+                .and_then(|shell| {
+                    let index = *shell.sources.get(pattern)?.first()?;
+                    Some(shell.written[index].1.pattern.as_str())
+                })
+                .unwrap_or(pattern);
+            if !named.contains(&name) {
+                named.push(name);
             }
+        }
+        if named.len() == 1 {
+            format!("{}:{}", self.permission, named[0])
         } else {
-            evaluation
+            format!("{}: {}", self.permission, named.join("  "))
         }
     }
-    /// This group narrowed to the patterns still to be answered. An
-    /// "always" answer also remembers the patterns read from inside the
-    /// command that are still asked.
+    /// This group narrowed to the patterns still to be answered. For shell
+    /// commands, an "always" answer remembers the "always" patterns of
+    /// exactly those: an ask about the `tool-x a` in `sudo tool-x a`
+    /// remembers `tool-x *`, not `sudo *`.
     fn asking(self, patterns: Vec<String>) -> Self {
         let resolved = self
             .resolved
             .into_iter()
             .filter(|(pattern, _)| patterns.contains(pattern))
             .collect();
-        let derived: Vec<_> = self
-            .derived
-            .into_iter()
-            .filter(|derived| patterns.contains(&derived.pattern))
-            .collect();
-        let mut always = self.always;
-        for derived in &derived {
-            if !always.contains(&derived.always) {
-                always.push(derived.always.clone());
+        let always = match &self.shell {
+            Some(shell) => {
+                let mut always: Vec<String> = Vec::new();
+                for pattern in &patterns {
+                    let remembered = shell.always.get(pattern).or_else(|| {
+                        shell
+                            .index
+                            .get(pattern)
+                            .map(|&index| &shell.written[index].1.always)
+                    });
+                    if let Some(remembered) = remembered
+                        && !remembered.is_empty()
+                        && !always.contains(remembered)
+                    {
+                        always.push(remembered.clone());
+                    }
+                }
+                if always.is_empty() {
+                    self.always
+                } else {
+                    always
+                }
             }
-        }
+            None => self.always,
+        };
         Self {
             permission: self.permission,
             patterns,
             always,
             external_paths: Vec::new(),
             resolved,
-            derived,
+            shell: self.shell,
         }
     }
 }
@@ -11414,7 +11492,7 @@ fn combine_browser_approvals(name: &str, plans: Vec<AskPlan>) -> Vec<AskPlan> {
         always: Vec::new(),
         external_paths: Vec::new(),
         resolved: Vec::new(),
-        derived: Vec::new(),
+        shell: None,
     };
     for plan in plans {
         combined
@@ -11459,7 +11537,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             always: vec![pattern],
             external_paths: Vec::new(),
             resolved: Vec::new(),
-            derived: Vec::new(),
+            shell: None,
         }];
     }
     if matches!(
@@ -11483,7 +11561,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             always: vec![format!("{action}:*")],
             external_paths: Vec::new(),
             resolved: Vec::new(),
-            derived: Vec::new(),
+            shell: None,
         }];
     }
     if name.starts_with("browser_") {
@@ -11512,7 +11590,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             patterns,
             external_paths: Vec::new(),
             resolved: Vec::new(),
-            derived: Vec::new(),
+            shell: None,
         }];
         let remember = arguments["__browser"]["remember"]
             .as_array()
@@ -11528,7 +11606,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 always: remember,
                 external_paths: Vec::new(),
                 resolved: Vec::new(),
-                derived: Vec::new(),
+                shell: None,
             });
         }
         if matches!(name, "browser_files_upload" | "browser_files_drop") {
@@ -11556,7 +11634,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             always: vec![format!("{kind}:*")],
             external_paths: Vec::new(),
             resolved: Vec::new(),
-            derived: Vec::new(),
+            shell: None,
         }];
     }
     if name == "workflow" {
@@ -11573,7 +11651,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             always: vec!["*".into()],
             external_paths: Vec::new(),
             resolved: Vec::new(),
-            derived: Vec::new(),
+            shell: None,
         }];
         if arguments.get("action").and_then(serde_json::Value::as_str) == Some("create") {
             // The new file also meets the rules for where a linked
@@ -11591,7 +11669,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 always: vec![file],
                 external_paths: Vec::new(),
                 resolved,
-                derived: Vec::new(),
+                shell: None,
             });
         }
         return plans;
@@ -11626,17 +11704,18 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                 always: external_patterns,
                 external_paths,
                 resolved: Vec::new(),
-                derived: Vec::new(),
+                shell: None,
             });
         }
         if !analysis.patterns.is_empty() {
+            let shell = ShellReadings::new(&analysis);
             plans.push(AskPlan {
                 permission: "bash".into(),
                 patterns: analysis.patterns,
                 always: analysis.always,
                 external_paths: Vec::new(),
                 resolved: Vec::new(),
-                derived: analysis.derived,
+                shell: Some(shell),
             });
         }
         return plans;
@@ -11672,7 +11751,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             patterns,
             external_paths,
             resolved,
-            derived: Vec::new(),
+            shell: None,
         });
     }
     if name == "apply_patch" {
@@ -11710,7 +11789,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
                     always: vec!["*".into()],
                     external_paths: Vec::new(),
                     resolved,
-                    derived: Vec::new(),
+                    shell: None,
                 });
                 return plans;
             }
@@ -11721,7 +11800,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
             always: vec!["*".into()],
             external_paths: Vec::new(),
             resolved: Vec::new(),
-            derived: Vec::new(),
+            shell: None,
         });
         return plans;
     }
@@ -11775,7 +11854,7 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
         always,
         external_paths: Vec::new(),
         resolved,
-        derived: Vec::new(),
+        shell: None,
     });
     plans
 }
@@ -11914,10 +11993,7 @@ mod shell_reading_tests {
         .unwrap();
         plan.patterns
             .iter()
-            .map(|pattern| {
-                let evaluation = engine.evaluate_detailed(&plan.operation(pattern));
-                (pattern.clone(), plan.judge(pattern, evaluation).decision)
-            })
+            .map(|pattern| (pattern.clone(), plan.evaluate(engine, pattern).decision))
             .filter(|(_, decision)| *decision != PermissionDecision::Allow)
             .collect()
     }
@@ -11980,6 +12056,120 @@ mod shell_reading_tests {
         assert_eq!(
             verdicts(&review, "cargo test; timeout 5 cargo test"),
             vec![("cargo test".to_owned(), Ask)]
+        );
+    }
+
+    fn rule(pattern: &str, decision: PermissionDecision) -> PermissionRule {
+        PermissionRule {
+            pattern: pattern.into(),
+            decision,
+        }
+    }
+
+    fn plan(command: &str) -> AskPlan {
+        ask_plans(
+            "bash",
+            &json!({"command": command}),
+            Path::new("/workspace"),
+        )
+        .into_iter()
+        .find(|plan| plan.permission == "bash")
+        .unwrap()
+    }
+
+    #[test]
+    fn readings_are_judged_in_every_layer_without_the_rules_that_cover_the_written_command() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        // A parent's whitelist boundary does not hide the child's own deny,
+        // and still lets the wrapper it allows run what it runs.
+        let mut child = engine(&[("bash:tool-x *", Deny)]);
+        child.add_inherited_ceiling(vec![vec![
+            rule("bash:*", Deny),
+            rule("bash:timeout *", Allow),
+        ]]);
+        assert!(
+            verdicts(&child, "timeout 5 tool-x a").contains(&("tool-x a".to_owned(), Deny)),
+            "{:?}",
+            verdicts(&child, "timeout 5 tool-x a")
+        );
+        assert_eq!(verdicts(&child, "timeout 5 cargo test"), Vec::new());
+        // A deny for the reading bites before or after a blanket ask.
+        for rules in [
+            [("bash:tool-x *", Deny), ("bash:*", Ask)],
+            [("bash:*", Ask), ("bash:tool-x *", Deny)],
+        ] {
+            assert!(
+                verdicts(&engine(&rules), "sudo tool-x a").contains(&("tool-x a".to_owned(), Deny)),
+                "{rules:?}"
+            );
+        }
+        let asks = engine(&[("bash:tool-x *", Ask), ("bash:sudo *", Allow)]);
+        assert_eq!(
+            verdicts(&asks, "sudo tool-x a"),
+            vec![("tool-x a".to_owned(), Ask)]
+        );
+        // A skill's rules are an engine of their own; their deny reaches a
+        // reading too.
+        let skill = PermissionEngine::new(vec![rule("bash:rm *", Deny)]);
+        assert!(verdicts(&skill, "sudo rm x").contains(&("rm x".to_owned(), Deny)));
+    }
+
+    #[test]
+    fn a_command_whose_reading_a_limit_stopped_asks_when_a_narrower_rule_exists() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        let padded = format!("bash -c '{}rm x'", "true; ".repeat(300 * 1024 / 6));
+        assert_eq!(
+            verdicts(&engine(&[("bash:rm *", Deny)]), &padded),
+            vec![(padded.clone(), Ask)]
+        );
+        // Without a narrower rule it runs as before.
+        assert_eq!(verdicts(&engine(&[]), &padded), Vec::new());
+        assert_eq!(
+            verdicts(&engine(&[("bash:*", Ask), ("bash:bash *", Allow)]), &padded),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn an_always_answer_remembers_only_what_was_asked() {
+        use PermissionDecision::{Allow, Ask};
+        let asked: Vec<String> = verdicts(&engine(&[("bash:tool-x *", Ask)]), "sudo tool-x a")
+            .into_iter()
+            .map(|(pattern, _)| pattern)
+            .collect();
+        assert_eq!(asked, vec!["tool-x a"]);
+        let remembered = plan("sudo tool-x a").asking(asked).always_rules();
+        assert_eq!(remembered, vec!["bash:tool-x *"]);
+        // So afterwards other sudo commands still ask under "bash": "ask".
+        let mut review = engine(&[("bash:*", Ask)]);
+        for pattern in remembered {
+            review.add_grant(rule(&pattern, Allow));
+        }
+        assert_eq!(
+            verdicts(&review, "sudo other"),
+            vec![("sudo other".to_owned(), Ask)]
+        );
+        assert_eq!(verdicts(&review, "tool-x b"), Vec::new());
+        // The same holds for the commands of a chain.
+        assert_eq!(
+            plan("git status && rm x")
+                .asking(vec!["rm x".into()])
+                .always,
+            vec!["rm *"]
+        );
+    }
+
+    #[test]
+    fn a_prompt_about_a_reading_is_named_after_the_command_as_written() {
+        let sudo = plan("sudo tool-x a");
+        assert_eq!(sudo.describe(&["tool-x a".into()]), "bash:sudo tool-x a");
+        assert_eq!(
+            sudo.describe(&["sudo tool-x a".into(), "tool-x a".into()]),
+            "bash:sudo tool-x a"
+        );
+        assert_eq!(
+            plan("git status; sudo tool-x a").describe(&["git status".into(), "tool-x a".into()]),
+            "bash: git status  sudo tool-x a"
         );
     }
 
