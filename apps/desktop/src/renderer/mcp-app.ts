@@ -124,16 +124,44 @@ function decode(blob: string) {
 }
 
 /**
- * A CSP source list takes host sources only: anything else (a keyword, a quote, a semicolon)
- * could widen or end the directive it is pasted into.
+ * Whether a declared host is a site on the internet: not every host (`*`, or
+ * a wildcard over a whole top-level domain), and not this computer or its
+ * network (`localhost`, `.local` names, loopback, private and link-local
+ * addresses), which a page must never reach.
+ */
+function publicHost(host: string) {
+  const name = host.toLowerCase().replace(/\.$/, "");
+  const fixed = name.startsWith("*.") ? name.slice(2) : name;
+  if (fixed.includes("*") || !fixed.includes(".")) return false;
+  if (/(^|\.)(localhost|local|internal|home\.arpa)$/.test(fixed)) return false;
+  const address = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(fixed);
+  if (!address) return true;
+  const [a, b] = [Number(address[1]), Number(address[2])];
+  return !(
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    a >= 224
+  );
+}
+
+/**
+ * A CSP source list takes https and wss host sources of public sites only:
+ * anything else (a keyword, a quote, a semicolon) could widen or end the
+ * directive it is pasted into, and plain http, every host, or this computer's
+ * network is not something a page may reach. IPv6 literals are not taken.
  */
 export function sources(list: unknown): string[] {
   if (!Array.isArray(list)) return [];
-  return list.filter(
-    (item): item is string =>
-      typeof item === "string" &&
-      /^(https?|wss?):\/\/[a-z0-9*.-]+(:\d+)?(\/[^\s;,'"]*)?$/i.test(item),
-  );
+  return list.filter((item): item is string => {
+    if (typeof item !== "string") return false;
+    const match = /^(https|wss):\/\/([a-z0-9*.-]+)(:\d+)?(\/[^\s;,'"]*)?$/i.exec(item);
+    return !!match && publicHost(match[2]);
+  });
 }
 
 /**
