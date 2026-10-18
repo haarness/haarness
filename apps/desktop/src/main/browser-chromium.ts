@@ -63,6 +63,7 @@ export function createBrowserPage(
   const detachNetwork = options.network?.attach(contents);
   contents.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown") return;
+    page.personActed();
     if (
       input.key === "F5" &&
       !input.meta &&
@@ -90,6 +91,11 @@ export function createBrowserPage(
     contents.setZoomLevel(
       input.key === "0" ? 0 : contents.getZoomLevel() + step,
     );
+  });
+  // A press of the person's in the page ends any hold on file choosers the
+  // agent's last action left (an agent's own input arrives during its action).
+  contents.on("before-mouse-event", (_event, mouse) => {
+    if (mouse.type === "mouseDown") page.personActed();
   });
   const cdp = createCdp(contents);
   // Electron reports loadURL's navigation start synchronously, before

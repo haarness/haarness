@@ -404,6 +404,7 @@ function recordingPage(calls: string[]): CreatePage {
       return { value: { ok: true }, files: [] };
     },
     navigationStarted() {},
+    personActed() {},
     dispose() {},
   });
 }
@@ -472,6 +473,7 @@ function loggingPage(log: string[], delay: (type: string) => number = () => 0): 
         log.push("navigation");
         options.publish();
       },
+      personActed() {},
       dispose() {
         log.push("dispose");
       },
@@ -795,6 +797,7 @@ test("the shared page driver plugs in through createPage and runs inside the sit
       navigationStarted() {
         generation++;
       },
+      personActed() {},
       dispose() {
         calls.push("dispose");
       },

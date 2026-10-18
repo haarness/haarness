@@ -25,6 +25,7 @@ const focusPage = `<!doctype html><html lang="en"><head><title>Focus fixture</ti
 <a href="/focus?next">Next page</a>
 <label>Pick a file <input type="file" id="file"></label>
 <button onclick="file.click()">Choose file</button>
+<button onclick="setTimeout(() => file.click(), 1500)">Choose file later</button>
 <p id="picked">none</p>
 <script>window.focus(); field.focus(); file.oncancel = () => picked.textContent = "cancelled"; file.onchange = () => picked.textContent = "picked";</script>
 </body></html>`;
@@ -232,29 +233,40 @@ test("a page put away while it has the keyboard gives it back to the message box
   expect(errors).toEqual([]);
 });
 
-test("a file chooser a page opens during the agent's click never appears, and the agent is told to upload instead", async () => {
+test("a file chooser a page opens during or just after the agent's click never appears, and the agent is told to upload instead", async () => {
+  // While a native chooser is open the page hears nothing; a held one is
+  // cancelled for the page at once. (The window's own focus is no witness
+  // here: other apps on the machine take it at any time.)
+  const picked = async () => (await tool("evaluate", { tabID, script: "document.getElementById('picked').textContent" })).value;
+  const reset = () => tool("evaluate", { tabID, script: "document.getElementById('picked').textContent = 'none'" });
   const tabID = (await tool("tabs_open", { url: siteURL + "/focus?files" })).id;
-  await activate();
-  const snapshot = (await tool("snapshot", { tabID })).content;
+  let snapshot = (await tool("snapshot", { tabID })).content;
   const clicked = await tool("click", { tabID, ref: ref(snapshot, "Choose file") });
-  expect(clicked.fileChooser).toMatch(/kept from appearing.*browser_files_upload|kept from appearing.*browser\.files\.upload/);
-  // The page hears that its chooser closed, and the window keeps its place.
-  await expect
-    .poll(async () => (await tool("evaluate", { tabID, script: "document.getElementById('picked').textContent" })).value)
-    .toBe("cancelled");
-  expect((await settled()).window).toBe(true);
-  // A click of the person's own, once the agent is done, opens the system's chooser as usual.
+  expect(clicked.fileChooser).toMatch(/^The page opened a file chooser, which Haarness kept from appearing.*browser\.files\.upload/);
+  await expect.poll(picked).toBe("cancelled");
+  // A widget that opens its chooser a moment after the click (once a request
+  // returns, say) is held too, and the agent's next result says so.
+  await reset();
+  snapshot = (await tool("snapshot", { tabID })).content;
+  const later = await tool("click", { tabID, ref: ref(snapshot, "Choose file later") });
+  expect(later.fileChooser).toBeUndefined();
+  await page.waitForTimeout(2500);
+  const after = await tool("evaluate", { tabID, script: "document.getElementById('picked').textContent" });
+  expect(after.value).toBe("cancelled");
+  expect(after.fileChooser).toMatch(/^Shortly after your last action, the page opened a file chooser/);
+  // A press of the person's own ends the hold at once: the system's chooser
+  // opens as usual, so the page hears no cancel.
   const box = (await tool("evaluate", {
     tabID,
-    script: "(() => { const r = [...document.querySelectorAll('button')].find((b) => b.textContent === 'Choose file').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()",
+    script: "(() => { document.getElementById('picked').textContent = 'none'; const r = [...document.querySelectorAll('button')].find((b) => b.textContent === 'Choose file').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()",
   })).value as { x: number; y: number };
-  // Choosers stay held for a moment after the agent's last action (that evaluate).
-  await page.waitForTimeout(1000);
+  await page.waitForTimeout(500);
   await app.evaluate(({ webContents }, { x, y }) => {
     const contents = webContents.getAllWebContents().find((contents) => contents.getURL().endsWith("/focus?files"))!;
     contents.sendInputEvent({ type: "mouseDown", x, y, button: "left", clickCount: 1 });
     contents.sendInputEvent({ type: "mouseUp", x, y, button: "left", clickCount: 1 });
   }, box);
-  await expect.poll(async () => (await keyboard()).window, { timeout: 5000 }).toBe(false);
+  await page.waitForTimeout(1500);
+  expect(await picked()).toBe("none");
   expect(errors).toEqual([]);
 });
