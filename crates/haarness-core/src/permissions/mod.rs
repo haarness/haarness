@@ -46,32 +46,95 @@ pub struct Evaluation {
 pub const CONFIG_EDIT_RULE: &str = "edit:<haarness configuration>";
 
 /// Whether `path` (after `.` and `..`, at any depth) is a file Haarness, or a
-/// tool it reads settings from, takes permissions, hooks, MCP servers or
-/// providers from: `haarness.json{,c}`, `opencode.json{,c}`,
-/// `.haarness/config.toml`, `.claude/settings.json`,
-/// `.claude/settings.local.json` and `.mcp.json`. An agent that changes one
-/// could widen its own permissions at the next reload, so an edit asks a
-/// person unless a rule naming the file allows it.
+/// tool it reads settings from, takes permissions, hooks, MCP servers,
+/// extensions or providers from: `haarness.json{,c}`, `opencode.json{,c}`,
+/// `.haarness/config.toml`, `.haarness/extensions.json` and the extension code
+/// under `.haarness/extensions/`, `.claude/settings.json`,
+/// `.claude/settings.local.json`, `.mcp.json`, a plugin's `hooks/hooks.json`
+/// and `.claude-plugin/plugin.json`, and the global configuration folder's
+/// `config.toml`, `extensions.json` and `extensions/`. An agent that changes
+/// one could widen its own permissions at the next reload, so an edit asks a
+/// person unless a rule naming the file allows it. Names compare without
+/// case and without the trailing dots and spaces Windows drops.
 #[must_use]
 pub fn is_config_path(path: &Path) -> bool {
     let path = normalize_absolute(path);
-    let mut names = path
+    let names: Vec<String> = path
         .components()
-        .rev()
         .filter_map(|component| match component {
-            Component::Normal(name) => Some(name.to_string_lossy().to_ascii_lowercase()),
+            Component::Normal(name) => Some(file_name_key(&name.to_string_lossy())),
             _ => None,
-        });
-    let Some(name) = names.next() else {
+        })
+        .collect();
+    let Some((name, folders)) = names.split_last() else {
         return false;
     };
-    let parent = names.next();
-    matches!(
+    let parent = folders.last().map(String::as_str);
+    if matches!(
         name.as_str(),
         "haarness.json" | "haarness.jsonc" | "opencode.json" | "opencode.jsonc" | ".mcp.json"
-    ) || (name == "config.toml" && parent.as_deref() == Some(".haarness"))
-        || (matches!(name.as_str(), "settings.json" | "settings.local.json")
-            && parent.as_deref() == Some(".claude"))
+    ) {
+        return true;
+    }
+    let pair = (parent.unwrap_or_default(), name.as_str());
+    if matches!(
+        pair,
+        (".haarness", "config.toml" | "extensions.json")
+            | (".claude", "settings.json" | "settings.local.json")
+            | ("hooks", "hooks.json")
+            | (".claude-plugin", "plugin.json")
+    ) {
+        return true;
+    }
+    // Extension code, which runs inside Haarness and can answer approvals.
+    if folders
+        .windows(2)
+        .any(|pair| pair[0] == ".haarness" && pair[1] == "extensions")
+    {
+        return true;
+    }
+    global_config_dir().is_some_and(|global| {
+        let global = normalize_absolute(&global);
+        let real = global.canonicalize().unwrap_or_else(|_| global.clone());
+        [global, real].iter().any(|root| {
+            path.strip_prefix(root).is_ok_and(|rest| {
+                let rest: Vec<String> = rest
+                    .components()
+                    .map(|part| file_name_key(&part.as_os_str().to_string_lossy()))
+                    .collect();
+                matches!(
+                    rest.iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .as_slice(),
+                    ["config.toml" | "extensions.json"] | ["extensions", _, ..]
+                )
+            })
+        })
+    })
+}
+
+/// A file or folder name as Haarness compares it: lower case, without the
+/// trailing dots and spaces Windows drops when it creates the file.
+fn file_name_key(name: &str) -> String {
+    name.trim_end_matches(['.', ' ']).to_ascii_lowercase()
+}
+
+/// The global configuration folder, as the CLI's layout finds it:
+/// `$HAARNESS_HOME/config`, else `$XDG_CONFIG_HOME/haarness`, else
+/// `~/.config/haarness`.
+fn global_config_dir() -> Option<PathBuf> {
+    let absolute = |name: &str| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    if let Some(root) = absolute("HAARNESS_HOME") {
+        return Some(root.join("config"));
+    }
+    absolute("XDG_CONFIG_HOME")
+        .or_else(|| absolute("HOME").map(|home| home.join(".config")))
+        .map(|base| base.join("haarness"))
 }
 
 /// Whether a rule's pattern covers every file rather than naming some: `*`,
@@ -83,6 +146,17 @@ fn catch_all(rule: &PermissionRule) -> bool {
             target
                 .chars()
                 .all(|character| matches!(character, '*' | '/'))
+        })
+}
+
+/// Whether an allow rule opens the protected file `name`: its last path
+/// segment holds the name literally, as `haarness.json`, `**/haarness.json`
+/// and `*.mcp.json` do, while `*.json`, `.claude/**` and `edit:*` do not.
+fn names_file(rule: &PermissionRule, name: &str) -> bool {
+    !catch_all(rule)
+        && rule.pattern.split_once(':').is_some_and(|(_, target)| {
+            let last = target.rsplit(['/', '\\']).next().unwrap_or(target);
+            !name.is_empty() && file_name_key(last).contains(name)
         })
 }
 
@@ -262,6 +336,18 @@ impl PermissionEngine {
 
     #[must_use]
     pub fn evaluate_detailed(&self, operation: &str) -> Evaluation {
+        self.evaluate_with(operation, false)
+    }
+
+    /// [`Self::evaluate_detailed`] for an edit the caller knows widens what an
+    /// agent, command or skill may do (its frontmatter's `permission` or
+    /// `tools` change): asked like a configuration file edit.
+    #[must_use]
+    pub fn evaluate_guarded(&self, operation: &str) -> Evaluation {
+        self.evaluate_with(operation, true)
+    }
+
+    fn evaluate_with(&self, operation: &str, guarded: bool) -> Evaluation {
         let operation = normalize_operation_alias(operation);
         let spellings = self.path_spellings(&operation);
         let names = |rule: &&PermissionRule| rule_names(rule, &operation, &spellings);
@@ -289,19 +375,41 @@ impl PermissionEngine {
             configured
         };
         // An edit of a configuration file asks unless a deny refuses it or
-        // an allow names it: a blanket `edit: allow` or an "always" answer
-        // to another edit never opens it.
-        if operation
+        // an allow names it: a blanket `edit: allow`, an allow for a folder
+        // or `*.json`, or an "always" answer to another edit never opens it.
+        if let Some(target) = operation
             .split_once(':')
-            .is_some_and(|(permission, target)| {
-                permission == "edit" && is_config_path(Path::new(target))
-            })
-            && matched.is_none_or(|rule| rule.decision != PermissionDecision::Deny)
+            .filter(|(permission, _)| *permission == "edit")
+            .map(|(_, target)| target)
+            .filter(|target| guarded || is_config_path(Path::new(target)))
         {
-            let opener = [repository, grant, configured]
-                .into_iter()
-                .flatten()
-                .find(|rule| rule.decision == PermissionDecision::Allow && !catch_all(rule));
+            let name = Path::new(target)
+                .file_name()
+                .map(|name| file_name_key(&name.to_string_lossy()))
+                .unwrap_or_default();
+            // The last rule of each layer that counts here: an allow that
+            // does not name the file is passed over.
+            let counts = |rule: &&PermissionRule| {
+                names(rule)
+                    && (rule.decision != PermissionDecision::Allow || names_file(rule, &name))
+            };
+            let configured = self.rules.iter().rfind(counts);
+            if let Some(rule) = configured.filter(|rule| rule.decision == PermissionDecision::Deny)
+            {
+                return Evaluation {
+                    decision: PermissionDecision::Deny,
+                    matched: Some(rule.pattern.clone()),
+                    protected: false,
+                };
+            }
+            let opener = [
+                self.repository_grants.iter().rfind(counts),
+                self.session_rules.iter().rfind(counts),
+                configured,
+            ]
+            .into_iter()
+            .flatten()
+            .find(|rule| rule.decision == PermissionDecision::Allow);
             return Evaluation {
                 decision: if opener.is_some() {
                     PermissionDecision::Allow
@@ -1389,8 +1497,31 @@ mod tests {
             "/work/project/.claude/settings.local.json",
             ".mcp.json",
             "./src/../Haarness.JSON",
+            // Windows drops trailing dots and spaces, so these are the files.
+            ".mcp.json.",
+            "haarness.json ",
+            ".claude./settings.json. .",
+            // A project plugin's hooks and MCP servers, and extensions.
+            ".haarness/plugins/kit/hooks/hooks.json",
+            ".haarness/plugins/kit/.claude-plugin/plugin.json",
+            ".haarness/extensions.json",
+            ".haarness/extensions/approve.js",
+            ".haarness/extensions/pkg/dist/index.mjs",
         ] {
             assert!(is_config_path(Path::new(path)), "{path}");
+        }
+        // The global configuration folder's own settings and extensions.
+        let global = global_config_dir().expect("a home folder");
+        for name in [
+            "config.toml",
+            "extensions.json",
+            "extensions/x.js",
+            "haarness.json",
+        ] {
+            assert!(is_config_path(&global.join(name)), "{name}");
+        }
+        for name in ["AGENTS.md", "commands/x.md", "extensions"] {
+            assert!(!is_config_path(&global.join(name)), "{name}");
         }
         for path in [
             "config.toml",
@@ -1400,6 +1531,10 @@ mod tests {
             "my-haarness.json",
             "haarness.json.bak",
             "package.json",
+            "hooks.json",
+            "src/hooks/hooks.ts",
+            "plugin.json",
+            "extensions/x.js",
             "",
         ] {
             assert!(!is_config_path(Path::new(path)), "{path}");
@@ -1446,8 +1581,37 @@ mod tests {
         assert_eq!(allowed.decision, PermissionDecision::Allow);
         assert!(!allowed.protected);
         asks(&engine, "edit:.haarness/haarness.json");
+        // An allow for a folder or a file kind does not name the file.
+        for broad in [
+            "edit:.claude/**",
+            "edit:.haarness/**",
+            "edit:*.json",
+            "edit:*.toml",
+        ] {
+            engine.add_rule(rule(broad, PermissionDecision::Allow));
+        }
+        for operation in [
+            "edit:.claude/settings.json",
+            "edit:.haarness/config.toml",
+            "edit:.haarness/haarness.json",
+        ] {
+            asks(&engine, operation);
+        }
         engine.add_rule(rule("edit:*.mcp.json", PermissionDecision::Allow));
         assert_eq!(engine.evaluate("edit:.mcp.json"), PermissionDecision::Allow);
+        engine.add_rule(rule("edit:**/haarness.json", PermissionDecision::Allow));
+        assert_eq!(
+            engine.evaluate("edit:pkg/haarness.json"),
+            PermissionDecision::Allow
+        );
+        // A named allow still counts when a blanket allow comes after it.
+        let mut later = PermissionEngine::build_defaults();
+        later.add_rule(rule("edit:opencode.json", PermissionDecision::Allow));
+        later.add_rule(rule("edit:*", PermissionDecision::Allow));
+        assert_eq!(
+            later.evaluate("edit:opencode.json"),
+            PermissionDecision::Allow
+        );
         engine.add_rule(rule("edit:opencode.json", PermissionDecision::Deny));
         let denied = engine.evaluate_detailed("edit:opencode.json");
         assert_eq!(denied.decision, PermissionDecision::Deny);

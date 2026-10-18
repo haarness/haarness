@@ -101,6 +101,65 @@ fn json_front(front: &str) -> CoreResult<Value> {
         .map_err(|e| CoreError::Invalid(format!("invalid definition frontmatter: {e}")))
 }
 
+/// Frontmatter fields that decide what a definition may do when it runs: an
+/// agent's `permission`, `permissions` and `tools`, a command's or skill's
+/// `allowed-tools` (granted while it runs), and Claude's `permissionMode`.
+const GRANT_FIELDS: [&str; 6] = [
+    "permission",
+    "permissions",
+    "tools",
+    "allowed-tools",
+    "allowed_tools",
+    "permissionMode",
+];
+
+/// Whether `path` is where an agent, command or skill is read from: a
+/// markdown file below an `agents`, `agent`, `commands` or `command` folder,
+/// or a `SKILL.md`.
+#[must_use]
+pub fn is_definition_path(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if name == "skill.md" {
+        return true;
+    }
+    name.ends_with(".md")
+        && path.parent().is_some_and(|parent| {
+            parent.components().any(|component| {
+                matches!(
+                    component
+                        .as_os_str()
+                        .to_string_lossy()
+                        .to_ascii_lowercase()
+                        .as_str(),
+                    "agents" | "agent" | "commands" | "command"
+                )
+            })
+        })
+}
+
+/// Whether a definition that read `before` (`None` for a new file) and now
+/// reads `after` decides differently what it may do: a [`GRANT_FIELDS`]
+/// value was added, changed or removed (removing `permission: {bash: deny}`
+/// widens an agent too). Text whose frontmatter does not load grants nothing.
+#[must_use]
+pub fn grants_change(before: Option<&str>, after: &str) -> bool {
+    let grants = |text: &str| {
+        markdown(text).ok().map(|(front, _)| {
+            GRANT_FIELDS
+                .iter()
+                .filter_map(|field| front.get(*field).map(|value| (*field, value.clone())))
+                .collect::<Vec<_>>()
+        })
+    };
+    let Some(after) = grants(after) else {
+        return false;
+    };
+    after != before.and_then(grants).unwrap_or_default()
+}
+
 fn front_value(value: &Value) -> String {
     value
         .as_str()
@@ -892,6 +951,54 @@ mod tests {
                 .0["name"],
             "bom"
         );
+    }
+    #[test]
+    fn a_definition_edit_changes_grants_only_when_its_permission_fields_change() {
+        for path in [
+            ".haarness/agents/reviewer.md",
+            ".claude/agents/nested/helper.md",
+            "/home/me/.config/haarness/agent/x.md",
+            ".haarness/commands/git/review.md",
+            ".haarness/skills/deploy/SKILL.md",
+            "plugins/kit/skills/a/skill.md",
+        ] {
+            assert!(is_definition_path(Path::new(path)), "{path}");
+        }
+        for path in [
+            "README.md",
+            "docs/guide.md",
+            ".haarness/agents/notes.txt",
+            "agents.md",
+        ] {
+            assert!(!is_definition_path(Path::new(path)), "{path}");
+        }
+        let plain = "---\ndescription: Reviewer\n---\nReview.";
+        let open = "---\ndescription: Reviewer\npermission:\n  bash: allow\n---\nReview.";
+        let closed = "---\ndescription: Reviewer\npermission:\n  bash: deny\n---\nReview.";
+        // A new file, an added, changed or removed grant.
+        assert!(grants_change(None, open));
+        assert!(grants_change(Some(plain), open));
+        assert!(grants_change(Some(closed), open));
+        assert!(grants_change(Some(closed), plain));
+        assert!(grants_change(
+            Some(plain),
+            "---\nallowed-tools: Bash(*)\n---\nRun."
+        ));
+        // The prompt, the description or nothing at all changing.
+        assert!(!grants_change(None, plain));
+        assert!(!grants_change(
+            Some(open),
+            &open.replace("Review.", "Review carefully.")
+        ));
+        assert!(!grants_change(
+            Some(plain),
+            "---\ndescription: Other\n---\nReview."
+        ));
+        // Frontmatter that does not load is skipped, so it grants nothing.
+        assert!(!grants_change(
+            Some(plain),
+            "---js\n({ permission: {} })\n---\nx"
+        ));
     }
     #[test]
     fn claude_arguments_are_zero_based_quoted_and_non_recursive() {
