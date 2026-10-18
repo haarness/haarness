@@ -3,6 +3,15 @@
 //! `command` node yields an exact `bash:` operation plus a generalized
 //! "always" prefix pattern, and path-taking commands / redirect targets that
 //! escape the workspace raise `external_directory` operations.
+//!
+//! A command is also read the ways the shell runs it: without its leading
+//! assignments, quotes, escapes or program folder (`FOO=1 "/bin/rm" x` is
+//! `rm x`), through the wrappers that run the rest of their words (`sudo`,
+//! `env`, `timeout`, `xargs`, `find -exec` …), and inside the text a shell
+//! runs again (`bash -c`, `eval`, `env -S`, a here-document or here-string
+//! fed to a shell or `source`). Each reading adds a pattern of its own (see
+//! [`BashAnalysis::derived`]) and has its paths checked like a command
+//! written on its own.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -18,6 +27,24 @@ pub struct BashAnalysis {
     /// Directory globs outside the workspace this command touches,
     /// e.g. `/tmp/*`.
     pub external_dirs: Vec<String>,
+    /// The patterns read from inside a written command rather than written
+    /// as one: another spelling of it (`git status` for `FOO=1 "git"
+    /// status`), a command it runs (`rm x` for `sudo rm x`), or a command in
+    /// text a shell runs again (`rm x` for `bash -c 'rm x'`). They are in
+    /// [`Self::patterns`] too; their "always" patterns are not in
+    /// [`Self::always`].
+    pub derived: Vec<Derived>,
+}
+
+/// One pattern read from inside a written command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Derived {
+    pub pattern: String,
+    /// The written command it was read from, as [`BashAnalysis::patterns`]
+    /// holds it.
+    pub written: String,
+    /// Its generalized "don't ask again" pattern.
+    pub always: String,
 }
 
 /// Commands whose non-flag arguments are filesystem paths worth resolving.
@@ -25,128 +52,899 @@ const PATH_COMMANDS: &[&str] = &[
     "cd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat",
 ];
 
+/// How many strings deep commands are read: `bash -c "eval 'sh -c …'"`.
+const MAX_NESTING: u8 = 4;
+/// Text a shell runs again that is longer than this is not read.
+const MAX_NESTED_BYTES: usize = 256 * 1024;
+
+/// Shells whose `-c` runs the word after their options, and which read a
+/// script from standard input without one.
+const SHELLS: &[&str] = &[
+    "bash", "sh", "zsh", "dash", "ksh", "mksh", "ash", "fish", "yash", "posh",
+];
+
+/// Paths that name the reading command's own standard input.
+const STDIN_PATHS: &[&str] = &["/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"];
+
 /// Analyze `command` as it would run from `workspace`. Parse failures fall
 /// back to treating the whole command as one opaque pattern (never silently
 /// allowing).
 #[must_use]
 pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
-    let mut parser = tree_sitter::Parser::new();
-    let language = tree_sitter_bash::LANGUAGE;
-    if parser.set_language(&language.into()).is_err() {
-        return fallback(command);
-    }
-    let Some(tree) = parser.parse(command, None) else {
-        return fallback(command);
+    let mut reader = Reader {
+        workspace,
+        analysis: BashAnalysis::default(),
+        written: Vec::new(),
+        source: String::new(),
     };
-    let mut analysis = BashAnalysis::default();
-    let mut stack = vec![tree.root_node()];
-    let mut command_nodes = Vec::new();
-    let mut redirects = Vec::new();
-    while let Some(node) = stack.pop() {
-        if node.kind() == "command" {
-            command_nodes.push(node);
-        }
-        if node.kind() == "file_redirect" {
-            redirects.push(node);
-        }
-        for index in (0..node.child_count()).rev() {
-            if let Some(child) = node.child(index) {
-                stack.push(child);
-            }
-        }
+    if !reader.read(command, 0) {
+        return fallback(command);
     }
-    // The traversal above visits parents before children but pops LIFO;
-    // sort by position so patterns keep source order.
-    command_nodes.sort_by_key(tree_sitter::Node::start_byte);
-
-    for node in command_nodes {
-        // Redirects belong to the command they feed.
-        let command_text = match node.parent() {
-            Some(parent) if parent.kind() == "redirected_statement" => node_text(parent, command),
-            _ => node_text(node, command),
-        };
-        let mut tokens = Vec::new();
-        for index in 0..node.child_count() {
-            let Some(child) = node.child(index) else {
-                continue;
-            };
-            if matches!(
-                child.kind(),
-                "command_name" | "word" | "number" | "string" | "raw_string" | "concatenation"
-            ) {
-                tokens.push(node_text(child, command));
-            }
-        }
-        let paths = (0..node.named_child_count())
-            .filter_map(|index| node.named_child(index))
-            .filter(|child| {
-                matches!(
-                    child.kind(),
-                    "command_name"
-                        | "word"
-                        | "number"
-                        | "string"
-                        | "raw_string"
-                        | "concatenation"
-                        | "simple_expansion"
-                        | "expansion"
-                )
-            })
-            .map(|child| {
-                let (value, complete) = path_literal(child, command);
-                (value, complete, node_text(child, command))
-            })
-            .collect::<Vec<_>>();
-        if let Some((first, true, _)) = paths.first() {
-            if PATH_COMMANDS.contains(&first.as_str()) {
-                for (argument, complete, raw) in &paths[1..] {
-                    if argument.starts_with('-') || (first == "chmod" && argument.starts_with('+'))
-                    {
-                        continue;
-                    }
-                    if let Some(dir) = external_dir(workspace, raw, argument, *complete) {
-                        push_unique(&mut analysis.external_dirs, glob(&dir));
-                    }
-                }
-            }
-        }
-        if let Some(first) = tokens.first() {
-            if first != "cd" {
-                push_unique(&mut analysis.patterns, command_text);
-                let prefix = arity::prefix(&tokens).join(" ");
-                push_unique(&mut analysis.always, format!("{prefix} *"));
-            }
-        }
-    }
-    for redirect in redirects {
-        let Some(dest) = redirect.child_by_field_name("destination") else {
-            continue;
-        };
-        let (value, complete) = path_literal(dest, command);
-        let descriptor = (0..redirect.child_count())
-            .filter_map(|i| redirect.child(i))
-            .any(|child| matches!(node_text(child, command).as_str(), ">&" | "<&"));
-        if descriptor
-            && complete
-            && (value == "-"
-                || value
-                    .trim_end_matches('-')
-                    .chars()
-                    .all(|c| c.is_ascii_digit()))
-        {
-            continue;
-        }
-        if value.starts_with("/dev/") {
-            continue;
-        }
-        if let Some(dir) = external_dir(workspace, &node_text(dest, command), &value, complete) {
-            push_unique(&mut analysis.external_dirs, glob(&dir));
-        }
-    }
+    let Reader {
+        mut analysis,
+        written,
+        ..
+    } = reader;
     if analysis.patterns.is_empty() && analysis.external_dirs.is_empty() {
         return fallback(command);
     }
+    // A command written on its own is judged as written, whatever else it
+    // is also read from.
     analysis
+        .derived
+        .retain(|derived| !written.contains(&derived.pattern));
+    analysis
+}
+
+struct Reader<'w> {
+    workspace: &'w Path,
+    analysis: BashAnalysis,
+    /// The patterns written as commands of their own.
+    written: Vec<String>,
+    /// The written command being read.
+    source: String,
+}
+
+/// One word of a command: its program or an argument.
+struct Word<'t> {
+    node: tree_sitter::Node<'t>,
+    /// As written.
+    raw: String,
+    /// As the program receives it, quotes and escapes removed, with
+    /// expansions and substitutions as written.
+    value: String,
+    /// Whether `value` is all literal text.
+    literal: bool,
+}
+
+/// Node kinds that are a command's words.
+const WORD_KINDS: &[&str] = &[
+    "command_name",
+    "word",
+    "number",
+    "string",
+    "raw_string",
+    "ansi_c_string",
+    "translated_string",
+    "concatenation",
+    "simple_expansion",
+    "expansion",
+    "command_substitution",
+    "process_substitution",
+    "arithmetic_expansion",
+];
+
+impl Reader<'_> {
+    /// Read one shell program: the command as written (`depth` 0) or text
+    /// inside it that a shell runs again. False when it does not parse.
+    fn read(&mut self, command: &str, depth: u8) -> bool {
+        let mut parser = tree_sitter::Parser::new();
+        let language = tree_sitter_bash::LANGUAGE;
+        if parser.set_language(&language.into()).is_err() {
+            return false;
+        }
+        let Some(tree) = parser.parse(command, None) else {
+            return false;
+        };
+        let mut stack = vec![tree.root_node()];
+        let mut command_nodes = Vec::new();
+        let mut redirects = Vec::new();
+        while let Some(node) = stack.pop() {
+            if node.kind() == "command" {
+                command_nodes.push(node);
+            }
+            if node.kind() == "file_redirect" {
+                redirects.push(node);
+            }
+            for index in (0..node.child_count()).rev() {
+                if let Some(child) = node.child(index) {
+                    stack.push(child);
+                }
+            }
+        }
+        // The traversal above visits parents before children but pops LIFO;
+        // sort by position so patterns keep source order.
+        command_nodes.sort_by_key(tree_sitter::Node::start_byte);
+
+        for node in command_nodes {
+            // Redirects belong to the command they feed.
+            let command_text = match node.parent() {
+                Some(parent) if parent.kind() == "redirected_statement" => {
+                    node_text(parent, command)
+                }
+                _ => node_text(node, command),
+            };
+            let mut tokens = Vec::new();
+            for index in 0..node.child_count() {
+                let Some(child) = node.child(index) else {
+                    continue;
+                };
+                if matches!(
+                    child.kind(),
+                    "command_name" | "word" | "number" | "string" | "raw_string" | "concatenation"
+                ) {
+                    tokens.push(node_text(child, command));
+                }
+            }
+            if depth == 0 {
+                self.source.clone_from(&command_text);
+            }
+            let words = words(node, command);
+            self.check_paths(&words, command);
+            if let Some(first) = tokens.first() {
+                if first != "cd" {
+                    let prefix = arity::prefix(&tokens).join(" ");
+                    let always = format!("{prefix} *");
+                    if depth == 0 {
+                        push_unique(&mut self.analysis.patterns, command_text.clone());
+                        push_unique(&mut self.analysis.always, always);
+                        push_unique(&mut self.written, command_text);
+                    } else {
+                        self.derive(command_text, always);
+                    }
+                }
+            }
+            let assigned = (0..node.named_child_count())
+                .filter_map(|index| node.named_child(index))
+                .any(|child| child.kind() == "variable_assignment");
+            self.spell(&words, assigned);
+            self.unwrap(&words, Some(node), command, depth);
+        }
+        for redirect in redirects {
+            let Some(dest) = redirect.child_by_field_name("destination") else {
+                continue;
+            };
+            let (value, complete) = path_literal(dest, command);
+            let descriptor = (0..redirect.child_count())
+                .filter_map(|i| redirect.child(i))
+                .any(|child| matches!(node_text(child, command).as_str(), ">&" | "<&"));
+            if descriptor
+                && complete
+                && (value == "-"
+                    || value
+                        .trim_end_matches('-')
+                        .chars()
+                        .all(|c| c.is_ascii_digit()))
+            {
+                continue;
+            }
+            if value.starts_with("/dev/") {
+                continue;
+            }
+            if let Some(dir) =
+                external_dir(self.workspace, &node_text(dest, command), &value, complete)
+            {
+                push_unique(&mut self.analysis.external_dirs, glob(&dir));
+            }
+        }
+        true
+    }
+
+    /// A pattern read from inside the written command being read.
+    fn derive(&mut self, pattern: String, always: String) {
+        if pattern.trim().is_empty() || pattern == self.source {
+            return;
+        }
+        push_unique(&mut self.analysis.patterns, pattern.clone());
+        let written = &self.source;
+        if !self
+            .analysis
+            .derived
+            .iter()
+            .any(|derived| derived.pattern == pattern && derived.written == *written)
+        {
+            self.analysis.derived.push(Derived {
+                pattern,
+                written: written.clone(),
+                always,
+            });
+        }
+    }
+
+    /// The other spellings of a command's words: as the program receives
+    /// them, when that differs from how they are written or `changed` says
+    /// the words are not the whole command (an assignment before them, a
+    /// wrapper), and with the program's folder left out.
+    fn spell(&mut self, words: &[Word<'_>], changed: bool) {
+        let Some(program) = words.first() else {
+            return;
+        };
+        if program.literal && program.value == "cd" {
+            return;
+        }
+        let mut values: Vec<String> = words.iter().map(|word| word.value.clone()).collect();
+        let spelled = values.join(" ");
+        if changed
+            || spelled
+                != words
+                    .iter()
+                    .map(|word| word.raw.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+        {
+            let always = format!("{} *", arity::prefix(&values).join(" "));
+            self.derive(spelled, always);
+        }
+        if program.literal && program.value.contains(['/', '\\']) {
+            let name = program
+                .value
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            if !name.is_empty() {
+                values[0] = name;
+                let always = format!("{} *", arity::prefix(&values).join(" "));
+                self.derive(values.join(" "), always);
+            }
+        }
+    }
+
+    /// A command that a wrapper runs, read like one written on its own.
+    fn invocation(
+        &mut self,
+        words: &[Word<'_>],
+        stdin: Option<tree_sitter::Node<'_>>,
+        source: &str,
+        depth: u8,
+    ) {
+        if words.is_empty() {
+            return;
+        }
+        self.check_paths(words, source);
+        self.spell(words, true);
+        self.unwrap(words, stdin, source, depth);
+    }
+
+    /// Text a shell runs again, read as a command of its own.
+    fn nested(&mut self, text: &str, depth: u8) {
+        if depth + 1 > MAX_NESTING || text.len() > MAX_NESTED_BYTES || text.trim().is_empty() {
+            return;
+        }
+        self.read(text, depth + 1);
+    }
+
+    /// Read what a command runs: the rest of a wrapper's words, or the text
+    /// a shell, `eval`, `env -S` or `source` runs again. `stdin` is the
+    /// written command whose standard input the program reads.
+    fn unwrap(
+        &mut self,
+        words: &[Word<'_>],
+        stdin: Option<tree_sitter::Node<'_>>,
+        source: &str,
+        depth: u8,
+    ) {
+        let Some((program, arguments)) = words.split_first() else {
+            return;
+        };
+        if !program.literal {
+            return;
+        }
+        let input = || stdin.and_then(|node| stdin_script(node, source));
+        let name = program_name(&program.value);
+        match name.as_str() {
+            "eval" => self.nested(&joined(arguments), depth),
+            "source" | "." => {
+                let text = arguments.first().and_then(|first| {
+                    if first.node.kind() == "process_substitution" {
+                        substituted(first.node, source)
+                    } else if first.literal && STDIN_PATHS.contains(&first.value.as_str()) {
+                        input()
+                    } else {
+                        None
+                    }
+                });
+                if let Some(text) = text {
+                    self.nested(&text, depth);
+                }
+            }
+            "env" => {
+                let options = Options::read(
+                    arguments,
+                    "uCPSa",
+                    "",
+                    &["unset", "chdir", "split-string", "argv0"],
+                );
+                let rest = after_assignments(options.rest);
+                if let Some(split) = options.value("S").or_else(|| options.value("split-string")) {
+                    // `env -S` splits its text into words, options and
+                    // assignments included, and goes on with the words
+                    // after it.
+                    let rest: Vec<&str> =
+                        options.rest.iter().map(|word| word.raw.as_str()).collect();
+                    self.nested(&format!("env {split} {}", rest.join(" ")), depth);
+                } else {
+                    self.invocation(rest, stdin, source, depth);
+                }
+            }
+            "sudo" | "doas" => {
+                let options = Options::read(
+                    arguments,
+                    if name == "sudo" { "ugpCDrtTU" } else { "uC" },
+                    "",
+                    &[
+                        "user",
+                        "group",
+                        "host",
+                        "prompt",
+                        "close-from",
+                        "chdir",
+                        "role",
+                        "type",
+                        "command-timeout",
+                        "other-user",
+                    ],
+                );
+                // `sudo -e` edits files, `-l` and `-V` list.
+                if name == "sudo" && options.flags.contains(['e', 'l', 'V']) {
+                    return;
+                }
+                let rest = after_assignments(options.rest);
+                if rest.is_empty() {
+                    // A shell that reads its commands from standard input.
+                    if options.flags.contains(['s', 'i'])
+                        && let Some(text) = input()
+                    {
+                        self.nested(&text, depth);
+                    }
+                    return;
+                }
+                self.invocation(rest, stdin, source, depth);
+            }
+            "su" => {
+                if let Some(text) = su_command(arguments) {
+                    self.nested(&text, depth);
+                }
+            }
+            "command" => {
+                let options = Options::read(arguments, "", "", &[]);
+                // `command -v` and `-V` only say what a name is.
+                if !options.flags.contains(['v', 'V']) {
+                    self.invocation(options.rest, stdin, source, depth);
+                }
+            }
+            "builtin" | "nohup" | "setsid" | "busybox" | "pkexec" => {
+                let options = Options::read(arguments, "", "", &["user"]);
+                self.invocation(options.rest, stdin, source, depth);
+            }
+            "exec" => {
+                let options = Options::read(arguments, "a", "", &[]);
+                self.invocation(options.rest, stdin, source, depth);
+            }
+            "nice" => {
+                let options = Options::read(arguments, "n", "", &["adjustment"]);
+                self.invocation(options.rest, stdin, source, depth);
+            }
+            "timeout" | "gtimeout" => {
+                let options = Options::read(arguments, "sk", "", &["signal", "kill-after"]);
+                // The first word after the options is the duration.
+                if let Some((_, rest)) = options.rest.split_first() {
+                    self.invocation(rest, stdin, source, depth);
+                }
+            }
+            "time" => {
+                let options = Options::read(arguments, "of", "", &["output", "format"]);
+                self.invocation(options.rest, stdin, source, depth);
+            }
+            "stdbuf" => {
+                let options = Options::read(arguments, "ioe", "", &["input", "output", "error"]);
+                self.invocation(options.rest, stdin, source, depth);
+            }
+            "caffeinate" => {
+                let options = Options::read(arguments, "tw", "", &[]);
+                self.invocation(options.rest, stdin, source, depth);
+            }
+            "xargs" => {
+                let options = Options::read(
+                    arguments,
+                    "InPLsdEaJRS",
+                    "ile",
+                    &[
+                        "max-args",
+                        "max-procs",
+                        "max-lines",
+                        "max-chars",
+                        "delimiter",
+                        "eof",
+                        "arg-file",
+                        "process-slot-var",
+                    ],
+                );
+                // The command reads no input of the written command's.
+                self.invocation(options.rest, None, source, depth);
+            }
+            "find" => {
+                let mut index = 0;
+                while index < arguments.len() {
+                    let starts = matches!(
+                        arguments[index].value.as_str(),
+                        "-exec" | "-execdir" | "-ok" | "-okdir"
+                    );
+                    index += 1;
+                    if !starts {
+                        continue;
+                    }
+                    let start = index;
+                    while index < arguments.len()
+                        && !(arguments[index].value == ";"
+                            || (arguments[index].value == "+"
+                                && index > start
+                                && arguments[index - 1].value == "{}"))
+                    {
+                        index += 1;
+                    }
+                    self.invocation(&arguments[start..index], None, source, depth);
+                }
+            }
+            name if SHELLS.contains(&name) => {
+                if let Some(text) = shell_script(arguments, input, source) {
+                    self.nested(&text, depth);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The outside-the-project check for one command's words: the paths
+    /// that the commands in [`PATH_COMMANDS`] take, by the program's name
+    /// wherever it is installed.
+    fn check_paths(&mut self, words: &[Word<'_>], source: &str) {
+        let Some((program, arguments)) = words.split_first() else {
+            return;
+        };
+        let (name, complete) = path_literal(program.node, source);
+        let name = program_name(&name);
+        if !complete || !PATH_COMMANDS.contains(&name.as_str()) {
+            return;
+        }
+        for word in arguments {
+            let (argument, complete) = path_literal(word.node, source);
+            if argument.starts_with('-') || (name == "chmod" && argument.starts_with('+')) {
+                continue;
+            }
+            if let Some(dir) = external_dir(self.workspace, &word.raw, &argument, complete) {
+                push_unique(&mut self.analysis.external_dirs, glob(&dir));
+            }
+        }
+    }
+}
+
+/// A command's words, its assignments and redirects left out.
+fn words<'t>(node: tree_sitter::Node<'t>, source: &str) -> Vec<Word<'t>> {
+    (0..node.named_child_count())
+        .filter_map(|index| node.named_child(index))
+        .filter(|child| WORD_KINDS.contains(&child.kind()))
+        .map(|child| {
+            let (value, literal) = unquote(child, source);
+            Word {
+                node: child,
+                raw: node_text(child, source),
+                value,
+                literal,
+            }
+        })
+        .collect()
+}
+
+/// Words as `eval` joins them before it runs them.
+fn joined(words: &[Word<'_>]) -> String {
+    words
+        .iter()
+        .map(|word| word.value.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The words after any `NAME=value` assignments (`env A=1 cmd`, `sudo A=1 cmd`).
+fn after_assignments<'s, 't>(words: &'s [Word<'t>]) -> &'s [Word<'t>] {
+    let count = words
+        .iter()
+        .take_while(|word| {
+            word.literal
+                && word.value.split_once('=').is_some_and(|(name, _)| {
+                    name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                })
+        })
+        .count();
+    &words[count..]
+}
+
+/// A program's name as wrappers and shells are recognized: its last path
+/// segment in lower case, without `.exe`.
+fn program_name(value: &str) -> String {
+    let name = value
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match name.strip_suffix(".exe") {
+        Some(stem) => stem.to_owned(),
+        None => name,
+    }
+}
+
+/// A wrapper's own options, read the way getopt reads them.
+struct Options<'s, 't> {
+    /// The words after them: the command the wrapper runs.
+    rest: &'s [Word<'t>],
+    /// Short options given without a value.
+    flags: String,
+    /// Options given with a value, by their short letter or long name.
+    values: Vec<(String, String)>,
+}
+
+impl<'s, 't> Options<'s, 't> {
+    /// `valued` short options take a value (the rest of their cluster or the
+    /// next word), `optional` ones only the rest of their cluster, and
+    /// `long` ones the next word unless written `--name=value`.
+    fn read(words: &'s [Word<'t>], valued: &str, optional: &str, long: &[&str]) -> Self {
+        let mut options = Self {
+            rest: words,
+            flags: String::new(),
+            values: Vec::new(),
+        };
+        let mut index = 0;
+        while let Some(word) = words.get(index) {
+            if !word.literal {
+                break;
+            }
+            let value = word.value.as_str();
+            if value == "--" {
+                index += 1;
+                break;
+            }
+            if let Some(name) = value.strip_prefix("--") {
+                index += 1;
+                match name.split_once('=') {
+                    Some((name, given)) => options.values.push((name.into(), given.into())),
+                    None if long.contains(&name) => {
+                        let given = words.get(index).map(|word| word.value.clone());
+                        options
+                            .values
+                            .push((name.into(), given.unwrap_or_default()));
+                        index += 1;
+                    }
+                    None => {}
+                }
+                continue;
+            }
+            let Some(cluster) = value
+                .strip_prefix('-')
+                .filter(|cluster| !cluster.is_empty())
+            else {
+                break;
+            };
+            index += 1;
+            for (at, letter) in cluster.char_indices() {
+                let attached = &cluster[at + letter.len_utf8()..];
+                if valued.contains(letter) {
+                    let given = if attached.is_empty() {
+                        index += 1;
+                        words.get(index - 1).map(|word| word.value.clone())
+                    } else {
+                        Some(attached.to_owned())
+                    };
+                    options
+                        .values
+                        .push((letter.into(), given.unwrap_or_default()));
+                    break;
+                }
+                if optional.contains(letter) {
+                    options.values.push((letter.into(), attached.to_owned()));
+                    break;
+                }
+                options.flags.push(letter);
+            }
+        }
+        options.rest = &words[index.min(words.len())..];
+        options
+    }
+
+    fn value(&self, name: &str) -> Option<&str> {
+        self.values
+            .iter()
+            .find(|(given, _)| given == name)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+/// The text a shell runs: the word after its options under `-c`, or what
+/// it reads from standard input (`input`) or a process substitution when it
+/// is given no script file.
+fn shell_script(
+    arguments: &[Word<'_>],
+    input: impl FnOnce() -> Option<String>,
+    source: &str,
+) -> Option<String> {
+    let mut index = 0;
+    let mut command = false;
+    let mut from_stdin = false;
+    while let Some(word) = arguments.get(index) {
+        if !word.literal {
+            break;
+        }
+        let value = word.value.as_str();
+        if value == "--" || value == "-" {
+            index += 1;
+            break;
+        }
+        if let Some(name) = value.strip_prefix("--") {
+            // fish spells `-c` as `--command`.
+            if let Some(text) = name.strip_prefix("command=") {
+                return Some(text.to_owned());
+            }
+            if name == "command" {
+                return arguments.get(index + 1).map(|word| word.value.clone());
+            }
+            index += if matches!(name, "rcfile" | "init-file") {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+        let Some(flags) = value
+            .strip_prefix(['-', '+'])
+            .filter(|flags| !flags.is_empty())
+        else {
+            break;
+        };
+        // A cluster such as `-lc`, `-xc` or `-ec` runs the next word as
+        // `-c` does.
+        if value.starts_with('-') {
+            command |= flags.contains('c');
+            from_stdin |= flags.contains('s');
+        }
+        // `-o name` and `-O name` take the next word.
+        index += if flags.contains(['o', 'O']) { 2 } else { 1 };
+    }
+    let operand = arguments.get(index);
+    if command {
+        return operand.map(|word| word.value.clone());
+    }
+    match operand {
+        None => input(),
+        Some(_) if from_stdin => input(),
+        Some(word) if word.node.kind() == "process_substitution" => substituted(word.node, source),
+        Some(word) if word.literal && STDIN_PATHS.contains(&word.value.as_str()) => input(),
+        // A script file, which is not read.
+        Some(_) => None,
+    }
+}
+
+/// The text `su -c` (or `--command`) runs, wherever the option stands.
+fn su_command(arguments: &[Word<'_>]) -> Option<String> {
+    let mut words = arguments.iter();
+    while let Some(word) = words.next() {
+        let value = word.value.as_str();
+        if let Some(text) = value.strip_prefix("--command=") {
+            return Some(text.to_owned());
+        }
+        if value == "--command"
+            || (value.starts_with('-') && !value.starts_with("--") && value.ends_with('c'))
+        {
+            return words.next().map(|word| word.value.clone());
+        }
+    }
+    None
+}
+
+/// The script a command reads on standard input, when the command line
+/// spells it out: a here-string or here-document of its own, or what an
+/// `echo`, `printf` or `cat` of one writes into a pipe to it.
+fn stdin_script(node: tree_sitter::Node<'_>, source: &str) -> Option<String> {
+    if let Some(text) = children(node)
+        .into_iter()
+        .find(|child| child.kind() == "herestring_redirect")
+        .and_then(|redirect| here_string(redirect, source))
+    {
+        return Some(text);
+    }
+    let parent = node.parent()?;
+    match parent.kind() {
+        "redirected_statement" => {
+            children(parent)
+                .into_iter()
+                .find_map(|child| match child.kind() {
+                    "heredoc_redirect" => heredoc_body(child, source),
+                    "herestring_redirect" => here_string(child, source),
+                    _ => None,
+                })
+        }
+        "pipeline" => {
+            if let Some(previous) = node.prev_named_sibling() {
+                return output(previous, source);
+            }
+            // `cat <<EOF | sh`: the pipe is part of the here-document's
+            // redirect, and `cat` writes the document into it.
+            let redirect = parent
+                .parent()
+                .filter(|redirect| redirect.kind() == "heredoc_redirect")?;
+            let writer = redirect.parent()?.child_by_field_name("body")?;
+            let words = words(writer, source);
+            let (program, arguments) = words.split_first()?;
+            (program.literal && program_name(&program.value) == "cat" && arguments.is_empty())
+                .then(|| heredoc_body(redirect, source))
+                .flatten()
+        }
+        _ => None,
+    }
+}
+
+fn children(node: tree_sitter::Node<'_>) -> Vec<tree_sitter::Node<'_>> {
+    (0..node.named_child_count())
+        .filter_map(|index| node.named_child(index))
+        .collect()
+}
+
+fn here_string(redirect: tree_sitter::Node<'_>, source: &str) -> Option<String> {
+    let value = (0..redirect.named_child_count())
+        .filter_map(|index| redirect.named_child(index))
+        .find(|child| WORD_KINDS.contains(&child.kind()))?;
+    Some(unquote(value, source).0)
+}
+
+fn heredoc_body(redirect: tree_sitter::Node<'_>, source: &str) -> Option<String> {
+    (0..redirect.named_child_count())
+        .filter_map(|index| redirect.named_child(index))
+        .find(|child| child.kind() == "heredoc_body")
+        .map(|body| node_text(body, source))
+}
+
+/// What a process substitution writes, when its words say so.
+fn substituted(node: tree_sitter::Node<'_>, source: &str) -> Option<String> {
+    (node.named_child_count() == 1)
+        .then(|| node.named_child(0))
+        .flatten()
+        .and_then(|statement| output(statement, source))
+}
+
+/// What a command writes, when its words say so: `echo` and `printf` their
+/// arguments, `cat` its here-document or here-string.
+fn output(statement: tree_sitter::Node<'_>, source: &str) -> Option<String> {
+    let command = match statement.kind() {
+        "command" => statement,
+        "redirected_statement" => statement
+            .child_by_field_name("body")
+            .filter(|body| body.kind() == "command")?,
+        _ => return None,
+    };
+    let words = words(command, source);
+    let (program, arguments) = words.split_first()?;
+    if !program.literal {
+        return None;
+    }
+    match program_name(&program.value).as_str() {
+        "echo" => {
+            let count = arguments
+                .iter()
+                .take_while(|word| {
+                    word.value.len() > 1
+                        && word.value.starts_with('-')
+                        && word.value[1..]
+                            .chars()
+                            .all(|c| matches!(c, 'n' | 'e' | 'E'))
+                })
+                .count();
+            Some(joined(&arguments[count..]))
+        }
+        "printf" => Some(joined(arguments).replace("\\n", "\n")),
+        "cat" if arguments.is_empty() => stdin_script(command, source),
+        _ => None,
+    }
+}
+
+/// A word as the program receives it: quotes and escapes removed, with
+/// expansions and substitutions kept as written (and the word marked not
+/// literal).
+fn unquote(node: tree_sitter::Node<'_>, source: &str) -> (String, bool) {
+    match node.kind() {
+        "raw_string" | "word" | "number" | "string_content" => literal(node, source),
+        "ansi_c_string" => {
+            let text = node_text(node, source);
+            let inner = text
+                .strip_prefix("$'")
+                .and_then(|rest| rest.strip_suffix('\''))
+                .unwrap_or_default();
+            (ansi_c(inner), true)
+        }
+        "command_name" | "concatenation" | "string" | "translated_string" => {
+            let mut value = String::new();
+            let mut whole = true;
+            for index in 0..node.named_child_count() {
+                let Some(child) = node.named_child(index) else {
+                    continue;
+                };
+                let (part, complete) = unquote(child, source);
+                value.push_str(&part);
+                whole &= complete;
+            }
+            (value, whole)
+        }
+        _ => (node_text(node, source), false),
+    }
+}
+
+/// The text of `$'…'` as the shell reads it, its C escapes decoded.
+fn ansi_c(text: &str) -> String {
+    let mut value = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    // Up to `limit` digits of `radix` after an escape letter, as one character.
+    let number = |chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+                  radix: u32,
+                  limit: usize,
+                  first: Option<u32>| {
+        let mut code = first.unwrap_or(0);
+        let mut count = usize::from(first.is_some());
+        while count < limit {
+            let Some(digit) = chars.peek().and_then(|c| c.to_digit(radix)) else {
+                break;
+            };
+            code = code * radix + digit;
+            chars.next();
+            count += 1;
+        }
+        (count > 0).then(|| char::from_u32(code)).flatten()
+    };
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            value.push(c);
+            continue;
+        }
+        let Some(next) = chars.next() else {
+            value.push('\\');
+            break;
+        };
+        let decoded = match next {
+            'a' => Some('\x07'),
+            'b' => Some('\x08'),
+            'e' | 'E' => Some('\x1b'),
+            'f' => Some('\x0c'),
+            'n' => Some('\n'),
+            'r' => Some('\r'),
+            't' => Some('\t'),
+            'v' => Some('\x0b'),
+            '\\' | '\'' | '"' | '?' => Some(next),
+            'x' => number(&mut chars, 16, 2, None),
+            'u' => number(&mut chars, 16, 4, None),
+            'U' => number(&mut chars, 16, 8, None),
+            '0'..='7' => number(&mut chars, 8, 3, next.to_digit(8)),
+            'c' => chars
+                .next()
+                .and_then(|control| u8::try_from(control).ok())
+                .map(|byte| char::from(byte & 0x1f)),
+            _ => None,
+        };
+        match decoded {
+            Some(decoded) => value.push(decoded),
+            None => {
+                value.push('\\');
+                value.push(next);
+            }
+        }
+    }
+    value
 }
 
 /// Whether a shell program is structurally limited to a conservative set of
@@ -300,7 +1098,7 @@ fn fallback(command: &str) -> BashAnalysis {
     BashAnalysis {
         patterns: vec![command.to_owned()],
         always,
-        external_dirs: Vec::new(),
+        ..BashAnalysis::default()
     }
 }
 
@@ -553,11 +1351,25 @@ mod tests {
             "git add -A && git commit -m 'x' || echo failed",
             &workspace(),
         );
+        // The quoted message is also read as git receives it.
         assert_eq!(
             analysis.patterns,
-            vec!["git add -A", "git commit -m 'x'", "echo failed"]
+            vec![
+                "git add -A",
+                "git commit -m 'x'",
+                "git commit -m x",
+                "echo failed"
+            ]
         );
         assert_eq!(analysis.always, vec!["git add *", "git commit *", "echo *"]);
+        assert_eq!(
+            analysis.derived,
+            vec![Derived {
+                pattern: "git commit -m x".into(),
+                written: "git commit -m 'x'".into(),
+                always: "git commit *".into(),
+            }]
+        );
     }
 
     #[test]
@@ -905,5 +1717,260 @@ mod regression {
         ] {
             assert!(is_obviously_read_only(command), "{command}");
         }
+    }
+}
+
+#[cfg(test)]
+mod readings {
+    use super::*;
+    use crate::permissions::wildcard_match;
+
+    fn workspace() -> PathBuf {
+        std::env::current_dir().expect("cwd")
+    }
+
+    /// The patterns read from inside `command`.
+    fn derived(command: &str) -> Vec<String> {
+        let analysis = analyze(command, &workspace());
+        for derived in &analysis.derived {
+            assert!(
+                analysis.patterns.contains(&derived.pattern)
+                    && analysis.patterns.contains(&derived.written),
+                "{command}: {analysis:?}"
+            );
+        }
+        analysis
+            .derived
+            .into_iter()
+            .map(|derived| derived.pattern)
+            .collect()
+    }
+
+    fn quoted(text: &str) -> String {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
+
+    #[test]
+    fn a_rule_for_rm_reaches_every_command_that_runs_rm() {
+        for command in [
+            "bash -c \"rm -rf x\"",
+            "sh -xc 'rm x'",
+            "bash -lc 'rm x'",
+            "bash -ec 'rm x'",
+            "bash -cx 'rm x'",
+            "zsh -c 'rm x'",
+            "fish --command='rm x'",
+            "bash -o pipefail -c 'rm x'",
+            "bash --norc -c 'rm x'",
+            "/bin/bash -c 'rm x'",
+            "eval \"rm x\"",
+            "eval rm x",
+            "eval 'rm' \"x\"",
+            "eval $'rm x'",
+            "eval $'\\x72m x'",
+            "env -S 'rm x'",
+            "env -iS 'rm x'",
+            "env --split-string='rm x'",
+            "env -S'rm x'",
+            "env -i A=1 rm x",
+            "env -u HOME -- rm x",
+            "xargs rm",
+            "xargs -0 -I{} rm {}",
+            "xargs -n 1 -P 4 rm",
+            "find . -exec rm {} +",
+            "find . -name '*.tmp' -execdir rm {} \\;",
+            "xargs sh -c 'rm \"$@\"' _",
+            "find . -exec sh -c 'rm x' \\;",
+            "sudo rm x",
+            "sudo -u root -E rm x",
+            "sudo FOO=1 rm x",
+            "doas rm x",
+            "nohup rm x",
+            "timeout 5 rm x",
+            "timeout -s KILL -k 1 5 rm x",
+            "nice -n 5 rm x",
+            "nice -10 rm x",
+            "time rm x",
+            "time -p rm x",
+            "command rm x",
+            "command -p rm x",
+            "exec rm x",
+            "exec -a name rm x",
+            "stdbuf -oL rm x",
+            "setsid rm x",
+            "caffeinate -i rm x",
+            "busybox rm x",
+            "/bin/rm x",
+            "\\rm x",
+            "\"rm\" x",
+            "'rm' x",
+            "r\"m\" x",
+            "FOO=1 rm x",
+            "sudo FOO=1 timeout 5 nice -n 2 rm x",
+            "su -c 'rm x'",
+            "su root -c 'rm x'",
+            "su - root --command='rm x'",
+            "bash <<< 'rm x'",
+            "bash <<'EOF'\nrm x\nEOF",
+            "sudo bash <<EOF\nrm x\nEOF",
+            "sh -s <<EOF\nrm x\nEOF",
+            "source /dev/stdin <<< 'rm x'",
+            ". /dev/stdin <<EOF\nrm x\nEOF",
+            "echo 'rm x' | sh",
+            "printf 'rm x\\n' | bash",
+            "cat <<EOF | sh\nrm x\nEOF",
+            "source <(echo 'rm x')",
+            ". <(printf 'rm x')",
+            "bash <(echo rm x)",
+            "bash -c \"eval 'sh -c \\\"rm x\\\"'\"",
+            "busybox sh -c 'rm x'",
+            "git status && sudo rm x",
+            "for f in a; do timeout 1 rm \"$f\"; done",
+        ] {
+            let readings = derived(command);
+            assert!(
+                readings
+                    .iter()
+                    .any(|pattern| wildcard_match("rm *", pattern)),
+                "{command}: {readings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn words_that_only_name_rm_run_nothing() {
+        for command in [
+            "command -v rm",
+            "echo rm x",
+            "printf 'rm x'",
+            "bash script.sh rm",
+            "sudo -l rm",
+            "git commit -m 'rm x'",
+            "cat <<EOF\nrm x\nEOF",
+            "grep -r 'eval rm' .",
+            "echo 'rm x' > script.sh",
+            "find . -name rm",
+        ] {
+            let readings = derived(command);
+            assert!(
+                !readings
+                    .iter()
+                    .any(|pattern| wildcard_match("rm *", pattern)),
+                "{command}: {readings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_commands_read_no_more_than_they_say() {
+        for command in [
+            "git status --short",
+            "cargo test -p haarness-core",
+            "ls -la src",
+            "npm run build",
+            "git log --oneline -5 | head",
+            "echo hi > out.txt",
+            "cd src && make",
+            "git commit -m x",
+            "cat <<EOF > notes.txt\nhello\nEOF",
+        ] {
+            assert_eq!(derived(command), Vec::<String>::new(), "{command}");
+        }
+    }
+
+    #[test]
+    fn other_spellings_of_a_command_are_read_as_the_shell_runs_them() {
+        for (command, reading, always) in [
+            ("FOO=1 git status", "git status", "git status *"),
+            ("\"git\" status", "git status", "git status *"),
+            ("\\git status", "git status", "git status *"),
+            ("/usr/bin/git status", "git status", "git status *"),
+            ("git push \"--force\"", "git push --force", "git push *"),
+        ] {
+            let analysis = analyze(command, &workspace());
+            assert_eq!(analysis.patterns[0], command);
+            let derived = analysis
+                .derived
+                .iter()
+                .find(|derived| derived.pattern == reading)
+                .unwrap_or_else(|| panic!("{command}: {analysis:?}"));
+            assert_eq!(derived.written, command);
+            assert_eq!(derived.always, always);
+        }
+        // The command as written keeps its own "always" pattern only.
+        assert_eq!(
+            analyze("FOO=1 git status", &workspace()).always,
+            vec!["git status *"]
+        );
+    }
+
+    #[test]
+    fn a_command_written_on_its_own_is_never_a_reading() {
+        let analysis = analyze("rm x; sudo rm x", &workspace());
+        assert_eq!(analysis.patterns, vec!["rm x", "sudo rm x"]);
+        assert!(
+            analysis
+                .derived
+                .iter()
+                .all(|derived| derived.pattern != "rm x"),
+            "{analysis:?}"
+        );
+    }
+
+    #[test]
+    fn nesting_and_size_are_bounded() {
+        let mut command = "rm x".to_owned();
+        for _ in 0..MAX_NESTING {
+            command = format!("bash -c {}", quoted(&command));
+        }
+        assert!(derived(&command).iter().any(|pattern| pattern == "rm x"));
+        let deeper = format!("bash -c {}", quoted(&command));
+        assert!(!derived(&deeper).iter().any(|pattern| pattern == "rm x"));
+        let long = format!(
+            "bash -c '{}rm x'",
+            "true; ".repeat(MAX_NESTED_BYTES / 6 + 1)
+        );
+        assert!(!derived(&long).iter().any(|pattern| pattern == "rm x"));
+    }
+
+    #[test]
+    fn ansi_c_strings_decode_like_the_shell() {
+        assert_eq!(
+            ansi_c("\\x72m\\t\\101\\cA\\q\\u00e9"),
+            "rm\tA\u{1}\\q\u{e9}"
+        );
+        assert_eq!(ansi_c("\\x"), "\\x");
+        assert_eq!(ansi_c("it\\'s"), "it's");
+    }
+
+    #[test]
+    fn paths_in_the_commands_a_command_runs_are_checked() {
+        let root = std::env::temp_dir().join(format!("haarness-readings-{}", uuid::Uuid::now_v7()));
+        let workspace = root.join("project");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let expected = vec![glob(&outside.canonicalize().unwrap())];
+        let outside = outside.display();
+        for command in [
+            format!("sudo rm -rf {outside}/x"),
+            format!("timeout 5 cat {outside}/f"),
+            format!("/bin/rm {outside}/x"),
+            format!("bash -c 'touch {outside}/new'"),
+            format!("sh -c \"echo x > {outside}/new\""),
+            format!("env -S 'touch {outside}/new'"),
+            format!("eval touch {outside}/new"),
+            format!("xargs rm {outside}/x"),
+            format!("find . -exec cp {{}} {outside}/ \\;"),
+            format!("bash <<EOF\ntouch {outside}/new\nEOF"),
+            format!("echo 'mkdir {outside}/made' | sh"),
+        ] {
+            assert_eq!(
+                analyze(&command, &workspace).external_dirs,
+                expected,
+                "{command}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

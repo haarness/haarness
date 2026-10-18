@@ -13,11 +13,16 @@
    project's own haarness.json asks a person even under `"edit": "allow"`, `--yolo` and a schedule,
    unless a rule names the file; `$HOME/...` in a shell command asks for the home folder; code
    frontmatter (`---js`) is skipped while `---json` keeps an agent's limits.
+7. (October 18, second pass) A shell rule meets what a command really runs: `rm *` denied refuses
+   rm inside `bash -c`, `sh -xc`, `eval`, `env -S`, `xargs`, `find -exec`, wrappers, a here-document
+   and other spellings; an ask through an assignment stops a headless run naming the whole
+   command; an allowed wrapper and quoted words add no question under `"bash": "ask"`; a path
+   outside the project inside `bash -c` or behind a wrapper asks for its folder.
 
 Usage: python3 scripts/test-permission-boundaries.py   (HAARNESS_BIN picks the binary,
 HAARNESS_E2E_ROOT a folder to keep the fixture in, HAARNESS_E2E_CASES a comma-separated subset
-of paths, headless, schedules, session_start, plugin_workflow, config_files, home_variable and
-frontmatter). No model is called.
+of paths, headless, schedules, session_start, plugin_workflow, config_files, home_variable,
+frontmatter and shell_readings). No model is called.
 """
 import json
 import os
@@ -322,8 +327,42 @@ def case_frontmatter():
     passed('a ---json agent keeps its bash deny, and a ---js agent is skipped with a notice')
 
 
+def case_shell_readings():
+    """A shell rule meets what a command really runs."""
+    shell = project('shell-readings', {'permission': {'bash': {'*': 'allow', 'rm *': 'deny', 'git push *': 'ask'}}})
+    (shell / 'victim').mkdir()
+    for command in ["bash -c 'rm -rf victim'", "sh -xc 'rm -rf victim'", "eval 'rm -rf victim'",
+                    "env -S 'rm -rf victim'", 'echo victim | xargs rm -rf',
+                    'find . -maxdepth 1 -name victim -exec rm -rf {} +', 'nohup rm -rf victim', 'nice rm -rf victim',
+                    'command rm -rf victim', '/bin/rm -rf victim', '\\rm -rf victim', 'FOO=1 rm -rf victim',
+                    "bash <<'EOF'\nrm -rf victim\nEOF", "echo 'rm -rf victim' | sh"]:
+        output = haarness(shell, 'run', '!tool bash ' + json.dumps({'command': command})).stdout
+        assert "is denied by permission rule 'bash:rm *'" in output, f'{command}: {output}'
+        assert (shell / 'victim').is_dir(), f'{command} removed the folder'
+    passed('an rm deny refuses rm inside bash -c, eval, env -S, xargs, find -exec, wrappers and a here-document')
+    command = 'GIT_TRACE=0 git push origin main'
+    result = haarness(shell, 'run', '!tool bash ' + json.dumps({'command': command}), check=False)
+    assert result.returncode != 0, result.stdout
+    assert f'Stopped: the agent asked to run a command ({command}), and nobody can approve that' in result.stderr, result.stderr
+    assert 'Allow it by adding {"permission":{"bash":{"git push *":"allow"}}}' in result.stderr, result.stderr
+    passed('a git push ask reaches it through an assignment and names the whole command')
+    review = project('shell-review', {'permission': {'bash': {'*': 'ask', 'nice *': 'allow', 'printf *': 'allow'}}})
+    haarness(review, 'run', '!tool bash ' + json.dumps({'command': "nice sh -c 'printf ok > ok.txt'"}))
+    haarness(review, 'run', '!tool bash ' + json.dumps({'command': "printf 'quoted words' > quoted.txt"}))
+    assert (review / 'ok.txt').read_text() == 'ok' and (review / 'quoted.txt').read_text() == 'quoted words'
+    passed('under "bash": "ask", an allowed wrapper and quoted words run without a new question')
+    outside = project('shell-outside', {'permission': {'bash': 'allow'}})
+    target = root / 'outside-shell-readings.txt'
+    for command in [f"bash -c 'touch {target}'", f'nice touch {target}', f"eval 'echo x > {target}'"]:
+        result = haarness(outside, 'run', '!tool bash ' + json.dumps({'command': command}), check=False)
+        assert result.returncode != 0, f'{command}: {result.stdout}'
+        assert 'reach outside the project' in result.stderr and str(root) in result.stderr, result.stderr
+        assert not target.exists(), f'{command} wrote outside the project without asking'
+    passed('a path outside the project inside bash -c, eval or behind a wrapper asks for its folder')
+
+
 CASES = {name: globals()['case_' + name] for name in ['paths', 'headless', 'schedules', 'session_start', 'plugin_workflow',
-                                                       'config_files', 'home_variable', 'frontmatter']}
+                                                       'config_files', 'home_variable', 'frontmatter', 'shell_readings']}
 selected = [name for name in os.environ.get('HAARNESS_E2E_CASES', ','.join(CASES)).split(',') if name]
 try:
     for name in selected:
