@@ -2439,5 +2439,12 @@
   "Click and press the keys, including a modifier key.": "点击后按下按键，需包含一个修饰键。",
   "Use a modifier key and one more key, such as {keys}.": "请使用一个修饰键加另一个键，例如 {keys}。",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} 已被系统占用。请选择其他快捷键。",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "其他应用或系统已在使用 {keys}。请选择其他快捷键。"
+  "Another app or the system already uses {keys}. Choose another shortcut.": "其他应用或系统已在使用 {keys}。请选择其他快捷键。",
+  "first token {time}": "首个 token {time}",
+  "{speed} tok/s": "{speed} token/秒",
+  "Last request: {details}": "最近一次请求：{details}",
+  "First token": "首个 token",
+  "Output speed": "输出速度",
+  "{count} tokens/s": "{count} token/秒",
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "首个 token 是从发送请求到收到第一段流式内容的等待时间。输出速度是流式传输期间每秒的输出 token 数，仅在流持续至少半秒时显示。"
 }

@@ -2439,5 +2439,12 @@
   "Click and press the keys, including a modifier key.": "Cliquez puis appuyez sur les touches, dont une touche de modification.",
   "Use a modifier key and one more key, such as {keys}.": "Utilisez une touche de modification et une autre touche, par exemple {keys}.",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} est réservé au système. Choisissez un autre raccourci.",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "Une autre app ou le système utilise déjà {keys}. Choisissez un autre raccourci."
+  "Another app or the system already uses {keys}. Choose another shortcut.": "Une autre app ou le système utilise déjà {keys}. Choisissez un autre raccourci.",
+  "first token {time}": "premier jeton {time}",
+  "{speed} tok/s": "{speed} jetons/s",
+  "Last request: {details}": "Dernière requête : {details}",
+  "First token": "Premier jeton",
+  "Output speed": "Vitesse de sortie",
+  "{count} tokens/s": "{count} jetons/s",
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "Premier jeton est l’attente entre l’envoi de la requête et le premier contenu diffusé. La vitesse de sortie correspond aux jetons de sortie par seconde pendant la diffusion ; elle s’affiche quand le flux a duré au moins une demi-seconde."
 }

@@ -2634,6 +2634,8 @@ fn usage_totals_reach_the_composer_label() {
                 cache_write_tokens: 0,
                 cost_usd: None,
                 estimated: false,
+                first_token_ms: None,
+                stream_ms: None,
             },
         ),
         message_item(
@@ -2647,6 +2649,8 @@ fn usage_totals_reach_the_composer_label() {
                 cache_write_tokens: 0,
                 cost_usd: None,
                 estimated: false,
+                first_token_ms: None,
+                stream_ms: None,
             },
         ),
     ];
@@ -2680,6 +2684,65 @@ fn usage_totals_reach_the_composer_label() {
         .collect();
     assert!(narrow.contains("Reasoning off"), "{narrow}");
     assert!(!narrow.contains("13.0k↑ 1.0k↓"), "{narrow}");
+}
+
+#[test]
+fn the_newest_timed_request_reaches_the_sidebar() {
+    let thread = fixture_thread();
+    let usage =
+        |first_token_ms: Option<u64>, stream_ms: Option<u64>, output_tokens: u64| ItemData::Usage {
+            prompt: None,
+            input_tokens: 1_000,
+            output_tokens,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: None,
+            estimated: false,
+            first_token_ms,
+            stream_ms,
+        };
+    let items = vec![
+        message_item(1, &thread, usage(Some(900), Some(4_000), 100)),
+        // A request recorded before timing existed, or a stopped one, is
+        // passed over for the newest one that was timed.
+        message_item(2, &thread, usage(Some(1_240), Some(2_000), 170)),
+        message_item(3, &thread, usage(None, None, 30)),
+    ];
+    let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    assert_eq!(
+        app.request_pace_label().as_deref(),
+        Some("first token 1.2s · 85 tok/s")
+    );
+    let sidebar: Vec<String> = crate::view::sidebar::sidebar_lines(&app, 40, 40)
+        .lines
+        .iter()
+        .map(line_text)
+        .collect();
+    assert!(
+        sidebar
+            .iter()
+            .any(|line| line.trim() == "first token 1.2s · 85 tok/s"),
+        "{sidebar:?}"
+    );
+    // Under half a second of streaming there is no honest rate.
+    app.items = vec![message_item(1, &thread, usage(Some(400), Some(300), 90))];
+    assert_eq!(
+        app.request_pace_label().as_deref(),
+        Some("first token 0.4s")
+    );
+    app.items.clear();
+    assert_eq!(app.request_pace_label(), None);
+}
+
+#[test]
+fn request_pace_formats_are_stable() {
+    use crate::view::span::{seconds_label, speed_label};
+    assert_eq!(seconds_label(820), "0.8s");
+    assert_eq!(seconds_label(9_960), "10s");
+    assert_eq!(seconds_label(14_200), "14s");
+    assert_eq!(speed_label(85.4), "85");
+    assert_eq!(speed_label(9.94), "9.9");
+    assert_eq!(speed_label(9.96), "10");
 }
 
 #[test]

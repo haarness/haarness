@@ -2439,5 +2439,12 @@
   "Click and press the keys, including a modifier key.": "คลิกแล้วกดแป้น รวมถึงแป้นปรับแต่ง",
   "Use a modifier key and one more key, such as {keys}.": "ใช้แป้นปรับแต่งร่วมกับแป้นอื่นอีกหนึ่งแป้น เช่น {keys}",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} เป็นของระบบ โปรดเลือกทางลัดอื่น",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "แอปอื่นหรือระบบใช้ {keys} อยู่แล้ว โปรดเลือกทางลัดอื่น"
+  "Another app or the system already uses {keys}. Choose another shortcut.": "แอปอื่นหรือระบบใช้ {keys} อยู่แล้ว โปรดเลือกทางลัดอื่น",
+  "first token {time}": "โทเค็นแรก {time}",
+  "{speed} tok/s": "{speed} โทเค็น/วิ",
+  "Last request: {details}": "คำขอล่าสุด: {details}",
+  "First token": "โทเค็นแรก",
+  "Output speed": "ความเร็วเอาต์พุต",
+  "{count} tokens/s": "{count} โทเค็น/วินาที",
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "โทเค็นแรกคือเวลาที่รอตั้งแต่ส่งคำขอจนได้รับเนื้อหาแบบสตรีมชิ้นแรก ความเร็วเอาต์พุตคือจำนวนโทเค็นเอาต์พุตต่อวินาทีระหว่างการสตรีม และจะแสดงเมื่อสตรีมนานอย่างน้อยครึ่งวินาที"
 }

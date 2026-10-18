@@ -2439,5 +2439,12 @@
   "Click and press the keys, including a modifier key.": "클릭한 다음 보조 키를 포함한 키를 누르세요.",
   "Use a modifier key and one more key, such as {keys}.": "보조 키와 다른 키 하나를 함께 사용하세요(예: {keys}).",
   "{keys} belongs to the system. Choose another shortcut.": "{keys}은(는) 시스템에서 사용합니다. 다른 단축키를 선택하세요.",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "다른 앱이나 시스템에서 이미 {keys}을(를) 사용하고 있습니다. 다른 단축키를 선택하세요."
+  "Another app or the system already uses {keys}. Choose another shortcut.": "다른 앱이나 시스템에서 이미 {keys}을(를) 사용하고 있습니다. 다른 단축키를 선택하세요.",
+  "first token {time}": "첫 토큰 {time}",
+  "{speed} tok/s": "{speed} 토큰/초",
+  "Last request: {details}": "마지막 요청: {details}",
+  "First token": "첫 토큰",
+  "Output speed": "출력 속도",
+  "{count} tokens/s": "{count} 토큰/초",
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "첫 토큰은 요청을 보낸 뒤 첫 스트리밍 콘텐츠가 도착할 때까지의 대기 시간입니다. 출력 속도는 스트리밍되는 동안 초당 출력 토큰 수이며, 스트림이 0.5초 이상 이어졌을 때만 표시됩니다."
 }

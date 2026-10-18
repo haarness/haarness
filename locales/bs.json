@@ -2439,5 +2439,12 @@
   "Click and press the keys, including a modifier key.": "Kliknite i pritisnite tipke, uključujući modifikatorsku tipku.",
   "Use a modifier key and one more key, such as {keys}.": "Koristite modifikatorsku tipku i još jednu tipku, npr. {keys}.",
   "{keys} belongs to the system. Choose another shortcut.": "{keys} pripada sistemu. Odaberite drugu prečicu.",
-  "Another app or the system already uses {keys}. Choose another shortcut.": "Druga aplikacija ili sistem već koristi {keys}. Odaberite drugu prečicu."
+  "Another app or the system already uses {keys}. Choose another shortcut.": "Druga aplikacija ili sistem već koristi {keys}. Odaberite drugu prečicu.",
+  "first token {time}": "prvi token {time}",
+  "{speed} tok/s": "{speed} tokena/s",
+  "Last request: {details}": "Posljednji zahtjev: {details}",
+  "First token": "Prvi token",
+  "Output speed": "Brzina izlaza",
+  "{count} tokens/s": "{count} tokena/s",
+  "First token is the wait from sending the request to its first streamed content. Output speed is output tokens per second while they streamed, shown when the stream lasted at least half a second.": "Prvi token je čekanje od slanja zahtjeva do prvog strimovanog sadržaja. Brzina izlaza je broj izlaznih tokena u sekundi dok su se strimovali, a prikazuje se kada je strim trajao najmanje pola sekunde."
 }
