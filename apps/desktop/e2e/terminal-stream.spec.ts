@@ -275,6 +275,22 @@ test("a terminal scrolled up opens where it was when shown again", async () => {
   await input().pressSequentially("x");
   await expect.poll(top).not.toBe(place);
   await input().press("Backspace");
+  // Scrolled up again, then, while hidden, the scrollback is erased and
+  // refilled past that line: it holds other text, so the view opens at the
+  // bottom, at the prompt.
+  await page.locator(".terminal-view").hover();
+  await page.mouse.wheel(0, -2400);
+  await expect.poll(top).toMatch(/^row 0[0-3]\d\d/);
+  await page.waitForTimeout(300);
+  await page.getByRole("button", { name: "Hide terminal", exact: true }).click();
+  const socket = await client.connectPty(id!);
+  socket.send(`printf '\\033[3J'; seq -f 'new %04g' 1 3000; touch ${join(temporary, "refilled")}\r`);
+  await expect.poll(() => exists("refilled")).toBe(true);
+  socket.close();
+  await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  await expect(input()).toBeFocused();
+  await expect(page.locator(".terminal-view .xterm-rows")).toContainText("new 3000");
+  await expect.poll(top).toMatch(/^new 29\d\d/);
   expect(errors).toEqual([]);
 });
 
