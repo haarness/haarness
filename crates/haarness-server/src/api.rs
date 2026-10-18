@@ -1627,7 +1627,12 @@ async fn run_shell(
     let runtime = Arc::clone(&state.runtime);
     tokio::spawn(async move {
         if let Err(error) = runtime.run_shell(id, request.command).await {
-            tracing::warn!(thread_id = %id, %error, "shell command failed");
+            // The error can quote the command, which can carry a credential.
+            tracing::warn!(
+                thread_id = %id,
+                error = %crate::hooks::log_text(&error.to_string(), 300),
+                "shell command failed"
+            );
         }
     });
     Ok(StatusCode::ACCEPTED)

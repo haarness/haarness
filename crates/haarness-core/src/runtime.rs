@@ -3851,7 +3851,11 @@ impl AgentRuntime {
             // schedule, `run --yolo`, ACP or a `--yolo` terminal UI approves
             // them once, as it does its agents' requests.
             if !forced && !explicit && stance.auto_approve {
-                tracing::info!(thread = %thread_id, operation, "approved once (unattended run)");
+                tracing::info!(
+                    thread = %thread_id,
+                    operation = %operation_for_log(&operation),
+                    "approved once (unattended run)"
+                );
                 continue;
             }
             let always_rules = plan.always_rules();
@@ -3859,7 +3863,11 @@ impl AgentRuntime {
             // requests once, ordered with mode changes by the gate.
             let approval_gate = self.approval_modes.gate.lock().await;
             if !forced && !explicit && self.approval_modes.is_auto(thread_id).await {
-                tracing::info!(thread = %thread_id, operation, "approved once (Auto)");
+                tracing::info!(
+                    thread = %thread_id,
+                    operation = %operation_for_log(&operation),
+                    "approved once (Auto)"
+                );
                 continue;
             }
             let id = uuid::Uuid::now_v7().to_string();
@@ -8852,7 +8860,10 @@ impl RunnerTask {
                     });
                 }
             }
-            tracing::info!(operation, "auto-approved (--yolo)");
+            tracing::info!(
+                operation = %operation_for_log(&operation),
+                "auto-approved (--yolo)"
+            );
             return Ok(PermissionResolution {
                 allowed: true,
                 feedback: None,
@@ -8908,7 +8919,11 @@ impl RunnerTask {
                 });
             }
             if auto {
-                tracing::info!(thread = %self.thread.id, operation, "approved once (Auto)");
+                tracing::info!(
+                    thread = %self.thread.id,
+                    operation = %operation_for_log(&operation),
+                    "approved once (Auto)"
+                );
                 return Ok(PermissionResolution {
                     allowed: true,
                     feedback: None,
@@ -11070,6 +11085,13 @@ fn turn_panicked(panic: &(dyn std::any::Any + Send)) -> CoreError {
     CoreError::Tool(format!(
         "Haarness stopped this turn after an internal error ({message}). The details are in the Haarness log; send a message to continue."
     ))
+}
+
+/// A permission operation as a log line shows it: a command or address
+/// can carry a credential (`curl -H "Authorization: …"`, `https://u:p@host`),
+/// so it is redacted and clipped.
+fn operation_for_log(operation: &str) -> String {
+    crate::redact::log_text(operation, 300)
 }
 
 /// Why a scheduled run's request that always asks failed instead of waiting.
