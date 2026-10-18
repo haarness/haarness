@@ -2,6 +2,15 @@ import { defaultGlobalShortcut, type GlobalShortcut } from "./global-shortcut";
 import type * as Types from "@haarness/sdk";
 import type { ThemeId } from "./themes";
 import type { Attachment } from "./attachments";
+/** What the Screenshots dialog shows: a folder's newest images, without their paths. */
+export type ScreenshotListing =
+  | { canceled: true }
+  | { needsFolder: true }
+  | {
+      folder: string;
+      listing: string;
+      items: { name: string; modified: number; thumbnail: string }[];
+    };
 export interface ProjectLocation {
   cloudWorkspace?: string;
   cloudSession?: string;
@@ -347,6 +356,10 @@ export interface Bridge {
   review(input: import("./review-drafts").ReviewRequest): Promise<import("./review-drafts").ReviewResponse>;
   attachmentDraft(key: string, value?: Attachment[]): Promise<Attachment[]>;
   attachments(): Promise<Attachment[]>;
+  /** The newest images of the screenshots folder, or another folder the person chooses. */
+  screenshots(input?: { choose?: boolean }): Promise<ScreenshotListing>;
+  /** Reads the screenshots at these places in the window's last listing, in this order. */
+  screenshotAttach(listing: string, indexes: number[]): Promise<Attachment[]>;
   save(name: string, content: string): Promise<boolean>;
   openArchive(): Promise<unknown | null>;
   pick(kind: "file" | "directory"): Promise<string | null>;
