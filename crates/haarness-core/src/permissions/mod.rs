@@ -35,6 +35,55 @@ pub struct PermissionRule {
 pub struct Evaluation {
     pub decision: PermissionDecision,
     pub matched: Option<String>,
+    /// The ask is about one of Haarness's own configuration files (see
+    /// [`is_config_path`]): only a person answers it, never Auto, a
+    /// `--yolo` or scheduled run, or a hook, and it offers no "always".
+    pub protected: bool,
+}
+
+/// The rule an edit of a configuration file is asked under, as
+/// [`Evaluation::matched`] names it.
+pub const CONFIG_EDIT_RULE: &str = "edit:<haarness configuration>";
+
+/// Whether `path` (after `.` and `..`, at any depth) is a file Haarness, or a
+/// tool it reads settings from, takes permissions, hooks, MCP servers or
+/// providers from: `haarness.json{,c}`, `opencode.json{,c}`,
+/// `.haarness/config.toml`, `.claude/settings.json`,
+/// `.claude/settings.local.json` and `.mcp.json`. An agent that changes one
+/// could widen its own permissions at the next reload, so an edit asks a
+/// person unless a rule naming the file allows it.
+#[must_use]
+pub fn is_config_path(path: &Path) -> bool {
+    let path = normalize_absolute(path);
+    let mut names = path
+        .components()
+        .rev()
+        .filter_map(|component| match component {
+            Component::Normal(name) => Some(name.to_string_lossy().to_ascii_lowercase()),
+            _ => None,
+        });
+    let Some(name) = names.next() else {
+        return false;
+    };
+    let parent = names.next();
+    matches!(
+        name.as_str(),
+        "haarness.json" | "haarness.jsonc" | "opencode.json" | "opencode.jsonc" | ".mcp.json"
+    ) || (name == "config.toml" && parent.as_deref() == Some(".haarness"))
+        || (matches!(name.as_str(), "settings.json" | "settings.local.json")
+            && parent.as_deref() == Some(".claude"))
+}
+
+/// Whether a rule's pattern covers every file rather than naming some: `*`,
+/// `edit:*`, `edit:**` or `edit:**/*`. Such a rule (or an "always" answer,
+/// which is `edit:*`) does not open a configuration file.
+fn catch_all(rule: &PermissionRule) -> bool {
+    rule.pattern == "*"
+        || rule.pattern.split_once(':').is_some_and(|(_, target)| {
+            target
+                .chars()
+                .all(|character| matches!(character, '*' | '/'))
+        })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -224,6 +273,7 @@ impl PermissionEngine {
                 return Evaluation {
                     decision: PermissionDecision::Deny,
                     matched: Some(ceiling.pattern.clone()),
+                    protected: false,
                 };
             }
         }
@@ -238,9 +288,36 @@ impl PermissionEngine {
         } else {
             configured
         };
+        // An edit of a configuration file asks unless a deny refuses it or
+        // an allow names it: a blanket `edit: allow` or an "always" answer
+        // to another edit never opens it.
+        if operation
+            .split_once(':')
+            .is_some_and(|(permission, target)| {
+                permission == "edit" && is_config_path(Path::new(target))
+            })
+            && matched.is_none_or(|rule| rule.decision != PermissionDecision::Deny)
+        {
+            let opener = [repository, grant, configured]
+                .into_iter()
+                .flatten()
+                .find(|rule| rule.decision == PermissionDecision::Allow && !catch_all(rule));
+            return Evaluation {
+                decision: if opener.is_some() {
+                    PermissionDecision::Allow
+                } else {
+                    PermissionDecision::Ask
+                },
+                matched: Some(
+                    opener.map_or_else(|| CONFIG_EDIT_RULE.into(), |rule| rule.pattern.clone()),
+                ),
+                protected: opener.is_none(),
+            };
+        }
         Evaluation {
             decision: matched.map_or(PermissionDecision::Ask, |rule| rule.decision),
             matched: matched.map(|rule| rule.pattern.clone()),
+            protected: false,
         }
     }
 
@@ -1296,5 +1373,89 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[test]
+    fn configuration_files_are_named_at_any_depth_and_nothing_else_is() {
+        for path in [
+            "haarness.json",
+            "haarness.jsonc",
+            ".haarness/haarness.json",
+            ".haarness/cloud/haarness.json",
+            "packages/app/opencode.jsonc",
+            ".opencode/opencode.json",
+            ".haarness/config.toml",
+            ".claude/settings.json",
+            "/work/project/.claude/settings.local.json",
+            ".mcp.json",
+            "./src/../Haarness.JSON",
+        ] {
+            assert!(is_config_path(Path::new(path)), "{path}");
+        }
+        for path in [
+            "config.toml",
+            "src/config.toml",
+            "settings.json",
+            ".vscode/settings.json",
+            "my-haarness.json",
+            "haarness.json.bak",
+            "package.json",
+            "",
+        ] {
+            assert!(!is_config_path(Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_configuration_file_edit_asks_a_person_unless_a_rule_names_it() {
+        let asks = |engine: &PermissionEngine, operation: &str| {
+            let evaluation = engine.evaluate_detailed(operation);
+            assert_eq!(evaluation.decision, PermissionDecision::Ask, "{operation}");
+            assert!(evaluation.protected, "{operation}");
+            assert_eq!(evaluation.matched.as_deref(), Some(CONFIG_EDIT_RULE));
+        };
+        let mut engine = PermissionEngine::build_defaults();
+        for operation in [
+            "edit:haarness.json",
+            "edit:sub/.haarness/haarness.json",
+            "edit:/work/project/opencode.jsonc",
+            "edit:.haarness/config.toml",
+            "edit:./x/../.mcp.json",
+        ] {
+            asks(&engine, operation);
+        }
+        // Other files, and reading a configuration file, are unchanged.
+        assert_eq!(
+            engine.evaluate("edit:src/main.rs"),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            engine.evaluate("read:haarness.json"),
+            PermissionDecision::Allow
+        );
+        assert!(!engine.evaluate_detailed("edit:src/main.rs").protected);
+        // A blanket allow and an "always" answer to another edit leave it asking.
+        engine.add_rule(rule("edit:*", PermissionDecision::Allow));
+        engine.add_rule(rule("*", PermissionDecision::Allow));
+        engine.add_rule(rule("edit:**/*", PermissionDecision::Allow));
+        engine.approve_always("edit:*");
+        asks(&engine, "edit:haarness.json");
+        // A rule naming the file opens it; a deny refuses it.
+        engine.add_rule(rule("edit:haarness.json", PermissionDecision::Allow));
+        let allowed = engine.evaluate_detailed("edit:haarness.json");
+        assert_eq!(allowed.decision, PermissionDecision::Allow);
+        assert!(!allowed.protected);
+        asks(&engine, "edit:.haarness/haarness.json");
+        engine.add_rule(rule("edit:*.mcp.json", PermissionDecision::Allow));
+        assert_eq!(engine.evaluate("edit:.mcp.json"), PermissionDecision::Allow);
+        engine.add_rule(rule("edit:opencode.json", PermissionDecision::Deny));
+        let denied = engine.evaluate_detailed("edit:opencode.json");
+        assert_eq!(denied.decision, PermissionDecision::Deny);
+        assert!(!denied.protected);
+        // The plan agent's write ceiling still refuses it outright.
+        assert_eq!(
+            PermissionEngine::plan_defaults().evaluate("edit:haarness.json"),
+            PermissionDecision::Deny
+        );
     }
 }

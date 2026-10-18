@@ -3778,15 +3778,18 @@ impl AgentRuntime {
             .flat_map(|plan| plan.external_paths.iter().cloned())
             .collect();
         let mut pending_plans = Vec::new();
+        // Asks only a person answers (a configuration file edit).
+        let mut protected = HashSet::new();
         for plan in plans {
             let mut asked = Vec::new();
             for pattern in &plan.patterns {
                 let operation = plan.operation(pattern);
                 let constraint = tool.permission_constraint(&arguments, &operation);
                 let explicit = tool.explicit_approval(&arguments, &operation);
+                let evaluation = engine.evaluate_detailed(&operation);
                 let decision = if explicit {
                     crate::permissions::explicit_decision(
-                        engine.evaluate(&operation),
+                        evaluation.decision,
                         constraint,
                         crate::permissions::explicit_granted(
                             &self.session_rules.lock(),
@@ -3794,7 +3797,7 @@ impl AgentRuntime {
                         ),
                     )
                 } else {
-                    constrained_permission(engine.evaluate(&operation), constraint)
+                    constrained_permission(evaluation.decision, constraint)
                 };
                 match decision {
                     PermissionDecision::Deny => {
@@ -3805,10 +3808,16 @@ impl AgentRuntime {
                     // may, nor where a path leads that the hook never saw.
                     PermissionDecision::Ask
                         if !explicit
+                            && !evaluation.protected
                             && hook_permission == Some(PermissionDecision::Allow)
                             && !plan.is_resolved(pattern)
                             && constraint != Some(PermissionDecision::Ask) => {}
-                    PermissionDecision::Ask => asked.push(pattern.clone()),
+                    PermissionDecision::Ask => {
+                        if evaluation.protected {
+                            protected.insert(operation);
+                        }
+                        asked.push(pattern.clone());
+                    }
                     PermissionDecision::Allow => {}
                 }
             }
@@ -3823,8 +3832,9 @@ impl AgentRuntime {
             }
             let asked = &plan.patterns;
             let forced = asked.iter().any(|pattern| {
-                tool.permission_constraint(&arguments, &plan.operation(pattern))
-                    == Some(PermissionDecision::Ask)
+                protected.contains(&plan.operation(pattern))
+                    || tool.permission_constraint(&arguments, &plan.operation(pattern))
+                        == Some(PermissionDecision::Ask)
             });
             let explicit_operations: Vec<String> = asked
                 .iter()
@@ -8580,6 +8590,8 @@ impl RunnerTask {
             .collect();
         let engine = self.permission_engine_for_tool(agent, name);
         let mut pending_plans = Vec::new();
+        // Asks only a person answers (a configuration file edit).
+        let mut protected = HashSet::new();
         for plan in plans {
             let mut asked = Vec::new();
             for pattern in &plan.patterns {
@@ -8623,13 +8635,19 @@ impl RunnerTask {
                     // leads that the hook never saw.
                     PermissionDecision::Ask
                         if !explicit
+                            && !evaluation.protected
                             && constraint != Some(PermissionDecision::Ask)
                             && ((hook_permission == Some(PermissionDecision::Allow)
                                 && !plan.is_resolved(pattern))
                                 || (evaluation.matched.is_none()
                                     && self.skill_engine().evaluate(&plan.operation(pattern))
                                         == PermissionDecision::Allow)) => {}
-                    PermissionDecision::Ask => asked.push(pattern.clone()),
+                    PermissionDecision::Ask => {
+                        if evaluation.protected {
+                            protected.insert(plan.operation(pattern));
+                        }
+                        asked.push(pattern.clone());
+                    }
                     PermissionDecision::Allow => {}
                 }
             }
@@ -8639,9 +8657,10 @@ impl RunnerTask {
         }
         for plan in combine_browser_approvals(name, pending_plans) {
             let forced = plan.patterns.iter().any(|pattern| {
-                tool.as_ref().and_then(|tool| {
-                    tool.permission_constraint(&arguments, &plan.operation(pattern))
-                }) == Some(PermissionDecision::Ask)
+                protected.contains(&plan.operation(pattern))
+                    || tool.as_ref().and_then(|tool| {
+                        tool.permission_constraint(&arguments, &plan.operation(pattern))
+                    }) == Some(PermissionDecision::Ask)
             });
             let explicit: Vec<String> = plan
                 .patterns
