@@ -2519,5 +2519,7 @@
   "Comment on selection": "Kommenter markeringen",
   "Comment on these lines…": "Kommenter disse linjene …",
   "Comment added to your message": "Kommentar lagt til i meldingen din",
-  "Preview comment": "Kommentar til forhåndsvisningen"
+  "Preview comment": "Kommentar til forhåndsvisningen",
+  "{count} failed": "{count} mislyktes",
+  "+{count} more": "{count} til"
 }

@@ -2519,5 +2519,7 @@
   "Comment on selection": "Comentar la selección",
   "Comment on these lines…": "Comenta estas líneas…",
   "Comment added to your message": "Comentario añadido a tu mensaje",
-  "Preview comment": "Comentario sobre la vista previa"
+  "Preview comment": "Comentario sobre la vista previa",
+  "{count} failed": "{count} con error",
+  "+{count} more": "{count} más"
 }

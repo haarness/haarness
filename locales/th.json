@@ -2519,5 +2519,7 @@
   "Comment on selection": "แสดงความคิดเห็นส่วนที่เลือก",
   "Comment on these lines…": "แสดงความคิดเห็นบรรทัดเหล่านี้…",
   "Comment added to your message": "เพิ่มความคิดเห็นไปยังข้อความของคุณแล้ว",
-  "Preview comment": "ความคิดเห็นในตัวอย่าง"
+  "Preview comment": "ความคิดเห็นในตัวอย่าง",
+  "{count} failed": "ล้มเหลว {count} รายการ",
+  "+{count} more": "อีก {count} รายการ"
 }

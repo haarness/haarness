@@ -2519,5 +2519,7 @@
   "Comment on selection": "Прокомментировать выделенное",
   "Comment on these lines…": "Комментарий к этим строкам…",
   "Comment added to your message": "Комментарий добавлен к вашему сообщению",
-  "Preview comment": "Комментарий к предпросмотру"
+  "Preview comment": "Комментарий к предпросмотру",
+  "{count} failed": "с ошибкой: {count}",
+  "+{count} more": "ещё {count}"
 }

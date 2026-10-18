@@ -2519,5 +2519,7 @@
   "Comment on selection": "Commenter la sélection",
   "Comment on these lines…": "Commenter ces lignes…",
   "Comment added to your message": "Commentaire ajouté à votre message",
-  "Preview comment": "Commentaire sur l’aperçu"
+  "Preview comment": "Commentaire sur l’aperçu",
+  "{count} failed": "{count} en échec",
+  "+{count} more": "{count} de plus"
 }
