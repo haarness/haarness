@@ -72,6 +72,22 @@ impl CoreError {
 
 pub type CoreResult<T> = Result<T, CoreError>;
 
+/// A subagent launched (or moved) into the background whose run ended
+/// without its result reaching the chat that launched it: the server
+/// stopped while it ran, or stopped between its end and the delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrandedTask {
+    pub parent_thread_id: ThreadId,
+    /// The turn that launched it, which holds its task checkpoints.
+    pub parent_turn_id: Option<TurnId>,
+    pub call_id: String,
+    pub child_thread_id: ThreadId,
+    pub child_turn_id: TurnId,
+    /// The task's state as recovery recorded it: `done`, `failed` or
+    /// `interrupted`.
+    pub state: String,
+}
+
 #[async_trait]
 pub trait ThreadRepository: Send + Sync {
     /// Export one root thread and its complete descendant tree as a portable
@@ -237,6 +253,12 @@ pub trait ThreadRepository: Send + Sync {
         workspace: &str,
     ) -> CoreResult<Vec<crate::PermissionRule>>;
     async fn recover_interrupted(&self) -> CoreResult<u64>;
+    /// [`Self::recover_interrupted`], also naming the background subagents
+    /// whose result the launching chat is still owed. A repository that does
+    /// not track task checkpoints names none.
+    async fn recover_interrupted_tasks(&self) -> CoreResult<(u64, Vec<StrandedTask>)> {
+        Ok((self.recover_interrupted().await?, Vec::new()))
+    }
     /// Standing goal + loop configuration for a thread (absent by default).
     async fn thread_extras(
         &self,

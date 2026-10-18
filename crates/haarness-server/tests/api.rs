@@ -1459,6 +1459,342 @@ async fn restart_recovery_suspends_an_orphaned_goal_instead_of_leaving_it_runnin
 }
 
 #[tokio::test]
+async fn restart_recovery_reports_background_tasks_to_the_chat_that_launched_them() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let request = |text: &str| StartTurnRequest {
+        request_id: RequestId::new(),
+        text: text.into(),
+        ..turn_request("")
+    };
+    let echo = || CreateThreadRequest {
+        provider: Some("echo".into()),
+        model: Some("echo-1".into()),
+        ..Default::default()
+    };
+    // `ended` is the child's turn as the restart found it, `parent_done`
+    // whether the launching chat had finished its own turn.
+    let mut chats = Vec::new();
+    for (name, ended, parent_done) in [
+        ("Audit the parser", TurnStatus::Running, true),
+        ("Summarize the logs", TurnStatus::Completed, true),
+        ("Check the build", TurnStatus::Running, false),
+    ] {
+        let parent = store.create_thread(echo()).await.unwrap();
+        let parent_turn = store
+            .start_turn(parent.id, request("launch it"))
+            .await
+            .unwrap()
+            .0;
+        store
+            .append_item(
+                parent.id,
+                Some(parent_turn.id),
+                haarness_protocol::ItemData::ToolCall {
+                    call_id: "call-task".into(),
+                    name: "task".into(),
+                    arguments: serde_json::json!({"description": name, "prompt": "work", "background": true}),
+                    provider_metadata: Value::Null,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .append_item(
+                parent.id,
+                Some(parent_turn.id),
+                haarness_protocol::ItemData::ToolResult {
+                    call_id: "call-task".into(),
+                    name: "task".into(),
+                    output: "The subagent is working in the background.".into(),
+                    is_error: false,
+                    metadata: Value::Null,
+                },
+            )
+            .await
+            .unwrap();
+        if parent_done {
+            store
+                .set_turn_status(parent_turn.id, TurnStatus::Completed, None)
+                .await
+                .unwrap();
+        }
+        let child = store
+            .create_thread(CreateThreadRequest {
+                parent_id: Some(parent.id),
+                ..echo()
+            })
+            .await
+            .unwrap();
+        let child_turn = store.start_turn(child.id, request("work")).await.unwrap().0;
+        store
+            .append_item(
+                parent.id,
+                Some(parent_turn.id),
+                haarness_protocol::ItemData::TaskState {
+                    call_id: "call-task".into(),
+                    child_thread_id: child.id,
+                    child_turn_id: child_turn.id,
+                    state: "background".into(),
+                },
+            )
+            .await
+            .unwrap();
+        if ended == TurnStatus::Completed {
+            store
+                .append_item(
+                    child.id,
+                    Some(child_turn.id),
+                    haarness_protocol::ItemData::AssistantMessage {
+                        text: "LOGS_SUMMARY".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            store
+                .set_turn_status(child_turn.id, ended, None)
+                .await
+                .unwrap();
+        }
+        chats.push((parent.id, child.id));
+    }
+
+    // The restarted server, over the same store.
+    let provider = Capturing::default();
+    let runtime = AgentRuntime::new(
+        store.clone(),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(provider.clone()) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(256),
+    );
+    assert_eq!(runtime.recover().await.unwrap(), 3);
+    for (parent, _) in &chats {
+        wait_idle(&runtime, *parent).await;
+    }
+    let notice = |parent| {
+        let runtime = &runtime;
+        async move {
+            runtime
+                .items(parent, None)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter_map(|item| match item.data {
+                    haarness_protocol::ItemData::UserMessage {
+                        text,
+                        synthetic: true,
+                        ..
+                    } => Some((item.turn_id, text)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        }
+    };
+
+    let (audit, audit_child) = chats[0];
+    let delivered = notice(audit).await;
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    let text = &delivered[0].1;
+    assert!(
+        text.starts_with(&format!("<task id=\"{audit_child}\" state=\"error\">")),
+        "{text}"
+    );
+    assert!(text.contains("Audit the parser: failed"), "{text}");
+    assert!(
+        text.contains("not resumed") && text.contains(&format!("task_id \"{audit_child}\"")),
+        "{text}"
+    );
+
+    let (logs, _) = chats[1];
+    let delivered = notice(logs).await;
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert!(
+        delivered[0].1.contains("state=\"completed\"") && delivered[0].1.contains("LOGS_SUMMARY"),
+        "a result the restart kept from the chat is delivered: {delivered:?}"
+    );
+
+    // Both idle chats took the notice as a delivered result: a turn each.
+    let requests = provider.requests.lock().unwrap().clone();
+    for parent in [audit, logs] {
+        assert!(
+            runtime.items(parent, None).await.unwrap().iter().any(|item| matches!(
+                &item.data,
+                haarness_protocol::ItemData::AssistantMessage { text } if text.starts_with("Echo: <task id=")
+            )),
+            "the idle chat answers the notice"
+        );
+    }
+    assert_eq!(requests.len(), 2, "{requests:?}");
+
+    // The busy chat was stopped by the same restart: it keeps the notice for
+    // when it goes on, without a turn of its own.
+    let (build, build_child) = chats[2];
+    let delivered = notice(build).await;
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert!(
+        delivered[0]
+            .1
+            .contains(&format!("task_id \"{build_child}\""))
+    );
+    assert!(runtime.active_turn(build).await.unwrap().is_none());
+    let turns = runtime
+        .items(build, None)
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|item| item.turn_id)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(turns.len(), 1, "no turn starts in the busy chat");
+
+    // A second restart names nothing again.
+    assert_eq!(runtime.recover().await.unwrap(), 0);
+    for (parent, _) in &chats {
+        wait_idle(&runtime, *parent).await;
+        assert_eq!(notice(*parent).await.len(), 1);
+    }
+}
+
+/// `Capturing`, except that a chat whose prompt is `HANG` gets a response
+/// that never begins: a subagent still working when the server stops.
+#[derive(Clone, Default)]
+struct HangingChild(Capturing);
+
+#[async_trait]
+impl ModelProvider for HangingChild {
+    fn id(&self) -> &str {
+        "echo"
+    }
+    fn info(&self) -> ProviderInfo {
+        self.0.info()
+    }
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        cancel: CancellationToken,
+    ) -> CoreResult<ProviderStream> {
+        let hangs = request.messages.iter().any(|message| {
+            matches!(message, ProviderMessage::Text { role, content } if role == "user" && content == "HANG")
+        });
+        if hangs {
+            return Ok(Box::pin(stream::pending()));
+        }
+        self.0.stream(request, cancel).await
+    }
+}
+
+#[tokio::test]
+async fn a_shutdown_leaves_a_background_task_to_be_reported_on_the_next_start() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let runtime = |provider: HangingChild| {
+        AgentRuntime::with_config(
+            store.clone(),
+            Arc::new(StaticProviderRegistry::new(vec![
+                Arc::new(provider) as Arc<dyn ModelProvider>
+            ])),
+            Arc::new(haarness_server::NativeToolRegistry::new(
+                std::env::temp_dir(),
+            )),
+            EventBus::new(512),
+            std::env::temp_dir(),
+            String::new(),
+            RuntimeConfig::default(),
+        )
+    };
+    let first = runtime(HangingChild::default());
+    let thread = first
+        .create_thread(CreateThreadRequest {
+            provider: Some("echo".into()),
+            model: Some("echo-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let turn = first
+        .start_turn(
+            thread.id,
+            turn_request(
+                r#"!tool task {"description":"Long audit","prompt":"HANG","background":true}"#,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wait_done(&first, &turn).await.status, TurnStatus::Completed);
+    let child = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let child = first
+                .items(thread.id, None)
+                .await
+                .unwrap()
+                .into_iter()
+                .find_map(|item| match item.data {
+                    haarness_protocol::ItemData::TaskState {
+                        child_thread_id,
+                        state,
+                        ..
+                    } if state == "background" => Some(child_thread_id),
+                    _ => None,
+                });
+            if let Some(child) = child
+                && first.active_turn(child).await.unwrap().is_some()
+            {
+                return child;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the background subagent starts");
+
+    first
+        .interrupt_active_turns("Haarness stopped")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while first.active_turn(child).await.unwrap().is_some() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the subagent stops with the server");
+    // Let the subagent's runner finish its bookkeeping.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let states = |items: Vec<haarness_protocol::Item>| {
+        items
+            .into_iter()
+            .filter_map(|item| match item.data {
+                haarness_protocol::ItemData::TaskState { state, .. } => Some(state),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        states(first.items(thread.id, None).await.unwrap()),
+        ["background"],
+        "not marked cancelled: nobody stopped it on purpose"
+    );
+    drop(first);
+
+    let provider = HangingChild::default();
+    let second = runtime(provider.clone());
+    second.recover().await.unwrap();
+    wait_idle(&second, thread.id).await;
+    let items = second.items(thread.id, None).await.unwrap();
+    assert_eq!(states(items.clone()), ["background", "interrupted"]);
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            haarness_protocol::ItemData::UserMessage { text, synthetic: true, .. }
+                if text.contains("Long audit: failed") && text.contains(&format!("task_id \"{child}\"")))),
+        "{items:?}"
+    );
+    assert!(
+        items.iter().any(|item| matches!(&item.data,
+            haarness_protocol::ItemData::AssistantMessage { text } if text.starts_with("Echo: <task id="))),
+        "the idle chat answers the report: {items:?}"
+    );
+}
+
+#[tokio::test]
 async fn detached_sse_client_and_thread_switch_leave_turn_owned_by_server_until_interrupt() {
     let provider = SlowText::default();
     let runtime = Arc::new(AgentRuntime::new(
