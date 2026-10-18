@@ -5623,6 +5623,11 @@ impl crate::ToolInvoker for TurnToolInvoker {
         self.runner.resolve_tool_name(name)
     }
 
+    fn skip_call(&self) {
+        self.sequence
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     async fn invoke(&self, name: &str, arguments: serde_json::Value) -> CoreResult<ToolOutput> {
         let resolved = self.runner.resolve_tool_name(name);
         let name = resolved.as_str();
