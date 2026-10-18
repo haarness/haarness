@@ -155,3 +155,35 @@ async fn an_allowed_wrapper_under_bash_ask_runs_without_a_new_question() {
         "ran"
     );
 }
+
+async fn reply(runtime: &AgentRuntime, id: &str, decision: Reply) {
+    runtime
+        .reply_permission(
+            id,
+            PermissionReply {
+                decision,
+                feedback: None,
+            },
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_command_too_long_to_read_asks_when_a_rule_could_be_about_what_it_runs() {
+    let fixture = Fixture::new();
+    std::fs::create_dir_all(fixture.0.join("victim")).unwrap();
+    let runtime = runtime(&fixture.0, &[("bash:rm *", D::Deny)]);
+    let thread = echo_thread(&runtime).await;
+    let command = format!("bash -c '{}rm -rf victim'", "true; ".repeat(300 * 1024 / 6));
+    let turn = runtime
+        .start_turn(thread.id, turn_request(&bash(&command)))
+        .await
+        .unwrap();
+    wait_pending_permissions(&runtime, 1).await;
+    let pending = runtime.pending_permissions().remove(0);
+    assert_eq!(pending.patterns, vec![command]);
+    reply(&runtime, &pending.permission_id, Reply::Reject).await;
+    wait_done(&runtime, &turn).await;
+    assert!(fixture.0.join("victim").is_dir());
+}

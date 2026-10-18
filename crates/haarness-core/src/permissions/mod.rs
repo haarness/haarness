@@ -481,6 +481,25 @@ impl PermissionEngine {
         }
     }
 
+    /// Bash rules that deny or ask without covering the command as written
+    /// (`covers`): the first one, when there is any. A command whose
+    /// readings a limit stopped is asked about when one exists.
+    #[must_use]
+    pub fn narrower_bash_rule(&self, covers: &dyn Fn(&str) -> bool) -> Option<String> {
+        std::iter::once(&self.ceilings)
+            .chain(&self.inherited)
+            .chain(std::iter::once(&self.rules))
+            .flatten()
+            .filter(|rule| rule.decision != PermissionDecision::Allow)
+            .filter(|rule| {
+                rule.pattern
+                    .split_once(':')
+                    .is_some_and(|(permission, _)| wildcard_match(permission, "bash"))
+            })
+            .find(|rule| !covers(&rule.pattern))
+            .map(|rule| rule.pattern.clone())
+    }
+
     /// The other ways to write a path operation's file, each with whether it
     /// is absolute: the project-relative path of an absolute one inside the
     /// project (also through a link such as macOS's `/tmp` for

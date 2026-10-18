@@ -13,6 +13,7 @@
 //! [`BashAnalysis::derived`]) and has its paths checked like a command
 //! written on its own.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use super::arity;
@@ -27,6 +28,9 @@ pub struct BashAnalysis {
     /// Directory globs outside the workspace this command touches,
     /// e.g. `/tmp/*`.
     pub external_dirs: Vec<String>,
+    /// The commands as written, each pattern in [`Self::patterns`] that is
+    /// not a reading, once.
+    pub written: Vec<Written>,
     /// The patterns read from inside a written command rather than written
     /// as one: another spelling of it (`git status` for `FOO=1 "git"
     /// status`), a command it runs (`rm x` for `sudo rm x`), or a command in
@@ -36,13 +40,24 @@ pub struct BashAnalysis {
     pub derived: Vec<Derived>,
 }
 
+/// One command as written in the line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Written {
+    pub pattern: String,
+    /// Its generalized "don't ask again" pattern.
+    pub always: String,
+    /// A limit (nesting, size or number of readings) stopped reading what
+    /// it runs, so its readings may be missing some command.
+    pub incomplete: bool,
+}
+
 /// One pattern read from inside a written command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Derived {
     pub pattern: String,
-    /// The written command it was read from, as [`BashAnalysis::patterns`]
-    /// holds it.
-    pub written: String,
+    /// The written command it was read from: an index into
+    /// [`BashAnalysis::written`].
+    pub written: usize,
     /// Its generalized "don't ask again" pattern.
     pub always: String,
 }
@@ -54,8 +69,18 @@ const PATH_COMMANDS: &[&str] = &[
 
 /// How many strings deep commands are read: `bash -c "eval 'sh -c …'"`.
 const MAX_NESTING: u8 = 4;
+/// How many wrappers and strings deep, together: `sudo nice timeout 5 …`.
+const MAX_HOPS: u8 = 16;
 /// Text a shell runs again that is longer than this is not read.
 const MAX_NESTED_BYTES: usize = 256 * 1024;
+/// How much text one command line has read again, in all.
+const MAX_READ_BYTES: usize = 1024 * 1024;
+/// How many readings one written command has.
+const MAX_READINGS: usize = 64;
+/// How many readings one command line has.
+const MAX_ALL_READINGS: usize = 512;
+/// How many commands one command line reads in text run again, in all.
+const MAX_NESTED_COMMANDS: usize = 4096;
 
 /// Shells whose `-c` runs the word after their options, and which read a
 /// script from standard input without one.
@@ -74,10 +99,16 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
     let mut reader = Reader {
         workspace,
         analysis: BashAnalysis::default(),
-        written: Vec::new(),
-        source: String::new(),
+        patterns: HashSet::new(),
+        written: HashMap::new(),
+        source: None,
+        readings: HashSet::new(),
+        counts: HashMap::new(),
+        texts: HashSet::new(),
+        read_bytes: 0,
+        nested_commands: 0,
     };
-    if !reader.read(command, 0) {
+    if !reader.read(command, Depth::default()) {
         return fallback(command);
     }
     let Reader {
@@ -92,17 +123,38 @@ pub fn analyze(command: &str, workspace: &Path) -> BashAnalysis {
     // is also read from.
     analysis
         .derived
-        .retain(|derived| !written.contains(&derived.pattern));
+        .retain(|derived| !written.contains_key(&derived.pattern));
     analysis
 }
 
 struct Reader<'w> {
     workspace: &'w Path,
     analysis: BashAnalysis,
-    /// The patterns written as commands of their own.
-    written: Vec<String>,
+    /// The patterns in the analysis, to keep them unique.
+    patterns: HashSet<String>,
+    /// The written commands, by pattern, as indices into the analysis.
+    written: HashMap<String, usize>,
     /// The written command being read.
-    source: String,
+    source: Option<usize>,
+    /// The readings recorded, with the written command they came from.
+    readings: HashSet<(String, usize)>,
+    /// How many readings each written command has.
+    counts: HashMap<usize, usize>,
+    /// The text each written command has read again.
+    texts: HashSet<(usize, String)>,
+    /// Bytes of text read again, in all.
+    read_bytes: usize,
+    /// Commands read in text run again, in all.
+    nested_commands: usize,
+}
+
+/// How far a reading is from the command as written.
+#[derive(Clone, Copy, Default)]
+struct Depth {
+    /// Strings a shell runs again around it.
+    text: u8,
+    /// Wrappers and strings around it, together.
+    hops: u8,
 }
 
 /// One word of a command: its program or an argument.
@@ -135,9 +187,9 @@ const WORD_KINDS: &[&str] = &[
 ];
 
 impl Reader<'_> {
-    /// Read one shell program: the command as written (`depth` 0) or text
-    /// inside it that a shell runs again. False when it does not parse.
-    fn read(&mut self, command: &str, depth: u8) -> bool {
+    /// Read one shell program: the command as written (`depth.text` 0) or
+    /// text inside it that a shell runs again. False when it does not parse.
+    fn read(&mut self, command: &str, depth: Depth) -> bool {
         let mut parser = tree_sitter::Parser::new();
         let language = tree_sitter_bash::LANGUAGE;
         if parser.set_language(&language.into()).is_err() {
@@ -167,6 +219,13 @@ impl Reader<'_> {
         command_nodes.sort_by_key(tree_sitter::Node::start_byte);
 
         for node in command_nodes {
+            if depth.text > 0 {
+                self.nested_commands += 1;
+                if self.nested_commands > MAX_NESTED_COMMANDS {
+                    self.stopped();
+                    break;
+                }
+            }
             // Redirects belong to the command they feed.
             let command_text = match node.parent() {
                 Some(parent) if parent.kind() == "redirected_statement" => {
@@ -186,19 +245,17 @@ impl Reader<'_> {
                     tokens.push(node_text(child, command));
                 }
             }
-            if depth == 0 {
-                self.source.clone_from(&command_text);
-            }
             let words = words(node, command);
             self.check_paths(&words, command);
+            if depth.text == 0 {
+                self.source = None;
+            }
             if let Some(first) = tokens.first() {
                 if first != "cd" {
                     let prefix = arity::prefix(&tokens).join(" ");
                     let always = format!("{prefix} *");
-                    if depth == 0 {
-                        push_unique(&mut self.analysis.patterns, command_text.clone());
-                        push_unique(&mut self.analysis.always, always);
-                        push_unique(&mut self.written, command_text);
+                    if depth.text == 0 {
+                        self.write(command_text, always);
                     } else {
                         self.derive(command_text, always);
                     }
@@ -240,25 +297,72 @@ impl Reader<'_> {
         true
     }
 
-    /// A pattern read from inside the written command being read.
-    fn derive(&mut self, pattern: String, always: String) {
-        if pattern.trim().is_empty() || pattern == self.source {
+    /// A command as written, which its readings come from.
+    fn write(&mut self, pattern: String, always: String) {
+        if let Some(&index) = self.written.get(&pattern) {
+            self.source = Some(index);
             return;
         }
-        push_unique(&mut self.analysis.patterns, pattern.clone());
-        let written = &self.source;
-        if !self
-            .analysis
-            .derived
-            .iter()
-            .any(|derived| derived.pattern == pattern && derived.written == *written)
-        {
-            self.analysis.derived.push(Derived {
-                pattern,
-                written: written.clone(),
-                always,
-            });
+        let index = self.analysis.written.len();
+        self.source = Some(index);
+        self.written.insert(pattern.clone(), index);
+        if self.patterns.insert(pattern.clone()) {
+            self.analysis.patterns.push(pattern.clone());
         }
+        push_unique(&mut self.analysis.always, always.clone());
+        self.analysis.written.push(Written {
+            pattern,
+            always,
+            incomplete: false,
+        });
+    }
+
+    /// A pattern read from inside the written command being read.
+    fn derive(&mut self, pattern: String, always: String) {
+        let Some(source) = self.source else {
+            return;
+        };
+        if pattern.trim().is_empty() || pattern == self.analysis.written[source].pattern {
+            return;
+        }
+        if self.readings.contains(&(pattern.clone(), source)) {
+            return;
+        }
+        let count = self.counts.entry(source).or_default();
+        if *count >= MAX_READINGS || self.analysis.derived.len() >= MAX_ALL_READINGS {
+            self.stopped();
+            return;
+        }
+        *count += 1;
+        self.readings.insert((pattern.clone(), source));
+        if self.patterns.insert(pattern.clone()) {
+            self.analysis.patterns.push(pattern.clone());
+        }
+        self.analysis.derived.push(Derived {
+            pattern,
+            written: source,
+            always,
+        });
+    }
+
+    /// A limit stopped reading what the written command being read runs.
+    fn stopped(&mut self) {
+        if let Some(source) = self.source {
+            self.analysis.written[source].incomplete = true;
+        }
+    }
+
+    /// One more wrapper or string around a reading, or `None` (and the
+    /// written command marked incomplete) past [`MAX_HOPS`].
+    fn hop(&mut self, depth: Depth) -> Option<Depth> {
+        if depth.hops >= MAX_HOPS {
+            self.stopped();
+            return None;
+        }
+        Some(Depth {
+            hops: depth.hops + 1,
+            ..depth
+        })
     }
 
     /// The other spellings of a command's words: as the program receives
@@ -306,22 +410,47 @@ impl Reader<'_> {
         words: &[Word<'_>],
         stdin: Option<tree_sitter::Node<'_>>,
         source: &str,
-        depth: u8,
+        depth: Depth,
     ) {
         if words.is_empty() {
             return;
         }
+        let Some(depth) = self.hop(depth) else {
+            return;
+        };
         self.check_paths(words, source);
         self.spell(words, true);
         self.unwrap(words, stdin, source, depth);
     }
 
-    /// Text a shell runs again, read as a command of its own.
-    fn nested(&mut self, text: &str, depth: u8) {
-        if depth + 1 > MAX_NESTING || text.len() > MAX_NESTED_BYTES || text.trim().is_empty() {
+    /// Text a shell runs again, read as a command of its own: once for
+    /// each written command, within the limits on nesting and size.
+    fn nested(&mut self, text: &str, depth: Depth) {
+        if text.trim().is_empty() {
             return;
         }
-        self.read(text, depth + 1);
+        let Some(source) = self.source else {
+            return;
+        };
+        let key = (source, text.to_owned());
+        if self.texts.contains(&key) {
+            return;
+        }
+        let Some(mut depth) = self.hop(depth) else {
+            return;
+        };
+        depth.text += 1;
+        if depth.text > MAX_NESTING
+            || text.len() > MAX_NESTED_BYTES
+            || self.read_bytes + text.len() > MAX_READ_BYTES
+            || self.nested_commands >= MAX_NESTED_COMMANDS
+        {
+            self.stopped();
+            return;
+        }
+        self.read_bytes += text.len();
+        self.texts.insert(key);
+        self.read(text, depth);
     }
 
     /// Read what a command runs: the rest of a wrapper's words, or the text
@@ -332,7 +461,7 @@ impl Reader<'_> {
         words: &[Word<'_>],
         stdin: Option<tree_sitter::Node<'_>>,
         source: &str,
-        depth: u8,
+        depth: Depth,
     ) {
         let Some((program, arguments)) = words.split_first() else {
             return;
@@ -1097,6 +1226,11 @@ fn fallback(command: &str) -> BashAnalysis {
     };
     BashAnalysis {
         patterns: vec![command.to_owned()],
+        written: vec![Written {
+            pattern: command.to_owned(),
+            always: always.first().cloned().unwrap_or_default(),
+            incomplete: false,
+        }],
         always,
         ..BashAnalysis::default()
     }
@@ -1366,7 +1500,7 @@ mod tests {
             analysis.derived,
             vec![Derived {
                 pattern: "git commit -m x".into(),
-                written: "git commit -m 'x'".into(),
+                written: 1,
                 always: "git commit *".into(),
             }]
         );
@@ -1735,7 +1869,9 @@ mod readings {
         for derived in &analysis.derived {
             assert!(
                 analysis.patterns.contains(&derived.pattern)
-                    && analysis.patterns.contains(&derived.written),
+                    && analysis
+                        .patterns
+                        .contains(&analysis.written[derived.written].pattern),
                 "{command}: {analysis:?}"
             );
         }
@@ -1894,7 +2030,7 @@ mod readings {
                 .iter()
                 .find(|derived| derived.pattern == reading)
                 .unwrap_or_else(|| panic!("{command}: {analysis:?}"));
-            assert_eq!(derived.written, command);
+            assert_eq!(analysis.written[derived.written].pattern, command);
             assert_eq!(derived.always, always);
         }
         // The command as written keeps its own "always" pattern only.
@@ -1931,6 +2067,105 @@ mod readings {
             "true; ".repeat(MAX_NESTED_BYTES / 6 + 1)
         );
         assert!(!derived(&long).iter().any(|pattern| pattern == "rm x"));
+    }
+
+    /// `analyze` on a thread with a small stack, as a busy worker has, and
+    /// how long it took.
+    fn bounded(command: String) -> (BashAnalysis, std::time::Duration) {
+        std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                let analysis = analyze(&command, &workspace());
+                (analysis, started.elapsed())
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn thousands_of_stacked_wrappers_finish_quickly_on_a_small_stack() {
+        for command in [
+            format!("{}rm x", "nice ".repeat(3000)),
+            format!("{}rm x", "xargs ".repeat(3000)),
+            format!("{}rm x", "find . -exec ".repeat(1000)),
+            format!("{}rm x", "sudo timeout 5 ".repeat(1000)),
+        ] {
+            let (analysis, took) = bounded(command.clone());
+            assert!(
+                took < std::time::Duration::from_secs(2),
+                "{took:?}: {}",
+                &command[..30]
+            );
+            assert!(analysis.derived.len() <= MAX_READINGS);
+            assert!(analysis.written[0].incomplete, "{}", &command[..30]);
+        }
+    }
+
+    #[test]
+    fn deeply_nested_substitutions_finish_quickly() {
+        let mut command = "rm x".to_owned();
+        for _ in 0..60 {
+            command = format!("eval \"$({command})\"");
+        }
+        let (analysis, took) = bounded(command);
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+        assert!(analysis.derived.len() <= MAX_ALL_READINGS);
+    }
+
+    #[test]
+    fn a_long_here_document_fed_to_a_shell_stays_small() {
+        use std::fmt::Write as _;
+        let mut script = String::new();
+        for line in 0..5000 {
+            let _ = writeln!(script, "echo line {line:05} of the script");
+        }
+        assert!(script.len() > 100 * 1024 && script.len() < MAX_NESTED_BYTES);
+        let (analysis, took) = bounded(format!("sh <<'EOF'\n{script}EOF"));
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+        assert!(analysis.derived.len() <= MAX_READINGS);
+        let bytes: usize = analysis
+            .derived
+            .iter()
+            .map(|derived| derived.pattern.len() + derived.always.len())
+            .sum();
+        assert!(bytes < 16 * 1024, "{bytes}");
+        assert!(analysis.written[0].incomplete);
+    }
+
+    #[test]
+    fn a_limit_that_stops_a_reading_marks_the_command() {
+        let long = format!(
+            "bash -c '{}rm x'",
+            "true; ".repeat(MAX_NESTED_BYTES / 6 + 1)
+        );
+        let mut deep = "rm x".to_owned();
+        for _ in 0..=MAX_NESTING {
+            deep = format!("bash -c {}", quoted(&deep));
+        }
+        let stacked = format!("{}rm x", "nice ".repeat(usize::from(MAX_HOPS) + 1));
+        for command in [long, deep, stacked] {
+            assert!(
+                analyze(&command, &workspace()).written[0].incomplete,
+                "{}",
+                &command[..30]
+            );
+        }
+        for command in [
+            "git status",
+            "bash -c 'rm x'",
+            "sudo FOO=1 timeout 5 nice -n 2 rm x",
+            "bash -c \"eval 'sh -c \\\"rm x\\\"'\"",
+        ] {
+            assert!(
+                !analyze(command, &workspace())
+                    .written
+                    .iter()
+                    .any(|written| written.incomplete),
+                "{command}"
+            );
+        }
     }
 
     #[test]
