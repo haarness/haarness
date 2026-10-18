@@ -16616,6 +16616,80 @@ fn management_lines_read_inline_instead_of_behind_a_details_row() {
     );
 }
 
+#[test]
+fn search_rows_name_the_pattern_and_where_it_looked() {
+    let thread = fixture_thread();
+    let call = |sequence: u64, call_id: &str, name: &str, arguments: serde_json::Value| {
+        message_item(
+            sequence,
+            &thread,
+            ItemData::ToolCall {
+                call_id: call_id.into(),
+                name: name.into(),
+                arguments,
+                provider_metadata: serde_json::Value::Null,
+            },
+        )
+    };
+    let items = vec![
+        call(
+            1,
+            "grep-1",
+            "grep",
+            serde_json::json!({"pattern":"fn main","path":"src"}),
+        ),
+        call(
+            2,
+            "grep-2",
+            "grep",
+            serde_json::json!({"pattern":"TODO","path":"src"}),
+        ),
+        call(
+            3,
+            "glob-1",
+            "glob",
+            serde_json::json!({"pattern":"**/*.md"}),
+        ),
+        call(
+            4,
+            "read-1",
+            "mcp__files__read",
+            serde_json::json!({"file_path":"docs/TUI.md"}),
+        ),
+        call(
+            5,
+            "memory-1",
+            "memory_search",
+            serde_json::json!({"query":"release checklist"}),
+        ),
+    ];
+    let mut app = App::new(thread.clone(), vec![thread.clone()], items, vec![], vec![]);
+    let text = |app: &App| {
+        app.lines((120, 40))
+            .iter()
+            .map(Line::text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let english = text(&app);
+    // Two searches of one folder are told apart by what they looked for.
+    assert!(english.contains("grep fn main in src"), "{english}");
+    assert!(english.contains("grep TODO in src"), "{english}");
+    assert!(english.contains("glob **/*.md"), "{english}");
+    // Tools that name their file or query differently still show it.
+    assert!(
+        english.contains("mcp__files__read docs/TUI.md"),
+        "{english}"
+    );
+    assert!(
+        english.contains("memory_search release checklist"),
+        "{english}"
+    );
+    app.language = crate::locale::Language::French;
+    let french = text(&app);
+    assert!(french.contains("grep TODO dans src"), "{french}");
+}
+
 #[tokio::test]
 async fn batch_children_are_live_rows_under_the_batch_call() {
     let thread = fixture_thread();
