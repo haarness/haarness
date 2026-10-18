@@ -168,6 +168,8 @@ test.beforeAll(async () => {
     response.end(
       request.url === "/popup"
         ? "<title>Popup fixture</title><h1>Popup isolated</h1>"
+        : request.url === "/later-popup"
+          ? `<title>Later popup fixture</title><button onclick="setTimeout(() => window.open('/popup'), 600)">Open popup later</button>`
         : request.url === "/frame"
           ? "<label>Frame name<input></label>"
           : html,
@@ -574,6 +576,16 @@ test("an agent's page opens a closed side panel on the Browser, but never brings
     await expect(browser).toBeHidden();
     if (opened.url === siteURL + "/popup" && opened.id !== background) await tool("tabs_close", { tabID: opened.id });
   }
+  // A popup the page opens a moment after the agent's click, once the click
+  // has returned, is the agent's too.
+  await tool("navigate", { tabID, url: siteURL + "/later-popup" });
+  const tabsBefore = (await tool("tabs_list")).value.tabs.map((tab: any) => tab.id);
+  await tool("click", { tabID, ref: ref(await inspect(), "Open popup later") });
+  await expect.poll(async () => (await tool("tabs_list")).value.tabs.length).toBe(tabsBefore.length + 1);
+  await stays(() => expect(page.locator(".dock-tab.active")).toContainText("Context"));
+  await expect(browser).toBeHidden();
+  const popup = (await tool("tabs_list")).value.tabs.find((tab: any) => !tabsBefore.includes(tab.id));
+  await tool("tabs_close", { tabID: popup.id });
   await composite("test-results/browser-dot.png");
   await browserTab.click();
   await expect(browser).toBeVisible();
